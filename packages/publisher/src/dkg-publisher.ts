@@ -71,6 +71,7 @@ import {
   compareRootIris,
   generateOwnershipQuads,
   generateAssertionCreatedMetadata,
+  generateAssertionWrittenMetadata,
   generateAssertionDiscardedMetadata,
   generateTentativeMetadata,
   WM_CURRENT_ASSERTION_PRED,
@@ -8091,7 +8092,11 @@ export class DKGPublisher implements Publisher {
     // protocol-reserved URN namespace. See RESERVED_SUBJECT_PREFIXES above.
     rejectUserAuthoredProtocolMetadata(quads);
     rejectOversizedRdfLiterals(quads, 'assertionWrite.quads');
-    await this.store.insert(quads);
+    await this.store.insert([...quads, ...generateAssertionWrittenMetadata({
+      contextGraphId, agentAddress, assertionName: name, subGraphName,
+      assertionGraph: graphUri, destinationGraphs: [...new Set(quads.map((quad) => quad.graph))],
+      quadCount: quads.length, timestamp: new Date(),
+    }, { provenanceEvents: this.provenanceEvents })]);
   }
 
   /**

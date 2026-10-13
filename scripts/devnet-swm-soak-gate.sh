@@ -27,6 +27,17 @@ agent_address() {
   api "$1" GET /api/agent/identity | python3 -c 'import json,sys; print(json.load(sys.stdin)["agentAddress"])'
 }
 
+# The two peers must hold a connection to each other before they share. A share
+# goes to the peers its author reaches at that moment, and nothing sends it
+# again to a peer that connects later. A node that an earlier suite restarted
+# dials its bootstrap peers only, so node 6 dials node 5 here instead of
+# relying on a connection that something else happened to open.
+PEER5=$(api 5 GET /api/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["peerId"])')
+connect_body=$(python3 -c 'import json,sys; print(json.dumps({"peerId":sys.argv[1]}))' "$PEER5")
+connect_response=$(api 6 POST /api/connect "$connect_body") || connect_response=""
+printf '%s' "$connect_response" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("connected") is True else 1)' 2>/dev/null \
+  || { echo "SWM soak peers are not connected: node6 could not dial node5: $connect_response" >&2; exit 1; }
+
 CURATOR=$(agent_address 5)
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 CG_ID="${CURATOR}/swm-soak-${STAMP}"

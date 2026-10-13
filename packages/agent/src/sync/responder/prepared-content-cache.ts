@@ -75,7 +75,7 @@ export function resolvePreparedContentCacheConfig(config: PreparedContentCacheCo
  */
 export function createPreparedContentCache(
   options: NonNullable<ReturnType<typeof resolvePreparedContentCacheConfig>>,
-  onError: () => void = () => {},
+  onError: (error: unknown, operation: 'initialize' | 'read' | 'publish') => void = () => {},
 ): PreparedContentCache {
   const { directory, maxBytes, maxEntries, ttlMs } = options;
   // Iteration order is oldest first; successful reads/writes move to the end.
@@ -84,10 +84,11 @@ export function createPreparedContentCache(
   let tail: Promise<unknown> = Promise.resolve();
   // Reads and writes serialize within the bounded responder admission. No
   // background writer survives a response or shutdown and no whole graph is held.
-  const run = <T>(fallback: T, work: () => Promise<T>): Promise<T> => {
+  const run = <T>(operation: 'read' | 'publish', fallback: T, work: () => Promise<T>): Promise<T> => {
     const next = tail.then(async () => {
-      try { await initialize(); return await work(); }
-      catch { try { onError(); } catch { /* diagnostics cannot deny a valid response */ } return fallback; }
+      let phase: 'initialize' | 'read' | 'publish' = 'initialize';
+      try { await initialize(); phase = operation; return await work(); }
+      catch (error) { try { onError(error, phase); } catch { /* diagnostics cannot deny a valid response */ } return fallback; }
     });
     tail = next.then(() => undefined);
     return next;
@@ -126,7 +127,7 @@ export function createPreparedContentCache(
   }
   return {
     get(key) {
-      return run<PreparedContent | null>(null, async () => {
+      return run<PreparedContent | null>('read', null, async () => {
         const name = digest(key) + SUFFIX;
         if (!entries.has(name)) return null;
         const handle = await open(join(directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -159,7 +160,7 @@ export function createPreparedContentCache(
     put(key, value) {
       // Called while the response budget still owns these bytes. Awaited IO
       // prevents unbounded background work or retained buffers after release.
-      return run<void>(undefined, async () => {
+      return run<void>('publish', undefined, async () => {
         if (!positive(value.body.byteLength, EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES)
           || !positive(value.plainBytes, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES)) return;
         const header = encodeManifest({ version: 1, key, createdAt: Date.now(),
@@ -185,4 +186,11 @@ export function createPreparedContentCache(
       });
     },
   };
+}
+
+/** Bounded diagnostic labels never include local paths or content. */
+export function preparedCacheFailureCause(error: unknown): string {
+  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+  if (typeof code === 'string' && /^[A-Z_0-9]{1,48}$/.test(code)) return code;
+  return error instanceof Error && /^[A-Za-z]{1,48}$/.test(error.name) ? error.name : 'UnknownError';
 }

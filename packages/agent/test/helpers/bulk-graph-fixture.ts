@@ -1,6 +1,6 @@
 import { afterEach, expect } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { startOxigraphSparqlEndpoint } from '../../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGNode, LibP2PNetwork, ProtocolRouter, createOperationContext, BULK_GRAPH_KIND as K, type BulkGraphFrame, type BulkGraphSession,
@@ -29,7 +29,8 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
   payloadBytes?: readonly number[]; expandedLengthMismatch?: boolean; tamperDigest?: 'asset' | 'chunk';
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(),'dkg-bulk-test-')); cleanups.push(() => rm(directory,{recursive:true,force:true}));
-  const backing = new OxigraphStore(), target = new OxigraphStore(); cleanups.push(() => backing.close(), () => target.close());
+  const endpoint = await startOxigraphSparqlEndpoint({ maxRequestBytes: 1_048_576 });
+  const target = new OxigraphStore(); cleanups.push(endpoint.close, () => target.close());
   const prepared = new Map<string, { body: Uint8Array; metadata: Uint8Array; plainBytes: number }>();
   const uals: string[] = [], byId = new Map<bigint, Uint8Array>();
   for (let i = 1; i <= count; i++) {
@@ -43,7 +44,7 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
       assertionVersion:1, publicTripleCount:data.length, privateTripleCount:0, merkleRoot:root, authorAddress:address,
       publisherPeerId:'fixture', accessPolicy:'public', allowedPeers:[], timestamp:new Date() },
     {status:'confirmed',confirmation:{kind:'finalized-materialization', provenance:{batchId:BigInt(i),materializedVersion:{blockNumber:1,txIndex:0}}}});
-    await backing.insert([...data,...metadata]);
+    endpoint.store.load(quadsToNQuads([...data,...metadata]), { format: 'application/n-quads' });
     if (hooks.payloadBytes) {
       const plain = Buffer.from(quadsToNQuads(data));
       const body = await encodeNegotiatedExactSyncResponse(plain, { request: {
@@ -52,26 +53,8 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
       prepared.set(ual, { body, metadata: Buffer.from(quadsToNQuads(metadata)), plainBytes: plain.length });
     }
   }
-  function cell(value: string) {
-    if (!value.startsWith('"')) return { type: 'uri', value };
-    const match = /^("(?:[^"\\]|\\.)*")(?:(?:\^\^<([^>]+)>)|@([\w-]+))?$/.exec(value);
-    if (!match) throw new Error('Invalid fixture literal');
-    return { type: 'literal', value: JSON.parse(match[1]!), ...(match[2] ? { datatype: match[2] } : {}), ...(match[3] ? { 'xml:lang': match[3] } : {}) };
-  }
-  const httpServer = createServer(async (req, res) => {
-    try {
-      const pieces: Buffer[] = []; let bytes = 0;
-      for await (const piece of req) { bytes += piece.length; if (bytes > 1_048_576) throw new Error('Fixture request limit'); pieces.push(Buffer.from(piece)); }
-      const result = await backing.query(Buffer.concat(pieces).toString('utf8'));
-      if (result.type !== 'bindings') throw new Error('Fixture SELECT only');
-      res.setHeader('Content-Type', 'application/sparql-results+json');
-      res.end(JSON.stringify({ head: { vars: Object.keys(result.bindings[0] ?? {}) }, results: { bindings: result.bindings.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, cell(value)]))) } }));
-    } catch { res.statusCode = 500; res.end('fixture-query-failure'); }
-  });
-  await new Promise<void>(resolve => httpServer.listen(0, '127.0.0.1', resolve));
-  const endpoint = httpServer.address(); if (!endpoint || typeof endpoint === 'string') throw new Error('Fixture server absent');
-  const source = new BlazegraphStore(`http://127.0.0.1:${endpoint.port}/sparql`);
-  cleanups.push(() => new Promise<void>((resolve, reject) => httpServer.close(error => error ? reject(error) : resolve())), () => source.close());
+  const source = new BlazegraphStore(endpoint.queryEndpoint);
+  cleanups.push(() => source.close());
   const chain = {chainId:'base:84532',getLatestMerkleRoot:async(id:bigint)=>byId.get(id)!,
     getMerkleRootCount:async()=>1n,getKAContextGraphId:async()=>14n} as unknown as ChainAdapter;
   const nodes = [0,1].map(() => new DKGNode({listenAddresses:['/ip4/127.0.0.1/tcp/0'],enableMdns:false}));
@@ -145,14 +128,15 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
       verification:{contextGraphId:cg,assetUals:uals,ctx:createOperationContext('sync'),
         parseAndFilter:worker.parseAndFilter.bind(worker),processDurableBatchInWorker:(data,meta,_ctx,accept,mode)=>worker.processDurableBatch(data,meta,accept,mode),
       },
-      commit:async (assets, signal, onPublished)=>{
+      commit:async (assets, signal)=>{
         const authenticated=[];
         for(const asset of assets) authenticated.push((await authenticateVerifiedGraphScopedAsset(chain,asset,async()=>true)).asset);
         await hooks.beforePublish?.();
         const outcome=await materializeVerifiedGraphScopedGroup({store:target,assets:authenticated,
           assertCurrent:()=>signal.throwIfAborted(),shouldQuarantineCommitted:()=>false});
-        expect(outcome).toBe('applied'); onPublished(); groups.push(assets.length);
+        expect(outcome).toBe('applied'); groups.push(assets.length);
         heaps.push(assets.flatMap(a => [...a.dataQuads, ...a.metadataQuads]).reduce((n, q) => n + estimateQuadHeapBytes(q), 0));
+        return authenticated;
       }});
   return {run,cancellation,source,target,groups,heaps,exports,uals,router,worker,directory,byId, supplierPeer: nodes[1]!.peerId};
 }

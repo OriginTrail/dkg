@@ -25,13 +25,7 @@ import {
   computeKaChunkTreeRootV1,
   encodeOpaqueKaBundleV1,
   parseCanonicalAuthorCatalogRowV1,
-  readVerifiedCatalogSealBindingV1,
-  readVerifiedCgSharedProjectionMetadataV1,
-  readVerifiedTransferredCatalogBundleMetadataV1,
   verifyAuthorCatalogDirectoryPathV1,
-  verifyCatalogSealBindingV1,
-  verifyCgSharedProjectionV1,
-  verifyTransferredCatalogBundleV1,
   type AssertionCoordinateV1,
   type AuthorCatalogRowV1,
   type ByteLengthV1,
@@ -51,6 +45,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import {
+  Rfc64SuccessorRowVerificationV1,
+  type Rfc64VerifiedCatalogRowsV1,
+} from '../internal/verified-catalog-rows.js';
 import { createMainThreadTimeSlice } from '../main-thread-time-slice.js';
 import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 import { throwIfRfc64AbortedV1 } from './abort-v1.js';
@@ -70,7 +68,6 @@ import type {
   Rfc64ControlObjectOperationsV1,
   StageVerifiedControlObjectsResultV1,
 } from './control-object-store-v1.js';
-import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1,
   addRfc64PublicCatalogExactSetBundleBytesV1,
@@ -135,6 +132,11 @@ export interface Rfc64PublicCatalogSuccessorProducerOptionsV1 {
    * already referenced by the verified predecessor bucket.
    */
   readonly readKaBundleByDigest?: (blobDigest: Digest32V1) => Promise<Uint8Array | null>;
+  /**
+   * Rows of this catalog that this process has already verified. A row found there, under the
+   * same scope, deployment, canonical row and bytes, is not verified a second time (GH#3072).
+   */
+  readonly verifiedRows?: Rfc64VerifiedCatalogRowsV1;
 }
 
 /** Bound independent immutable-bundle reads/writes without serializing an entire successor. */
@@ -218,6 +220,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
   readonly #stageKaBundle: Rfc64PublicCatalogSuccessorProducerOptionsV1['stageKaBundle'];
   readonly #readKaBundleByDigest:
     Rfc64PublicCatalogSuccessorProducerOptionsV1['readKaBundleByDigest'];
+  readonly #verifiedRows: Rfc64VerifiedCatalogRowsV1 | undefined;
 
   constructor(options: Rfc64PublicCatalogSuccessorProducerOptionsV1) {
     if (
@@ -230,6 +233,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       .bind(options.controlObjects);
     this.#stageKaBundle = options.stageKaBundle;
     this.#readKaBundleByDigest = options.readKaBundleByDigest;
+    this.#verifiedRows = options.verifiedRows;
   }
 
   async produceAndStage(
@@ -273,6 +277,21 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
   async produceAndStageExactSet(
     input: ProduceAndStagePublicOpenExactSetSuccessorInputV1,
   ): Promise<ProducedAndStagedPublicOpenExactSetSuccessorV1> {
+    const rows = new Rfc64SuccessorRowVerificationV1(this.#verifiedRows);
+    try {
+      const produced = await this.#produceAndStageExactSet(input, rows);
+      rows.complete();
+      return produced;
+    } catch (cause) {
+      rows.abandon();
+      throw cause;
+    }
+  }
+
+  async #produceAndStageExactSet(
+    input: ProduceAndStagePublicOpenExactSetSuccessorInputV1,
+    rows: Rfc64SuccessorRowVerificationV1,
+  ): Promise<ProducedAndStagedPublicOpenExactSetSuccessorV1> {
     // The caller's input is read once, here, before the first row boundary.
     const exactSet = snapshotExactSet(input);
     const { previousHead, previousDirectoryPath, previousBucket, issuedAt } = input;
@@ -293,15 +312,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     for (const prepared of preparedAssets) {
       await rowBoundary();
       try {
-        const initialSealBinding = verifyCatalogSealBindingV1(
-          prepared.scope,
-          prepared.row,
-          prepared.sealBytes,
-          prepared.deployment,
-        );
-        assertRecoverableAuthorAttestationCapabilityV1(
-          readVerifiedCatalogSealBindingV1(initialSealBinding),
-        );
+        rows.assertSealBinds(prepared);
       } catch (cause) {
         fail(
           'catalog-successor-producer-binding',
@@ -311,6 +322,10 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       }
     }
 
+    // Rows verified before pass in a fraction of a time slice. What follows is the longest
+    // block of a production, the canonical producer's check of the predecessor and its
+    // replacement bucket: it starts on a turn of its own, not at the end of the rows' slice.
+    await createMainThreadTimeSlice(0)();
     // A set without rows passed no row boundary: nothing is signed for a
     // production that was cancelled, whatever its size.
     throwIfRfc64AbortedV1(signal, RFC64_SUCCESSOR_PRODUCTION_ABORT_MESSAGE_V1);
@@ -370,34 +385,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
         );
       }
       try {
-        const transferred = verifyTransferredCatalogBundleV1(
-          publication.head,
-          producedRow,
-          prepared.bundleBytes,
-          prepared.deployment,
-        );
-        const transfer = readVerifiedTransferredCatalogBundleMetadataV1(
-          transferred,
-          publication.head,
-          producedRow,
-          prepared.deployment,
-        );
-        const sealBinding = readVerifiedCatalogSealBindingV1(transfer.catalogSealBinding);
-        assertRecoverableAuthorAttestationCapabilityV1(sealBinding);
-        const verifiedProjection = verifyCgSharedProjectionV1(
-          transferred,
-          publication.head,
-          producedRow,
-          prepared.deployment,
-        );
-        const projection = readVerifiedCgSharedProjectionMetadataV1(
-          verifiedProjection,
-          transferred,
-          publication.head,
-          producedRow,
-          prepared.deployment,
-        );
-        return { prepared, row: producedRow, sealBinding, transfer, projection };
+        return rows.verifyProduced(publication.head, producedRow, prepared);
       } catch (cause) {
         fail(
           'catalog-successor-producer-verification',

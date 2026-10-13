@@ -3,7 +3,7 @@ import { mkdtemp, readdir, readFile, writeFile, rm, symlink, stat, utimes } from
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createPreparedContentCache, resolvePreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
+import { preparedCacheFailureCause, createPreparedContentCache, resolvePreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
 
 const dirs: string[] = [];
 async function fixture(limits = {}) {
@@ -143,4 +143,23 @@ describe('persistent prepared content', () => {
       expect(() => resolvePreparedContentCacheConfig(config as any)).toThrow();
     }
   });
+});
+
+it('reports initialization and publication causes while diagnostics remain fail-open', async () => {
+  const f = await fixture();
+  const blocked = join(f.directory, 'not-a-directory'); await writeFile(blocked, 'fixture');
+  const failures: {operation:string,cause:string}[] = [];
+  const diagnostic = (error: unknown, operation: string) => {
+    failures.push({operation,cause:preparedCacheFailureCause(error)});
+    throw new Error('logger unavailable');
+  };
+  const badRoot = createPreparedContentCache({...f.options,directory:join(blocked,'child')},diagnostic);
+  await expect(badRoot.get('key')).resolves.toBeNull();
+  const cache = createPreparedContentCache(f.options,diagnostic);
+  await cache.get('missing');
+  expect(failures).toHaveLength(1); // Ordinary misses have no operational diagnostic.
+  await rm(f.directory,{recursive:true});
+  await expect(cache.put('key',value)).resolves.toBeUndefined();
+  expect(failures).toEqual([{operation:'initialize',cause:'ENOTDIR'},{operation:'publish',cause:'ENOENT'}]);
+  expect(preparedCacheFailureCause(Object.assign(new Error('secret path'),{code:'ENOSPC'}))).toBe('ENOSPC');
 });
