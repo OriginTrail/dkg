@@ -41,7 +41,7 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only') {
     for(const ual of uals) {
       const verified=assets.get(ual)!;
       if(verified.ual.endsWith('/11')) continue; // Second batch fails on both transports.
-      const authenticated=await options.authenticateGraphScopedAsset(verified);
+      const authenticated=await options.recoveryAuthority.authenticate(verified);
       expect(await materializeVerifiedGraphScopedAsset({store,asset:authenticated.asset})).toBe('applied');
       committed.push(ual);
     }

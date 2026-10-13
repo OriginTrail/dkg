@@ -9,21 +9,14 @@ import type { DKGAgent } from "./dkg-agent.js";
 import {
   PublicSnapshotEvidence,
   markCoreTrustedGraph,
-  type PublicSnapshotMode,
 } from "./public-snapshot-evidence.js";
 
 import { createPublicSnapshotReader, PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from "./public-snapshot-reader.js";
 export { PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from "./public-snapshot-reader.js";
 const encoder = new TextEncoder();
 const jobs = new WeakSet<DKGAgent>();
-export interface PublicSnapshotSyncOptions {
-  contextGraphId: string;
-  onChainId: string;
-  /** Operator-configured peer identities, never populated from self-advertised roles. */
-  trustedCorePeerIds: readonly string[];
-  mode?: PublicSnapshotMode;
-  signal?: AbortSignal;
-}
+import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export class PublicSnapshotMethods {
   startPublicGraphSnapshots(this: DKGAgent): void {
     if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
@@ -85,21 +78,8 @@ export class PublicSnapshotMethods {
     this: DKGAgent,
     options: PublicSnapshotSyncOptions,
   ) {
-    const { contextGraphId, onChainId } = options;
-    const mode = options.mode ?? "core-cache";
-    if (
-      !validateContextGraphId(contextGraphId).valid ||
-      !/^[1-9][0-9]{0,77}$/.test(onChainId) ||
-      !["core-cache", "rpc-only"].includes(mode)
-    )
-      throw new Error("Invalid snapshot job");
-    const peers = [...new Set(options.trustedCorePeerIds)];
-    if (
-      !peers.length ||
-      peers.length > 4 ||
-      peers.some((p) => typeof p !== "string" || p.length > 256 || !p.length)
-    )
-      throw new Error("Configure one to four trusted core peer identities");
+    const normalized = normalizePublicSnapshotSyncOptions(options);
+    const { contextGraphId, onChainId, mode, trustedCorePeerIds: peers } = normalized;
     if (jobs.has(this)) throw new Error("A snapshot job is already running");
     if (!this.started || this.vmReconcileRotationClosed) throw new Error("Node is stopping");
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
@@ -179,12 +159,8 @@ export class PublicSnapshotMethods {
               const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(peer, contextGraphId, remaining, {
                 signal, isCurrent, forceFreshExactSession: true,
                 exactRecoveryTransportMode: transport,
-                authenticateGraphScopedAsset: asset => evidence.authenticate(asset),
+                recoveryAuthority: evidence,
                 totalTimeoutMs: 120_000,
-                registeredPublicEvidence: {
-                  usableFor: (id, s) => id === contextGraphId && isCurrent() && !s?.aborted,
-                  revoke: () => {},
-                },
               });
               for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
             }

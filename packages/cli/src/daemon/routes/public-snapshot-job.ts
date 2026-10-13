@@ -1,3 +1,4 @@
+import { normalizePublicSnapshotSyncOptions } from '@origintrail-official/dkg-agent';
 // SPDX-License-Identifier: Apache-2.0
 import { readBody, jsonResponse, isPayloadTooLargeError } from "../http-utils.js";
 import { randomUUID } from "node:crypto";
@@ -45,11 +46,11 @@ export async function handlePublicSnapshotJob({
   }
   let input: PublicSnapshotSyncOptions;
   try {
-    input = JSON.parse(await readBody(req, 4096));
+    const raw: unknown = JSON.parse(await readBody(req, 4096));
     if (
-      !input ||
-      typeof input !== "object" ||
-      Object.keys(input).some(
+      !raw ||
+      typeof raw !== "object" ||
+      Object.keys(raw).some(
         (k) =>
           ![
             "contextGraphId",
@@ -57,19 +58,10 @@ export async function handlePublicSnapshotJob({
             "trustedCorePeerIds",
             "mode",
           ].includes(k),
-      ) ||
-      typeof input.contextGraphId !== "string" ||
-      typeof input.onChainId !== "string" ||
-      !Array.isArray(input.trustedCorePeerIds) ||
-      input.trustedCorePeerIds.length < 1 ||
-      input.trustedCorePeerIds.length > 4 ||
-      input.trustedCorePeerIds.some(
-        (p) => typeof p !== "string" || !p || p.length > 256,
-      ) ||
-      ![undefined, "core-cache", "rpc-only"].includes(input.mode) ||
-      !/^[1-9][0-9]{0,77}$/.test(input.onChainId)
+      )
     )
       throw new Error("Invalid request");
+    input = normalizePublicSnapshotSyncOptions(raw);
   } catch (error) {
     if (isPayloadTooLargeError(error)) { reply(413, { error: "Request too large" }); return; }
     reply(400, { error: "Invalid snapshot recovery request" });

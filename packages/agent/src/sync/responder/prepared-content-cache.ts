@@ -15,13 +15,6 @@ export interface PreparedContentCacheConfig {
   /** Absolute retention age, not extended by reads. Default/maximum six hours. */
   ttlMs?: number;
 }
-/** Local responder retention policy; neither setting changes request authority. */
-export interface SyncResponderCacheConfig {
-  /** Daemon-local retained responder snapshot row/estimated-byte policy. */
-  syncResponderSnapshotLimits?: import('../policy.js').SyncResponderSnapshotLimitsConfig;
-  /** Opt-in persistent verified public assertion bytes, never cached authority. */
-  preparedContentCache?: PreparedContentCacheConfig;
-}
 export interface PreparedContent {
   readonly body: Uint8Array;
   readonly plainBytes: number;
