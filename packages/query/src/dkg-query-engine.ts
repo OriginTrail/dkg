@@ -67,7 +67,7 @@ import {
 import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { raceAgainstCallerAbort } from './caller-abort.js';
-import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
+import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
@@ -422,13 +422,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         && initialGraphScope.graphVariables.length > 0 && !isSwmOnlyRoute;
       // Broad variable scans already need a fresh scoped inventory. Reuse that
       // inventory for memory routing within this request, avoiding another admission.
-      const scopedContentGraphs = shouldExpandGraphVariables
-        ? await this.resolveScopedContentGraphAllowList(effectiveContextGraphId, reads, subGraphName)
+      const scopedDiscovery = shouldExpandGraphVariables
+        ? await this.resolveScopedContentGraphDiscovery(effectiveContextGraphId, reads, subGraphName)
         : undefined;
-      const discoverRouteGraphs = (prefix: string): Promise<string[]> => scopedContentGraphs
-        ? Promise.resolve(scopedContentGraphs.filter(
-            (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
-          ))
+      const discoverRouteGraphs = (prefix: string): Promise<string[]> => scopedDiscovery
+        ? Promise.resolve(filterRouteGraphsByPrefix(scopedDiscovery.inventory, prefix))
         : this.discoverGraphsByPrefix(prefix, reads);
       // Per-KA SWM: when a route targets SWM, expand the allow-set with the discovered
       // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
@@ -450,8 +448,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           ))]
         : staticPrivateAllowList;
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
-      const variableAllowedGraphs = scopedContentGraphs
-        ? [...new Set([...explicitAllowedGraphs, ...scopedContentGraphs])]
+      const variableAllowedGraphs = scopedDiscovery
+        ? [...new Set([...explicitAllowedGraphs, ...scopedDiscovery.contentGraphs])]
         : explicitAllowedGraphs;
       // Explicit GRAPH IRIs remain limited to the static route-specific
       // allow-list. GRAPH variables only gain known same-CG content
@@ -879,9 +877,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       sharedReads.listGraphsByPrefix(prefix),
       callerSignal,
     );
-    return allGraphs.filter(
-      (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
-    );
+    return filterRouteGraphsByPrefix(allGraphs, prefix);
   }
 
   /**
@@ -1010,11 +1006,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return undefined;
   }
 
-  private async resolveScopedContentGraphAllowList(
+  private async resolveScopedContentGraphDiscovery(
     contextGraphId: string,
     reads: QueryStoreReadContext,
     subGraphName?: string,
-  ): Promise<readonly string[]> {
+  ): Promise<ScopedContentGraphDiscoverySnapshot> {
     const contentKey = JSON.stringify([contextGraphId, subGraphName ?? null]);
     const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
     return this.scopedContentGraphDiscoveryMemo.get({
@@ -1022,7 +1018,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
-      load: () => this.discoverScopedContentGraphAllowList(
+      load: () => this.discoverScopedContentGraphDiscovery(
         contextGraphId,
         reads.shared,
         subGraphName,
@@ -1030,11 +1026,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     });
   }
 
-  private async discoverScopedContentGraphAllowList(
+  private async discoverScopedContentGraphDiscovery(
     contextGraphId: string,
     reads: StoreReadLane,
     subGraphName?: string,
-  ): Promise<string[]> {
+  ): Promise<ScopedContentGraphDiscoverySnapshot> {
     const allowed = new Set<string>();
     const catalog = await readScopedContentGraphCatalog(contextGraphId, reads.query);
     const registeredSubGraphs = subGraphName ? new Set([subGraphName]) : catalog.subGraphs;
@@ -1042,15 +1038,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const knownChildContextGraphs = catalog.childContextGraphs;
     const allGraphs = catalog.graphs;
 
-    const dataGraph = subGraphName
-      ? contextGraphSubGraphUri(contextGraphId, subGraphName)
-      : contextGraphDataUri(contextGraphId);
     for (const graph of allGraphs) {
-      // Preserve uniform-layout VM routing: these are the selected route's
-      // own per-KA graphs, even if payload metadata calls one a child CG.
-      const routeVmGraph = graph.startsWith(`${dataGraph}/_verifiable_memory/`)
-        && !graph.includes('/_meta') && !graph.includes('/staging/');
-      if (routeVmGraph ||
+      if (
         isScopedContentGraph(
           graph,
           contextGraphId,
@@ -1064,7 +1053,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       }
     }
 
-    return [...allowed];
+    return { inventory: [...allGraphs], contentGraphs: [...allowed] };
   }
 
   private async discoverRegisteredSubGraphNames(
@@ -1506,4 +1495,9 @@ function hasCrossGraphUnsafeModifier(scope: PreparedGraphScope): boolean {
     ) return true;
   }
   return false;
+}
+
+/** Route visibility is derived from inventory, independently of content authority. */
+function filterRouteGraphsByPrefix(graphs: readonly string[], prefix: string): string[] {
+  return graphs.filter(g => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'));
 }

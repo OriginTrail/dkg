@@ -24,11 +24,42 @@ const REQUEST = {
   graphPrefix: 'did:dkg:context-graph:parent',
 };
 
+
+// Existing lane/revision cases use the same graph list for each half of a
+// discovery snapshot; assert content results while exercising the full memo.
+function testMemo(...args: ConstructorParameters<typeof ScopedContentGraphDiscoveryMemo>) {
+  const memo = new ScopedContentGraphDiscoveryMemo(...args);
+  return {
+    get(request: typeof REQUEST & { signal?: AbortSignal; load: () => Promise<readonly string[]> }) {
+      return memo.get({ ...request, load: async () => {
+        const graphs = await request.load();
+        return { inventory: graphs, contentGraphs: graphs };
+      } }).then(snapshot => snapshot.contentGraphs);
+    },
+  };
+}
+
 describe('ScopedContentGraphDiscoveryMemo', () => {
+  it('preserves distinct inventory and authority as an immutable snapshot', async () => {
+    const memo = new ScopedContentGraphDiscoveryMemo(
+      revisionSource('all-writers', () => ({ generation: 1, stable: true })),
+    );
+    const inventory = ['urn:route-only', 'urn:content'];
+    const contentGraphs = ['urn:content'];
+    const first = await memo.get({ ...REQUEST, load: async () => ({ inventory, contentGraphs }) });
+    inventory.push('urn:later'); contentGraphs.push('urn:later');
+    expect(first).toEqual({ inventory: ['urn:route-only', 'urn:content'], contentGraphs: ['urn:content'] });
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.inventory)).toBe(true);
+    expect(Object.isFrozen(first.contentGraphs)).toBe(true);
+    const second = await memo.get({ ...REQUEST, load: async () => { throw new Error('unexpected reload'); } });
+    expect(second).toBe(first);
+  });
+
   it('reuses completed values across lanes until the all-writers generation changes', async () => {
     let revision = { generation: 1, stable: true };
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('all-writers', () => revision),
     );
     const load = async () => [`urn:graph:${++loads}`];
@@ -47,7 +78,7 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
   it('never reuses authorization discovery under a process-local revision', async () => {
     const stale = deferred<readonly string[]>();
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('process-local', () => ({ generation: 1, stable: true })),
     );
 
@@ -65,7 +96,7 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
   it('does not reuse or admit values while the revision is unstable', async () => {
     let revision = { generation: 7, stable: true };
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('all-writers', () => revision),
     );
     const load = async () => [`urn:graph:${++loads}`];
@@ -89,7 +120,7 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
   it('shares only same-generation, same-lane flights and keeps abort caller-local', async () => {
     const gate = deferred<readonly string[]>();
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('all-writers', () => ({ generation: 1, stable: true })),
     );
     const controller = new AbortController();
@@ -110,7 +141,7 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
     const code = deferred<readonly string[]>();
     const decisions = deferred<readonly string[]>();
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('all-writers', () => ({ generation: 1, stable: true })),
     );
 
