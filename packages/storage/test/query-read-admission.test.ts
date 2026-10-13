@@ -1,3 +1,4 @@
+import { withAdmittedReadCancellation } from '../src/admitted-read-cancellation.js';
 import { QueryReadAdmission } from '../src/query-read-admission.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
@@ -141,4 +142,16 @@ describe('query read admission', () => {
     }, options)).rejects.toMatchObject({ name: 'TimeoutError' });
     expect(fetcher).not.toHaveBeenCalled();
   });
+});
+
+it('exposes only read capabilities to a per-read cancellation scope', async () => {
+  const owner = { signal: new AbortController().signal, check: vi.fn(),
+    waitFor: <T>(work: Promise<T>) => work, markStarted: vi.fn(), dispose: vi.fn() };
+  await withAdmittedReadCancellation(owner, undefined, async read => {
+    expect(Object.keys(read).sort()).toEqual(['check', 'signal', 'waitFor']);
+    expect(await read.waitFor(Promise.resolve('value'))).toBe('value');
+    read.check();
+  });
+  expect(owner.markStarted).not.toHaveBeenCalled();
+  expect(owner.dispose).not.toHaveBeenCalled();
 });

@@ -1,13 +1,13 @@
 import { composeAbortSignals } from './abortable-store-work-lifecycle.js';
 
-interface ReadDeadline {
+export interface AdmittedReadDeadline {
   readonly signal: AbortSignal;
   check(): void;
   waitFor<T>(work: Promise<T>): Promise<T>;
 }
 /** Share the original deadline, while each admitted read can cancel its transport. */
-export async function withAdmittedReadCancellation<Context extends ReadDeadline, T>(
-  deadline: Context, signal: AbortSignal | undefined, work: (context: Context) => Promise<T>,
+export async function withAdmittedReadCancellation<T>(
+  deadline: AdmittedReadDeadline, signal: AbortSignal | undefined, work: (context: AdmittedReadDeadline) => Promise<T>,
 ): Promise<T> {
   const scope = composeAbortSignals(deadline.signal, signal === deadline.signal ? undefined : signal);
   const check = () => { deadline.check(); scope.signal!.throwIfAborted(); };
@@ -17,7 +17,7 @@ export async function withAdmittedReadCancellation<Context extends ReadDeadline,
   };
   try {
     check();
-    const result = await work({ ...deadline, signal: scope.signal!, check, waitFor });
+    const result = await work({ signal: scope.signal!, check, waitFor });
     check();
     return result;
   } finally { scope.dispose(); }
