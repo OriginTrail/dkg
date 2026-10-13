@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { OxigraphStore, ChangelogStore, GraphSetIndexStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, ChangelogStore, GraphSetIndexStore, StoreResponseTooLargeError, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { readScopedContentGraphCatalog } from '../src/scoped-content-graph-catalog.js';
 
@@ -169,4 +169,37 @@ describe('fresh dynamic scoped query admission', () => {
       .toEqual([ROOT, `${ROOT}/_verifiable_memory/a/1`].sort());
     await store.close();
   });
+});
+
+it.each([true, false])('keeps catalog bytes separate from caller result limits (owned=%s)', async owned => {
+  const adapter = new OxigraphStore(), controller = new AbortController();
+  const options = { ...OPTIONS, signal: controller.signal, priority: 'background' as const,
+    source: 'catalog-budget-test', maxResponseBytes: 1024 };
+  const calls: Array<{ bytes: number; options: Parameters<TripleStore['query']>[1] }> = [];
+  const store = new Proxy(adapter, { get(target, key) {
+    if (key === 'withQueryReadAdmission') return owned ? async (work: () => Promise<unknown>) => work() : undefined;
+    if (key === 'query') return async (sparql: string, readOptions: Parameters<TripleStore['query']>[1]) => {
+      const result = await target.query(sparql, readOptions);
+      const bytes = Buffer.byteLength(JSON.stringify(result));
+      calls.push({ bytes, options: readOptions });
+      if (readOptions?.maxResponseBytes !== undefined && bytes > readOptions.maxResponseBytes)
+        throw new StoreResponseTooLargeError(readOptions.maxResponseBytes, bytes);
+      return result;
+    };
+    const value = Reflect.get(target, key, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  try {
+    await adapter.insert(Array.from({ length: 32 }, (_, n) => ({ graph: `${ROOT}/_verifiable_memory/large-catalog/${n}`,
+      subject: `urn:item:${n}`, predicate: NAME, object: '"visible"' })));
+    const engine = new DKGQueryEngine(store);
+    expect((await engine.query('SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }', options)).bindings)
+      .toEqual([{ n: '"32"^^<http://www.w3.org/2001/XMLSchema#integer>' }]);
+    expect(calls[0]!.bytes).toBeGreaterThan(1024);
+    expect(calls[0]!.options).toMatchObject({ priority: options.priority, source: options.source });
+    expect(calls[0]!.options?.signal).toBe(owned ? controller.signal : undefined);
+    expect(calls[0]!.options?.maxResponseBytes).toBeUndefined();
+    expect(calls.at(-1)!.options?.maxResponseBytes).toBe(1024);
+    await expect(engine.query(QUERY, options)).rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
+  } finally { await adapter.close(); }
 });

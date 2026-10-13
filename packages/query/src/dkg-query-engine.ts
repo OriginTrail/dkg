@@ -306,6 +306,12 @@ export function resolveViewGraphs(
   }
 }
 
+type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
+type QueryExecutionContext = { reads: StoreReadLane } & (
+  { kind: 'unscoped' | 'view' } |
+  { kind: 'scoped'; plan: ScopedQueryReadPlan; variableContentGraphs: readonly string[] }
+);
+
 /**
  * Local-only query engine that executes SPARQL against this node's own
  * triple store. No remote query capability — by design (Spec §1.6 Store
@@ -351,32 +357,46 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (plan.kind === 'scoped' && plan.discovery === 'admission-owned') {
       return this.store.withQueryReadAdmission!(async () => {
         const caller = createStoreReadLane(this.store, storeOptions(options), listGraphsByPrefix);
-        const discovery = await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, caller);
-        // This lane has no shared refresh capability: all routing reuses the owned inventory.
-        const reads: StoreReadLane = { query: caller.query,
-          listGraphsByPrefix: async prefix => filterRouteGraphsByPrefix(discovery.inventory, prefix) };
-        return this.queryPrepared(initialGraphScope, options, plan, reads, discovery);
+        // Discovery shares the owner, priority and cancellation, but the caller's
+        // result ceiling applies only to caller-derived reads, not the catalog.
+        const { maxResponseBytes: _callerLimit, ...discoveryOptions } = storeOptions(options) ?? {};
+        const catalogReads = createStoreReadLane(this.store, discoveryOptions, listGraphsByPrefix);
+        const discovery = await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, catalogReads);
+        return this.queryPrepared(initialGraphScope, options, this.prepareScopedExecution(plan, caller, discovery));
       }, storeOptions(options));
     }
     const reads = createQueryStoreReadContext(this.store, options, listGraphsByPrefix);
     const discovery = plan.kind === 'scoped' && plan.expandGraphVariables
       ? await this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads) : undefined;
-    return this.queryPrepared(initialGraphScope, options, plan, reads, discovery);
+    const context: QueryExecutionContext = plan.kind === 'scoped'
+      ? this.prepareScopedExecution(plan, reads, discovery) : { kind: plan.kind, reads };
+    return this.queryPrepared(initialGraphScope, options, context);
+  }
+
+  private prepareScopedExecution(plan: ScopedQueryReadPlan, reads: StoreReadLane,
+    discovery?: ScopedContentGraphDiscoverySnapshot): QueryExecutionContext {
+    if (plan.expandGraphVariables && !discovery) throw new Error('Scoped expansion requires discovery authority');
+    return { kind: 'scoped', plan,
+      // Routing consumes one discovery callback for owned and memoized inventories.
+      reads: discovery ? { query: reads.query,
+        listGraphsByPrefix: async prefix => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads,
+      variableContentGraphs: discovery ? scopedContentGraphs(discovery, plan.contextGraphId, plan.graphs.subGraphName) : [],
+    };
   }
 
   private async queryPrepared(initialGraphScope: PreparedGraphScope, options: QueryOptions | undefined,
-    plan: QueryReadPlan, reads: StoreReadLane, scopedDiscovery?: ScopedContentGraphDiscoverySnapshot): Promise<QueryResult> {
+    context: QueryExecutionContext): Promise<QueryResult> {
+    const { reads } = context;
     let routedScope = initialGraphScope;
 
     // ── V10 view-based routing ────────────────────────────────────────
     const effectiveContextGraphId = options?.contextGraphId;
-    if (plan.kind === 'scoped') {
+    if (context.kind === 'scoped') {
+      const { plan } = context;
       const { dataGraph, sharedMemoryGraph, staticContentGraphs,
         subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
       const { needsDiscovery, swmRouted, dataRouted } = plan;
-      const discoverRouteGraphs = (prefix: string): Promise<string[]> => scopedDiscovery
-        ? Promise.resolve(filterRouteGraphsByPrefix(scopedDiscovery.inventory, prefix))
-        : this.discoverGraphsByPrefix(prefix, reads);
+      const discoverRouteGraphs = (prefix: string) => this.discoverGraphsByPrefix(prefix, reads);
       // Per-KA SWM: when a route targets SWM, expand the allow-set with the discovered
       // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
       const swmPerKaGraphs = needsDiscovery && swmRouted
@@ -395,9 +415,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           ))]
         : staticPrivateAllowList;
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
-      const variableAllowedGraphs = scopedDiscovery
-        ? [...new Set([...explicitAllowedGraphs, ...scopedContentGraphs(scopedDiscovery, plan.contextGraphId, subGraphName)])]
-        : explicitAllowedGraphs;
+      const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...context.variableContentGraphs])];
       // Explicit GRAPH IRIs remain limited to the static route-specific
       // allow-list. GRAPH variables only gain known same-CG content
       // partitions for callers that explicitly opt into broad count scans;
