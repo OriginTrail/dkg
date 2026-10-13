@@ -227,10 +227,30 @@ describe('unquoted YAML timestamps are read as written (validated before any Dat
 });
 
 describe('staleness does not depend on the machine time zone', () => {
-  it('reads an offset-less stale_after as UTC', () => {
-    expect(isStale('2026-12-31T00:00:00', new Date('2026-12-30T23:59:59Z'))).toBe(false);
-    expect(isStale('2026-12-31T00:00:00', new Date('2026-12-31T00:00:00Z'))).toBe(true);
-    expect(isStale('2026-06-15', new Date('2026-06-15T00:00:00Z'))).toBe(true);
-    expect(isStale('2026-06-15', new Date('2026-06-14T23:59:59Z'))).toBe(false);
-  });
+  // An offset-less stale_after is read as UTC. On a UTC machine, reading it as
+  // local time gives the same answers, so the boundaries are checked in a zone
+  // behind UTC and one ahead of it, switched for each test and restored after.
+  function inZone(tz: string, run: () => void): void {
+    const saved = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      run();
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+  }
+
+  for (const [tz, offsetMinutes] of [['America/New_York', 300], ['Asia/Tokyo', -540]] as const) {
+    it(`reads an offset-less stale_after as UTC in ${tz}`, () => {
+      inZone(tz, () => {
+        // The switch took effect: local midnight is hours away from UTC midnight.
+        expect(new Date(2026, 11, 31).getTimezoneOffset()).toBe(offsetMinutes);
+        expect(isStale('2026-12-31T00:00:00', new Date('2026-12-30T23:59:59Z'))).toBe(false);
+        expect(isStale('2026-12-31T00:00:00', new Date('2026-12-31T00:00:00Z'))).toBe(true);
+        expect(isStale('2026-06-15', new Date('2026-06-15T00:00:00Z'))).toBe(true);
+        expect(isStale('2026-06-15', new Date('2026-06-14T23:59:59Z'))).toBe(false);
+      });
+    });
+  }
 });
