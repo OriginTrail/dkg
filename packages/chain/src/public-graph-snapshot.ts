@@ -4,28 +4,28 @@ import { ethers } from "ethers";
 
 /** Public chain statements, not a light-client proof. All integers are canonical decimal strings. */
 export interface PublicGraphSnapshot {
-  version: 1;
-  chainId: string;
-  deploymentId: string;
-  contextGraphId: string;
-  onChainId: string;
-  nameHash: string;
-  contextGraphStorage: string;
-  assetStorage: string;
-  blockNumber: string;
-  blockHash: string;
-  finalityConfirmations: number;
-  observedAt: number;
-  expiresAt: number;
-  accessPolicy: 0;
-  assets: PublicGraphSnapshotAsset[];
-  inventoryDigest: string;
-  snapshotDigest: string;
+  readonly version: 1;
+  readonly chainId: string;
+  readonly deploymentId: string;
+  readonly contextGraphId: string;
+  readonly onChainId: string;
+  readonly nameHash: string;
+  readonly contextGraphStorage: string;
+  readonly assetStorage: string;
+  readonly blockNumber: string;
+  readonly blockHash: string;
+  readonly finalityConfirmations: number;
+  readonly observedAt: number;
+  readonly expiresAt: number;
+  readonly accessPolicy: 0;
+  readonly assets: readonly PublicGraphSnapshotAsset[];
+  readonly inventoryDigest: string;
+  readonly snapshotDigest: string;
 }
 export interface PublicGraphSnapshotAsset {
-  id: string;
-  root: string;
-  version: string;
+  readonly id: string;
+  readonly root: string;
+  readonly version: string;
 }
 export const PUBLIC_GRAPH_SNAPSHOT_MAX_ASSETS = 10_000;
 export const PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
