@@ -415,6 +415,83 @@ describe('selected SWM metadata retention budget', () => {
     for (const lease of [continuing, other, waiter]) lease.release();
   });
 
+  // Rows to spare and bytes for two allowances: here the bytes decide.
+  const byteBound = () => createSelectedSwmMetaRetentionBudget({
+    maxRows: 10,
+    maxBytesEstimate: 400,
+    maxPrefixRows: 2,
+    maxPrefixBytesEstimate: 200,
+  });
+
+  it('grants a whole allowance only when its bytes are free as well as its rows', async () => {
+    const budget = byteBound();
+    const first = budget.lease();
+    const other = budget.lease();
+    const firstFetch = first.reserve();
+    const otherFetch = other.reserve();
+    const waiter = budget.lease();
+    // Six rows are free, and no bytes.
+    const refused = waiter.reserve();
+    expect(refused).toEqual(expect.objectContaining({
+      maxRows: 2,
+      maxBytesEstimate: 0,
+      exhaustion: 'shared',
+    }));
+    refused.release();
+    const waiting = waiter.reserveWholeAllowance(60_000);
+    let granted = false;
+    void waiting.then(() => { granted = true; });
+
+    // A whole manifest of one row and 150 bytes is kept. Seven rows are free
+    // but only 50 bytes: a manifest that fits an allowance would not fit
+    // them, so the waiting lease stays in line.
+    firstFetch.commitReplace(1, 150, true);
+    await turn();
+    expect(granted).toBe(false);
+
+    // The other fetch keeps nothing. Its 200 bytes make the allowance whole.
+    otherFetch.commitReplace(0, 0, true);
+    const reservation = await waiting;
+    expect(reservation).toEqual(expect.objectContaining({
+      maxRows: 2,
+      maxBytesEstimate: 200,
+      exhaustion: null,
+    }));
+    reservation!.release();
+    for (const lease of [first, other, waiter]) lease.release();
+  });
+
+  it('leaves a transfer between two passes the bytes of its allowance', async () => {
+    const budget = byteBound();
+    const continuing = budget.lease();
+    const other = budget.lease();
+    const firstPass = continuing.reserve();
+    const otherFetch = other.reserve();
+    const waiter = budget.lease();
+    const waiting = waiter.reserveWholeAllowance(60_000);
+
+    // One row and 100 bytes of an unfinished manifest are kept: the next pass
+    // comes back for the other 100 bytes. The second fetch keeps a whole
+    // manifest of 50 bytes. 250 bytes are free, which is an allowance, but
+    // not an allowance and the 100 bytes of the next pass. Rows were never
+    // short: eight of ten are free.
+    firstPass.commitReplace(1, 100);
+    otherFetch.commitReplace(1, 50, true);
+    await expect(waiting).resolves.toBeNull();
+
+    // With the 50 bytes given back there is room for both.
+    other.release();
+    const reservation = await waiter.reserveWholeAllowance(60_000);
+    expect(reservation).toEqual(expect.objectContaining({ maxRows: 2, maxBytesEstimate: 200 }));
+    expect(continuing.reserve()).toEqual(expect.objectContaining({
+      maxRows: 1,
+      maxBytesEstimate: 100,
+      exhaustion: null,
+    }));
+    reservation!.release();
+    for (const lease of [continuing, waiter]) lease.release();
+  });
+
   it('grants in the order the leases started to wait', async () => {
     const budget = pool(1);
     const holder = budget.lease();
