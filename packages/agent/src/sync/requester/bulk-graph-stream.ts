@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_KIND as K, exchangeBulkGraph,
   type BulkGraphSession, type ProtocolRouter, type DuplexStreamOptions } from '@origintrail-official/dkg-core';
-import { bulkChunkHash, readBulkJson, parseBulkAssetHeader,
+import { bulkChunkHash, parseBulkRefusal, parseBulkChunkEnd, parseBulkAssetHeader,
   type BulkGraphRequest } from '../bulk-graph-contract.js';
 import { BulkStagingQueue } from './bulk-staging-queue.js';
 import { BulkCommitGroup } from './bulk-commit-group.js';
@@ -54,13 +54,13 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
       signal.throwIfAborted();
       const frame = await session.next();
       if (frame.kind === K.REFUSE) {
-        const refusal = readBulkJson(frame.payload) as { code?: unknown };
-        if (refusal?.code !== 'RESOURCE_LIMIT' || frame.index !== metrics.receivedAssets || frame.sequence !== 0)
+        parseBulkRefusal(frame.payload);
+        if (frame.index !== metrics.receivedAssets || frame.sequence !== 0)
           throw new Error('Invalid bulk graph refusal');
         throw Object.assign(new Error('Bulk graph source refused RESOURCE_LIMIT'), { code: 'RESOURCE_LIMIT' });
       }
       if (frame.kind === K.CHUNK_END) {
-        const end = readBulkJson(frame.payload) as { digest: string; assets: number; encodedBytes: number };
+        const end = parseBulkChunkEnd(frame.payload);
         if (!metrics.receivedAssets || frame.index !== metrics.receivedAssets || frame.sequence !== metrics.encodedBytes
           || end.assets !== frame.index || end.encodedBytes !== frame.sequence || end.digest !== hash.digest('hex'))
           throw new Error('Bulk chunk directory digest or coverage mismatch');

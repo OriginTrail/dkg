@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { AtomicAssetReplacement } from '../src/atomic-asset-group.js';
+import { buildBulkAssetGroupPlan } from '../src/adapters/bulk-asset-group.js';
+import { parseNQuadsTextTolerant } from '../src/nquads-text.js';
+import { quadsToNQuads } from '../src/bounded-rdf.js';
 /**
  * BlazegraphStore INTEGRATION tests — run against a REAL Blazegraph server.
  *
@@ -112,6 +115,33 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     } finally {
       await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
       await store.close();
+    }
+  });
+
+  it.each([0, 1, 2, 3])('preserves all destinations when native staging member %s is absent', async missing => {
+    const root = `urn:incomplete-group:${randomUUID()}`, meta = `${root}:meta`;
+    const member = (id: number, value: string): AtomicAssetReplacement => ({
+      graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
+      graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: JSON.stringify(value) }],
+      metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: JSON.stringify(value) }],
+    });
+    const plan = buildBulkAssetGroupPlan([member(1, 'new'), member(2, 'new')])!;
+    const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
+    try {
+      await store.insert([...[member(1, 'old'), member(2, 'old')].flatMap(a => [...a.graphQuads, ...a.metadataQuads]),
+        { graph: meta, subject: `${root}:unrelated`, predicate: 'urn:p', object: '"keep"' }]);
+      const before = await store.query(select);
+      const staged = parseNQuadsTextTolerant(plan.nquads), graphs = [...new Set(staged.map(q => q.graph))];
+      expect(graphs).toHaveLength(4);
+      const response = await fetch(BLAZEGRAPH_URL!, { method: 'POST', headers: { 'Content-Type': 'application/n-quads' },
+        body: quadsToNQuads(staged.filter(q => q.graph !== graphs[missing])) });
+      await response.text(); expect(response.ok).toBe(true);
+      await store.update(plan.update);
+      expect(await store.query(plan.receiptQuery)).toEqual({ type: 'boolean', value: false });
+      expect(await store.query(select)).toEqual(before);
+    } finally {
+      await store.update(plan.cleanup);
+      await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
     }
   });
 

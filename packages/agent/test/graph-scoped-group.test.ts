@@ -59,7 +59,7 @@ describe('group materialization fences and physical completion', () => {
       await new Promise(resolve => setTimeout(resolve, 20));
       expect(newerStarted).toBe(false);
       releaseCleanup.resolve();
-      expect(await run).toEqual(['quarantined', 'quarantined']);
+      expect(await run).toBe('quarantined');
       expect(await newer).toBe('applied');
     } finally { releaseCleanup.resolve(); await transport.close(); }
   });
@@ -78,7 +78,7 @@ describe('group materialization fences and physical completion', () => {
       control('accessPolicy', 'public'), control('allowedPeer', 'untrusted')] };
     if (mode === 'singleton') expect(await materializeVerifiedGraphScopedAsset({ store, asset: poisoned })).toBe('applied');
     else expect(await materializeVerifiedGraphScopedGroup({ store, assets: [poisoned],
-      assertCurrent: () => {}, shouldQuarantineCommitted: () => false })).toEqual(['applied']);
+      assertCurrent: () => {}, shouldQuarantineCommitted: () => false })).toBe('applied');
     const result = await store.query(`SELECT ?p ?o WHERE { GRAPH <${member.metaGraph}> { <${member.ual}> ?p ?o } }`);
     expect(result).toMatchObject({ bindings: expect.arrayContaining([
       { p: published.predicate, o: published.object },
@@ -113,7 +113,7 @@ describe('group materialization fences and physical completion', () => {
       await write(members, options); revoked = true;
     });
     expect(await materializeVerifiedGraphScopedGroup({ store, assets: group, assertCurrent: () => {},
-      shouldQuarantineCommitted: () => revoked })).toEqual(['quarantined', 'quarantined']);
+      shouldQuarantineCommitted: () => revoked })).toBe('quarantined');
     expect(spy).toHaveBeenCalledTimes(2); expect(await store.countQuads()).toBe(0);
   });
   it('rejects the entire group before mutation when one local version is newer', async () => {
