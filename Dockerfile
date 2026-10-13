@@ -11,7 +11,9 @@
 #     -t dkg-node .
 #
 # Running a node from the image: docs/use-dkg/run-node.md. Release images are
-# published to ghcr.io/origintrail/dkg-node by .github/workflows/node-image.yml.
+# published to ghcr.io/origintrail/dkg-node by .github/workflows/node-image.yml;
+# .github/workflows/node-image-check.yml builds and starts the image on the pull
+# requests that change it.
 
 # Node.js 22 (.nvmrc) on Debian slim. The node's Oxigraph server binary, which
 # it downloads on first start, needs glibc.

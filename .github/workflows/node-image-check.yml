@@ -1,0 +1,122 @@
+name: Node image check
+
+# Proves that a pull request which changes the node's container image still
+# builds and starts it: builds the Dockerfile for linux/amd64, starts the image
+# on testnet with a throwaway volume, waits until HEAD /api/status answers and
+# Docker reports the container healthy, checks what /api/status reports, then
+# stops the node and checks that it exited cleanly.
+#
+# It pushes nothing, logs in to no registry and uses no secrets; the token can
+# only read the repository. node-image.yml publishes the release images.
+
+on:
+  pull_request:
+    branches: [main, testnet-canary]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'scripts/docker-entrypoint.sh'
+      - '.github/workflows/node-image.yml'
+      - '.github/workflows/node-image-check.yml'
+
+permissions: {}
+
+concurrency:
+  group: node-image-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CONTAINER: dkg-node-check
+  VOLUME: dkg-node-check-data
+  IMAGE: dkg-node:check
+
+jobs:
+  check:
+    name: Build and start the node image
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Build the image
+        # The release build's arguments: the version gate runs, and the build
+        # records the commit for /api/status.
+        env:
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --platform linux/amd64 \
+            --build-arg DKG_VERSION="$(jq -r .version package.json)" \
+            --build-arg DKG_COMMIT="$COMMIT" \
+            --tag "$IMAGE" \
+            .
+
+      - name: Start the node on testnet
+        run: |
+          set -euo pipefail
+          docker volume create "$VOLUME"
+          docker run --detach --name "$CONTAINER" \
+            --env DKG_NETWORK=testnet \
+            --volume "$VOLUME:/data" \
+            --publish 127.0.0.1:9200:9200 \
+            "$IMAGE"
+
+      - name: Wait until the node is healthy
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 300))
+          until [[ "$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER")" == healthy ]] \
+            && curl --silent --fail --head --max-time 5 http://127.0.0.1:9200/api/status > /dev/null; do
+            if [[ "$(docker inspect --format '{{.State.Status}}' "$CONTAINER")" != running ]]; then
+              echo "::error::The container stopped before it was healthy."
+              exit 1
+            fi
+            if ((SECONDS >= deadline)); then
+              echo "::error::The node was not healthy within 300 seconds."
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "Healthy after ${SECONDS} seconds."
+
+      - name: Check what the node reports
+        env:
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          status="$(curl --silent --fail --max-time 10 http://127.0.0.1:9200/api/status)"
+          jq '{name, version, commit, distTag, installMode, nodeRole, networkConfig}' <<< "$status"
+          expected_version="$(jq -r .version package.json)"
+          jq --exit-status \
+            --arg version "$expected_version" --arg commit "$COMMIT" \
+            '.version == $version and .commit == $commit and .distTag == "container" and .networkConfig == "testnet"' \
+            <<< "$status" > /dev/null
+          # The CLI in the running container, as the documentation runs it.
+          docker exec "$CONTAINER" dkg status
+
+      - name: Stop the node
+        run: |
+          set -euo pipefail
+          docker stop --time 30 "$CONTAINER"
+          exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$CONTAINER")"
+          if [[ "$exit_code" != 0 ]]; then
+            echo "::error::The node exited with code ${exit_code} instead of shutting down cleanly."
+            exit 1
+          fi
+          echo "The node shut down cleanly."
+
+      - name: Show the node's log
+        if: always()
+        run: docker logs --tail 300 "$CONTAINER" 2>&1 || true
+
+      - name: Remove the container and the volume
+        if: always()
+        run: |
+          docker rm --force "$CONTAINER" > /dev/null 2>&1 || true
+          docker volume rm "$VOLUME" > /dev/null 2>&1 || true

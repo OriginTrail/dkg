@@ -17,6 +17,9 @@ name: Node image
 # the tag's version. Tags follow docker/metadata-action's semver rules: the
 # version (10.0.24), its minor line (10.0) and latest; a prerelease gets its
 # version only. A rebuild of an older release leaves 10.0 and latest alone.
+#
+# node-image-check.yml builds and starts the image on the pull requests that
+# change its definition or these workflows.
 
 on:
   push:
