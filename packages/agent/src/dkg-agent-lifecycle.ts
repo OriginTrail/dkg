@@ -1,5 +1,6 @@
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import { registerPublicBulkGraph } from './sync/responder/bulk-graph-stream.js';
+import type { DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import { createRemoteQueryHandler } from "./remote-query-handler.js";
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
@@ -132,7 +133,6 @@ import {
   type ChallengePinnedGraphScopedAsset,
   type GraphScopedMaterializationOutcome,
   type VerifiedGraphScopedAsset,
-  type AuthenticatedGraphScopedAsset,
   type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import {
@@ -1647,7 +1647,7 @@ interface ExactKnowledgeAssetSyncOptions {
   forceFreshExactSession?: boolean;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-  authenticateGraphScopedAsset?: (asset: VerifiedGraphScopedAsset) => AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
+  recoveryAuthority?: DurableRecoveryAuthority;
   totalTimeoutMs?: number;
 }
 
@@ -1693,7 +1693,7 @@ export type DurableSyncOptions = {
    * stream pre-flight to rely on. Handed only to that pass's own exchange; absent otherwise.
    */
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-  authenticateGraphScopedAsset?: (asset: VerifiedGraphScopedAsset) => AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
+  recoveryAuthority?: DurableRecoveryAuthority;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1757,7 +1757,7 @@ type LegacyDurableContextGraphOptions = {
   durableMetaContinuation?: DurableMetaContinuation;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-  authenticateGraphScopedAsset?: (asset: VerifiedGraphScopedAsset) => AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
+  recoveryAuthority?: DurableRecoveryAuthority;
 };
 
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
@@ -5870,7 +5870,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 forceFreshExactSession: options?.forceFreshExactSession,
                 exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
                 registeredPublicEvidence: options?.registeredPublicEvidence,
-                authenticateGraphScopedAsset: options?.authenticateGraphScopedAsset,
+                recoveryAuthority: options?.recoveryAuthority,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -5989,7 +5989,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasCurrentFence: Boolean(options?.isCurrent),
       hasChallengePinnedSelection: exactAssetSelection?.kind === 'challenge-pinned',
       hasForcedFreshExactSession: options?.forceFreshExactSession === true,
-      hasRegisteredPublicEvidence: options?.registeredPublicEvidence !== undefined,
+      hasRegisteredPublicEvidence: options?.registeredPublicEvidence !== undefined || options?.recoveryAuthority !== undefined,
       exactAssetUals,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
       exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
@@ -6090,7 +6090,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         forceFreshExactSession: options.forceFreshExactSession,
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
         registeredPublicEvidence: options.registeredPublicEvidence,
-        authenticateGraphScopedAsset: options.authenticateGraphScopedAsset,
+        recoveryAuthority: options.recoveryAuthority,
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
         priority: VM_RECOVERY_SYNC_PRIORITY,
@@ -6167,7 +6167,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession,
       exactRecoveryTransportMode = 'stream-preferred',
       registeredPublicEvidence,
-      authenticateGraphScopedAsset,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -6220,6 +6219,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
         throw error;
       }
+    };
+    const authority: DurableRecoveryAuthority = options.recoveryAuthority ?? {
+      lifetime: 'exchange',
+      isRegisteredPublic: async (id, signal) => registeredPublicEvidence?.usableFor(id, signal) === true
+        || (await this.resolveRegisteredContextGraphAuthority(id, { authorityReadMode: 'finalized-index-or-live', signal })).kind === 'public',
+      authenticate: (asset, deadline, signal) => authenticateDurableGraphScopedAsset({
+      chain: this.chain,
+      asset,
+      verifyContextGraphBinding,
+      deadline,
+      signal,
+      onRetry: (error, attempt, maxAttempts) => {
+        this.log.warn(
+          ctx,
+          `Retrying graph-scoped durable authentication for ${asset.ual} `
+          + `after transient chain verification failure (${attempt}/${maxAttempts}): `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+          }),
     };
     const contextGraphBudget = createDurableSyncBudget({
       fetchTimeoutMs,
@@ -6383,21 +6402,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           recaptureBindingGeneration,
           assertCurrent,
         }): Promise<GraphScopedMaterializationOutcome> => {
-          const authentication = authenticateGraphScopedAsset ? await authenticateGraphScopedAsset(asset) : await authenticateDurableGraphScopedAsset({
-            chain: this.chain,
-            asset,
-            verifyContextGraphBinding,
-            deadline: authenticationDeadline,
-            signal: operationSignal,
-            onRetry: (error, attempt, maxAttempts) => {
-              this.log.warn(
-                ctx,
-                `Retrying graph-scoped durable authentication for ${asset.ual} `
-                + `after transient chain verification failure (${attempt}/${maxAttempts}): `
-                + `${error instanceof Error ? error.message : String(error)}`,
-              );
-            },
-          });
+          const authentication = await authority.authenticate(asset, authenticationDeadline, operationSignal);
           assertCurrent();
           const verifiedOnChainId = authentication.onChainContextGraphId;
           if (
@@ -6522,10 +6527,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         getPeerProtocols: () => this.getPeerProtocols(remotePeerId),
         // The recovery pass that owns this exchange may have handed it its own fresh positive
         // answer; every other fetch, and any doubt about that answer, reads the authority itself.
-        isRegisteredPublic: async () => registeredPublicEvidence?.usableFor(contextGraphId, signal) === true
-          || (await this.resolveRegisteredContextGraphAuthority(contextGraphId, {
-            authorityReadMode: 'finalized-index-or-live', signal,
-          })).kind === 'public',
+        isRegisteredPublic: async () => authority.isRegisteredPublic(contextGraphId, signal),
         requestIdentity: () => ({
           requesterPeerId: this.peerId,
           computeSyncDigest: (...args) => this.computeSyncDigest(...args),

@@ -242,11 +242,10 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     const { supplier, sink, mismatchStore, ual, beforeRows, rows } = await mismatchedSnapshotMember(f, transport === 'legacy' ? 12 : 1, transport);
     const writes = vi.spyOn(mismatchStore, 'replaceGraphAndSubject');
     const evidence = new PublicSnapshotEvidence({ snapshot: independent, mode: 'core-cache', sourceCore: supplier.peerId }, () => true);
-    const authenticate = vi.fn(asset => evidence.authenticate(asset));
+    const authenticate = vi.spyOn(evidence, 'authenticate');
     const rejected = await sink.syncExactKnowledgeAssetsFromPeerDetailed(supplier.peerId, graph, [ual], {
       forceFreshExactSession: true, exactRecoveryTransportMode: transport, totalTimeoutMs: 15000,
-      authenticateGraphScopedAsset: authenticate,
-      registeredPublicEvidence: { usableFor: () => true, revoke: () => {} },
+      recoveryAuthority: evidence,
     });
     expect(authenticate).toHaveBeenCalled();
     expect(rejected.committedExactAssetUals ?? []).toEqual([]);
