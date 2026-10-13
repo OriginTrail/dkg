@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-13T13:10:37.030063+00:00",
+  "repository": "OriginTrail/dkg",
+  "pullRequest": 3196,
+  "implementationCommit": "a0e7ef77fcd8aae78a8e2760f40da570fb7a02e6",
+  "baseBranch": "codex/dmaast-program-editor-deploy-20260921",
+  "localEnvironment": {
+    "node": "25.2.1",
+    "pnpm": "10.28.1"
+  },
+  "validation": {
+    "nodeUi": {
+      "filesPassed": 179,
+      "testsPassed": 2469,
+      "existingTestsSkipped": 38
+    },
+    "graphViz": {
+      "filesPassed": 13,
+      "testsPassed": 151
+    },
+    "graphVizTypes": "passed",
+    "graphVizBuild": "passed",
+    "productionUiBuild": "passed with the unchanged 896 MiB build setting",
+    "focusedOxlint": {
+      "files": 29,
+      "status": "passed"
+    },
+    "browserTypes": {
+      "baselineDiagnostics": 42,
+      "candidateDiagnostics": 42,
+      "newDiagnostics": [],
+      "normalizedDiagnosticsMatch": true
+    },
+    "workflowYaml": "passed",
+    "diffWhitespace": "passed",
+    "nulAudit": "passed"
+  },
+  "liveReadOnlyApi": {
+    "at": "2026-10-13T13:03:40.855Z",
+    "environment": "candidate-client-with-read-only-live-JPB-API",
+    "contextGraph": "private-owner-scoped-jpb-data",
+    "firstPage": 50,
+    "secondPage": 50,
+    "distinctAcrossPages": 100,
+    "firstPageCountsPresent": 50,
+    "membershipReadyMs": 4677,
+    "metadataAndCountReadsSeparate": true,
+    "firstPageUalsPresent": 50,
+    "repeatedFirstPageUsedCache": true,
+    "resourceDetailTriples": 9,
+    "resourceDetailPartial": false,
+    "browserPreviewVerified": false,
+    "deployed": false
+  },
+  "deployment": {
+    "candidateDeployed": false,
+    "servicesRestarted": false,
+    "dataMutated": false,
+    "authorizationBroadened": false,
+    "ingestionWorkerPreserved": true,
+    "workerRuntimeCommit": "9e823207538e47f5bbfd3024707187d283057080"
+  },
+  "limitations": [
+    "Candidate browser preview was blocked by ERR_BLOCKED_BY_CLIENT; no candidate or deployed-browser acceptance is claimed.",
+    "No browser heap soak measurement; reproduced observer, GPU resource and asynchronous initialization regressions are covered by tests.",
+    "Graph pages use ordered offsets and are refreshed on graph changes, not a frozen dataset snapshot.",
+    "Explicitly loading and rendering more nodes increases client memory and layout cost.",
+    "42 browser TypeScript diagnostics are identical to the unchanged previous PR head; this is not a clean browser TypeScript gate.",
+    "Full ingestion recovery and the next automatic unchanged-data cycle are still a separate verification."
+  ]
+}

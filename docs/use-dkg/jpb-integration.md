@@ -79,6 +79,54 @@ and configuration pins remain enforced.
 
 ## Validation and deployed state
 
+### UI loading and graph rendering
+
+The UI now lists assertions in cursor pages of 50. It reads membership and UALs
+from metadata first, then loads triple-count badges only for the visible page.
+Old physical aliases are suppressed in favor of their canonical lifecycle rows;
+published aliases do not reappear in the Shared Working Memory list. Explicit
+bulk share/publish actions still apply to all eligible assertions across pages,
+with query-catalog configuration excluded from the bulk scope.
+
+Graph reads use ordered pages of 5,000 triples per layer. A visible notice and
+**Load more graph data** replace the old silent cutoff. Counts describe loaded
+data and remain lower bounds when a layer is clipped or unavailable. A failed
+page can retry its last offset. Graph-change events reset the read and invalidate
+cached pages; these pages are a live browse view, not an immutable SQL snapshot.
+
+Recent graph reads and assertion pages are cached for five minutes within the
+same authenticated session. The cache has a 64-entry / 32 MiB serialized-size
+budget; this is an estimate, not a measured heap ceiling. Graph-list caching is
+separately limited to one entry / 2 MiB. Graph changes, refreshes, authentication
+changes and authorization failures invalidate the appropriate cache. Ordinary
+query execution remains fresh, and updates are never cached.
+
+Clicking a graph resource performs a scoped lookup of its own and incoming
+triples, including facts outside the loaded overview pages. Loading, failures
+and the 1,000-triple-per-layer detail limit are explicit. Blank nodes remain
+connected, URI-shaped literals remain literals, and stale tab/refresh responses
+cannot overwrite a newer view. Click handlers use the latest React callback,
+and the 2D picking region matches the visible node radius.
+
+Large graphs disclose the existing 3,000-node connected-view limit. **Show all
+loaded nodes** includes disconnected components in the already fetched data;
+it does not claim that every SQL record or graph page has been loaded. Loading
+and drawing more nodes increases client cost. Refreshing a graph whose previous
+focal resource was removed now selects a valid resource instead of drawing an
+empty graph.
+
+Cleanup disconnects resize observers, cancels pending parses and animation
+frames, releases GPU labels/textures/materials on replacement and unmount,
+prunes removed icons and initializes 3D only once for concurrent callers.
+These fixes address reproduced lifecycle leaks; a browser heap soak test is
+still a rollout check rather than a claimed result.
+
+The [UI validation receipt](jpb-ui-validation-20261013.json) separates local
+regression tests from read-only live JPB API checks. The in-app browser blocked
+the local preview with `ERR_BLOCKED_BY_CLIENT`, so candidate browser interaction
+and deployed-browser verification are not claimed. No JPB service was deployed,
+restarted, or given broader access for this UI change.
+
 The accompanying [validation receipt](jpb-dkg-consolidation-20261013.json) records source coverage,
 local checks and the live source comparison. The `JPB DKG integration` workflow
 runs the combined regression suites on this feature-base PR; normal protected
