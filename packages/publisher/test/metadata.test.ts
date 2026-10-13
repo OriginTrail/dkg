@@ -1,3 +1,4 @@
+import { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from '../src/graph-knowledge-asset-metadata.js';
 import { describe, it, expect } from 'vitest';
 import {
   generateKCMetadata,
@@ -1123,4 +1124,21 @@ describe('generateAssertionPromotedMetadata pointer stamping', () => {
     });
     expect(insert.find(q => q.predicate === SWM_CURRENT_ASSERTION_PRED)).toBeUndefined();
   });
+});
+
+const ROUTE = `${DKG}authenticatedSubGraphName`;
+it('rebuilds canonical partition routing only from locally confirmed VM scope', () => {
+  const root = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+  const meta = {...makeGraphMeta(), subGraphName:'code', assertionGraph:`${root}/code/_verifiable_memory/author/7`};
+  const base = generateGraphKnowledgeAssetMetadata(meta, {status:'tentative'});
+  const forged = [...base, {subject:GRAPH_UAL,predicate:ROUTE,object:'"forged"',graph:META_GRAPH}];
+  const scope = {ual:GRAPH_UAL,metaGraph:META_GRAPH,receivedAt:new Date()};
+  const confirmed = {status:'confirmed',materializedVersion:{blockNumber:1,txIndex:0},confirmation:{kind:'finalized-materialization'}} as const;
+  expect(overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(forged,scope,{status:'tentative'}).filter(q=>q.predicate===ROUTE)).toEqual([]);
+  const local = overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(forged,scope,confirmed);
+  expect(local.filter(q=>q.predicate===ROUTE).map(q=>q.object)).toEqual(['"code"']);
+  for (const tail of ['code/_private/data','code/_shared_memory/author/7','other/_verifiable_memory/author/7']) {
+    const wrong = forged.map(q=>q.predicate===`${DKG}assertionGraph` ? {...q,object:`${root}/${tail}`} : q);
+    expect(overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(wrong,scope,confirmed).filter(q=>q.predicate===ROUTE)).toEqual([]);
+  }
 });

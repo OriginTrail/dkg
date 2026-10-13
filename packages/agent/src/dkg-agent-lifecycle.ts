@@ -405,7 +405,6 @@ import {
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
 import { createExactBatchResponderBinding, exactBatchResponderTransportOptions } from './sync/responder/exact-batch-stream.js';
-import { exactBatchTransportOptions } from './sync/requester/exact-batch-stream.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import {
   runSelectedSharedMemoryRetry,
