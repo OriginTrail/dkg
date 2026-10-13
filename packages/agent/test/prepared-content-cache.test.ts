@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readdir, readFile, writeFile, rm, symlink, stat, utimes } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,7 @@ async function fixture(limits = {}) {
 }
 const value = { body: new TextEncoder().encode('bounded immutable assertion'), plainBytes: 100 };
 const entryPath = (directory: string, key: string) => join(directory, createHash('sha256').update(key).digest('hex') + '.prepared');
-afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
+afterEach(async () => { vi.useRealTimers(); await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
 
 describe('persistent prepared content', () => {
   it('atomically publishes bytes and manifest and reads them from a new cache instance', async () => {
@@ -41,10 +41,17 @@ describe('persistent prepared content', () => {
     await writeFile(file, bytes);
     expect(await f.restart().get('key')).toBeNull(); expect(await readdir(f.directory)).toEqual([]);
   });
-  it('expires entries by creation time even if they are read frequently', async () => {
-    const f = await fixture({ ttlMs: 1 }); await f.cache.put('key', value);
-    await new Promise(resolve => setTimeout(resolve, 5));
-    expect(await f.restart().get('key')).toBeNull();
+  it.each([false, true])('reads do not extend absolute expiry (reopen=%s)', async reopen => {
+    const createdAt = Date.now();
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(createdAt);
+    const f = await fixture({ ttlMs: 1000 }); await f.cache.put('key', value);
+    vi.setSystemTime(createdAt + 900);
+    expect(await f.cache.get('key')).toEqual(value);
+    expect((await stat(entryPath(f.directory, 'key'))).mtimeMs).toBeCloseTo(createdAt + 900, 0);
+    const cache = reopen ? f.restart() : f.cache;
+    vi.setSystemTime(createdAt + 1100);
+    expect(await cache.get('key')).toBeNull();
+    expect(await readdir(f.directory)).toEqual([]);
   });
   it('bounds entries and physical bytes across restarts and concurrent puts', async () => {
     const f = await fixture({ maxEntries: 2, maxBytes: 1024 });
