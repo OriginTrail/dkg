@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import * as fallbackPlanner from '../src/atomic-asset-group.js';
 import * as bulkPlanner from '../src/adapters/bulk-asset-group.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 
@@ -10,7 +11,7 @@ const members = [{ graphUri: 'urn:data', metaGraphUri: 'urn:meta', metadataSubje
 }];
 
 describe('Blazegraph confirmed bulk publication', () => {
-  it('does not serialize a bulk payload until the scheduler admits it', async () => {
+  it.each([false, true])('defers all serialization and uses one admission (fallback=%s)', async fallback => {
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
       healthReservedSlots: 0, normalReservedSlots: 0, backgroundReservedSlots: 0 });
     let release!: () => void, entered!: () => void;
@@ -19,16 +20,22 @@ describe('Blazegraph confirmed bulk publication', () => {
     const occupying = scheduler.run('normal', 'fixture', async () => { entered(); await blocked; });
     await admitted;
     const plan = vi.spyOn(bulkPlanner, 'buildBulkAssetGroupPlan');
+    const fallbackPlan = vi.spyOn(fallbackPlanner, 'buildAtomicAssetGroupUpdate');
+    const admissions = vi.spyOn(scheduler, 'run');
     const fetcher = vi.fn().mockResolvedValueOnce(new Response('')).mockResolvedValueOnce(new Response(''))
       .mockResolvedValueOnce(new Response(JSON.stringify({ boolean: true }))).mockResolvedValueOnce(new Response(''));
     vi.stubGlobal('fetch', fetcher);
     const store = new BlazegraphStore('http://fixture.invalid/sparql', { scheduler });
-    const work = store.replaceAssetGroup(members);
+    const selected = fallback ? [{ ...members[0]!, graphQuads: ['1', '01'].map(value => ({
+      ...members[0]!.graphQuads[0]!, object: `"${value}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+    })) }] : members;
+    const work = store.replaceAssetGroup(selected);
     try {
       await new Promise(resolve => setTimeout(resolve, 10));
-      expect(plan).not.toHaveBeenCalled(); expect(fetcher).not.toHaveBeenCalled();
+      expect(plan).not.toHaveBeenCalled(); expect(fallbackPlan).not.toHaveBeenCalled(); expect(fetcher).not.toHaveBeenCalled();
       release(); await occupying; await work;
-      expect(plan).toHaveBeenCalledTimes(1); expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(plan).toHaveBeenCalledTimes(1); expect(fetcher).toHaveBeenCalledTimes(fallback ? 1 : 4);
+      expect(admissions).toHaveBeenCalledTimes(1); expect(fallbackPlan).toHaveBeenCalledTimes(fallback ? 1 : 0);
     } finally { release(); await occupying; await store.close(); }
   });
 
@@ -68,15 +75,30 @@ describe('Blazegraph confirmed bulk publication', () => {
     } finally { await store.close(); }
   });
 
+  it('cleans only owned staging after a settled publication failure, retaining the first error', async () => {
+    const failure = new Error('publication failed');
+    const request = vi.fn().mockResolvedValueOnce(new Response('')).mockRejectedValueOnce(failure)
+      .mockRejectedValueOnce(new Error('cleanup failed'));
+    vi.stubGlobal('fetch', request);
+    const store = new BlazegraphStore('http://fixture.invalid/sparql');
+    try {
+      await expect(store.replaceAssetGroup(members)).rejects.toBe(failure);
+      expect(request).toHaveBeenCalledTimes(3);
+      const cleanup = String(request.mock.calls[2]![1].body);
+      expect(cleanup.split(';').every(line => /^\s*DROP SILENT GRAPH <urn:dkg:/.test(line))).toBe(true);
+      expect(cleanup).not.toContain('<urn:data>'); expect(cleanup).not.toContain('<urn:meta>');
+    } finally { await store.close(); }
+  });
+
   it('does not convert a missing receipt into success or retry publication', async () => {
     const request = vi.fn().mockResolvedValueOnce(new Response(''))
       .mockResolvedValueOnce(new Response(''))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ boolean: false })));
+      .mockResolvedValueOnce(new Response(JSON.stringify({ boolean: false }))).mockResolvedValueOnce(new Response(''));
     vi.stubGlobal('fetch', request);
     const store = new BlazegraphStore('http://fixture.invalid/sparql');
     try {
       await expect(store.replaceAssetGroup(members)).rejects.toThrow('receipt missing');
-      expect(request).toHaveBeenCalledTimes(3);
+      expect(request).toHaveBeenCalledTimes(4);
     } finally { await store.close(); }
   });
 });

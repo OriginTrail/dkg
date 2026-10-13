@@ -8,7 +8,8 @@ import { bulkChunkHash, readBulkJson, parseBulkAssetHeader,
   type BulkGraphRequest } from '../bulk-graph-contract.js';
 import { BulkStagingQueue } from './bulk-staging-queue.js';
 import { BulkCommitGroup } from './bulk-commit-group.js';
-import { createAssetPayloadVerifier, decodeAssetPayload, type AssetVerificationOptions } from './asset-payload-verifier.js';
+import { createAssetPayloadVerifier, type AssetVerificationOptions } from './asset-payload-verifier.js';
+import { decodeNegotiatedExactSyncResponse } from '../wire-compression.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
@@ -113,17 +114,17 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
       const staged = delivery.value;
       const dataBytes = await readFile(staged.path);
       const started = performance.now();
-      const decoded = await decodeAssetPayload(dataBytes, signal);
+      const decoded = await decodeNegotiatedExactSyncResponse(dataBytes, { allowCompression: true, signal });
       if (decoded.bytes.length !== staged.header.plainBytes) throw new Error('Bulk expanded size mismatch');
       observeExactBatch(() => options.verification.onStage?.('decode', staged.index, performance.now() - started));
       const asset = await verify({ assetIndex: staged.index, assetUal: request.assetUals[staged.index]!,
         metadataBytes: Buffer.from(staged.header.metadata, 'base64'), dataBytes: decoded.bytes }, signal);
-      await group.append(asset, staged); metrics.verifiedAssets++;
+      metrics.verifiedAssets++;
       // CREDIT returns bounded staging capacity after verification has consumed the file.
       // It is deliberately not durable coverage; only COMMIT has that meaning.
       await rm(staged.path); queue.consumed(staged.header.encodedBytes);
       await session.send({ kind: K.CREDIT, index: staged.index, sequence: staged.header.encodedBytes, payload: new Uint8Array() });
-      await group.flushIfDue();
+      await group.append(asset, staged);
     }
     await group.flush();
     if (committed.length !== metrics.receivedAssets) throw new Error('Bulk chunk contains uncommitted assets');
