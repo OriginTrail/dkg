@@ -99,13 +99,16 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
     try {
       const members = [member(1, 'new-first', '2'), member(2, 'new-second', '2')];
-      await store.insert([...members.flatMap(a => [...a.graphQuads, ...a.metadataQuads]), unrelated]);
-      const expected = await store.query(select);
-      await store.insert([member(1, 'old-first', '1'), member(2, 'old-second', '1')].flatMap(a => [...a.graphQuads, ...a.metadataQuads]));
+      const expected = { type: 'bindings', variables: ['g', 's', 'p', 'o'], bindings: [...members.flatMap(a => [...a.graphQuads, ...a.metadataQuads]), unrelated]
+        .map(q => ({ g: q.graph, s: q.subject, p: q.predicate, o: q.object })) };
+      const sorted = (result: typeof expected) => ({ ...result, bindings: [...result.bindings].sort((a, b) =>
+        JSON.stringify(a).localeCompare(JSON.stringify(b))) });
+      await store.insert([...[member(1, 'old-first', '1'), member(2, 'old-second', '1')]
+        .flatMap(a => [...a.graphQuads, ...a.metadataQuads]), unrelated]);
       await store.replaceAssetGroup(members);
-      expect(await store.query(select)).toEqual(expected);
+      expect(sorted(await store.query(select) as typeof expected)).toEqual(sorted(expected));
       await store.replaceAssetGroup(members);
-      expect(await store.query(select)).toEqual(expected);
+      expect(sorted(await store.query(select) as typeof expected)).toEqual(sorted(expected));
     } finally {
       await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
       await store.close();

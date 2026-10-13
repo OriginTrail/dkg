@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { decodeAssetPayload } from './requester/asset-payload-verifier.js';
 import { requireExactAssetUals } from './exact-assets.js';
-import { EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES } from './wire-compression.js';
+import { decodeNegotiatedExactSyncResponse, EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES } from './wire-compression.js';
 
 import {
   EXACT_BATCH_FRAME_KIND, EXACT_BATCH_MAX_ASSETS,
@@ -180,5 +179,5 @@ export function isRecoverableExactBatchRefusal(code: ExactBatchRefusal | undefin
 }
 
 export function decodeExactBatchAsset(asset: ReceivedExactBatchAsset, options: { readonly signal?: AbortSignal } = {}) {
-  return decodeAssetPayload(asset.dataBytes, options.signal);
+  return decodeNegotiatedExactSyncResponse(asset.dataBytes, { allowCompression: true, signal: options.signal });
 }

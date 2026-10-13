@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { decodeNegotiatedExactSyncResponse } from '../wire-compression.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
 import { parseGraphScopedDescriptor } from '../durable-integrity.js';
 import { estimateQuadHeapBytes } from '../memory-telemetry.js';
@@ -13,9 +12,6 @@ export interface DecodedAssetPayload {
   readonly assetUal: string;
   readonly metadataBytes: Uint8Array;
   readonly dataBytes: Uint8Array;
-}
-export function decodeAssetPayload(bytes: Uint8Array, signal?: AbortSignal) {
-  return decodeNegotiatedExactSyncResponse(bytes, { allowCompression: true, signal });
 }
 export type AssetVerificationStage = 'decode' | 'parse' | 'verify' | 'authenticate-and-store';
 export interface AssetVerificationOptions {

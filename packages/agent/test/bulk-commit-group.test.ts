@@ -4,6 +4,7 @@ import { quadsToNQuads } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { createAssetPayloadVerifier } from '../src/sync/requester/asset-payload-verifier.js';
+import type { VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 import { BulkCommitGroup } from '../src/sync/requester/bulk-commit-group.js';
 import { encodeNegotiatedExactSyncResponse } from '../src/sync/wire-compression.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
@@ -16,6 +17,17 @@ vi.mock('../src/sync/bulk-graph-contract.js', async importOriginal => ({
 }));
 
 describe('bulk group independent parsed heap fence', () => {
+  it('append alone enforces eight members before a ninth arrives', async () => {
+    const sizes: number[] = [], events: string[] = [];
+    const group = new BulkCommitGroup(async members => { sizes.push(members.length); events.push('commit'); });
+    for (let index = 0; index < 9; index++) {
+      events.push('credit');
+      await group.append({ dataQuads: [], metadataQuads: [] } as unknown as VerifiedGraphScopedAsset,
+        { index, path: 'consumed', chunks: 1, header: { encodedBytes: 1, plainBytes: 1, offset: index, digest: '0'.repeat(64), metadata: '' } });
+    }
+    await group.flush(); expect(sizes).toEqual([8, 1]);
+    expect(events.indexOf('commit')).toBe(8);
+  });
   it('splits real verified assets before 64 MiB or eight members', async () => {
     const worker = new SyncVerifyWorker(), assets = [], stages = [];
     const cg = 'heap-fixture', address = '0x0000000000000000000000000000000000000001';

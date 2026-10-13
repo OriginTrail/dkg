@@ -21,8 +21,9 @@ export class BulkCommitGroup {
       || this.expanded + staged.header.plainBytes > BULK_GROUP_EXPANDED_BYTES)) await this.flush();
     if (!this.members.length) this.startedAt = Date.now();
     this.members.push({ asset, staged }); this.heap += heap; this.expanded += staged.header.plainBytes;
+    await this.flushIfDue();
   }
-  async flushIfDue() {
+  private async flushIfDue() {
     if (this.members.length >= BULK_GROUP_ASSETS || this.expanded >= BULK_GROUP_EXPANDED_BYTES
       || (this.flushAt !== undefined && Date.now() >= this.flushAt)) await this.flush();
   }

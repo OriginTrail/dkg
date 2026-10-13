@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DKGNode, LibP2PNetwork, ProtocolRouter, createOperationContext, BULK_GRAPH_KIND as K, type BulkGraphFrame,
+import { DKGNode, LibP2PNetwork, ProtocolRouter, createOperationContext, BULK_GRAPH_KIND as K, type BulkGraphFrame, type BulkGraphSession,
   bulkGraphTransportOptions, MemoryLayer, knowledgeAssetLayerGraphUri, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, quadsToNQuads } from '@origintrail-official/dkg-storage';
 import { generateGraphKnowledgeAssetMetadata, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
@@ -25,7 +25,7 @@ const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanups.reverse()) await close(); cleanups.length = 0; });
 async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
   beforePublish?: () => Promise<void>; onControl?: (frame: BulkGraphFrame) => void;
-  payloadBytes?: readonly number[]; expandedLengthMismatch?: boolean;
+  payloadBytes?: readonly number[]; expandedLengthMismatch?: boolean; tamperDigest?: 'asset' | 'chunk';
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(),'dkg-bulk-test-')); cleanups.push(() => rm(directory,{recursive:true,force:true}));
   const backing = new OxigraphStore(), target = new OxigraphStore(); cleanups.push(() => backing.close(), () => target.close());
@@ -85,6 +85,24 @@ async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
     store:source,peerId:nodes[1]!.peerId,parseSyncRequest:parse,authorizeSyncRequest:async()=>true,
     logWarn:()=>{},logDebug:()=>{},onExperimentalExactBatchResources:r=>{resources=r;}});
   const exports: number[] = [];
+  let markPrefixCommitted!: () => void;
+  const prefixCommitted = new Promise<void>(resolve => { markPrefixCommitted = resolve; });
+  if (hooks.tamperDigest) {
+    const register = server.registerDuplexStream.bind(server);
+    server.registerDuplexStream = (protocol, prepare, respond, options) => register(protocol, prepare, async context => {
+      const session = context.continuation as unknown as BulkGraphSession, send = session.send.bind(session);
+      session.send = async frame => {
+        if ((hooks.tamperDigest === 'asset' && frame.kind === K.META && frame.index === 0)
+          || (hooks.tamperDigest === 'chunk' && frame.kind === K.CHUNK_END)) {
+          if (frame.kind === K.CHUNK_END) await prefixCommitted;
+          const payload = JSON.parse(Buffer.from(frame.payload).toString()); payload.digest = '0'.repeat(64);
+          return send({ ...frame, payload: Buffer.from(JSON.stringify(payload)) });
+        }
+        return send(frame);
+      };
+      return respond(context);
+    }, options);
+  }
   registerPublicBulkGraph(server,{admission:resources,
     exportCache:{ acquireEncoded:async request=>{
       // Byte-boundary cases isolate receiver parsing/verification from exporter budgets.
@@ -101,13 +119,15 @@ async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
   const worker = new SyncVerifyWorker(); cleanups.push(() => worker.close());
   const request: BulkGraphRequest = {version:1,contextGraphId:cg,snapshotDigest:'a'.repeat(64),assetUals:uals};
   const groups: number[]=[]; const heaps: number[]=[];
-  if (hooks.onControl) {
+  if (hooks.onControl || hooks.tamperDigest === 'chunk') {
     const exchange = router.withDuplexStream.bind(router);
     router.withDuplexStream = (peer, protocol, options, consume) => exchange(peer, protocol, options, (stream, signal) => {
       const send = stream.send.bind(stream);
       stream.send = bytes => {
         const data = bytes.subarray(), header = new DataView(data.buffer, data.byteOffset, data.byteLength);
-        hooks.onControl!({ kind: header.getUint8(4), index: header.getUint32(8), sequence: header.getUint32(12), payload: data.subarray(20) });
+        const frame = { kind: header.getUint8(4), index: header.getUint32(8), sequence: header.getUint32(12), payload: data.subarray(20) };
+        if (frame.kind === K.COMMIT && frame.index === 7) markPrefixCommitted();
+        hooks.onControl?.(frame);
         return send(bytes);
       };
       return consume(stream, signal);
@@ -168,6 +188,20 @@ describe('bulk public graph stream over real Noise sockets and verifier', () => 
     expect(f.groups).toEqual([1, 1]);
     expect(f.heaps.every(n => n < 64 * 1024 * 1024)).toBe(true);
   }, 60_000);
+  it.each(['asset', 'chunk'] as const)('rejects a forged %s digest without losing durable prefix accounting', async tamperDigest => {
+    const f = await fixture(20, -1, false, { tamperDigest });
+    const error = await f.run().then(() => { throw new Error('forged digest accepted'); }, error => error);
+    expect(error).toBeInstanceOf(BulkGraphPartialError);
+    expect(error.message).toContain(tamperDigest === 'asset' ? 'encoded asset digest mismatch' : 'directory digest or coverage mismatch');
+    if (tamperDigest === 'asset') expect(error.committedAssetUals).toEqual([]);
+    else {
+      expect(error.committedAssetUals.length).toBeGreaterThanOrEqual(8);
+      expect(error.committedAssetUals).toEqual(f.uals.slice(0, error.committedAssetUals.length));
+      expect(error.metrics.committedAssets).toBe(error.committedAssetUals.length);
+      for (const ual of error.committedAssetUals) expect(await f.target.countQuads(
+        knowledgeAssetLayerGraphUri(cg, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, 1)))).toBeGreaterThan(0);
+    }
+  });
   it('rejects a false expanded-length directory before verification or publication', async () => {
     const f = await fixture(1, -1, false, { expandedLengthMismatch: true });
     await expect(f.run()).rejects.toThrow('Bulk expanded size mismatch');
