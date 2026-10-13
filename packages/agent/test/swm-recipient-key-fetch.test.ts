@@ -89,7 +89,7 @@ describe('private share recipients with a missing member key (#2849)', () => {
       contextGraphMetaProjection: {
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
-        ...stubRecipientRevisions(),
+        ...stubRecipientRevisions(store),
       },
       resolveSwmTransportAuthority: vi.fn(async () => (transportKind === 'private-roster'
         ? { kind: 'private-roster' as const, participantAgents: members.map((member) => member.address) }

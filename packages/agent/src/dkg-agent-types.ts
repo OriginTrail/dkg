@@ -144,12 +144,10 @@ export type LocalSwmSenderKeySendState = {
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
-  /**
-   * Exact transport-route snapshot seeded for this epoch. Optional only for
-   * sender state persisted before route-aware epoch rotation was introduced;
-   * such legacy state rotates once before it can be reused.
-   */
+  /** Exact transport-route snapshot seeded for this epoch. State saved before route-aware rotation has none and rotates once. */
   recipientRouteHash?: string;
+  /** Set on an epoch whose `chainKey` is always the key of `nextMessageIndex`. State saved without it rotates once. */
+  chainKeyMatchesIndex?: true;
   chainKey: Uint8Array;
   nextMessageIndex: number;
   senderSigningSecretKey: Uint8Array;
@@ -487,6 +485,8 @@ export interface PeerConnectionSnapshot {
    * limited connections not being reused by `dialProtocol`.
    */
   limited: boolean;
+  /** What is left on a relayed connection as libp2p reports it (bytes as a decimal string); null on a direct one. */
+  allowance: { bytes: string | null; seconds: number | null } | null;
   /** Active stream count (multiplexer-level). */
   streams: number;
   /** UNIX-ms when the connection was opened, or `null` if libp2p didn't expose it. */

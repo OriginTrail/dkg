@@ -97,6 +97,17 @@ interface CGMemberEnumerationBase {
    * regression.
    */
   readonly substrateEligibleMembers?: readonly string[];
+  /**
+   * Peers that follow a public CG's shared memory without being topic
+   * subscribers (see `shared-memory-followers.ts`), already filtered by
+   * {@link CGMemberEnumeratorDeps.isPeerDialable}. GossipSub does not run
+   * over a relayed connection, so a direct send is their only delivery path:
+   * the fan-out sends to them whatever tier it chose for the subscribers and
+   * without the narrowing it applies to subscribers. Set only for a public
+   * CG and only when there is one; read on every `enumerate()` call and
+   * never held in the cache.
+   */
+  readonly directFollowers?: readonly string[];
 }
 
 /**
@@ -230,6 +241,17 @@ export interface CGMemberEnumeratorDeps {
    */
   isPeerDialable?: (peerId: string) => boolean | Promise<boolean>;
   /**
+   * Peers known to follow a public CG's shared memory by other means than a
+   * GossipSub subscription: see `shared-memory-followers.ts`. GossipSub does
+   * not run over a relayed connection, so a subscriber this node reaches only
+   * through a relay never shows up in {@link getTopicSubscribers}. Those that
+   * are not subscribers and pass {@link isPeerDialable} are returned as
+   * {@link CGMemberEnumeration.directFollowers}. Read on every `enumerate()`
+   * call, outside the cache, and never for a private or allowlisted CG, whose
+   * roster is authoritative.
+   */
+  getSharedMemoryFollowers?: (cgId: string) => readonly string[];
+  /**
    * Lazy accessor for our own peer ID. Always excluded from the
    * returned member set — we don't fan-out to ourselves (the local
    * apply already happened in the caller).
@@ -262,6 +284,17 @@ export interface CGMemberEnumeratorDeps {
 
 const DEFAULT_CACHE_TTL_MS = 60_000;
 
+/**
+ * What the cache holds for a CG: its member classification, and whether the
+ * CG is public. A public CG with no subscriber resolves to `source: 'none'`
+ * like a private one without a roster, and only the public one may have
+ * followers.
+ */
+interface ResolvedMembers {
+  readonly enumeration: CGMemberEnumeration;
+  readonly isPublic: boolean;
+}
+
 export interface CGMemberEnumerator {
   /**
    * Resolve the current member set for {@link cgId}. Agent rosters bypass the
@@ -282,7 +315,7 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
   const ttl = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = new Map<string, {
     computedAtMs: number;
-    value: CGMemberEnumeration;
+    value: ResolvedMembers;
   }>();
   // In-flight promise dedup so a burst of concurrent `enumerate(cgId)`
   // calls for the same cgId collapses onto a single resolution. Bug
@@ -292,7 +325,7 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
   // miss (cache is populated only after the async resolution
   // finishes) and each performed its own SPARQL query +
   // `getSubscribers` call.
-  const inFlight = new Map<string, Promise<CGMemberEnumeration>>();
+  const inFlight = new Map<string, Promise<ResolvedMembers>>();
   // Per-cgId generation counter bumped on every `invalidate(cgId)`.
   // Bug fix (codex review on #571 round 2): `invalidate()` previously
   // only cleared the resolved TTL cache, so concurrent
@@ -318,7 +351,7 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
     cgId: string,
     gen: number,
     computedAtMs: number,
-  ): Promise<CGMemberEnumeration> {
+  ): Promise<ResolvedMembers> {
     const result = await computeMembers(cgId);
     // Only commit to the TTL cache if no `invalidate(cgId)` has run
     // since this resolve started. Otherwise a stale resolve could
@@ -326,13 +359,17 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
     // Agent rosters and empty/unknown states are intentionally not cached.
     // This makes an actual membership/profile write visible to the very next
     // share without coupling correctness to a global store-write revision.
-    if (currentGen(cgId) === gen && result.source !== 'agent-roster' && result.source !== 'none') {
+    if (
+      currentGen(cgId) === gen
+      && result.enumeration.source !== 'agent-roster'
+      && result.enumeration.source !== 'none'
+    ) {
       cache.set(cgId, { computedAtMs, value: result });
     }
     return result;
   }
 
-  async function computeMembers(cgId: string): Promise<CGMemberEnumeration> {
+  async function computeMembers(cgId: string): Promise<ResolvedMembers> {
     const [allowed, isPrivate] = await Promise.all([
       deps.getContextGraphAllowedPeers(cgId),
       deps.isPrivateContextGraph(cgId),
@@ -345,9 +382,12 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
       // subscribers — that would re-admit peers the curator just
       // kicked).
       return {
-        source: 'allowlist',
-        isPrivate,
-        members: dedupAndExcludeSelf(allowed, deps.getSelfPeerId()),
+        isPublic: false,
+        enumeration: {
+          source: 'allowlist',
+          isPrivate,
+          members: dedupAndExcludeSelf(allowed, deps.getSelfPeerId()),
+        },
       };
     }
 
@@ -359,11 +399,14 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
       const resolvedRoster = await (deps.getContextGraphAllowedAgentPeers?.(cgId) ?? null);
       if (resolvedRoster) {
         return {
-          ...resolvedRoster,
-          members: dedupAndExcludeSelf(resolvedRoster.members, deps.getSelfPeerId()),
+          isPublic: false,
+          enumeration: {
+            ...resolvedRoster,
+            members: dedupAndExcludeSelf(resolvedRoster.members, deps.getSelfPeerId()),
+          },
         };
       }
-      return { source: 'none', members: [] };
+      return { isPublic: false, enumeration: { source: 'none', members: [] } };
     }
 
     // Public CG: no on-chain roster exists by design (subscribers
@@ -394,40 +437,71 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
     // cached; only the cheap liveness check repeats.
     const subscribers = deps.getTopicSubscribers(deps.topicForCG(cgId));
     const members = dedupAndExcludeSelf(subscribers, deps.getSelfPeerId());
-    return members.length === 0
-      ? { source: 'none', members: [] }
-      : { source: 'topic-subscribers', members };
+    return {
+      isPublic: true,
+      enumeration: members.length === 0
+        ? { source: 'none', members: [] }
+        : { source: 'topic-subscribers', members },
+    };
   }
 
-  /**
-   * Populate `substrateEligibleMembers` on a topic-subscribers
-   * result by awaiting `isPeerDialable` per-peer. No-op for
-   * other sources or when no filter is wired. Async to
-   * accommodate libp2p's `peerStore.get`. Throws caught + treated
-   * as "not dialable" — a single bad peerStore lookup shouldn't
-   * shrink the substrate target set across the whole CG.
-   *
-   * Returns the input unchanged when there's nothing to filter;
-   * otherwise returns a NEW object sharing the same `members`
-   * array (callers that mutate the result get the dual-field
-   * shape they expect).
-   */
-  async function populateSubstrateEligibleMembers(value: CGMemberEnumeration): Promise<CGMemberEnumeration> {
-    if (value.source !== 'topic-subscribers') return value;
-    if (!deps.isPeerDialable) return value;
+  async function dialable(peerIds: readonly string[]): Promise<string[]> {
     const predicate = deps.isPeerDialable;
-    const checks = await Promise.all(value.members.map(async (peerId) => {
+    if (!predicate) return [...peerIds];
+    const checks = await Promise.all(peerIds.map(async (peerId) => {
       try {
         return await predicate(peerId);
       } catch {
         return false;
       }
     }));
-    const filtered = value.members.filter((_, idx) => checks[idx]);
+    return peerIds.filter((_, idx) => checks[idx]);
+  }
+
+  /**
+   * The followers of a public CG that are not among its subscribers and that
+   * this node can reach now. Read live on every call: a follower is cheap to
+   * read, comes and goes with the sync requests of its peer, and must be a
+   * recipient of the very next share, whatever the cache holds.
+   *
+   * "Not a subscriber" is judged against GossipSub's subscribers of this
+   * moment, not against the cached snapshot. A peer that was a subscriber a
+   * minute ago and is reached only through a relay now has lost its gossip
+   * path; the snapshot would still list it and it would be left without one.
+   */
+  async function directFollowersOf(cgId: string, resolved: ResolvedMembers): Promise<string[]> {
+    if (!resolved.isPublic || !deps.getSharedMemoryFollowers) return [];
+    const followers = deps.getSharedMemoryFollowers(cgId);
+    if (followers.length === 0) return [];
+    const subscribers = new Set(deps.getTopicSubscribers(deps.topicForCG(cgId)));
+    return dialable(
+      dedupAndExcludeSelf(followers, deps.getSelfPeerId()).filter((peerId) => !subscribers.has(peerId)),
+    );
+  }
+
+  /**
+   * Populate `substrateEligibleMembers` on a topic-subscribers
+   * result by awaiting `isPeerDialable` per-peer, and `directFollowers`
+   * on a public result. Async to accommodate libp2p's `peerStore.get`.
+   * Throws caught + treated as "not dialable" — a single bad peerStore
+   * lookup shouldn't shrink the substrate target set across the whole CG.
+   *
+   * Returns the resolved enumeration unchanged when there's nothing to
+   * add; otherwise returns a NEW object sharing the same `members`
+   * array (callers that mutate the result get the shape they expect).
+   */
+  async function finishEnumeration(cgId: string, resolved: ResolvedMembers): Promise<CGMemberEnumeration> {
+    const value = resolved.enumeration;
+    const directFollowers = await directFollowersOf(cgId, resolved);
+    const followers = directFollowers.length > 0 ? { directFollowers } : {};
+    if (value.source === 'none') return { source: 'none', members: [], ...followers };
+    if (value.source !== 'topic-subscribers') return value;
+    if (!deps.isPeerDialable) return directFollowers.length > 0 ? { ...value, ...followers } : value;
     return {
       source: value.source,
       members: value.members,
-      substrateEligibleMembers: filtered,
+      substrateEligibleMembers: await dialable(value.members),
+      ...followers,
     };
   }
 
@@ -436,12 +510,12 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
       const nowMs = now();
       const cached = cache.get(cgId);
       if (cached && isFresh(cached, nowMs)) {
-        return populateSubstrateEligibleMembers(cached.value);
+        return finishEnumeration(cgId, cached.value);
       }
 
       const existing = inFlight.get(cgId);
       if (existing) {
-        return populateSubstrateEligibleMembers(await existing);
+        return finishEnumeration(cgId, await existing);
       }
 
       const gen = currentGen(cgId);
@@ -455,7 +529,7 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
         }
       });
       inFlight.set(cgId, promise);
-      return populateSubstrateEligibleMembers(await promise);
+      return finishEnumeration(cgId, await promise);
     },
 
     invalidate(cgId: string): void {

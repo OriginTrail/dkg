@@ -20,6 +20,10 @@ import {
   decodeKnowledgeAssetMerkleRootCount,
 } from './evm-knowledge-asset-update-context.js';
 import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
+import {
+  KnowledgeAssetVersionSnapshotTrace,
+  type KnowledgeAssetVersionSnapshotReadOptions,
+} from './ka-version-snapshot-report.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
 import { readFirstProviderWithTransientRetry } from './rpc-provider-fallback.js';
 import { readRpcTuple } from './rpc-read-lifecycle.js';
@@ -111,21 +115,29 @@ export class StorageReadMethods extends EVMChainAdapterBase {
    */
   async readKnowledgeAssetVersionSnapshot(
     kaId: bigint,
-    options: ChainReadOptions = {},
+    options: KnowledgeAssetVersionSnapshotReadOptions = {},
   ): Promise<KnowledgeAssetVersionSnapshot | null> {
     if (options.signal?.aborted || activeRpcRequestAbortSignal()?.aborted) return null;
     await this.init();
     if (options.signal?.aborted || activeRpcRequestAbortSignal()?.aborted) return null;
+    // Observation only (see ka-version-snapshot-report.ts): `unavailable` and `noView` return
+    // the same `null` and `established` the same view; the trace keeps which endpoint failed.
+    const callerSignal = activeRpcRequestAbortSignal();
+    const trace = new KnowledgeAssetVersionSnapshotTrace(this.providers, this.rpcUrls, {
+      onUnavailable: options.onUnavailable,
+      cancelled: () => options.signal?.aborted === true || callerSignal?.aborted === true,
+    });
     const kas = this.contracts.knowledgeAssetStorage;
-    if (!kas) return null;
+    if (!kas) return trace.unavailable('no-storage-contract');
     const knowledgeAssetStorageAddress = this.knowledgeAssetStorageBindingAddress(kas);
     const knowledgeAssetStorageGeneration = this.knowledgeAssetStorageBindingGeneration;
-    if (knowledgeAssetStorageAddress === undefined) return null;
-    const readOne = async (provider: JsonRpcProvider, signal: AbortSignal) => {
+    if (knowledgeAssetStorageAddress === undefined) return trace.unavailable('no-storage-contract');
+    const readOne = trace.observe(async (provider: JsonRpcProvider, signal: AbortSignal, step) => {
       signal.throwIfAborted();
       if (!this.knowledgeAssetStorageBindingIsCurrent(
         kas, knowledgeAssetStorageAddress, knowledgeAssetStorageGeneration,
       )) return null;
+      step('chain-id');
       // r15 (3814317260) / r17 (3814893080) — every endpoint must prove it is THIS chain before its
       // view is eligible; a configured wrong-chain RPC must not supply a durable version decision.
       //
@@ -142,6 +154,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         if (BigInt(network.chainId) !== expectedChainId) return null;
       }
       signal.throwIfAborted();
+      step('head-block');
       // Use the same operator-selected confirmation depth as the receipt proof. The receipt block
       // itself is confirmation 1, so finalityConfirmations=1 pins this coherent version view to
       // the current head. Larger values pin head-depth+1. Using the RPC-specific `finalized` tag
@@ -155,6 +168,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       );
       signal.throwIfAborted();
       if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
+      step('pinned-block');
       const blockNumber = confirmedStateBlockAtHead(
         head.number,
         this.finalityConfirmations,
@@ -171,6 +185,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         || block.number !== blockNumber
         || typeof block.hash !== 'string'
         || !ethers.isHexString(block.hash, 32)) return null;
+      step('pinned-read');
       const bound = this.rebindContract(kas as Contract, provider);
       const at = { blockTag: blockNumber };
       const [latestRoot, context, latestAuthor, latestPublisher] = await readRpcTuple([
@@ -181,6 +196,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       ]);
       signal.throwIfAborted();
       if (!latestRoot || !latestAuthor || !latestPublisher) return null;
+      step('storage-binding');
       if (!this.knowledgeAssetStorageBindingIsCurrent(
         kas,
         knowledgeAssetStorageAddress,
@@ -197,18 +213,18 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         knowledgeAssetStorageAddress,
         knowledgeAssetStorageGeneration,
       };
-    };
+    });
     const view = await readFirstProviderWithTransientRetry(this.providers, readOne, {
       retryDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
       isRetryable: isContractViewRetryable,
       signal: options.signal,
     });
-    if (!view || options.signal?.aborted || activeRpcRequestAbortSignal()?.aborted) return null;
+    if (!view || options.signal?.aborted || activeRpcRequestAbortSignal()?.aborted) return trace.noView();
     return this.knowledgeAssetStorageBindingIsCurrent(
       kas,
       knowledgeAssetStorageAddress,
       knowledgeAssetStorageGeneration,
-    ) ? view : null;
+    ) ? trace.established(view) : trace.unavailable('storage-binding-changed');
   }
 
   async knowledgeAssetVersionSnapshotIsCurrent(

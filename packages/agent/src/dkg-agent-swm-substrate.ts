@@ -10,6 +10,7 @@
  */
 
 
+import type { ContextGraphSubscriptionRollbackSlotRelease } from './context-graph-subscription-authority-recovery.js';
 import { isLocalPrivateMember } from './internal/local-private-member.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -177,6 +178,8 @@ import {
   type SwmFanoutPeerSelector,
 } from './swm/swm-fanout-peer-selection.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
+import { connectionCarriesShareDelivery } from './swm/relayed-connection-allowance.js';
+import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
   BEACON_REANNOUNCE_INTERVAL_MS,
@@ -397,6 +400,7 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
+import { SharedMemoryGossipAuthorityRead } from './internal/swm-gossip-authority-read.js';
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { projectRfc64CatalogTransportStateV1 } from
@@ -614,6 +618,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     options?: {
       persist?: boolean;
       updateRehydrationStatus?: boolean;
+      rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
       /** The cleartext id that supersedes this name-hash id (adoption). */
       supersededBy?: string;
     },
@@ -670,7 +675,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.setContextGraphSubscription(
       contextGraphId,
       { ...existing, subscribed: false },
-      { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus },
+      { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus, rollbackSlotRelease: options?.rollbackSlotRelease },
     );
 
     void this.reconcileSwmHostModeSubscription(contextGraphId).catch((err) => {
@@ -910,8 +915,21 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       }
       return;
     }
-    const canUseSharedMemory = await this.canUseSharedMemoryForContextGraph(contextGraphId);
+    const authorityRead = new SharedMemoryGossipAuthorityRead(
+      contextGraphId,
+      () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
+    );
+    const canUseSharedMemory = await authorityRead.run(() => this.canUseSharedMemoryForContextGraph(contextGraphId));
     if (!session.active || this.gossipSession !== session) return;
+    if (authorityRead.deferIfUnanswered({
+      session, canUseSharedMemory, isRegistered, log: this.log, ctx,
+      askAgain: () => this.queueSharedMemoryGossipSubscription(contextGraphId),
+    })) {
+      // A core that holds no member subscription may still host the curated
+      // substrate, as after a refusal (see below).
+      if (!isRegistered) await this.reconcileSwmHostModeSubscription(contextGraphId);
+      return;
+    }
     if (!canUseSharedMemory) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
@@ -1284,13 +1302,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // proof finishes without invalidating the receiver's proof. Retry
           // one changed snapshot so the ordinary revoke race does not drop an
           // otherwise valid envelope, then fail closed under continued churn.
+          // This graph's own authority facts: a write to another graph cannot
+          // change its gate and must not drop the envelope (#2968).
           for (let attempt = 0; attempt < 2; attempt += 1) {
-            const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+            const metadataRevision = this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId);
             const meta = await this.getCgMeta(cgId);
             const allowedPeers =
               await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(cgId);
             if (
-              this.contextGraphMetaProjection.readAuthorityFactsRevision
+              this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId)
                 === metadataRevision
             ) {
               return allowedPeers === undefined ? meta : { ...meta, allowedPeers };
@@ -1448,23 +1468,18 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         return this.node.libp2p.getPeers().some((p) => p.toString() === peerId);
       }
 
-      // PR-K filter tier 1: connectivity. Reject peers whose
-      // ONLY live connections are *limited* Circuit Relay V2
-      // reservations. Limited reservations cap data (~128 KiB)
-      // and duration (~2 min) per stream; the aggressive
-      // per-cycle traffic of SWM substrate fan-out exhausts
-      // these caps almost immediately, after which every
-      // `messenger.sendReliable` hits a stream-reset / aborted
-      // error that `isRecoverableSendError` (correctly)
-      // classifies as recoverable. The outbox queues + retries
-      // forever, each retry eating fresh budget — a death
-      // spiral the 2026-05-18 Miles<->Lex soak surfaced as
-      // `swm-update: d=0 q=2031` after ~60 cycles, with both
-      // peers behind NAT and connected only via limited relays.
+      // PR-K filter tier 1: connectivity. Reject a peer whose live
+      // connections are all relayed with a SMALL allowance. A relay
+      // that grants about 128 KiB and 2 minutes for a circuit is used
+      // up by the fan-out at once; every later `sendReliable` then
+      // fails as recoverable and is queued again, each retry eating
+      // the next circuit (`swm-update: d=0 q=2031` in the 2026-05-18
+      // soak, both peers behind NAT). A relayed connection with enough
+      // allowance left, as Core nodes grant, does carry the fan-out:
+      // see `swm/relayed-connection-allowance.ts`.
       const conns = this.node.libp2p.getConnections(pid);
       if (conns.length > 0) {
-        const hasNonLimited = conns.some((c) => !((c as unknown as { limits?: unknown }).limits));
-        if (!hasNonLimited) return false;
+        if (!conns.some((c) => connectionCarriesShareDelivery((c as unknown as { limits?: unknown }).limits))) return false;
       } else {
         // No live connection — fall back to peerStore-cached
         // addresses. A future dial may yield a non-limited
@@ -1523,6 +1538,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         getContextGraphAllowedAgentPeers: (cgId) => this.resolvePrivateSwmAgentPeerRoster(cgId),
         isPrivateContextGraph: (cgId) => this.isPrivateContextGraph(cgId),
         getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),
+        getSharedMemoryFollowers: (cgId) => sharedMemoryFollowersOf(this).followers(cgId),
         // OT-RFC-38 / LU-6 Phase B — substrate caller passes the local
         // cleartext id; resolver derives the wire-form topic for the
         // peer-subscriber probe so the substrate doesn't query the
@@ -1672,14 +1688,16 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       return;
     }
     const quorumRecord = this.swmAckQuorum?.inspect(shareOperationId);
+    // A direct member has no gossip path: it is retried outside the narrowing made for subscribers.
+    const direct = new Set(quorumRecord?.directMembers ?? []);
     let topUpPeers = dialableMissingPeers;
     if (quorumRecord?.enumerationSource === 'topic-subscribers') {
       const selection = this.selectSwmFanoutPeersForActiveShare({
         contextGraphId: cgId,
-        candidatePeers: dialableMissingPeers,
+        candidatePeers: dialableMissingPeers.filter((peerId) => !direct.has(peerId)),
         enumerationSource: 'topic-subscribers',
       });
-      topUpPeers = selection.selectedPeers;
+      topUpPeers = [...selection.selectedPeers, ...dialableMissingPeers.filter((peerId) => direct.has(peerId))];
       if (selection.skippedRecentPeers.length > 0 || topUpPeers.length !== dialableMissingPeers.length) {
         this.log.info(
           ctx,
@@ -1746,7 +1764,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
         });
         const classified = classifySendResult(peerId, sendResult);
-        if (quorumRecord?.enumerationSource === 'topic-subscribers') {
+        if (quorumRecord?.enumerationSource === 'topic-subscribers' && !direct.has(peerId)) {
           this.recordSwmFanoutPeerRecord(cgId, classified);
         }
         switch (classified.outcome) {
@@ -1765,7 +1783,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
-        if (quorumRecord?.enumerationSource === 'topic-subscribers') {
+        if (quorumRecord?.enumerationSource === 'topic-subscribers' && !direct.has(peerId)) {
           this.recordSwmFanoutPeerOutcome(cgId, peerId, 'failed');
         }
         this.swmAckQuorum?.dropPeer(shareOperationId, peerId);

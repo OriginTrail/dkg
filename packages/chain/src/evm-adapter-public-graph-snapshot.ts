@@ -3,7 +3,8 @@ import { Contract, ethers, type JsonRpcProvider } from "ethers";
 import {
   MULTICALL3_ADDRESS,
   MULTICALL3_RUNTIME_CODE_HASH,
-} from "./evm-background-read-batching.js";
+  createMulticall3, staticAggregate3, decodeContractResult,
+} from "./evm-multicall-wire.js";
 import { EVMChainAdapterBase } from "./evm-adapter-base.js";
 import { resolveEvmFinalityAnchorBlockV1 } from "./evm-finality-anchor.js";
 import { decodeKnowledgeAssetMerkleRootCount } from "./evm-knowledge-asset-update-context.js";
@@ -185,31 +186,13 @@ async function readSnapshotCalls(
 ): Promise<unknown[]> {
   signal.throwIfAborted();
   if (aggregate) {
-    const contract = new Contract(
-      MULTICALL3_ADDRESS,
-      [
-        "function aggregate3((address target,bool allowFailure,bytes callData)[] calls) payable returns ((bool success,bytes returnData)[])",
-      ],
-      provider,
-    );
-    const result = await contract.aggregate3.staticCall(
-      calls.map((c) => ({
-        target: c.contract.target,
-        allowFailure: false,
-        callData: c.contract.interface.encodeFunctionData(c.method, c.args),
-      })),
-      { blockTag },
-    );
-    if (result.length !== calls.length)
-      throw new Error("Snapshot aggregate count mismatch");
+    const result = await staticAggregate3(createMulticall3(provider), calls.map(c => ({
+      target: String(c.contract.target),
+      callData: c.contract.interface.encodeFunctionData(c.method, c.args),
+    })), blockTag, false);
     return calls.map((c, i) => {
-      if (result[i].success !== true)
-        throw new Error("Snapshot aggregate read failed");
-      const value = c.contract.interface.decodeFunctionResult(
-        c.method,
-        result[i].returnData,
-      );
-      return value.length === 1 ? value[0] : value;
+      if (!result[i]!.success) throw new Error("Snapshot aggregate read failed");
+      return decodeContractResult(c.contract.interface, c.method, result[i]!.returnData);
     });
   }
   // Local development chains may not deploy Multicall3. Preserve the same anchor and cancellation.

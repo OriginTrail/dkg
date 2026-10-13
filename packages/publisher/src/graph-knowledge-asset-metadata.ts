@@ -2,6 +2,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   toAgentDid,
+  validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -11,6 +12,7 @@ import type {
   OnChainProvenance,
 } from './metadata.js';
 
+const AUTHENTICATED_SUB_GRAPH = 'http://dkg.io/ontology/authenticatedSubGraphName';
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -235,7 +237,7 @@ export function overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
   const controls = new Set([
     GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
     GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE,
-    MATERIALIZED_VERSION_PREDICATE,
+    MATERIALIZED_VERSION_PREDICATE, AUTHENTICATED_SUB_GRAPH,
   ]);
   const result = metadata.filter(q => !controls.has(q.predicate));
   result.push(
@@ -244,6 +246,7 @@ export function overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
       `${lit(scope.receivedAt.toISOString())}^^<${XSD}dateTime>`, scope.metaGraph),
   );
   if (state.status === 'confirmed') {
+    appendAuthenticatedSubGraphRoute(result, scope.ual, scope.metaGraph);
     result.push(
       mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, lit(state.confirmation.kind), scope.metaGraph),
       materializedVersionQuad(scope.metaGraph, scope.ual, state.materializedVersion),
@@ -303,7 +306,23 @@ export function generateGraphKnowledgeAssetMetadata(
   } else {
     quads.push(mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('tentative'), metaGraph));
   }
+  if (state.status === 'confirmed') appendAuthenticatedSubGraphRoute(quads, scope.ual, metaGraph);
   return quads;
+}
+
+/** Locally authenticated routing is independent of receipt or snapshot provenance. */
+function appendAuthenticatedSubGraphRoute(quads: Quad[], ual: string, metaGraph: string): void {
+  const value = (predicate: string) => {
+    const rows = quads.filter(q => q.subject === ual && q.graph === metaGraph && q.predicate === `${DKG}${predicate}`);
+    return rows.length === 1 ? rows[0]!.object : undefined;
+  };
+  const rawName = value('subGraphName');
+  const name = rawName === undefined ? undefined : rdfLiteralLexicalValue(rawName);
+  const root = metaGraph.replace(/\/_meta$/, '');
+  if (name === undefined || !validateSubGraphName(name).valid
+    || value('kaUal') !== ual || value('contextGraph') !== root
+    || !value('assertionGraph')?.startsWith(`${root}/${name}/_verifiable_memory/`)) return;
+  quads.push(mq(ual, AUTHENTICATED_SUB_GRAPH, lit(name), metaGraph));
 }
 
 function generateGraphKnowledgeAssetMetadataBase(

@@ -216,6 +216,7 @@ export {
 } from './ccl-policy.js';
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 export {
   CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
@@ -266,6 +267,12 @@ export type {
   Rfc64PublicCatalogAuthorRepairStatusV1,
   Rfc64SwmCatalogProjectionSupervisorStatusV1,
 } from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+export type {
+  CatalogHeadDeliveryStatusV1,
+} from './internal/catalog-head-delivery-report.js';
+export type {
+  FinalizedPrivatePlacementQueueStatusV1,
+} from './internal/catalog-placement-timing.js';
 export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';

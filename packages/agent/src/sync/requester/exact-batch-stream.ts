@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_FRAME_BYTES, EXACT_BATCH_MAX_REQUEST_BYTES,
   EXACT_BATCH_MAX_ASSETS, EXACT_BATCH_MAX_CHUNKS_PER_ASSET, type ExactBatchTransportSession, type ExactBatchTransportOptions } from '@origintrail-official/dkg-core';
 import {
@@ -6,7 +7,6 @@ import {
   ExactBatchReceiveWindow, decodeExactBatchAsset,
   type ExactBatchFrame, type ExactBatchRefusal, type ReceivedExactBatchAsset,
 } from '../exact-batch-stream-contract.js';
-import { EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES } from '../wire-compression.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
 import type { DurableSyncContext } from './durable-sync.js';
@@ -28,15 +28,7 @@ export interface ExactBatchVerifiedResult {
   readonly committedAssetUals: readonly string[];
 }
 
-export function exactBatchTransportOptions(timeoutMs: number, signal?: AbortSignal): ExactBatchTransportOptions {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new RangeError('Exact batch transport deadline outside bounded recovery profile');
-  const maxFrameBytes = EXACT_BATCH_MAX_FRAME_BYTES + EXACT_BATCH_FRAME_HEADER_BYTES;
-  return { timeoutMs, signal, maxRequestBytes: EXACT_BATCH_MAX_REQUEST_BYTES, maxFrameBytes, maxReadBufferBytes: 2 * maxFrameBytes,
-    maxResponseBytes: EXACT_BATCH_MAX_ASSETS * (EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES + EXACT_BATCH_MAX_FRAME_BYTES
-      + (EXACT_BATCH_MAX_CHUNKS_PER_ASSET + 2) * EXACT_BATCH_FRAME_HEADER_BYTES)
-      + EXACT_BATCH_MAX_REQUEST_BYTES + EXACT_BATCH_FRAME_HEADER_BYTES,
-    windowSize: EXACT_BATCH_STREAM_WINDOW_SIZE };
-}
+export { exactBatchTransportOptions } from '../exact-batch-transport-options.js';
 /** Settled local observations only; these never grant recovery or holder credit. */
 export interface ExactBatchRefusalObservation {
   readonly code: ExactBatchRefusal;
