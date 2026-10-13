@@ -29,9 +29,22 @@ agent's own entries, and a member whose metadata fetch failed right after a
 live approval no longer needs a restart, which fixes a 10.0.23 known issue
 (#3109).
 
+This release also fixes what a community report found between Edge nodes
+(#3198). An asset whose text holds a tab no longer blocks its author's
+catalog, and a node on Blazegraph accepts catalog rows with dates and
+numbers. A share into a sub-graph reaches the peers that follow a public
+graph through a relay, and a request to such a peer no longer fails when its
+dial ends in a closed connection. A new subscription to a public graph asks
+every peer it selected, gets the graph's definition and reports synced
+within seconds. An Edge keeps its relay reservations on the relays its
+network lists.
+
 **No smart-contract, ABI or deployment registry changes.** Message formats
 are unchanged; a node now announces only the newest head of a catalog
-(#3130) and runs the libp2p identify push protocol (#3145).
+(#3130) and runs the libp2p identify push protocol (#3145). A catalog
+projection may now hold a literal with a tab or another control character;
+a node on an earlier version does not apply a catalog head with such a row
+(#3209).
 
 ### Upgrading from 10.0.23
 
@@ -65,6 +78,14 @@ are unchanged; a node now announces only the newest head of a catalog
 | Catalog status keeps a promised head pending (#3161) | `phase` under `rfc64Catalog.contextGraphs[]` in `GET /api/status` reads `known-incomplete`, where it could read `complete`, while a head that a peer promised is not applied. `expectedCatalogHeadDigest` is null when two heads compete at one version | None. Tooling that waits for `complete` can wait longer, for a state that was not complete before either |
 | Every assertion write records an `AssertionWritten` activity (#3164) | Seven rows or more for each write in the Context Graph's `_meta` graph, in the same insert as the payload. Assertion history gains `written` events; the lifecycle state is unchanged | None. `metadata.provenanceEvents: false` leaves them out, as it does the other lifecycle events |
 | The dashboard shows `Node unavailable` when its node does not answer (#3160) | The demo data that filled the dashboard after failed status checks is gone. The view replaces every route until the page is reloaded | None. Use **Retry connection** once the node answers again |
+| A `cg-shared-v1` catalog projection may hold a literal with a tab or another control character (#3209) | Such a literal had no form the projection check accepted, so an author that shared an asset with one could not publish its catalog row, nor any later row for that graph's root. A node on an earlier version does not apply a catalog head that contains such a row; it did not receive these rows before either. Merkle leaves and roots are unchanged | Upgrade the nodes that should receive such assets. An author with a stuck row publishes it with its next share into that graph's root; a restart alone does not |
+| A receiver accepts a catalog row when its store returns a literal in its own lexical form (#3209) | A node on Blazegraph refused a row with a whole-second `xsd:dateTime`, an integral `xsd:double` or `xsd:float`, or a short `xsd:duration`, with `catalog reconciliation failed ... cause=NQUADS_BYTE_LIMIT_EXCEEDED` or `exact SWM post-read differs`, and the graph stayed at `catalog-reconciliation-failed`. The read-back is now compared in the canonical term form | None. A graph that was stuck applies the rows with the next catalog head it receives |
+| A share into a public Context Graph also goes to the peers that follow the graph through a relay (#3208) | A peer that asked this node for the graph's shared memory or for its catalog heads is a follower for 30 minutes and is sent each share directly, also over a relayed connection that has at least 16 MiB and 5 minutes of its allowance left. The fan-out line gains `followers=<n>`; `GET /api/peer-info` reports `allowance` for a relayed connection | None |
+| An Edge keeps its relay reservations on the relays its network lists (#3206) | A node with a relay list no longer reserves a slot on a relay outside it, and its circuit fallback tries every listed relay within the time the first four took. New line at info, at most once per peer in 10 minutes: `Relay reservation skipped: peer=<suffix> offers a relay but is not in this node's relay set`. While a slot is free the node keeps looking for a relay, as it did before whenever it was short | None for an Edge. An operator of listed relays restarts at most one of a network's listed relays at a time, so that no Edge is short of relays |
+| A subscribe asks every peer it selected for the graph's shared memory (#3205) | A catch-up job fetched from three peers and ended the rounds of the others without a request. It now waits for the metadata pool, at most ten seconds a transfer. A new subscription of a public graph that is not registered on chain reports `synced` within seconds where it stayed unsynced, and its first write is accepted. One job sends more metadata requests than before | None |
+| The peer that served a graph's seed is asked first for its definition (#3212) | For a public graph that is not registered on chain. An empty answer from a peer that does not hold the graph is logged as `Peer <suffix> holds no definition of "<graph>"` at info, where it read `Rejected curator metadata snapshot ... missing an unambiguous public definition` at warn | None. Tooling that counted the warning sees fewer of them |
+| A sender's Sender Key epoch for a private graph is replaced once after the upgrade (#3203) | One setup message per recipient, once per graph and sender agent, the first time the node shares into the graph. Shares that overlap get consecutive message indexes | None |
+| A catch-up job waits for the graph's policy to become active (#3217) | Once per job and for at most 10 s, only for a graph whose public policy the node has accepted and not yet activated. New line at info for a job that waited: `Catch-up for "<graph>": the selected SWM lane became active after <n> ms`, or `is still not active after <n> ms` | None |
 
 ### Known issues
 
@@ -257,6 +278,26 @@ are unchanged; a node now announces only the newest head of a catalog
 - **Some lifecycle pointer stamps are still only logged when they fail**
   (#2962): the Verifiable Memory stamps after a confirmed publish, and the
   shared pointer stamp of `publishAsync` between its share and its publish.
+- **A share from one member of a public graph to another member it has no
+  connection with is not delivered** (#1611, #3211): the owner receives it
+  and nothing carries it on. Members that reach each other only through the
+  owner's relays are in this layout.
+- **A request over a relayed connection still sets up a second circuit that
+  is closed at once** (#3211): the request then goes out on the open
+  connection (#3216), but each one costs a circuit on a relay.
+- **A subscriber that does not get a graph's definition is not asked again
+  until the next subscribe call** (#3207): when no connected peer holds it,
+  or the request fails for a reason other than the one #3216 removes.
+- **A subscription to a public graph without content stays unsynced when one
+  of the peers it asked failed in transport** (#3207): such a graph is marked
+  synced only when every asked peer answered, and the job is not repeated.
+  It becomes synced when content arrives or with the next subscribe call;
+  until then a write answers `CONTEXT_GRAPH_NOT_WRITABLE`.
+- **Blazegraph can return the delete character U+007F as another character**
+  (#3209): a catalog row whose literal holds it is refused on such a node.
+- **Overlapping first shares into a private graph set up one epoch each, and
+  a recipient that misses more than 64 shares of an epoch refuses the later
+  ones until the epoch is replaced** (#3202).
 
 ### Fixed
 
@@ -712,6 +753,45 @@ are unchanged; a node now announces only the newest head of a catalog
   looking live. Every route now shows a `Node unavailable` view with a
   **Retry connection** button, which reloads the page. A status answer keeps
   the dashboard, and a 401 keeps the token prompt.
+- **Shares into a private Context Graph that overlapped took the same message
+  index, and recipients refused later shares** (#3203). Recipients answered
+  with a transient rejection and logged `Sender Key message nonce does not
+  match ratchet state`; past 64 skipped messages they refused every later
+  share of the epoch. The assets still arrived once finalized. Present since
+  10.0.0.
+- **An asset whose text holds a tab or another control character blocked its
+  author's catalog for that graph** (#3198, #3209). The author logged
+  `catalog_repair_failed` with `kind: unknown` on every attempt, and neither
+  that asset nor any later one shared into the graph's root reached other
+  nodes.
+- **A node on Blazegraph refused catalog rows with common typed literals**
+  (#3198, #3209): whole-second date-times, integral doubles and floats, and
+  short durations, which that store returns in another lexical form of the
+  same value.
+- **Two Edge nodes that reach each other only through a relay did not deliver
+  a share into a named sub-graph to each other** (#3198, #3208). Share
+  recipients of a public graph were the peers subscribed to its gossip topic,
+  and gossip does not run over a relayed connection.
+- **A request to a peer reached only through a relay failed whenever its dial
+  ended in a closed connection** (#3198, #3216), with `Remote closed
+  connection during opening`. Sync requests, which are sent once, never used
+  the relayed connection that was already open. A subscriber's request for a
+  graph's definition to the one peer that holds it failed in most tries.
+- **A subscribe to a public Context Graph asked only three peers for its
+  shared memory** (#3198, #3205), since 10.0.17. With four or more peers the
+  subscription of a graph without content never reported `synced` and
+  refused writes with `CONTEXT_GRAPH_NOT_WRITABLE`.
+- **A subscriber could leave the peer that holds a graph's definition out of
+  the peers it asked** (#3198, #3212), on a node with more than eight
+  connected peers.
+- **An Edge could move a relay reservation to a relay outside its network's
+  list and then not get it back** (#3206), after a listed relay restarted;
+  the node then announced an address that other nodes of its network refuse.
+
+- **A new subscription whose graph definition arrived within a second or two
+  never reported `synced`** (#3198, #3217): its catch-up asked every peer
+  before the graph's policy was active on the node, and nothing repeated it.
+  A catch-up job now waits for that, once, for at most ten seconds.
 
 ### Changed
 
