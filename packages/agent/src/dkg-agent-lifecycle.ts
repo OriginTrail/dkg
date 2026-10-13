@@ -3350,6 +3350,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             const binding = createExactBatchResponderBinding(responderOptions);
             if (process.env.DKG_PUBLIC_SNAPSHOT_BULK === '1') registerPublicBulkGraph(this.router, {
               ...responderOptions,
+              isPublicContextGraph: async (cg, signal) => await responderOptions.resolvePublicContextGraphAuthority(cg, signal) === 'public',
               onExport: (index, count, ctx) => this.log.info(ctx, `Bulk responder export asset=${index} wholePayloadExports=${count}`),
               onPayload: (index, plain, encoded, ctx) => this.log.info(ctx, `Bulk responder payload asset=${index} plainBytes=${plain} encodedBytes=${encoded}`),
               onStage: (stage, index, ms, ctx) => this.log.info(ctx, `Bulk responder stage=${stage} asset=${index} durationMs=${ms.toFixed(3)}`),

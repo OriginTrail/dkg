@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { Quad } from '@origintrail-official/dkg-storage';
-import { EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_FRAME_BYTES, EXACT_BATCH_MAX_REQUEST_BYTES,
-  EXACT_BATCH_MAX_ASSETS, EXACT_BATCH_MAX_CHUNKS_PER_ASSET, type ExactBatchTransportSession, type ExactBatchTransportOptions } from '@origintrail-official/dkg-core';
+import type { ExactBatchTransportSession } from '@origintrail-official/dkg-core';
 import {
   EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_STREAM_WINDOW_SIZE,
   ExactBatchReceiveWindow, decodeExactBatchAsset,

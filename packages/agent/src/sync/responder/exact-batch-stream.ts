@@ -11,10 +11,13 @@ import {
 } from '../exact-batch-stream-contract.js';
 import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js';
 
+import { ExactBatchAssetMissingError } from './exact-asset-export-cache.js';
 import type { PublicAssetResponderOptions } from './public-asset-responder.js';
 
 const EMPTY = new Uint8Array(0);
-export interface ExactBatchResponderBindingOptions extends PublicAssetResponderOptions {
+export interface ExactBatchResponderBindingOptions extends Omit<PublicAssetResponderOptions, 'isPublicContextGraph'> {
+  readonly resolvePublicContextGraphAuthority: (contextGraphId: string, signal: AbortSignal) => Promise<'public' | 'non-public' | 'unavailable'>;
+  readonly onRefusal?: (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING') => void;
   readonly localPeerId: string;
   readonly store: TripleStore;
   readonly parseSyncRequest: (bytes: Uint8Array) => SyncRequestEnvelope;

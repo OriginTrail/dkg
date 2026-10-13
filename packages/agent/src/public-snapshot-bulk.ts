@@ -55,7 +55,7 @@ export async function recoverPublicSnapshotBulk(agent: DKGAgent, options: Public
           parseAndFilter: (text, graph, cg) => agent.getOrCreateSyncVerifyWorker().parseAndFilter(text, graph, cg),
           processDurableBatchInWorker: agent.processDurableBatchInWorker.bind(agent),
         },
-        commit: async (assets, commitSignal, onPublished) => {
+        commit: async (assets, commitSignal) => {
           assertCurrent();
           const authenticated = assets.map(asset => options.evidence.authenticate(asset).asset);
           const outcome = await materializeVerifiedGraphScopedGroup({ store: agent.store, assets: authenticated,
@@ -64,7 +64,9 @@ export async function recoverPublicSnapshotBulk(agent: DKGAgent, options: Public
             shouldQuarantineCommitted: options.shouldQuarantineCommitted,
           });
           if (outcome !== 'applied') throw new Error('Bulk group was quarantined after graph binding changed');
-          onPublished();
+          return authenticated;
+        },
+        reconcile: async (authenticated, commitSignal) => {
           options.onCommitted();
           commitSignal.throwIfAborted(); assertCurrent();
           await Promise.all(authenticated.map(asset => agent.reconcileAfterGraphScopedMaterialization(asset, ctx)));

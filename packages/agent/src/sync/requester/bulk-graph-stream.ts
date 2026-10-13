@@ -37,7 +37,8 @@ export async function exchangeBulkGraphVerified(router: ProtocolRouter, peer: st
 /** Disk staging and one bounded verifier/group writer overlap the continuous network reader. */
 export async function consumeBulkGraph(session: BulkGraphSession, request: BulkGraphRequest, options: {
   stagingRoot: string; verification: AssetVerificationOptions;
-  commit: (assets: readonly VerifiedGraphScopedAsset[], signal: AbortSignal, onPublished: () => void) => Promise<void>;
+  commit: (assets: readonly VerifiedGraphScopedAsset[], signal: AbortSignal) => Promise<readonly VerifiedGraphScopedAsset[]>;
+  reconcile?: (assets: readonly VerifiedGraphScopedAsset[], signal: AbortSignal) => Promise<void>;
   onMetrics?: (metrics: BulkGraphMetrics) => void;
 }) {
   await mkdir(options.stagingRoot, { recursive: true, mode: 0o700 });
@@ -98,18 +99,15 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
   const group = new BulkCommitGroup(async members => {
     signal.throwIfAborted();
     const started = performance.now();
-    let published = false;
-    await options.commit(members.map(x => x.asset), signal, () => {
-      if (published) return;
-      published = true;
-      // Record confirmed storage before cancellation, reconciliation or ACK I/O.
-      for (const { asset } of members) committed.push(asset.ual);
-      metrics.committedAssets += members.length; metrics.commitGroups++;
-      metrics.largestGroup = Math.max(metrics.largestGroup, members.length);
-      metrics.commitMs += performance.now() - started;
-      observe();
-    });
-    if (!published) throw new Error('Bulk group publication was not confirmed');
+    const authenticated = await options.commit(members.map(x => x.asset), signal);
+    // Publication has completed. Preserve this prefix even if housekeeping or
+    // acknowledgement fails, or cancellation arrives while the write drains.
+    for (const { asset } of members) committed.push(asset.ual);
+    metrics.committedAssets += members.length; metrics.commitGroups++;
+    metrics.largestGroup = Math.max(metrics.largestGroup, members.length);
+    metrics.commitMs += performance.now() - started;
+    observe();
+    await options.reconcile?.(authenticated, signal);
     signal.throwIfAborted();
     for (const { staged } of members) await session.send({ kind: K.COMMIT, index: staged.index, sequence: staged.header.encodedBytes, payload: new Uint8Array() });
     observe();
