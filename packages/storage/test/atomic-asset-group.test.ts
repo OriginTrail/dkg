@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../src/atomic-asset-group.js';
 import { buildBulkAssetGroupPlan } from '../src/adapters/bulk-asset-group.js';
@@ -114,4 +115,23 @@ describe('atomic asset group', () => {
       expect(await store.query(select)).toEqual(before);
     } finally { await store.close(); }
   });
+});
+
+it.each(['oxigraph','blazegraph','sparql-http'] as const)('rejects invalid groups before dispatch on %s', async backend => {
+  const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+  const store = backend === 'oxigraph' ? new OxigraphStore() : backend === 'blazegraph'
+    ? new BlazegraphStore('http://fixture.invalid/sparql')
+    : new SparqlHttpStore({queryEndpoint:'http://fixture.invalid/sparql', consistencyProfile:'atomic-update'});
+  try {
+    const valid = asset(1,'valid');
+    const invalid = [
+      [valid, valid],
+      [{...valid, graphQuads:[{...valid.graphQuads[0]!,graph:'urn:other'}]}],
+      [{...valid, metadataQuads:[{...valid.metadataQuads[0]!,subject:'urn:other'}]}],
+      [{...valid, graphQuads:[{...valid.graphQuads[0]!,object:JSON.stringify('x'.repeat(65536))}]}],
+    ];
+    for (const members of invalid) await expect(store.replaceAssetGroup(members)).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+    if (backend === 'oxigraph') expect(await store.countQuads()).toBe(0);
+  } finally { await store.close(); vi.unstubAllGlobals(); }
 });

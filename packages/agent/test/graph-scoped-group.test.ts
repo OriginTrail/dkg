@@ -28,7 +28,7 @@ describe('group materialization fences and physical completion', () => {
     let revoked = false, cleanupFailed = false;
     vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
       const body = String(init.body);
-      if (init.headers['Content-Type'] === 'application/n-quads') await store.insert(parseNQuadsTextTolerant(body));
+      if (init.headers['Content-Type'] === 'text/x-nquads') await store.insert(parseNQuadsTextTolerant(body));
       else if (body.startsWith('ASK')) {
         const reply = await store.query(body);
         if (reply.type !== 'boolean') throw new Error('Expected receipt');
@@ -123,4 +123,37 @@ describe('group materialization fences and physical completion', () => {
       shouldQuarantineCommitted: () => false })).rejects.toThrow('newer local assertion');
     expect(spy).not.toHaveBeenCalled(); expect(await store.countQuads('urn:data:1')).toBe(0);
   });
+});
+
+it.each(['singleton','group'] as const)('holds publication and quarantine locks through %s settlement', async mode => {
+  const {store,group,asset} = setup();
+  const published=deferred(), releasePublish=deferred(), quarantining=deferred(), releaseQuarantine=deferred();
+  let calls=0;
+  if(mode==='group') {
+    const write=store.replaceAssetGroup.bind(store);
+    vi.spyOn(store,'replaceAssetGroup').mockImplementation(async (...args) => {
+      if(++calls===1){published.resolve();await releasePublish.promise;}
+      else if(calls===2){quarantining.resolve();await releaseQuarantine.promise;}
+      await write(...args);
+    });
+  } else {
+    const write=store.replaceGraphAndSubject.bind(store);
+    vi.spyOn(store,'replaceGraphAndSubject').mockImplementation(async (...args) => {
+      if(++calls===1){published.resolve();await releasePublish.promise;}
+      else if(calls===2){quarantining.resolve();await releaseQuarantine.promise;}
+      await write(...args);
+    });
+  }
+  const pending=mode==='group'
+    ? materializeVerifiedGraphScopedGroup({store,assets:group,assertCurrent:()=>{},shouldQuarantineCommitted:()=>true})
+    : materializeVerifiedGraphScopedAsset({store,asset:group[0]!,shouldQuarantineCommitted:()=>true});
+  await Promise.race([published.promise,pending]);
+  let newerSettled=false;
+  const newer=materializeVerifiedGraphScopedAsset({store,asset:asset(1,2)}).then(r=>{newerSettled=true;return r;});
+  try {
+    await new Promise(r=>setTimeout(r,10));expect(newerSettled).toBe(false);
+    releasePublish.resolve();await Promise.race([quarantining.promise,pending]);
+    await new Promise(r=>setTimeout(r,10));expect(newerSettled).toBe(false);
+    releaseQuarantine.resolve();expect(await pending).toBe('quarantined');expect(await newer).toBe('applied');
+  } finally {releasePublish.resolve();releaseQuarantine.resolve();await Promise.allSettled([pending,newer]);}
 });

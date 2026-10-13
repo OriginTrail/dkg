@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-import { withMaterializationLock } from '@origintrail-official/dkg-publisher';
+import { executeGraphScopedPublication } from './graph-scoped-publication.js';
 import { ATOMIC_ASSET_GROUP_MAX_ASSETS, UnsupportedTripleStoreCapabilityError, type AtomicAssetReplacement, type TripleStore,
   type QueryOptions } from '@origintrail-official/dkg-storage';
-import { prepareGraphScopedReplacementUnderLock } from './graph-scoped-replacement.js';
 import { filterOversizedSyncQuads } from '../oversize-filter.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
@@ -21,33 +20,14 @@ export async function materializeVerifiedGraphScopedGroup(params: {
     if (filterOversizedSyncQuads([...asset.dataQuads, ...asset.metadataQuads]).dropped.length)
       throw new Error('Materialization group contains oversized RDF terms');
   }
-  const ordered = [...assets].sort((a,b) => `${a.metaGraph}\0${a.ual}` < `${b.metaGraph}\0${b.ual}` ? -1 : 1);
-  const lock = (index: number): Promise<'applied' | 'quarantined'> => index < ordered.length
-    ? withMaterializationLock(ordered[index]!.metaGraph, ordered[index]!.ual, () => lock(index + 1), { signal: options.signal })
-    : apply();
-  const apply = async (): Promise<'applied' | 'quarantined'> => {
-    const replacements: AtomicAssetReplacement[] = [];
-    for (const asset of assets) {
-      const replacement = await prepareGraphScopedReplacementUnderLock({
-        store, asset, options, assertCurrent, requireCurrentMetadata: true,
-      });
-      // Singleton callers report stale; a group must reject before any write.
-      if (!replacement) throw new Error('Materialization group has a newer local assertion');
-      replacements.push(replacement);
-    }
-    assertCurrent();
-    // Cancellation must drain the real dispatched transaction while retaining all locks.
-    const { signal: _signal, ...commitOptions } = options;
+  const publish = async (replacements: AtomicAssetReplacement[], commitOptions: QueryOptions) => {
     if (!store.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'snapshot');
     await store.replaceAssetGroup(replacements, commitOptions);
-    if (shouldQuarantineCommitted()) {
-      await store.replaceAssetGroup(replacements.map(a => ({ ...a, graphQuads: [], metadataQuads: [] })), commitOptions);
-      return 'quarantined';
-    }
-    // A lifecycle cancellation never creates an ACK. Data already atomically published
-    // remains available to a later independently authenticated resume.
-    assertCurrent();
-    return 'applied';
   };
-  return lock(0);
+  return executeGraphScopedPublication({ store, assets, options, assertCurrent, shouldQuarantineCommitted,
+    requireCurrentMetadata: true,
+    stale: () => { throw new Error('Materialization group has a newer local assertion'); },
+    complete: () => { assertCurrent(); return 'applied' as const; },
+    publish, quarantine: publish,
+  });
 }

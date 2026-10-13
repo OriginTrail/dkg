@@ -1,3 +1,4 @@
+import { PublicSnapshotEvidence } from '../src/public-snapshot-evidence.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { runDurableSync, createDurableSyncBudget } from '../src/sync/requester/durable-sync.js';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
@@ -30,7 +31,7 @@ it.each([false, true])('preserves ordinary legacy compatibility while fencing sn
   const result = await runDurableSync({
     ctx:createOperationContext('sync'), remotePeerId:'fixture-peer', contextGraphIds:[cg],
     durableSyncBudget:createDurableSyncBudget({fetchTimeoutMs:10000,authenticationTimeoutMs:10000}),
-    requireAuthenticatedGraphScopedAssets:snapshot,
+    admitVerifiedPage:snapshot ? page => PublicSnapshotEvidence.prototype.admitVerifiedPage.call({isCurrent:()=>true} as PublicSnapshotEvidence,page) : undefined,
     fetchSyncPages:async ({phase}) => { const quads = phase === 'data' ? [...v2Data,...data] : [...v2Meta,...meta];
       return {quads,bytesReceived:0,resumedFromOffset:0,nextOffset:quads.length,checkpointKey:phase,completed:true,timedOut:false}; },
     processDurableBatchInWorker:(data,meta,_ctx,accept,mode) => worker.processDurableBatch(data,meta,accept,mode),

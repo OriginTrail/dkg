@@ -1,3 +1,4 @@
+import type { partitionVerifiedGraphScopedAssets } from './sync/requester/verified-asset-preparation.js';
 import type { VmRecoveryRegisteredPublicEvidence } from "./vm-recovery-pass-authority.js";
 import type { AuthenticatedGraphScopedAsset, VerifiedGraphScopedAsset } from './sync/requester/graph-scoped-materialization.js';
 
@@ -6,7 +7,7 @@ import type { AuthenticatedGraphScopedAsset, VerifiedGraphScopedAsset } from './
  * to its observation and ownership, and is never disguised as revocable VM evidence.
  */
 export interface DurableRecoveryAuthority {
-  readonly lifetime: 'exchange' | 'snapshot-job';
+  admitVerifiedPage(page: ReturnType<typeof partitionVerifiedGraphScopedAssets>): void;
   readonly coalescing: 'allowed' | 'owner-only';
   isRegisteredPublic(contextGraphId: string, signal?: AbortSignal): boolean | Promise<boolean>;
   authenticate(asset: VerifiedGraphScopedAsset, deadline: number, signal?: AbortSignal):

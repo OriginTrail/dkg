@@ -140,6 +140,10 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       },
     );
     expect(accepted.bindings?.length).toBe(12);
+    const namedVm = await receiver.query('SELECT ?entity WHERE {?entity a <http://schema.org/Thing>}', {
+      contextGraphId:graph,view:'verifiable-memory',chainEvidenceMode:'core-cache',
+    });
+    expect(namedVm.bindings).toEqual([{entity:'urn:entity:3'}]);
     // The remote protocol has no evidence-acceptance field yet, so it must
     // refuse marked graphs rather than silently weakening the caller's trust.
     for (const response of [
@@ -181,6 +185,8 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       current: true,
     });
     expect(rpcReads).toHaveBeenCalledTimes(2);
+    const entities = await core.findEntitiesByType(rpcReceiver.peerId, graph, 'http://schema.org/Thing');
+    expect(entities).toMatchObject({status:'OK',entityUris:['urn:entity:3']});
     console.log(
       JSON.stringify({
         measurement: "local-independent-snapshot-recovery",

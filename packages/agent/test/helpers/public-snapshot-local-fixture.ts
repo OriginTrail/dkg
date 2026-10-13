@@ -57,7 +57,8 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
     for (let n = 1; n <= 12; n++) {
       const id = (BigInt(signer.address) << 96n) | BigInt(n);
       const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
-      const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
+      const subGraphName = n === 3 ? 'code' : undefined;
+      const assertionGraph = `did:dkg:context-graph:${graph}${subGraphName ? '/' + subGraphName : ''}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
       const data: Quad[] = [
         {
           subject: `urn:entity:${n}`,
@@ -66,6 +67,7 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
           graph: assertionGraph,
         },
       ];
+      if (subGraphName) data.push({subject:`urn:entity:${n}`,predicate:'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',object:'http://schema.org/Thing',graph:assertionGraph});
       const privateRoot = n === 12 && transport === "exact" ? new Uint8Array(32).fill(7) : undefined;
       const root = computeFlatKCRootV10(data, privateRoot ? [privateRoot] : []);
       await (
@@ -94,6 +96,7 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
             contextGraphId: graph,
             ual,
             assertionGraph,
+            subGraphName,
             merkleRoot: root,
             publisherPeerId: "fixture",
             accessPolicy: "public",
@@ -101,7 +104,7 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
             timestamp: new Date(),
             assertionVersion: 1,
             authorAddress: signer.address,
-            publicTripleCount: 1,
+            publicTripleCount: data.length,
             privateTripleCount: privateRoot ? 1 : 0,
             privateMerkleRoot: privateRoot,
           },
@@ -153,7 +156,8 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
 export async function mismatchedSnapshotMember(f: Awaited<ReturnType<typeof publicSnapshotFixture>>, n: number, label: string) {
   const { signer, source, make, rpcUrl, hubAddress, onChainId } = f;
   const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
-  const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
+  const subGraphName = n === 3 ? 'code' : undefined;
+      const assertionGraph = `did:dkg:context-graph:${graph}${subGraphName ? '/' + subGraphName : ''}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
   const metaGraph = `did:dkg:context-graph:${graph}/_meta`;
   const privateRoot = n === 12 ? new Uint8Array(32).fill(7) : undefined;
   const changed: Quad[] = [{subject:`urn:entity:${n}`,predicate:"http://schema.org/name",object:'"Unanchored replacement"',graph:assertionGraph}];

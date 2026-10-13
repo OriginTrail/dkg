@@ -1,4 +1,4 @@
-import { prepareGraphScopedReplacementUnderLock } from './graph-scoped-replacement.js';
+import { executeGraphScopedPublication } from './graph-scoped-publication.js';
 import { normalizeGraphScopedHex32 } from "../graph-scoped-root.js";
 import {
   parseDeterministicKnowledgeAssetUal,
@@ -6,6 +6,7 @@ import {
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   tryReplaceGraphAndSubjectAtomically,
+  type AtomicAssetReplacement,
   type Quad,
   type QueryOptions,
   type TripleStore,
@@ -13,7 +14,6 @@ import {
 import {
   overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
   readGraphKnowledgeAssetConfirmationKindV1,
-  withMaterializationLock,
 } from '@origintrail-official/dkg-publisher';
 import {
   filterOversizedSyncQuads,
@@ -381,63 +381,19 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     return 'quarantined';
   }
 
-  const materializeUnderLock = async (): Promise<GraphScopedMaterializationOutcome> => {
-    assertCurrent();
-    const replacement = await prepareGraphScopedReplacementUnderLock({
-      store, asset, options, assertCurrent, requireCurrentMetadata: false,
-    });
-    if (!replacement) return 'stale';
-    // This is the last interruptible boundary. Once the atomic replacement is
-    // dispatched, its real completion owns the materialization lock and stop()
-    // must drain it rather than detaching the writer.
-    assertCurrent();
-    const { signal: _lifecycleSignal, ...commitOptions } = options;
-
-    const replaced = await tryReplaceGraphAndSubjectAtomically(
-      store,
-      asset.assertionGraph,
-      asset.dataQuads,
-      asset.metaGraph,
-      asset.ual,
-      replacement.metadataQuads,
-      commitOptions,
-    );
-    if (!replaced) {
-      throw Object.assign(
-        new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
-          'atomic data/metadata replacement',
-        )),
-        { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
-      );
-    }
-    if (shouldQuarantineCommitted?.() === true) {
-      const quarantined = await tryReplaceGraphAndSubjectAtomically(
-        store,
-        asset.assertionGraph,
-        [],
-        asset.metaGraph,
-        asset.ual,
-        [],
-        commitOptions,
-      );
-      if (!quarantined) {
-        throw Object.assign(
-          new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
-            'atomic stale-binding quarantine',
-          )),
-          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
-        );
-      }
-      return 'quarantined';
-    }
-    if (isCurrent?.() === false) return 'quarantined';
-    return 'applied';
+  const write = async (replacements: AtomicAssetReplacement[], commitOptions: QueryOptions, capability: string) => {
+    const replacement = replacements[0]!;
+    const replaced = await tryReplaceGraphAndSubjectAtomically(store, replacement.graphUri, replacement.graphQuads,
+      replacement.metaGraphUri, replacement.metadataSubject, replacement.metadataQuads, commitOptions);
+    if (!replaced) throw Object.assign(new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(capability)),
+      { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
   };
-  return lockAlreadyHeldByCaller
-    ? materializeUnderLock()
-    : withMaterializationLock(asset.metaGraph, asset.ual, materializeUnderLock, {
-        signal: options.signal,
-      });
+  return executeGraphScopedPublication({ store, assets: [asset], options, assertCurrent,
+    shouldQuarantineCommitted, lockAlreadyHeldByCaller, requireCurrentMetadata: false,
+    stale: () => 'stale', complete: () => isCurrent?.() === false ? 'quarantined' : 'applied',
+    publish: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic data/metadata replacement'),
+    quarantine: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic stale-binding quarantine'),
+  });
 }
 
 function parseBytes32Literal(raw: string, field: string): Uint8Array {
