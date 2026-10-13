@@ -84,9 +84,38 @@ export function isMapping(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);
 }
 
+/**
+ * `String(value)` that never throws. A YAML mapping can carry its own
+ * `toString` key (`{ toString: x }`), and `String()` of such an object throws
+ * because the key is not callable; one malformed optional field must not abort
+ * a whole bundle. Every value `String()` handles is returned exactly as
+ * `String()` returns it; the rest get the generic `[object Object]` form.
+ */
+export function safeString(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
+}
+
+/**
+ * A single YAML value: a string, number, boolean or timestamp — not a mapping
+ * or a list. Family fields that hold one value check this before coercing.
+ */
+export function isScalar(value: unknown): value is string | number | boolean | bigint | Date {
+  return (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint' ||
+    value instanceof Date
+  );
+}
+
 /** Absent, or a value whose string form is empty after trimming (the spec's "missing"). */
 export function isBlank(value: unknown): boolean {
-  return value === undefined || value === null || String(value).trim() === '';
+  return value === undefined || value === null || safeString(value).trim() === '';
 }
 
 /**

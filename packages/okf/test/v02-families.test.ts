@@ -25,6 +25,8 @@ import {
   OKF_VERIFIED_AT,
   OKF_TRUST_TIER,
   OKF_STATUS,
+  SCHEMA_URL,
+  SCHEMA_IS_PART_OF,
   OKF_STALE_AFTER,
   OKF_SOURCE,
   OKF_RESOURCE,
@@ -890,6 +892,103 @@ describe('family definitions are internal and carry their behaviour as data', ()
     const copy = encodeFamily('urn:okf:m', { ...VERIFIED }, value, ctx);
     expect(quadsToNQuads(copy.quads)).toBe(quadsToNQuads(canonical.quads));
     expect(copy.quads.some((q) => q.predicate === OKF_TRUST_TIER)).toBe(true);
+  });
+});
+
+describe('a malformed value never aborts the bundle', () => {
+  // A YAML mapping can carry its own `toString` key; String() of it throws.
+  const SIBLING: BundleFile = { path: 'sibling.md', content: '---\ntype: Thing\ntitle: Healthy\n---\n\nbody\n' };
+  const withSibling = (fm: string) => [...bundle(fm), SIBLING];
+  const strip = (quads: Quad[]) => quadsToNQuads(quads.filter((q) => !q.subject.includes(GENID_TAGS.section) && q.predicate !== DKG_HAS_SECTION));
+
+  it('a verifier given as a mapping names no verifier, warns, and leaves sibling concepts importing', () => {
+    const files = withSibling('type: Metric\nverified: { by: { toString: human:alice } }');
+    const r = importBundle(files);
+    expect(r.concepts.map((c) => c.conceptId).sort()).toEqual(['metrics/revenue', 'policies/revenue-recognition', 'sibling']);
+    const c = r.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(objs(c.quads, OKF_VERIFICATION)).toEqual([]);
+    expect(c.trust).toMatchObject({ tier: 'unverified', verifications: 0 });
+    expect(r.warnings.map((w) => w.message)).toContain('`verified[0].by` should be a single value, not a mapping or list (§5.2); the entry is skipped');
+    expect(validateBundle(files).warnings.join('\n')).toMatch(/verified\[0\]\.by` should be a single value/);
+  });
+
+  it('keeps any other family field given a mapping or list verbatim, with a warning, through export', () => {
+    const fm = [
+      'type: Attested Computation',
+      'status: { toString: x }',
+      'stale_after: [2026-12-31T00:00:00Z]',
+      'runtime: [bigquery]',
+      'computation: { file: x.sql }',
+      'generated: { by: { toString: g }, at: 2026-06-30T14:00:00Z }',
+      'sources:',
+      '  - { id: [a], resource: { href: https://x.example/s }, title: { toString: t }, author: { toString: a }, usage_count: [1, 2] }',
+      'parameters:',
+      '  - { name: [year], required: [true] }',
+      'executor: { resource: { toString: r }, receipt: [job_id, { k: 1 }] }',
+    ].join('\n');
+    const files = withSibling(fm);
+    const r = importBundle(files);
+    const messages = r.warnings.map((w) => w.message);
+    for (const label of ['status', 'stale_after', 'runtime', 'computation', 'generated.by', 'sources[0].id', 'sources[0].resource', 'sources[0].title', 'sources[0].author', 'sources[0].usage_count', 'parameters[0].name', 'parameters[0].required', 'executor.resource']) {
+      expect(messages.some((m) => m.startsWith(`\`${label}\` should be a single value`)), `warning for ${label}`).toBe(true);
+    }
+    expect(messages).toContain('`executor.receipt[1]` should be a single value, not a mapping or list (§10.2); kept verbatim');
+    const c = r.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(objs(c.quads, OKF_STATUS)).toEqual([`"{\\"toString\\":\\"x\\"}"^^<${RDF_JSON}>`]);
+    expect(objs(c.quads, PROV_WAS_DERIVED_FROM)).toEqual([]); // a mapping is not a resource IRI
+    expect(c.trust.generatedBy).toBeNull();
+    const exported = exportBundle(r);
+    const back = parseDocument('metrics/revenue.md', exported.find((f) => f.path === 'metrics/revenue.md')!.content).frontmatter;
+    expect(Object.getOwnPropertyDescriptor(back.status, 'toString')?.value).toBe('x');
+    expect(back.runtime).toEqual(['bigquery']);
+    expect((back.executor as Record<string, unknown>).receipt).toEqual(['job_id', { k: 1 }]);
+    expect(strip(importBundle(exported).quads)).toBe(strip(r.quads));
+  });
+
+  it('never throws on a malformed base field or type', () => {
+    const files = [IDX_V02(), { path: 'a.md', content: '---\ntype: Metric\ntitle: { toString: x }\ntags: [{ toString: t }]\nresource: { toString: r }\n---\n\nbody\n' }, { path: 'b.md', content: '---\ntype: { toString: x }\n---\n\nbody\n' }, SIBLING];
+    const r = importBundle(files);
+    expect(r.concepts.map((c) => c.conceptId)).toEqual(['a', 'b', 'sibling']);
+    expect(validateBundle(files).conformant).toBe(true);
+  });
+
+  it('skips only the concept whose value no RDF term can hold (a cyclic alias)', () => {
+    const files = [IDX_V02(), { path: 'a.md', content: '---\ntype: Metric\nowner: &x\n  self: *x\n---\n\nbody\n' }, SIBLING];
+    const r = importBundle(files);
+    expect(r.concepts.map((c) => c.conceptId)).toEqual(['sibling']);
+    expect(r.warnings.find((w) => w.conceptId === 'a')).toMatchObject({ code: 'parse' });
+    expect(r.warnings.find((w) => w.conceptId === 'a')!.message).toMatch(/^could not be mapped \(.*circular.*\); skipped$/);
+  });
+});
+
+describe('schema:isPartOf and schema:url on export', () => {
+  it('keeps an explicit isPartOf producer value', () => {
+    const files = [IDX_V02(), { path: 'reports/q.md', content: '---\ntype: Metric\nisPartOf: FY2026 reporting\n---\n\nbody\n' }];
+    const first = importBundle(files);
+    const exported = exportBundle(first);
+    expect(parseDocument('reports/q.md', exported.find((f) => f.path === 'reports/q.md')!.content).frontmatter.isPartOf).toBe('FY2026 reporting');
+    expect(quadsToNQuads(importBundle(exported).quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF))).toBe(
+      quadsToNQuads(first.quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF)),
+    );
+  });
+
+  it('omits only the folder edge emitFolderHierarchy infers, which the option re-derives', () => {
+    const files = [IDX_V02(), { path: 'reports/q.md', content: '---\ntype: Metric\nisPartOf: FY2026 reporting\n---\n\nbody\n' }];
+    const first = importBundle(files, { emitFolderHierarchy: true });
+    expect(objs(first.quads, SCHEMA_IS_PART_OF, 'urn:okf:reports/q').sort()).toEqual(['"FY2026 reporting"', 'urn:okf:reports']);
+    const exported = exportBundle(first);
+    expect(parseDocument('reports/q.md', exported.find((f) => f.path === 'reports/q.md')!.content).frontmatter.isPartOf).toBe('FY2026 reporting');
+    expect(quadsToNQuads(importBundle(exported, { emitFolderHierarchy: true }).quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF))).toBe(
+      quadsToNQuads(first.quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF)),
+    );
+  });
+
+  it('writes a resource that is not an IRI back by value, not as a quoted term', () => {
+    const files = [IDX_V02(), { path: 'a.md', content: '---\ntype: Metric\nresource: tables/orders\n---\n\nbody\n' }];
+    const first = importBundle(files);
+    const exported = exportBundle(first);
+    expect(parseDocument('a.md', exported.find((f) => f.path === 'a.md')!.content).frontmatter.resource).toBe('tables/orders');
+    expect(objs(importBundle(exported).quads, SCHEMA_URL, 'urn:okf:a')).toEqual(['"tables/orders"']);
   });
 });
 

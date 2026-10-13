@@ -21,6 +21,7 @@ import { parseDocument, OkfDocumentError } from './document.js';
 import { familyDiagnostics } from './families/index.js';
 import { isConceptFile, isReservedFile, isValidSegment, basename, pathToConceptId } from './paths.js';
 import { OKF_KNOWN_VERSIONS, OKF_TARGET_VERSION } from './constants.js';
+import { isBlank, safeString } from './utils.js';
 import type { BundleFile, ConformanceReport } from './types.js';
 
 export function validateBundle(files: BundleFile[]): ConformanceReport {
@@ -51,9 +52,9 @@ export function validateBundle(files: BundleFile[]): ConformanceReport {
               );
             }
             const v = parsed.frontmatter.okf_version;
-            if (v !== undefined && v !== null && !(OKF_KNOWN_VERSIONS as readonly string[]).includes(String(v))) {
+            if (v !== undefined && v !== null && !(OKF_KNOWN_VERSIONS as readonly string[]).includes(safeString(v))) {
               warnings.push(
-                `root index.md declares okf_version "${String(v)}"; this consumer targets OKF ${OKF_TARGET_VERSION} and consumes the bundle best-effort (§12)`,
+                `root index.md declares okf_version "${safeString(v)}"; this consumer targets OKF ${OKF_TARGET_VERSION} and consumes the bundle best-effort (§12)`,
               );
             }
           } else {
@@ -88,7 +89,7 @@ export function validateBundle(files: BundleFile[]): ConformanceReport {
       continue;
     }
     const type = frontmatter.type;
-    if (type === undefined || type === null || String(type).trim() === '') {
+    if (isBlank(type)) {
       errors.push(`${conceptId}: frontmatter has no non-empty \`type\` (§11 rule 2)`);
     }
     for (const d of familyDiagnostics(frontmatter)) warnings.push(`${conceptId}: ${d.message}`);

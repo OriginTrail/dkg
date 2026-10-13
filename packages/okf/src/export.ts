@@ -108,6 +108,12 @@ const CONCEPT_KEY_ORDER = [
   'usage_window',
 ];
 
+/** The IRI `emitFolderHierarchy` gives a nested concept's parent directory, or `null` at the bundle root. */
+function parentDirectoryIri(conceptId: string, iriBase: string): string | null {
+  const slash = conceptId.lastIndexOf('/');
+  return slash === -1 ? null : `${iriBase}${conceptId.slice(0, slash)}`;
+}
+
 function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportContext): BundleFile {
   const bySubject = new Map<string, Quad[]>();
   // A repeated triple is one triple (see `distinctTriples`), however the input was assembled.
@@ -136,7 +142,9 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         frontmatter.description = literalValue(q.object) ?? q.object;
         break;
       case SCHEMA_URL:
-        frontmatter.resource = q.object;
+        // An IRI as written; a resource that is not an IRI was stored as a
+        // literal, so write its value (not the quoted term) back.
+        frontmatter.resource = termValue(q.object, ctx);
         break;
       case SCHEMA_DATE_MODIFIED:
         dateModified = termValue(q.object, ctx);
@@ -156,7 +164,13 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         break;
       }
       case SCHEMA_IS_PART_OF:
-        break; // folder hierarchy is implied by the concept path
+        // `emitFolderHierarchy` points a nested concept at its own parent
+        // directory; that edge is implied by the path and re-derived by the
+        // option. Any other value is a producer key (`isPartOf: …`) and is kept.
+        if (q.object !== parentDirectoryIri(c.conceptId, ctx.iriBase)) {
+          accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
+        }
+        break;
       case SCHEMA_CITATION:
         citations.push(literalValue(q.object) ?? q.object);
         break;

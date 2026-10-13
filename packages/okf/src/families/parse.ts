@@ -5,7 +5,7 @@
  * which index" are decided once.
  */
 
-import { isBlank, isMapping } from '../utils.js';
+import { isBlank, isMapping, isScalar } from '../utils.js';
 import type { ListFamilySpec } from './specs.js';
 
 export interface ParsedEntry {
@@ -13,7 +13,7 @@ export interface ParsedEntry {
   readonly index: number;
   /** The entry when it is a mapping, else `null`. */
   readonly mapping: Record<string, unknown> | null;
-  /** Whether the entry becomes a node: a mapping with every `skipEntryWhenBlank` field present. */
+  /** Whether the entry becomes a node: a mapping whose every `skipEntryWhenBlank` field holds one non-blank value. */
   readonly usable: boolean;
 }
 
@@ -32,7 +32,9 @@ export function parseList(spec: ListFamilySpec, value: unknown): ParsedList {
   if (raw === null) return { shape: 'invalid', entries: [] };
   const entries = raw.map((entry, index): ParsedEntry => {
     const mapping = isMapping(entry) ? entry : null;
-    const usable = mapping !== null && spec.fields.every((f) => !f.skipEntryWhenBlank || !isBlank(mapping[f.key]));
+    const usable =
+      mapping !== null &&
+      spec.fields.every((f) => !f.skipEntryWhenBlank || (isScalar(mapping[f.key]) && !isBlank(mapping[f.key])));
     return { index, mapping, usable };
   });
   return { shape: Array.isArray(value) ? 'list' : 'mapping', entries };

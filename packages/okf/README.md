@@ -135,7 +135,8 @@ UTC (same instant).
 
 Everything the spec makes a SHOULD is a warning, never an error: a malformed
 family (`generated` without `by`, an unknown `status`, a timestamp without an
-explicit offset, an `Attested Computation` without `runtime`, …), a footnote
+explicit offset, an `Attested Computation` without `runtime`, a mapping or list
+where one value belongs — kept verbatim — …), a footnote
 `[^label]` that joins no `sources[].id`, a `.md` path in a path-valued field
 that names no concept, and an `okf_version` this consumer does not know (the
 bundle is still consumed best-effort, §12).

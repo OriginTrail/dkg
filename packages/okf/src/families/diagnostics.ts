@@ -13,7 +13,7 @@
 
 import { dateTimeLexical, hasExplicitOffset, isXsdDateTime } from '../trust.js';
 import { isConceptType } from '../terms.js';
-import { isBlank, isMapping } from '../utils.js';
+import { isBlank, isMapping, isScalar, safeString } from '../utils.js';
 import type { OkfWarning } from '../types.js';
 import { parseList } from './parse.js';
 import {
@@ -33,7 +33,7 @@ function checkDateTime(field: string, value: unknown, out: Diagnostic[]): void {
   if (lexical === null || !isXsdDateTime(lexical)) {
     out.push({
       code: 'malformed-family',
-      message: `${field} "${String(value)}" is not a valid ISO 8601 datetime (§5); kept as a plain literal`,
+      message: `${field} "${safeString(value)}" is not a valid ISO 8601 datetime (§5); kept as a plain literal`,
     });
     return;
   }
@@ -45,6 +45,10 @@ function checkDateTime(field: string, value: unknown, out: Diagnostic[]): void {
   }
 }
 
+function toList(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [value];
+}
+
 /** The backticked name of a field in a message (`stale_after`, `sources[0].usage_window.from`). */
 function fieldLabel(spec: FamilySpec, label: string, field: FieldSpec): string {
   return spec.shape === 'scalar' ? `\`${label}\`` : `\`${label}.${field.key}\``;
@@ -53,8 +57,21 @@ function fieldLabel(spec: FamilySpec, label: string, field: FieldSpec): string {
 function checkField(spec: FamilySpec, field: FieldSpec, value: unknown, label: string, out: Diagnostic[]): void {
   if (value === undefined || value === null) return;
   const name = fieldLabel(spec, label, field);
+  if (field.kind === 'text-list') {
+    toList(value).forEach((item, i) => {
+      if (!isScalar(item)) {
+        out.push({ code: 'malformed-family', message: `${name.slice(0, -1)}[${i}]\` should be a single value, not a mapping or list (${spec.section}); kept verbatim` });
+      }
+    });
+    return;
+  }
+  if (!isScalar(value)) {
+    const outcome = field.skipEntryWhenBlank ? 'the entry is skipped' : 'kept verbatim';
+    out.push({ code: 'malformed-family', message: `${name} should be a single value, not a mapping or list (${spec.section}); ${outcome}` });
+    return;
+  }
   if (field.allowedValues) {
-    const s = String(value).trim();
+    const s = safeString(value).trim();
     if (!field.allowedValues.includes(s)) {
       out.push({ code: 'malformed-family', message: `${name} "${s}" is not one of ${field.allowedValues.join(' | ')} (${spec.section}); kept verbatim` });
     }
@@ -133,7 +150,7 @@ export function sourceIds(frontmatter: Record<string, unknown>): Set<string> {
   const ids = new Set<string>();
   for (const entry of parseList(SOURCES, frontmatter.sources).entries) {
     const id = entry.mapping?.id;
-    if (id !== undefined && id !== null) ids.add(String(id));
+    if (id !== undefined && id !== null) ids.add(safeString(id));
   }
   return ids;
 }

@@ -22,6 +22,7 @@ import {
   conceptIdToIri,
 } from './paths.js';
 import { DEFAULT_IRI_BASE, SCHEMA_MENTIONS, OKF_KNOWN_VERSIONS, OKF_TARGET_VERSION } from './constants.js';
+import { isBlank, safeString } from './utils.js';
 import type {
   BundleFile,
   BundleImport,
@@ -81,9 +82,8 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     docs.push(doc);
     iriByConceptId[doc.conceptId] = conceptIdToIri(doc.conceptId, iriBase);
     typeByConceptId[doc.conceptId] =
-      doc.frontmatter.type != null ? String(doc.frontmatter.type) : undefined;
-    const type = doc.frontmatter.type;
-    if (type === undefined || type === null || String(type).trim() === '') {
+      doc.frontmatter.type != null ? safeString(doc.frontmatter.type) : undefined;
+    if (isBlank(doc.frontmatter.type)) {
       warnings.push({
         conceptId: doc.conceptId,
         code: 'missing-type',
@@ -99,7 +99,7 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     try {
       const parsed = parseDocument('index.md', rootIndex.content);
       const v = parsed.frontmatter.okf_version;
-      if (v !== undefined && v !== null) okfVersion = String(v);
+      if (v !== undefined && v !== null) okfVersion = safeString(v);
     } catch {
       // Reserved files need no frontmatter; ignore.
     }
@@ -127,7 +127,19 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
   const concepts: ConceptMapping[] = [];
   const quads: Quad[] = [];
   for (const doc of docs) {
-    const mapping = mapConcept(doc, iriByConceptId[doc.conceptId], exists, opts);
+    let mapping: ConceptMapping;
+    try {
+      mapping = mapConcept(doc, iriByConceptId[doc.conceptId], exists, opts);
+    } catch (err) {
+      // A value no RDF term can hold (a cyclic YAML alias, say) skips this
+      // concept with a warning; it never aborts the rest of the bundle.
+      warnings.push({
+        conceptId: doc.conceptId,
+        code: 'parse',
+        message: `could not be mapped (${err instanceof Error ? err.message.split('\n')[0] : safeString(err)}); skipped`,
+      });
+      continue;
+    }
     if (typeRelations.length > 0) {
       const fromType = typeByConceptId[doc.conceptId];
       for (const q of mapping.quads) {

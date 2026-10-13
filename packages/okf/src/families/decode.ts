@@ -32,6 +32,17 @@ function fieldByPredicate(spec: MappingFamilySpec | ListFamilySpec): ReadonlyMap
   return map;
 }
 
+/** Set-valued fields come back sorted: strings by value, a kept-verbatim structure by its JSON. */
+function listKey(item: unknown): string {
+  return typeof item === 'string' ? item : JSON.stringify(item);
+}
+
+function byListKey(a: unknown, b: unknown): number {
+  const x = listKey(a);
+  const y = listKey(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
 /** A family's producer extensions on one subject (`okf:<familyKey>.<key>`), in quad order. */
 function extensionsOf(quads: readonly Quad[], familyKey: string, ctx: ExportContext): Record<string, unknown> {
   const extras: Record<string, unknown> = {};
@@ -50,15 +61,15 @@ function decodeFields(
 ): { value: Record<string, unknown>; fields: Record<string, unknown>; extensions: Record<string, unknown> } {
   const byPredicate = fieldByPredicate(spec);
   const fields: Record<string, unknown> = {};
-  const lists: Record<string, string[]> = {};
+  const lists: Record<string, unknown[]> = {};
   for (const q of quads) {
     const field = byPredicate.get(q.predicate);
     if (!field) continue;
     const decoded = termValue(q.object, ctx, field.kind === 'path');
-    if (field.kind === 'text-list') (lists[field.key] ??= []).push(String(decoded));
+    if (field.kind === 'text-list') (lists[field.key] ??= []).push(decoded);
     else fields[field.key] = decoded; // single-valued: last wins
   }
-  for (const [key, items] of Object.entries(lists)) fields[key] = [...items].sort();
+  for (const [key, items] of Object.entries(lists)) fields[key] = [...items].sort(byListKey);
   const extensions = extensionsOf(quads, spec.key, ctx);
   return { value: { ...fields, ...extensions }, fields, extensions };
 }

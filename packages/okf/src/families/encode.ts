@@ -26,9 +26,9 @@ import {
   XSD_INTEGER,
 } from '../constants.js';
 import { okfExtensionPredicate } from '../extensions.js';
-import { genericQuads, dateTerm, pathFieldTerm, toArray, valueToTerms, type PathContext, type PathFieldTerm } from '../terms.js';
+import { genericQuads, dateTerm, jsonTerm, pathFieldTerm, toArray, valueToTerms, type PathContext, type PathFieldTerm } from '../terms.js';
 import { deriveTrustTier } from '../trust.js';
-import { isBlank, isMapping, literalTerm, sanitizeForBlank, typedLiteralTerm } from '../utils.js';
+import { isBlank, isMapping, isScalar, literalTerm, safeString, sanitizeForBlank, typedLiteralTerm } from '../utils.js';
 import type { OkfWarning, Quad } from '../types.js';
 import { parseList } from './parse.js';
 import {
@@ -57,14 +57,21 @@ function nodeIri(iri: string, tag: string, conceptId: string, index: number): st
   return `${iri}${SECTION_GENID_INFIX}${tag}${sanitizeForBlank(conceptId)}_${index}`;
 }
 
-/** A field value's object terms, per its kind (see `FieldKind`). */
+/**
+ * A field value's object terms, per its kind (see `FieldKind`). Every kind but
+ * `text-list` holds one value; given a mapping or list instead, the field keeps
+ * it verbatim as one `rdf:JSON` literal (reported by the diagnostics) rather
+ * than coercing it — coercion would lose it, or throw on a mapping that has
+ * its own `toString` key.
+ */
 function fieldTerms(field: FieldSpec, value: unknown, ctx: PathContext): { terms: string[]; path?: PathFieldTerm } {
+  if (field.kind !== 'text-list' && !isScalar(value)) return { terms: [jsonTerm(value)] };
   switch (field.kind) {
     case 'text':
-      return { terms: [literalTerm(String(value))] };
+      return { terms: [literalTerm(safeString(value))] };
     case 'token':
     case 'actor':
-      return { terms: [literalTerm(String(value).trim())] };
+      return { terms: [literalTerm(safeString(value).trim())] };
     case 'date': {
       const term = dateTerm(value);
       return { terms: term ? [term] : [] };
@@ -85,7 +92,7 @@ function fieldTerms(field: FieldSpec, value: unknown, ctx: PathContext): { terms
       return { terms: [path.term], path };
     }
     case 'text-list':
-      return { terms: toArray(value).map((item) => literalTerm(String(item))) };
+      return { terms: toArray(value).map((item) => (isScalar(item) ? literalTerm(safeString(item)) : jsonTerm(item))) };
   }
 }
 
@@ -107,7 +114,7 @@ function encodeField(enc: Encoding, field: FieldSpec, subject: string, value: un
     enc.result.warnings.push({
       conceptId: enc.ctx.conceptId,
       code: 'broken-link',
-      message: `${label} "${String(value).trim()}" does not resolve to a concept in the bundle (not an error, SPEC §6.1/§11)`,
+      message: `${label} "${safeString(value).trim()}" does not resolve to a concept in the bundle (not an error, SPEC §6.1/§11)`,
     });
   }
 }

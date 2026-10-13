@@ -266,6 +266,17 @@ it; the CLI summary reports it against the current time.
   exactly, and the predicate is always IRI-safe. The top-level convention is
   left as it was in v0.1 so an OKF import keeps converging with the node's
   Markdown extractor.
+- **Values are arbitrary YAML.** A family field that holds one value but is
+  given a mapping or list (`status: { … }`, `runtime: [bigquery]`) keeps it
+  verbatim as one `rdf:JSON` literal and warns; it is never coerced, because a
+  mapping with its own `toString` key makes `String()` throw. A verifier given
+  that way names no verifier, so its entry is skipped. Base fields use a
+  coercion that never throws. If a concept still cannot be mapped (a cyclic
+  YAML alias has no RDF form), only that concept is skipped, with a `parse`
+  warning; the rest of the bundle imports.
+- **`schema:isPartOf` on export.** The edge `emitFolderHierarchy` infers (to the
+  concept's own parent directory) is omitted, since the path implies it and the
+  option re-derives it; any other `isPartOf` value is a producer key and is kept.
 - **Keys are arbitrary strings.** Producer keys, extension keys and concept
   IDs (file paths) may be `constructor`, `toString` or `__proto__`. Export uses
   own-property checks and defined (not assigned) properties throughout, and the

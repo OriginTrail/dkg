@@ -38,7 +38,7 @@ import {
   DEFAULT_IRI_BASE,
 } from './constants.js';
 import { conceptIdToIri, resolveLinkTarget } from './paths.js';
-import { dedupeQuads, isSafeIri, literalTerm, sanitizeForBlank } from './utils.js';
+import { dedupeQuads, isBlank, isSafeIri, isScalar, literalTerm, safeString, sanitizeForBlank } from './utils.js';
 import {
   typeToIri,
   dateTerm,
@@ -128,14 +128,14 @@ export function mapFrontmatter(
         break;
       }
       case 'title':
-        out.push({ subject: iri, predicate: SCHEMA_NAME, object: literalTerm(String(value)) });
+        out.push({ subject: iri, predicate: SCHEMA_NAME, object: literalTerm(safeString(value)) });
         break;
       case 'description':
-        out.push({ subject: iri, predicate: SCHEMA_DESCRIPTION, object: literalTerm(String(value)) });
+        out.push({ subject: iri, predicate: SCHEMA_DESCRIPTION, object: literalTerm(safeString(value)) });
         break;
       case 'tags':
         for (const tag of toArray(value)) {
-          out.push({ subject: iri, predicate: SCHEMA_KEYWORDS, object: literalTerm(String(tag)) });
+          out.push({ subject: iri, predicate: SCHEMA_KEYWORDS, object: literalTerm(safeString(tag)) });
         }
         break;
       case 'timestamp': {
@@ -150,7 +150,7 @@ export function mapFrontmatter(
         break;
       }
       case 'resource': {
-        const r = String(value);
+        const r = safeString(value);
         out.push({ subject: iri, predicate: SCHEMA_URL, object: isSafeIri(r) ? r : literalTerm(r) });
         break;
       }
@@ -184,7 +184,7 @@ export function summarizeTrust(
 ): ConceptTrust {
   const generated = isMapping(frontmatter.generated) ? frontmatter.generated : null;
   const by = generated?.by;
-  const generatedBy = by !== undefined && by !== null && String(by).trim() !== '' ? String(by).trim() : null;
+  const generatedBy = isScalar(by) && !isBlank(by) ? safeString(by).trim() : null;
   const generatedAt = (generated ? dateTimeLexical(generated.at) : null) ?? dateTimeLexical(frontmatter.timestamp);
   // The same parses the RDF mapping uses, so the counts match the nodes minted.
   const { events } = parseVerified(frontmatter.verified);

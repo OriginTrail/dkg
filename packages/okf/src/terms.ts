@@ -14,7 +14,7 @@ import {
   XSD_INTEGER,
 } from './constants.js';
 import { conceptIdToIri, resolveLinkTarget } from './paths.js';
-import { isSafeIri, literalTerm, typedLiteralTerm, pascalCase, camelCase } from './utils.js';
+import { isSafeIri, literalTerm, safeString, typedLiteralTerm, pascalCase, camelCase } from './utils.js';
 import { dateTimeLexical, isXsdDate, isXsdDateTime } from './trust.js';
 import type { Quad } from './types.js';
 
@@ -26,7 +26,7 @@ export function toArray(value: unknown): unknown[] {
 
 /** OKF `type` value → an rdf:type object IRI (raw, no angle brackets). */
 export function typeToIri(value: unknown): string | null {
-  const s = String(value).trim();
+  const s = safeString(value).trim();
   if (!s) return null;
   if (isSafeIri(s)) return s; // already a full IRI (e.g. `tag:…`, `https://…`)
   const pascal = pascalCase(s);
@@ -46,7 +46,7 @@ export function isAttestedComputationType(value: unknown): boolean {
 /** True when a `type` value names `typeName`, in its spec spelling or the PascalCased form its rdf:type IRI carries. */
 export function isConceptType(value: unknown, typeName: string): boolean {
   if (value === undefined || value === null) return false;
-  return pascalCase(String(value)) === pascalCase(typeName);
+  return pascalCase(safeString(value)) === pascalCase(typeName);
 }
 
 /**
@@ -64,7 +64,7 @@ export function dateTerm(value: unknown): string | null {
 
 /** Actor-convention fields (§7) are a string convention, never IRIs — always a plain literal. */
 export function actorTerm(value: unknown): string {
-  return literalTerm(String(value).trim());
+  return literalTerm(safeString(value).trim());
 }
 
 /**
@@ -89,6 +89,15 @@ export function valueToTerms(value: unknown): string[] {
 }
 
 /** The generic producer-defined-key mapping: `schema:<camelKey>` with typed terms (SPEC §4.1/§11). */
+/**
+ * A whole value as one `rdf:JSON` literal — how a family field that holds a
+ * single value keeps a mapping or list it was given instead (kept verbatim,
+ * decoded back to the same structure on export).
+ */
+export function jsonTerm(value: unknown): string {
+  return typedLiteralTerm(JSON.stringify(value), RDF_JSON);
+}
+
 /** The generic producer-key predicate for `key`: `schema:<camelKey>` (SPEC §4.1/§11). */
 export function genericPredicate(key: string): string {
   return SCHEMA_NS + camelCase(key);
@@ -128,7 +137,7 @@ export interface PathFieldTerm {
  *     `references/` file, or a scope descriptor) → the raw string as a literal.
  */
 export function pathFieldTerm(value: unknown, ctx?: PathContext): PathFieldTerm {
-  const s = String(value).trim();
+  const s = safeString(value).trim();
   if (isSafeIri(s)) return { term: s };
   if (!ctx) return { term: literalTerm(s) };
   const direct = resolveLinkTarget(s, ctx.conceptId);

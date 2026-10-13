@@ -9,7 +9,7 @@
 import { OKF_STATUS_VALUES } from './constants.js';
 import { VERIFIED, definedKeys } from './families/specs.js';
 import { parseList, type ParsedEntry } from './families/parse.js';
-import { setOwn } from './utils.js';
+import { safeString, setOwn } from './utils.js';
 import type { OkfStatus, TrustTier, VerificationEvent } from './types.js';
 
 /** XSD `dateTime` lexical form (`YYYY-MM-DDThh:mm:ss[.s+][Z|±hh:mm]`). The zone is optional in XSD; OKF wants it explicit (§5). */
@@ -127,7 +127,7 @@ export function parseVerified(value: unknown): ParsedVerification {
     if (!entry.usable || entry.mapping === null) return [];
     const extra: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(entry.mapping)) if (!known.has(k)) setOwn(extra, k, v);
-    return [{ index: entry.index, by: String(entry.mapping.by).trim(), at: dateTimeLexical(entry.mapping.at), extra }];
+    return [{ index: entry.index, by: safeString(entry.mapping.by).trim(), at: dateTimeLexical(entry.mapping.at), extra }];
   });
   return { shape: parsed.shape, entries: parsed.entries, events };
 }
@@ -155,8 +155,8 @@ export function deriveTrustTier(verified: unknown): TrustTier {
 /** Lifecycle status (§5.4). Absent ⇒ `stable`. An unknown value is returned verbatim (tolerated). */
 export function conceptStatus(frontmatter: Record<string, unknown>): OkfStatus | string {
   const v = frontmatter.status;
-  if (v === undefined || v === null || String(v).trim() === '') return 'stable';
-  return String(v).trim();
+  if (v === undefined || v === null || safeString(v).trim() === '') return 'stable';
+  return safeString(v).trim();
 }
 
 /** True when `value` is one of the three spec'd status values. */
