@@ -1,3 +1,4 @@
+import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource,
@@ -31,8 +32,8 @@ import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
   contextGraphLayerUriCandidates, contextGraphLayerPrefixCandidates,
   contextGraphAssertionPrefixCandidates,
-  contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
-  contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
+  contextGraphSubGraphUri, contextGraphMetaUri, assertionLifecycleUri,
+  contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   ASSERTION_NAMED_GRAPH_PREFIX,
   isAssertionScopedChildGraph,
@@ -407,16 +408,32 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
         : contextGraphDataUri(effectiveContextGraphId);
       const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
+      const { subGraphName, isSwmOnlyRoute, metaAllowList, staticPrivateAllowList } =
+        staticScopedRouteGraphs(effectiveContextGraphId, options);
+      // Explicit static GRAPH targets need only the route's static authority.
+      // Avoid unrelated catalog admissions while ingestion occupies the store.
+      // Variables and dynamic partitions still require fresh discovery below.
+      const staticAllowedGraphs = [
+        ...(options?.includeSharedMemory ?? options?.includeWorkspace
+          ? [dataGraph, sharedMemoryGraph]
+          : isSwmOnlyRoute ? [sharedMemoryGraph] : [dataGraph]),
+        ...metaAllowList,
+        ...staticPrivateAllowList,
+      ];
+      const needsDiscovery = !initialGraphScope.hasGraphClause
+        || initialGraphScope.graphTargets.some(
+          (target) => target.kind !== 'iri' || !staticAllowedGraphs.includes(target.iri),
+        );
       // Per-KA SWM: when a route targets SWM, expand the allow-set with the discovered
       // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
       const swmRouted = (options?.includeSharedMemory ?? options?.includeWorkspace) || options?.graphSuffix === '_shared_memory';
-      const swmPerKaGraphs = swmRouted
+      const swmPerKaGraphs = needsDiscovery && swmRouted
         ? await this.discoverGraphsByPrefix(`${sharedMemoryGraph}/`, reads)
         : [];
       // Per-KA VM: published data is in …/_verifiable_memory/{addr}/{number}; bind those too
       // for GRAPH-variable scans on any route that reads the data graph.
       const dataRouted = options?.graphSuffix !== '_shared_memory';
-      const vmPerKaGraphs = dataRouted
+      const vmPerKaGraphs = needsDiscovery && dataRouted
         ? await this.discoverGraphsByPrefix(
             `${dataGraph}/_verifiable_memory/`,
             reads,
@@ -427,78 +444,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         : options?.graphSuffix === '_shared_memory'
           ? [sharedMemoryGraph, ...swmPerKaGraphs]
           : [dataGraph, ...vmPerKaGraphs];
-      // Authenticated callers that scope a query to a `contextGraphId`
-      // already have read access to that CG; refusing them visibility
-      // into the same CG's metadata graphs breaks every legitimate
-      // metadata read:
-      //   - `/_meta` — curator lookup, allowedAgent list, registration
-      //     status (invite-flow `assert_curator_triple_landed` probe,
-      //     CG Overview UI, downstream sync code)
-      //   - `/_shared_memory_meta` — SWM share metadata (operation
-      //     heads, digests, storage-ACK ledger) and legacy
-      //     root-keyed workspaceOwner rows. Graph-scoped KAs (10.0.7+)
-      //     keep ownership in the per-author SWM graph instead.
-      //
-      // Privacy fence: a caller that explicitly narrowed routing to
-      // SWM-only via `graphSuffix: '_shared_memory'` does NOT gain
-      // access to the CG-level `_meta` (curator / allowedAgent /
-      // registrationStatus). They asked for SWM, they get SWM
-      // (including `_shared_memory_meta`). All other scoped routes
-      // expose both `_meta` and `_shared_memory_meta` for the
-      // legitimate metadata reads called out above.
-      //
-      // Sub-graph metadata uses `contextGraphSubGraphMetaUri`
-      // (`/<sub>/_meta`) — the same path the storage layer
-      // (`graph-manager.ts`) writes to — not the
-      // `/context/<sub>/_meta` shape produced by `contextGraphMetaUri`
-      // when a subGraphId is passed.
-      //
-      // Metadata graphs are always part of the scoped explicit allow-set:
-      // UI helpers enumerate sub-graph metadata with `GRAPH ?g` under a
-      // contextGraphId, while explicit GRAPH IRIs still need the same static
-      // route checks. Broader content-partition scans are handled later and
-      // require an explicit count-query opt-in.
-      const subGraphName = options?.subGraphName;
-      const isSwmOnlyRoute = options?.graphSuffix === '_shared_memory';
-      const metaAllowList = [
-        ...(isSwmOnlyRoute
-          ? []
-          : subGraphName
-            ? [
-                // Sub-graph metadata graph (`<cg>/<sub>/_meta`).
-                contextGraphSubGraphMetaUri(effectiveContextGraphId, subGraphName),
-                // Root CG metadata graph (`<cg>/_meta`). Canonical KA provenance
-                // (`rootEntity` / `partOf` / `confirmed` status) is written to the
-                // ROOT `_meta` even for sub-graph publishes — see
-                // `finalization-handler.ts` (the confirmed-meta writes hardcode
-                // `<cg>/_meta`). A sub-graph-scoped reader (e.g. the EPCIS events
-                // query) joins provenance from there, so the root `_meta` must be
-                // admitted alongside the sub-graph `_meta`. Both are within the
-                // same `contextGraphId`, so this does not cross the privacy
-                // boundary (which is the CG scope itself).
-                contextGraphMetaUri(effectiveContextGraphId),
-              ]
-            : [contextGraphMetaUri(effectiveContextGraphId)]),
-        contextGraphSharedMemoryMetaUri(effectiveContextGraphId, subGraphName),
-      ];
-      // `_private` is excluded from the allow-set by default (it is more
-      // sensitive than the `_meta` graphs above). Only callers that opt in
-      // via `includePrivate` may name the CG's own private partition — the
-      // EPCIS events query does this to surface private-anchored events to
-      // the hosting node. This stays strictly within the queried CG, so it
-      // is not a cross-CG leak, and it does not widen any other caller.
-      const privateAllowList = options?.includePrivate
-        ? [
-            subGraphName
-              ? contextGraphSubGraphPrivateUri(effectiveContextGraphId, subGraphName)
-              : contextGraphPrivateUri(effectiveContextGraphId),
-            ...(await this.discoverGraphScopedPrivateGraphs(
-              effectiveContextGraphId,
-              reads,
-              subGraphName,
-            )),
-          ]
-        : [];
+      const privateAllowList = options?.includePrivate && needsDiscovery
+        ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(
+            effectiveContextGraphId, reads, subGraphName,
+          ))]
+        : staticPrivateAllowList;
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
       const shouldExpandGraphVariables =
         options?.includeContextGraphPartitions === true
@@ -554,7 +504,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
       if (options?.includeSharedMemory ?? options?.includeWorkspace) {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
-        const vmGraphsInc = await this.discoverGraphsByPrefix(
+        const vmGraphsInc = routedScope.hasGraphClause ? [] : await this.discoverGraphsByPrefix(
           `${dataGraph}/_verifiable_memory/`,
           reads,
         );
@@ -565,7 +515,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           'deduplicated-values-union',
         ));
         // Per-KA SWM: union the discovered …/_shared_memory/{addr}/{number} graphs.
-        const swmGraphs = await this.discoverGraphsByPrefix(
+        const swmGraphs = routedScope.hasGraphClause ? [] : await this.discoverGraphsByPrefix(
           `${sharedMemoryGraph}/`,
           reads,
         );
@@ -586,7 +536,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       if (options?.graphSuffix === '_shared_memory') {
         // Uniform layout: SWM is per-KA …/_shared_memory/{addr}/{number}. Discover the
         // per-KA graphs under the prefix and union them (the legacy bucket is now empty).
-        const swmGraphs = await this.discoverGraphsByPrefix(
+        const swmGraphs = routedScope.hasGraphClause ? [] : await this.discoverGraphsByPrefix(
           `${sharedMemoryGraph}/`,
           reads,
         );
@@ -598,7 +548,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         ));
       } else {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
-        const vmGraphs = await this.discoverGraphsByPrefix(
+        const vmGraphs = routedScope.hasGraphClause ? [] : await this.discoverGraphsByPrefix(
           `${dataGraph}/_verifiable_memory/`,
           reads,
         );
