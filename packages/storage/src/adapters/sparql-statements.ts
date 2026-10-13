@@ -1,5 +1,4 @@
-import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
-import { validateAtomicAssetGroup, type AtomicAssetReplacement } from '../atomic-asset-group.js';
+import type { AtomicAssetReplacement } from '../atomic-asset-group.js';
 /**
  * The SPARQL statements the storage adapters build by string interpolation.
  *
@@ -248,10 +247,8 @@ export function sparqlStatements(
 
     checkIris: {
       replaceAssetGroup: assets => {
-        validateAtomicAssetGroup(assets);
         for (const a of assets) {
           const quads = [...a.graphQuads, ...a.metadataQuads];
-          assertQuadLiteralsMutf8Safe(quads, { maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'replaceAssetGroup' });
           checkIris('replaceAssetGroup', quads, [
             { term: a.graphUri, position: 'graph' }, { term: a.metaGraphUri, position: 'graph' },
             { term: a.metadataSubject, position: 'subject' },

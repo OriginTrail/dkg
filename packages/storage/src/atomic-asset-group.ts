@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { assertSafeIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { assertReplacementPayload, assertSubjectReplacementPayload, buildAtomicGraphAndSubjectReplaceUpdate } from './atomic-graph-replace.js';
 import type { Quad } from './triple-store.js';
 
@@ -27,8 +27,17 @@ export function validateAtomicAssetGroup(assets: readonly AtomicAssetReplacement
     assertSubjectReplacementPayload(a.metaGraphUri, a.metadataSubject, a.metadataQuads);
   }
 }
+/** Enforce backend literal limits independently from optional IRI reporting. */
+export function preflightAtomicAssetGroupLiterals(assets: readonly AtomicAssetReplacement[]): void {
+  for (const a of assets) {
+    assertQuadLiteralsMutf8Safe([...a.graphQuads, ...a.metadataQuads], {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'replaceAssetGroup',
+    });
+  }
+}
 export function buildAtomicAssetGroupUpdate(assets: readonly AtomicAssetReplacement[]) {
   validateAtomicAssetGroup(assets);
+  preflightAtomicAssetGroupLiterals(assets);
   const plans = assets.map(a => buildAtomicGraphAndSubjectReplaceUpdate(
     a.graphUri, a.graphQuads, a.metaGraphUri, a.metadataSubject, a.metadataQuads));
   const update = plans.map(p => p.update).join(';\n');
