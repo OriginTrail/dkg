@@ -495,6 +495,7 @@ export class QueryMethods extends DKGAgentBase {
       contextGraphId: rawOpts.contextGraphId,
       includeSharedMemory: rawOpts.includeSharedMemory ?? rawOpts.includeWorkspace,
     };
+    opts.signal?.throwIfAborted();
     const ctx = opts.operationCtx ?? createOperationContext('query');
     const sgLabel = opts.subGraphName ? `/${opts.subGraphName}` : '';
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
@@ -610,7 +611,7 @@ export class QueryMethods extends DKGAgentBase {
       && targetsSharedMemory
       && !(await this.canUseSharedMemoryForContextGraph(opts.contextGraphId, {
         callerAgentAddress: callerAgentAddressStr,
-        readAuthority: scopedReadAuthority,
+        readAuthority: scopedReadAuthority, signal: opts.signal,
       }))
     ) {
       this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
@@ -692,7 +693,9 @@ export class QueryMethods extends DKGAgentBase {
     const wmAddressAliases = opts.view === 'working-memory'
       ? resolveWmIdentity(effectiveWmAddress).aliases : undefined;
 
-    const execute = () => this.queryEngine.query(sparql, {
+    const execute = () => {
+      opts.signal?.throwIfAborted();
+      return this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
@@ -713,7 +716,8 @@ export class QueryMethods extends DKGAgentBase {
       // callers on the legacy shape still get the trust gate without
       // engines needing to know about both names.
       minTrust: opts.minTrust ?? opts._minTrust,
-    });
+      });
+    };
     // Arbitrary unscoped SPARQL can reveal private data through aggregates or
     // projections without a graph column. The executor owns admission and both
     // local consistency checks, including the release of the materialized result.

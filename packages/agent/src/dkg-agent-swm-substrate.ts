@@ -801,7 +801,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    */
   async rfc64PrivateRootSwmOnLegacyLaneV1(
     this: DKGAgent,
-    contextGraphId: string,
+    contextGraphId: string, options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
     const authorityContextGraphId = this.rfc64PrivateRootLegacyLaneAuthorityIdV1(contextGraphId);
     if (authorityContextGraphId === null) return false;
@@ -813,10 +813,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // it also holds replicated ONTOLOGY and AGENTS facts, so the decision is
     // taken from the graph's own `_meta` alone.
     try {
-      if (!isLocalPrivateMember(await this.getCgMeta(authorityContextGraphId), localAgents)) {
+      if (!isLocalPrivateMember(await this.getCgMeta(authorityContextGraphId, options), localAgents)) {
         return false;
       }
-      if (!isLocalPrivateMember(await this.getOwnCgMetaFacts(authorityContextGraphId), localAgents)) {
+      if (!isLocalPrivateMember(await this.getOwnCgMetaFacts(authorityContextGraphId, options), localAgents)) {
         return false;
       }
     } catch {
