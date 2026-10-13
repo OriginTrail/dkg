@@ -1,16 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import {
+  exportBundle,
+  frontmatterQuads,
+  importBundle,
   isSafeIri,
   literalTerm,
-  typedLiteralTerm,
-  frontmatterQuads,
   quadsToNQuads,
-  exportBundle,
-  importBundle,
-  validateBundle,
   resolveLinkTarget,
+  typedLiteralTerm,
+  validateBundle,
+  RDF_JSON,
+  SCHEMA_NS,
 } from '../src/index.js';
-
+import { objs, bundle, conceptOf, exportedFrontmatter } from './helpers/okf-v02-fixtures.js';
 describe('term helpers', () => {
   it('isSafeIri requires a scheme and rejects unsafe chars', () => {
     expect(isSafeIri('https://x/y')).toBe(true);
@@ -141,5 +143,21 @@ describe('robustness', () => {
   it('rejects a link whose resolved segment is not a valid concept-ID segment', () => {
     expect(resolveLinkTarget('/-bad.md', 'a')).toBeNull();
     expect(resolveLinkTarget('/.hidden.md', 'a')).toBeNull();
+  });
+});
+
+describe('producer-defined keys', () => {
+  it('carries nested mappings as rdf:JSON so they round-trip as objects', () => {
+    const yaml = 'type: Metric\nnot:\n  - term: revenue minus product cost only\n    why: legacy\nowner: { team: finance, lead: human:a }';
+    const { c } = conceptOf(bundle(yaml));
+    expect(objs(c.quads, SCHEMA_NS + 'not')).toEqual([`"{\\"term\\":\\"revenue minus product cost only\\",\\"why\\":\\"legacy\\"}"^^<${RDF_JSON}>`]);
+    const fm = exportedFrontmatter(bundle(yaml));
+    expect(fm.not).toEqual({ term: 'revenue minus product cost only', why: 'legacy' });
+    expect(fm.owner).toEqual({ team: 'finance', lead: 'human:a' });
+  });
+  it('writes a v0.1 import back with the legacy timestamp key (generated needs a by)', () => {
+    const fm = exportedFrontmatter(bundle("type: Metric\ntimestamp: '2026-05-28T22:44:47+00:00'"));
+    expect(fm.timestamp).toBe('2026-05-28T22:44:47+00:00');
+    expect(fm.generated).toBeUndefined();
   });
 });
