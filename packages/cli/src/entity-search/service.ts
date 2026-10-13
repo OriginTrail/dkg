@@ -17,7 +17,7 @@ export class EntitySearchService {
       let state = this.store.state(id);
       if (!state && this.store.indexCount() >= 32) throw new EntitySearchError('ENTITY_INDEX_CAPACITY', 422);
       if (!state || restart) {
-        state = { id, spec, fingerprint: this.embedder.fingerprint, generation: (state?.generation ?? 0) + 1,
+        state = { id, spec, fingerprint: this.embedder.fingerprint,
           cursor: null, scanComplete: false, completedAt: null };
         this.store.begin(state);
       }
