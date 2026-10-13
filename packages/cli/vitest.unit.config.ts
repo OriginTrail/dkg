@@ -49,6 +49,7 @@ export default defineConfig({
           'test/semantic-runtime-configuration-api.test.ts',
           'test/semantic-runtime-routes.test.ts',
           'test/semantic-runtime-safe-llm-adapter.test.ts',
+          'test/semantic-runtime-local-llm-adapter.test.ts',
           'test/semantic-runtime-remote-execute-adapter.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',

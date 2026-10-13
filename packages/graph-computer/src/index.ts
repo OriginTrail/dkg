@@ -176,7 +176,7 @@ class Programs {
     const program = input.program;
     if (!/^[0-9a-f]{64}$/.test(program.sourceHash)) throw new TypeError('Program sourceHash must be a SHA-256 hex digest');
     if (!['wm', 'swm', 'vm'].includes(program.programLayer)) throw new TypeError('Invalid Program layer');
-    if (!input.query && !input.sparqlRead && !input.assetCreation && !input.typescript) throw new TypeError('Explicit Program permission is required');
+    if (!input.query && !input.sparqlRead && !input.assetCreation && !input.localLlm && !input.typescript) throw new TypeError('Explicit Program permission is required');
     const binding = {
       ...operation(input),
       allowedCallerAgentAddresses: input.allowedCallers.map(getAddress),
@@ -186,6 +186,7 @@ class Programs {
       ...(input.query ? { query: input.query } : {}),
       ...(input.sparqlRead ? { sparqlRead: input.sparqlRead } : {}),
       ...(input.assetCreation ? { assetCreation: input.assetCreation } : {}),
+      ...(input.localLlm ? { localLlm: input.localLlm } : {}),
       ...(input.typescript ? { typescript: { ...input.typescript, children: input.typescript.children.map(child => ({
         contextGraphId: graph(child.graphId), operationIri: iri(child.operationIri),
         ...(child.programIri ? { programIri: iri(child.programIri) } : {}),

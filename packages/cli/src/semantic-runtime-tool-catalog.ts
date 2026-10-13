@@ -9,6 +9,9 @@ export const PROGRAM_TOOL_CATALOG = [
   { kind: 'assetCreation', toolIri: 'urn:dkg:tool:asset-create', label: 'Create Knowledge Asset',
     description: 'Create an asset from RDF triples in the selected graph.',
     definition: { operation: 'dkg/asset-create', version: '1', wit: 'origintrail:semantic-runtime/asset-create@0.1.0' } },
+  { kind: 'localLlm', toolIri: 'urn:dkg:tool:safe-llm', label: 'Read-only local LLM',
+    description: 'Call the operator model and graph-scoped read tools; persist the answer and evidence.',
+    definition: { operation: 'llm/safe', version: '1', wit: 'origintrail:semantic-runtime/safe-llm@0.1.0' } },
 ] as const;
 
 export function programToolDefinition(kind: typeof PROGRAM_TOOL_CATALOG[number]['kind']) {

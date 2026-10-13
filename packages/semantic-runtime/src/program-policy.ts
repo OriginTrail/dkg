@@ -73,6 +73,8 @@ export interface SemanticProgramBinding {
   sparqlRead?: SemanticSparqlReadGrant;
   /** Explicit tenant-approved creation tool; never inferred from read permission. */
   assetCreation?: { toolIri: string };
+  /** Native graph-scoped read-only chat. Pins the operator model/tool configuration. */
+  localLlm?: { toolIri: string; configurationSha256: string };
   /** TypeScript calls share these tool grants and may also invoke pinned child operations. */
   typescript?: SemanticTypeScriptGrant;
   /** Output assets inherit this execution layer; defaults to wm for compatibility. */

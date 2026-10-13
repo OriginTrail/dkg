@@ -113,6 +113,7 @@ export interface ApproveProgram extends Operation {
   sparqlRead?: SparqlReadPermission;
   query?: QueryPermission;
   assetCreation?: { toolIri: string };
+  localLlm?: { toolIri: string; configurationSha256: string };
   typescript?: {
     /** Pinned tool identities; the server fills these from the stored Program. */
     requiredTools?: string[];
@@ -134,6 +135,7 @@ export interface ProgramBinding {
   sparqlRead?: SparqlReadPermission & { outputSchemaSha256: string };
   query?: QueryPermission & { queryIri: string; definitionSha256: string; outputSchemaSha256: string };
   assetCreation?: { toolIri: string };
+  localLlm?: { toolIri: string; configurationSha256: string };
   typescript?: {
     /** Pinned tool identities; the server fills these from the stored Program. */
     requiredTools?: string[];
@@ -204,4 +206,5 @@ export interface RequestedToolPermissions {
   query?: QueryPermission;
   sparqlRead?: SparqlReadPermission;
   assetCreation?: { toolIri: string };
+  localLlm?: { toolIri: string };
 }

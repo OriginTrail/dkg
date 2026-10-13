@@ -4,6 +4,7 @@ export interface DkgLocalLlmDomainProfile {
   routingKeywords: string[];
   readTools: string[];
   writeTools?: string[];
+  requiredTools?: string[];
   systemContext?: string;
 }
 
@@ -57,6 +58,9 @@ export function parseDomainProfile(value: unknown): DkgLocalLlmDomainProfile {
     readTools: stringList(record, 'readTools', { required: true, toolNames: true }),
     ...(record.writeTools !== undefined
       ? { writeTools: stringList(record, 'writeTools', { toolNames: true }) }
+      : {}),
+    ...(record.requiredTools !== undefined
+      ? { requiredTools: stringList(record, 'requiredTools', { toolNames: true }) }
       : {}),
     ...(systemContext ? { systemContext } : {}),
   };

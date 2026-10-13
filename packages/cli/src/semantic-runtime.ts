@@ -1,4 +1,5 @@
 import { programToolDefinition } from './semantic-runtime-tool-catalog.js';
+import { createLocalLlmProgramAdapter, type LocalLlmProgramProvider } from './semantic-runtime-local-llm-adapter.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -143,6 +144,7 @@ export class SemanticProgramError extends Error {
 }
 
 export interface ConfiguredSemanticRuntimeService {
+  readonly localLlmProvider?: LocalLlmProgramProvider;
   host: SemanticRuntimeHost;
   store: SemanticRuntimeStore;
   configuration: SemanticProgramConfiguration;
@@ -155,6 +157,7 @@ export interface ConfiguredSemanticRuntimeService {
 }
 
 export interface ConfiguredSemanticRuntimeDeps {
+  localLlmProvider?: LocalLlmProgramProvider;
   log: (message: string) => void;
   dataDirectory?: string;
   start?: (options: SemanticRuntimeHostOptions) => Promise<SemanticRuntimeHost>;
@@ -199,6 +202,7 @@ export async function startConfiguredSemanticRuntime(
   const typescript = new TypeScriptProgramHost();
   const inFlight: ConfiguredSemanticRuntimeService['inFlight'] = new Map();
   return {
+    localLlmProvider: deps.localLlmProvider,
     host,
     store,
     configuration,
@@ -671,13 +675,15 @@ function assertRequestedToolPermissions(program: StoredSemanticProgram, binding:
     ...(binding.query ? { query: { selector: binding.query.selector, outputSchema: binding.query.outputSchema } } : {}),
     ...(binding.sparqlRead ? { sparqlRead: (({ outputSchemaSha256: _, ...grant }) => grant)(binding.sparqlRead) } : {}),
     ...(binding.assetCreation ? { assetCreation: binding.assetCreation } : {}),
+    ...(binding.localLlm ? { localLlm: { toolIri: binding.localLlm.toolIri } } : {}),
   };
   const tools = new Set(program.requiredTools);
-  const expectedCount = Number(!!binding.query) + Number(!!binding.sparqlRead) + Number(!!binding.assetCreation);
+  const expectedCount = Number(!!binding.query) + Number(!!binding.sparqlRead) + Number(!!binding.assetCreation) + Number(!!binding.localLlm);
   if (!sameSet(tools, new Set(binding.typescript?.requiredTools ?? []))
     || tools.size !== expectedCount
     || binding.sparqlRead && !tools.has(binding.sparqlRead.toolIri)
     || binding.assetCreation && !tools.has(binding.assetCreation.toolIri)
+    || binding.localLlm && !tools.has(binding.localLlm.toolIri)
     || (expectedCount > 0 && !requested)) {
     throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Declared tools must match the approved tool grants', 403);
   }
@@ -695,7 +701,7 @@ async function resolveTypeScriptTools(agent: DKGAgent, runtime: ConfiguredSemant
   const digest = programBindingDigest(binding);
   const resolved = await resolveProgramTools(agent, binding.contextGraphId, program, config, undefined,
     binding.executorAgentAddress, binding.executorAgentAddress, binding.executionLayer ?? 'wm', undefined, check,
-    { binding, digest, assertAuthorized: check }, runtime.store);
+    { binding, digest, assertAuthorized: check }, runtime.store, runtime.localLlmProvider);
   if (resolved.tools.some(tool => !tool.effective)) throw new SemanticProgramError('REQUIRED_TOOL_UNAVAILABLE', 'A requested adapter is unavailable', 409);
   return { registry: resolved.registry, policyHashHex: resolved.policyHashHex,
     public: { contextGraphId: binding.contextGraphId, programIri: program.programIri, programLayer: program.layer,
@@ -948,6 +954,7 @@ async function resolveProgramTools(
   executionLayer: SemanticMemoryLayer, childInvoker: SemanticProgramChildInvoker | undefined,
   assertAuthorized: (() => Promise<void>) | undefined, bound: BoundProgramInvocation | undefined,
   assetStore: SemanticRuntimeStore | undefined,
+  localLlmProvider?: LocalLlmProgramProvider,
 ) {
   const programIri = program.programIri, programLayer = program.layer;
   const readPrincipal = bound?.binding.executorAgentAddress ?? callerAgentAddress;
@@ -969,7 +976,8 @@ async function resolveProgramTools(
     const descriptors: string[] = [];
     for (const toolIri of program.requiredTools) {
       const definition = programToolDefinition(toolIri === bound.binding.assetCreation?.toolIri
-        ? 'assetCreation' : toolIri === bound.binding.sparqlRead?.toolIri ? 'sparqlRead' : 'query');
+        ? 'assetCreation' : toolIri === bound.binding.sparqlRead?.toolIri ? 'sparqlRead'
+          : toolIri === bound.binding.localLlm?.toolIri ? 'localLlm' : 'query');
       toolDefinitions.set(toolIri, new Map([[JSON.stringify(definition), definition]]));
       descriptors.push(toolIri, definition.operation, definition.version, definition.wit);
     }
@@ -1091,6 +1099,10 @@ async function resolveProgramTools(
   }
   if (bound?.binding.assetCreation) {
     registry.register(createAssetCreationAdapter(agent, contextGraphId, executionLayer, operatorAddress, assetStore, bound.assertAuthorized));
+  }
+  if (bound?.binding.localLlm) {
+    registry.register(createLocalLlmProgramAdapter(contextGraphId, operatorAddress,
+      bound.binding.localLlm, bound.assertAuthorized, localLlmProvider));
   }
   if (!bound && (!config?.programPolicy || config.programPolicy.disclosure)) {
     registry.register(createSafeLlmAdapter(
@@ -1296,6 +1308,9 @@ function createProgramToolDispatcher(
       return descriptor ? [descriptor.verb] : [];
     }))];
     const readOnly = [...authority.allowedEffectClasses].every(effectClass => effectClass === 'read');
+    // Bound TypeScript Programs spend their shared maxCalls budget per tool.
+    // Non-repeatable effects retain separate durable call IDs; consuming the
+    // execution-wide capability on their first call would also disable reads.
     runtime.store.putCapability({
       capabilityId,
       executionId: executionIri,
@@ -1306,14 +1321,14 @@ function createProgramToolDispatcher(
         verbs: capabilityVerbs,
         resources: resolved.public.requiredTools.map(tool => tool.toolIri),
         delegationDepth: 0,
-        oneShot: !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
+        oneShot: !bound?.binding.typescript && !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
         budgetMicros: 0n,
       }),
       hostBindingKey: resolved.public.requiredTools[0]?.adapterHash ?? 'no-adapter',
       policyEpoch: 1n,
       notBefore: now - 1_000,
       expiresAt: now + 30 * 24 * 60 * 60 * 1_000,
-      oneShot: !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
+      oneShot: !bound?.binding.typescript && !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
       consumedAt: null,
       revokedAt: null,
     });

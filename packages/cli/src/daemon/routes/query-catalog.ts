@@ -33,7 +33,9 @@ import {
 import { authenticatedAgentAddress, isExplicitNodeOperator } from '../../auth.js';
 
 const QUERY_CATALOG_RESULT_LIMIT = 5_000;
-const QUERY_CATALOG_RESPONSE_BYTES = 1024 * 1024;
+// v2 returns canonical items and legacy bindings together. Allow two bounded
+// representations; callers can select one catalog before the database read.
+const QUERY_CATALOG_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 /**
  * Semantic query-catalog HTTP boundary. Persistence belongs to the Context
@@ -154,6 +156,10 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     if (!parsed) return true;
     const contextGraphId = parsed.contextGraphId;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return true;
+    if (parsed.catalogSlug !== undefined && (typeof parsed.catalogSlug !== 'string' || !parsed.catalogSlug || parsed.catalogSlug.length > 512)) {
+      jsonResponse(res, 400, { error: 'catalogSlug must be a nonempty string of at most 512 characters.', code: 'QUERY_CATALOG_INVALID_FILTER' });
+      return true;
+    }
 
     const callerAgentAddress = authenticatedAgentAddress(authentication);
     const isNodeAdmin = isExplicitNodeOperator(authentication);
@@ -179,6 +185,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
         priority: lifecycle.priority,
         source: lifecycle.source,
         callerAgentAddress,
+        catalogSlug: parsed.catalogSlug,
       });
     } catch (err: any) {
       if (isApiQueryCallerDisconnected(err) || lifecycle.signal.aborted) {
@@ -190,7 +197,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
         jsonResponse(res, 413, {
           error: err?.message ?? 'Query catalog response exceeded the byte limit',
           code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
-          limitBytes: QUERY_CATALOG_RESPONSE_BYTES,
+          limitBytes: typeof err?.limitBytes === 'number' ? err.limitBytes : 1024 * 1024,
           ...(typeof err?.actualBytes === 'number' ? { actualBytes: err.actualBytes } : {}),
         });
         return true;
@@ -240,7 +247,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     getMetrics().storeQueryResultBytesEstimate.record(responseBytes, { source: lifecycle.source });
     if (responseBytes > QUERY_CATALOG_RESPONSE_BYTES) {
       jsonResponse(res, 413, {
-        error: 'Query catalog response exceeds the 1 MiB serialized-response limit.',
+        error: 'Query catalog response exceeds the 2 MiB serialized-response limit.',
         code: 'QUERY_CATALOG_RESULT_TOO_LARGE',
         limitBytes: QUERY_CATALOG_RESPONSE_BYTES,
         actualBytes: responseBytes,

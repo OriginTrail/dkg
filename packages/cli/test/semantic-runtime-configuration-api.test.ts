@@ -21,6 +21,7 @@ import { startConfiguredSemanticRuntime, type ConfiguredSemanticRuntimeService }
 import { authenticateHttpRequest } from '../src/auth.js';
 import { signAgentHttpHeaders } from '../src/agent-http-signing.js';
 import { boundSemanticInvocationScope } from '../src/semantic-runtime-bound-invocation.js';
+import { type LocalLlmProgramProvider } from '../src/semantic-runtime-local-llm-adapter.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { GraphComputer } from '../../graph-computer/src/index.js';
 import { examples as sdkExamples } from '../../graph-computer/examples/programs.mjs';
@@ -56,14 +57,14 @@ const runtimes = new Set<ConfiguredSemanticRuntimeService>();
 const dirs: string[] = [];
 afterEach(async () => { for (const runtime of runtimes) await runtime.stop(); runtimes.clear(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 type Identity = 'owner' | 'operator' | 'member' | 'caller' | 'anonymous' | 'disabled-anonymous';
-type Node = { agent: any; config: { semanticRuntime: SemanticRuntimeConfig }; runtime: ConfiguredSemanticRuntimeService | null; dir: string; boot(activate?: boolean): Promise<ConfiguredSemanticRuntimeService | null> };
+type Node = { agent: any; config: { semanticRuntime: SemanticRuntimeConfig }; runtime: ConfiguredSemanticRuntimeService | null; dir: string; localLlmProvider?: LocalLlmProgramProvider; boot(activate?: boolean): Promise<ConfiguredSemanticRuntimeService | null> };
 
 function node(agent: any, configured: SemanticRuntimeConfig = {}): Node {
   const dir = mkdtempSync(join(tmpdir(), 'program-api-')); dirs.push(dir);
   const n: Node = { agent, dir, config: { semanticRuntime: { watchdogMs: 1000, startupTimeoutMs: 30_000, ...configured } }, runtime: null,
     async boot(activate = false) {
       if (n.runtime) return n.runtime;
-      n.runtime = await startConfiguredSemanticRuntime(n.config.semanticRuntime, { dataDirectory: dir, log: vi.fn(), activate });
+      n.runtime = await startConfiguredSemanticRuntime(n.config.semanticRuntime, { dataDirectory: dir, log: vi.fn(), activate, localLlmProvider: n.localLlmProvider });
       if (n.runtime) { runtimes.add(n.runtime); registerSemanticRuntimeInboxSkill(agent, n.runtime, n.config.semanticRuntime, undefined); }
       return n.runtime;
     } };
@@ -169,7 +170,7 @@ const toolApi = '@origintrail-official/dkg-graph-computer/program';
 const readQuery = 'SELECT ?value WHERE { <urn:example:device:1> <urn:example:value> ?value } LIMIT 5';
 const createTool = 'urn:example:tool:create-asset';
 const assetInput = { quads: [{ subject: 'urn:example:assessment:1', predicate: 'urn:example:status', object: '"checked"' }] };
-async function toolFixture(text: string, permissions: any = { graphId: graph, sparqlRead: bindingInput().sparqlRead }, tools = [tool]) {
+async function toolFixture(text: string, permissions: any = { graphId: graph, sparqlRead: bindingInput().sparqlRead }, tools = [tool], localLlmProvider?: LocalLlmProgramProvider) {
   const f = await fixture();
   f.agent.listContextGraphs = vi.fn(async () => [{ id: graph }, { id: sourceGraph }]);
   const fetchFor = (n: Node, wallet: ethers.Wallet, operator = false): typeof fetch => async (url, init) => {
@@ -185,6 +186,7 @@ async function toolFixture(text: string, permissions: any = { graphId: graph, sp
     executorPeerId: f.agent.peerId, fetch: fetchFor(f.client, new ethers.Wallet(callerKey), true), retries: 0 });
   const program = await manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: tools,
     requestedPermissions: permissions, source: text });
+  f.target.localLlmProvider = localLlmProvider;
   await f.target.boot(true);
   const operation = { graphId: graph, operationIri: 'urn:test:direct-tool' };
   const approve = (overrides: any = {}) => manager.programs.approve({ ...permissions, ...operation, program,
@@ -193,6 +195,121 @@ async function toolFixture(text: string, permissions: any = { graphId: graph, sp
 }
 
 describe('TypeScript direct tools through shared authorization and effects', () => {
+  it('keeps separately constructed semantic runtimes bound to their own provider', async () => {
+    const toolIri = 'urn:dkg:tool:safe-llm';
+    const localLlm = { toolIri, configurationSha256: 'a'.repeat(64) };
+    const source = `import { invoke_tool } from '${toolApi}';
+      export async function run() { const result = await invoke_tool('${toolIri}', { prompt: 'Read' }); return JSON.parse(result.output); }`;
+    const firstRun = vi.fn(async () => ({ answer: 'first' })), secondRun = vi.fn(async () => ({ answer: 'second' }));
+    const capability = { ...localLlm, contextGraphId: graph, ownerAgentAddress: owner };
+    const first = await toolFixture(source, { graphId: graph, localLlm: { toolIri } }, [toolIri], { capability, run: firstRun, isEnabled: () => true });
+    const second = await toolFixture(source, { graphId: graph, localLlm: { toolIri } }, [toolIri], { capability, run: secondRun, isEnabled: () => true });
+    await first.approve({ allowedCallers: [owner], localLlm });
+    await second.approve({ allowedCallers: [owner], localLlm });
+    expect((await first.manager.programs.invoke(first.operation)).outputs).toEqual([{ answer: 'first' }]);
+    expect((await second.manager.programs.invoke(second.operation)).outputs).toEqual([{ answer: 'second' }]);
+    expect(firstRun).toHaveBeenCalledOnce();
+    expect(secondRun).toHaveBeenCalledOnce();
+  });
+
+  it('keeps approved LLM/read/LLM calls usable without assetCreation and enforces maxCalls', async () => {
+    const toolIri = 'urn:dkg:tool:safe-llm';
+    const localLlm = { toolIri, configurationSha256: 'a'.repeat(64) };
+    const run = vi.fn(async () => ({ answer: 'model answer' }));
+    const provider = { capability: { ...localLlm, contextGraphId: graph, ownerAgentAddress: owner }, run, isEnabled: () => true };
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export async function run() {
+        const first = await invoke_tool('${toolIri}', { prompt: 'Inspect order' });
+        const rows = await invoke_tool('${tool}', { sparql: ${JSON.stringify(readQuery)} });
+        const second = await invoke_tool('${toolIri}', { prompt: 'Explain stored facts' });
+        return { first: JSON.parse(first.output), count: rows.result.bindings.length, second: JSON.parse(second.output) };
+      }`, { graphId: graph, localLlm: { toolIri }, sparqlRead: bindingInput().sparqlRead }, [toolIri, tool], provider);
+    const approval = await f.approve({ allowedCallers: [owner], localLlm, typescript: { children: [], maxCalls: 3 } });
+    const input = f.manager.programs.prepareInvocation(f.operation);
+    const result = await f.manager.programs.invoke(input);
+    expect(result.outputs).toEqual([{ first: { answer: 'model answer' }, count: 1, second: { answer: 'model answer' } }]);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(f.target.runtime!.store.effectsForExecution(result.executionIri).map(effect => effect.state)).toEqual(['succeeded', 'succeeded']);
+    expect(await f.manager.programs.invoke(input)).toEqual(result);
+    expect(run).toHaveBeenCalledTimes(2);
+    await f.manager.programs.updateApproval({ ...f.permissions, ...f.operation, program: f.program,
+      allowedCallers: [owner], localLlm, typescript: { children: [], maxCalls: 2 }, expectedRevision: approval.revision });
+    await expect(f.manager.programs.invoke(f.operation)).rejects.toMatchObject({
+      code: 'TYPESCRIPT_EXECUTION_FAILED', message: expect.stringContaining('TYPESCRIPT_CALL_BUDGET_EXCEEDED'),
+    });
+    expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it('records a post-inference configuration change as unknown and never automatically repeats it', async () => {
+    const toolIri = 'urn:dkg:tool:safe-llm';
+    const localLlm = { toolIri, configurationSha256: 'a'.repeat(64) };
+    let enabled = true;
+    const run = vi.fn(async () => { enabled = false; return { answer: 'withheld' }; });
+    const provider = { capability: { ...localLlm, contextGraphId: graph, ownerAgentAddress: owner }, run, isEnabled: () => enabled };
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export async function run() { try { await invoke_tool('${toolIri}', { prompt: 'Inspect order' }); } catch {} return 'pretend success'; }`,
+      { graphId: graph, localLlm: { toolIri } }, [toolIri], provider);
+    await f.approve({ allowedCallers: [owner], localLlm });
+    const input = f.manager.programs.prepareInvocation(f.operation);
+    await expect(f.manager.programs.invoke(input)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+    expect(f.target.runtime!.store.effectsForExecution(`urn:sr:execution:${input.invocationId}`)[0].state).toBe('unknown');
+    expect(run).toHaveBeenCalledOnce();
+    enabled = true;
+    await expect(f.manager.programs.invoke(input)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('rejects foreign-only and mixed local LLM caller lists without saving a binding or inferring', async () => {
+    const toolIri = 'urn:dkg:tool:safe-llm';
+    const localLlm = { toolIri, configurationSha256: 'a'.repeat(64) };
+    const run = vi.fn(async () => ({ answer: 'private' }));
+    const provider = { capability: { ...localLlm, contextGraphId: graph, ownerAgentAddress: owner }, run, isEnabled: () => true };
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export function run() { return invoke_tool('${toolIri}', { prompt: 'Read' }); }`,
+      { graphId: graph, localLlm: { toolIri } }, [toolIri], provider);
+    for (const allowedCallers of [[caller], [owner, caller]]) {
+      await expect(f.approve({ allowedCallers, localLlm })).rejects.toMatchObject({ status: 400 });
+      expect(f.target.config.semanticRuntime.programBindings ?? []).toEqual([]);
+      expect(f.target.runtime!.store.programConfigurationRecords()).toEqual([]);
+      expect(run).not.toHaveBeenCalled();
+    }
+    await f.approve({ allowedCallers: [owner], localLlm });
+    await f.manager.programs.invoke(f.operation);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('calls the native LLM from WASM, persists evidence, replays once and rejects revoked access', async () => {
+    const toolIri = 'urn:dkg:tool:safe-llm';
+    const localLlm = { toolIri, configurationSha256: 'a'.repeat(64) };
+    const question = 'What is the stored quantity for order 62994?';
+    const answer = { question, answer: 'Stored quantity: 280.', contextGraphId: graph,
+      evidence: [{ snapshot: 'urn:snapshot:62994', source: 'AFFAIRE', lastSuccessfulFetchAt: '2026-10-06T10:42:10.278Z' }] };
+    const run = vi.fn(async () => answer);
+    const provider = {
+      capability: { ...localLlm, contextGraphId: graph, ownerAgentAddress: owner }, run, isEnabled: () => true,
+    };
+    {
+      const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+        export async function run(question) {
+          const response = await invoke_tool('${toolIri}', { prompt: question });
+          return JSON.parse(response.output);
+        }`, { graphId: graph, localLlm: { toolIri } }, [toolIri], provider);
+      const approval = await f.approve({ allowedCallers: [owner], localLlm });
+      const input = f.manager.programs.prepareInvocation({ ...f.operation, inputs: [question] });
+      const result = await f.manager.programs.invoke(input);
+      expect(result).toMatchObject({ persisted: true, executionLayer: 'wm', outputs: [answer] });
+      expect(result.trace?.calls).toMatchObject([{ kind: 'tool', target: toolIri, status: 'succeeded' }]);
+      expect(run).toHaveBeenCalledWith(question);
+      const creates = f.agent.assertion.create.mock.calls.length;
+      expect(await f.manager.programs.invoke(input)).toEqual(result);
+      expect(f.agent.assertion.create.mock.calls).toHaveLength(creates);
+      expect(run).toHaveBeenCalledTimes(1);
+      await f.manager.programs.revoke({ ...f.operation, expectedRevision: approval.revision });
+      await expect(f.manager.programs.invoke(input)).rejects.toMatchObject({ status: 403 });
+      expect(run).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('returns durable tool traces only to the executor and rechecks authority on replay', async () => {
     const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
       export async function run() { const rows = await invoke_tool('${tool}', { sparql: ${JSON.stringify(readQuery)} }); return { count: rows.result.bindings.length }; }`);
@@ -419,6 +536,7 @@ describe('durable Program management API', () => {
     expect(catalog.status).toBe(200);
     expect(catalog.body.tools.map((tool: any) => [tool.kind, tool.definition.operation])).toEqual([
       ['sparqlRead', 'dkg/sparql-read'], ['query', 'dkg/query'], ['assetCreation', 'dkg/asset-create'],
+      ['localLlm', 'llm/safe'],
     ]);
     expect(await request(f.target, 'operator', 'GET', inspect)).toEqual(before);
     for (const identity of ['anonymous', 'disabled-anonymous'] as const)

@@ -13,7 +13,7 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
   const seen = new Set<string>();
   for (const binding of value) {
     if (!record(binding)
-      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'typescript', 'executionLayer', 'authorizationRevision'])
+      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'localLlm', 'typescript', 'executionLayer', 'authorizationRevision'])
       || typeof binding.enabled !== 'boolean'
       || !address(binding.executorAgentAddress)
       || !Array.isArray(binding.allowedCallerAgentAddresses)
@@ -42,6 +42,16 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
         || typeof binding.assetCreation.toolIri !== 'string' || binding.assetCreation.toolIri.length > 2_048
         || !/^[a-z][a-z0-9+.-]*:/i.test(binding.assetCreation.toolIri)) throw new Error('INVALID_ASSET_CREATION_GRANT');
       sparqlIri(binding.assetCreation.toolIri);
+    }
+    if (binding.localLlm !== undefined) {
+      if (!record(binding.localLlm) || !keys(binding.localLlm, ['toolIri', 'configurationSha256'])
+        || binding.localLlm.toolIri !== 'urn:dkg:tool:safe-llm'
+        || typeof binding.localLlm.configurationSha256 !== 'string'
+        || !/^[a-f0-9]{64}$/.test(binding.localLlm.configurationSha256)
+        || !binding.typescript
+        || binding.allowedCallerAgentAddresses.some(caller => caller.toLowerCase() !== String(binding.executorAgentAddress).toLowerCase())) {
+        throw new Error('INVALID_LOCAL_LLM_GRANT');
+      }
     }
     if (binding.sparqlRead !== undefined) validateSparqlReadGrant(binding.sparqlRead);
     if (binding.sparqlRead && binding.assetCreation && (binding.sparqlRead as { toolIri: string }).toolIri === binding.assetCreation.toolIri) throw new Error('DUPLICATE_PROGRAM_TOOL');
