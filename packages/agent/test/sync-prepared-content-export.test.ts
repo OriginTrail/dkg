@@ -47,6 +47,29 @@ describe('cold prepared writes retain source fences and response ownership', () 
 });
 
 describe('prepared assertion reuse across responder restarts', () => {
+  it('serves prepared bytes when memory retention declines and keeps the response charged and fenced', async () => {
+    const f = fixture(4), directory = mkdtempSync(join(tmpdir(), 'prepared-no-retain-'));
+    const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;
+    const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      encodedMaxBytes: 1, preparedContentCache: createPreparedContentCache(config) });
+    try {
+      const first = (await restart().acquireEncoded(f))!;
+      await first.assertCurrent(); const expected = first.body.slice(); first.release();
+      const before = f.budget.stats().bytesEstimate;
+      const cache = restart(); f.reads.length = 0;
+      const lease = (await cache.acquireEncoded(f))!;
+      expect(lease.body).toEqual(expected);
+      expect(lease.wholePayloadExports).toBe(0);
+      expect(cache.stats()).toMatchObject({ exports: 0, preparedCacheHits: 1, encodedCacheEntries: 0 });
+      expect(f.budget.stats().bytesEstimate).toBe(before + 96 * 1024 * 1024);
+      await lease.assertCurrent();
+      f.meta.push({ subject: f.assetUal, predicate: 'urn:changed', object: '"value"', graph: '' });
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+      lease.release(); lease.release();
+      expect(f.budget.stats().bytesEstimate).toBe(before);
+      expect(f.reads.every(read => read.options?.source?.endsWith('.metadata'))).toBe(true);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
   it('reuses disk bytes without exporting DATA, but reads fresh metadata and fences every response', async () => {
     const f = fixture(4), directory = mkdtempSync(join(tmpdir(), 'prepared-responder-'));
     const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;

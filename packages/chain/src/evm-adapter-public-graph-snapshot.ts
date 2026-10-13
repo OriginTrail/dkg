@@ -12,7 +12,7 @@ import {
   PUBLIC_GRAPH_SNAPSHOT_MAX_ASSETS,
   PUBLIC_GRAPH_SNAPSHOT_MAX_AGE_MS,
   sealPublicGraphSnapshot,
-  decodePublicGraphSnapshot,
+  normalizePublicGraphSnapshot,
   type PublicGraphSnapshot,
 } from "./public-graph-snapshot.js";
 import { readFirstProviderWithTransientRetry } from "./rpc-provider-fallback.js";
@@ -125,7 +125,7 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
         accessPolicy: 0,
         assets,
       });
-      return decodePublicGraphSnapshot(Buffer.from(JSON.stringify(snapshot)), {
+      return normalizePublicGraphSnapshot(snapshot, {
         chainId: this.chainId,
         deploymentId: this.deploymentId,
         contextGraphId,

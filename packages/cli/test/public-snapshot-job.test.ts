@@ -45,7 +45,7 @@ describe("public snapshot administrator API", () => {
     const input = { ...JSON.parse(body), transport: 'bulk' };
     expect((await fetch(url, { method: 'POST', body: JSON.stringify(input) })).status).toBe(202);
     await vi.waitFor(async () => expect((await (await fetch(url)).json()).request.transport).toBe('bulk'));
-    expect(sync).toHaveBeenCalledWith(input);
+    expect(sync).toHaveBeenCalledWith({...input, mode:'core-cache'});
     expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...input, transport: 'parallel' }) })).status).toBe(400);
   });
   it("denies an agent principal and never starts recovery", async () => {
@@ -62,6 +62,19 @@ describe("public snapshot administrator API", () => {
     await vi.waitFor(async () => expect((await (await fetch(url)).json()).state).toBe('complete'));
     expect((await fetch(url, {method:'POST',body:' '.repeat(4097)})).status).toBe(413);
     expect(sync).toHaveBeenCalledTimes(1);
+  });
+  it('shares distinct-peer normalization and rejects malformed domain values before dispatch', async () => {
+    const sync = vi.fn(async () => ({})), url = await serve(true, sync);
+    const request = JSON.parse(body);
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...request, trustedCorePeerIds: Array(5).fill('core') }) })).status).toBe(202);
+    expect(sync).toHaveBeenCalledWith({ ...request, mode: 'core-cache', transport: 'exact', trustedCorePeerIds: ['core'] });
+    await vi.waitFor(async () => expect((await (await fetch(url)).json()).state).toBe('complete'));
+    sync.mockClear();
+    for (const patch of [{ mode: 'unknown' }, { contextGraphId: '../bad' }, { onChainId: '0' },
+      { trustedCorePeerIds: [] }, { trustedCorePeerIds: ['a', 'b', 'c', 'd', 'e'] }, { trustedCorePeerIds: [1] }]) {
+      expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...request, ...patch }) })).status).toBe(400);
+    }
+    expect(sync).not.toHaveBeenCalled();
   });
   it("starts one owned job, refuses duplicates, and preserves terminal failure", async () => {
     let reject!: (error: Error) => void;

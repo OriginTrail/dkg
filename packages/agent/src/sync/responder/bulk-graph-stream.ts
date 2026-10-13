@@ -6,7 +6,7 @@ import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readB
   validateBulkGraphRequest, type BulkGraphRequest } from '../bulk-graph-contract.js';
 import type { PublicAssetResponderOptions } from './public-asset-responder.js';
 
-const observe = (callback: () => void) => { try { callback(); } catch { /* Diagnostic only. */ } };
+import { observeExactBatch as observe } from '../exact-batch-observation.js';
 const EMPTY = new Uint8Array();
 /** Public-only, shares the existing responder admission and verified prepared-content cache. */
 export function registerPublicBulkGraph(router: ProtocolRouter, options: PublicAssetResponderOptions): void {
@@ -29,17 +29,17 @@ export function registerPublicBulkGraph(router: ProtocolRouter, options: PublicA
 export async function servePublicBulkChunk(request: BulkGraphRequest, session: BulkGraphSession, options: PublicAssetResponderOptions): Promise<void> {
   const context = createOperationContext('sync');
   const hash = bulkChunkHash(request);
-  const outstanding = new Map<number, number>();
-  const lengths: number[] = [];
-  let outstandingBytes = 0, credited = 0, committed = 0, bytes = 0;
+  // Encoded prefix offsets are the single ledger for sent, credited and durable progress.
+  const offsets = [0];
+  let credited = 0, committed = 0;
+  const lengthAt = (index: number) => offsets[index + 1]! - offsets[index]!;
   const readControl = async () => {
     const frame = await session.next();
     if (frame.kind === K.CREDIT) {
-      const length = outstanding.get(credited);
-      if (frame.index !== credited || length === undefined || frame.sequence !== length) throw new Error('Invalid bulk receipt credit');
-      outstanding.delete(credited++); outstandingBytes -= length;
+      if (frame.index !== credited || credited >= offsets.length - 1 || frame.sequence !== lengthAt(credited)) throw new Error('Invalid bulk receipt credit');
+      credited++;
     } else if (frame.kind === K.COMMIT) {
-      if (frame.index !== committed || committed >= credited || frame.sequence !== lengths[committed]) throw new Error('Invalid bulk durable acknowledgement');
+      if (frame.index !== committed || committed >= credited || frame.sequence !== lengthAt(committed)) throw new Error('Invalid bulk durable acknowledgement');
       committed++;
     } else throw new Error('Unexpected bulk receiver control');
   };
@@ -57,8 +57,10 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: B
       return;
     }
     try {
+      const bytes = offsets[index]!;
       if (lease.body.length > BULK_GRAPH_CHUNK_BYTES - bytes) break;
-      while (outstandingBytes + lease.body.length > BULK_STAGING_BYTES || outstanding.size >= BULK_STAGING_ASSETS) await readControl();
+      while (bytes - offsets[credited]! + lease.body.length > BULK_STAGING_BYTES
+        || index - credited >= BULK_STAGING_ASSETS) await readControl();
       // Credit backpressure can outlive the earlier policy read; recheck before
       // disclosing the next body, as the exact transport does after its ACK wait.
       if (options.servingWithheld?.(request.contextGraphId)
@@ -70,7 +72,7 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: B
       const directory = bulkJson({ encodedBytes: lease.body.length, plainBytes: lease.plainBytes, offset: bytes,
         digest: createHash('sha256').update(lease.body).digest('hex'), metadata: Buffer.from(lease.metadata).toString('base64') });
       hash.update(directory).update(lease.body);
-      outstanding.set(index, lease.body.length); outstandingBytes += lease.body.length; lengths.push(lease.body.length);
+      offsets.push(bytes + lease.body.length);
       await session.send({ kind: K.META, index, sequence: 0, payload: directory });
       let sequence = 0;
       for (let offset = 0; offset < lease.body.length; offset += BULK_GRAPH_FRAME_BYTES)
@@ -78,14 +80,14 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: B
       await lease.assertCurrent();
       session.signal.throwIfAborted();
       await session.send({ kind: K.ASSET_END, index, sequence, payload: EMPTY });
-      bytes += lease.body.length;
       if (lease.wholePayloadExports !== undefined) observe(() => options.onExport?.(index, lease.wholePayloadExports!, context));
       observe(() => options.onPayload?.(index, lease.plainBytes, lease.body.length, context));
       observe(() => options.onStage?.('export', index, performance.now() - started, context));
     } finally { lease.release(); }
   }
-  if (!lengths.length) throw new Error('Bulk graph chunk made no progress');
-  await session.send({ kind: K.CHUNK_END, index: lengths.length, sequence: bytes,
-    payload: encodeBulkChunkEnd({ digest: hash.digest('hex'), assets: lengths.length, encodedBytes: bytes }) });
-  while (committed < lengths.length) await readControl();
+  const assets = offsets.length - 1, bytes = offsets[assets]!;
+  if (!assets) throw new Error('Bulk graph chunk made no progress');
+  await session.send({ kind: K.CHUNK_END, index: assets, sequence: bytes,
+    payload: encodeBulkChunkEnd({ digest: hash.digest('hex'), assets, encodedBytes: bytes }) });
+  while (committed < assets) await readControl();
 }

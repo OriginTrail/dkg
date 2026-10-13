@@ -31,6 +31,7 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only') {
     chain:{chainId:'evm:31337',deploymentId:'test',readPublicGraphSnapshot:async()=>snapshot},
     router:{send:async()=>Buffer.from(JSON.stringify(snapshot))},
     subscribeToContextGraph:()=>{generation++;a.subscribedContextGraphs.set(graph,{subscribed:true,onChainId:'1'});},
+    persistContextGraphSubscriptionState: async () => {},
     recordCgWireId:(_:string,hash:string)=>{a.subscribedContextGraphs.set(graph,{...a.subscribedContextGraphs.get(graph),onChainHash:hash});},
   };
   // Stub only the already-verified transport boundary. The actual job owns the
@@ -41,7 +42,7 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only') {
     for(const ual of uals) {
       const verified=assets.get(ual)!;
       if(verified.ual.endsWith('/11')) continue; // Second batch fails on both transports.
-      const authenticated=await options.authenticateGraphScopedAsset(verified);
+      const authenticated=await options.recoveryAuthority.authenticate(verified);
       expect(await materializeVerifiedGraphScopedAsset({store,asset:authenticated.asset})).toBe('applied');
       committed.push(ual);
     }

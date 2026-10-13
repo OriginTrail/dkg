@@ -14,12 +14,8 @@ export async function recoverPublicSnapshotExact(agent: DKGAgent, options: Publi
       const result = await agent.syncExactKnowledgeAssetsFromPeerDetailed(peer, contextGraphId, remaining, {
         signal, isCurrent, forceFreshExactSession: true,
         exactRecoveryTransportMode: transport,
-        authenticateGraphScopedAsset: asset => evidence.authenticate(asset),
+        recoveryAuthority: evidence,
         totalTimeoutMs: 120_000,
-        registeredPublicEvidence: {
-          usableFor: (id, s) => id === contextGraphId && isCurrent() && !s?.aborted,
-          revoke: () => {},
-        },
       });
       for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
     }
