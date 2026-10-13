@@ -1,0 +1,300 @@
+name: Node image
+
+# Publishes the container image of the DKG node (Dockerfile) for a release to
+# ghcr.io/origintrail/dkg-node: one image for linux/amd64 and linux/arm64, each
+# platform built on a native runner, with provenance and an SBOM attached and a
+# build provenance attestation signed for the published digest.
+#
+# Triggers:
+#   * a pushed v* tag builds that release;
+#   * workflow_dispatch builds an existing release tag with the image definition
+#     (Dockerfile, .dockerignore, scripts/docker-entrypoint.sh) of the branch
+#     the run starts from, for a release tagged before that definition existed
+#     or one whose image build failed.
+#
+# A release passes the npm publish preflight first (RELEASE_PROCESS.md): an
+# annotated, signed tag on origin, reachable from main, with every package at
+# the tag's version. Tags follow docker/metadata-action's semver rules: the
+# version (10.0.24), its minor line (10.0) and latest; a prerelease gets its
+# version only. A rebuild of an older release leaves 10.0 and latest alone.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, for example v10.0.23
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: node-image-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/origintrail/dkg-node
+
+jobs:
+  release:
+    name: Resolve the release
+    if: github.repository == 'OriginTrail/dkg'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+      version: ${{ steps.verify.outputs.version }}
+      commit: ${{ steps.verify.outputs.commit }}
+      newest: ${{ steps.verify.outputs.newest }}
+      newest-in-minor: ${{ steps.verify.outputs.newest-in-minor }}
+    steps:
+      - name: Validate the tag name
+        id: tag
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$TAG' is not a release tag (vX.Y.Z or vX.Y.Z-<prerelease>)."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the release and the repository history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release
+        id: verify
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          node scripts/release-packages.mjs verify-tag --tag "$TAG" --version "$version"
+          node scripts/release-packages.mjs verify-versions --version "$version"
+
+          # 10.0 and latest move only forward: to this release when it is the
+          # newest stable release of its minor line, or of all releases.
+          newest=false
+          newest_in_minor=false
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            stable="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)"
+            minor="${TAG%.*}"
+            if [[ "$(tail -n 1 <<< "$stable")" == "$TAG" ]]; then
+              newest=true
+            fi
+            if [[ "$(grep -E "^${minor//./\\.}\.[0-9]+$" <<< "$stable" | tail -n 1)" == "$TAG" ]]; then
+              newest_in_minor=true
+            fi
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "commit=$(git rev-parse "refs/tags/$TAG^{commit}")"
+            echo "newest=$newest"
+            echo "newest-in-minor=$newest_in_minor"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: release
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write # push the platform image to ghcr.io by digest
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.release.outputs.commit }}
+          path: release
+          persist-credentials: false
+
+      - name: Check out the image definition of this run
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: image-definition
+          sparse-checkout: |
+            Dockerfile
+            .dockerignore
+            scripts/docker-entrypoint.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Use the image definition of this run
+        # The same files for a pushed tag; for a dispatched rebuild, the
+        # definition of the branch the run starts from.
+        run: |
+          set -euo pipefail
+          for file in Dockerfile .dockerignore scripts/docker-entrypoint.sh; do
+            cp "image-definition/$file" "release/$file"
+          done
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: release
+          file: release/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            DKG_VERSION=${{ needs.release.outputs.version }}
+            DKG_COMMIT=${{ needs.release.outputs.commit }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ needs.release.outputs.tag }}
+    needs: [release, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # push the tagged image index and its attestation
+      id-token: write # sign the attestation with the workflow's OIDC identity
+      attestations: write # record the attestation for the repository
+    steps:
+      - name: Download the digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the image tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=${{ needs.release.outputs.newest == 'true' && 'auto' || 'false' }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.release.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.tag }},enable=${{ needs.release.outputs.newest-in-minor }}
+
+      - name: Push the multi-platform image
+        id: publish
+        working-directory: digests
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          VERSION: ${{ needs.release.outputs.version }}
+          COMMIT: ${{ needs.release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            if [[ -n "$tag" ]]; then
+              args+=(--tag "$tag")
+            fi
+          done <<< "$TAGS"
+          args+=(
+            --annotation "index:org.opencontainers.image.title=DKG node"
+            --annotation "index:org.opencontainers.image.description=OriginTrail Decentralized Knowledge Graph (DKG) V10 node"
+            --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            --annotation "index:org.opencontainers.image.licenses=Apache-2.0"
+            --annotation "index:org.opencontainers.image.version=${VERSION}"
+            --annotation "index:org.opencontainers.image.revision=${COMMIT}"
+          )
+          for digest in *; do
+            args+=("${IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${args[@]}"
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' | jq -r .digest)"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not read the digest of ${IMAGE}:${VERSION} (got '${digest}')."
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+          # A storage record needs the artifact-metadata permission as well.
+          create-storage-record: false
+
+      - name: Write the job summary
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          COMMIT: ${{ needs.release.outputs.commit }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          tags=""
+          while IFS= read -r ref; do
+            if [[ -n "$ref" ]]; then
+              tags+=" \`${ref##*:}\`"
+            fi
+          done <<< "$TAGS"
+          {
+            echo "### ${IMAGE} for ${TAG}"
+            echo
+            echo "- Digest: \`${DIGEST}\`"
+            echo "- Commit: \`${COMMIT}\`"
+            echo "- Tags:${tags}"
+            echo
+            echo '```sh'
+            echo "docker pull ${IMAGE}@${DIGEST}"
+            echo "gh attestation verify oci://${IMAGE}@${DIGEST} --repo ${GITHUB_REPOSITORY}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
