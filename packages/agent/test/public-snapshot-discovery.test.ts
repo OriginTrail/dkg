@@ -16,14 +16,14 @@ async function fixture() {
   // Historical enumeration, rather than the live event tail, owns this record.
   for (let i = 0; i < 600; i++) chain.advanceBlock();
   Object.assign(chain, { getBlockNumber: async () => 600 });
-  const snapshot = () => sealPublicGraphSnapshot({
+  const snapshot = () => { const now = Date.now(); return sealPublicGraphSnapshot({
     version: 1, chainId: chain.chainId, deploymentId: chain.deploymentId,
     contextGraphId: graph, onChainId: '1', nameHash: ethers.id(graph),
     contextGraphStorage: `0x${'1'.repeat(40)}`, assetStorage: `0x${'2'.repeat(40)}`,
     blockNumber: '600', blockHash: `0x${'a'.repeat(64)}`, finalityConfirmations: 1,
-    observedAt: Date.now(), expiresAt: Date.now() + 120000, accessPolicy: 0,
+    observedAt: now, expiresAt: now + 120000, accessPolicy: 0,
     assets: [{ id: '1', root: `0x${'b'.repeat(64)}`, version: '1' }],
-  });
+  }); };
   Object.assign(chain, { readPublicGraphSnapshot: async () => snapshot() });
   const agent = await DKGAgent.create({ name: 'SnapshotDiscovery', nodeRole: 'edge',
     listenHost: '127.0.0.1', listenPort: 0, chainAdapter: chain,
