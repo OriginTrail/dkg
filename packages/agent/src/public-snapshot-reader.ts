@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { decodePublicGraphSnapshot, PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES } from '@origintrail-official/dkg-chain';
+import { decodePublicGraphSnapshot, normalizePublicGraphSnapshot, PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES } from '@origintrail-official/dkg-chain';
 import type { DKGAgent } from './dkg-agent.js';
 import type { PublicSnapshotMode, PublicSnapshotObservation } from './public-snapshot-evidence.js';
 
@@ -16,7 +16,7 @@ export function createPublicSnapshotReader(options: {
     assertCurrent();
     if (!chain.readPublicGraphSnapshot) throw new Error('Independent snapshots are unsupported by this chain adapter');
     const raw=await chain.readPublicGraphSnapshot(expected.contextGraphId,expected.onChainId,{signal});
-    const snapshot=decodePublicGraphSnapshot(encoder.encode(JSON.stringify(raw)),expected);
+    const snapshot=normalizePublicGraphSnapshot(raw,expected);
     assertCurrent();
     return {mode:'rpc-only',snapshot,sourceCore:null};
   };

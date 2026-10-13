@@ -335,15 +335,22 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     );
     // Internally valid peer content B must not replace local content when
     // the accepted chain snapshot still authenticates root A.
-    for (const transport of ["stream-required", "legacy"] as const) {
-      const n = transport === "legacy" ? 12 : 1;
+    for (const scenario of ["stream-required", "legacy", "legacy-envelope"] as const) {
+      const transport = scenario === "legacy-envelope" ? "legacy" : scenario;
+      const n = scenario === "legacy-envelope" ? 2 : transport === "legacy" ? 12 : 1;
       const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
       const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
       const metaGraph = `did:dkg:context-graph:${graph}/_meta`;
       const privateRoot = n === 12 ? new Uint8Array(32).fill(7) : undefined;
       const changed: Quad[] = [{subject:`urn:entity:${n}`,predicate:"http://schema.org/name",object:'"Unanchored replacement"',graph:assertionGraph}];
       const root = computeFlatKCRootV10(changed, privateRoot ? [privateRoot] : []);
-      const metadata = generateGraphKnowledgeAssetMetadata({contextGraphId:graph,ual,assertionGraph,merkleRoot:root,publisherPeerId:"fixture",accessPolicy:"public",allowedPeers:[],timestamp:new Date(),assertionVersion:1,authorAddress:signer.address,publicTripleCount:1,privateTripleCount:privateRoot?1:0,privateMerkleRoot:privateRoot}, {status:"confirmed",confirmation:{kind:"finalized-materialization",provenance:{batchId:BigInt(n),materializedVersion:{blockNumber:0,txIndex:0}}}});
+      let metadata = generateGraphKnowledgeAssetMetadata({contextGraphId:graph,ual,assertionGraph,merkleRoot:root,publisherPeerId:"fixture",accessPolicy:"public",allowedPeers:[],timestamp:new Date(),assertionVersion:1,authorAddress:signer.address,publicTripleCount:1,privateTripleCount:privateRoot?1:0,privateMerkleRoot:privateRoot}, {status:"confirmed",confirmation:{kind:"finalized-materialization",provenance:{batchId:BigInt(n),materializedVersion:{blockNumber:0,txIndex:0}}}});
+      if (scenario === "legacy-envelope") {
+        metadata = [
+          ["kaUal", ual], ["assertionGraph", assertionGraph],
+          ["rootEntity", changed[0]!.subject], ["merkleRoot", JSON.stringify(ethers.hexlify(root).slice(2))],
+        ].map(([key, value]) => ({subject:ual,predicate:`http://dkg.io/ontology/${key}`,object:value!,graph:metaGraph}));
+      }
       await source.replaceGraphAndSubject(assertionGraph, changed, metaGraph, ual, metadata);
       // A fresh supplier avoids the encoded cache from the matching-content test.
       const supplier = await make(`MismatchSource-${transport}`, "core", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.DEPLOYER)),source);
@@ -358,16 +365,30 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       await sink.connectTo(supplier.multiaddrs.find(a=>a.includes("/tcp/")&&!a.includes("/p2p-circuit"))!);
       const beforeRows = await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o");
       const writes = vi.spyOn(mismatchStore,"replaceGraphAndSubject");
-      const evidence = new PublicSnapshotEvidence({snapshot: independent, mode:"core-cache", sourceCore:supplier.peerId},()=>true);
+      const evidence = new PublicSnapshotEvidence({snapshot: independent, mode:"rpc-only", sourceCore:null},()=>true);
       const authenticate = vi.spyOn(evidence, 'authenticate');
+      if (scenario === "legacy-envelope") {
+        // Model the malicious legacy peer's accepted raw pages. Keep the real
+        // worker, RPC snapshot, lifecycle and physical store; an honest upgraded
+        // responder filters this malformed descriptor before sending it.
+        vi.spyOn(sink as any, "fetchSyncPages").mockImplementation(async (...args: any[]) => {
+          const phase = args[4], quads = phase === "meta" ? metadata : changed;
+          return {quads,bytesReceived:0,resumedFromOffset:0,nextOffset:quads.length,
+            checkpointKey:`malicious:${phase}`,completed:true,timedOut:false};
+        });
+      }
       const rejected = await sink.syncExactKnowledgeAssetsFromPeerDetailed(supplier.peerId,graph,[ual],{
         forceFreshExactSession:true,exactRecoveryTransportMode:transport,totalTimeoutMs:15000,
         recoveryAuthority:evidence,
       });
-      expect(authenticate).toHaveBeenCalled();
+      expect(await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o")).toEqual(beforeRows);
+      if (scenario === "legacy-envelope") {
+        expect(rejected.result.complete).toBe(false);
+        expect(rejected.result.failedPhases).toBeGreaterThan(0);
+        expect(authenticate).not.toHaveBeenCalled();
+      } else expect(authenticate).toHaveBeenCalled();
       expect(rejected.committedExactAssetUals ?? []).toEqual([]);
       expect(writes).not.toHaveBeenCalled();
-      expect(await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o")).toEqual(beforeRows);
     }
     const privateCreated = await adapter.createOnChainContextGraph({
       participantAgents: [],

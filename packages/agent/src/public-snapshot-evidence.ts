@@ -73,6 +73,7 @@ export async function assertPublicSnapshotQueryTrust(
 /** Owned by one explicit public job, never installed as a shared/global chain adapter. */
 export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
   readonly lifetime = 'snapshot-job' as const;
+  readonly coalescing = 'owner-only' as const;
   readonly assets: Map<string, PublicGraphSnapshot["assets"][number]>;
   constructor(
     readonly observation: PublicSnapshotObservation,
