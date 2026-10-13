@@ -462,6 +462,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
 import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
+import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
@@ -1101,14 +1102,14 @@ export class DKGAgent extends DKGAgentBase {
             headRevision: headDigest,
           };
         },
-        listFinalizedPrivateRepairs: () => (
-          this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
-        ),
-        repairFinalizedPrivatePlacement: async (repair) => {
-          await this.repairRfc64FinalizedPrivateCatalogPlacementV1(repair);
+        listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
+        repairFinalizedPrivatePlacement: async (repair, placement) => {
+          await this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
         },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
+        readAppliedCatalogHead: (scope, author) => this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(scope, author),
         warn: (ctx, message) => this.log.warn(ctx, message),
+        placementTiming: () => catalogPlacementTimingV1(this),
       }),
     );
     const authorityRefreshOwner = createRfc64CatalogAuthorityRefreshOwnerV1({
@@ -2074,7 +2075,7 @@ export class DKGAgent extends DKGAgentBase {
         ...(options.signal ? { signal: options.signal } : {}),
       });
     } catch (err) {
-      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+      this.ontologyRelocation = 'withheld';
       throw err;
     }
     if (result.movedToMeta.length > 0 || result.deletedForeign > 0) {
@@ -2088,12 +2089,12 @@ export class DKGAgent extends DKGAgentBase {
           `${result.movedToMeta.length} moved to their own _meta, ${result.deletedForeign} removed`,
       );
     }
-    if (result.deferred > 0) {
+    if (result.deferred > 0 || result.unclassified > 0) {
       this.log.info(
         createOperationContext('system'),
-        `Context graph metadata relocation stopped early: ${result.deferred} candidate(s) left for a later pass`,
+        `Context graph metadata relocation is incomplete: ${result.deferred} deferred, ${result.unclassified} unclassified candidate(s)`,
       );
-      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+      this.ontologyRelocation = 'withheld';
     } else if (this.ontologyRelocation !== 'relocated') {
       if (this.ontologyRelocation === 'withheld') {
         this.log.info(
@@ -2109,11 +2110,11 @@ export class DKGAgent extends DKGAgentBase {
   /**
    * Whether peers asking for `contextGraphId` are to be told to retry later
    * rather than be served it: `ontology`, until a metadata relocation pass
-   * has reached every candidate. Until then it may still hold private
+   * has classified or relocated every candidate. Until then it may still hold private
    * metadata that earlier builds wrote there, and it is a public graph, so
    * sync, changelog sync and remote queries would hand those rows to anyone.
-   * Nothing in this build writes private metadata to ontology, so once a pass
-   * finishes, the graph stays servable for the life of the agent.
+   * Unknown bindings remain local until proven public or removed; later
+   * bounded passes can reopen serving, with no time-based privacy exception.
    */
   contextGraphServingWithheld(contextGraphId: string): boolean {
     return contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY && this.ontologyRelocation !== 'relocated';
@@ -2871,7 +2872,7 @@ export class DKGAgent extends DKGAgentBase {
         for (const settled of snapshot) this.graphScopedStorePhysicalRuns?.delete(settled);
       }
     };
-    const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
+    const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain, this.closeOwedLegacySwmRetirementsV1()];
     drains.push(authorityIndexSnapshotDrain);
     if (onDemandPhonebookDrain) drains.push(onDemandPhonebookDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
@@ -4105,6 +4106,7 @@ export class DKGAgent extends DKGAgentBase {
               createOperationContext('share'),
               gossipSigner,
               shareOperationId,
+              { subGraphName: opts?.subGraphName ?? null },
             );
           } catch (err: any) {
             agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
@@ -4350,9 +4352,10 @@ export class DKGAgent extends DKGAgentBase {
 
         // Layer transition by event class (the writers no longer persist it):
         //   created  ⇒ none→WM   · promoted  ⇒ WM→SWM
-        //   updated  ⇒ VM→VM     · discarded ⇒ WM→none
+        //   written ⇒ WM→WM     · updated ⇒ VM→VM     · discarded ⇒ WM→none
         const LAYER_BY_TYPE: Record<string, { from: string; to: string }> = {
           created: { from: 'none', to: MemoryLayer.WorkingMemory },
+          written: { from: MemoryLayer.WorkingMemory, to: MemoryLayer.WorkingMemory },
           promoted: { from: MemoryLayer.WorkingMemory, to: MemoryLayer.SharedWorkingMemory },
           published: { from: MemoryLayer.SharedWorkingMemory, to: MemoryLayer.VerifiableMemory },
           updated: { from: MemoryLayer.VerifiableMemory, to: MemoryLayer.VerifiableMemory },
@@ -4369,7 +4372,7 @@ export class DKGAgent extends DKGAgentBase {
               const typeSuffix = (b['type'] ?? '').replace(DKG_NS, '').replace('Assertion', '').toLowerCase();
               const derived = LAYER_BY_TYPE[typeSuffix];
               eventMap.set(eventUri, {
-                type: (typeSuffix || stateStr) as AssertionState,
+                type: (typeSuffix || stateStr) as AssertionEvent['type'],
                 timestamp: strip(b['timestamp']) ?? '',
                 fromLayer: strip(b['fromLayer']) ?? derived?.from ?? '',
                 toLayer: strip(b['toLayer']) ?? derived?.to ?? '',

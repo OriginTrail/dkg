@@ -106,6 +106,7 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
     let inFlight = 0;
     return {
       promoteQueue: queue,
+      resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: tokenAgentAddress ? 'caller' : 'node', source: 'legacy-local', reason: 'fixture-node', metadataBootstrap: 'eligible' }),
       async listContextGraphs() {
         return ['team-graph', 'graphify', 'cg'].map((id) => ({
           id,
@@ -221,7 +222,7 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
           requestAgentAddress: 'did:dkg:agent:test',
           authentication: tokenAgentAddress
             ? requestAuthentication({ kind: 'agent', agentAddress: tokenAgentAddress, token: requestToken })
-            : requestAuthentication({ kind: 'anonymous' }),
+            : requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

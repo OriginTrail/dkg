@@ -1,13 +1,19 @@
 import { syncBuiltinESMExports } from 'node:module';
 import timersPromises, { setTimeout as nativeDelay } from 'node:timers/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { activeRpcRequestContext, RpcRequestGovernor } from '@origintrail-official/dkg-chain';
+import {
+  activeRpcRequestContext,
+  EVMChainAdapter,
+  RpcRequestGovernor,
+} from '@origintrail-official/dkg-chain';
 import { PublisherStartupAdmission } from '../src/publisher-startup-admission.js';
 
 describe('transaction-free publisher startup admission', () => {
   const budgets: PublisherStartupAdmission[] = [];
+  const adapters: EVMChainAdapter[] = [];
   afterEach(() => {
     for (const budget of budgets.splice(0)) budget.dispose();
+    for (const adapter of adapters.splice(0)) adapter.destroy();
     vi.restoreAllMocks();
     vi.useRealTimers();
     syncBuiltinESMExports();
@@ -16,6 +22,35 @@ describe('transaction-free publisher startup admission', () => {
     const result = new PublisherStartupAdmission(parent);
     budgets.push(result);
     return result;
+  }
+
+  /**
+   * A wallet's chain adapter before its first use, with the Hub boundary
+   * scripted: every binding the adapter resolves is one `hubRead`. The
+   * initialization the wallet read waits for is production code.
+   */
+  function uninitializedAdapter(hubRead: () => Promise<void>) {
+    const address = '0x0000000000000000000000000000000000000001';
+    const adapter: any = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      hubAddress: address,
+      chainId: 'evm:31337',
+      allowNoAdminSigner: true,
+    });
+    adapters.push(adapter);
+    const binding = async () => {
+      await hubRead();
+      return { target: address, getAddress: async () => address };
+    };
+    vi.spyOn(adapter, 'resolveContract').mockImplementation(binding);
+    vi.spyOn(adapter, 'resolveAssetStorage').mockImplementation(binding);
+    vi.spyOn(adapter, 'resolveAndAssignRandomSamplingPair').mockImplementation(binding);
+    vi.spyOn(adapter, 'readContract').mockResolvedValue(7n);
+    vi.spyOn(adapter, 'startChainIndexRuntime').mockImplementation(() => {});
+    vi.spyOn(adapter, 'startHubRotationListener').mockResolvedValue(undefined);
+    adapter.tokenAddress = address;
+    return adapter as EVMChainAdapter;
   }
 
   function usePromiseFakeClock() {
@@ -86,6 +121,55 @@ describe('transaction-free publisher startup admission', () => {
     await resolved;
     expect(governor.snapshot().foregroundAdmitted).toBe(9);
     expect(governor.snapshot().maxRequestsPerSecond).toBe(0.1);
+  });
+
+  it('permits a wallet read that waits for a low-rate adapter initialization progressing beyond a minute', async () => {
+    vi.useFakeTimers();
+    const governor = new RpcRequestGovernor({ maxRequestsPerSecond: 0.1, burstRequests: 1 });
+    const adapter = uninitializedAdapter(async () => {
+      // One governed request for each binding, reported as the transport
+      // reports a request that has succeeded.
+      await governor.acquireActiveRequest();
+      activeRpcRequestContext().onProgress?.();
+    });
+    const pending = budget().readIdentity(() => adapter.getIdentityId());
+    const resolved = expect(pending).resolves.toBe(7n);
+    await vi.advanceTimersByTimeAsync(300_000);
+    await resolved;
+    // More requests than one inactivity bound admits at this rate.
+    expect(governor.snapshot().foregroundAdmitted).toBeGreaterThan(7);
+  });
+
+  it('bounds inactivity while the adapter initialization it waits for stalls, and ends that initialization', async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    let ended: unknown;
+    const adapter = uninitializedAdapter(() => new Promise<void>((resolve, reject) => {
+      const { signal, onProgress } = activeRpcRequestContext();
+      // Three bindings answer 20 seconds apart. The fourth never does.
+      if (++reads <= 3) {
+        setTimeout(() => { onProgress?.(); resolve(); }, 20_000);
+        return;
+      }
+      signal!.addEventListener('abort', () => {
+        ended = signal!.reason;
+        reject(signal!.reason);
+      }, { once: true });
+    }));
+    const startup = budget();
+    const pending = startup.readIdentity(() => adapter.getIdentityId());
+    const rejected = expect(pending).rejects.toThrow('60000ms');
+    // The last answer came at 60 seconds: the bound runs from there.
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(startup.assertActive()).toBeUndefined();
+    expect(ended).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(4);
+    // Nobody waits for the initialization any more: it was ended too.
+    expect(ended).toBeInstanceOf(Error);
+    expect((ended as Error).message).toContain('no active waiters');
   });
 
   it('bounds inactivity after earlier progress and cancels the queued read', async () => {
