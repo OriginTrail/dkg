@@ -28,6 +28,9 @@ export interface QueryOptions {
    * in the same context graph (root data, registered assertion graphs, SWM,
    * VM, and registered sub-graph content). Legacy scoped routes stay limited
    * to their selected graph set unless this is true.
+   * With `view: 'working-memory'`, a query without GRAPH clauses merges only
+   * the resolved agent's WM partitions into its default dataset, allowing
+   * joins across KAs. This does not include SWM, VM, metadata or other agents.
    */
   includeContextGraphPartitions?: boolean;
   /**
