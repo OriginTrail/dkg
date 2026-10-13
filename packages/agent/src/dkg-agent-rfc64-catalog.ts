@@ -1883,7 +1883,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       : null;
   }
 
-  /** Read the curator-authored local roster generation from authenticated metadata. */
+  /** Read the newest curator-authored roster generation held in authenticated metadata. */
   async readRfc64PrivateRosterVersionV1(
     this: DKGAgent,
     contextGraphId: string,
@@ -1914,10 +1914,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       versions.add(lexical);
     }
-    if (versions.size !== 1) {
-      throw new Error('RFC-64 private roster metadata has conflicting generations');
-    }
-    return [...versions][0]!;
+    // The curator replaces its generation; a member's sync stores the newer one
+    // beside the one it held. Generations only advance, so the newest is current.
+    const newest = [...versions].map((version) => BigInt(version));
+    return newest.reduce((left, right) => (right > left ? right : left)).toString(10);
   }
 
   /**

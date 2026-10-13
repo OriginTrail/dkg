@@ -67,6 +67,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-public-catalog-native-gate1.integration.test.ts",
   // #3198: a store that returns a typed literal in its own lexical form still holds the projection.
   "test/rfc64-projection-store-read-back-v1.test.ts",
+  // A member holds two roster generations after a sync that followed a roster change: the newest is read.
+  "test/rfc64-private-roster-version.test.ts",
   "test/rfc64-public-catalog-inventory-completeness-v1.test.ts",
   "test/rfc64-persistent-catalog-provider-v1.test.ts",
   "test/rfc64-public-catalog-successor-bundle-durability-v1.test.ts",
