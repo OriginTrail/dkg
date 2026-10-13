@@ -11,6 +11,8 @@ Knowledge commerce is the roadmap path where agents can pay for access to useful
 
 The DKG role is not only payment. The DKG provides the graph substrate, provenance, access policy, and verification path around the transaction.
 
+For the broader public direction, see the [NeuroSymbolic Marketplace RFC](https://github.com/OriginTrail/OT-RFC-repository/tree/main/RFCs/OT-RFC-27_NeuroSymbolic_Marketplace) and [feature availability](../references/availability.md). The RFC covers knowledge and inference services; x402 is a separate payment integration direction, not a synonym for the marketplace.
+
 ## Intended Flow
 
 ```mermaid
@@ -30,7 +32,7 @@ sequenceDiagram
 
 ## Current status
 
-The current codebase reserves payment-proof and x402-related hooks, and internal specs describe paid access grants and context-oracle consumption paths. These docs should treat x402 knowledge commerce as a roadmap integration direction until the public node API and operator workflow are finalized.
+The current codebase reserves payment-proof and x402-related hooks, and the public roadmap describes knowledge-service and context-oracle directions. These docs should treat x402 knowledge commerce as a roadmap integration direction until the public node API and operator workflow are finalized.
 
 Current DKG V10 users should rely on:
 

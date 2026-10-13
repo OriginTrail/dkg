@@ -20,8 +20,18 @@ export DKG_NODE_URL='http://127.0.0.1:9200'
 export DKG_CONTEXT_GRAPH='<exact existing Context Graph ID>'
 export DKG_KA_NAME='atlas-app'
 # Local operator demonstration only:
-export DKG_AUTH_TOKEN="$(dkg auth show)"
+export DKG_AUTH_TOKEN="$(dkg auth show | head -n 1)"
 ```
+
+This selects the first local configured token. Confirm the caller before writing:
+
+```bash
+curl --fail --silent --show-error \
+  -H "Authorization: Bearer $DKG_AUTH_TOKEN" \
+  "$DKG_NODE_URL/api/agent/identity"
+```
+
+Check that the returned `agentAddress` is the intended author. A remote application's own agent token can resolve to a different identity from the node operator.
 
 For remote access, use an operator-configured HTTPS endpoint. Opening a public port is not an authentication strategy. Agent credentials and the application's own end-user authorization are separate: decide which graphs and records each user may access before forwarding requests.
 

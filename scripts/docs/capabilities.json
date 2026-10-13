@@ -1,0 +1,142 @@
+[
+  {
+    "name": "First node + agent workflow",
+    "page": "docs/getting-started/quickstart.md",
+    "availability": "released baseline",
+    "baseline": "10.0.23",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "CLI create/write/read/seal/share/query passed; framework conversation pending",
+    "sources": [
+      "packages/cli/src/commands/knowledge-asset.ts",
+      "examples/docs/atlas.ttl"
+    ]
+  },
+  {
+    "name": "HTTP application",
+    "page": "docs/build/http-application.md",
+    "availability": "released baseline",
+    "baseline": "10.0.23",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "Published-package WM write/read and local SWM share passed",
+    "sources": [
+      "examples/docs/http-app.mjs",
+      "packages/cli/src/api-client.ts"
+    ]
+  },
+  {
+    "name": "Google OKF",
+    "page": "docs/build/okf-tutorial.md",
+    "availability": "released baseline",
+    "baseline": "10.0.23",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "Mapping, WM import, local SWM share, completeness verification, and export passed",
+    "sources": [
+      "packages/cli/src/commands/okf.ts",
+      "packages/okf/README.md"
+    ]
+  },
+  {
+    "name": "Two-node collaboration",
+    "page": "docs/build/collaborate.md",
+    "availability": "released baseline",
+    "baseline": "10.0.23",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "Attempted; subscription blocked by chain/metadata authority; replication pending",
+    "sources": [
+      "packages/cli/src/daemon/routes/context-graph.ts",
+      "packages/cli/src/daemon/http-utils.ts"
+    ]
+  },
+  {
+    "name": "Hermes",
+    "page": "docs/integrations/hermes.md",
+    "availability": "released baseline",
+    "baseline": "10.0.23",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "Source reviewed; live framework session pending",
+    "sources": [
+      "packages/adapter-hermes/README.md",
+      "packages/cli/src/commands/hermes.ts"
+    ]
+  },
+  {
+    "name": "OpenClaw",
+    "page": "docs/integrations/openclaw.md",
+    "availability": "released baseline",
+    "baseline": "10.0.23",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "Source reviewed; live framework session pending",
+    "sources": [
+      "packages/adapter-openclaw/README.md",
+      "packages/cli/src/commands/openclaw.ts"
+    ]
+  },
+  {
+    "name": "Prime Agent chat bridge",
+    "page": "docs/integrations/prime-agent.md",
+    "availability": "released baseline",
+    "baseline": "10.0.23",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "Source and released CLI reviewed; live session pending; automatic memory not advertised",
+    "sources": [
+      "packages/cli/src/daemon/local-agents.ts",
+      "packages/cli/src/commands/prime-agent.ts"
+    ]
+  },
+  {
+    "name": "MCP clients",
+    "page": "docs/integrations/mcp.md",
+    "availability": "released baseline",
+    "baseline": "10.0.23",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "Source reviewed; client conversation pending",
+    "sources": [
+      "packages/mcp-dkg/README.md",
+      "packages/cli/src/commands/mcp.ts"
+    ]
+  },
+  {
+    "name": "Local models",
+    "page": "docs/use-dkg/local-llm.md",
+    "availability": "released baseline",
+    "baseline": "10.0.23",
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "Source reviewed; model execution pending",
+    "sources": [
+      "packages/local-llm/README.md"
+    ]
+  },
+  {
+    "name": "External signer",
+    "page": "docs/references/availability.md",
+    "availability": "source only",
+    "baseline": null,
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "On main after 10.0.23 (PR #3177); absent from this canary baseline",
+    "sources": [
+      "docs/references/api.md"
+    ]
+  },
+  {
+    "name": "NeuroSymbolic Marketplace direction",
+    "page": "docs/how-dkg-works/roadmap-and-convergence.md",
+    "availability": "proposal",
+    "baseline": null,
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-13",
+    "validation": "Public RFC; prototype evidence does not establish general release availability",
+    "sources": [
+      "docs/how-dkg-works/roadmap-and-convergence.md"
+    ]
+  }
+]

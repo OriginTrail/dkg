@@ -22,29 +22,7 @@
 * [MCP Clients](integrations/mcp.md)
 * [Run a Local LLM](use-dkg/local-llm.md)
 
-## Active Now
-
-* [DKG V10 Bounty Program](active-now/dkg-v10-bounty.md)
-* [Staking & Migration (V8 → V10)](active-now/staking-migration.md)
-
-## Concepts
-
-* [Node + Agent and Neuro-Symbolic AI](how-dkg-works/node-and-agent.md)
-* [Key Concepts](how-dkg-works/key-concepts.md)
-* [DKG Network](how-dkg-works/dkg-network.md)
-* [DKG Node](how-dkg-works/dkg-node.md)
-* [Node Components](how-dkg-works/node-architecture.md)
-* [Agents & Trust](how-dkg-works/agents-and-trust.md)
-* [Memory Layers](how-dkg-works/memory-layers.md)
-* [Context Graphs](how-dkg-works/context-graphs.md)
-* [Knowledge Assets](how-dkg-works/knowledge-assets.md)
-* [Conviction & Economics](how-dkg-works/conviction-and-economics.md)
-* [Roadmap & Convergence](how-dkg-works/roadmap-and-convergence.md)
-* [Knowledge Commerce](how-dkg-works/knowledge-commerce.md)
-* [Universal Messenger](how-dkg-works/universal-messenger.md)
-* [P2P Resilience](how-dkg-works/p2p-resilience.md)
-
-## Operate and Use DKG
+## Operate
 
 * [Daemon Lifecycle](use-dkg/run-node.md)
 * [Publish & Query](use-dkg/publish-and-query.md)
@@ -63,6 +41,33 @@
 * [Backpressure Observability](use-dkg/backpressure-observability.md)
 * [Troubleshooting](use-dkg/troubleshooting.md)
 
+## Concepts
+
+* [Node + Agent and Neuro-Symbolic AI](how-dkg-works/node-and-agent.md)
+* [Key Concepts](how-dkg-works/key-concepts.md)
+* [DKG Network](how-dkg-works/dkg-network.md)
+* [DKG Node](how-dkg-works/dkg-node.md)
+* [Node Components](how-dkg-works/node-architecture.md)
+* [Agents & Trust](how-dkg-works/agents-and-trust.md)
+* [Memory Layers](how-dkg-works/memory-layers.md)
+* [Context Graphs](how-dkg-works/context-graphs.md)
+* [Knowledge Assets](how-dkg-works/knowledge-assets.md)
+* [Conviction & Economics](how-dkg-works/conviction-and-economics.md)
+* [Roadmap & Convergence](how-dkg-works/roadmap-and-convergence.md)
+* [Knowledge Commerce](how-dkg-works/knowledge-commerce.md)
+* [Universal Messenger](how-dkg-works/universal-messenger.md)
+* [P2P Resilience](how-dkg-works/p2p-resilience.md)
+
+## References
+
+* [Feature Availability](references/availability.md)
+* [Tool and Route Map](references/tool-route-map.md)
+* [CLI](references/cli.md)
+* [API](references/api.md)
+* [Packages](references/packages.md)
+* [Glossary](references/glossary.md)
+* [Node Skill](references/node-skill.md)
+
 ## For Agents
 
 * [Local LLM Agent Runbook](use-dkg/local-llm-agent-runbook.md)
@@ -76,13 +81,10 @@
 * [Publish & Query](agent-context/task-packs/publish-query.md)
 * [Operate & Troubleshoot](agent-context/task-packs/operate-troubleshoot.md)
 
-## References
+## Active Now
 
-* [CLI](references/cli.md)
-* [API](references/api.md)
-* [Packages](references/packages.md)
-* [Glossary](references/glossary.md)
-* [Node Skill](references/node-skill.md)
+* [DKG V10 Bounty Program](active-now/dkg-v10-bounty.md)
+* [Staking & Migration (V8 → V10)](active-now/staking-migration.md)
 
 ## General
 

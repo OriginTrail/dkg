@@ -7,9 +7,9 @@ doc_type: how-to
 
 # Your first node + agent workflow
 
-**Outcome:** store a small project fact, have your agent retrieve it in a fresh conversation, and optionally share it. This tutorial uses public sample data. It does not publish on-chain. Commands use a POSIX shell; Windows users can follow them in WSL2.
+**Outcome:** store a small project fact, have your agent retrieve it in a fresh conversation, and optionally share it. This tutorial uses public sample data and does not publish Knowledge Assets on-chain. Commands use a POSIX shell; Windows users can follow them in WSL2.
 
-Prerequisites: Node.js 22.13+ (or 23.4+), npm 10+, and a supported agent runtime if you want the conversational step. The command surface below is based on DKG 10.0.23. Check [feature availability](../how-dkg-works/roadmap-and-convergence.md) before using newer features.
+Prerequisites: Node.js 22.13+ (or 23.4+), npm 10+, and a supported agent runtime if you want the conversational step. The command surface below is based on DKG 10.0.23. Check [feature availability](../references/availability.md) before using newer features.
 
 ## 1. Install and choose your connection
 
@@ -33,6 +33,8 @@ The wizard asks for node and storage settings. Allow storage provisioning to fin
 WM work needs no funded wallet. Adapter setup defaults to mainnet unless a network is selected on a fresh node; the integration pages explicitly use testnet. Model/provider charges are separate from DKG publication fees.
 
 ## 2. Create a project
+
+Use a fresh, unfunded testnet node for this sample. On a chain-enabled node, graph creation can attempt on-chain graph registration as a best-effort side effect when funds and prerequisites are available. That graph-metadata operation is separate from publishing the Knowledge Assets below. See [Context Graphs](../how-dkg-works/context-graphs.md) before using an already funded node.
 
 ```bash
 dkg context-graph create atlas-demo

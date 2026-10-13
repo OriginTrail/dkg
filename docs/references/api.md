@@ -7,6 +7,8 @@ doc_type: reference
 
 # API
 
+Use [Feature availability](availability.md) for supported baselines and the generated [Tool and route map](tool-route-map.md) for discovery.
+
 Start with [Integrate an application over HTTP](../build/http-application.md) for a runnable client, request bodies, result checks, and error handling.
 
 The detailed operational contract is maintained in the DKG Node Skill template and served with live node information:

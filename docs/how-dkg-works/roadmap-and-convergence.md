@@ -23,24 +23,19 @@ That makes DKG useful for research agents, coding agents, operational agents, an
 
 <table><thead><tr><th width="230">Area</th><th>Direction</th></tr></thead><tbody><tr><td>DePIN infrastructure</td><td>Local nodes become agent hosts, query endpoints, and network participants.</td></tr><tr><td>Multi-agent memory</td><td>Agents use shared graph memory instead of isolated logs or vector-only stores.</td></tr><tr><td>DKG applications</td><td>Apps ground predictions, research, operations, and support in queryable Knowledge Assets.</td></tr><tr><td>Truth-seeking algorithms</td><td>Verification, conviction, and payment rails align publishers, stakers, and consumers.</td></tr></tbody></table>
 
-## Current public surface
+## Availability is part of the contract
 
-The current docs focus on the operational DKG V10 surface that users and agents can call today:
+See [Feature availability](../references/availability.md) for reviewed baselines and recorded validation. A feature on a development branch is not necessarily in the published npm package. Use `dkg --version`, the running node's status, and its served skill to establish the installed surface.
 
-* node install and runtime setup
-* MCP, Hermes, and OpenClaw connection paths
-* Working Memory and Shared Working Memory Knowledge Assets
-* sharing from WM to SWM
-* Verifiable Memory publishing flows
-* Context Graph creation and subscription
-* peer discovery, relays, and P2P resilience
-* Publishing Conviction Account CLI/API routes
+The builder journey covers WM/SWM workflows, explicit VM publication, Context Graphs, MCP/framework connections, Google OKF, and local-model integration. The maturity of each connection differs: for example, Prime Agent currently supplies chat transport without advertised primary-memory integration.
 
-## Roadmap surface
+## Direction
 
-Some roadmap concepts are important to explain now because they shape the system vocabulary and bounty program, but they should not be confused with day-one operator commands.
+The DKG combines agents and models with graph knowledge: neural interpretation and tool use, symbolic queries and evidence, shared knowledge, and explicit provenance. Richer reasoning/retrieval and governed service composition extend that model. A proposal needs a released implementation, a callable interface, and an exercised workflow before it becomes an operational how-to.
 
-<table><thead><tr><th width="205">Topic</th><th>Status in these docs</th></tr></thead><tbody><tr><td>Publisher conviction</td><td>Current concept with current PCA CLI/API surface.</td></tr><tr><td>Staker conviction</td><td>Contract-backed V10 economics concept; no public staker how-to is documented here yet.</td></tr><tr><td>Context oracles</td><td>Roadmap direction for consuming matured verifiable knowledge.</td></tr><tr><td>x402 paid access</td><td>Roadmap/payment integration direction; current protocol surfaces reserve payment-proof hooks.</td></tr><tr><td>Later bounty rounds</td><td>Planned and indicative unless the official bounty page says otherwise.</td></tr></tbody></table>
+The public [NeuroSymbolic Marketplace RFC](https://github.com/OriginTrail/OT-RFC-repository/tree/main/RFCs/OT-RFC-27_NeuroSymbolic_Marketplace) proposes query, reasoning, graph-ML, and inference services. It includes prototype evidence; that does not establish generally available support in every DKG node. Keep proposed settlement/economics and deployed node behavior distinct.
+
+Publisher conviction has a documented [PCA workflow](../use-dkg/publishing-conviction.md). Staking has its own [staking/migration guide](../active-now/staking-migration.md). Context-oracle and x402 concepts must not be inferred to have a complete operator workflow unless the installed contract and current guide supply one. Private planning documents inform development but are not a public API specification.
 
 ## Sequence
 
