@@ -25,31 +25,35 @@ export interface QueryStoreReadContext extends StoreReadLane {
 export function createStoreReadLane(
   store: TripleStore,
   options: StoreQueryOptions | undefined,
-  listByPrefix: (store: TripleStore, prefix: string, options?: StoreQueryOptions) => Promise<string[]>,
 ): StoreReadLane {
   return {
     query: (sparql) => store.query(sparql, options),
-    listGraphsByPrefix: (prefix) => listByPrefix(store, prefix, options),
+    listGraphsByPrefix: (prefix) => listGraphsByPrefix(store, prefix, options),
   };
 }
 
 export function createQueryStoreReadContext(
   store: TripleStore,
   queryOptions: QueryOptions | undefined,
-  listByPrefix: (store: TripleStore, prefix: string, options?: StoreQueryOptions) => Promise<string[]>,
 ): QueryStoreReadContext {
   const options = storeOptions(queryOptions);
-  const lane = createStoreReadLane(store, options, listByPrefix);
+  const lane = createStoreReadLane(store, options);
   const sharedOptions = sharedDiscoveryStoreOptions(options);
   return {
     ...lane,
     signal: options?.signal,
     shared: {
-      ...createStoreReadLane(store, sharedOptions, listByPrefix),
+      ...createStoreReadLane(store, sharedOptions),
       cacheKey: JSON.stringify([
         sharedOptions?.priority ?? 'normal',
         sharedOptions?.source ?? null,
       ]),
     },
   };
+}
+
+async function listGraphsByPrefix(store: TripleStore, prefix: string, options?: StoreQueryOptions): Promise<string[]> {
+  return store.listGraphsByPrefix
+    ? store.listGraphsByPrefix(prefix, options)
+    : (await store.listGraphs(options)).filter(graph => graph.startsWith(prefix));
 }

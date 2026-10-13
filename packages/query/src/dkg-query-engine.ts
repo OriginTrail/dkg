@@ -13,7 +13,6 @@ import type {
   TripleStore,
   Quad,
   QueryResult as StoreQueryResult,
-  QueryOptions as StoreQueryOptions,
 } from '@origintrail-official/dkg-storage';
 import {
   ExactGraphReadError,
@@ -354,19 +353,19 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       Boolean(this.store.withQueryReadAdmission && this.store.graphEnumerationVisibility));
-    if (plan.kind === 'scoped' && plan.discovery === 'admission-owned') {
+    if (plan.kind === 'scoped' && plan.discovery.mode === 'admission-owned') {
       return this.store.withQueryReadAdmission!(async () => {
-        const caller = createStoreReadLane(this.store, storeOptions(options), listGraphsByPrefix);
+        const caller = createStoreReadLane(this.store, storeOptions(options));
         // Discovery shares the owner, priority and cancellation, but the caller's
         // result ceiling applies only to caller-derived reads, not the catalog.
         const { maxResponseBytes: _callerLimit, ...discoveryOptions } = storeOptions(options) ?? {};
-        const catalogReads = createStoreReadLane(this.store, discoveryOptions, listGraphsByPrefix);
+        const catalogReads = createStoreReadLane(this.store, discoveryOptions);
         const discovery = await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, catalogReads);
         return this.queryPrepared(initialGraphScope, options, this.prepareScopedExecution(plan, caller, discovery));
       }, storeOptions(options));
     }
-    const reads = createQueryStoreReadContext(this.store, options, listGraphsByPrefix);
-    const discovery = plan.kind === 'scoped' && plan.expandGraphVariables
+    const reads = createQueryStoreReadContext(this.store, options);
+    const discovery = plan.kind === 'scoped' && plan.discovery.expandGraphVariables
       ? await this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads) : undefined;
     const context: QueryExecutionContext = plan.kind === 'scoped'
       ? this.prepareScopedExecution(plan, reads, discovery) : { kind: plan.kind, reads };
@@ -375,7 +374,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   private prepareScopedExecution(plan: ScopedQueryReadPlan, reads: StoreReadLane,
     discovery?: ScopedContentGraphDiscoverySnapshot): QueryExecutionContext {
-    if (plan.expandGraphVariables && !discovery) throw new Error('Scoped expansion requires discovery authority');
+    if (plan.discovery.expandGraphVariables && !discovery) throw new Error('Scoped expansion requires discovery authority');
     return { kind: 'scoped', plan,
       // Routing consumes one discovery callback for owned and memoized inventories.
       reads: discovery ? { query: reads.query,
@@ -393,23 +392,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const effectiveContextGraphId = options?.contextGraphId;
     if (context.kind === 'scoped') {
       const { plan } = context;
-      const { dataGraph, sharedMemoryGraph, staticContentGraphs,
-        subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
-      const { needsDiscovery, swmRouted, dataRouted } = plan;
-      const discoverRouteGraphs = (prefix: string) => this.discoverGraphsByPrefix(prefix, reads);
-      // Per-KA SWM: when a route targets SWM, expand the allow-set with the discovered
-      // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
-      const swmPerKaGraphs = needsDiscovery && swmRouted
-        ? await discoverRouteGraphs(`${sharedMemoryGraph}/`)
-        : [];
-      // Per-KA VM: published data is in …/_verifiable_memory/{addr}/{number}; bind those too
-      // for GRAPH-variable scans on any route that reads the data graph.
-      const vmPerKaGraphs = needsDiscovery && dataRouted
-        ? await discoverRouteGraphs(`${dataGraph}/_verifiable_memory/`)
-        : [];
-      const allowedGraphs = staticContentGraphs.flatMap(graph =>
-        [graph, ...(graph === dataGraph ? vmPerKaGraphs : swmPerKaGraphs)]);
-      const privateAllowList = options?.includePrivate && needsDiscovery
+      const { staticContentGraphs, subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
+      const partitions = new Map<string, string[]>();
+      for (const { root, prefix } of plan.discovery.contentPrefixes) {
+        partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
+      }
+      const allowedGraphs = staticContentGraphs.flatMap(graph => [graph, ...(partitions.get(graph) ?? [])]);
+      const privateAllowList = plan.discovery.privatePartitions
         ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(
             plan.contextGraphId, reads, subGraphName,
           ))]
@@ -452,24 +441,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // ── Legacy routing (V9 compat) ────────────────────────────────────
     let effectiveScope = routedScope;
 
-    if (effectiveContextGraphId) {
-      const dataGraph = options?.subGraphName
-        ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
-        : contextGraphDataUri(effectiveContextGraphId);
-      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
-      const resolveRoute = (root: string, family: 'data' | 'shared-memory') =>
-        resolveLegacyRouteScope(routedScope, root, family, prefix => this.discoverGraphsByPrefix(prefix, reads));
-      if (options?.includeSharedMemory ?? options?.includeWorkspace) {
-        const dataScope = await resolveRoute(dataGraph, 'data');
-        const sharedMemoryScope = await resolveRoute(sharedMemoryGraph, 'shared-memory');
-        // Preserve both caller executions and the established merge semantics.
-        const dataResult = await this.execCallerQuery(dataScope, reads);
-        const smResult = await this.execCallerQuery(sharedMemoryScope, reads);
+    if (context.kind === 'scoped') {
+      const scopes: PreparedGraphScope[] = [];
+      for (const target of context.plan.targets) scopes.push(await resolveLegacyRouteScope(
+        routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads)));
+      if (scopes.length === 2) {
+        const dataResult = await this.execCallerQuery(scopes[0]!, reads);
+        const smResult = await this.execCallerQuery(scopes[1]!, reads);
         return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
-      effectiveScope = options?.graphSuffix === '_shared_memory'
-        ? await resolveRoute(sharedMemoryGraph, 'shared-memory')
-        : await resolveRoute(dataGraph, 'data');
+      effectiveScope = scopes[0]!;
     }
 
     const result = await this.execAndNormalize(effectiveScope, reads);
@@ -1289,16 +1270,6 @@ function parseCanonicalIntegerBinding(value: string | undefined): bigint | undef
   } catch {
     return undefined;
   }
-}
-
-async function listGraphsByPrefix(
-  store: TripleStore,
-  prefix: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix, options)
-    : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
 }
 
 function mergeSharedMemoryAndDataResults(
