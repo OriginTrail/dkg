@@ -313,6 +313,7 @@ export {
   type RetryOptions,
 } from './retry.js';
 export { resolveWithinAbort } from './abort-boundary.js';
+export { isTransportTimeoutError } from './request-abort-lifecycle.js';
 export {
   RetryQueue,
   type RetryEntry,
@@ -432,6 +433,8 @@ export {
   SwmGossipPayloadTooLargeError,
   toErrorMessage,
   hasErrorCode,
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,

@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: Apache-2.0
+
+export interface ChainEvent {
+  /** Normalized update evidence; absent only on legacy adapters or other event types. */
+  updateIdentity?: KnowledgeAssetUpdateIdentity;
+  type: string;
+  blockNumber: number;
+  data: Record<string, unknown>;
+}
+
+/**
+ * Legacy adapters explicitly describe only the event position they can prove.
+ * Block of the update event, when known. A chain view older than it has
+ * not seen the update, so it can never settle the target as current. Only
+ * targets with a block hold the event lane's persisted cursor.
+ * Hash of the event's block distinguishes a replacement fork; log position
+ * distinguishes two updates with the same root in one block. Transaction
+ * identity is retained when a log position is unavailable or a block reorganizes.
+ */
+export type KnowledgeAssetUpdateIdentity =
+  | { readonly eventKind: 'legacy-unpositioned'; readonly blockNumber?: never; readonly logIndex?: never; readonly blockHash?: string; readonly txHash?: string }
+  | { readonly eventKind: 'legacy-block'; readonly blockNumber: number; readonly logIndex?: never; readonly blockHash?: string; readonly txHash?: never }
+  | { readonly eventKind: 'transaction'; readonly blockNumber: number; readonly txHash: string; readonly blockHash?: string; readonly logIndex?: never }
+  | { readonly eventKind: 'log'; readonly blockNumber: number; readonly logIndex: number; readonly blockHash?: string; readonly txHash?: string };
+
+export interface KnowledgeAssetUpdateMetadata {
+  readonly blockNumber?: unknown;
+  readonly logIndex?: unknown;
+  readonly blockHash?: unknown;
+  readonly txHash?: unknown;
+}
+
+/** Normalize raw/legacy adapter evidence once, before it enters a typed callback. */
+export function normalizeKnowledgeAssetUpdateIdentity(metadata: KnowledgeAssetUpdateMetadata): KnowledgeAssetUpdateIdentity {
+  const hash = (value: unknown): string | undefined => typeof value === 'string' && value.length > 0 ? value.toLowerCase() : undefined;
+  const blockHash = hash(metadata.blockHash);
+  const txHash = hash(metadata.txHash);
+  const blockNumber = typeof metadata.blockNumber === 'number'
+    && Number.isSafeInteger(metadata.blockNumber) && metadata.blockNumber >= 0 ? metadata.blockNumber : undefined;
+  if (blockNumber === undefined) return { eventKind: 'legacy-unpositioned', ...(blockHash === undefined ? {} : { blockHash }), ...(txHash === undefined ? {} : { txHash }) };
+  const logIndex = typeof metadata.logIndex === 'number'
+    && Number.isSafeInteger(metadata.logIndex) && metadata.logIndex >= 0 ? metadata.logIndex : undefined;
+  if (logIndex !== undefined) return {
+    eventKind: 'log', blockNumber, logIndex,
+    ...(blockHash === undefined ? {} : { blockHash }), ...(txHash === undefined ? {} : { txHash }),
+  };
+  if (txHash !== undefined) return { eventKind: 'transaction', blockNumber, txHash, ...(blockHash === undefined ? {} : { blockHash }) };
+  return { eventKind: 'legacy-block', blockNumber, ...(blockHash === undefined ? {} : { blockHash }) };
+}

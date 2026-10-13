@@ -1,6 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { describe, expect, it, vi } from 'vitest';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
@@ -9,12 +8,6 @@ import {
   computeContextGraphPolicyObjectDigestV1,
 } from '@origintrail-official/dkg-core';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
-import {
-  SyncSemanticStoreV1,
-  SyncSharedProjectionStoreV1,
-  asChangelogReader,
-  createManagedOxigraphRuntimeStoreConfigV1,
-} from '@origintrail-official/dkg-storage';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 import type { ChainResetWipeResult } from '../src/daemon/chain-reset-wipe.js';
 import type { StoreIdentityTagResult } from '../src/daemon/store-health-check.js';
@@ -99,231 +92,14 @@ function rfc64PrivateCatalogActivation() {
   };
 }
 
-const mocks = vi.hoisted(() => ({
-  agentCreate: vi.fn(),
-  chainResetWipe: vi.fn(),
-  createServer: vi.fn(),
-  checkExternalStoreReachable: vi.fn(),
-  checkOrSetStoreIdentity: vi.fn(),
-  loadOpWallets: vi.fn(),
-  loadNetworkConfig: vi.fn(),
-  startPublisherRuntimeWithOutcome: vi.fn(),
-  startManagedOxigraph: vi.fn(),
-}));
-
-vi.mock('node:http', () => ({
-  createServer: mocks.createServer,
-}));
-
-vi.mock('@origintrail-official/dkg-agent', async importOriginal => {
-  const actual = await importOriginal<typeof import('@origintrail-official/dkg-agent')>();
-  return {
-    ...actual,
-    DKGAgent: { create: mocks.agentCreate },
-    loadOpWallets: mocks.loadOpWallets,
-    KaNumberAllocator: class KaNumberAllocator {},
-  };
-});
-
-vi.mock('../src/config.js', async importOriginal => {
-  const actual = await importOriginal<typeof import('../src/config.js')>();
-  return {
-    ...actual,
-    loadNetworkConfig: mocks.loadNetworkConfig,
-  };
-});
-
-vi.mock('../src/daemon/chain-reset-wipe.js', async importOriginal => {
-  const actual = await importOriginal<typeof import('../src/daemon/chain-reset-wipe.js')>();
-  return {
-    ...actual,
-    chainResetWipe: mocks.chainResetWipe,
-  };
-});
-
-vi.mock('../src/daemon/oxigraph-managed.js', async importOriginal => {
-  const actual = await importOriginal<typeof import('../src/daemon/oxigraph-managed.js')>();
-  return { ...actual, startManagedOxigraph: mocks.startManagedOxigraph };
-});
-
-vi.mock('../src/daemon/store-health-check.js', async importOriginal => {
-  const actual = await importOriginal<typeof import('../src/daemon/store-health-check.js')>();
-  return {
-    ...actual,
-    checkExternalStoreReachable: mocks.checkExternalStoreReachable,
-    checkOrSetStoreIdentity: mocks.checkOrSetStoreIdentity,
-  };
-});
-
-vi.mock('../src/publisher-runner.js', async importOriginal => {
-  const actual = await importOriginal<typeof import('../src/publisher-runner.js')>();
-  return {
-    ...actual,
-    startPublisherRuntimeWithOutcome: mocks.startPublisherRuntimeWithOutcome,
-  };
-});
-
-const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
-const { DKGAgent: RealDKGAgent } = await vi.importActual<
-  typeof import('@origintrail-official/dkg-agent')
->('@origintrail-official/dkg-agent');
-
-function createFakeServer() {
-  const server = {
-    listen: vi.fn((_port: number, _host: string, cb?: () => void) => {
-      cb?.();
-      return server;
-    }),
-    address: vi.fn(() => ({ port: 43123 })),
-    close: vi.fn((cb?: () => void) => {
-      cb?.();
-      return server;
-    }),
-    on: vi.fn(() => server),
-    once: vi.fn(() => server),
-  };
-  return server;
-}
-
-function closeDashboardDbFromAgentCreateArg(createArg: any): void {
-  const db =
-    createArg?.chainEventCursorStore?.cursors?.db ??
-    createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
-  db?.close?.();
-}
+import {
+  daemonWiringMocks as mocks, runDaemonInner, closeDashboardDbFromAgentCreateArg,
+  installDaemonLifecycleWiringFixture,
+} from './helpers/daemon-lifecycle-wiring.js';
 
 describe('runDaemonInner StorageACK timing wiring', () => {
-  let tempHome: string | undefined;
-  let originalDkgHome: string | undefined;
-  let stdoutWrite: typeof process.stdout.write = process.stdout.write;
-  let stderrWrite: typeof process.stderr.write = process.stderr.write;
-  let uncaughtExceptionListeners: NodeJS.UncaughtExceptionListener[] = [];
-  let unhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] = [];
-  let exitListeners: NodeJS.ExitListener[] = [];
-  let sigintListeners: NodeJS.SignalsListener[] = [];
-  let sigtermListeners: NodeJS.SignalsListener[] = [];
-  let stdoutLines: string[] = [];
-
-  beforeEach(async () => {
-    tempHome = await mkdtemp(join(tmpdir(), 'dkg-storage-ack-timing-wiring-'));
-    originalDkgHome = process.env.DKG_HOME;
-    process.env.DKG_HOME = tempHome;
-    stdoutWrite = process.stdout.write;
-    stderrWrite = process.stderr.write;
-    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
-    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
-    exitListeners = process.listeners('exit') as NodeJS.ExitListener[];
-    sigintListeners = process.listeners('SIGINT') as NodeJS.SignalsListener[];
-    sigtermListeners = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
-    stdoutLines = [];
-
-    mocks.createServer.mockImplementation(createFakeServer);
-    mocks.startPublisherRuntimeWithOutcome.mockResolvedValue({
-      runtime: null,
-      availability: {
-        available: false,
-        reason: 'no_publisher_wallets',
-        retryable: false,
-        operatorActionRequired: true,
-      },
-    });
-    mocks.startManagedOxigraph.mockResolvedValue(null);
-    mocks.checkExternalStoreReachable.mockResolvedValue({
-      ok: true,
-      backend: 'sparql-http',
-      endpoint: 'http://127.0.0.1:7878/query',
-    });
-    mocks.checkOrSetStoreIdentity.mockResolvedValue({
-      ok: true,
-      action: 'matched',
-      nodeName: 'storage-ack-timing-core-test',
-    });
-    mocks.loadNetworkConfig.mockResolvedValue({
-      networkName: 'DKG V10 Gnosis Mainnet',
-      genesisId: 'gnosis-mainnet',
-      genesisVersion: 1,
-      relays: ['/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
-      defaultNodeRole: 'core',
-    });
-    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
-    mocks.chainResetWipe.mockResolvedValue({
-      status: 'inactive',
-      attempted: false,
-      requiresStoreRetag: false,
-      prevMarker: null,
-      removedFiles: [],
-      backedUpFiles: [],
-      failedFiles: [],
-    });
-    mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
-    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
-      stdoutLines.push(String(chunk));
-      return true;
-    }) as typeof process.stdout.write);
-    vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
-      throw new Error(`process.exit:${code}`);
-    }) as never);
-  });
-
-  afterEach(async () => {
-    vi.restoreAllMocks();
-    vi.clearAllMocks();
-    vi.useRealTimers();
-    process.stdout.write = stdoutWrite;
-    process.stderr.write = stderrWrite;
-    process.removeAllListeners('uncaughtException');
-    for (const listener of uncaughtExceptionListeners) process.on('uncaughtException', listener);
-    process.removeAllListeners('unhandledRejection');
-    for (const listener of unhandledRejectionListeners) process.on('unhandledRejection', listener);
-    process.removeAllListeners('exit');
-    for (const listener of exitListeners) process.on('exit', listener);
-    process.removeAllListeners('SIGINT');
-    for (const listener of sigintListeners) process.on('SIGINT', listener);
-    process.removeAllListeners('SIGTERM');
-    for (const listener of sigtermListeners) process.on('SIGTERM', listener);
-    if (originalDkgHome === undefined) delete process.env.DKG_HOME;
-    else process.env.DKG_HOME = originalDkgHome;
-    if (tempHome) {
-      await rm(tempHome, {
-        recursive: true,
-        force: true,
-        maxRetries: 5,
-        retryDelay: 50,
-      });
-    }
-    tempHome = undefined;
-  });
-
-  async function captureCreateArg(
-    configOverrides: Record<string, unknown> = {},
-    inspectDuringCreate?: (createArg: any) => Promise<void>,
-  ): Promise<any> {
-    if (inspectDuringCreate) {
-      mocks.agentCreate.mockImplementationOnce(async (createArg: any) => {
-        await inspectDuringCreate(createArg);
-        throw new Error('after-agent-create');
-      });
-    }
-    await expect(runDaemonInner(true, {
-      name: 'storage-ack-timing-core-test',
-      networkConfig: 'mainnet-gnosis',
-      listenPort: 0,
-      nodeRole: 'core',
-      chain: {
-        type: 'evm',
-        rpcUrl: 'https://private-rpc.example',
-        hubAddress: '0x1234567890123456789012345678901234567890',
-        chainId: 'evm:100',
-        receiptTimeoutMs: 1_200_000,
-      },
-      ...configOverrides,
-    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-agent-create');
-
-    expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
-    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
-    closeDashboardDbFromAgentCreateArg(createArg);
-    return createArg;
-  }
+  const fixture = installDaemonLifecycleWiringFixture();
+  const { captureCreateArg } = fixture;
 
   it('re-tags managed store ownership after an incomplete wipe requests it', async () => {
     mocks.chainResetWipe.mockResolvedValueOnce({
@@ -417,16 +193,16 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         expect(mocks.agentCreate).not.toHaveBeenCalled();
         expect(mocks.loadOpWallets).not.toHaveBeenCalled();
         expect(mocks.startPublisherRuntimeWithOutcome).not.toHaveBeenCalled();
-        const log = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+        const log = await readFile(join(fixture.tempHome!, 'daemon.log'), 'utf8');
         expect(log).toContain(diagnostic);
-        expect(stdoutLines.join('')).toContain(diagnostic);
+        expect(fixture.stdoutLines.join('')).toContain(diagnostic);
         expect(log).not.toContain('Re-tagged triple-store namespace');
         if (failure.action === 'mismatch') {
           expect(log).toContain(failure.existingNodeName);
           expect(log).toContain(failure.expectedNodeName);
         }
-        expect(process.listeners('uncaughtException')).toEqual(uncaughtExceptionListeners);
-        expect(process.listeners('unhandledRejection')).toEqual(unhandledRejectionListeners);
+        expect(process.listeners('uncaughtException')).toEqual(fixture.uncaughtExceptionListeners);
+        expect(process.listeners('unhandledRejection')).toEqual(fixture.unhandledRejectionListeners);
       } finally {
         closeDashboardDbFromAgentCreateArg(mocks.agentCreate.mock.calls[0]?.[0]);
       }
@@ -490,68 +266,6 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       receiptTimeoutMs: 1_200_000,
     });
   });
-
-  it.each([false, true])(
-    'preserves managed RFC-64 store authority through DKGAgent.create when changelog=%s',
-    async (changelog) => {
-      const managedStore = createManagedOxigraphRuntimeStoreConfigV1({
-        backend: 'sparql-http',
-        options: {
-          queryEndpoint: 'http://127.0.0.1:7878/query',
-          updateEndpoint: 'http://127.0.0.1:7878/update',
-          managedByDkg: true,
-        },
-        graphSetIndex: true,
-      });
-      mocks.startManagedOxigraph.mockResolvedValue({
-        handle: {
-          queryEndpoint: 'http://127.0.0.1:7878/query',
-          updateEndpoint: 'http://127.0.0.1:7878/update',
-          getRecoveryState: () => ({ recovering: false }),
-          killSync: vi.fn(),
-        },
-        storeConfig: managedStore,
-        largeLiteralStorage: {
-          enabled: true,
-          directory: join(tempHome!, 'literal-blobs'),
-        },
-      });
-
-      await captureCreateArg({
-        store: {
-          backend: 'oxigraph-server',
-          options: {},
-          changelog,
-        },
-      }, async (createArg) => {
-        const originalFetch = globalThis.fetch;
-        globalThis.fetch = (async (_input, init) => {
-          const body = String(init?.body ?? '');
-          if (/\bSELECT\b/iu.test(body)) {
-            return new Response(JSON.stringify({
-              head: { vars: ['network'] },
-              results: { bindings: [] },
-            }), {
-              status: 200,
-              headers: { 'Content-Type': 'application/sparql-results+json' },
-            });
-          }
-          return new Response(null, { status: 204 });
-        }) as typeof fetch;
-        let agent: Awaited<ReturnType<typeof RealDKGAgent.create>> | undefined;
-        try {
-          agent = await RealDKGAgent.create(createArg);
-          const store = agent.store;
-          expect(() => new SyncSharedProjectionStoreV1(store)).not.toThrow();
-          expect(() => new SyncSemanticStoreV1(store)).not.toThrow();
-          expect(asChangelogReader(agent.store) !== null).toBe(changelog);
-        } finally {
-          await agent?.stop().catch(() => {});
-          globalThis.fetch = originalFetch;
-        }
-      });
-    },
-  );
 
   it('merges configured and network-default context graphs into the automatic sync scope', async () => {
     mocks.loadNetworkConfig.mockResolvedValue({

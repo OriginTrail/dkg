@@ -12,25 +12,36 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { canonicalKnowledgeAssetAgentAddress } from '@origintrail-official/dkg-core';
 
-export interface EmbeddingRecord {
+interface EmbeddingRecordFields {
   id?: string;
   embedding: number[];
   sourceUri: string;
   entityUri: string;
   contextGraphId: string;
-  memoryLayer: 'wm' | 'swm' | 'vm';
   model: string;
   snippet?: string;
   label?: string;
   createdAt?: string;
 }
 
+/** New WM writes must choose an owner or explicitly declare it unknown. */
+export type EmbeddingRecord = EmbeddingRecordFields & (
+  | { memoryLayer: 'wm'; agentAddress: string | { readonly kind: 'unknown' } }
+  | { memoryLayer: 'swm' | 'vm'; agentAddress?: string }
+);
+
+export type VectorWorkingMemoryScope =
+  | { readonly kind: 'agents'; readonly agentAddresses: readonly string[] }
+  | { readonly kind: 'nodeOperator' };
+
 export interface VectorSearchOpts {
   contextGraphId: string;
   memoryLayers: Array<'wm' | 'swm' | 'vm'>;
   limit: number;
   minSimilarity?: number;
+  workingMemoryScope: VectorWorkingMemoryScope;
 }
 
 export interface VectorSearchResult {
@@ -62,37 +73,45 @@ export class VectorStore {
 
   private migrate(): void {
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version >= 1) return;
-
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS embeddings (
-        id TEXT PRIMARY KEY,
-        embedding BLOB NOT NULL,
-        dimensions INTEGER NOT NULL,
-        source_uri TEXT NOT NULL,
-        entity_uri TEXT NOT NULL,
-        context_graph_id TEXT NOT NULL,
-        memory_layer TEXT NOT NULL CHECK(memory_layer IN ('wm','swm','vm')),
-        model TEXT NOT NULL,
-        label TEXT,
-        snippet TEXT,
-        created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_embeddings_cg ON embeddings(context_graph_id);
-      CREATE INDEX IF NOT EXISTS idx_embeddings_entity ON embeddings(entity_uri);
-      CREATE INDEX IF NOT EXISTS idx_embeddings_source ON embeddings(source_uri);
-      CREATE INDEX IF NOT EXISTS idx_embeddings_layer ON embeddings(memory_layer);
-    `);
-    this.db.pragma(`user_version = 1`);
+    if (version >= 2) return;
+    this.db.transaction(() => {
+      if (version < 1) this.db.exec(`
+        CREATE TABLE IF NOT EXISTS embeddings (
+          id TEXT PRIMARY KEY,
+          embedding BLOB NOT NULL,
+          dimensions INTEGER NOT NULL,
+          source_uri TEXT NOT NULL,
+          entity_uri TEXT NOT NULL,
+          context_graph_id TEXT NOT NULL,
+          memory_layer TEXT NOT NULL CHECK(memory_layer IN ('wm','swm','vm')),
+          model TEXT NOT NULL,
+          label TEXT,
+          snippet TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_embeddings_cg ON embeddings(context_graph_id);
+        CREATE INDEX IF NOT EXISTS idx_embeddings_entity ON embeddings(entity_uri);
+        CREATE INDEX IF NOT EXISTS idx_embeddings_source ON embeddings(source_uri);
+        CREATE INDEX IF NOT EXISTS idx_embeddings_layer ON embeddings(memory_layer);
+      `);
+      // Existing rows have unknown ownership. Retain them for explicit operator
+      // recovery, but never infer ownership or expose their WM to agent callers.
+      this.db.exec('ALTER TABLE embeddings ADD COLUMN agent_address TEXT');
+      this.db.pragma('user_version = 2');
+    })();
   }
 
   async insert(record: EmbeddingRecord): Promise<string> {
+    const owner = record.agentAddress;
+    if (record.memoryLayer === 'wm' && typeof owner !== 'string' && owner?.kind !== 'unknown') {
+      throw new TypeError('Working-memory embedding requires explicit ownership');
+    }
     const id = record.id ?? randomUUID();
     const blob = float32ToBlob(record.embedding);
     this.db.prepare(`
       INSERT OR REPLACE INTO embeddings
-        (id, embedding, dimensions, source_uri, entity_uri, context_graph_id, memory_layer, model, label, snippet, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, embedding, dimensions, source_uri, entity_uri, context_graph_id, memory_layer, model, label, snippet, created_at, agent_address)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       blob,
@@ -105,6 +124,7 @@ export class VectorStore {
       record.label ?? null,
       record.snippet ?? null,
       record.createdAt ?? new Date().toISOString(),
+      typeof owner === 'string' ? canonicalKnowledgeAssetAgentAddress(owner) : null,
     );
     return id;
   }
@@ -116,11 +136,17 @@ export class VectorStore {
    */
   async search(queryEmbedding: number[], opts: VectorSearchOpts): Promise<VectorSearchResult[]> {
     const layerPlaceholders = opts.memoryLayers.map(() => '?').join(',');
+    const addresses = opts.workingMemoryScope?.kind === 'agents'
+      ? [...new Set(opts.workingMemoryScope.agentAddresses.map(canonicalKnowledgeAssetAgentAddress))]
+      : [];
+    const ownershipFilter = opts.workingMemoryScope?.kind === 'nodeOperator' ? ''
+      : `AND (memory_layer <> 'wm'${addresses.length ? ` OR agent_address IN (${addresses.map(() => '?').join(',')})` : ''})`;
     const rows = this.db.prepare(`
       SELECT id, embedding, dimensions, entity_uri, source_uri, label, snippet, memory_layer
       FROM embeddings
       WHERE context_graph_id = ? AND memory_layer IN (${layerPlaceholders})
-    `).all(opts.contextGraphId, ...opts.memoryLayers) as Array<{
+      ${ownershipFilter}
+    `).all(opts.contextGraphId, ...opts.memoryLayers, ...addresses) as Array<{
       id: string;
       embedding: Buffer;
       dimensions: number;

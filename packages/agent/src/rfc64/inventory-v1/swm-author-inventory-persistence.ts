@@ -11,6 +11,7 @@ import {
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
   type Digest32V1,
   type SwmAuthorInventorySnapshotV1,
+  type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
 
 import {
@@ -145,6 +146,26 @@ export class SwmAuthorInventoryPersistenceV1 {
 
   read(key: EncodedSwmAuthorInventoryKeyV1): SwmAuthorInventorySnapshotV1 | null {
     return this.readStored(key)?.snapshot ?? null;
+  }
+
+  /** Bounded local lookup only; it does not establish whole-inventory completeness. */
+  readRow(
+    key: EncodedSwmAuthorInventoryKeyV1,
+    kaUal: SwmAuthorInventoryRowV1['kaUal'],
+  ): Readonly<SwmAuthorInventoryRowV1> | null {
+    assertCanonicalDeterministicUalV1(kaUal);
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRow);
+    const stored = this.host.statement(() => query.get({
+      scope: key.scope, author: key.author, kaUal,
+    }) as SqlRowV1 | undefined);
+    if (stored === undefined) return null;
+    try {
+      const row = decodeStoredSwmAuthorInventoryRowV1(stored);
+      if (row.kaUal !== kaUal) throw new Error('stored row does not match its requested key');
+      return row;
+    } catch (cause) {
+      throw this.host.error('swm-inventory-database-corrupt', 'stored SWM author row is not canonical', { cause });
+    }
   }
 
   /** Local scheduling hint only; it does not authenticate or materialize rows. */

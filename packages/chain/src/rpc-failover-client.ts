@@ -46,6 +46,7 @@
 import { type RpcReadDescriptor, createRpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 export { type RpcReadDescriptor, createRpcReadDescriptor, rpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 import type { SignedTransactionEnvelope } from './chain-adapter.js';
+import { bufferedGasLimit, wantsGasLimitBuffer, type GasLimitBufferOptions } from './gas-limit-buffer.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
@@ -65,7 +66,7 @@ import {
   noteRpcServed,
   rpcHost,
 } from './rpc-failover-log.js';
-import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
+import { EndpointStickiness, type ReadStickinessIntent } from './endpoint-stickiness.js';
 import { EndpointReadRefusals } from './endpoint-read-refusals.js';
 import { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
 import { runRpcProviderPass } from './rpc-provider-pass.js';
@@ -118,7 +119,7 @@ export interface ReceiptLookupOptions {
  */
 interface ProviderPassOptions<T> {
   isRetryable: (err: unknown) => boolean;
-  intent: StickinessIntent;
+  intent: ReadStickinessIntent;
   attemptTimeoutMs: (providerCount: number) => number | undefined;
   deadlineMs?: number;
   isEmptyResult?: (value: T) => boolean;
@@ -203,8 +204,6 @@ export class RpcFailoverClient {
   private readonly stickiness: EndpointStickiness;
   /** Which endpoint refused which read (see endpoint-read-refusals.ts). */
   private readonly readRefusals: EndpointReadRefusals;
-  /** The stickiness kill switch: off means every pass uses the configured order. */
-  private readonly endpointOrderingEnabled: () => boolean;
   /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
   private readonly validateEndpoint?: ValidateEndpointFn;
   private readonly readThrottleRetries: number;
@@ -235,7 +234,6 @@ export class RpcFailoverClient {
       onEstablished: (url) => notePreferredEndpoint('rpc failover', url),
     });
     this.readRefusals = new EndpointReadRefusals({ now: stickiness?.now ?? Date.now });
-    this.endpointOrderingEnabled = isEnabled;
   }
 
   /**
@@ -444,7 +442,7 @@ export class RpcFailoverClient {
     args: readonly unknown[],
     signer: Wallet,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<SignedTransactionEnvelope> {
     const canonical = this.getEndpoints();
     // 'nonceWrite': the state machine starts a fresh-nonce populate on a backend
@@ -468,14 +466,14 @@ export class RpcFailoverClient {
           `${label} transaction population via RPC #${i + 1}`,
           () => connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
         );
-        if (opts?.gasLimitBufferBps && populated.gasLimit == null) {
+        if (wantsGasLimitBuffer(opts) && populated.gasLimit == null) {
           try {
             const est = (await withRpcRequestTimeout<bigint>(
               RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
               `${label} gas estimation via RPC #${i + 1}`,
               () => connected[method].estimateGas(...args) as Promise<bigint>,
             ));
-            populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
+            populated.gasLimit = bufferedGasLimit(est, opts);
           } catch (estErr) {
             // A CALL_EXCEPTION is the contract's deterministic answer to THIS exact call. Running
             // `signer.populateTransaction(populated)` after that answer asks for the same gas
@@ -760,15 +758,13 @@ export class RpcFailoverClient {
     // so the cap/exhaustion contract stays canonical while only the try-order changes.
     const canonical = this.getEndpoints();
     // A read that an endpoint has refused by policy starts at the others; the
-    // refusing endpoint stays in the pass, last. `readRefusals` builds the pass
-    // from the stickiness order and owns what each outcome is recorded as. A
+    // refusing endpoint stays in the pass, last. Stickiness owns the full plan
+    // using refusal memory before binding each outcome recorder. A
     // tip-sensitive read keeps the configured order, as it does under
     // stickiness, and so does every read when ordering is switched off.
-    const attempts = this.readRefusals.attempts(
-      label,
-      this.stickiness.attempts(canonical, options.intent),
-      options.intent !== 'transparentRead' && this.endpointOrderingEnabled(),
-    );
+    const attempts = this.stickiness.readAttempts(canonical, options.intent, {
+      label, memory: this.readRefusals,
+    });
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let allEndpointsThrottled = true;
     let retryAfterMs: number | undefined;
@@ -792,13 +788,13 @@ export class RpcFailoverClient {
         const endpoint = attempt.endpoint;
         if (this.validateEndpoint) {
           await this.runProviderAttemptStage(
-            () => this.validateEndpoint!(endpoint),
+            () => { attempt.recordStart(); return this.validateEndpoint!(endpoint); },
             attemptDeadlineMs,
             `${label} chainId validation via RPC #${index + 1}`,
           );
         }
         return this.runProviderAttemptStage(
-          () => fn(endpoint.provider),
+          () => { attempt.recordStart(); return fn(endpoint.provider); },
           attemptDeadlineMs,
           `${label} via RPC #${index + 1}`,
         );

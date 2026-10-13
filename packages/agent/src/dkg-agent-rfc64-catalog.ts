@@ -72,6 +72,7 @@ import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { noteCatalogHeadReplayFollower, sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
 import { yieldMainThread } from './main-thread-time-slice.js';
 import {
   isApprovedPrivateReplicaDelegationActive,
@@ -98,6 +99,7 @@ import {
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
+import { rfc64CatalogLookupFailedAsV1 } from './rfc64/catalog-policy-decision-probe-v1.js';
 import {
   resolveRfc64CatalogAuthorizationRosterV1,
   type AcceptRfc64CatalogAccessSnapshotInputV1,
@@ -176,9 +178,9 @@ import {
 } from './rfc64/public-catalog-activation-config-v1.js';
 import {
   Rfc64CatalogResponsibilityRegistryV1,
-  resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
+import { Rfc64CatalogResponsibilityRosterV1 } from './internal/rfc64-catalog-responsibility-roster-v1.js';
 import {
   projectRfc64CatalogTransportStateV1,
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
@@ -370,7 +372,7 @@ export interface PublishOpenAuthorCatalogSuccessorResultV1 {
   readonly kaUal: string;
   readonly inventoryRowCount: CountV1;
   readonly announcedPeers: readonly string[];
-  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
+  readonly failedPeers: AnnounceRfc64PublicCatalogHeadResultV1['failedPeers'];
 }
 
 export interface PublishAuthorCatalogSuccessorAssetResultV1 {
@@ -401,7 +403,7 @@ export interface PublishAuthorCatalogExactSetSuccessorResultV1 {
   readonly assets: readonly Readonly<PublishAuthorCatalogSuccessorAssetResultV1>[];
   readonly inventoryRowCount: CountV1;
   readonly announcedPeers: readonly string[];
-  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
+  readonly failedPeers: AnnounceRfc64PublicCatalogHeadResultV1['failedPeers'];
 }
 
 export type PublishOpenAuthorCatalogSuccessorAssetResultV1 =
@@ -1358,7 +1360,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const promisedTargets = promisedTargetsByContextGraph.get(selection.contextGraphId) ?? null;
       const targetCapacityExceeded = targetTracker
         ?.capacityExceededForContextGraph(selection.contextGraphId) ?? false;
-      const { replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets,
+      const { replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets, liveTargetsPending,
         catalogHeadDigest, expectedCatalogHeadDigest, inventoryDigest, rowCount, rowProjection,
       } = evaluateRfc64CatalogCompletionV1({
         heads, targets, promisedTargets, promisedRowCounts, replay: currentReplayProgress,
@@ -1448,9 +1450,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               ? 'blocked'
             : replayActive
               ? 'applying'
-            : pendingTargets.length > 0
+            : liveTargetsPending
               ? 'applying'
-            : legacyReadOnlyCount > 0
+            : pendingTargets.length > 0 || legacyReadOnlyCount > 0
               ? 'known-incomplete'
             : rowProjection.missingRowCount !== null
               && BigInt(rowProjection.missingRowCount) > 0n
@@ -1834,10 +1836,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: ContextGraphIdV1,
   ): Promise<EvmAddressV1 | null> {
-    if (await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
+    if (await this.hasConfirmedMetaState(contextGraphId).catch(rfc64CatalogLookupFailedAsV1(false))) {
       const delegatedAgents = new Set<EvmAddressV1>();
       const delegateePeers = await this.getContextGraphAllowedDelegateePeers(contextGraphId)
-        .catch(() => new Map<string, string[]>());
+        .catch(rfc64CatalogLookupFailedAsV1(new Map<string, string[]>()));
       for (const [agentAddress, peerIds] of delegateePeers) {
         const normalized = agentAddress.toLowerCase();
         if (
@@ -1855,7 +1857,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         const requesterState = await this.readRequesterJoinRequestState(
           contextGraphId,
           approvedAgent,
-        ).catch(() => null);
+        ).catch(rfc64CatalogLookupFailedAsV1(null));
         if (
           requesterState?.status === 'approved'
           && requesterState.curatorPeerId === remotePeerId
@@ -1864,7 +1866,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         ) {
           const current = await this.readRfc64CurrentCuratorAuthorityBindingV1(
             contextGraphId,
-          ).catch(() => null);
+          ).catch(rfc64CatalogLookupFailedAsV1(null));
           if (
             current?.agentAddress === requesterState.curatorAgentAddress
             && current.authorityEra === requesterState.curatorAuthorityEra
@@ -1881,7 +1883,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       : null;
   }
 
-  /** Read the curator-authored local roster generation from authenticated metadata. */
+  /** Read the newest curator-authored roster generation held in authenticated metadata. */
   async readRfc64PrivateRosterVersionV1(
     this: DKGAgent,
     contextGraphId: string,
@@ -1912,10 +1914,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       versions.add(lexical);
     }
-    if (versions.size !== 1) {
-      throw new Error('RFC-64 private roster metadata has conflicting generations');
-    }
-    return [...versions][0]!;
+    // The curator replaces its generation; a member's sync stores the newer one
+    // beside the one it held. Generations only advance, so the newest is current.
+    const newest = [...versions].map((version) => BigInt(version));
+    return newest.reduce((left, right) => (right > left ? right : left)).toString(10);
   }
 
   /**
@@ -2360,19 +2362,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         // chain evidence keeps precedence whenever a numeric binding exists.
         accessPolicy = this.readAcceptedRfc64CatalogAccessPolicyV1(contextGraphId);
       }
-      const privateMembershipVerified = accessPolicy === 'private'
-        && await this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId);
-      const reason = resolveRfc64CatalogResponsibilityReasonV1({
+      const roster = new Rfc64CatalogResponsibilityRosterV1({
+        contextGraphId, accessPolicy, registry, owner: this, log: this.log,
+        lifecycleSignal: this.rfc64BackgroundWorkDispatcherV1.shutdownSignal,
         nodeRole: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
-        subscribed: subscription.subscribed === true,
-        coreHosted: subscription.coreHosted === true,
-        accessPolicy,
-        privateMembershipVerified,
+        subscribed: subscription.subscribed === true, coreHosted: subscription.coreHosted === true,
+        isCurrent: () => isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision),
+        askAgain: () => this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId),
       });
-      if (!isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
-        return registry.read(contextGraphId);
-      }
-      const next = commit(reason);
+      const decision = roster.decide(accessPolicy === 'private'
+        && await roster.read(() => this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId)));
+      if (decision.keep !== undefined) return decision.keep;
+      const next = commit(decision.reason);
       if (
         finalizedAuthorityEvidence?.snapshot !== null
         && finalizedAuthorityEvidence?.snapshot !== undefined
@@ -4257,17 +4258,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           );
         },
       },
+      catalogHeadDelivery: this.rfc64CatalogHeadDeliveryPortsV1(),
       onCatalogHeadReplayRequested: (request, remotePeerId) => {
         const admission = this.tryQueueRfc64CatalogHeadReplayV1(remotePeerId, request);
         if (admission.status === 'busy') return admission;
         if (admission.newlyQueued) {
           void admission.completion
             .then((result) => {
+              // A peer that asks for a graph's catalog heads under the policy this node holds follows the graph.
+              noteCatalogHeadReplayFollower(sharedMemoryFollowersOf(this), this.rfc64PublicCatalogServiceV1?.acceptedPolicySnapshot(request.networkId, request.contextGraphId)?.policyDigest, request, remotePeerId);
               if (result.announced > 0) {
-                this.log.info(
-                  ctx,
-                  `Replayed ${result.announced} RFC-64 catalog head(s) to ${remotePeerId.slice(-8)}`,
-                );
+                this.log.info(ctx, `Replayed ${result.announced} RFC-64 catalog head(s) to ${remotePeerId.slice(-8)}`);
               }
             })
             .catch((error: unknown) => {
@@ -4305,7 +4306,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async closeRfc64PublicCatalogMutationPersistenceV1(this: DKGAgent): Promise<void> {
     try {
       await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
+      await rfc64CatalogReplaySnapshotRuntimesV1.get(this)?.runtime.whenIdle();
     } finally {
+      this.clearRfc64CatalogMutationMemoryV1();
       this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
@@ -4550,12 +4553,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     let announced = 0;
     let failed = 0;
-    const replaySnapshotRuntime = rfc64CatalogReplaySnapshotRuntimeForV1(
-      this,
-      persistence,
-      this.rfc64CatalogMutationCoordinatorV1,
-    );
-    return replaySnapshotRuntime.withSnapshot({
+    return rfc64CatalogReplaySnapshotRuntimeForV1(this, persistence, this.rfc64CatalogMutationCoordinatorV1)
+      .withSnapshot({
       selection: requestedScope === undefined
         ? Object.freeze({ kind: 'all' })
         : Object.freeze({
@@ -4563,7 +4562,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             networkId: requestedScope.networkId,
             contextGraphId: requestedScope.contextGraphId,
           }),
-      operation: async (replayEntries) => {
+      prepare: (replayEntries) => {
         const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const { head } of replayEntries) {
           const servingAuthority = this.resolveRfc64CatalogServingAuthorityV1(
@@ -4626,6 +4625,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         // where the offending scope can still be named, rather than letting
         // the encoder fail the whole response at delivery time.
         assertRfc64ReplayManifestScopesUniqueV1(manifest);
+        return manifest;
+      },
+      deliver: async (manifest) => {
         const completedManifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const announcement of manifest) {
           try {
@@ -4938,6 +4940,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       controlObjects: persistence.controlObjects,
       stageKaBundle: persistence.kaBundles.putKaBundle,
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
+      verifiedRows: this.rfc64VerifiedCatalogRowsV1(scope),
     });
     // The history read above and the production below each walk the whole set.
     await yieldMainThread();

@@ -1,6 +1,7 @@
 import type { ServerResponse } from 'node:http';
 import { recordCatchupRequest } from '../catchup-telemetry.js';
-import { jsonResponse } from '../http-utils.js';
+import { jsonResponse, respondContextGraphReadAuthorityUnavailable } from '../http-utils.js';
+import { decodeReadAuthorityAttribution } from '../read-authority-diagnostics.js';
 
 /**
  * Refuse to mint a new catch-up job because the daemon is shutting down.
@@ -31,22 +32,15 @@ export function catchupShuttingDownResponse(res: ServerResponse, includeSharedMe
 export function catchupAuthorityUnavailableResponse(
   res: ServerResponse,
   includeSharedMemory: boolean,
+  attribution?: unknown,
 ): void {
   recordCatchupRequest('authority_unavailable', includeSharedMemory);
-  return authorityUnavailableResponse(res);
+  return authorityUnavailableResponse(res, attribution);
 }
 
 /** The retryable 503 for an admission read that could not be completed. */
-export function authorityUnavailableResponse(res: ServerResponse): void {
-  return jsonResponse(
-    res,
-    503,
-    {
-      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '3' },
+export function authorityUnavailableResponse(res: ServerResponse, attribution?: unknown): void {
+  return respondContextGraphReadAuthorityUnavailable(
+    res, decodeReadAuthorityAttribution(attribution), undefined, 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
   );
 }

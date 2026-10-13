@@ -24,6 +24,11 @@ const MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS = 1_000;
 const DURABLE_CATCHUP_SETTLEMENT_GRACE_MS = 30_000;
 
 import type { CatchupPhaseProgress, CatchupPlaneCompletionEvidence } from './catchup-proof.js';
+import {
+  SelectedLaneActivationWait,
+  legacySharedMemoryLaneAllowed,
+  selectedSharedMemoryLaneActive,
+} from './catchup-selected-lane.js';
 
 export {
   addCatchupPlaneEvidence,
@@ -168,7 +173,7 @@ export interface CatchupRunRequest {
  * - `catalog-authoritative`: legacy durable sync drops a catalog-authoritative
  *   graph before sending any request (`syncFromPeerDetailed`).
  * - `selected-lane-refused`: no accepted RFC-64 public policy was active for the
- *   graph when this call started, or the recovery lease revoked the lane.
+ *   graph, also after the job's wait for one, or the recovery lease revoked it.
  */
 export type CatchupPlaneNotAttemptedReason =
   | 'catalog-authoritative'
@@ -218,24 +223,6 @@ async function legacyDurableSyncAllowed(agent: any, contextGraphId: string): Pro
   // leaves the durable plane unverified even when the curator can serve it.
   return typeof agent.rfc64PrivateRootSwmOnLegacyLaneV1 === 'function'
     && await agent.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
-}
-
-/**
- * The selected SWM lane's own admission rule: its recovery lease is current
- * only while the graph's RFC-64 recovery authority is active on the
- * `selected-public` lane (`Rfc64SwmRecoveryRuntimeV1.acquireTargetLease`).
- * An agent without the resolver leaves the decision to the lease itself.
- */
-function selectedSharedMemoryLaneActive(agent: any, contextGraphId: string): boolean {
-  if (typeof agent.resolveRfc64SwmRecoveryRuntimeAuthorityV1 !== 'function') return true;
-  const authority = agent.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId);
-  return authority?.active === true && authority.lane === 'selected-public';
-}
-
-/** Delegate ordinary SWM admission to the agent's complete lane decision. */
-async function legacySharedMemoryLaneAllowed(agent: any, contextGraphId: string): Promise<boolean> {
-  return typeof agent.canUseLegacySharedMemorySyncForContextGraphV1 === 'function'
-    && await agent.canUseLegacySharedMemorySyncForContextGraphV1(contextGraphId) === true;
 }
 
 /** `Rfc64SwmRecoveryTargetRevokedErrorV1`, thrown by a selected lane whose lease is not current. */
@@ -734,6 +721,7 @@ class WorkerCatchupRunner implements CatchupRunner {
   private readonly pendingRuns = new Map<number, PendingRun>();
   /** Set once the worker dies; every later run fails fast instead of hanging. */
   private workerFailure: Error | undefined;
+  private readonly selectedLaneWait = new SelectedLaneActivationWait();
 
   constructor(private readonly agent: DKGAgent) {
     const jsWorkerUrl = new URL('./catchup-runner-worker-impl.js', import.meta.url);
@@ -795,6 +783,7 @@ class WorkerCatchupRunner implements CatchupRunner {
   }
 
   async close(): Promise<void> {
+    this.selectedLaneWait.close();
     await this.worker.terminate();
   }
 
@@ -816,6 +805,7 @@ class WorkerCatchupRunner implements CatchupRunner {
     switch (method) {
       case 'prepareCatchup': {
         const [contextGraphId, includeSharedMemory = true] = args as [string, boolean?];
+        if (includeSharedMemory) this.selectedLaneWait.begin(contextGraphId);
         const isPrivateContextGraph = await agent.isPrivateContextGraph(contextGraphId);
         // ONE resolution, two notions. Ranking uses whatever peer is available;
         // letting one peer's answer stand for the whole graph requires the
@@ -963,14 +953,19 @@ class WorkerCatchupRunner implements CatchupRunner {
           // Checked on every call, never once per job: a first subscribe
           // commits the graph's RFC-64 authority in the background while the
           // job is still preparing, and a later peer's call must then run.
+          // The walk can be over before that commit, so the calls of a job
+          // whose graph has an accepted public policy wait for it, together
+          // and bounded (`SelectedLaneActivationWait`).
           if (!selectedSharedMemoryLaneActive(agent, contextGraphId)) {
             if (await legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
               return runLegacyFallback();
             }
-            return this.selectedLaneNotAttempted(
-              contextGraphId,
-              'has no active RFC-64 public policy',
-            );
+            if (!await this.selectedLaneWait.untilActive(agent, contextGraphId)) {
+              return this.selectedLaneNotAttempted(
+                contextGraphId,
+                'has no active RFC-64 public policy',
+              );
+            }
           }
           try {
             return await agent.syncSelectedSharedMemoryFromPeerDetailed(
