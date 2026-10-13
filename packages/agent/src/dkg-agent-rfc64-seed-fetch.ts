@@ -16,7 +16,10 @@
  * of the window is reserved for non-core peers (the author is usually an
  * edge), and each group's window rotates across attempts for one scope so
  * successive retries cover every connected peer instead of re-asking the same
- * eight cores.
+ * eight cores. The peer that served a scope's seed leads every later window
+ * for that scope: the metadata bootstrap selects from the same windows, runs
+ * once per activation or subscribe, and would otherwise be handed the window
+ * after the one that reached the author.
  *
  * Provider side: serve the seed from the keyed store. The ontology system
  * graph is consulted only as a DEPRECATED backward-compat fallback for graphs
@@ -38,6 +41,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import { rememberBounded } from './bounded-map.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -130,6 +134,18 @@ function comparePeerIds(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/** Per-agent, per-scope peer that last served the scope's seed to this node. */
+const rfc64SeedSourcePeersV1 = new WeakMap<DKGAgent, Map<string, string>>();
+
+function rememberSeedSourcePeer(agent: DKGAgent, contextGraphId: string, peerId: string): void {
+  let sources = rfc64SeedSourcePeersV1.get(agent);
+  if (sources === undefined) {
+    sources = new Map();
+    rfc64SeedSourcePeersV1.set(agent, sources);
+  }
+  rememberBounded(sources, contextGraphId, peerId, MAX_PEER_WINDOW_SCOPES_V1);
+}
+
 /** Per-agent serve-side compat state: single-flight, negative cache, one write-through per scope. */
 interface Rfc64CompatServeStateV1 {
   readonly inflight: Map<string, Promise<Uint8Array | null>>;
@@ -201,9 +217,13 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
    * dropped, capped at the fan-out bound, in this order:
    *  1. configured complete SWM providers for the scope (accepted-policy
    *     pins) that are connected right now;
-   *  2. core peers (they receive ontology durable sync and are the likeliest
+   *  2. the peer that served this scope's seed to this node, while it is
+   *     still connected: it holds the graph's authority, so it is the author
+   *     or a replica of the graph, and the rotation below would move on from
+   *     it;
+   *  3. core peers (they receive ontology durable sync and are the likeliest
    *     seed holders), deterministic order;
-   *  3. non-core peers, deterministic order.
+   *  4. non-core peers, deterministic order.
    * At least `RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1` of the
    * remaining slots go to non-cores when any are connected; each group fills
    * from the other when short. With a scope, each group's window starts at an
@@ -251,6 +271,17 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
         }
       }
     }
+    const seedSource = contextGraphId === undefined
+      ? undefined
+      : rfc64SeedSourcePeersV1.get(this)?.get(contextGraphId);
+    if (
+      seedSource !== undefined
+      && selected.length < cap
+      && admitted.has(seedSource)
+      && !selected.includes(seedSource)
+    ) {
+      selected.push(seedSource);
+    }
     const hinted = new Set(selected);
     const isCore = (peerId: string) => this.peerCapabilityRegistry?.supportsCore(peerId) === true;
     const cores: string[] = [];
@@ -262,7 +293,7 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
     cores.sort(comparePeerIds);
     nonCores.sort(comparePeerIds);
 
-    // 2./3. Reserve non-core slots, then let each group backfill the other.
+    // 3./4. Reserve non-core slots, then let each group backfill the other.
     const remaining = cap - selected.length;
     let nonCoreTake = nonCores.length === 0
       ? 0
@@ -318,6 +349,7 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
       canonicalEnvelopeBytes: fetched.seed.canonicalBytes,
       signal,
     });
+    rememberSeedSourcePeer(this, scope.contextGraphId, fetched.remotePeerId);
     this.log.info(
       createOperationContext('system'),
       `RFC-64 unregistered authority seed for ${contextGraphId} obtained from peer `

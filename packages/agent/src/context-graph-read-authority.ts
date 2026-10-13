@@ -47,10 +47,11 @@ interface ContextGraphReadAuthorityDecisionFields {
   registration?: 'unregistered';
 }
 
-/** An authoritative answer: the read is allowed or denied. */
-export interface SettledContextGraphReadAuthorityDecision extends ContextGraphReadAuthorityDecisionFields {
-  outcome: 'allowed' | 'denied';
-}
+/** Authoritative grants and refusals cannot convey contradictory scope. */
+export type SettledContextGraphReadAuthorityDecision = ContextGraphReadAuthorityDecisionFields & (
+  | { outcome: 'allowed'; grantScope: 'public' | 'caller' | 'node' }
+  | { outcome: 'denied'; grantScope: 'none' }
+);
 
 /** No authority source could answer; `dependency` says which one could not. */
 export interface UnavailableContextGraphReadAuthorityDecision extends ContextGraphReadAuthorityDecisionFields {
@@ -63,6 +64,24 @@ export interface UnavailableContextGraphReadAuthorityDecision extends ContextGra
 export type ContextGraphReadAuthorityDecision =
   | SettledContextGraphReadAuthorityDecision
   | UnavailableContextGraphReadAuthorityDecision;
+
+/** Caller admission is distinct from a node-scoped graph grant. */
+export type ContextGraphCallerReadAdmission =
+  | { readonly outcome: 'admitted'; readonly decision: Extract<SettledContextGraphReadAuthorityDecision, { outcome: 'allowed' }> }
+  | { readonly outcome: 'refused'; readonly decision: SettledContextGraphReadAuthorityDecision }
+  | { readonly outcome: 'unavailable'; readonly decision: UnavailableContextGraphReadAuthorityDecision };
+
+export function admitContextGraphReadCaller(
+  decision: ContextGraphReadAuthorityDecision,
+  callerAgentAddress: string | undefined,
+): ContextGraphCallerReadAdmission {
+  if (decision.outcome === 'unavailable') return { outcome: 'unavailable', decision };
+  if (decision.outcome === 'denied' || (callerAgentAddress !== undefined
+    && decision.grantScope !== 'caller' && decision.grantScope !== 'public')) {
+    return { outcome: 'refused', decision };
+  }
+  return { outcome: 'admitted', decision };
+}
 
 interface ScopedContextGraphQueryReadAuthorityInput {
   contextGraphId: string;
@@ -101,7 +120,7 @@ export async function resolveScopedContextGraphQueryReadAuthority(
     && input.readCurrentBinding(input.contextGraphId)?.onChainId === undefined
     && input.readCurrentBinding(input.contextGraphId)?.pendingMeta !== true
   ) {
-    return { ...authority, outcome: 'allowed', reason: 'local-first-working-memory-owner' };
+    return { ...authority, outcome: 'allowed', grantScope: input.callerAgentAddress ? 'caller' : 'node', reason: 'local-first-working-memory-owner' };
   }
   return authority;
 }
@@ -163,19 +182,19 @@ export interface ContextGraphReadAuthorityInput {
   getLocalIdentityId(): Promise<bigint>;
 }
 
-const decision = (
-  outcome: SettledContextGraphReadAuthorityDecision['outcome'],
-  source: ContextGraphReadAuthoritySource,
-  reason: string,
-  onChainId?: bigint,
-  metadataBootstrap: 'eligible' | 'forbidden' = outcome === 'denied' ? 'forbidden' : 'eligible',
-): SettledContextGraphReadAuthorityDecision => ({
-  outcome,
-  source,
-  reason,
-  metadataBootstrap,
-  ...(onChainId === undefined ? {} : { onChainId }),
-});
+function allowedDecision(
+  fields: ContextGraphReadAuthorityDecisionFields & { grantScope: 'public' | 'caller' | 'node' },
+): SettledContextGraphReadAuthorityDecision {
+  return { ...fields, outcome: 'allowed' };
+}
+
+function deniedDecision(
+  fields: Omit<ContextGraphReadAuthorityDecisionFields, 'metadataBootstrap'> & {
+    metadataBootstrap?: ContextGraphReadAuthorityDecisionFields['metadataBootstrap'];
+  },
+): SettledContextGraphReadAuthorityDecision {
+  return { ...fields, outcome: 'denied', grantScope: 'none', metadataBootstrap: fields.metadataBootstrap ?? 'forbidden' };
+}
 
 /** The one way to build an unavailable decision, so every one names its dependency. */
 export function unavailableContextGraphReadAuthorityDecision(
@@ -215,7 +234,7 @@ export async function resolveContextGraphReadAuthorityResolution(
   input: ContextGraphReadAuthorityInput,
 ): Promise<ContextGraphReadAuthorityResolution> {
   if (input.isSystemContextGraph) {
-    return { decision: decision('allowed', 'system', 'system-context-graph') };
+    return { decision: allowedDecision({ source: 'system', reason: 'system-context-graph', metadataBootstrap: 'eligible', grantScope: 'public' }) };
   }
 
   let registeredAuthority: RegisteredContextGraphAuthority;
@@ -255,7 +274,7 @@ async function resolveReadAuthorityFromRegistration(
     );
   }
   if (registeredAuthority.kind === 'public') {
-    return decision('allowed', 'registered-chain', 'chain-public', registeredAuthority.onChainId);
+    return allowedDecision({ source: 'registered-chain', reason: 'chain-public', onChainId: registeredAuthority.onChainId, metadataBootstrap: 'eligible', grantScope: 'public' });
   }
   if (registeredAuthority.kind === 'private') {
     const onChainAgents = registeredAuthority.participantAgents;
@@ -263,7 +282,7 @@ async function resolveReadAuthorityFromRegistration(
       ? input.isAgentAllowed(input.callerAgentAddress, onChainAgents)
       : input.hasLocalAgentInRoster(onChainAgents);
     if (!agentAllowed) {
-      return decision('denied', 'registered-chain', 'agent-not-in-chain-roster', registeredAuthority.onChainId);
+      return deniedDecision({ source: 'registered-chain', reason: 'agent-not-in-chain-roster', onChainId: registeredAuthority.onChainId });
     }
     let allowedPeers: string[] | null;
     try {
@@ -277,9 +296,9 @@ async function resolveReadAuthorityFromRegistration(
       );
     }
     if (allowedPeers !== null && !allowedPeers.includes(input.getPeerId())) {
-      return decision('denied', 'registered-chain', 'local-peer-not-allowed', registeredAuthority.onChainId);
+      return deniedDecision({ source: 'registered-chain', reason: 'local-peer-not-allowed', onChainId: registeredAuthority.onChainId });
     }
-    return decision('allowed', 'registered-chain', 'chain-participant', registeredAuthority.onChainId);
+    return allowedDecision({ source: 'registered-chain', reason: 'chain-participant', onChainId: registeredAuthority.onChainId, metadataBootstrap: 'eligible', grantScope: input.callerAgentAddress ? 'caller' : 'node' });
   }
 
   const approvedPrivateReplica = registeredAuthority.approvedPrivateReplicaAuthority;
@@ -287,18 +306,18 @@ async function resolveReadAuthorityFromRegistration(
     ?? input.resolveRfc64PrivateRoster();
   if (rfc64Roster !== undefined) {
     if (rfc64Roster === null) {
-      return decision('denied', 'rfc64-private', 'invalid-private-policy-roster');
+      return deniedDecision({ source: 'rfc64-private', reason: 'invalid-private-policy-roster' });
     }
     const effectiveCaller = input.callerAgentAddress
       ?? approvedPrivateReplica?.approvedAgentAddress
       ?? input.rfc64LocalAgentAddress
       ?? input.defaultAgentAddress;
     return input.isAgentAllowed(effectiveCaller, rfc64Roster)
-      ? decision('allowed', 'rfc64-private', 'rfc64-participant')
-      : decision('denied', 'rfc64-private', 'agent-not-in-rfc64-roster');
+      ? allowedDecision({ source: 'rfc64-private', reason: 'rfc64-participant', metadataBootstrap: 'eligible', grantScope: input.callerAgentAddress ? 'caller' : 'node' })
+      : deniedDecision({ source: 'rfc64-private', reason: 'agent-not-in-rfc64-roster' });
   }
   if (input.hasAcceptedRfc64PublicPolicy) {
-    return decision('allowed', 'rfc64-public', 'accepted-public-policy');
+    return allowedDecision({ source: 'rfc64-public', reason: 'accepted-public-policy', metadataBootstrap: 'eligible', grantScope: 'public' });
   }
 
   // A durable join approval may restore a minimal subscription row before its
@@ -315,7 +334,7 @@ async function resolveReadAuthorityFromRegistration(
   } catch (error) {
     return unavailable('legacy-local', 'local-access-policy-unavailable', contextGraphReadAuthorityDependencyOf(error));
   }
-  if (!isPrivate) return decision('allowed', 'legacy-local', 'local-public');
+  if (!isPrivate) return allowedDecision({ source: 'legacy-local', reason: 'local-public', metadataBootstrap: 'eligible', grantScope: 'public' });
 
   let allowedPeers: string[] | null;
   try {
@@ -338,13 +357,13 @@ async function resolveReadAuthorityFromRegistration(
 
   if (agentGateAddresses !== null && allowedPeers !== null) {
     return allowedPeers.includes(input.getPeerId()) && agentGateAllowed
-      ? decision('allowed', 'legacy-local', 'local-agent-and-peer-allowlist')
-      : decision('denied', 'legacy-local', 'local-agent-or-peer-not-allowed');
+      ? allowedDecision({ source: 'legacy-local', reason: 'local-agent-and-peer-allowlist', metadataBootstrap: 'eligible', grantScope: input.callerAgentAddress ? 'caller' : 'node' })
+      : deniedDecision({ source: 'legacy-local', reason: 'local-agent-or-peer-not-allowed' });
   }
   if (agentGateAddresses !== null) {
     return agentGateAllowed
-      ? decision('allowed', 'legacy-local', 'local-agent-allowlist')
-      : decision('denied', 'legacy-local', 'local-agent-not-allowed');
+      ? allowedDecision({ source: 'legacy-local', reason: 'local-agent-allowlist', metadataBootstrap: 'eligible', grantScope: input.callerAgentAddress ? 'caller' : 'node' })
+      : deniedDecision({ source: 'legacy-local', reason: 'local-agent-not-allowed' });
   }
 
   let participants: string[] | null;
@@ -359,13 +378,13 @@ async function resolveReadAuthorityFromRegistration(
   }
   if ((!participants || participants.length === 0) && allowedPeers !== null) {
     return allowedPeers.includes(input.getPeerId())
-      ? decision('allowed', 'legacy-local', 'legacy-peer-allowlist')
-      : decision('denied', 'legacy-local', 'legacy-peer-not-allowed');
+      ? allowedDecision({ source: 'legacy-local', reason: 'legacy-peer-allowlist', metadataBootstrap: 'eligible', grantScope: 'node' })
+      : deniedDecision({ source: 'legacy-local', reason: 'legacy-peer-not-allowed' });
   }
   if (!participants || participants.length === 0) {
     return input.allowSubscriptionFallback && input.hasLegacySubscription
-      ? decision('allowed', 'legacy-local', 'legacy-subscription')
-      : decision('denied', 'legacy-local', 'no-read-authority', undefined, 'eligible');
+      ? allowedDecision({ source: 'legacy-local', reason: 'legacy-subscription', metadataBootstrap: 'eligible', grantScope: 'node' })
+      : deniedDecision({ source: 'legacy-local', reason: 'no-read-authority', metadataBootstrap: 'eligible' });
   }
   if (
     input.callerAgentAddress
@@ -373,7 +392,7 @@ async function resolveReadAuthorityFromRegistration(
       participant.toLowerCase() === input.callerAgentAddress!.toLowerCase()
     ))
   ) {
-    return decision('allowed', 'legacy-local', 'legacy-caller-participant');
+    return allowedDecision({ source: 'legacy-local', reason: 'legacy-caller-participant', metadataBootstrap: 'eligible', grantScope: 'caller' });
   }
   if (
     input.defaultAgentAddress
@@ -381,7 +400,7 @@ async function resolveReadAuthorityFromRegistration(
       participant.toLowerCase() === input.defaultAgentAddress!.toLowerCase()
     ))
   ) {
-    return decision('allowed', 'legacy-local', 'legacy-local-agent-participant');
+    return allowedDecision({ source: 'legacy-local', reason: 'legacy-local-agent-participant', metadataBootstrap: 'eligible', grantScope: 'node' });
   }
 
   let localIdentityId = 0n;
@@ -392,17 +411,17 @@ async function resolveReadAuthorityFromRegistration(
     // positive participant or peer fact into a denial, but supplies no allow.
   }
   if (localIdentityId > 0n && participants.includes(String(localIdentityId))) {
-    return decision('allowed', 'legacy-local', 'legacy-local-identity-participant');
+    return allowedDecision({ source: 'legacy-local', reason: 'legacy-local-identity-participant', metadataBootstrap: 'eligible', grantScope: 'node' });
   }
   if (allowedPeers?.includes(input.getPeerId())) {
-    return decision('allowed', 'legacy-local', 'legacy-peer-invitation');
+    return allowedDecision({ source: 'legacy-local', reason: 'legacy-peer-invitation', metadataBootstrap: 'eligible', grantScope: 'node' });
   }
   if (
     localIdentityId === 0n
     && input.allowSubscriptionFallback
     && input.hasLegacySubscription
   ) {
-    return decision('allowed', 'legacy-local', 'legacy-edge-subscription');
+    return allowedDecision({ source: 'legacy-local', reason: 'legacy-edge-subscription', metadataBootstrap: 'eligible', grantScope: 'node' });
   }
-  return decision('denied', 'legacy-local', 'legacy-participant-not-allowed');
+  return deniedDecision({ source: 'legacy-local', reason: 'legacy-participant-not-allowed' });
 }

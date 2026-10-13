@@ -17,25 +17,13 @@ import type {
   UnavailableContextGraphReadAuthorityDecision,
 } from '../context-graph-read-authority.js';
 import { ContextGraphNotFoundError } from '../dkg-agent-types.js';
-
-/**
- * On a current-state read these reasons only come from a chain read that
- * timed out or that the transport rejected. `chain-access-policy-unknown` is
- * absent on purpose: there the chain answered, and the answer is final.
- */
-const UNANSWERED_CHAIN_READ_REASONS: ReadonlySet<string> = new Set([
-  'chain-access-policy-timeout',
-  'chain-access-policy-unavailable',
-  'chain-participant-authority-unavailable',
-]);
+import { isUnansweredChainReadAuthorityDecision } from './context-graph-authority/unanswered-authority-read.js';
 
 /** Whether the decision is "no answer from the chain" rather than a refusal. */
 export function isUnansweredVmReconcileReadAuthority(
   decision: ContextGraphReadAuthorityDecision | undefined,
 ): decision is UnavailableContextGraphReadAuthorityDecision {
-  return decision?.outcome === 'unavailable'
-    && decision.dependency === 'chain'
-    && UNANSWERED_CHAIN_READ_REASONS.has(decision.reason);
+  return isUnansweredChainReadAuthorityDecision(decision);
 }
 
 /**

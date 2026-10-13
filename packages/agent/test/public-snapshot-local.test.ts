@@ -310,6 +310,16 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       current: true,
     });
     expect(rpcReads).toHaveBeenCalledTimes(2);
+    // Re-authenticate through ordinary RPC exact sync after snapshot import. Replacing
+    // the snapshot receipt must leave the canonical partition route discoverable.
+    const replayUal = `did:dkg:evm:31337/${signer.address.toLowerCase()}/3`;
+    await rpcReceiver.syncExactKnowledgeAssetsFromPeerDetailed(core.peerId, graph, [replayUal], {
+      exactRecoveryTransportMode: 'legacy',
+    });
+    const replayed = await rpcReceiver.query('SELECT ?entity WHERE {?entity a <http://schema.org/Thing>}', {
+      contextGraphId: graph, view: 'verifiable-memory',
+    });
+    expect(replayed.bindings).toEqual([{entity:'urn:entity:3'}]);
     const entities = await core.findEntitiesByType(rpcReceiver.peerId, graph, 'http://schema.org/Thing');
     expect(entities).toMatchObject({status:'OK',entityUris:['urn:entity:3']});
     console.log(

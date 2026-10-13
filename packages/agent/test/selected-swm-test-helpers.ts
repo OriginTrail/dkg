@@ -572,6 +572,8 @@ ProductionSelectedSyncSharedMemoryOptions,
 > & {
   requestedScope?: TestSelectedSharedMemoryRequestedScope;
   recoveryTargets?: readonly Rfc64SwmRecoveryTargetV1[];
+  /** The peer this round asks; defaults to the harness's one provider. */
+  remotePeerId?: string;
 };
 
 type ProductionSyncSharedMemoryOptions = Parameters<
@@ -604,7 +606,7 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
     ids: string[],
     syncOptions: ProductionSelectedSyncSharedMemoryOptions,
   ) => Promise<SelectedSharedMemorySyncResult>;
-  const { requestedScope, recoveryTargets, ...productionOptions } = options;
+  const { requestedScope, recoveryTargets, remotePeerId, ...productionOptions } = options;
   const targets = testRecoveryTargets(contextGraphIds, recoveryTargets);
   const exactRequestedScope: SelectedSharedMemoryRequestedScope = requestedScope?.kind
     === 'rfc64-recovery-plan'
@@ -624,7 +626,7 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
         ),
       ),
     };
-  return method.call(agent, PEER, contextGraphIds, {
+  return method.call(agent, remotePeerId ?? PEER, contextGraphIds, {
     ...productionOptions,
     requestedScope: exactRequestedScope,
   });

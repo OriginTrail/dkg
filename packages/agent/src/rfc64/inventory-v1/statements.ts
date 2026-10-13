@@ -315,6 +315,16 @@ FROM rfc64_swm_author_inventory_rows_v1
 WHERE inventory_scope_digest = :scope
   AND author_address = :author;`,
 
+  getSwmAuthorRow: `
+SELECT ka_ual, assertion_coordinate, assertion_version_u64be,
+       share_operation_id, projection_digest, public_triple_count_u64be,
+       private_triple_count_u64be, seal_digest, shared_at_u64be,
+       expires_at_u64be
+FROM rfc64_swm_author_inventory_rows_v1
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author
+  AND ka_ual = :kaUal;`,
+
   insertSwmAuthorHead: `
 INSERT INTO rfc64_swm_author_inventory_heads_v1 (
   inventory_scope_digest, author_address, current_head_digest,
@@ -437,6 +447,7 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   deleteStagedHead: 'rfc64.staged-head.delete.v1',
   getSwmAuthorHead: 'rfc64.swm-author-inventory.head.get.v1',
   getSwmAuthorRows: 'rfc64.swm-author-inventory.rows.get.v1',
+  getSwmAuthorRow: 'rfc64.swm-author-inventory.row.get.v1',
   insertSwmAuthorHead: 'rfc64.swm-author-inventory.head.insert.v1',
   updateSwmAuthorHeadCas: 'rfc64.swm-author-inventory.head.cas-update.v1',
   upsertSwmAuthorRow: 'rfc64.swm-author-inventory.row.upsert.v1',
@@ -470,6 +481,7 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'getStagedHead',
   'getSwmAuthorHead',
   'getSwmAuthorRows',
+  'getSwmAuthorRow',
   'listFinalizedPrivatePlacementRepairs',
   'getUnregisteredAuthoritySeed',
 ] as const satisfies readonly InventoryV1StatementKey[]);
