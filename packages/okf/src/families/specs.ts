@@ -116,6 +116,11 @@ export interface MappingFamilySpec extends FamilyBase {
    * last-modified time exports as the legacy `timestamp` instead.
    */
   readonly presentWith?: readonly string[];
+  /**
+   * §13.1: when the family is not there (`presentWith`), this field reads
+   * back under the legacy `key` instead: `generated.at` as `timestamp`.
+   */
+  readonly legacy?: { readonly field: string; readonly key: string };
 }
 
 /** A list of entries, one skolemized node each: `verified`, `sources`, `parameters`. */
@@ -148,6 +153,7 @@ export const GENERATED: MappingFamilySpec = {
   shape: 'mapping',
   shapeNote: 'must be a `{ by, at }` mapping (§5.2); preserved verbatim',
   presentWith: ['by'],
+  legacy: { field: 'at', key: 'timestamp' },
   fields: [
     { key: 'by', predicate: OKF_GENERATED_BY, kind: 'actor', requiredNote: 'is required within `generated` (§5.2)', omitWhenBlank: true },
     { key: 'at', predicate: SCHEMA_DATE_MODIFIED, kind: 'date' },

@@ -574,10 +574,47 @@ describe('family definitions drive both directions', () => {
       const quads = familyQuads('urn:okf:m', key, SAMPLES[key], ctx).quads;
       const bySubject = new Map<string, Quad[]>();
       for (const q of quads) bySubject.set(q.subject, [...(bySubject.get(q.subject) ?? []), q]);
-      const decoded = decodeFamilies(bySubject.get('urn:okf:m') ?? [], (n) => bySubject.get(n) ?? [], decodeCtx);
-      expect(decoded[key]).toEqual(SAMPLES[key]);
+      const conceptQuads = bySubject.get('urn:okf:m') ?? [];
+      const decoded = decodeFamilies(conceptQuads, (n) => bySubject.get(n) ?? [], decodeCtx);
+      expect(decoded.frontmatter[key]).toEqual(SAMPLES[key]);
+      // It owns every concept quad of the family but the derived ones, so the
+      // exporter reads none of them as a producer key.
+      const derived = new Set([OKF_TRUST_TIER, PROV_WAS_DERIVED_FROM]);
+      expect(conceptQuads.filter((q) => !decoded.consumed.has(q) && !derived.has(q.predicate))).toEqual([]);
     });
   }
+});
+
+describe('the family decoder owns what the encoder keeps for a family', () => {
+  const decodeCtx = { iriBase: 'urn:okf:', conceptIris: new Set(['urn:okf:metrics/revenue']) };
+  const conceptQuads = (yaml: string) => {
+    const { c } = conceptOf(bundle(`type: Metric\n${yaml}`));
+    return c.quads.filter((q) => q.subject === c.iri);
+  };
+  const usageWindow = SCHEMA_NS + 'usageWindow';
+
+  it('reads a list kept verbatim back under the family key and consumes it', () => {
+    const quads = conceptQuads('usage_window: [{ from: 2026-06-01T00:00:00Z }]');
+    const decoded = decodeFamilies(quads, () => [], decodeCtx);
+    expect(decoded.frontmatter.usage_window).toEqual([{ from: '2026-06-01T00:00:00Z' }]);
+    expect(quads.filter((q) => q.predicate === usageWindow).every((q) => decoded.consumed.has(q))).toBe(true);
+  });
+
+  it('leaves a single value on the same predicate to the exporter, as the producer key it also is', () => {
+    for (const yaml of ['usage_window: Q2', 'usageWindow: Q2']) {
+      const quads = conceptQuads(yaml);
+      const decoded = decodeFamilies(quads, () => [], decodeCtx);
+      expect('usage_window' in decoded.frontmatter).toBe(false);
+      expect(quads.some((q) => q.predicate === usageWindow && decoded.consumed.has(q))).toBe(false);
+    }
+  });
+
+  it('reads a lone generated.at back as the legacy timestamp and consumes it', () => {
+    const quads = conceptQuads('generated: { at: 2026-06-30T00:00:00Z }');
+    const decoded = decodeFamilies(quads, () => [], decodeCtx);
+    expect(decoded.frontmatter).toEqual({ timestamp: '2026-06-30T00:00:00Z' });
+    expect(quads.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED).every((q) => decoded.consumed.has(q))).toBe(true);
+  });
 });
 
 describe('a nested family of the wrong shape is kept through export', () => {
