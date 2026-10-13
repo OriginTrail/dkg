@@ -133,7 +133,7 @@ export function mapFrontmatter(
 function prepareFrontmatter(iri: string, frontmatter: Record<string, unknown>, conceptId: string): PreparedQuad[] {
   const out: PreparedQuad[] = [];
   // v0.2 `generated.at` supersedes the v0.1 `timestamp` (§13.1).
-  const generatedAt = isMapping(frontmatter.generated) ? dateTimeLexical(frontmatter.generated.at) : null;
+  const generatedAt = generatedAtOf(frontmatter);
 
   for (const [key, value] of Object.entries(frontmatter)) {
     if (value === null || value === undefined) continue;
@@ -186,6 +186,15 @@ function resolveFrontmatter(iri: string, prepared: readonly PreparedQuad[], ctx:
   return { quads: dedupeQuads(r.quads), derivedFromConcepts: [...new Set(r.derivedFromConcepts)].sort(), warnings: r.warnings };
 }
 
+/**
+ * `generated.at` when it gives a last-modified time, which then supersedes the
+ * v0.1 `timestamp` (§13.1); a blank one is missing (§11) and does not.
+ */
+function generatedAtOf(frontmatter: Record<string, unknown>): string | null {
+  const at = isMapping(frontmatter.generated) ? frontmatter.generated.at : undefined;
+  return isBlank(at) ? null : dateTimeLexical(at);
+}
+
 /** Quads-only view of `mapFrontmatter` (kept for API compatibility). */
 export function frontmatterQuads(
   iri: string,
@@ -203,7 +212,7 @@ export function summarizeTrust(
   const generated = isMapping(frontmatter.generated) ? frontmatter.generated : null;
   const by = generated?.by;
   const generatedBy = isScalar(by) && !isBlank(by) ? safeString(by).trim() : null;
-  const generatedAt = (generated ? dateTimeLexical(generated.at) : null) ?? dateTimeLexical(frontmatter.timestamp);
+  const generatedAt = generatedAtOf(frontmatter) ?? dateTimeLexical(frontmatter.timestamp);
   // The same parses the RDF mapping uses, so the counts match the nodes minted.
   const { events } = parseVerified(frontmatter.verified);
   const sources = parseList(SOURCES, frontmatter.sources).entries.filter((e) => e.mapping !== null).length;

@@ -118,7 +118,9 @@ export interface MappingFamilySpec extends FamilyBase {
   readonly presentWith?: readonly string[];
   /**
    * §13.1: when the family is not there (`presentWith`), this field reads
-   * back under the legacy `key` instead: `generated.at` as `timestamp`.
+   * back under the legacy `key` instead: `generated.at` as `timestamp`. When
+   * the concept also keeps a producer value under that key (which only this
+   * field makes), the field reads back inside the family instead.
    */
   readonly legacy?: { readonly field: string; readonly key: string };
 }

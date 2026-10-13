@@ -258,6 +258,11 @@ it; the CLI summary reports it against the current time.
 - **Both `timestamp` and `generated` present.** Unusual (a migration leftover).
   `generated.at` → `schema:dateModified`; `timestamp` → `schema:timestamp` (the
   node extractor's own slug for that key), preserved and exported verbatim.
+  Export writes both back even when `generated` has no `by`: since only a
+  `generated.at` makes `timestamp` a producer key, the lone `at` is then
+  written inside `generated`, not as the legacy `timestamp`, so neither date
+  replaces the other. A blank `generated.at` is missing (§11) and does not
+  supersede the `timestamp`.
 - **Nested producer values are `rdf:JSON`.** A mapping-valued producer key (e.g.
   the `not:` extension in `acme_retail`) is carried as
   `"…"^^rdf:JSON` so it exports back as an object; previously it degraded to a

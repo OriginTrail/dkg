@@ -16,6 +16,7 @@ import {
   SCHEMA_NAME,
   SCHEMA_URL,
   SECTION_GENID_INFIX,
+  SCHEMA_DATE_MODIFIED,
   XSD_DATE,
   okfExtensionPredicate,
 } from '../src/index.js';
@@ -514,5 +515,52 @@ describe('a family value of the wrong shape is kept whole through export and re-
       expect(Object.keys(fm)).toEqual(['type', 'usageWindow']);
       expect(first.warnings).toEqual([]);
     }
+  });
+});
+
+describe('a last-modified time and a legacy timestamp both survive a round trip', () => {
+  // `generated.at` supersedes the v0.1 `timestamp` (§13.1), which is then kept
+  // as a producer key: export must write both back, so neither date replaces
+  // the other, while a concept with only a last-modified time keeps the
+  // legacy `timestamp` key.
+  const roundTrip = (yaml: string) => {
+    const files = bundle(`type: Metric\n${yaml}`);
+    const first = importBundle(files);
+    const second = importBundle(exportBundle(first));
+    return { files, first, second };
+  };
+  const messages = (r: ReturnType<typeof importBundle>) => r.warnings.map((w) => w.message);
+
+  for (const [name, at, timestamp] of [
+    ['a quoted timestamp', '2026-06-30T00:00:00Z', "'2026-01-01T00:00:00Z'"],
+    ['an unquoted timestamp', '2026-06-30T00:00:00Z', '2026-01-01T00:00:00Z'],
+    ['an invalid generated.at', 'soon', "'2026-01-01T00:00:00Z'"],
+  ]) {
+    it(`keeps generated.at and the timestamp beside it, with ${name}`, () => {
+      const { files, first, second } = roundTrip(`generated: { at: ${at} }\ntimestamp: ${timestamp}`);
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      expect(messages(second)).toEqual(messages(first));
+      const fm = exportedFrontmatter(files);
+      expect(Object.keys(fm.generated as object)).toEqual(['at']);
+      expect('timestamp' in fm).toBe(true);
+    });
+  }
+
+  it('still writes a lone last-modified time as the legacy timestamp', () => {
+    for (const yaml of ["timestamp: '2026-05-28T22:44:47+00:00'", 'generated: { at: 2026-06-30T00:00:00Z }']) {
+      const { files, first, second } = roundTrip(yaml);
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      const fm = exportedFrontmatter(files);
+      expect('generated' in fm).toBe(false);
+      expect('timestamp' in fm).toBe(true);
+    }
+  });
+
+  it('reads a blank generated.at as missing, so the timestamp beside it is the last-modified time', () => {
+    const { first, second } = roundTrip("generated: { at: '' }\ntimestamp: '2026-01-01T00:00:00Z'");
+    const c = first.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(objs(c.quads, SCHEMA_DATE_MODIFIED)).toEqual([DT('2026-01-01T00:00:00Z')]);
+    expect(c.trust.generatedAt).toBe('2026-01-01T00:00:00Z');
+    expect(semantic(second.quads)).toBe(semantic(first.quads));
   });
 });

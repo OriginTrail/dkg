@@ -201,9 +201,20 @@ export function decodeFamilies(
         }
         const kept = keptVerbatim(spec, conceptQuads, ctx, 'concept');
         if (kept) put(spec.key, kept);
-        // Without the family, a legacy field reads back under its legacy key (§13.1).
+        // Without the family, a legacy field reads back under its legacy key
+        // (§13.1), unless the concept keeps a value of its own under that key:
+        // only the family's field makes one (`generated.at` supersedes
+        // `timestamp`, which is then a producer key), so the field reads back
+        // inside the family and neither value overwrites the other.
         const legacy = spec.legacy;
-        if (legacy && legacy.field in decoded.fields) put(legacy.key, { value: decoded.fields[legacy.field], quads: decoded.quads });
+        if (legacy && legacy.field in decoded.fields) {
+          const keyTaken = conceptQuads.some((q) => q.predicate === genericPredicate(legacy.key));
+          if (keyTaken && !(spec.key in frontmatter)) {
+            put(spec.key, { value: orderKeys(decoded.value, spec.fields.map((f) => f.key)), quads: decoded.quads });
+          } else {
+            put(legacy.key, { value: decoded.fields[legacy.field], quads: decoded.quads });
+          }
+        }
         break;
       }
       case 'list': {

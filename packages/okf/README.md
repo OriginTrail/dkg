@@ -124,7 +124,9 @@ rebuilt in their original order; derived triples (`okf:trustTier`,
 `prov:wasDerivedFrom`) are not written back and are re-derived on the next
 import. A concept that only carries a last-modified time (a v0.1 import) is
 written with the legacy `timestamp` key — `generated` requires a `by` actor and
-the exporter never invents provenance. A graph keeps no order, so export
+the exporter never invents provenance. When a legacy `timestamp` was kept
+beside a `generated.at`, both are written back, the `at` inside `generated`,
+so neither date replaces the other. A graph keeps no order, so export
 depends only on which triples it holds: entry order is restored from the node
 IRIs (a skipped entry takes no number, so they are the same after a round
 trip), and everything else is written in a canonical order, so two stores holding
