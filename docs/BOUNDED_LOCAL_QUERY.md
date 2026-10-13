@@ -36,7 +36,7 @@ also remains subject to the existing small-body limit). Nested SELECTs remain
 subject to the existing scope guards, including refusal of nested GRAPH
 variables that cannot be safely constrained.
 
-The route appends `LIMIT maxRows + 1` as an overflow witness. The maximum is
+The route inserts `LIMIT maxRows + 1` before any trailing `VALUES` as an overflow witness. The maximum is
 8,192 returned rows and 1 MiB of serialized result data. An over-limit result
 returns 422 `QUERY_RESULT_TOO_LARGE` in the default `mode: "complete"`,
 never a successful truncated decision. HTTP
@@ -46,7 +46,8 @@ returns. Metadata discovery and backend query planning still have their normal
 resource behavior; this is not a bound on all internal working memory.
 
 Browsing uses explicit `mode: "page"` with an integer `offset` from 0 to
-1,000,000 and a deterministic ORDER BY. It returns at most `maxRows` rows,
+1,000,000 and a top-level ORDER BY, which the route requires. Callers must choose
+a deterministic ordering with enough tie-breakers to uniquely order rows. It returns at most `maxRows` rows,
 `pageComplete: true`, `hasMore`, `offset` and `nextOffset`; `resultComplete` is
 always **false**. The extra row is only a continuation witness. A byte-bound
 failure still returns an error. Decision consumers must use complete mode and
