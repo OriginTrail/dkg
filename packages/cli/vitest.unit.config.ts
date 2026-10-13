@@ -293,6 +293,9 @@ export default defineConfig({
           'test/knowledge-asset-cli-smoke.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
+          // Pure `dkg okf` helpers: import summary, --relate parsing, graph →
+          // exporter-input reconstruction. No daemon.
+          'test/okf-helpers.test.ts',
           'test/okf-subgraph-roundtrip.test.ts',
           'test/okf-scoped-verify.test.ts',
           'test/epcis-route-readiness.test.ts',

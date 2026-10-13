@@ -187,10 +187,20 @@ describe('§5.4 / §5.5 status and stale_after', () => {
     expect(objs(c.quads, OKF_STALE_AFTER)).toEqual(['"next quarter"']);
     const msgs = r.warnings.map((w) => w.message).join('\n');
     expect(msgs).toMatch(/"retired" is not one of draft \| stable \| deprecated/);
-    expect(msgs).toMatch(/stale_after` "next quarter" is not an ISO 8601 datetime/);
+    expect(msgs).toMatch(/stale_after` "next quarter" is not a valid ISO 8601 datetime/);
     const report = validateBundle(files);
     expect(report.conformant).toBe(true);
     expect(report.warnings.join('\n')).toMatch(/retired/);
+  });
+  it('keeps an impossible calendar value as a plain literal with a warning (never a bogus xsd:dateTime)', () => {
+    const files = bundle("type: Metric\nstale_after: '2026-02-30T00:00:00Z'");
+    const { c, r } = conceptOf(files);
+    expect(objs(c.quads, OKF_STALE_AFTER)).toEqual(['"2026-02-30T00:00:00Z"']);
+    expect(r.warnings.map((w) => w.message).join('\n')).toMatch(/stale_after` "2026-02-30T00:00:00Z" is not a valid ISO 8601 datetime/);
+    expect(validateBundle(files).warnings.join('\n')).toMatch(/2026-02-30/);
+    // a well-formed value is typed, and the same instant is not reported stale by an impossible one
+    const ok = conceptOf(bundle("type: Metric\nstale_after: '2026-02-28T00:00:00Z'")).c;
+    expect(objs(ok.quads, OKF_STALE_AFTER)).toEqual([DT('2026-02-28T00:00:00Z')]);
   });
   it('warns when a timestamp lacks the explicit UTC offset OKF requires', () => {
     const { r } = conceptOf(bundle("type: Metric\nstale_after: '2026-12-31T00:00:00'"));
@@ -384,6 +394,58 @@ describe('§10 attested computations', () => {
   it('warns on a computation path that looks like a concept but is missing', () => {
     const { r } = conceptOf(bundle('type: Attested Computation\nruntime: dbt\ncomputation: /computations/missing.md'));
     expect(r.warnings.some((w) => w.code === 'broken-link' && /computation "\/computations\/missing\.md"/.test(w.message))).toBe(true);
+  });
+});
+
+describe('export only rewrites IRIs that are exported concepts', () => {
+  // With a custom iriBase the namespace alone does not identify a concept:
+  // an external https://example.org/docs/external must survive verbatim.
+  const BASE = 'https://example.org/';
+  const files: BundleFile[] = [
+    { path: 'index.md', content: '---\nokf_version: "0.2"\n---\n\n# Root\n' },
+    {
+      path: 'metric.md',
+      content: [
+        '---',
+        'type: Attested Computation',
+        'runtime: bigquery',
+        'computation: https://example.org/sql/revenue.sql',
+        'executor: { resource: https://example.org/skills/run.md }',
+        'attester: { resource: /policy.md }',
+        'sources:',
+        '  - { id: ext, resource: https://example.org/docs/external }',
+        '  - { id: pol, resource: /policy.md }',
+        '---',
+        '',
+        'body',
+        '',
+      ].join('\n'),
+    },
+    { path: 'policy.md', content: '---\ntype: Policy\n---\n\nbody\n' },
+  ];
+
+  it('keeps external IRIs under the namespace verbatim and writes real concepts as bundle paths', () => {
+    const first = importBundle(files, { iriBase: BASE });
+    const exported = exportBundle(first, { iriBase: BASE });
+    const fm = parseDocument('metric.md', exported.find((f) => f.path === 'metric.md')!.content).frontmatter;
+    expect(fm.sources).toEqual([
+      { id: 'ext', resource: 'https://example.org/docs/external' },
+      { id: 'pol', resource: '/policy.md' },
+    ]);
+    expect(fm.computation).toBe('https://example.org/sql/revenue.sql');
+    expect(fm.executor).toEqual({ resource: 'https://example.org/skills/run.md' });
+    expect(fm.attester).toEqual({ resource: '/policy.md' });
+  });
+
+  it('round-trips graph-equal, lineage edges included', () => {
+    const first = importBundle(files, { iriBase: BASE });
+    const second = importBundle(exportBundle(first, { iriBase: BASE }), { iriBase: BASE });
+    const metric = (r: typeof first) => r.concepts.find((c) => c.conceptId === 'metric')!;
+    expect(objs(metric(first).quads, PROV_WAS_DERIVED_FROM, BASE + 'metric').sort()).toEqual([
+      'https://example.org/docs/external',
+      'https://example.org/policy',
+    ]);
+    expect(quadsToNQuads(metric(second).quads)).toBe(quadsToNQuads(metric(first).quads));
   });
 });
 

@@ -141,20 +141,31 @@ function conceptIdFromIri(iri: string, iriBase: string): string | null {
   return iri.startsWith(iriBase) ? iri.slice(iriBase.length) : null;
 }
 
+/** What one export run knows: the IRI namespace and the exact set of concept IRIs being written. */
+interface ExportContext {
+  iriBase: string;
+  /** Subject IRIs of the concepts in this export — the only IRIs a path-valued field may be rewritten to a path for. */
+  conceptIris: ReadonlySet<string>;
+}
+
 /**
  * Object term → YAML value. Literals become their typed native value or lexical
  * string; IRIs are written as given, except that for path-valued fields
- * (`pathForm`) a bundle concept IRI is written back as its recommended
- * absolute bundle path `/<conceptId>.md` (SPEC §6.1/§6.2).
+ * (`pathForm`) an IRI that is one of the exported concepts is written back as
+ * its recommended absolute bundle path `/<conceptId>.md` (SPEC §6.1/§6.2).
+ * Membership is checked against the exported concept set, not just the IRI
+ * namespace: with `iriBase: "https://example.org/"` an external
+ * `https://example.org/docs/external` source must survive verbatim, or
+ * re-import would read a broken path and lose its `prov:wasDerivedFrom` edge.
  */
-function termValue(term: string, iriBase: string, pathForm = false): unknown {
+function termValue(term: string, ctx: ExportContext, pathForm = false): unknown {
   if (term.startsWith('"')) {
     const typed = typedValue(term);
     return typed ? typed.value : (literalValue(term) ?? term);
   }
-  if (pathForm) {
-    const id = conceptIdFromIri(term, iriBase);
-    if (id !== null && !id.includes(SECTION_GENID_INFIX)) return `/${id}.md`;
+  if (pathForm && ctx.conceptIris.has(term)) {
+    const id = conceptIdFromIri(term, ctx.iriBase);
+    if (id !== null) return `/${id}.md`;
   }
   return term;
 }
@@ -206,12 +217,12 @@ const CONCEPT_PREDICATES = new Set([
 ]);
 
 /** A family node's producer-defined extras (`schema:<camelKey>` on the node). */
-function nodeExtras(quads: Quad[], known: Set<string>, iriBase: string): Record<string, unknown> {
+function nodeExtras(quads: Quad[], known: Set<string>, ctx: ExportContext): Record<string, unknown> {
   const extras: Record<string, unknown> = {};
   for (const q of quads) {
     if (known.has(q.predicate) || q.predicate === RDF_TYPE) continue;
     if (!q.predicate.startsWith(SCHEMA_NS)) continue;
-    accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, iriBase));
+    accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
   }
   return extras;
 }
@@ -229,51 +240,51 @@ const SOURCE_PREDICATES = new Set([
 ]);
 const PARAMETER_PREDICATES = new Set([SCHEMA_NAME, OKF_PARAMETER_TYPE, OKF_REQUIRED]);
 
-function verificationEntry(quads: Quad[], iriBase: string): Record<string, unknown> {
+function verificationEntry(quads: Quad[], ctx: ExportContext): Record<string, unknown> {
   const entry: Record<string, unknown> = {};
   for (const q of quads) {
-    if (q.predicate === OKF_VERIFIED_BY) entry.by = termValue(q.object, iriBase);
-    else if (q.predicate === OKF_VERIFIED_AT) entry.at = termValue(q.object, iriBase);
+    if (q.predicate === OKF_VERIFIED_BY) entry.by = termValue(q.object, ctx);
+    else if (q.predicate === OKF_VERIFIED_AT) entry.at = termValue(q.object, ctx);
   }
-  return orderKeys({ ...entry, ...nodeExtras(quads, VERIFICATION_PREDICATES, iriBase) }, ['by', 'at']);
+  return orderKeys({ ...entry, ...nodeExtras(quads, VERIFICATION_PREDICATES, ctx) }, ['by', 'at']);
 }
 
-function usageWindow(quads: Quad[], iriBase: string): Record<string, unknown> | null {
+function usageWindow(quads: Quad[], ctx: ExportContext): Record<string, unknown> | null {
   const w: Record<string, unknown> = {};
   for (const q of quads) {
-    if (q.predicate === OKF_USAGE_WINDOW_FROM) w.from = termValue(q.object, iriBase);
-    else if (q.predicate === OKF_USAGE_WINDOW_TO) w.to = termValue(q.object, iriBase);
+    if (q.predicate === OKF_USAGE_WINDOW_FROM) w.from = termValue(q.object, ctx);
+    else if (q.predicate === OKF_USAGE_WINDOW_TO) w.to = termValue(q.object, ctx);
   }
   return Object.keys(w).length > 0 ? orderKeys(w, ['from', 'to']) : null;
 }
 
-function sourceEntry(quads: Quad[], iriBase: string): Record<string, unknown> {
+function sourceEntry(quads: Quad[], ctx: ExportContext): Record<string, unknown> {
   const entry: Record<string, unknown> = {};
   for (const q of quads) {
     switch (q.predicate) {
       case SCHEMA_IDENTIFIER:
-        entry.id = termValue(q.object, iriBase);
+        entry.id = termValue(q.object, ctx);
         break;
       case OKF_RESOURCE:
-        entry.resource = termValue(q.object, iriBase, true);
+        entry.resource = termValue(q.object, ctx, true);
         break;
       case SCHEMA_NAME:
-        entry.title = termValue(q.object, iriBase);
+        entry.title = termValue(q.object, ctx);
         break;
       case OKF_AUTHOR:
-        entry.author = termValue(q.object, iriBase);
+        entry.author = termValue(q.object, ctx);
         break;
       case OKF_USAGE_COUNT:
-        entry.usage_count = termValue(q.object, iriBase);
+        entry.usage_count = termValue(q.object, ctx);
         break;
       case SCHEMA_DATE_MODIFIED:
-        entry.last_modified = termValue(q.object, iriBase);
+        entry.last_modified = termValue(q.object, ctx);
         break;
     }
   }
-  const window = usageWindow(quads, iriBase);
+  const window = usageWindow(quads, ctx);
   if (window) entry.usage_window = window;
-  return orderKeys({ ...entry, ...nodeExtras(quads, SOURCE_PREDICATES, iriBase) }, [
+  return orderKeys({ ...entry, ...nodeExtras(quads, SOURCE_PREDICATES, ctx) }, [
     'id',
     'resource',
     'title',
@@ -284,17 +295,18 @@ function sourceEntry(quads: Quad[], iriBase: string): Record<string, unknown> {
   ]);
 }
 
-function parameterEntry(quads: Quad[], iriBase: string): Record<string, unknown> {
+function parameterEntry(quads: Quad[], ctx: ExportContext): Record<string, unknown> {
   const entry: Record<string, unknown> = {};
   for (const q of quads) {
-    if (q.predicate === SCHEMA_NAME) entry.name = termValue(q.object, iriBase);
-    else if (q.predicate === OKF_PARAMETER_TYPE) entry.type = termValue(q.object, iriBase);
-    else if (q.predicate === OKF_REQUIRED) entry.required = termValue(q.object, iriBase);
+    if (q.predicate === SCHEMA_NAME) entry.name = termValue(q.object, ctx);
+    else if (q.predicate === OKF_PARAMETER_TYPE) entry.type = termValue(q.object, ctx);
+    else if (q.predicate === OKF_REQUIRED) entry.required = termValue(q.object, ctx);
   }
-  return orderKeys({ ...entry, ...nodeExtras(quads, PARAMETER_PREDICATES, iriBase) }, ['name', 'type', 'required']);
+  return orderKeys({ ...entry, ...nodeExtras(quads, PARAMETER_PREDICATES, ctx) }, ['name', 'type', 'required']);
 }
 
-function reconstructConcept(c: ExportInput['concepts'][number], iriBase: string): BundleFile {
+function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportContext): BundleFile {
+  const { iriBase } = ctx;
   const bySubject = new Map<string, Quad[]>();
   for (const q of c.quads) {
     if (!bySubject.has(q.subject)) bySubject.set(q.subject, []);
@@ -335,7 +347,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], iriBase: string)
         frontmatter.resource = q.object;
         break;
       case SCHEMA_DATE_MODIFIED:
-        dateModified = termValue(q.object, iriBase);
+        dateModified = termValue(q.object, ctx);
         break;
       case SCHEMA_KEYWORDS: {
         const v = literalValue(q.object);
@@ -357,7 +369,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], iriBase: string)
         citations.push(literalValue(q.object) ?? q.object);
         break;
       case OKF_GENERATED_BY:
-        generatedBy = termValue(q.object, iriBase);
+        generatedBy = termValue(q.object, ctx);
         break;
       case OKF_VERIFICATION:
         verificationNodes.push(q.object);
@@ -372,43 +384,43 @@ function reconstructConcept(c: ExportInput['concepts'][number], iriBase: string)
       case PROV_WAS_DERIVED_FROM:
         break; // derived at import; re-derived on the next import
       case OKF_STATUS:
-        frontmatter.status = termValue(q.object, iriBase);
+        frontmatter.status = termValue(q.object, ctx);
         break;
       case OKF_STALE_AFTER:
-        frontmatter.stale_after = termValue(q.object, iriBase);
+        frontmatter.stale_after = termValue(q.object, ctx);
         break;
       case OKF_USAGE_WINDOW_FROM:
-        usageFrom = termValue(q.object, iriBase);
+        usageFrom = termValue(q.object, ctx);
         break;
       case OKF_USAGE_WINDOW_TO:
-        usageTo = termValue(q.object, iriBase);
+        usageTo = termValue(q.object, ctx);
         break;
       case OKF_RUNTIME:
-        frontmatter.runtime = termValue(q.object, iriBase);
+        frontmatter.runtime = termValue(q.object, ctx);
         break;
       case OKF_COMPUTATION:
-        frontmatter.computation = termValue(q.object, iriBase, true);
+        frontmatter.computation = termValue(q.object, ctx, true);
         break;
       case OKF_EXECUTOR_RESOURCE:
-        executor.resource = termValue(q.object, iriBase, true);
+        executor.resource = termValue(q.object, ctx, true);
         break;
       case OKF_EXECUTOR_RECEIPT:
-        receipt.push(String(termValue(q.object, iriBase)));
+        receipt.push(String(termValue(q.object, ctx)));
         break;
       case OKF_ATTESTER_RESOURCE:
-        attester.resource = termValue(q.object, iriBase, true);
+        attester.resource = termValue(q.object, ctx, true);
         break;
       default: {
         if (q.predicate.startsWith(OKF_GENERATED_PREFIX)) {
-          accumulate(generatedExtras, lowerFirst(q.predicate.slice(OKF_GENERATED_PREFIX.length)), termValue(q.object, iriBase));
+          accumulate(generatedExtras, lowerFirst(q.predicate.slice(OKF_GENERATED_PREFIX.length)), termValue(q.object, ctx));
         } else if (q.predicate.startsWith(OKF_EXECUTOR_PREFIX)) {
-          accumulate(executor, lowerFirst(q.predicate.slice(OKF_EXECUTOR_PREFIX.length)), termValue(q.object, iriBase));
+          accumulate(executor, lowerFirst(q.predicate.slice(OKF_EXECUTOR_PREFIX.length)), termValue(q.object, ctx));
         } else if (q.predicate.startsWith(OKF_ATTESTER_PREFIX)) {
-          accumulate(attester, lowerFirst(q.predicate.slice(OKF_ATTESTER_PREFIX.length)), termValue(q.object, iriBase));
+          accumulate(attester, lowerFirst(q.predicate.slice(OKF_ATTESTER_PREFIX.length)), termValue(q.object, ctx));
         } else if (q.predicate.startsWith(SCHEMA_NS) && !CONCEPT_PREDICATES.has(q.predicate)) {
           // Producer-defined key: typed scalars and rdf:JSON objects come back
           // as native values so the datatype / structure survives re-import.
-          accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, iriBase));
+          accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
         }
       }
     }
@@ -417,7 +429,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], iriBase: string)
 
   // Attested Computation contract (§10.2).
   if (parameterNodes.length > 0) {
-    frontmatter.parameters = parameterNodes.sort(byNodeIndex).map((n) => parameterEntry(nodeQuads(n), iriBase));
+    frontmatter.parameters = parameterNodes.sort(byNodeIndex).map((n) => parameterEntry(nodeQuads(n), ctx));
   }
   if (receipt.length > 0) executor.receipt = [...receipt].sort();
   if (Object.keys(executor).length > 0) frontmatter.executor = orderKeys(executor, ['resource', 'receipt']);
@@ -434,11 +446,11 @@ function reconstructConcept(c: ExportInput['concepts'][number], iriBase: string)
     frontmatter.timestamp = dateModified;
   }
   if (verificationNodes.length > 0) {
-    frontmatter.verified = verificationNodes.sort(byNodeIndex).map((n) => verificationEntry(nodeQuads(n), iriBase));
+    frontmatter.verified = verificationNodes.sort(byNodeIndex).map((n) => verificationEntry(nodeQuads(n), ctx));
   }
   // Provenance (§5.1).
   if (sourceNodes.length > 0) {
-    frontmatter.sources = sourceNodes.sort(byNodeIndex).map((n) => sourceEntry(nodeQuads(n), iriBase));
+    frontmatter.sources = sourceNodes.sort(byNodeIndex).map((n) => sourceEntry(nodeQuads(n), ctx));
   }
   if (usageFrom !== null || usageTo !== null) {
     const w: Record<string, unknown> = {};
@@ -531,8 +543,11 @@ function regenerateIndexes(conceptIds: string[]): BundleFile[] {
 
 /** Serialise imported concepts back into a conformant OKF v0.2 `BundleFile[]`. */
 export function exportBundle(input: ExportInput, opts: OkfMappingOptions = {}): BundleFile[] {
-  const iriBase = opts.iriBase ?? DEFAULT_IRI_BASE;
-  const concepts = input.concepts.map((c) => reconstructConcept(c, iriBase));
+  const ctx: ExportContext = {
+    iriBase: opts.iriBase ?? DEFAULT_IRI_BASE,
+    conceptIris: new Set(input.concepts.map((c) => c.iri)),
+  };
+  const concepts = input.concepts.map((c) => reconstructConcept(c, ctx));
   const indexes = regenerateIndexes(input.concepts.map((c) => c.conceptId));
   return [...concepts, ...indexes].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }

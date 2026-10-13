@@ -368,7 +368,7 @@ function checkDateTime(field: string, value: unknown, out: Diagnostic[]): void {
   if (lexical === null || !isXsdDateTime(lexical)) {
     out.push({
       code: 'malformed-family',
-      message: `${field} "${String(value)}" is not an ISO 8601 datetime (§5); kept as a plain literal`,
+      message: `${field} "${String(value)}" is not a valid ISO 8601 datetime (§5); kept as a plain literal`,
     });
     return;
   }

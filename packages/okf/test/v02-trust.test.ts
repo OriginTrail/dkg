@@ -46,6 +46,29 @@ describe('lexical checks', () => {
     expect(isXsdDate('2026-06-30T14:00:00Z')).toBe(false);
     expect(isXsdDateTime('next tuesday')).toBe(false);
   });
+  it('rejects impossible calendar dates, times and zones, not just bad shapes', () => {
+    expect(isXsdDateTime('2026-02-30T00:00:00Z')).toBe(false);
+    expect(isXsdDateTime('2026-13-40T25:70:70Z')).toBe(false);
+    expect(isXsdDateTime('2023-02-29T00:00:00Z')).toBe(false); // not a leap year
+    expect(isXsdDateTime('2024-02-29T00:00:00Z')).toBe(true); // leap year
+    expect(isXsdDateTime('2000-02-29T00:00:00Z')).toBe(true); // divisible by 400
+    expect(isXsdDateTime('1900-02-29T00:00:00Z')).toBe(false); // divisible by 100 only
+    expect(isXsdDateTime('2026-04-31T00:00:00Z')).toBe(false);
+    expect(isXsdDateTime('2026-01-01T24:00:00Z')).toBe(true); // XSD end-of-day instant
+    expect(isXsdDateTime('2026-01-01T24:00:00.000Z')).toBe(true);
+    expect(isXsdDateTime('2026-01-01T24:00:01Z')).toBe(false);
+    expect(isXsdDateTime('2026-01-01T23:60:00Z')).toBe(false);
+    expect(isXsdDateTime('2026-01-01T23:59:60Z')).toBe(false);
+    expect(isXsdDateTime('2026-01-01T00:00:00+14:00')).toBe(true);
+    expect(isXsdDateTime('2026-01-01T00:00:00-14:00')).toBe(true);
+    expect(isXsdDateTime('2026-01-01T00:00:00+14:30')).toBe(false);
+    expect(isXsdDateTime('2026-01-01T00:00:00+15:00')).toBe(false);
+    expect(isXsdDateTime('2026-01-01T00:00:00+05:60')).toBe(false);
+    expect(isXsdDate('2026-02-30')).toBe(false);
+    expect(isXsdDate('2026-00-10')).toBe(false);
+    expect(isXsdDate('2024-02-29')).toBe(true);
+    expect(isXsdDate('2026-06-30+14:30')).toBe(false);
+  });
 });
 
 describe('actor convention (§7)', () => {
@@ -108,6 +131,9 @@ describe('lifecycle (§5.4, §5.5)', () => {
     expect(isStale(new Date(staleAfter), new Date('2027-01-01T00:00:00Z'))).toBe(true);
     expect(isStale(undefined, new Date('2099-01-01T00:00:00Z'))).toBe(false);
     expect(isStale('not a date', new Date('2099-01-01T00:00:00Z'))).toBe(false);
+    // an impossible date is never stale — Date.parse would roll Feb 30 over to March
+    expect(isStale('2026-02-30T00:00:00Z', new Date('2099-01-01T00:00:00Z'))).toBe(false);
+    expect(isStale('2026-02-28', new Date('2099-01-01T00:00:00Z'))).toBe(true);
   });
 });
 

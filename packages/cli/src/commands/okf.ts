@@ -10,20 +10,15 @@ import {
   validateBundle,
   quadsToNQuads,
   conceptIdToKaName,
-  isStale,
   DEFAULT_IRI_BASE,
   RDF_TYPE,
-  SCHEMA_NS,
-  SECTION_GENID_INFIX,
   PROV_WAS_DERIVED_FROM,
   OKF_VERIFICATION,
   OKF_SOURCE,
   OKF_TRUST_TIER,
-  type BundleImport,
-  type ExportInput,
   type Quad,
-  type TypeRelation,
 } from '@origintrail-official/dkg-okf';
+import { bindingsOf, cell, exportInputFromBindings, parseRelateRules, summarizeOkfImport } from './okf-helpers.js';
 import { batchEntityQuads, type PublishQuad } from '../batching.js';
 import { ApiClient } from '../api-client.js';
 import type { ActionOpts } from '../cli-helpers.js';
@@ -147,119 +142,12 @@ export function registerOkfCommand(program: Command): void {
     }
   }
 
-  // The daemon's /api/query returns SELECT results as `{ bindings: [...] }` —
-  // WITHOUT the `type: 'bindings'` discriminator the QueryResult union expects.
-  // Gating on `result.type === 'bindings'` therefore silently yields no rows
-  // (the bug that made `okf verify` report 0 for everything). Read `bindings`
-  // structurally instead.
-  function bindingsOf(result: unknown): Array<Record<string, unknown>> {
-    if (result && typeof result === 'object' && Array.isArray((result as { bindings?: unknown }).bindings)) {
-      return (result as { bindings: Array<Record<string, unknown>> }).bindings;
-    }
-    return [];
-  }
-
-  // A `/api/query` binding cell can arrive as a bare string OR a SPARQL-JSON
-  // object (`{ value, type, datatype? }`); calling `.startsWith()`/`.exec()` on
-  // the object form throws at runtime. Normalise every cell to its string value
-  // before use (mirrors the daemon's `bindingValue`). The static `QueryResult`
-  // type annotates cells as strings, but the runtime path can return objects.
-  const cell = (v: unknown): string => {
-    if (v === null || v === undefined) return '';
-    if (typeof v === 'string') return v;
-    if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
-      const raw = (v as { value?: unknown }).value;
-      return raw === null || raw === undefined ? '' : String(raw);
-    }
-    return String(v);
-  };
-
-  function summarize(imported: BundleImport): {
-    concepts: number;
-    reservedSkipped: number;
-    triples: number;
-    linksResolved: number;
-    linksBroken: number;
-    citations: number;
-    sources: number;
-    derivedFromConcepts: number;
-    trustTiers: { humanReviewed: number; machineConfirmed: number; unverified: number };
-    draft: number;
-    deprecated: number;
-    stale: number;
-    attestedComputations: number;
-  } {
-    let linksResolved = 0;
-    let linksBroken = 0;
-    let citations = 0;
-    let sources = 0;
-    let derivedFromConcepts = 0;
-    const trustTiers = { humanReviewed: 0, machineConfirmed: 0, unverified: 0 };
-    let draft = 0;
-    let deprecated = 0;
-    let stale = 0;
-    let attestedComputations = 0;
-    // Staleness is `now >= stale_after` (OKF §5.5) — evaluated at summary time,
-    // never baked into the deterministic mapping.
-    const now = new Date();
-    for (const c of imported.concepts) {
-      linksResolved += new Set(c.resolvedLinks.map((l) => l.targetConceptId)).size;
-      linksBroken += c.brokenLinks.length;
-      citations += c.citations.length;
-      sources += c.trust.sources;
-      derivedFromConcepts += c.trust.derivedFromConcepts.length;
-      if (c.trust.tier === 'human-reviewed') trustTiers.humanReviewed += 1;
-      else if (c.trust.tier === 'machine-confirmed') trustTiers.machineConfirmed += 1;
-      else trustTiers.unverified += 1;
-      if (c.trust.status === 'draft') draft += 1;
-      if (c.trust.status === 'deprecated') deprecated += 1;
-      if (isStale(c.trust.staleAfter, now)) stale += 1;
-      if (c.trust.attestedComputation) attestedComputations += 1;
-    }
-    return {
-      concepts: imported.concepts.length,
-      reservedSkipped: imported.reservedSkipped.length,
-      triples: imported.quads.length,
-      linksResolved,
-      linksBroken,
-      citations,
-      sources,
-      derivedFromConcepts,
-      trustTiers,
-      draft,
-      deprecated,
-      stale,
-      attestedComputations,
-    };
-  }
-
   const okfCmd = program
     .command('okf')
     .description('Import / export Google Open Knowledge Format (OKF) bundles as Knowledge Assets');
 
   // Collector for repeatable options (commander passes (val, prev)).
   const collect = (val: string, prev: string[]): string[] => prev.concat([val]);
-
-  // Parse repeatable `--relate "<FromType>><ToType>=<predicate>"` rules into
-  // deterministic type-pair edge relations. The predicate is used as-is if it is
-  // a full IRI, otherwise resolved against schema.org (so `hasPart` → schema:hasPart).
-  function parseRelateRules(raw: string[]): TypeRelation[] {
-    return raw.map((rule) => {
-      const eq = rule.lastIndexOf('=');
-      const gt = rule.indexOf('>');
-      if (eq === -1 || gt === -1 || gt > eq) {
-        throw new Error(`Invalid --relate rule "${rule}". Expected "<FromType>><ToType>=<predicate>".`);
-      }
-      const from = rule.slice(0, gt).trim();
-      const to = rule.slice(gt + 1, eq).trim();
-      const predToken = rule.slice(eq + 1).trim();
-      if (!from || !to || !predToken) {
-        throw new Error(`Invalid --relate rule "${rule}". Expected "<FromType>><ToType>=<predicate>".`);
-      }
-      const predicate = predToken.includes('://') ? predToken : SCHEMA_NS + predToken;
-      return { from, to, predicate };
-    });
-  }
 
   // ─── dkg okf import <bundleDir> ─────────────────────────────────────
   okfCmd
@@ -318,7 +206,7 @@ export function registerOkfCommand(program: Command): void {
         }
         const conformance = validateBundle(files);
         const imported = importBundle(files, { iriBase, includeCodeSpanLinks, typeRelations });
-        const summary = summarize(imported);
+        const summary = summarizeOkfImport(imported);
 
         // The deterministic, offline portion — no node required.
         if (opts.dryRun) {
@@ -601,47 +489,8 @@ export function registerOkfCommand(program: Command): void {
 
         const bindings = bindingsOf(result);
 
-        // Daemon bindings are already in N-term form (literals as `"…"`/`"…"^^<dt>`,
-        // IRIs as raw or `<…>`). Strip IRI brackets so they match the mapper's
-        // raw-IRI quad-term convention; literals/blank nodes pass through.
-        const unwrapIri = (term: string): string =>
-          term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
-
-        const quadsBySubject = new Map<string, Quad[]>();
-        // Skolemized nodes (`<conceptIri>/.well-known/genid/...`: sections and the
-        // OKF v0.2 verification / source / parameter nodes) grouped by the
-        // concept that owns them, so the exporter can rebuild the v0.2 families.
-        const nodeQuadsByOwner = new Map<string, Quad[]>();
-        for (const b of bindings) {
-          const s = cell(b.s);
-          const p = cell(b.p);
-          const o = cell(b.o);
-          if (!s || !p || !o) continue;
-          const subject = unwrapIri(s);
-          const quad: Quad = { subject, predicate: unwrapIri(p), object: o };
-          const infixAt = subject.indexOf(SECTION_GENID_INFIX);
-          if (infixAt !== -1) {
-            const owner = subject.slice(0, infixAt);
-            if (!nodeQuadsByOwner.has(owner)) nodeQuadsByOwner.set(owner, []);
-            nodeQuadsByOwner.get(owner)!.push(quad);
-            continue;
-          }
-          if (!quadsBySubject.has(subject)) quadsBySubject.set(subject, []);
-          quadsBySubject.get(subject)!.push(quad);
-        }
-
-        // Rebuild the exporter's input. Keep only real concept roots: subjects
-        // under the IRI base that carry an OKF concept rdf:type. The skolemized
-        // nodes are attached to their owning concept rather than treated as
-        // concepts — otherwise they would be rebuilt as standalone
-        // `.well-known/genid/*.md` files that were never concepts.
-        const concepts: ExportInput['concepts'] = [...quadsBySubject.entries()]
-          .filter(([iri, quads]) => iri.startsWith(iriBase) && quads.some((q) => q.predicate === RDF_TYPE))
-          .map(([iri, quads]) => ({
-            conceptId: iri.slice(iriBase.length),
-            iri,
-            quads: [...quads, ...(nodeQuadsByOwner.get(iri) ?? [])],
-          }));
+        // Concept roots + their skolemized family / section nodes (okf-helpers.ts).
+        const { concepts } = exportInputFromBindings(bindings, iriBase);
 
         if (concepts.length === 0) {
           console.error(
