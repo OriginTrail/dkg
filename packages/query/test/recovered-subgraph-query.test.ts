@@ -9,12 +9,12 @@ const asset = 'did:dkg:evm:31337/0x0000000000000000000000000000000000000001/1';
 const type = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', entityType = 'urn:Code';
 function descriptor(change?: string): Quad[] {
   const fields: Record<string, string> = {kaUal:asset,contentScopeVersion:'"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
-    contextGraph:root,status:'"confirmed"',chainSnapshotDigest:'"local-authenticated-fixture"',assertionGraph:graph,subGraphName:'"code"'};
+    contextGraph:root,status:'"confirmed"',authenticatedSubGraphName:'"code"',assertionGraph:graph,subGraphName:'"code"'};
   if (change === 'tentative') fields.status = '"tentative"';
   if (change === 'other-graph') fields.contextGraph = root + '-other';
   if (change === 'other-asset') fields.kaUal = asset + '2';
   if (change === 'private') fields.assertionGraph = `${root}/code/_private/data`;
-  if (change === 'missing-proof') delete fields.chainSnapshotDigest;
+  if (change) delete fields.authenticatedSubGraphName;
   return Object.entries(fields).map(([key,object]) => ({subject:asset,predicate:`http://dkg.io/ontology/${key}`,object,graph:meta}));
 }
 it.each([undefined,'tentative','other-graph','other-asset','private','missing-proof'])('routes only locally authenticated recovered partitions (%s)', async change => {

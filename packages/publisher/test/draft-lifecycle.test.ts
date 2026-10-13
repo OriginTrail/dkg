@@ -3390,6 +3390,7 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
   // assertions in the tests below now pin the DERIVATION contract.
   const LAYER_BY_EVENT_TYPE: Record<string, { from: string; to: string }> = {
     AssertionCreated: { from: 'none', to: 'WM' },
+    AssertionWritten: { from: 'WM', to: 'WM' },
     AssertionPromoted: { from: 'WM', to: 'SWM' },
     AssertionUpdated: { from: 'VM', to: 'VM' },
     AssertionDiscarded: { from: 'WM', to: 'none' },
@@ -3467,10 +3468,11 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     const events = await queryEvents();
-    expect(events).toHaveLength(2);
-    expect(events[1].type).toBe('AssertionPromoted');
-    expect(events[1].fromLayer).toBe('WM');
-    expect(events[1].toLayer).toBe('SWM');
+    expect(events).toEqual([
+      { type: 'AssertionCreated', fromLayer: 'none', toLayer: 'WM' },
+      { type: 'AssertionWritten', fromLayer: 'WM', toLayer: 'WM' },
+      { type: 'AssertionPromoted', fromLayer: 'WM', toLayer: 'SWM' },
+    ]);
   });
 
   it('promote records shareOperationId without root-entity member metadata', async () => {
@@ -3546,9 +3548,11 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
     await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
 
     const events = await queryEvents();
-    expect(events).toHaveLength(2);
-    expect(events[0].type).toBe('AssertionCreated');
-    expect(events[1].type).toBe('AssertionDiscarded');
+    expect(events).toEqual([
+      { type: 'AssertionCreated', fromLayer: 'none', toLayer: 'WM' },
+      { type: 'AssertionWritten', fromLayer: 'WM', toLayer: 'WM' },
+      { type: 'AssertionDiscarded', fromLayer: 'WM', toLayer: 'none' },
+    ]);
   });
 
   it('different agents have separate lifecycle records', async () => {

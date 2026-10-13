@@ -1,3 +1,4 @@
+import { normalizeKnowledgeAssetUpdateIdentity } from './knowledge-asset-update-identity.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -282,6 +283,7 @@ export class EventsMethods extends EVMChainAdapterBase {
             const blockHash = log.blockHash;
             yield {
               type: 'KnowledgeAssetUpdated',
+              updateIdentity: normalizeKnowledgeAssetUpdateIdentity({ blockNumber: log.blockNumber, logIndex, blockHash, txHash: log.transactionHash }),
               blockNumber: log.blockNumber,
               data: {
                 kaId,

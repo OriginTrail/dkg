@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { BULK_GRAPH_KIND, BULK_GRAPH_PROTOCOL } from '@origintrail-official/dkg-core';
 import { performance } from 'node:perf_hooks';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -185,6 +186,16 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       current: true,
     });
     expect(rpcReads).toHaveBeenCalledTimes(2);
+    // Re-authenticate through ordinary RPC exact sync after snapshot import. Replacing
+    // the snapshot receipt must leave the canonical partition route discoverable.
+    const replayUal = `did:dkg:evm:31337/${signer.address.toLowerCase()}/3`;
+    await rpcReceiver.syncExactKnowledgeAssetsFromPeerDetailed(core.peerId, graph, [replayUal], {
+      exactRecoveryTransportMode: 'legacy',
+    });
+    const replayed = await rpcReceiver.query('SELECT ?entity WHERE {?entity a <http://schema.org/Thing>}', {
+      contextGraphId: graph, view: 'verifiable-memory',
+    });
+    expect(replayed.bindings).toEqual([{entity:'urn:entity:3'}]);
     const entities = await core.findEntitiesByType(rpcReceiver.peerId, graph, 'http://schema.org/Thing');
     expect(entities).toMatchObject({status:'OK',entityUris:['urn:entity:3']});
     console.log(
@@ -218,6 +229,65 @@ describe("public snapshot recovery over live local nodes and chain", () => {
         privateCreated.contextGraphId.toString(),
       ),
     ).rejects.toThrow("unavailable");
+  }, 180_000);
+
+  it.each(['unsubscribe', 'rebind'] as const)('quarantines dispatched bulk writes after a real %s transition', async transition => {
+    vi.stubEnv('DKG_PUBLIC_SNAPSHOT_BULK', '1');
+    const f = await fixture('bulk');
+    const core = await f.make('RevocationCore', 'core', f.adapter, f.source);
+    const store = new OxigraphStore();
+    const receiver = await f.make('RevocationReceiver', 'edge',
+      new EVMChainAdapter(makeAdapterConfig(f.rpcUrl, f.hubAddress, HARDHAT_KEYS.REC1_OP)), store);
+    await receiver.awaitInitialChainPoll();
+    receiver.subscribeToContextGraph(graph, { onChainId: f.onChainId, syncMode: 'on-demand', trackSyncScope: false });
+    await receiver.connectTo(core.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; };
+    const entered = deferred(), release = deferred(), quarantining = deferred(), drain = deferred();
+    const replace = store.replaceAssetGroup.bind(store);
+    const writes: Parameters<typeof replace>[0][] = [];
+    vi.spyOn(store, 'replaceAssetGroup').mockImplementation(async (...args) => {
+      writes.push(args[0]);
+      if (writes.length === 1) { entered.resolve(); await release.promise; }
+      else { quarantining.resolve(); await drain.promise; }
+      await replace(...args);
+    });
+    const commits: number[] = [];
+    const exchange = receiver.router.withDuplexStream.bind(receiver.router);
+    vi.spyOn(receiver.router, 'withDuplexStream').mockImplementation((peer, protocol, options, consume) =>
+      exchange(peer, protocol, options, (stream, signal) => {
+        if (protocol === BULK_GRAPH_PROTOCOL) {
+          const send = stream.send.bind(stream);
+          stream.send = bytes => { const data = bytes.subarray(); if (data[4] === BULK_GRAPH_KIND.COMMIT) commits.push(data[4]); return send(bytes); };
+        }
+        return consume(stream, signal);
+      }));
+    let settled = false;
+    const pending = receiver.syncPublicGraphSnapshot({ transport: 'bulk', contextGraphId: graph,
+      onChainId: f.onChainId, trustedCorePeerIds: [core.peerId] })
+      .then(value => ({ value }), error => ({ error })).finally(() => { settled = true; });
+    try {
+      await entered.promise;
+      if (transition === 'unsubscribe') receiver.unsubscribeFromContextGraph(graph);
+      else receiver.subscribeToContextGraph(graph, { onChainId: String(BigInt(f.onChainId) + 1n), syncMode: 'on-demand', trackSyncScope: false });
+      expect(settled).toBe(false);
+      expect(commits).toEqual([]);
+      release.resolve();
+      await Promise.race([quarantining.promise, pending.then(() => { throw new Error('Job settled without quarantining revoked publication'); })]);
+      expect(settled).toBe(false); // The job owns the physical quarantine too.
+      expect(writes).toHaveLength(2);
+      expect(writes[0]!.length).toBeGreaterThan(1);
+      expect(writes[1]!.map(a => a.metadataSubject)).toEqual(writes[0]!.map(a => a.metadataSubject));
+      expect(writes[1]!.every(a => !a.graphQuads.length && !a.metadataQuads.length)).toBe(true);
+      drain.resolve();
+      const result = await pending;
+      expect('error' in result).toBe(true);
+      expect(commits).toEqual([]);
+      for (const member of writes[0]!) {
+        expect(await store.countQuads(member.graphUri)).toBe(0);
+        const rows = await store.query(`SELECT ?p WHERE { GRAPH <${member.metaGraphUri}> { <${member.metadataSubject}> ?p ?o } }`);
+        expect(rows.type === 'bindings' && rows.bindings).toEqual([]);
+      }
+    } finally { release.resolve(); drain.resolve(); await pending; }
   }, 180_000);
 
   it('rejects a bulk group with a matching first member and mismatched second member before publication', async () => {

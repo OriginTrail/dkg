@@ -11,28 +11,16 @@
  * keeps being sent to the preferred endpoint, is refused, and fails over: one
  * wasted request per read, for as long as the preference points there.
  *
- * This builds the attempts of one pass from the stickiness order, and owns
- * what each outcome means for both memories:
+ * This owns only refusal classification, expiry, bounded memory and the note
+ * of an endpoint that served instead. EndpointStickiness owns the full attempt
+ * plan and binds outcomes only after applying these constraints.
  *
- *  - No endpoint of the pass refused this read: the stickiness order and its
- *    outcome recorders, unchanged.
- *  - An endpoint further down refused it: that endpoint goes last. The endpoint
- *    stickiness starts at is still tried first, so every outcome still means
- *    what it meant, and the recorders are the ones stickiness bound.
- *  - The endpoint stickiness starts at refused it: the pass goes to the others
- *    and tells stickiness nothing. What stickiness learns from a later endpoint
- *    serving a read is that the one it prefers failed, or returned nothing, and
- *    here that one was not asked. Its preference, and whether that preference
- *    is proven for writes, stay as they are. The read keeps its own note of the
- *    endpoint that served it instead and starts there next time.
- *
- * It is ordering only, like the stickiness it sits beside: a refusing endpoint
- * is tried after the others, never dropped, so a pass still reaches every
- * endpoint; and the memory lapses, so an endpoint that serves the read again is
- * used again.
+ * It supplies ordering constraints only: the ordering owner tries a refusing
+ * endpoint after the others, never drops it, and still covers every endpoint.
+ * The memory lapses, so an endpoint that serves the read again is used again.
  */
 
-import type { StickyAttempt, StickyEndpoint } from './endpoint-stickiness.js';
+import type { StickyEndpoint } from './endpoint-stickiness.js';
 import { errorStatus } from './evm-adapter-errors.js';
 
 /** How long a refusal keeps an endpoint behind the others for that read. */
@@ -54,6 +42,9 @@ export function isEndpointPolicyRefusal(err: unknown): boolean {
 /** One attempt of a read pass: the endpoint to try and what its outcome is recorded as. */
 export interface ReadAttempt<T extends StickyEndpoint> {
   readonly endpoint: T;
+  readonly kind: 'ordinary' | 'substitute';
+  /** Called only when the transport actually enters this attempt. */
+  recordStart(): void;
   /** This endpoint served the read. */
   recordSuccess(): void;
   /** This endpoint failed the read with `error`, and the pass moves on. */
@@ -82,62 +73,24 @@ export class EndpointReadRefusals {
     this.#maxEntries = config.maxEntries ?? ENDPOINT_READ_REFUSAL_MAX_ENTRIES;
   }
 
-  /**
-   * The attempts of one pass of the read `label`. `preferredFirst` is the
-   * stickiness order with its bound outcome recorders. With `remember` false
-   * the pass is that order as it stands and nothing is remembered: a
-   * tip-sensitive read, or endpoint ordering switched off.
-   */
-  attempts<T extends StickyEndpoint>(
-    label: string,
-    preferredFirst: StickyAttempt<T>[],
-    remember = true,
-  ): ReadAttempt<T>[] {
-    if (!remember) {
-      return preferredFirst.map((attempt) => ({
-        endpoint: attempt.endpoint,
-        recordSuccess: () => attempt.recordSuccess(),
-        recordFailure: () => attempt.recordFailure(),
-      }));
+  /** Immutable inputs to the ordering owner; expiry is resolved once per pass. */
+  constraints(label: string, rpcUrls: readonly string[]) {
+    return {
+      refusing: new Set(rpcUrls.filter(rpcUrl => this.#refuses(label, rpcUrl))),
+      servedInstead: this.#servedInstead.get(label),
+    };
+  }
+
+  recordSuccess(label: string, rpcUrl: string, kind: ReadAttempt<StickyEndpoint>['kind']): void {
+    if (kind === 'substitute') this.#rememberServedInstead(label, rpcUrl);
+    else this.#until.delete(refusalKey(label, rpcUrl));
+  }
+
+  recordFailure(label: string, rpcUrl: string, error: unknown, kind: ReadAttempt<StickyEndpoint>['kind']): void {
+    this.#rememberRefusal(label, rpcUrl, error);
+    if (kind === 'substitute' && this.#servedInstead.get(label) === rpcUrl) {
+      this.#servedInstead.delete(label);
     }
-    const bound = (attempt: StickyAttempt<T>): ReadAttempt<T> => ({
-      endpoint: attempt.endpoint,
-      recordSuccess: () => {
-        this.#until.delete(refusalKey(label, attempt.endpoint.rpcUrl));
-        attempt.recordSuccess();
-      },
-      recordFailure: (error) => {
-        this.#rememberRefusal(label, attempt.endpoint.rpcUrl, error);
-        attempt.recordFailure();
-      },
-    });
-    const refusing = preferredFirst.filter((attempt) => this.#refuses(label, attempt.endpoint.rpcUrl));
-    if (refusing.length === 0 || refusing.length === preferredFirst.length) {
-      return preferredFirst.map(bound);
-    }
-    const others = preferredFirst.filter((attempt) => !refusing.includes(attempt));
-    if (!refusing.includes(preferredFirst[0]!)) {
-      return [...others, ...refusing].map(bound);
-    }
-    const instead = this.#servedInstead.get(label);
-    const first = others.find((attempt) => attempt.endpoint.rpcUrl === instead);
-    return [
-      ...(first ? [first, ...others.filter((attempt) => attempt !== first)] : others).map(
-        (attempt): ReadAttempt<T> => ({
-          endpoint: attempt.endpoint,
-          recordSuccess: () => this.#rememberServedInstead(label, attempt.endpoint.rpcUrl),
-          recordFailure: (error) => {
-            this.#rememberRefusal(label, attempt.endpoint.rpcUrl, error);
-            if (this.#servedInstead.get(label) === attempt.endpoint.rpcUrl) {
-              this.#servedInstead.delete(label);
-            }
-          },
-        }),
-      ),
-      // Reached only when no other endpoint answered. It is asked like any
-      // endpoint stickiness starts at, and recorded like one.
-      ...refusing.map(bound),
-    ];
   }
 
   #rememberRefusal(label: string, rpcUrl: string, error: unknown): void {

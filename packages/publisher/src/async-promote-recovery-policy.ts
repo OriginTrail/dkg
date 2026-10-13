@@ -4,6 +4,7 @@ import {
   type PromoteAttemptError,
   type PromoteAttemptState,
   type PromoteJob,
+  type PromoteFailureTransition,
 } from './async-promote-queue-types.js';
 import { isPromotePostCommitAttemptError } from './async-promote-queue-utils.js';
 import { PROMOTE_RETRYABLE_FAILURE_CODE } from './promote-replay-safety.js';
@@ -35,7 +36,7 @@ export function promoteRetryAttempt(
   attemptCount: number,
   now: number,
   backoff: (attemptCount: number) => number,
-): PromoteAttemptState | undefined {
+): (PromoteAttemptState & { nextRetryAt: number }) | undefined {
   const withinWindow = error.diagnosticCode === PROMOTE_RETRYABLE_FAILURE_CODE
     && now - job.enqueuedAt < PROMOTE_PREREQUISITE_RETRY_WINDOW_MS;
   if (attemptCount >= job.attempt.maxRetries && !withinWindow) return undefined;
@@ -72,4 +73,34 @@ export function requiresManualInspection(job: PromoteJob): boolean {
     || lastError.includes('legacy promote job')
     || reason.includes('missing storage lane')
     || lastError.includes('cannot prove the wm storage lane');
+}
+
+/** Build the failure once under the queue lock; acknowledge only after persistence. */
+export function promoteFailureTransition(
+  job: PromoteJob,
+  error: PromoteAttemptError,
+  now: number,
+  backoff: (attemptCount: number) => number,
+): { job: PromoteJob; transition: PromoteFailureTransition } {
+  const attemptCount = Math.max(1, job.attempt.count);
+  const swmInserted = job.commitMarker?.swmInserted === true;
+  const retryAttempt = error.retryable && !swmInserted
+    ? promoteRetryAttempt(job, error, attemptCount, now, backoff)
+    : undefined;
+  if (retryAttempt) {
+    return {
+      job: { ...job, state: 'failed_retrying', updatedAt: now, lease: undefined, attempt: retryAttempt },
+      transition: { state: 'failed_retrying', jobId: job.jobId, attemptCount, nextRetryAt: retryAttempt.nextRetryAt },
+    };
+  }
+  return {
+    job: {
+      ...job, state: 'failed', updatedAt: now, lease: undefined,
+      attempt: { count: attemptCount, maxRetries: job.attempt.maxRetries, lastError: error },
+      reason: swmInserted
+        ? 'partial promote ambiguity: failed after SWM insert; needs operator inspection'
+        : job.reason,
+    },
+    transition: { state: 'failed', jobId: job.jobId, attemptCount },
+  };
 }

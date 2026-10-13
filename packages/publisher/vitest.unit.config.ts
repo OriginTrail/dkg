@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: [
       'test/wm-lifecycle-integrity.test.ts',
+      'test/assertion-write-provenance.test.ts',
       'test/sealed-create-retry.test.ts',
       'test/workspace-snapshot-source.test.ts',
       'test/workspace-snapshot-page-index.test.ts',
@@ -31,6 +32,7 @@ export default defineConfig({
       'test/async-lift-ka-broadcast-progress.test.ts',
       'test/async-lift-broadcast-durability.test.ts',
       'test/async-lift-intent-lookup.test.ts',
+      'test/async-lift-list-context-graph.test.ts',
       'test/async-lift-writejob-atomicity.test.ts',
       'test/async-lift-publish-options.test.ts',
       'test/async-lift-auto-retry-2270.test.ts',
@@ -43,6 +45,7 @@ export default defineConfig({
       'test/async-lift-receipt-hint-core.test.ts',
       'test/async-lift-receipt-hint-scheduling.test.ts',
       'test/async-lift-receipt-hint-failures.test.ts',
+      'test/async-lift-post-finality-timing.test.ts',
       'test/async-lift-runner.test.ts',
       'test/async-lift-runner-wallet-wake.test.ts',
       'test/pre-broadcast-signal-await.test.ts',
@@ -70,6 +73,7 @@ export default defineConfig({
       'test/lift-job-types.test.ts',
       'test/lift-job-committed.test.ts',
       'test/lift-job-chain-observations.test.ts',
+      'test/lift-job-completion-timing.test.ts',
       'test/multi-root-token-rows.test.ts',
       'test/access-verification.test.ts',
       'test/promote-step-tag.test.ts',

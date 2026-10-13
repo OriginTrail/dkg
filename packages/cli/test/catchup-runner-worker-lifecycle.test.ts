@@ -675,6 +675,71 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(privateMember).toHaveBeenCalledWith('cg-catalog-only');
   });
 
+  it('waits for a selected lane that becomes active a moment after the walk of a first subscribe starts', async () => {
+    // A first subscribe: the graph's public policy is accepted and its
+    // definition is in, the selection that activates the lane is committed in
+    // the background a moment later, and the job asks all its peers in
+    // between. Every call used to find the lane inactive and answer "not
+    // attempted". The pass loop then stopped on a walk that had asked nobody,
+    // and nothing ran the job again.
+    let authority: { lane: string | null; active: boolean } = {
+      lane: 'selected-public',
+      active: false,
+    };
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => authority,
+      log: { info: vi.fn(), debug: vi.fn() },
+    });
+    // One runner, as the daemon has: the job's window is opened by its
+    // preparation and shared by the calls of its walk.
+    createCatchupRunner(agent);
+    const post = (invokeId: number, method: string, args: unknown[]) => (
+      workerControl.FakeWorker.emitToRunner({ type: 'invoke', invokeId, method, args })
+    );
+    type Answer = { type: string; invokeId: number; result?: any; error?: string };
+    const answers = () => new Map(
+      (workerControl.state.posted as Answer[])
+        .filter((message) => message.type === 'invoke-result')
+        .map((message) => [message.invokeId, message]),
+    );
+    const answered = async (count: number) => {
+      for (let i = 0; i < 400 && answers().size < count; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return answers();
+    };
+
+    post(1, 'prepareCatchup', ['cg-first-subscribe', true]);
+    expect((await answered(1)).get(1)?.error).toBeUndefined();
+    const peers = ['peer-a', 'peer-b', 'peer-c', 'peer-d'];
+    for (const [index, peerId] of peers.entries()) {
+      post(10 + index, 'syncSharedMemory', [
+        peerId, 'cg-first-subscribe', 2000, 'catchup-foreground', true,
+      ]);
+    }
+    // The whole walk is under way before the authority is there. No call has
+    // answered, and no peer has been asked.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(answers().size).toBe(1);
+    expect(calls.selectedShared).toHaveLength(0);
+
+    authority = { lane: 'selected-public', active: true };
+    const all = await answered(1 + peers.length);
+    expect(calls.selectedShared.map(([peerId]) => peerId).sort()).toEqual(peers);
+    for (const index of peers.keys()) {
+      expect(all.get(10 + index)?.result).toMatchObject({
+        kind: 'selected-shared-memory',
+        scopeComplete: true,
+      });
+    }
+    // The job says once that it waited.
+    const info = (agent as any).log.info as ReturnType<typeof vi.fn>;
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls[0]![1]).toMatch(
+      /^Catch-up for "cg-first-subscribe": the selected SWM lane became active after \d+ ms$/,
+    );
+  });
+
   it('decides the selected SWM lane on every call, not once per job', async () => {
     // A first subscribe commits the graph's RFC-64 policy in the background
     // while the job prepares, so one call can find the lane inactive and the

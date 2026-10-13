@@ -144,7 +144,7 @@ export class PublicSnapshotMethods {
               deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
               shouldQuarantineCommitted: () => {
                 const current = this.subscribedContextGraphs.get(contextGraphId);
-                return !current || current.onChainId !== onChainId;
+                return !current || (!current.subscribed && !current.coreHosted) || current.onChainId !== onChainId;
               },
               onCommitted: () => this.invalidateListContextGraphsCache(),
               log: message => this.log.info(createOperationContext('sync'), message),

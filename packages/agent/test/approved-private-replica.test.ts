@@ -1357,6 +1357,43 @@ describe('approved private bare-name replica authorization', () => {
     expect(projected?.allowedPeers).toEqual([fixture.receiver.peerId]);
   });
 
+  it('keeps the approved-private SWM metadata snapshot while only other graphs change (#2968)', async () => {
+    const additionalMember = new ethers.Wallet(`0x${'37'.repeat(32)}`);
+    const fixture = await approvedBareNameReplicaFixture({
+      additionalAllowedAgents: [additionalMember.address],
+      peerAllowlist: 'receiver-only',
+    });
+    const handler = fixture.receiver.getOrCreateSharedMemoryHandler();
+    const oracle = Reflect.get(handler, 'contextGraphMetaOracle') as undefined | ((
+      contextGraphId: string,
+    ) => Promise<{
+      allowedAgents?: readonly string[];
+      allowedPeers?: readonly string[];
+    } | null>);
+    if (oracle === undefined) throw new Error('shared-memory metadata oracle is not configured');
+
+    const projection = Reflect.get(fixture.receiver, 'contextGraphMetaProjection');
+    const originalOverride = fixture.receiver
+      .resolveApprovedPrivateReplicaSwmAllowedPeersOverride.bind(fixture.receiver);
+    let calls = 0;
+    vi.spyOn(fixture.receiver, 'resolveApprovedPrivateReplicaSwmAllowedPeersOverride')
+      .mockImplementation(async (contextGraphId) => {
+        calls += 1;
+        // A busy node: other graphs' metadata changes during every read of this one.
+        for (let write = 0; write < 20; write += 1) {
+          projection.markDirty(`other-context-graph-${calls}-${write}`);
+        }
+        return originalOverride(contextGraphId);
+      });
+
+    const projected = await oracle(CONTEXT_GRAPH_ID);
+
+    expect(calls).toBe(1);
+    expect(projected?.allowedAgents?.map((address) => address.toLowerCase()))
+      .toContain(additionalMember.address.toLowerCase());
+    expect(projected?.allowedPeers).toEqual([fixture.receiver.peerId]);
+  });
+
   it('does not let secondary peer metadata widen approved-replica sender-key or host ingest authority', async () => {
     const curator = new ethers.Wallet(`0x${'35'.repeat(32)}`);
     const curatorAddress = curator.address.toLowerCase();

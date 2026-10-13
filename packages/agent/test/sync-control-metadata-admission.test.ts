@@ -62,6 +62,8 @@ describe('durable sync control metadata admission', () => {
       quad(poison, `${DKG}batchId`, integer(999n)),
       quad(poison, `${DKG}assertionGraph`, `${CONTEXT_GRAPH}/_verifiable_memory/attacker/999`),
       quad(poison, `${DKG}assertionVersion`, integer(999n)),
+      quad(poison, `${DKG}authenticatedSubGraphName`, '"forged"'),
+      quad(UAL, `${DKG}authenticatedSubGraphName`, '"forged"'),
     ];
     const spoofedCompanion = 'urn:unverified:spoofed-companion';
     const spoofedDescriptorLink = [

@@ -361,6 +361,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       outcome: 'allowed',
       source: 'registered-chain',
       reason: 'chain-public',
+      grantScope: 'public',
       metadataBootstrap: 'eligible',
       onChainId: ON_CHAIN_ID,
     });
