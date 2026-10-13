@@ -213,7 +213,9 @@ function runGraphScopedDurableSync(options: {
   logWarn?: (ctx: OperationContext, message: string) => void;
 }) {
   const v2Data = dataQuad(2);
-  const v2Meta = metadata(2);
+  const v2Meta = [...metadata(2), ...['publicTripleCount', 'privateTripleCount'].map((predicate, i) => ({
+    subject: ual, predicate: `${DKG}${predicate}`, object: JSON.stringify(String(1 - i)), graph: metaGraph,
+  }))];
   return runDurableSync({
     ctx,
     remotePeerId: 'peer-graph-scoped-authentication',
@@ -1929,7 +1931,9 @@ describe('durable graph-scoped KA materialization', () => {
       graph: metaGraph,
     }));
     const v2Data = dataQuad(2);
-    const v2Meta = metadata(2);
+    const v2Meta = [...metadata(2), ...['publicTripleCount', 'privateTripleCount'].map((predicate, i) => ({
+    subject: ual, predicate: `${DKG}${predicate}`, object: JSON.stringify(String(1 - i)), graph: metaGraph,
+  }))];
     const inserted: Quad[] = [];
     const exactAssets: unknown[] = [];
 

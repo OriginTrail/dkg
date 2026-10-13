@@ -2,7 +2,8 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
   toAgentDid,
-  validateSubGraphName,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -227,7 +228,7 @@ export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
 /** Replace peer confirmation claims with facts established by this receiver. */
 export function overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
   metadata: readonly Quad[],
-  scope: { ual: string; metaGraph: string; receivedAt: Date },
+  scope: { ual: string; metaGraph: string; receivedAt: Date; subGraphName?: string },
   state: { status: 'tentative' } | {
     status: 'confirmed';
     materializedVersion: MaterializedVersion;
@@ -246,7 +247,7 @@ export function overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
       `${lit(scope.receivedAt.toISOString())}^^<${XSD}dateTime>`, scope.metaGraph),
   );
   if (state.status === 'confirmed') {
-    appendAuthenticatedSubGraphRoute(result, scope.ual, scope.metaGraph);
+    appendAuthenticatedSubGraphRoute(result, scope.ual, scope.metaGraph, scope.subGraphName);
     result.push(
       mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, lit(state.confirmation.kind), scope.metaGraph),
       materializedVersionQuad(scope.metaGraph, scope.ual, state.materializedVersion),
@@ -306,23 +307,14 @@ export function generateGraphKnowledgeAssetMetadata(
   } else {
     quads.push(mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('tentative'), metaGraph));
   }
-  if (state.status === 'confirmed') appendAuthenticatedSubGraphRoute(quads, scope.ual, metaGraph);
+  if (state.status === 'confirmed') appendAuthenticatedSubGraphRoute(quads, scope.ual, metaGraph, meta.subGraphName);
   return quads;
 }
 
 /** Locally authenticated routing is independent of receipt or snapshot provenance. */
-function appendAuthenticatedSubGraphRoute(quads: Quad[], ual: string, metaGraph: string): void {
-  const value = (predicate: string) => {
-    const rows = quads.filter(q => q.subject === ual && q.graph === metaGraph && q.predicate === `${DKG}${predicate}`);
-    return rows.length === 1 ? rows[0]!.object : undefined;
-  };
-  const rawName = value('subGraphName');
-  const name = rawName === undefined ? undefined : rdfLiteralLexicalValue(rawName);
-  const root = metaGraph.replace(/\/_meta$/, '');
-  if (name === undefined || !validateSubGraphName(name).valid
-    || value('kaUal') !== ual || value('contextGraph') !== root
-    || !value('assertionGraph')?.startsWith(`${root}/${name}/_verifiable_memory/`)) return;
-  quads.push(mq(ual, AUTHENTICATED_SUB_GRAPH, lit(name), metaGraph));
+function appendAuthenticatedSubGraphRoute(quads: Quad[], ual: string, metaGraph: string, subGraphName?: string): void {
+  // The caller carries the scope established by verification or typed local generation.
+  if (subGraphName !== undefined) quads.push(mq(ual, AUTHENTICATED_SUB_GRAPH, lit(subGraphName), metaGraph));
 }
 
 function generateGraphKnowledgeAssetMetadataBase(
@@ -350,6 +342,9 @@ function generateGraphKnowledgeAssetMetadataBase(
     throw new Error('Graph-scoped KA metadata cannot describe an empty asset');
   }
   assertSafeGraphIriForSparql(meta.assertionGraph);
+  if (meta.subGraphName !== undefined && meta.assertionGraph !== knowledgeAssetLayerGraphUri(
+    meta.contextGraphId, MemoryLayer.VerifiableMemory, scope, meta.subGraphName,
+  )) throw new Error('Graph-scoped KA subgraph does not match its canonical assertion graph');
 
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
   const publisherPeerId = meta.publisherPeerId || 'unknown';

@@ -7,15 +7,16 @@ import type {
 } from "@origintrail-official/dkg-agent";
 import type { RequestContext } from "./context.js";
 
-interface Job {
+interface JobBase {
   id: string;
   request: Omit<ReturnType<typeof normalizePublicSnapshotSyncOptions>, 'signal'>;
-  state: "running" | "complete" | "failed";
   startedAt: number;
-  finishedAt?: number;
-  result?: unknown;
-  error?: string;
 }
+type Job = JobBase & (
+  | { state: 'running' }
+  | { state: 'complete'; finishedAt: number; result: Awaited<ReturnType<DKGAgent['syncPublicGraphSnapshot']>> }
+  | { state: 'failed'; finishedAt: number; error: string }
+);
 const jobs = new WeakMap<DKGAgent, Job>();
 /** The parent route enforces node-admin authorization for both start and status. */
 export async function handlePublicSnapshotJob({
@@ -83,16 +84,12 @@ export async function handlePublicSnapshotJob({
     .syncPublicGraphSnapshot(input)
     .then(
       (result) => {
-        job.result = result;
-        job.state = "complete";
+        jobs.set(agent, { ...job, state: "complete", result, finishedAt: Date.now() });
       },
       (error) => {
-        job.error = error instanceof Error ? error.message : String(error);
-        job.state = "failed";
+        jobs.set(agent, { ...job, state: "failed", finishedAt: Date.now(),
+          error: error instanceof Error ? error.message : String(error) });
       },
-    )
-    .finally(() => {
-      job.finishedAt = Date.now();
-    });
+    );
   reply(202, job);
 }

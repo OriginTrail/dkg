@@ -8,6 +8,7 @@ import {
   GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
   readGraphKnowledgeAssetConfirmationKindV1,
 } from '@origintrail-official/dkg-publisher';
+import { parseGraphScopedDescriptor } from '../durable-integrity.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
@@ -195,8 +196,10 @@ export function partitionVerifiedGraphScopedAssets(
       object: `"${batchId}"^^<${XSD_INTEGER}>`,
       graph: metaGraph,
     });
+    const { subGraphName } = parseGraphScopedDescriptor(ual, metadataQuads);
     assets.push({
       contextGraphId,
+      subGraphName,
       ual,
       assertionVersion: BigInt(versionRaw),
       assertionGraph,

@@ -146,7 +146,7 @@ export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
         ...asset,
         metadataQuads: [
           ...overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(metadata, {
-            ual: asset.ual, metaGraph: asset.metaGraph, receivedAt: new Date(),
+            ual: asset.ual, metaGraph: asset.metaGraph, receivedAt: new Date(), subGraphName: asset.subGraphName,
           }, { status: "confirmed", confirmation: { kind: "finalized-materialization" },
             materializedVersion: { blockNumber, txIndex: 0 } }),
           ...Object.entries(fields).map(([key, value]) => ({
