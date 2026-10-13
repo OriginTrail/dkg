@@ -4,6 +4,7 @@
  */
 
 import { RDF_JSON, XSD_BOOLEAN, XSD_DECIMAL, XSD_INTEGER } from './constants.js';
+import { hasOwn, setOwn } from './utils.js';
 
 const LITERAL_RE = /^("(?:\\.|[^"\\])*")(?:\^\^<[^>]*>|@[A-Za-z-]+)?$/;
 const TYPED_LITERAL_RE = /^("(?:\\.|[^"\\])*")\^\^<([^>]*)>$/;
@@ -85,13 +86,17 @@ export function termValue(term: string, ctx: ExportContext, pathForm = false): u
   return term;
 }
 
-/** Accumulate a (possibly multi-valued) key: scalar on first sight, list thereafter. */
+/**
+ * Accumulate a (possibly multi-valued) key: scalar on first sight, list
+ * thereafter. Own-property checks and writes, so producer keys named
+ * `constructor`, `toString` or `__proto__` are stored like any other.
+ */
 export function accumulate(target: Record<string, unknown>, key: string, value: unknown): void {
-  if (key in target) {
+  if (hasOwn(target, key)) {
     const cur = target[key];
-    target[key] = Array.isArray(cur) ? [...cur, value] : [cur, value];
+    setOwn(target, key, Array.isArray(cur) ? [...cur, value] : [cur, value]);
   } else {
-    target[key] = value;
+    setOwn(target, key, value);
   }
 }
 
@@ -109,7 +114,7 @@ export function byNodeIndex(a: string, b: string): number {
 /** Place `known` keys first (in the given order), then everything else in insertion order. */
 export function orderKeys(obj: Record<string, unknown>, known: readonly string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const k of known) if (k in obj) out[k] = obj[k];
-  for (const k of Object.keys(obj)) if (!(k in out)) out[k] = obj[k];
+  for (const k of known) if (hasOwn(obj, k)) setOwn(out, k, obj[k]);
+  for (const k of Object.keys(obj)) if (!hasOwn(out, k)) setOwn(out, k, obj[k]);
   return out;
 }

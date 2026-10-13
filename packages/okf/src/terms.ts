@@ -84,8 +84,13 @@ export function valueToTerms(value: unknown): string[] {
 }
 
 /** The generic producer-defined-key mapping: `schema:<camelKey>` with typed terms (SPEC §4.1/§11). */
+/** The generic producer-key predicate for `key`: `schema:<camelKey>` (SPEC §4.1/§11). */
+export function genericPredicate(key: string): string {
+  return SCHEMA_NS + camelCase(key);
+}
+
 export function genericQuads(subject: string, key: string, value: unknown): Quad[] {
-  const predicate = SCHEMA_NS + camelCase(key);
+  const predicate = genericPredicate(key);
   return valueToTerms(value).map((object) => ({ subject, predicate, object }));
 }
 

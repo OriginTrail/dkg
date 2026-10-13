@@ -261,6 +261,15 @@ it; the CLI summary reports it against the current time.
   exactly, and the predicate is always IRI-safe. The top-level convention is
   left as it was in v0.1 so an OKF import keeps converging with the node's
   Markdown extractor.
+- **Keys are arbitrary strings.** Producer keys, extension keys and concept
+  IDs (file paths) may be `constructor`, `toString` or `__proto__`. Export uses
+  own-property checks and defined (not assigned) properties throughout, and the
+  bundle's concept dictionaries have no prototype, so none of these names is
+  dropped or misread.
+- **Wrong-shaped nested families** (`sources[].usage_window: last-quarter`) are
+  kept verbatim under the generic predicate on the entry's node, warned about,
+  and written back under their own key on export. Entry nodes carry no other
+  `schema:` producer keys, so the read-back is unambiguous.
 - **Each triple once.** The mapper deduplicates its output per concept: a store
   holds a set, so two `sources` naming one resource give two `okf:Source` nodes
   but a single `prov:wasDerivedFrom` edge. Without this the expected count in

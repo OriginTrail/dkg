@@ -88,3 +88,26 @@ export function isMapping(value: unknown): value is Record<string, unknown> {
 export function isBlank(value: unknown): boolean {
   return value === undefined || value === null || String(value).trim() === '';
 }
+
+/**
+ * Own-property check. Producer-defined keys are arbitrary strings, so `key in
+ * obj` is wrong for them: `constructor`, `toString` and friends are inherited
+ * by every plain object and would read as already present.
+ */
+export function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+/**
+ * Define `key` as an own, enumerable data property. Plain assignment would
+ * run the `__proto__` setter for that key instead of storing it (silently
+ * dropping the value); this stores every key, `__proto__` included.
+ */
+export function setOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+/** `Object.assign` for arbitrary keys: copies every own enumerable key of `source` with `setOwn`. */
+export function assignOwn(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  for (const key of Object.keys(source)) setOwn(target, key, source[key]);
+}

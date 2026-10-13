@@ -47,8 +47,11 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
 
   // --- Pass 1: index ---
   const docs: OkfDocument[] = [];
-  const iriByConceptId: Record<string, string> = {};
-  const typeByConceptId: Record<string, string | undefined> = {};
+  // Null-prototype dictionaries: a concept ID is a file path, and `__proto__.md`
+  // or `constructor.md` are valid concept files (§2), so a plain object would
+  // drop the first (prototype setter) and misread inherited names.
+  const iriByConceptId: Record<string, string> = Object.create(null) as Record<string, string>;
+  const typeByConceptId: Record<string, string | undefined> = Object.create(null) as Record<string, string | undefined>;
   for (const f of ordered) {
     if (!isConceptFile(f.path)) continue;
     let doc: OkfDocument;

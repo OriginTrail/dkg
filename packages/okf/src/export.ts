@@ -44,6 +44,7 @@ import {
 } from './constants.js';
 import { accumulate, conceptIdFromIri, literalValue, orderKeys, termValue, type ExportContext } from './decode-terms.js';
 import { decodeFamilies } from './families/decode.js';
+import { assignOwn, hasOwn } from './utils.js';
 import type { BundleFile, ExportInput, OkfMappingOptions, Quad } from './types.js';
 
 /**
@@ -163,10 +164,10 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   if (tags.length > 0) frontmatter.tags = tags;
 
   const families = decodeFamilies(conceptQuads, (node) => bySubject.get(node) ?? [], ctx);
-  Object.assign(frontmatter, families);
+  assignOwn(frontmatter, families);
   // §13.1: a last-modified time with no `generated` (which needs a `by`) is the legacy `timestamp`.
-  if (!('generated' in families) && dateModified !== null) frontmatter.timestamp = dateModified;
-  Object.assign(frontmatter, extras);
+  if (!hasOwn(families, 'generated') && dateModified !== null) frontmatter.timestamp = dateModified;
+  assignOwn(frontmatter, extras);
 
   const ordered = orderKeys(frontmatter, CONCEPT_KEY_ORDER);
 

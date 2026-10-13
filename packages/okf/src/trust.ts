@@ -9,6 +9,7 @@
 import { OKF_STATUS_VALUES } from './constants.js';
 import { VERIFIED, definedKeys } from './families/specs.js';
 import { parseList, type ParsedEntry } from './families/parse.js';
+import { setOwn } from './utils.js';
 import type { OkfStatus, TrustTier, VerificationEvent } from './types.js';
 
 /** XSD `dateTime` lexical form (`YYYY-MM-DDThh:mm:ss[.s+][Z|±hh:mm]`). The zone is optional in XSD; OKF wants it explicit (§5). */
@@ -125,7 +126,7 @@ export function parseVerified(value: unknown): ParsedVerification {
   const events = parsed.entries.flatMap((entry): VerificationEvent[] => {
     if (!entry.usable || entry.mapping === null) return [];
     const extra: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(entry.mapping)) if (!known.has(k)) extra[k] = v;
+    for (const [k, v] of Object.entries(entry.mapping)) if (!known.has(k)) setOwn(extra, k, v);
     return [{ index: entry.index, by: String(entry.mapping.by).trim(), at: dateTimeLexical(entry.mapping.at), extra }];
   });
   return { shape: parsed.shape, entries: parsed.entries, events };

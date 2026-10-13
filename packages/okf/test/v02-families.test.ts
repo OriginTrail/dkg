@@ -737,6 +737,83 @@ describe('exportInputFromQuads: the package rebuilds concepts from a graph in an
   });
 });
 
+describe('arbitrary producer keys, prototype names included', () => {
+  // `key in obj` is true for inherited names, and plain assignment of
+  // `__proto__` runs the prototype setter; neither may drop a producer key.
+  const PROTO = [
+    'type: Metric',
+    'constructor: c0',
+    'toString: t0',
+    'generated: { by: human:a, constructor: c1, toString: t1, __proto__: p1 }',
+    'verified:',
+    '  - { by: human:a, constructor: c2, __proto__: p2 }',
+    'sources:',
+    '  - { id: s, resource: https://x.example/s, toString: t3, usage_window: { from: 2026-05-01T00:00:00Z, constructor: c4, __proto__: p4 } }',
+    'usage_window: { from: 2026-06-01T00:00:00Z, toString: t5 }',
+    'parameters:',
+    '  - { name: year, constructor: c6, __proto__: p6 }',
+    'executor: { resource: https://example.org/run, constructor: custom, toString: t7, __proto__: p7 }',
+    'attester: { resource: https://x.example/a, valueOf: v8 }',
+  ].join('\n');
+  const own = (obj: unknown, key: string) => Object.getOwnPropertyDescriptor(obj as object, key)?.value;
+
+  it('writes every key back in every family', () => {
+    const fm = exportedFrontmatter(bundle(PROTO));
+    expect([own(fm, 'constructor'), own(fm, 'toString')]).toEqual(['c0', 't0']);
+    expect(['constructor', 'toString', '__proto__'].map((k) => own(fm.generated, k))).toEqual(['c1', 't1', 'p1']);
+    const [v] = fm.verified as unknown[];
+    expect([own(v, 'constructor'), own(v, '__proto__')]).toEqual(['c2', 'p2']);
+    const [src] = fm.sources as Array<Record<string, unknown>>;
+    expect(own(src, 'toString')).toBe('t3');
+    expect([own(src.usage_window, 'constructor'), own(src.usage_window, '__proto__')]).toEqual(['c4', 'p4']);
+    expect(own(fm.usage_window, 'toString')).toBe('t5');
+    const [param] = fm.parameters as unknown[];
+    expect([own(param, 'constructor'), own(param, '__proto__')]).toEqual(['c6', 'p6']);
+    expect(['constructor', 'toString', '__proto__'].map((k) => own(fm.executor, k))).toEqual(['custom', 't7', 'p7']);
+    expect(own(fm.attester, 'valueOf')).toBe('v8');
+    // and no prototype was replaced along the way
+    expect(Object.getPrototypeOf(fm.executor)).toBe(Object.prototype);
+  });
+
+  it('round-trips the graph exactly', () => {
+    const first = importBundle(bundle(PROTO));
+    const second = importBundle(exportBundle(first));
+    const strip = (r: typeof first) => quadsToNQuads(r.quads.filter((q) => !q.subject.includes(GENID_TAGS.section) && q.predicate !== DKG_HAS_SECTION));
+    expect(strip(second)).toBe(strip(first));
+  });
+});
+
+describe('a nested family of the wrong shape is kept through export', () => {
+  const SCALAR_WINDOW = 'type: Metric\nsources:\n  - { resource: https://example.org/source, usage_window: last-quarter }';
+
+  it('writes the per-source usage_window back verbatim and keeps the warning on re-import', () => {
+    const fm = exportedFrontmatter(bundle(SCALAR_WINDOW));
+    expect(fm.sources).toEqual([{ resource: 'https://example.org/source', usage_window: 'last-quarter' }]);
+    const second = importBundle(exportBundle(importBundle(bundle(SCALAR_WINDOW))));
+    expect(second.warnings.map((w) => w.message)).toContain('`sources[0].usage_window` must be a `{ from, to }` mapping (§5.1); preserved verbatim');
+    const node0 = node(GENID_TAGS.source, 0);
+    expect(objs(second.concepts.find((c) => c.conceptId === 'metrics/revenue')!.quads, SCHEMA_NS + 'usageWindow', node0)).toEqual(['"last-quarter"']);
+  });
+});
+
+describe('concept IDs are arbitrary file paths', () => {
+  it('imports `__proto__.md` and `constructor.md` as ordinary, linked concepts', () => {
+    const r = importBundle([
+      IDX_V02(),
+      { path: '__proto__.md', content: '---\ntype: Thing\ntitle: P\n---\n\nSee [c](constructor.md).\n' },
+      { path: 'constructor.md', content: '---\ntype: Thing\ntitle: C\n---\n\nSee [p](__proto__.md).\n' },
+    ]);
+    expect(r.concepts.map((c) => [c.conceptId, c.iri])).toEqual([
+      ['__proto__', 'urn:okf:__proto__'],
+      ['constructor', 'urn:okf:constructor'],
+    ]);
+    expect(Object.keys(r.iriByConceptId).sort()).toEqual(['__proto__', 'constructor']);
+    expect(r.concepts.map((c) => c.resolvedLinks.map((l) => l.targetConceptId))).toEqual([['constructor'], ['__proto__']]);
+    expect(r.quads.every((q) => typeof q.subject === 'string')).toBe(true);
+    expect(exportBundle(r).map((f) => f.path)).toEqual(['__proto__.md', 'constructor.md', 'index.md']);
+  });
+});
+
 describe('§12 versioning', () => {
   it('reads okf_version 0.2 silently and warns (best-effort) on an unknown version', () => {
     const ok = importBundle(bundle('type: Metric'));

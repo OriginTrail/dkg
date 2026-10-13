@@ -9,6 +9,8 @@
  */
 
 import { okfExtensionKey } from '../extensions.js';
+import { genericPredicate } from '../terms.js';
+import { hasOwn } from '../utils.js';
 import { accumulate, byNodeIndex, orderKeys, termValue, type ExportContext } from '../decode-terms.js';
 import type { Quad } from '../types.js';
 import {
@@ -65,7 +67,7 @@ function decodeFields(
 function decodeMapping(spec: MappingFamilySpec, quads: readonly Quad[], ctx: ExportContext): Record<string, unknown> | null {
   const { value, fields, extensions } = decodeFields(spec, quads, ctx);
   const anchors = spec.presentWith ?? spec.fields.map((f) => f.key);
-  const present = anchors.some((key) => key in fields) || Object.keys(extensions).length > 0;
+  const present = anchors.some((key) => hasOwn(fields, key)) || Object.keys(extensions).length > 0;
   return present ? orderKeys(value, spec.fields.map((f) => f.key)) : null;
 }
 
@@ -78,7 +80,16 @@ function decodeEntry(
   const nested: Record<string, unknown> = {};
   for (const n of spec.nested ?? []) {
     const value = decodeMapping(n, quads, ctx);
-    if (value) nested[n.key] = value;
+    if (value) {
+      nested[n.key] = value;
+      continue;
+    }
+    // A nested value of the wrong shape (`usage_window: last-quarter`) was
+    // kept verbatim under the generic predicate on the entry's node; entry
+    // nodes carry no other `schema:` producer keys, so it reads back unambiguously.
+    const fallback: Record<string, unknown> = {};
+    for (const q of quads) if (q.predicate === genericPredicate(n.key)) accumulate(fallback, n.key, termValue(q.object, ctx));
+    if (hasOwn(fallback, n.key)) nested[n.key] = fallback[n.key];
   }
   return orderKeys({ ...fields, ...nested, ...extensions }, [
     ...spec.fields.map((f) => f.key),
