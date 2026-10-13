@@ -22,8 +22,9 @@ export interface SelectedSwmMetaRetentionReservation {
   exhaustion: SelectedSwmMetaRetentionExhaustionV1 | null;
   /**
    * Atomically consume this reservation while replacing the lease's prefix.
-   * `complete` says that the prefix is the whole manifest: the lease will
-   * claim no more of its allowance.
+   * `complete` says that the prefix is the whole manifest. Without it the
+   * transfer is taken to come back for the rest of its allowance, and the pool
+   * keeps that room from waiting leases until `endRound()`.
    */
   commitReplace(rows: number, bytesEstimate: number, complete?: boolean): void;
   release(): void;
@@ -36,16 +37,19 @@ export interface SelectedSwmMetaRetentionLease {
    * Reserve this lease's whole remaining prefix allowance, waiting for it
    * while another lease's fetch is in flight.
    *
-   * The budget decides again whenever a reservation settles or a lease gives
-   * rows back, in the order the leases started to wait. It grants the
-   * allowance only whole, and only when the pool then still has room for the
-   * rest of the allowance of every lease that holds an unfinished prefix. A
-   * waiting lease holds no capacity.
+   * The budget decides again whenever a reservation settles, a lease gives
+   * rows back or a round ends, in the order the leases started to wait. It
+   * grants the allowance only whole, and only when the pool then still has
+   * room for the rest of the allowance of every lease whose transfer is
+   * between two passes over an unfinished manifest. A waiting lease holds no
+   * capacity.
    *
    * Resolves `null` after `timeoutMs`, when `signal` aborts, and as soon as
    * no other lease has a fetch in flight: the pool is then held by retained
    * prefixes, which only their owners or the retention clock give back, so
-   * there is nothing bounded to wait for.
+   * there is nothing bounded to wait for. A caller that is answered `null`
+   * has no reservation and must not take one in its place: what is free then
+   * is the room this operation kept for others.
    */
   reserveWholeAllowance(
     timeoutMs: number,
@@ -53,6 +57,18 @@ export interface SelectedSwmMetaRetentionLease {
   ): Promise<SelectedSwmMetaRetentionReservation | null>;
   /** Atomically replace this lease's retained size after a fetched tail. */
   replace(rows: number, bytesEstimate: number): void;
+  /**
+   * Drop the retained prefix and reserve a fresh allowance in one step, taking
+   * back any reservation this lease still has out. Waiting leases decide only
+   * afterwards, so a transfer that starts its prefix over keeps its allowance.
+   */
+  restart(): SelectedSwmMetaRetentionReservation;
+  /**
+   * The round that fetched this lease's prefix has ended. The prefix stays
+   * retained for a later round, which may never come: until that round
+   * fetches for it again, the pool keeps no room for its next pass.
+   */
+  endRound(): void;
   release(): void;
 }
 
@@ -98,8 +114,11 @@ export function createSelectedSwmMetaRetentionBudget(
   const entries = new Map<symbol, {
     rows: number;
     bytesEstimate: number;
-    /** The prefix is a whole manifest and will not grow. */
-    complete: boolean;
+    /**
+     * The prefix is part of a manifest and its transfer is between two passes
+     * of a running round: it will ask for the rest of its allowance.
+     */
+    expectsMore: boolean;
   }>();
   const reservations = new Map<
     symbol,
@@ -113,8 +132,9 @@ export function createSelectedSwmMetaRetentionBudget(
   const allowanceWaiters = new Set<{ decide(): void }>();
   /**
    * Let every waiting lease decide again, after a change that can free
-   * capacity or end the last fetch in flight. A grant is a reservation made
-   * right here, so the next waiter in line sees the pool without it.
+   * capacity, drop a claim on it or end the last fetch in flight. A grant is
+   * a reservation made right here, so the next waiter in line sees the pool
+   * without it.
    */
   const settleAllowanceWaiters = () => {
     for (const waiter of allowanceWaiters) waiter.decide();
@@ -134,12 +154,12 @@ export function createSelectedSwmMetaRetentionBudget(
   return {
     lease() {
       const id = Symbol('selected-swm-meta-retention');
-      entries.set(id, { rows: 0, bytesEstimate: 0, complete: false });
+      entries.set(id, { rows: 0, bytesEstimate: 0, expectsMore: false });
       let released = false;
       const replaceRetained = (
         nextRows: number,
         nextBytesEstimate: number,
-        complete = false,
+        expectsMore: boolean,
       ) => {
         if (released) {
           throw new Error('Selected SWM metadata retention lease is released');
@@ -176,7 +196,7 @@ export function createSelectedSwmMetaRetentionBudget(
             limits.maxBytesEstimate,
           );
         }
-        entries.set(id, { rows: nextRows, bytesEstimate: nextBytesEstimate, complete });
+        entries.set(id, { rows: nextRows, bytesEstimate: nextBytesEstimate, expectsMore });
         rows = globalRows;
         bytesEstimate = globalBytes;
       };
@@ -187,11 +207,20 @@ export function createSelectedSwmMetaRetentionBudget(
         }
         return false;
       };
+      /** Take back every reservation this lease still has out. */
+      const dropOwnReservations = () => {
+        for (const [reservationId, reservation] of reservations) {
+          if (reservation.owner !== id) continue;
+          reservations.delete(reservationId);
+          reservedRows -= reservation.rows;
+          reservedBytesEstimate -= reservation.bytesEstimate;
+        }
+      };
       /**
        * Whether this lease can take its whole remaining allowance now and
-       * leave every other lease that holds an unfinished prefix, and is not
-       * fetching at the moment, the rest of its own allowance: what that
-       * transfer will ask for with its next pass.
+       * leave every other lease whose transfer is between two passes the rest
+       * of its own allowance: what that transfer asks for with its next pass.
+       * A lease that is fetching has that room reserved already.
        */
       const wholeAllowanceIsFree = () => {
         const current = entries.get(id) ?? { rows: 0, bytesEstimate: 0 };
@@ -203,7 +232,7 @@ export function createSelectedSwmMetaRetentionBudget(
         let claimRows = 0;
         let claimBytesEstimate = 0;
         for (const [holder, held] of entries) {
-          if (holder === id || fetching.has(holder) || held.complete) continue;
+          if (holder === id || fetching.has(holder) || !held.expectsMore) continue;
           if (held.rows === 0 && held.bytesEstimate === 0) continue;
           claimRows += limits.maxPrefixRows - held.rows;
           claimBytesEstimate += limits.maxPrefixBytesEstimate - held.bytesEstimate;
@@ -235,18 +264,19 @@ export function createSelectedSwmMetaRetentionBudget(
           reservedRows += reservationRows;
           reservedBytesEstimate += reservationBytesEstimate;
           let reservationReleased = false;
+          /** False when the reservation was settled or taken back before. */
           const removeReservation = () => {
-            if (reservationReleased) return;
+            if (reservationReleased) return false;
             reservationReleased = true;
             const reservation = reservations.get(reservationId);
-            if (!reservation) return;
+            if (!reservation) return false;
             reservations.delete(reservationId);
             reservedRows -= reservation.rows;
             reservedBytesEstimate -= reservation.bytesEstimate;
+            return true;
           };
           const releaseReservation = () => {
-            removeReservation();
-            settleAllowanceWaiters();
+            if (removeReservation()) settleAllowanceWaiters();
           };
           // A lease at its own prefix ceiling stays exhausted no matter what
           // the rest of the pool does, so that case is reported first.
@@ -287,7 +317,7 @@ export function createSelectedSwmMetaRetentionBudget(
               // prefix is about to take.
               removeReservation();
               try {
-                replaceRetained(nextRows, nextBytesEstimate, complete);
+                replaceRetained(nextRows, nextBytesEstimate, complete !== true);
               } finally {
                 settleAllowanceWaiters();
               }
@@ -321,18 +351,29 @@ export function createSelectedSwmMetaRetentionBudget(
           });
         },
         replace(nextRows, nextBytesEstimate) {
-          replaceRetained(nextRows, nextBytesEstimate);
+          replaceRetained(nextRows, nextBytesEstimate, false);
+          settleAllowanceWaiters();
+        },
+        restart() {
+          if (released) {
+            throw new Error('Selected SWM metadata retention lease is released');
+          }
+          dropOwnReservations();
+          replaceRetained(0, 0, false);
+          const reservation = lease.reserve();
+          settleAllowanceWaiters();
+          return reservation;
+        },
+        endRound() {
+          const current = entries.get(id);
+          if (released || !current?.expectsMore) return;
+          entries.set(id, { ...current, expectsMore: false });
           settleAllowanceWaiters();
         },
         release() {
           if (released) return;
           released = true;
-          for (const [reservationId, reservation] of reservations) {
-            if (reservation.owner !== id) continue;
-            reservations.delete(reservationId);
-            reservedRows -= reservation.rows;
-            reservedBytesEstimate -= reservation.bytesEstimate;
-          }
+          dropOwnReservations();
           const current = entries.get(id);
           if (current) {
             entries.delete(id);

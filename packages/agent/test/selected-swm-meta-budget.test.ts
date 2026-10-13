@@ -246,13 +246,116 @@ describe('selected SWM metadata retention budget', () => {
     const reservation = await waiting;
     expect(reservation).toEqual(expect.objectContaining({ maxRows: 2, maxBytesEstimate: 200 }));
     reservation!.release();
-    // A prefix replaced without that word is an unfinished one again, and the
-    // same two free rows are no whole allowance beside it.
-    first.replace(1, 100);
-    await expect(waiter.reserveWholeAllowance(60_000)).resolves.toBeNull();
     first.release();
     other.release();
     waiter.release();
+  });
+
+  it('keeps no room for a prefix whose round has ended', async () => {
+    // Two allowances and one row more.
+    const budget = createSelectedSwmMetaRetentionBudget({
+      maxRows: 5,
+      maxBytesEstimate: 500,
+      maxPrefixRows: 2,
+      maxPrefixBytesEstimate: 200,
+    });
+    const stale = budget.lease();
+    const fetching = budget.lease();
+    const staleFetch = stale.reserve();
+    const inFlight = fetching.reserve();
+    const waiter = budget.lease();
+    const waiting = waiter.reserveWholeAllowance(60_000);
+    let granted = false;
+    void waiting.then(() => { granted = true; });
+
+    // One row of an unfinished manifest is kept. Its transfer is between two
+    // passes, and one of the two rows that are free is the one it comes back
+    // for: the waiting lease is not let through.
+    staleFetch.commitReplace(1, 100);
+    await turn();
+    expect(granted).toBe(false);
+
+    // The round ends with the manifest unfinished. The prefix is kept for a
+    // later round, which may never come, and holds no room meanwhile.
+    stale.endRound();
+    const reservation = await waiting;
+    expect(reservation).toEqual(expect.objectContaining({ maxRows: 2, maxBytesEstimate: 200 }));
+    // Ending the round twice, or on a lease that kept nothing, changes nothing.
+    stale.endRound();
+    waiter.endRound();
+    reservation!.release();
+
+    // The next round's fetch makes it a transfer between two passes again.
+    stale.reserve().commitReplace(1, 100);
+    const again = waiter.reserveWholeAllowance(60_000);
+    let grantedAgain = false;
+    void again.then(() => { grantedAgain = true; });
+    await turn();
+    expect(grantedAgain).toBe(false);
+    stale.endRound();
+    (await again)!.release();
+    inFlight.release();
+    for (const lease of [stale, fetching, waiter]) lease.release();
+    // A released lease has no round to end.
+    stale.endRound();
+  });
+
+  it('grants a lease that holds a prefix the whole rest of its own allowance', async () => {
+    const budget = pool(1);
+    const continuing = budget.lease();
+    continuing.reserve().commitReplace(1, 100);
+    const other = budget.lease();
+    const inFlight = other.reserve();
+    expect(inFlight).toEqual(expect.objectContaining({ maxRows: 1, maxBytesEstimate: 100 }));
+
+    // Its own prefix is no claim against itself: the row that comes free is
+    // the whole rest of its allowance.
+    const waiting = continuing.reserveWholeAllowance(60_000);
+    inFlight.release();
+    const reservation = await waiting;
+    expect(reservation).toEqual(expect.objectContaining({ maxRows: 1, maxBytesEstimate: 100 }));
+    reservation!.commitReplace(2, 200, true);
+    continuing.release();
+    other.release();
+  });
+
+  it('restarts a prefix with a fresh allowance before a waiting lease decides', async () => {
+    const budget = pool(2);
+    const restarting = budget.lease();
+    restarting.reserve().commitReplace(2, 200);
+    // Its prefix came from an earlier round: nothing is kept for it.
+    restarting.endRound();
+    const failed = restarting.reserve();
+    expect(failed).toEqual(expect.objectContaining({ maxRows: 0, exhaustion: 'prefix' }));
+    const other = budget.lease();
+    const inFlight = other.reserve();
+    const waiter = budget.lease();
+    const waiting = waiter.reserveWholeAllowance(60_000);
+    let granted = false;
+    void waiting.then((reservation) => { granted = reservation !== null; });
+
+    // The restart frees a whole allowance and takes it again in one step. A
+    // waiting lease that was handed it in between would leave the restarted
+    // transfer nothing to start over with.
+    const fresh = restarting.restart();
+    expect(fresh).toEqual(expect.objectContaining({
+      maxRows: 2,
+      maxBytesEstimate: 200,
+      exhaustion: null,
+    }));
+    await turn();
+    expect(granted).toBe(false);
+    // The reservation of the failed fetch went with the restart: releasing it
+    // afterwards gives nothing back twice.
+    failed.release();
+    expect(budget.lease().reserve()).toEqual(expect.objectContaining({ maxRows: 0 }));
+
+    fresh.commitReplace(0, 0, true);
+    (await waiting)!.release();
+    inFlight.release();
+    restarting.release();
+    expect(() => restarting.restart()).toThrow(/released/);
+    for (const lease of [other, waiter]) lease.release();
   });
 
   it('grants only what leaves a lease that holds a prefix the room it could still claim', async () => {
@@ -395,16 +498,24 @@ describe('selected SWM metadata retention budget', () => {
     probe.commitReplace(0, 0);
     (await afterProbe)!.release();
 
-    // Handing a prefix back while another fetch is in flight frees room too.
-    const retained = budget.lease();
-    retained.replace(1, 100);
-    const stillFetching = budget.lease().reserve();
-    expect(stillFetching).toEqual(expect.objectContaining({ maxRows: 1, exhaustion: null }));
-    const afterHandBack = waiter.reserveWholeAllowance(60_000);
+    // Handing a prefix back frees room too, while another fetch is still in
+    // flight.
+    const wide = pool(2);
+    const retained = wide.lease();
+    retained.replace(2, 200);
+    const stillFetching = wide.lease().reserve();
+    const queued = wide.lease();
+    const afterHandBack = queued.reserveWholeAllowance(60_000);
+    let handedOver = false;
+    void afterHandBack.then(() => { handedOver = true; });
+    await turn();
+    expect(handedOver).toBe(false);
     retained.replace(0, 0);
-    stillFetching.release();
+    await turn();
+    expect(handedOver).toBe(true);
     (await afterHandBack)!.release();
-    for (const lease of [waiter, atCeiling, retained]) lease.release();
+    stillFetching.release();
+    for (const lease of [waiter, atCeiling, retained, queued]) lease.release();
   });
 
   it('holds nothing for a waiting lease, so waiting leases cannot keep each other waiting', async () => {
