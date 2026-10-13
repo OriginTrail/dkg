@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "deployedAt": "2026-10-13T15:34:47.315517+00:00",
+  "repository": "OriginTrail/dkg",
+  "pullRequest": 3196,
+  "sourceCommit": "f42564295107e9be308d0a6f79a8add60f2426f5",
+  "implementationCommit": "da84768b92eb9585e32497bab7910cdb05268ce3",
+  "deploymentScope": "native-DKG-static-UI-only",
+  "artifact": {
+    "sha256": "d158e936a02c6555d8cce2b79444a37f02148e231424fa31664acbec33fbebcc",
+    "candidateFilesVerified": 69,
+    "servedFilesVerified": 68,
+    "oldChunksRetained": 88
+  },
+  "activation": {
+    "atomicDirectoryExchange": true,
+    "rollbackBackupPreserved": true,
+    "servicesRestarted": false,
+    "runtimeAndConfigurationUnchanged": true,
+    "graphDataModifiedByDeployment": false,
+    "authorizationBroadened": false,
+    "unauthenticatedApiStatus": 401,
+    "workerRuntimeCommit": "9e823207538e47f5bbfd3024707187d283057080",
+    "watcherResumed": false,
+    "monitoredOrders": 1000,
+    "sqlBatchSize": 10,
+    "intervalMs": 1800000
+  },
+  "browser": {
+    "uiSourceCommit": "f42564295107e9be308d0a6f79a8add60f2426f5",
+    "sourcesPageLoaded": true,
+    "sharedDataNavigationWorked": true,
+    "firstAssertionPageRows": 50,
+    "secondAssertionPageRows": 50,
+    "distinctAcrossAssertionPages": 100,
+    "countBadgesOnFirstPage": 50,
+    "disconnectedEntityOpened": true,
+    "scopedResourceDetailsLoaded": true,
+    "graphContinuation": {
+      "entitiesBefore": 5,
+      "entitiesAfter": 9,
+      "moreDataNoticeVisible": true
+    },
+    "assertionTabReturnReady": true,
+    "at": "2026-10-13T15:40:48.917Z"
+  },
+  "build": {
+    "productionBuildPassed": true,
+    "heapAllowanceMiB": 1536,
+    "previousCiFailure": "Vite completed output but then exceeded its 896 MiB heap allowance; every preceding hosted test passed.",
+    "latestHostedCi": "in progress at deployment"
+  },
+  "limitations": [
+    "This deploys the static DKG UI, not all backend code in PR 3196.",
+    "No browser heap soak measurement is claimed.",
+    "Browse counts and relations describe loaded pages; more data is explicitly indicated.",
+    "Recent-activity lookup still reports a ten-second timeout under current node load; its query is unchanged by this UI deployment.",
+    "Ingestion cycle completion and unchanged-data evidence remain unverified; the observer and automation stay stopped."
+  ]
+}

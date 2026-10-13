@@ -125,11 +125,18 @@ prunes removed icons and initializes 3D only once for concurrent callers.
 These fixes address reproduced lifecycle leaks; a browser heap soak test is
 still a rollout check rather than a claimed result.
 
-The [UI validation receipt](jpb-ui-validation-20261013.json) separates local
-regression tests from read-only live JPB API checks. The in-app browser blocked
-the local preview with `ERR_BLOCKED_BY_CLIENT`, so candidate browser interaction
-and deployed-browser verification are not claimed. No JPB service was deployed,
-restarted, or given broader access for this UI change.
+The [UI validation receipt](jpb-ui-validation-20261013.json) records the earlier
+local regression tests and read-only live JPB API checks. Its local browser
+preview was blocked with `ERR_BLOCKED_BY_CLIENT`. The native UI was subsequently
+deployed on JPB from `f42564295107e9be308d0a6f79a8add60f2426f5`; see the separate
+[deployment receipt](jpb-ui-deployment-20261013.json) for served-file verification
+and browser checks. Activation exchanged the static directories atomically,
+retained old hashed assets for open tabs, and preserved a rollback directory.
+Neither DKG nor ingestion was restarted. Backend modules, worker configuration,
+private data and authorization were preserved. The failed CI build had passed
+every test before exhausting its 896 MiB build heap; the production UI build
+now has a bounded 1,536 MiB allowance. This changes build capacity, not browser
+runtime memory limits.
 
 The accompanying [validation receipt](jpb-dkg-consolidation-20261013.json) records source coverage,
 local checks and the live source comparison. The `JPB DKG integration` workflow
@@ -159,19 +166,21 @@ unrelated exceptions. The chain-backed notification suite requires its
 Hardhat/global-setup lane; the targeted lane here checks the authenticated,
 bounded notification fanout without starting a chain.
 
-This consolidation does not deploy or restart JPB. The node remains based on
+The complete backend consolidation has not been deployed. The node remains based on
 `50acc9581297910065b272d1827b2f7649cae1b7` with selected overlays, including the
 LLM/catalog files from `766f601693ecb0a698a4c074b1ee6decf3646831`. Source inspection
 confirmed the private-write, receipt, quota, Working Memory, authority,
 notification and LLM/catalog overlays. The live compiler does not yet have the
-immutable bundle implementation from #3033. The live Sources source is also
-older than the consolidated coverage/absence display. A whole-branch runtime
-or UI deployment is not implied by earlier overlay deployments.
+immutable bundle implementation from #3033. The served static UI now includes
+the consolidated Sources coverage/absence display and the loading/graph fixes,
+while backend source files retain their previous overlays. The UI deployment
+is not a deployment of the complete combined backend.
 
 The worker shutdown/recovery fix remains in
 [JPB #20](https://github.com/OriginTrail/jbp_digital_twin/pull/20), with deployed
 runtime commit `9e823207538e47f5bbfd3024707187d283057080`. Full recovered-cycle and
-next automatic-refresh verification is a separate, ongoing check. Local DKG
+next automatic-refresh verification remains incomplete. The user stopped its
+observer and paused the follow-up automation; ingestion remains active. Local DKG
 tests do not prove that operational check completed. SQL coverage also does
 not establish complete lot genealogy or measured PLCA impacts.
 
