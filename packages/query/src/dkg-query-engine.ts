@@ -442,15 +442,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     let effectiveScope = routedScope;
 
     if (context.kind === 'scoped') {
-      const scopes: PreparedGraphScope[] = [];
-      for (const target of context.plan.targets) scopes.push(await resolveLegacyRouteScope(
-        routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads)));
-      if (scopes.length === 2) {
-        const dataResult = await this.execCallerQuery(scopes[0]!, reads);
-        const smResult = await this.execCallerQuery(scopes[1]!, reads);
+      const route = context.plan.execution;
+      const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
+        routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads));
+      if (route.kind === 'combined') {
+        const dataScope = await resolve(route.data);
+        const sharedScope = await resolve(route.sharedMemory);
+        const dataResult = await this.execCallerQuery(dataScope, reads);
+        const smResult = await this.execCallerQuery(sharedScope, reads);
         return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
-      effectiveScope = scopes[0]!;
+      effectiveScope = await resolve(route.target);
     }
 
     const result = await this.execAndNormalize(effectiveScope, reads);

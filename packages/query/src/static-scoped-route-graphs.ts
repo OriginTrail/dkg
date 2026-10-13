@@ -5,6 +5,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { QueryOptions } from './query-engine.js';
 
+export type ScopedExecutionRoute =
+  | { kind: 'single'; target: { root: string; family: 'data' | 'shared-memory' } }
+  | { kind: 'combined'; data: { root: string; family: 'data' };
+      sharedMemory: { root: string; family: 'shared-memory' } };
+
 /** Static authority of a legacy scoped route, independent of store inventory. */
 export function staticScopedRouteGraphs(effectiveContextGraphId: string, options?: QueryOptions) {
   // Authenticated callers that scope a query to a `contextGraphId`
@@ -45,9 +50,13 @@ export function staticScopedRouteGraphs(effectiveContextGraphId: string, options
     : contextGraphDataUri(effectiveContextGraphId);
   const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, subGraphName);
   // Keep option precedence and ordering shared by admission and authorization.
-  const staticContentGraphs = options?.includeSharedMemory ?? options?.includeWorkspace
-    ? [dataGraph, sharedMemoryGraph]
-    : isSwmOnlyRoute ? [sharedMemoryGraph] : [dataGraph];
+  const data = { root: dataGraph, family: 'data' as const };
+  const sharedMemory = { root: sharedMemoryGraph, family: 'shared-memory' as const };
+  const execution: ScopedExecutionRoute = options?.includeSharedMemory ?? options?.includeWorkspace
+    ? { kind: 'combined', data, sharedMemory }
+    : { kind: 'single', target: isSwmOnlyRoute ? sharedMemory : data };
+  const staticContentGraphs = execution.kind === 'combined'
+    ? [execution.data.root, execution.sharedMemory.root] : [execution.target.root];
   const metaAllowList = [
     ...(isSwmOnlyRoute
       ? []
@@ -82,5 +91,5 @@ export function staticScopedRouteGraphs(effectiveContextGraphId: string, options
           : contextGraphPrivateUri(effectiveContextGraphId),
       ]
     : [];
-  return { dataGraph, sharedMemoryGraph, staticContentGraphs, subGraphName, isSwmOnlyRoute, metaAllowList, staticPrivateAllowList };
+  return { execution, dataGraph, sharedMemoryGraph, staticContentGraphs, subGraphName, isSwmOnlyRoute, metaAllowList, staticPrivateAllowList };
 }
