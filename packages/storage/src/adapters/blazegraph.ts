@@ -358,17 +358,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       // retains the caller's quad array, not an additional potentially-large
       // N-Quads copy for every waiting insert.
       const nquads = quads.map(quadToBlazegraphNQuad).join('\n') + '\n';
-      deadline.check();
-      const res = await deadline.waitFor(fetch(this.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/x-nquads' },
-        body: nquads,
-        signal: deadline.signal,
-      }));
-      if (!res.ok) {
-        const text = await deadline.waitFor(res.text().catch(() => ''));
-        throw new Error(`Blazegraph insert failed (${res.status}): ${text.slice(0, 200)}`);
-      }
+      await this.postWriteRequest(nquads, 'text/x-nquads', deadline, 'insert');
     });
   }
 
@@ -479,13 +469,8 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         // Both strategies plan and publish under one slot and original deadline.
         const bulk = buildBulkAssetGroupPlan(assets);
         const plan = bulk ?? buildAtomicAssetGroupUpdate(assets);
-        const post = async (body: string, contentType: string) => {
-          deadline.check();
-          const response = await deadline.waitFor(fetch(this.url, { method: 'POST',
-            headers: { 'Content-Type': contentType }, body, signal: deadline.signal }));
-          await deadline.waitFor(readResponseTextBounded(response, 64 * 1024));
-          if (!response.ok) throw new Error(`Blazegraph bulk group failed (${response.status})`);
-        };
+        const post = (body: string, contentType: string) =>
+          this.postWriteRequest(body, contentType, deadline, 'bulk group');
         try {
           if (bulk) await post(bulk.nquads, 'application/n-quads');
           await post(plan.update, SPARQL_UPDATE_CONTENT_TYPE);
@@ -806,6 +791,28 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     );
   }
 
+  /** One HTTP write boundary under an existing scheduler slot and original deadline. */
+  private async postWriteRequest(
+    body: string,
+    contentType: string,
+    deadline: StoreOperationDeadline,
+    responsePolicy: 'insert' | 'update' | 'bulk group',
+  ): Promise<void> {
+    deadline.check();
+    const response = await deadline.waitFor(fetch(this.url, {
+      method: 'POST', headers: { 'Content-Type': contentType }, body, signal: deadline.signal,
+    }));
+    if (responsePolicy === 'bulk group') {
+      // Bulk staging bounds and drains every response before the next write.
+      await deadline.waitFor(readResponseTextBounded(response, 64 * 1024));
+      if (!response.ok) throw new Error(`Blazegraph bulk group failed (${response.status})`);
+    } else if (!response.ok) {
+      const text = await deadline.waitFor(response.text().catch(() => ''));
+      const excerpt = text.slice(0, responsePolicy === 'insert' ? 200 : 300);
+      throw new Error(`Blazegraph ${responsePolicy} failed (${response.status}): ${excerpt}`);
+    }
+  }
+
   private async sparqlUpdate(
     update: string,
     options?: QueryOptions,
@@ -821,16 +828,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     //
     // SPARQL_UPDATE_CONTENT_TYPE carries charset=utf-8 (see sparql-content-types.ts).
     await this.runStoreWork(operation, options, async (deadline) => {
-      const res = await deadline.waitFor(fetch(this.url, {
-        method: 'POST',
-        headers: { 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
-        body: update,
-        signal: deadline.signal,
-      }));
-      if (!res.ok) {
-        const text = await deadline.waitFor(res.text().catch(() => ''));
-        throw new Error(`Blazegraph update failed (${res.status}): ${text.slice(0, 300)}`);
-      }
+      await this.postWriteRequest(update, SPARQL_UPDATE_CONTENT_TYPE, deadline, 'update');
     });
   }
 }
