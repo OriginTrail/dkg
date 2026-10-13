@@ -582,6 +582,13 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
   },
   ...BUILD_ONLY_SCRIPTS.map((family) => ({ pattern: scriptsPattern(family), lanes: [], reason: family.reason })),
   {
+    // The node's container image: node-image-check.yml builds and starts it on
+    // the pull requests that change these files, and no lane reads them.
+    pattern: /^(?:Dockerfile|\.dockerignore|scripts\/docker-entrypoint\.sh)$/,
+    lanes: [],
+    reason: 'the node image is built and started by its own workflow',
+  },
+  {
     // Any other script, including a new one: its consumers are not known, so it
     // fails closed (the build, install hooks and other workflows' scripts too).
     pattern: /^scripts\//,
