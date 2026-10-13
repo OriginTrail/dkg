@@ -644,8 +644,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       )));
     }
 
-    // De-dup so a sub-graph never gets unioned twice.
-    const dedupedGraphs = [...new Set(allGraphs)];
+    // Parent authorization never grants access to a registered child context graph.
+    const children = await this.discoverKnownChildContextGraphUris(contextGraphId, reads);
+    const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
     allGraphs.length = 0;
     allGraphs.push(...dedupedGraphs);
 
