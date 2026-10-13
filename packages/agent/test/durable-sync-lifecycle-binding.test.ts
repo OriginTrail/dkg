@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SwmMetaTransferCoordinator } from '../src/sync/swm-meta-transfer-coordinator.js';
 import { ethers } from 'ethers';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from
   './_helpers/swm-target-executor-session-fixture.js';
+
+const metaTransfers: SwmMetaTransferCoordinator[] = [];
+afterEach(async () => {
+  for (const transfers of metaTransfers.splice(0)) await transfers.close();
+});
 
 vi.mock('../src/sync/requester/durable-sync.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/sync/requester/durable-sync.js')>();
@@ -1621,6 +1627,9 @@ describe('durable sync lifecycle chain binding', () => {
     ).retireFinalizedSwmTwinCandidate;
     agentLike.createSwmTargetExecutorSessionV1 =
       createSwmTargetExecutorSessionFactoryForTest(agentLike);
+    const transfers = new SwmMetaTransferCoordinator();
+    metaTransfers.push(transfers);
+    agentLike.getSwmMetaTransfers = () => transfers;
 
     await LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(
       agentLike,
@@ -1713,6 +1722,9 @@ describe('durable sync lifecycle chain binding', () => {
     ).retireFinalizedSwmTwinCandidate;
     agentLike.createSwmTargetExecutorSessionV1 =
       createSwmTargetExecutorSessionFactoryForTest(agentLike);
+    const transfers = new SwmMetaTransferCoordinator();
+    metaTransfers.push(transfers);
+    agentLike.getSwmMetaTransfers = () => transfers;
 
     await LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(
       agentLike,

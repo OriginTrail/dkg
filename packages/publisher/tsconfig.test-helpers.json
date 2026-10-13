@@ -24,6 +24,7 @@
     "test/_helpers/promote-replay-safety-public-api.ts",
     "test/_helpers/receipt-hint-scenario.ts",
     "test/_helpers/workspace-operation-equivalence-types.ts",
+    "test/_helpers/swm-metadata-writer-types.ts",
     "test/_helpers/workspace-snapshot-lifecycle-types.ts",
     "test/_helpers/collection-update-callback-types.ts"
   ],

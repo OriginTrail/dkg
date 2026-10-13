@@ -14,6 +14,8 @@
     "test/knowledge-asset-draft-read-authority.test.ts",
     "src/jsonld.d.ts",
     "test/_helpers/sync-requester-fixtures.ts",
-    "test/_helpers/rolling-subscription-promotion.ts"
+    "test/_helpers/rolling-subscription-promotion.ts",
+    "test/swm-protocol-root-ownership.test.ts",
+    "test/swm-shared-record-contracts.test.ts"
   ]
 }

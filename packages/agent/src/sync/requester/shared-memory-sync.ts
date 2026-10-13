@@ -47,6 +47,11 @@ import {
   type SyncPageResult,
 } from './page-fetch.js';
 import {
+  completeSharedMemoryMetadataFetcher,
+  normalizeSharedMemoryFetcherContext,
+  type CanonicalSharedMemoryFetcherContext,
+} from './shared-memory-metadata-fetcher.js';
+import {
   canonicalGraphScopedSnapshotManifestQuads,
   canonicalizeGraphScopedSwmHeadRows,
   discoverSwmRecoverySubGraphNames,
@@ -60,6 +65,7 @@ import {
   type RecoveryExecutionAdmission,
   type RecoveryExecutionGuard,
 } from './recovery-execution-guard.js';
+import { assertSwmRecoveryHeadsAccepted } from '../shared-memory-metadata-projections.js';
 import { canonicalQuadKey } from './quad-key.js';
 
 const sharedMemorySyncFetchSharingIdentity = createSyncFetchSharingIdentity();
@@ -315,8 +321,8 @@ type PublicSnapshotWalkSource =
 /**
  * Strategy boundary for metadata retrieval.
  *
- * The default requester performs one ordinary page fetch. Selected RFC-64 SWM
- * injects a strategy that owns its exceptional retained-prefix/session state;
+ * The agent injects a strategy that owns bounded retained-prefix/session state
+ * for both ordinary and selected RFC-64 SWM;
  * the canonical SWM pipeline only consumes the resulting page and yield bit.
  */
 export interface SharedMemoryMetadataFetcher {
@@ -342,6 +348,7 @@ export type SharedMemorySyncMode = Readonly<
   | {
     kind: 'selected-recovery';
     recoveryGuard: RecoveryExecutionGuard;
+    /** @deprecated Put metadataFetcher on SharedMemorySyncContext. */
     metadataFetcher?: SharedMemoryMetadataFetcher;
     snapshotEvidencePolicy?: SharedMemorySyncSnapshotEvidencePolicy;
     snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
@@ -351,6 +358,8 @@ export type SharedMemorySyncMode = Readonly<
 export interface SharedMemorySyncContext {
   /** One discriminant owns every selected-recovery-only capability. */
   mode: SharedMemorySyncMode;
+  /** Lifecycle callers supply a retained session; low-level callers may use the default page fetch. */
+  metadataFetcher?: SharedMemoryMetadataFetcher;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphIds: string[];
@@ -371,15 +380,7 @@ export interface SharedMemorySyncContext {
     contextGraphId: string,
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
-  ) => Promise<{
-    verifiedData: Quad[];
-    verifiedMeta: Quad[];
-    totalFetchedDataQuads: number;
-    totalFetchedMetaQuads: number;
-    droppedDataTriples: number;
-    emptyResponses: number;
-    entityCreators: Array<{ dataGraph: string; entity: string; creator: string }>;
-  }>;
+  ) => Promise<import('../../sync-verify-worker.js').SharedMemoryBatchProcessResult>;
   ensureContextGraph: (contextGraphId: string) => Promise<void>;
   storeInsert: (quads: Quad[]) => Promise<void>;
   /**
@@ -442,7 +443,15 @@ function storedVersionOutranksDescriptor(stored: string, descriptorVersion: stri
   }
 }
 
-export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(async context => {
+export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(
+  context => runSharedMemorySyncCore(normalizeSharedMemoryFetcherContext(context)),
+);
+
+async function runSharedMemorySyncCore(
+  context: CanonicalSharedMemoryFetcherContext<Omit<SharedMemorySyncContext, 'publicSnapshotStore'> & {
+    publicSnapshotStore: WorkspaceSnapshotScope | undefined;
+  }>,
+): Promise<SharedMemorySyncSummary> {
   const {
     ctx,
     remotePeerId,
@@ -470,9 +479,6 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
   } = context;
   const snapshotEvidencePolicy = context.mode.kind === 'selected-recovery'
     ? context.mode.snapshotEvidencePolicy
-    : undefined;
-  const metadataFetcher = context.mode.kind === 'selected-recovery'
-    ? context.mode.metadataFetcher
     : undefined;
   const snapshotRecoveryOrder = context.mode.kind === 'selected-recovery'
     ? context.mode.snapshotRecoveryOrder ?? 'manifest'
@@ -503,6 +509,16 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       ...(recoveryBoundary.signal === undefined ? {} : { signal: recoveryBoundary.signal }),
     });
   };
+  const metadataFetcher = completeSharedMemoryMetadataFetcher(
+    context.metadataFetcher,
+    request => fetchRecoveryPages(
+      request.contextGraphId,
+      'meta',
+      request.graphUri,
+      request.deadline,
+      request.workAdmission,
+    ),
+  );
 
   const summary = emptySharedMemorySyncResult();
 
@@ -624,25 +640,14 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       logInfo(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
 
       const fetchStartedAt = Date.now();
-      const metadataOutcome = metadataFetcher
-        ? await recoveryBoundary.read(() => metadataFetcher.fetch({
+      const metadataOutcome = await recoveryBoundary.read(() => metadataFetcher.fetch({
           ctx,
           remotePeerId,
           contextGraphId: pid,
           graphUri: wsMetaGraph,
           deadline,
           workAdmission,
-        }))
-        : {
-          result: await recoveryBoundary.read(() => fetchRecoveryPages(
-            pid,
-            'meta',
-            wsMetaGraph,
-            deadline,
-            workAdmission,
-          )),
-          continuationYielded: false,
-        };
+        }));
       const wsMetaResult = metadataOutcome.result;
       manifestComplete = wsMetaResult.completed;
       peerRespondedForContextGraph = true;
@@ -652,6 +657,10 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         summary.bytesReceived += wsMetaResult.bytesReceived;
         summary.replayPhaseBytesReceived += wsMetaResult.bytesReceived;
         summary.metadataContinuationYields += 1;
+        if (wsMetaResult.localYield) {
+          summary.localYield = true;
+          summary.deferredBackpressure += 1;
+        }
         recordPhaseOutcome(wsMetaResult);
         break;
       }
@@ -746,9 +755,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
           && wsDataResult.completed
           && !wsDataResult.timedOut
         ) {
-          if (metadataFetcher) {
-            recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
-          }
+          recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
         }
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
@@ -801,6 +808,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       // no head rows to describe.
       if (snapshotMaterializer && wsMetaResult.completed) {
         try {
+          assertSwmRecoveryHeadsAccepted(processed.rejectedHeads ?? []);
           const descriptors = parseGraphScopedSwmRecoveryDescriptors({
             contextGraphId: pid,
             metaQuads: processed.verifiedMeta,
@@ -875,7 +883,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
         ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
         : manifestSnapshots;
-      const snapshotWalk = metadataFetcher?.snapshotWalk?.(pid, orderedManifestSnapshots);
+      const snapshotWalk = metadataFetcher.snapshotWalk(pid, orderedManifestSnapshots);
       const materializedKeys = new Set<string>();
       /** Snapshot refs whose every descriptor is locally present. */
       const materializedRefs = new Set<string>(snapshotWalk?.resolvedRefsSnapshot() ?? []);
@@ -1635,9 +1643,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       }
 
       if (entityRecovery.recordMetaPhase) recordPhaseOutcome(wsMetaResult);
-      if (metadataFetcher) {
-        recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
-      }
+      recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
@@ -1707,7 +1713,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
   }
 
   return summary;
-});
+}
 
 export interface PublicSnapshotMetadata {
   ref: string;

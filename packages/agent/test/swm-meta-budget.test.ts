@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
-  createSelectedSwmMetaRetentionBudget,
-} from '../src/sync/selected-swm-meta-budget.js';
+  createSwmMetaRetentionBudget,
+} from '../src/sync/swm-meta-budget.js';
 
 describe('selected SWM metadata retention budget', () => {
   it('accounts retained prefixes across Context Graphs and overlapping invocations', () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 3,
       maxBytesEstimate: 300,
       maxPrefixRows: 2,
@@ -46,7 +46,7 @@ describe('selected SWM metadata retention budget', () => {
   });
 
   it('atomically replaces a restarted generation instead of double-counting it', () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 10,
       maxBytesEstimate: 1_000,
       maxPrefixRows: 10,
@@ -74,7 +74,7 @@ describe('selected SWM metadata retention budget', () => {
   });
 
   it('reserves global capacity before overlapping fetches start', () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 3,
       maxBytesEstimate: 300,
       maxPrefixRows: 3,
@@ -107,7 +107,7 @@ describe('selected SWM metadata retention budget', () => {
   });
 
   it('separates a lease-own prefix ceiling from shared-pool contention', () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 4,
       maxBytesEstimate: 400,
       maxPrefixRows: 1,
@@ -133,7 +133,7 @@ describe('selected SWM metadata retention budget', () => {
 
     // Below its own ceiling but blocked by rows the pool already handed to a
     // sibling: transient, and therefore reported as a different exhaustion.
-    const shared = createSelectedSwmMetaRetentionBudget({
+    const shared = createSwmMetaRetentionBudget({
       maxRows: 1,
       maxBytesEstimate: 400,
       maxPrefixRows: 4,

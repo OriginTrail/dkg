@@ -592,6 +592,45 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     },
   );
 
+  it('preserves materialized progress when a short snapshot prefix precedes a local admission yield', async () => {
+    vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const fixtures = [snapshotFixture(10, 'kept'), snapshotFixture(9, 'short'), snapshotFixture(8, 'not-admitted')];
+    const snapshots = new Map<string, Quad[]>();
+    const { run, fetchSyncPages, store } = harness({
+      getSnapshot: async ref => snapshots.get(ref) ?? null,
+      putSnapshot: async ({ digest, quads }) => {
+        snapshots.set(digest, quads.map(quad => ({ ...quad })));
+        return { ref: digest, byteLength: 1 };
+      },
+    });
+    fetchSyncPages.mockImplementation(async (_ctx, _peer, _cg, _swm, phase, _graph, _deadline, options) => {
+      if (phase === 'meta') return page(fixtures.flatMap(({ metadata }) => metadata));
+      expect(phase).toBe('snapshot');
+      if (options?.snapshotRef === fixtures[0].digest) {
+        elapsed = 30;
+        return page(fixtures[0].payload);
+      }
+      expect(options?.snapshotRef).toBe(fixtures[1].digest);
+      elapsed = 100;
+      return page([]); // Transport ended cleanly before its advertised one-row snapshot.
+    });
+    const result = await run();
+    expect(result).toMatchObject({
+      completedPhases: 0, failedPhases: 1, failedPeers: 0,
+      backoffWorthyFailures: 1, insertedDataTriples: 1,
+    });
+    expect(result.insertedMetaTriples).toBeGreaterThan(0);
+    expect(readSharedMemoryPhaseFailureAttribution(result)).toEqual({
+      localBudget: 0, transport: 1, materialization: 0,
+    });
+    expect(fetchSyncPages.mock.calls.filter(call => call[4] === 'snapshot')).toHaveLength(2);
+    expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(1);
+    expect(await store.countQuads(fixtures[1].assertionGraph)).toBe(0);
+    expect(await store.countQuads(fixtures[2].assertionGraph)).toBe(0);
+  });
+
   it('retains peer backoff for an admitted snapshot transport timeout', async () => {
     vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
     let elapsed = 0;

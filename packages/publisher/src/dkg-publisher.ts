@@ -5975,7 +5975,7 @@ export class DKGPublisher implements Publisher {
       `SELECT DISTINCT ?entity ?creator WHERE {
         GRAPH <${assertSafeIri(swmMetaGraph)}> {
           ${valuesClause}
-          ?op <${DKG}rootEntity> ?entity .
+          ?op ${ENTITY_PRED_ALT} ?entity .
           OPTIONAL { ?op <${DKG}publisherPeerId> ?pidField }
           OPTIONAL { ?op <${PROV}wasAttributedTo> ?attrField . FILTER(isLiteral(?attrField)) }
           BIND(COALESCE(?pidField, ?attrField) AS ?creator)
