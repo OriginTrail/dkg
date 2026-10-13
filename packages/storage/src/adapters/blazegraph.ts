@@ -484,7 +484,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         } catch (error) {
           // Best effort, staging-only, after failed I/O settles and within the
           // original deadline. Never replay publication or hide its first error.
-          if (!published) await post(plan.cleanup, SPARQL_UPDATE_CONTENT_TYPE).catch(() => undefined);
+          if (bulk && !published) await post(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE).catch(() => undefined);
           throw error;
         }
       });

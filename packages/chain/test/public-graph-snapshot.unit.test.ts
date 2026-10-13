@@ -152,7 +152,7 @@ describe.each([
   ["wire", (input: unknown, scope: Parameters<typeof normalizePublicGraphSnapshot>[1]) => decodePublicGraphSnapshot(bytes(input), scope)],
 ] as const)("%s snapshot validation parity", (_kind, normalize) => {
   it("canonicalizes field order and returns a detached frozen inventory", () => {
-    const raw = make();
+    const raw = { ...make(), assets: make().assets.map(asset => ({ ...asset })) };
     const reverse = Object.fromEntries(Object.entries(raw).reverse());
     const result = normalize(reverse, {...scope,now:2000});
     expect(result).toEqual(raw);

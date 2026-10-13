@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BULK_GRAPH_KIND as K, type BulkGraphFrame, knowledgeAssetLayerGraphUri, MemoryLayer, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import { BulkGraphPartialError } from '../src/sync/requester/bulk-graph-stream.js';
 import { fixture, cg } from './helpers/bulk-graph-fixture.js';
@@ -103,4 +103,27 @@ describe('bulk public graph stream over real Noise sockets and verifier', () => 
     expect((error as BulkGraphPartialError).committedAssetUals).toEqual(f.uals.slice(0,8));
     expect(await f.target.countQuads(knowledgeAssetLayerGraphUri(cg, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(f.uals[9]!, 1)))).toBe(0);
   },30_000);
+});
+
+it('reports a confirmed group when cancellation arrives during the dispatched write', async () => {
+  const f = await fixture(2);
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(r => { enter = r; });
+  const held = new Promise<void>(r => { release = r; });
+  const write = f.target.replaceAssetGroup.bind(f.target);
+  vi.spyOn(f.target, 'replaceAssetGroup').mockImplementation(async (...args) => {
+    enter(); await held; await write(...args);
+  });
+  const run = f.run().then(() => { throw new Error('cancelled exchange succeeded'); }, error => error);
+  try {
+    await entered;
+    f.cancellation.abort(new Error('cancelled during publication'));
+    release();
+    const error = await run;
+    expect(error).toBeInstanceOf(BulkGraphPartialError);
+    expect(error.committedAssetUals).toEqual(f.uals);
+    expect(error.metrics).toMatchObject({ committedAssets: 2, commitGroups: 1 });
+    for (const ual of f.uals) expect(await f.target.countQuads(
+      knowledgeAssetLayerGraphUri(cg, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, 1)))).toBeGreaterThan(0);
+  } finally { release(); await run; }
 });

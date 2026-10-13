@@ -27,7 +27,8 @@ export async function materializeVerifiedGraphScopedGroup(params: {
   return executeGraphScopedPublication({ store, assets, options, assertCurrent, shouldQuarantineCommitted,
     requireCurrentMetadata: true,
     stale: () => { throw new Error('Materialization group has a newer local assertion'); },
-    complete: () => { assertCurrent(); return 'applied' as const; },
+    // Report confirmed publication before the caller performs its final lifecycle check.
+    complete: () => 'applied' as const,
     publish, quarantine: publish,
   });
 }
