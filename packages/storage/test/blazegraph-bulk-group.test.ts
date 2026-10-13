@@ -22,9 +22,12 @@ describe('Blazegraph confirmed bulk publication', () => {
     try {
       await store.insert(quads);
       const ordinary = String(fetcher.mock.calls[0]![1].body);
+      const contentType = new Headers(fetcher.mock.calls[0]![1].headers).get('content-type');
+      expect(contentType).toBe('text/x-nquads');
       fetcher.mockClear();
       await store.replaceAssetGroup([{...members[0]!,graphQuads:quads,metadataQuads:[]}]);
       const staged = String(fetcher.mock.calls[0]![1].body);
+      expect(new Headers(fetcher.mock.calls[0]![1].headers).get('content-type')).toBe(contentType);
       const terms = (body: string) => body.trimEnd().split('\n').map(line => line.replace(/ <[^>]+> \.$/, ' .'));
       expect(terms(staged)).toEqual(terms(ordinary));
       expect(staged.endsWith('\n')).toBe(true);

@@ -424,10 +424,7 @@ export class OxigraphStore implements TripleStore {
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
     const plan = buildAtomicAssetGroupUpdate(assets);
-    for (const a of assets) {
-      assertQuadLiteralsMutf8Safe([...a.graphQuads, ...a.metadataQuads], { maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'replaceAssetGroup' });
-      statements.checkIris.replaceGraphAndSubject(a.graphUri, a.graphQuads, a.metaGraphUri, a.metadataSubject, a.metadataQuads);
-    }
+    statements.checkIris.replaceAssetGroup(assets);
     options?.signal?.throwIfAborted();
     this.store.update(plan.update);
     this.scheduleFlush();

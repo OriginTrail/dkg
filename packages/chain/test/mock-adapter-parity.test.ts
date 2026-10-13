@@ -122,6 +122,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // intentionally carry none of that EVM evidence, so absence preserves the
   // caller's live-read path instead of manufacturing a true lease.
   'knowledgeAssetVersionSnapshotIsCurrent',
+  // Optional finalized snapshot capability requires a canonical block hash and
+  // deployment addresses. Fixtures opt in explicitly; the mock must not invent evidence.
+  'readPublicGraphSnapshot',
   // TypeScript `private` is erased at runtime; these are adapter-internal
   // helpers that survived into the prototype and are not part of the
   // ChainAdapter contract. They must remain EVM-only.
