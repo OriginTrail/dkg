@@ -27,7 +27,7 @@ import {
   conceptIdToIri,
 } from './paths.js';
 import { DEFAULT_IRI_BASE, SCHEMA_MENTIONS, OKF_KNOWN_VERSIONS, OKF_TARGET_VERSION } from './constants.js';
-import { isBlank, safeString } from './utils.js';
+import { dict, isBlank, safeString } from './utils.js';
 import type {
   BundleFile,
   BundleImport,
@@ -53,11 +53,11 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
 
   // --- Pass 1: index ---
   const docs: OkfDocument[] = [];
-  // Null-prototype dictionaries: a concept ID is a file path, and `__proto__.md`
-  // or `constructor.md` are valid concept files (§2), so a plain object would
+  // Dictionaries: a concept ID is a file path, and `__proto__.md` or
+  // `constructor.md` are valid concept files (§2), so a plain object would
   // drop the first (prototype setter) and misread inherited names.
-  const iriByConceptId: Record<string, string> = Object.create(null) as Record<string, string>;
-  const typeByConceptId: Record<string, string | undefined> = Object.create(null) as Record<string, string | undefined>;
+  const iriByConceptId = dict<string>();
+  const typeByConceptId = dict<string | undefined>();
   for (const f of ordered) {
     if (!isConceptFile(f.path)) continue;
     let doc: OkfDocument;
@@ -142,8 +142,7 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
   }
 
   // --- Pass 3: resolve ---
-  const exists = (id: string): boolean =>
-    Object.prototype.hasOwnProperty.call(iriByConceptId, id);
+  const exists = (id: string): boolean => id in iriByConceptId;
   // Opt-in: retype cross-concept edges by their endpoints' OKF `type` pair
   // (deterministic; default keeps every edge as schema:mentions).
   const typeRelations = opts.typeRelations ?? [];

@@ -9,7 +9,7 @@
 import { OKF_STATUS_VALUES } from './constants.js';
 import { VERIFIED, definedKeys } from './families/specs.js';
 import { parseList, type ParsedEntry } from './families/parse.js';
-import { safeString, setOwn } from './utils.js';
+import { safeString } from './utils.js';
 import { yamlLexicalOf } from './yaml-lexical.js';
 import type { OkfStatus, TrustTier, VerificationEvent } from './types.js';
 
@@ -130,8 +130,10 @@ export function parseVerified(value: unknown): ParsedVerification {
   const known = definedKeys(VERIFIED);
   const events = parsed.entries.flatMap((entry): VerificationEvent[] => {
     if (!entry.usable || entry.mapping === null) return [];
-    const extra: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(entry.mapping)) if (!known.has(k)) setOwn(extra, k, v);
+    // A plain object for the public `extra`, built by defining properties
+    // (`Object.fromEntries`), so a `__proto__` or `constructor` key is an
+    // ordinary own key, in the order it was written.
+    const extra = Object.fromEntries(Object.entries(entry.mapping).filter(([k]) => !known.has(k)));
     return [{ index: entry.index, by: safeString(entry.mapping.by).trim(), at: dateTimeLexical(entry.mapping.at), extra }];
   });
   return { shape: parsed.shape, entries: parsed.entries, events };

@@ -4,7 +4,7 @@
  */
 
 import { RDF_JSON, XSD_BOOLEAN, XSD_DECIMAL, XSD_INTEGER } from './constants.js';
-import { hasOwn, setOwn } from './utils.js';
+import { dict } from './utils.js';
 
 const LITERAL_RE = /^("(?:\\.|[^"\\])*")(?:\^\^<[^>]*>|@[A-Za-z-]+)?$/;
 const TYPED_LITERAL_RE = /^("(?:\\.|[^"\\])*")\^\^<([^>]*)>$/;
@@ -87,16 +87,16 @@ export function termValue(term: string, ctx: ExportContext, pathForm = false): u
 }
 
 /**
- * Accumulate a (possibly multi-valued) key: scalar on first sight, list
- * thereafter. Own-property checks and writes, so producer keys named
- * `constructor`, `toString` or `__proto__` are stored like any other.
+ * Accumulate a (possibly multi-valued) key into a dictionary (`dict()`):
+ * scalar on first sight, list thereafter. A producer key named `constructor`,
+ * `toString` or `__proto__` is stored like any other.
  */
 export function accumulate(target: Record<string, unknown>, key: string, value: unknown): void {
-  if (hasOwn(target, key)) {
+  if (key in target) {
     const cur = target[key];
-    setOwn(target, key, Array.isArray(cur) ? [...cur, value] : [cur, value]);
+    target[key] = Array.isArray(cur) ? [...cur, value] : [cur, value];
   } else {
-    setOwn(target, key, value);
+    target[key] = value;
   }
 }
 
@@ -111,10 +111,10 @@ export function byNodeIndex(a: string, b: string): number {
   return nodeIndex(a) - nodeIndex(b) || (a < b ? -1 : a > b ? 1 : 0);
 }
 
-/** Place `known` keys first (in the given order), then everything else in insertion order. */
+/** A dictionary (`dict()`) with `known` keys first, in the given order, then everything else in insertion order. */
 export function orderKeys(obj: Record<string, unknown>, known: readonly string[]): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const k of known) if (hasOwn(obj, k)) setOwn(out, k, obj[k]);
-  for (const k of Object.keys(obj)) if (!hasOwn(out, k)) setOwn(out, k, obj[k]);
+  const out = dict();
+  for (const k of known) if (k in obj) out[k] = obj[k];
+  for (const k of Object.keys(obj)) if (!(k in out)) out[k] = obj[k];
   return out;
 }

@@ -99,6 +99,14 @@ describe('normalizeVerified (§5.2)', () => {
     expect(events[0].at).toBe('2026-06-25T09:00:00Z');
     expect(events[0].extra).toEqual({ note: 'sign-off' });
   });
+  it('keeps producer keys named like built-in object properties as ordinary own keys of a plain object', () => {
+    const { frontmatter } = parseDocument('a.md', '---\nverified: { by: human:a, __proto__: p, constructor: c, toString: t }\n---\n');
+    const [event] = normalizeVerified(frontmatter.verified);
+    expect(Object.keys(event.extra)).toEqual(['__proto__', 'constructor', 'toString']);
+    expect(Object.getOwnPropertyDescriptor(event.extra, '__proto__')?.value).toBe('p');
+    expect(Object.getPrototypeOf(event.extra)).toBe(Object.prototype);
+    expect(event.extra.constructor).toBe('c');
+  });
   it('drops entries that cannot name a verifier and ignores scalars', () => {
     expect(normalizeVerified([{ at: '2026-06-25T09:00:00Z' }, 'nope', { by: '' }])).toEqual([]);
     expect(normalizeVerified(true)).toEqual([]);

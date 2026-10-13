@@ -44,7 +44,7 @@ import {
 } from './constants.js';
 import { accumulate, conceptIdFromIri, literalValue, orderKeys, termValue, type ExportContext } from './decode-terms.js';
 import { decodeFamilies } from './families/decode.js';
-import { assignOwn, distinctTriples, hasOwn, pascalCase } from './utils.js';
+import { dict, distinctTriples, pascalCase } from './utils.js';
 import type { BundleFile, ExportInput, OkfMappingOptions, Quad } from './types.js';
 
 /**
@@ -138,11 +138,12 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   }
   const conceptQuads = bySubject.get(c.iri) ?? [];
 
-  const frontmatter: Record<string, unknown> = {};
+  // Dictionaries: producer keys are arbitrary (`constructor`, `__proto__`).
+  const frontmatter = dict();
   const tags: string[] = [];
   const edges: string[] = [];
   const citations: string[] = [];
-  const extras: Record<string, unknown> = {};
+  const extras = dict();
   let dateModified: unknown = null;
 
   for (const q of conceptQuads) {
@@ -201,10 +202,10 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   if (tags.length > 0) frontmatter.tags = tags;
 
   const families = decodeFamilies(conceptQuads, (node) => bySubject.get(node) ?? [], ctx);
-  assignOwn(frontmatter, families);
+  Object.assign(frontmatter, families);
   // §13.1: a last-modified time with no `generated` (which needs a `by`) is the legacy `timestamp`.
-  if (!hasOwn(families, 'generated') && dateModified !== null) frontmatter.timestamp = dateModified;
-  assignOwn(frontmatter, extras);
+  if (!('generated' in families) && dateModified !== null) frontmatter.timestamp = dateModified;
+  Object.assign(frontmatter, extras);
 
   const ordered = orderKeys(frontmatter, CONCEPT_KEY_ORDER);
 

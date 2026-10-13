@@ -10,7 +10,7 @@
 
 import { okfExtensionKey } from '../extensions.js';
 import { genericPredicate } from '../terms.js';
-import { hasOwn } from '../utils.js';
+import { dict } from '../utils.js';
 import { accumulate, byNodeIndex, orderKeys, termValue, type ExportContext } from '../decode-terms.js';
 import type { Quad } from '../types.js';
 import {
@@ -45,7 +45,7 @@ function byListKey(a: unknown, b: unknown): number {
 
 /** A family's producer extensions on one subject (`okf:<familyKey>.<key>`), in quad order. */
 function extensionsOf(quads: readonly Quad[], familyKey: string, ctx: ExportContext): Record<string, unknown> {
-  const extras: Record<string, unknown> = {};
+  const extras = dict();
   for (const q of quads) {
     const key = okfExtensionKey(familyKey, q.predicate);
     if (key !== null) accumulate(extras, key, termValue(q.object, ctx));
@@ -60,8 +60,8 @@ function decodeFields(
   ctx: ExportContext,
 ): { value: Record<string, unknown>; fields: Record<string, unknown>; extensions: Record<string, unknown> } {
   const byPredicate = fieldByPredicate(spec);
-  const fields: Record<string, unknown> = {};
-  const lists: Record<string, unknown[]> = {};
+  const fields = dict();
+  const lists = dict<unknown[]>();
   for (const q of quads) {
     const field = byPredicate.get(q.predicate);
     if (!field) continue;
@@ -71,14 +71,14 @@ function decodeFields(
   }
   for (const [key, items] of Object.entries(lists)) fields[key] = [...items].sort(byListKey);
   const extensions = extensionsOf(quads, spec.key, ctx);
-  return { value: { ...fields, ...extensions }, fields, extensions };
+  return { value: Object.assign(dict(), fields, extensions), fields, extensions };
 }
 
 /** A mapping family on one subject, or `null` when nothing of it is there. */
 function decodeMapping(spec: MappingFamilySpec, quads: readonly Quad[], ctx: ExportContext): Record<string, unknown> | null {
   const { value, fields, extensions } = decodeFields(spec, quads, ctx);
   const anchors = spec.presentWith ?? spec.fields.map((f) => f.key);
-  const present = anchors.some((key) => hasOwn(fields, key)) || Object.keys(extensions).length > 0;
+  const present = anchors.some((key) => key in fields) || Object.keys(extensions).length > 0;
   return present ? orderKeys(value, spec.fields.map((f) => f.key)) : null;
 }
 
@@ -88,7 +88,7 @@ function decodeEntry(
   ctx: ExportContext,
 ): Record<string, unknown> {
   const { fields, extensions } = decodeFields(spec, quads, ctx);
-  const nested: Record<string, unknown> = {};
+  const nested = dict();
   for (const n of spec.nested ?? []) {
     const value = decodeMapping(n, quads, ctx);
     if (value) {
@@ -98,11 +98,11 @@ function decodeEntry(
     // A nested value of the wrong shape (`usage_window: last-quarter`) was
     // kept verbatim under the generic predicate on the entry's node; entry
     // nodes carry no other `schema:` producer keys, so it reads back unambiguously.
-    const fallback: Record<string, unknown> = {};
+    const fallback = dict();
     for (const q of quads) if (q.predicate === genericPredicate(n.key)) accumulate(fallback, n.key, termValue(q.object, ctx));
-    if (hasOwn(fallback, n.key)) nested[n.key] = fallback[n.key];
+    if (n.key in fallback) nested[n.key] = fallback[n.key];
   }
-  return orderKeys({ ...fields, ...nested, ...extensions }, [
+  return orderKeys(Object.assign(dict(), fields, nested, extensions), [
     ...spec.fields.map((f) => f.key),
     ...(spec.nested ?? []).map((n) => n.key),
   ]);
@@ -126,7 +126,7 @@ export function decodeFamilies(
   nodeQuads: (node: string) => readonly Quad[],
   ctx: ExportContext,
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  const out = dict();
   for (const spec of FAMILY_SPECS) {
     switch (spec.shape) {
       case 'scalar': {
