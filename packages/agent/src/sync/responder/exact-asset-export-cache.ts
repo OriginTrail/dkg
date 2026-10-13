@@ -652,7 +652,9 @@ export function createBoundedExactAssetExportCache(params: {
           // All callers await the same publication while the response owns its bytes.
           if (!retained) {
             retainEncoded(key, body, plainBytes, rows.identity); retained = true;
-            persistence = params.preparedContentCache?.put(diskKey, { body, plainBytes });
+            // Publication may queue behind disk work. Its verified bytes must
+            // not alias the response buffer a caller can still mutate.
+            persistence = params.preparedContentCache?.put(diskKey, { body: body.slice(), plainBytes });
           }
           if (persistence) { await persistence; await encoded.assertCurrent(); }
         } });

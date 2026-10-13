@@ -1,5 +1,5 @@
 import type { PeerId } from '@origintrail-official/dkg-core';
-import { contextGraphDataUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import { assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import {
   isStoreSchedulerBusyError,
   quadsToNQuads,
@@ -415,10 +415,8 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing entityUri');
     }
 
-    const dataGraph = assertSafeIri(contextGraphDataUri(contextGraphId));
-    // Per-KA VM read-both: published data lives in …/_verifiable_memory/{addr}/{number} + (legacy) root.
-    const sparql = `SELECT ?p ?o WHERE { GRAPH ?g { <${assertSafeIri(entityUri)}> ?p ?o } FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}") }`;
-    const result = await this.queryEngine.query(sparql);
+    const sparql = `SELECT ?p ?o WHERE { <${assertSafeIri(entityUri)}> ?p ?o }`;
+    const result = await this.queryEngine.query(sparql, { contextGraphId, view: 'verifiable-memory' });
 
     const ntriples = result.bindings
       .map(b => `<${entityUri}> <${b['p']}> ${formatObject(b['o'])} .`)
