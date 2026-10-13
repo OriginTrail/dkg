@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { decodeFixedHeaderFrames } from './fixed-header-frame-decoder.js';
 /** Fixed experimental wire contract; registration and authorization belong to the host. */
 export const EXACT_BATCH_STREAM_PROTOCOL = '/dkg/experimental/exact-batch-stream/1.0.0';
 /** Fixed experimental profile, not an additional signed request field. */
@@ -65,34 +66,20 @@ export function encodeExactBatchFrame(frame: ExactBatchFrame): Uint8Array {
 
 /** Incremental header-first parsing: never concatenate unbounded source chunks. */
 export async function* decodeExactBatchFrames(source: AsyncIterable<Uint8Array>, options: { readonly signal?: AbortSignal } = {}): AsyncGenerator<ExactBatchFrame> {
-  const header = new Uint8Array(EXACT_BATCH_FRAME_HEADER_BYTES);
-  let headerBytes = 0, body: Uint8Array | undefined, bodyBytes = 0;
-  let kind = 0, index = 0, sequence = 0;
-  for await (const chunk of source) {
-    options.signal?.throwIfAborted();
-    if (!(chunk instanceof Uint8Array)) throw new TypeError('Exact batch stream must yield bytes');
-    let offset = 0;
-    while (offset < chunk.byteLength) {
-      options.signal?.throwIfAborted();
-      if (body === undefined) {
-        const take = Math.min(header.byteLength - headerBytes, chunk.byteLength - offset);
-        header.set(chunk.subarray(offset, offset + take), headerBytes); headerBytes += take; offset += take;
-        if (headerBytes < header.byteLength) continue;
-        const view = new DataView(header.buffer);
-        if (!MAGIC.every((byte, i) => header[i] === byte) || view.getUint16(6) !== 0) throw new Error('Invalid exact batch magic or reserved bits');
-        kind = view.getUint8(4); index = view.getUint8(5); sequence = view.getUint32(8);
-        const length = view.getUint32(12); validateHeader(kind, index, sequence, length);
-        body = new Uint8Array(length); bodyBytes = 0;
-      }
-      const take = Math.min(body.byteLength - bodyBytes, chunk.byteLength - offset);
-      body.set(chunk.subarray(offset, offset + take), bodyBytes); bodyBytes += take; offset += take;
-      if (bodyBytes === body.byteLength) {
-        const frame = Object.freeze({ kind, assetIndex: index, sequence, payload: body }); validatePayload(frame);
-        body = undefined; headerBytes = 0; yield frame;
-      }
-    }
-  }
-  options.signal?.throwIfAborted();
-  if (headerBytes !== 0 || body !== undefined) throw new Error('Truncated exact batch stream frame');
+  yield* decodeFixedHeaderFrames(source, {
+    headerBytes: EXACT_BATCH_FRAME_HEADER_BYTES, signal: options.signal,
+    bytesError: 'Exact batch stream must yield bytes', truncatedError: 'Truncated exact batch stream frame',
+    parseHeader: bytes => {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      if (!MAGIC.every((byte, i) => bytes[i] === byte) || view.getUint16(6) !== 0) throw new Error('Invalid exact batch magic or reserved bits');
+      const kind = view.getUint8(4), assetIndex = view.getUint8(5), sequence = view.getUint32(8), length = view.getUint32(12);
+      validateHeader(kind, assetIndex, sequence, length);
+      return { value: { kind, assetIndex, sequence }, length };
+    },
+    complete: (header, payload) => {
+      const frame = Object.freeze({ ...header, payload });
+      validatePayload(frame);
+      return frame;
+    },
+  });
 }
-

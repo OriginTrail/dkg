@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import type { AtomicAssetReplacement } from '../src/atomic-asset-group.js';
 /**
  * BlazegraphStore INTEGRATION tests — run against a REAL Blazegraph server.
  *
@@ -83,6 +85,31 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
 
   afterAll(async () => {
     if (store) await store.dropGraph(GRAPH).catch(() => {});
+  });
+
+  it('replaces values and preserves exact content on replay', async () => {
+    const store = new BlazegraphStore(BLAZEGRAPH_URL!, { timeout: 10_000 });
+    const root = `urn:group-test:${randomUUID()}`, meta = `${root}:meta`;
+    const member = (id: number, value: string, version: string): AtomicAssetReplacement => ({
+      graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
+      graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: JSON.stringify(value) }],
+      metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: JSON.stringify(version) }],
+    });
+    const unrelated = { graph: meta, subject: `${root}:unrelated`, predicate: 'urn:p', object: '"keep"' };
+    const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
+    try {
+      const members = [member(1, 'new-first', '2'), member(2, 'new-second', '2')];
+      await store.insert([...members.flatMap(a => [...a.graphQuads, ...a.metadataQuads]), unrelated]);
+      const expected = await store.query(select);
+      await store.insert([member(1, 'old-first', '1'), member(2, 'old-second', '1')].flatMap(a => [...a.graphQuads, ...a.metadataQuads]));
+      await store.replaceAssetGroup(members);
+      expect(await store.query(select)).toEqual(expected);
+      await store.replaceAssetGroup(members);
+      expect(await store.query(select)).toEqual(expected);
+    } finally {
+      await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
+      await store.close();
+    }
   });
 
   it('runs live requests under the configured deadline and recovers after pre-dispatch cancellation', async () => {

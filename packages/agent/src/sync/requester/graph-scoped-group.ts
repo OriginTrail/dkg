@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { withMaterializationLock } from '@origintrail-official/dkg-publisher';
-import { UnsupportedTripleStoreCapabilityError, type AtomicAssetReplacement, type TripleStore,
+import { ATOMIC_ASSET_GROUP_MAX_ASSETS, UnsupportedTripleStoreCapabilityError, type AtomicAssetReplacement, type TripleStore,
   type QueryOptions } from '@origintrail-official/dkg-storage';
 import { prepareGraphScopedReplacementUnderLock } from './graph-scoped-replacement.js';
 import { filterOversizedSyncQuads } from '../oversize-filter.js';
@@ -12,7 +12,7 @@ export async function materializeVerifiedGraphScopedGroup(params: {
   assertCurrent: () => void; shouldQuarantineCommitted: () => boolean;
 }): Promise<GraphScopedMaterializationOutcome[]> {
   const { store, assets, assertCurrent, shouldQuarantineCommitted, options = {} } = params;
-  if (!assets.length || assets.length > 8) throw new RangeError('Invalid materialization group');
+  if (!assets.length || assets.length > ATOMIC_ASSET_GROUP_MAX_ASSETS) throw new RangeError('Invalid materialization group');
   const keys = assets.map(a => `${a.metaGraph}\0${a.ual}`);
   if (new Set(keys).size !== keys.length || new Set(assets.map(a => a.contextGraphId)).size !== 1)
     throw new Error('Duplicate or cross-context materialization group');

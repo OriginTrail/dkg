@@ -32,9 +32,11 @@ export function buildBulkAssetGroupPlan(assets: readonly AtomicAssetReplacement[
       const variable = `n${stages.length}`;
       guards.push(`{ SELECT (COUNT(*) AS ?${variable}) WHERE { GRAPH <${stage}> { ?s ?p ?o } } } FILTER(?${variable} = ${triples.size})`);
       branches.push(`{ GRAPH <${stage}> { ?newS ?newP ?newO } BIND(<${target}> AS ?newGraph) }`);
+      // Retained triples need no deletion. Keeping delete/insert sets disjoint
+      // also makes replay safe on engines that stream UNION update bindings.
       branches.push(part === 0
-        ? `{ GRAPH <${target}> { ?oldS ?oldP ?oldO } BIND(<${target}> AS ?oldGraph) }`
-        : `{ GRAPH <${target}> { <${asset.metadataSubject}> ?oldP ?oldO } BIND(<${asset.metadataSubject}> AS ?oldS) BIND(<${target}> AS ?oldGraph) }`);
+        ? `{ GRAPH <${target}> { ?oldS ?oldP ?oldO } BIND(<${target}> AS ?oldGraph) FILTER NOT EXISTS { GRAPH <${stage}> { ?oldS ?oldP ?oldO } } }`
+        : `{ GRAPH <${target}> { <${asset.metadataSubject}> ?oldP ?oldO } BIND(<${asset.metadataSubject}> AS ?oldS) BIND(<${target}> AS ?oldGraph) FILTER NOT EXISTS { GRAPH <${stage}> { ?oldS ?oldP ?oldO } } }`);
       stages.push(stage);
     }
   }

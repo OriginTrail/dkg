@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { decodeFixedHeaderFrames } from './fixed-header-frame-decoder.js';
 /** Separate protocol: CREDIT is staged receipt; COMMIT alone means durable application. */
 export const BULK_GRAPH_PROTOCOL = '/dkg/experimental/bulk-graph/1.0.0';
 export const BULK_GRAPH_CHUNK_BYTES = 100_000_000;
@@ -30,29 +31,16 @@ export function encodeBulkGraphFrame(frame: BulkGraphFrame): Uint8Array {
 }
 /** Header-first allocation, independent of the native stream's chunk boundaries. */
 export async function* decodeBulkGraphFrames(source: AsyncIterable<Uint8Array>, signal?: AbortSignal): AsyncGenerator<BulkGraphFrame> {
-  const header = new Uint8Array(BULK_GRAPH_HEADER_BYTES);
-  let used = 0, body: Uint8Array | undefined, bodyUsed = 0, kind = 0, index = 0, sequence = 0;
-  for await (const chunk of source) {
-    if (!(chunk instanceof Uint8Array)) throw new TypeError('Bulk graph stream must yield bytes');
-    let offset = 0;
-    while (offset < chunk.length) {
-      signal?.throwIfAborted();
-      if (!body) {
-        const n = Math.min(header.length - used, chunk.length - offset);
-        header.set(chunk.subarray(offset, offset + n), used); used += n; offset += n;
-        if (used < header.length) continue;
-        const view = new DataView(header.buffer);
-        if (view.getUint32(0) !== MAGIC || view.getUint8(5) || view.getUint16(6)) throw new Error('Invalid bulk graph wire version');
-        kind = view.getUint8(4); index = view.getUint32(8); sequence = view.getUint32(12);
-        const length = view.getUint32(16); validateBulkGraphHeader(kind,index,sequence,length);
-        body = new Uint8Array(length); bodyUsed = 0;
-      }
-      const n = Math.min(body.length - bodyUsed, chunk.length - offset);
-      body.set(chunk.subarray(offset, offset + n), bodyUsed); bodyUsed += n; offset += n;
-      if (bodyUsed === body.length) {
-        const frame = { kind, index, sequence, payload: body }; body = undefined; used = 0; yield frame;
-      }
-    }
-  }
-  if (used || body) throw new Error('Truncated bulk graph frame');
+  yield* decodeFixedHeaderFrames(source, {
+    headerBytes: BULK_GRAPH_HEADER_BYTES, signal,
+    bytesError: 'Bulk graph stream must yield bytes', truncatedError: 'Truncated bulk graph frame',
+    parseHeader: bytes => {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      if (view.getUint32(0) !== MAGIC || view.getUint8(5) || view.getUint16(6)) throw new Error('Invalid bulk graph wire version');
+      const kind = view.getUint8(4), index = view.getUint32(8), sequence = view.getUint32(12), length = view.getUint32(16);
+      validateBulkGraphHeader(kind, index, sequence, length);
+      return { value: { kind, index, sequence }, length };
+    },
+    complete: (header, payload) => ({ ...header, payload }),
+  });
 }

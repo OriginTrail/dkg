@@ -3,9 +3,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DKGNode, LibP2PNetwork, ProtocolRouter, createOperationContext,
+import { DKGNode, LibP2PNetwork, ProtocolRouter, createOperationContext, BULK_GRAPH_KIND as K, type BulkGraphFrame,
   bulkGraphTransportOptions, MemoryLayer, knowledgeAssetLayerGraphUri, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
-import { BlazegraphStore, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, OxigraphStore, quadsToNQuads } from '@origintrail-official/dkg-storage';
 import { generateGraphKnowledgeAssetMetadata, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { registerPublicBulkGraph } from '../src/sync/responder/bulk-graph-stream.js';
 import { exchangeBulkGraphVerified, BulkGraphPartialError } from '../src/sync/requester/bulk-graph-stream.js';
@@ -15,25 +15,41 @@ import { authenticateVerifiedGraphScopedAsset } from '../src/sync/requester/grap
 import { registerSyncHandler, type ExperimentalExactBatchResponderResources } from '../src/sync/responder/sync-handler.js';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { ContextGraphResolveMethods as Resolve } from '../src/dkg-agent-cg-resolve.js';
+import { encodeNegotiatedExactSyncResponse } from '../src/sync/wire-compression.js';
+import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 
 const cg = 'bulk-fixture', address = '0x0000000000000000000000000000000000000001';
 const parse = (bytes: Uint8Array) => Resolve.prototype.parseSyncRequest.call({ parsePipeDelimitedSyncRequest: Resolve.prototype.parsePipeDelimitedSyncRequest } as never, bytes);
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanups.reverse()) await close(); cleanups.length = 0; });
-async function fixture(count = 20, corruptAt = -1, failClose = false) {
+async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
+  beforePublish?: () => Promise<void>; onControl?: (frame: BulkGraphFrame) => void;
+  payloadBytes?: readonly number[];
+} = {}) {
   const directory = await mkdtemp(join(tmpdir(),'dkg-bulk-test-')); cleanups.push(() => rm(directory,{recursive:true,force:true}));
   const backing = new OxigraphStore(), target = new OxigraphStore(); cleanups.push(() => backing.close(), () => target.close());
+  const prepared = new Map<string, { body: Uint8Array; metadata: Uint8Array; plainBytes: number }>();
   const uals: string[] = [], byId = new Map<bigint, Uint8Array>();
   for (let i = 1; i <= count; i++) {
     const ual = `did:dkg:base:84532/${address}/${i}`, graph = knowledgeAssetLayerGraphUri(cg, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, 1));
-    const data = [{ subject:`urn:entity:${i}`, predicate:'urn:payload', object:'"verified value"', graph }];
+    const payload = hooks.payloadBytes?.[i-1] ?? 14;
+    const data = Array.from({ length: Math.ceil(payload / 32768) }, (_, n) => ({
+      subject: `urn:entity:${i}:${n}`, predicate: 'urn:payload',
+      object: JSON.stringify('x'.repeat(Math.min(32768, payload - n * 32768))), graph }));
     const root = computeFlatKCRootV10(data, []); byId.set((BigInt(address)<<96n)|BigInt(i),root); uals.push(ual);
     const metadata = generateGraphKnowledgeAssetMetadata({ contextGraphId:cg, ual, assertionGraph:graph,
-      assertionVersion:1, publicTripleCount:1, privateTripleCount:0, merkleRoot:root, authorAddress:address,
+      assertionVersion:1, publicTripleCount:data.length, privateTripleCount:0, merkleRoot:root, authorAddress:address,
       publisherPeerId:'fixture', accessPolicy:'public', allowedPeers:[], timestamp:new Date() },
     {status:'confirmed',confirmation:{kind:'finalized-materialization', provenance:{batchId:BigInt(i),materializedVersion:{blockNumber:1,txIndex:0}}}});
     await backing.insert([...data,...metadata]);
+    if (hooks.payloadBytes) {
+      const plain = Buffer.from(quadsToNQuads(data));
+      const body = await encodeNegotiatedExactSyncResponse(plain, { request: {
+        responseEncoding: 'gzip-nquads-v1', assetUals: [ual], phase: 'data',
+      } });
+      prepared.set(ual, { body, metadata: Buffer.from(quadsToNQuads(metadata)), plainBytes: plain.length });
+    }
   }
   function cell(value: string) {
     if (!value.startsWith('"')) return { type: 'uri', value };
@@ -71,6 +87,9 @@ async function fixture(count = 20, corruptAt = -1, failClose = false) {
   const exports: number[] = [];
   registerPublicBulkGraph(server,{localPeerId:nodes[1]!.peerId,store:source,admission:resources,
     exportCache:{ acquireEncoded:async request=>{
+      // Byte-boundary cases isolate receiver parsing/verification from exporter budgets.
+      const payload = prepared.get(request.assetUal);
+      if (payload) return { ...payload, assertCurrent: async () => {}, release: () => {} };
       const lease = await resources.exportCache.acquireEncoded(request);
       if (lease && request.assetUal === uals[corruptAt]) {
         const body = lease.body.slice(); body[body.length-2] ^= 1; return {...lease,body};
@@ -81,7 +100,19 @@ async function fixture(count = 20, corruptAt = -1, failClose = false) {
     onExport:(_,n)=>exports.push(n)});
   const worker = new SyncVerifyWorker(); cleanups.push(() => worker.close());
   const request: BulkGraphRequest = {version:1,contextGraphId:cg,snapshotDigest:'a'.repeat(64),assetUals:uals};
-  const groups: number[]=[];
+  const groups: number[]=[]; const heaps: number[]=[];
+  if (hooks.onControl) {
+    const exchange = router.withDuplexStream.bind(router);
+    router.withDuplexStream = (peer, protocol, options, consume) => exchange(peer, protocol, options, (stream, signal) => {
+      const send = stream.send.bind(stream);
+      stream.send = bytes => {
+        const data = bytes.subarray(), header = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        hooks.onControl!({ kind: header.getUint8(4), index: header.getUint32(8), sequence: header.getUint32(12), payload: data.subarray(20) });
+        return send(bytes);
+      };
+      return consume(stream, signal);
+    });
+  }
   if (failClose) {
     const exchange = router.withDuplexStream.bind(router);
     router.withDuplexStream = async (...args) => { await exchange(...args); throw new Error('physical close failed'); };
@@ -95,13 +126,48 @@ async function fixture(count = 20, corruptAt = -1, failClose = false) {
       commit:async (assets, signal)=>{
         const authenticated=[];
         for(const asset of assets) authenticated.push((await authenticateVerifiedGraphScopedAsset(chain,asset,async()=>true)).asset);
+        await hooks.beforePublish?.();
         const outcomes=await materializeVerifiedGraphScopedGroup({store:target,assets:authenticated,
           assertCurrent:()=>signal.throwIfAborted(),shouldQuarantineCommitted:()=>false});
         expect(outcomes.every(x=>x==='applied')).toBe(true); groups.push(assets.length);
+        heaps.push(assets.flatMap(a => [...a.dataQuads, ...a.metadataQuads]).reduce((n, q) => n + estimateQuadHeapBytes(q), 0));
       }});
-  return {run,source,target,groups,exports,uals};
+  return {run,source,target,groups,heaps,exports,uals};
 }
 describe('bulk public graph stream over real Noise sockets and verifier', () => {
+  it.each([false, true])('withholds durable ACK while publication is pending or rejected (reject=%s)', async reject => {
+    const controls: BulkGraphFrame[] = [];
+    let release!: () => void, entered!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const publishing = new Promise<void>(resolve => { entered = resolve; });
+    const f = await fixture(2, -1, false, { onControl: frame => controls.push(frame), beforePublish: async () => {
+      entered(); await blocked; if (reject) throw new Error('fixture publication rejected');
+    } });
+    const result = f.run().then(value => ({ value }), error => ({ error }));
+    try {
+      await publishing;
+      expect(controls.filter(x => x.kind === K.CREDIT)).toHaveLength(2);
+      expect(controls.filter(x => x.kind === K.COMMIT)).toHaveLength(0);
+      expect(await f.target.countQuads()).toBe(0);
+    } finally { release(); }
+    const outcome = await result;
+    if (reject) {
+      expect(outcome).toHaveProperty('error');
+      expect(controls.filter(x => x.kind === K.COMMIT)).toHaveLength(0);
+      expect(await f.target.countQuads()).toBe(0);
+    } else {
+      expect(outcome).toHaveProperty('value');
+      expect(controls.filter(x => x.kind === K.COMMIT).map(x => x.index)).toEqual([0, 1]);
+      expect(await f.target.countQuads()).toBeGreaterThan(0);
+    }
+  }, 30_000);
+  it.each([[5, 5], [10, 1]])('separates expanded assets %j MiB with real decoding and verification', async (first, second) => {
+    const f = await fixture(2, -1, false, { payloadBytes: [first, second].map(n => n * 1024 * 1024) });
+    const result = await f.run();
+    expect(result.committedAssetUals).toEqual(f.uals);
+    expect(f.groups).toEqual([1, 1]);
+    expect(f.heaps.every(n => n < 64 * 1024 * 1024)).toBe(true);
+  }, 60_000);
   it('transfers more than ten assets, groups atomic publication, and reuses warm payloads', async () => {
     const f=await fixture(); const first=await f.run();
     expect(first.committedAssetUals).toEqual(f.uals); expect(first.metrics.commitGroups).toBeLessThan(20);
