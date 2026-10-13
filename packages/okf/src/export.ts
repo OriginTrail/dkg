@@ -44,6 +44,7 @@ import {
 } from './constants.js';
 import { accumulate, conceptIdFromIri, literalValue, orderKeys, termValue, type ExportContext } from './decode-terms.js';
 import { decodeFamilies } from './families/decode.js';
+import { readsAsProducerKey } from './mapping.js';
 import { dict, distinctTriples, pascalCase } from './utils.js';
 import type { BundleFile, ExportInput, OkfMappingOptions, Quad } from './types.js';
 
@@ -115,6 +116,11 @@ const CONCEPT_KEY_ORDER = [
 function parentDirectoryIri(conceptId: string, iriBase: string): string | null {
   const slash = conceptId.lastIndexOf('/');
   return slash === -1 ? null : `${iriBase}${conceptId.slice(0, slash)}`;
+}
+
+/** `sources` → `Sources`: camelCase reads it back as the same `schema:` predicate. */
+function capitalised(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
 }
 
 /** Total order on triples: subject, then predicate, then object term. */
@@ -205,7 +211,15 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   if (tags.length > 0) frontmatter.tags = tags;
 
   Object.assign(frontmatter, families.frontmatter);
-  Object.assign(frontmatter, extras);
+  // A producer value is written back under a key the importer reads as a
+  // producer key on the same predicate: the predicate's local name, or, where
+  // the importer reads that name as a base field or a family (`Sources`
+  // beside `sources`, a lone `Status`, `Type`), the name capitalised, which
+  // camelCase reads back as the same predicate. The base field or family
+  // keeps its key, and neither value replaces the other.
+  for (const [name, value] of Object.entries(extras)) {
+    frontmatter[readsAsProducerKey(name, frontmatter) ? name : capitalised(name)] = value;
+  }
 
   const ordered = orderKeys(frontmatter, CONCEPT_KEY_ORDER);
 

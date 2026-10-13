@@ -49,6 +49,7 @@ import {
   type PathContext,
 } from './terms.js';
 import {
+  FAMILY_BY_KEY,
   SOURCES,
   familyDiagnostics,
   parseList,
@@ -126,6 +127,24 @@ export function mapFrontmatter(
 }
 
 /**
+ * The frontmatter keys the importer maps itself (SPEC §4.1, §13.1). The v0.2
+ * families come next (`families/`), and every other key is a producer key.
+ */
+const BASE_KEYS: ReadonlySet<string> = new Set(['type', 'title', 'description', 'tags', 'timestamp', 'resource']);
+
+/**
+ * Whether the importer reads `key` in `frontmatter` as a producer key, kept
+ * as `schema:<camelKey>` (SPEC §4.1/§11): a key that is neither a base field
+ * nor a v0.2 family, and the legacy `timestamp` when a `generated.at`
+ * supersedes it (§13.1). Export writes a producer value back only under such
+ * a key.
+ */
+export function readsAsProducerKey(key: string, frontmatter: Record<string, unknown>): boolean {
+  if (key === 'timestamp') return generatedAtOf(frontmatter) !== null;
+  return !BASE_KEYS.has(key) && !FAMILY_BY_KEY.has(key);
+}
+
+/**
  * The frontmatter as quads, with every path-valued field left as a reference:
  * what the document alone decides, and the one place a value can fail to
  * encode (`OkfValueError`).
@@ -137,6 +156,11 @@ function prepareFrontmatter(iri: string, frontmatter: Record<string, unknown>, c
 
   for (const [key, value] of Object.entries(frontmatter)) {
     if (value === null || value === undefined) continue;
+    if (!BASE_KEYS.has(key)) {
+      // A v0.2 family, or a producer-defined key (preserved, never dropped — SPEC §4.1/§11).
+      out.push(...prepareFamilyQuads(iri, conceptId, key, value));
+      continue;
+    }
     switch (key) {
       case 'type': {
         const t = typeToIri(value);
@@ -170,9 +194,6 @@ function prepareFrontmatter(iri: string, frontmatter: Record<string, unknown>, c
         out.push({ subject: iri, predicate: SCHEMA_URL, object: isSafeIri(r) ? r : literalTerm(r) });
         break;
       }
-      default:
-        // A v0.2 family, or a producer-defined key (preserved, never dropped — SPEC §4.1/§11).
-        out.push(...prepareFamilyQuads(iri, conceptId, key, value));
     }
   }
   return out;

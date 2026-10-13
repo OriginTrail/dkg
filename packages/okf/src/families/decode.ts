@@ -17,9 +17,10 @@
 import { RDF_JSON, SCHEMA_NS } from '../constants.js';
 import { okfExtensionKey } from '../extensions.js';
 import { genericPredicate } from '../terms.js';
-import { dict } from '../utils.js';
+import { dict, isMapping } from '../utils.js';
 import { accumulate, byNodeIndex, literalDatatype, orderKeys, termValue, type ExportContext, type TermForm } from '../decode-terms.js';
 import type { Quad } from '../types.js';
+import { parseList } from './parse.js';
 import {
   FAMILY_SPECS,
   type FamilySpec,
@@ -117,25 +118,39 @@ function decodeMapping(spec: MappingFamilySpec, quads: readonly Quad[], ctx: Exp
   return isPresent(spec, decoded) ? { value: orderKeys(decoded.value, spec.fields.map((f) => f.key)), quads: decoded.quads } : null;
 }
 
+/** Whether the family keeps `value` verbatim: it is no value of the family's own shape. */
+function keepsVerbatim(spec: FamilySpec, value: unknown): boolean {
+  if (spec.shape === 'mapping') return !isMapping(value);
+  if (spec.shape === 'list') return parseList(spec, value).shape === 'invalid';
+  return false;
+}
+
 /**
  * A family's value kept verbatim (`encode.ts`): the triples on the family
  * key's generic predicate, read back the way a producer key's are, or `null`.
  * On an entry node they are all the family's, since a node carries no
  * producer keys. On the concept that predicate is also the one a producer key
- * of the same camelCase uses: where that key is the family's own
- * (`generated`), the two read back alike; where it differs (`usage_window` →
- * `usageWindow`), only a list, one `rdf:JSON` array, which no producer key
- * yields (a producer key's list is one triple per item), is the family's.
+ * of the same camelCase uses (`Sources`), so only an unambiguous value is the
+ * family's: where the key reads back as the family key (`generated`), one
+ * triple holding a value the family keeps verbatim (the encoder writes
+ * exactly one); where it does not (`usage_window` → `usageWindow`), a list,
+ * one `rdf:JSON` array, which no producer key yields (a producer key's list is
+ * one triple per item). Anything else is a producer value, which the exporter
+ * writes back under a spelling of its own.
  */
 function keptVerbatim(spec: FamilySpec, quads: readonly Quad[], ctx: ExportContext, on: 'node' | 'concept'): Read | null {
   const predicate = genericPredicate(spec.key);
-  const ownKey = on === 'node' || predicate === SCHEMA_NS + spec.key;
+  const onPredicate = quads.filter((q) => q.predicate === predicate);
+  if (on === 'concept' && predicate === SCHEMA_NS + spec.key) {
+    if (onPredicate.length !== 1) return null;
+    const value = termValue(onPredicate[0].object, ctx);
+    return keepsVerbatim(spec, value) ? { value, quads: onPredicate } : null;
+  }
   const kept = dict();
   const read: Quad[] = [];
-  for (const q of quads) {
-    if (q.predicate !== predicate) continue;
+  for (const q of onPredicate) {
     const value = termValue(q.object, ctx);
-    if (!ownKey && !Array.isArray(value)) continue;
+    if (on === 'concept' && !Array.isArray(value)) continue;
     accumulate(kept, spec.key, value);
     read.push(q);
   }

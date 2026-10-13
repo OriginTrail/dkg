@@ -347,6 +347,17 @@ it; the CLI summary reports it against the current time.
   produces, so export writes it back as that producer key: the graph
   round-trips exactly, but the frontmatter key changes and the shape warning
   does not recur on re-import.
+- **A producer key named like a family or base field.** A producer key is kept
+  as `schema:<camelKey>`, so `Sources` lands on the predicate a `sources` value
+  kept verbatim uses, and `Type`, `Title`, `Tags` or `Resource` on one that
+  reads back as a base key. Export writes a producer value back under a key the
+  importer reads as a producer key on the same predicate: the predicate's local
+  name, or, where the importer reads that name as a base field or a family,
+  the name capitalised (`Sources`, `Status`, `Type`), so neither value
+  replaces the other. The legacy `timestamp` keeps its key when a
+  `generated.at` supersedes it. The family decoder claims a value on its
+  predicate only when it is one the family itself keeps verbatim, in one
+  triple, so `Generated: { by: … }` never comes back as provenance.
 - **Each triple once.** The mapper deduplicates its output per concept: a store
   holds a set, so two `sources` naming one resource give two `okf:Source` nodes
   but a single `prov:wasDerivedFrom` edge. Without this the expected count in

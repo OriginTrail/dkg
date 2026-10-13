@@ -134,7 +134,9 @@ the same graph export the same bytes whatever order they return rows in. Known
 deviations: set-valued lists (`tags`, `authors`, `executor.receipt`, links,
 citations) and producer keys come back in canonical order (a value kept
 verbatim as one JSON literal keeps its own), a repeated list value
-(`tags: [a, a]`) comes back once, concept paths come back in the recommended
+(`tags: [a, a]`) comes back once, a producer key named like a family or base
+field (`Sources` beside `sources`, `Type`) comes back capitalised, so neither
+replaces the other, concept paths come back in the recommended
 absolute `/path.md` form, and an unquoted timestamp with an offset is folded to
 UTC (same instant). A typed date keeps its type: a date field (`generated.at`,
 `stale_after`, …) is written as text, which its import types again, and a date
