@@ -1,3 +1,4 @@
+import { readResponseBodyBytesBounded, BoundedResponseBodyLimitError } from '@origintrail-official/dkg-http-utils';
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { EntitySearchError, validVector, type EntityEmbedder, type EntityEmbeddingConfig } from './types.js';
@@ -26,18 +27,13 @@ export class LocalEntityEmbedder implements EntityEmbedder {
     const res = await fetch(this.base + path, { method: body ? 'POST' : 'GET', redirect: 'error', signal,
       headers: { 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
     if (!res.ok || !res.body) { await res.body?.cancel(); throw new EntitySearchError('ENTITY_EMBEDDING_UNAVAILABLE'); }
-    const reader = res.body.getReader();
-    const chunks: Uint8Array[] = []; let size = 0;
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.length;
-        if (size > 1024 * 1024) throw new EntitySearchError('ENTITY_EMBEDDING_INVALID');
-        chunks.push(value);
-      }
-      return JSON.parse(Buffer.concat(chunks).toString());
-    } finally { await reader.cancel(); }
+      const bytes = await readResponseBodyBytesBounded(res, 1024 * 1024);
+      return JSON.parse(Buffer.from(bytes).toString());
+    } catch (error) {
+      if (error instanceof BoundedResponseBodyLimitError) throw new EntitySearchError('ENTITY_EMBEDDING_INVALID');
+      throw error;
+    }
   }
   private async model(signal: AbortSignal): Promise<string> {
     const tags = await this.json('/api/tags', signal);
