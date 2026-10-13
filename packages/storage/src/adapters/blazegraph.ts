@@ -61,6 +61,8 @@ import {
 
 /** Every SPARQL statement this adapter builds by interpolation. */
 const statements = sparqlStatements('blazegraph');
+// Stock Blazegraph 2.1.5 recognizes this MIME type for both native write paths.
+const NQUADS_CONTENT_TYPE = 'text/x-nquads';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -358,7 +360,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       // retains the caller's quad array, not an additional potentially-large
       // N-Quads copy for every waiting insert.
       const nquads = quads.map(quadToBlazegraphNQuad).join('\n') + '\n';
-      await this.postWriteRequest(nquads, 'text/x-nquads', deadline, 'insert');
+      await this.postWriteRequest(nquads, NQUADS_CONTENT_TYPE, deadline, 'insert');
     });
   }
 
@@ -459,10 +461,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
     validateAtomicAssetGroup(assets);
-    for (const a of assets) {
-      assertQuadLiteralsMutf8Safe([...a.graphQuads, ...a.metadataQuads], { maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'replaceAssetGroup' });
-      statements.checkIris.replaceGraphAndSubject(a.graphUri, a.graphQuads, a.metaGraphUri, a.metadataSubject, a.metadataQuads);
-    }
+    statements.checkIris.replaceAssetGroup(assets);
     let published = false;
     try {
       await this.runStoreWork('replaceAssetGroup', options, async deadline => {
@@ -472,7 +471,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         const post = (body: string, contentType: string) =>
           this.postWriteRequest(body, contentType, deadline, 'bulk group');
         try {
-          if (bulk) await post(bulk.nquads, 'application/n-quads');
+          if (bulk) await post(bulk.nquads, NQUADS_CONTENT_TYPE);
           await post(plan.update, SPARQL_UPDATE_CONTENT_TYPE);
           if (bulk) {
             const response = await this.postReadQuery(bulk.receiptQuery,

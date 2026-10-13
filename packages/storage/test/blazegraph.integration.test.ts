@@ -133,7 +133,7 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       const before = await store.query(select);
       const staged = parseNQuadsTextTolerant(plan.nquads), graphs = [...new Set(staged.map(q => q.graph))];
       expect(graphs).toHaveLength(4);
-      const response = await fetch(BLAZEGRAPH_URL!, { method: 'POST', headers: { 'Content-Type': 'application/n-quads' },
+      const response = await fetch(BLAZEGRAPH_URL!, { method: 'POST', headers: { 'Content-Type': 'text/x-nquads' },
         body: quadsToNQuads(staged.filter(q => q.graph !== graphs[missing])) });
       await response.text(); expect(response.ok).toBe(true);
       await store.update(plan.update);

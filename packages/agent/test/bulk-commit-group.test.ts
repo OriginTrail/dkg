@@ -31,7 +31,7 @@ describe('bulk group independent parsed heap fence', () => {
   it('splits real verified assets before 64 MiB or eight members', async () => {
     const worker = new SyncVerifyWorker(), assets = [], stages = [];
     const cg = 'heap-fixture', address = '0x0000000000000000000000000000000000000001';
-    const uals = [1, 2, 3].map(id => `did:dkg:base:84532/${address}/${id}`);
+    const uals = [1, 2, 3, 4, 5, 6].map(id => `did:dkg:base:84532/${address}/${id}`);
     const verify = createAssetPayloadVerifier({ contextGraphId: cg, assetUals: uals,
       ctx: createOperationContext('sync'), parseAndFilter: worker.parseAndFilter.bind(worker),
       processDurableBatchInWorker: (data, meta, _ctx, accept, mode) => worker.processDurableBatch(data, meta, accept, mode),
@@ -39,7 +39,9 @@ describe('bulk group independent parsed heap fence', () => {
     try {
       for (const [index, ual] of uals.entries()) {
         const graph = knowledgeAssetLayerGraphUri(cg, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, 1));
-        const data = Array.from({ length: 90_000 }, (_, n) => ({ graph, subject: `urn:s:${n}`, predicate: 'urn:p', object: '"x"' }));
+        // Few large valid literals exercise the real 64 MiB fence without
+        // hundreds of thousands of Merkle leaves under CI coverage.
+        const data = Array.from({ length: 200 }, (_, n) => ({ graph, subject: `urn:s:${n}`, predicate: 'urn:p', object: JSON.stringify('x'.repeat(60_000)) }));
         const root = computeFlatKCRootV10(data, []);
         const meta = generateGraphKnowledgeAssetMetadata({ contextGraphId: cg, ual, assertionGraph: graph,
           assertionVersion: 1, publicTripleCount: data.length, privateTripleCount: 0, merkleRoot: root,
@@ -68,7 +70,7 @@ describe('bulk group independent parsed heap fence', () => {
       });
       for (const [index, asset] of assets.entries()) await group.append(asset, stages[index]!);
       await group.flush();
-      expect(groups).toEqual([2, 1]);
+      expect(groups).toEqual([5, 1]);
     } finally { await worker.close(); }
   }, 60_000);
 });
