@@ -18,6 +18,28 @@ import { isSafeIri, literalTerm, safeString, typedLiteralTerm, pascalCase, camel
 import { dateTimeLexical, isXsdDate, isXsdDateTime } from './trust.js';
 import type { Quad } from './types.js';
 
+/**
+ * A frontmatter value no RDF term can hold — a cyclic YAML alias
+ * (`a: &x { self: *x }`) has no JSON form. The one recoverable mapping
+ * failure: `importBundle` skips just the concept that carries it, while any
+ * other exception is a defect and propagates with its stack.
+ */
+export class OkfValueError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'OkfValueError';
+  }
+}
+
+/** `JSON.stringify` for a frontmatter value, failing as an `OkfValueError`. */
+function jsonOf(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    throw new OkfValueError(`value cannot be written as JSON: ${err instanceof Error ? err.message.split('\n')[0] : 'unknown error'}`, { cause: err });
+  }
+}
+
 export { isMapping } from './utils.js';
 
 export function toArray(value: unknown): unknown[] {
@@ -85,7 +107,7 @@ export function valueToTerms(value: unknown): string[] {
   if (typeof value === 'string') {
     return [isSafeIri(value) ? value : literalTerm(value)];
   }
-  return [typedLiteralTerm(JSON.stringify(value), RDF_JSON)];
+  return [typedLiteralTerm(jsonOf(value), RDF_JSON)];
 }
 
 /** The generic producer-defined-key mapping: `schema:<camelKey>` with typed terms (SPEC §4.1/§11). */
@@ -95,7 +117,7 @@ export function valueToTerms(value: unknown): string[] {
  * decoded back to the same structure on export).
  */
 export function jsonTerm(value: unknown): string {
-  return typedLiteralTerm(JSON.stringify(value), RDF_JSON);
+  return typedLiteralTerm(jsonOf(value), RDF_JSON);
 }
 
 /** The generic producer-key predicate for `key`: `schema:<camelKey>` (SPEC §4.1/§11). */

@@ -212,12 +212,21 @@ it; the CLI summary reports it against the current time.
   export always writes the unambiguous absolute `/path.md` form.
 - **Timestamps.** YAML parsers (js-yaml here, PyYAML in the reference agent) turn
   an unquoted `2026-06-30T14:00:00Z` into a native datetime; a quoted one stays a
-  string. A native `Date` is rendered in XSD canonical form (`Z`, no `.000`) so
-  the common spelling round-trips byte-for-byte; an offset-bearing value folds to
-  UTC (same instant — the deployed store canonicalises xsd:dateTime the same way).
-  A value that is not a valid xsd:dateTime / xsd:date lexical is kept as a
-  **plain** literal with a warning, never as a bogus typed literal that would
-  poison date comparisons. Missing explicit offsets (§5 requires one) warn.
+  string. js-yaml's own conversion would roll an impossible `2026-02-30` over to
+  March and read an offset-less value as UTC before any check saw it, so the OKF
+  document schema validates the text first: an unquoted value that is not a
+  valid xsd:dateTime / xsd:date (or uses a YAML-only spelling such as
+  `2001-12-14 21:59:43.10 -5`) stays the string it was, and a valid one keeps
+  its original text alongside the `Date`. Quoted or not, a value therefore gets
+  the same diagnostics: an invalid one is kept as a **plain** literal with a
+  warning, never as a bogus typed literal that would poison date comparisons,
+  and a missing explicit offset (§5 requires one) warns. Offset-less and
+  date-only values are read as written (`2026-06-15` stays an xsd:date); a value
+  with an offset is rendered in XSD canonical form (`Z`, no `.000`) and folds to
+  UTC (same instant — the deployed store canonicalises xsd:dateTime the same
+  way). Staleness reads an offset-less value as UTC, and a timestamp in a text
+  field or inside a value kept verbatim is written as its original text, so
+  nothing depends on the machine's time zone.
 - **Actors are literals, not IRIs.** Minting `urn:okf:actor:human:x` nodes would
   let a later layer link actors to DIDs / wallets, but the convention is a string
   and IRI-encoding `@`, spaces or `%` adds an invertibility problem for no
@@ -271,9 +280,12 @@ it; the CLI summary reports it against the current time.
   verbatim as one `rdf:JSON` literal and warns; it is never coerced, because a
   mapping with its own `toString` key makes `String()` throw. A verifier given
   that way names no verifier, so its entry is skipped. Base fields use a
-  coercion that never throws. If a concept still cannot be mapped (a cyclic
-  YAML alias has no RDF form), only that concept is skipped, with a `parse`
-  warning; the rest of the bundle imports.
+  coercion that never throws. A concept whose value no RDF term can hold (a
+  cyclic YAML alias has no JSON form) is skipped with an `unmappable-value`
+  warning and dropped from the concept index first, so no other concept links
+  to it (its links report as unresolved); the rest of the bundle imports. That
+  is the only failure caught: any other exception in the mapper is a defect and
+  propagates.
 - **`schema:isPartOf` on export.** The edge `emitFolderHierarchy` infers (to the
   concept's own parent directory) is omitted, since the path implies it and the
   option re-derives it; any other `isPartOf` value is a producer key and is kept.

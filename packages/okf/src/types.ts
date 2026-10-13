@@ -167,7 +167,8 @@ export interface OkfWarning {
     | 'invalid-path'
     | 'malformed-family'
     | 'unknown-footnote'
-    | 'unsupported-version';
+    | 'unsupported-version'
+    | 'unmappable-value';
   message: string;
 }
 
@@ -175,7 +176,10 @@ export interface OkfWarning {
 export interface BundleImport {
   /** OKF version declared in the root `index.md`, if any (SPEC §12). */
   okfVersion: string | null;
-  /** Concept ID → subject IRI map (Pass 1). */
+  /**
+   * Concept ID → subject IRI of every imported concept. A concept skipped for
+   * an unmappable value is not in it (and no other concept links to it).
+   */
   iriByConceptId: Record<string, string>;
   /** Per-concept mappings (Pass 2). */
   concepts: ConceptMapping[];

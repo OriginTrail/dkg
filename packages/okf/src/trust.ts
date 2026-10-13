@@ -10,6 +10,7 @@ import { OKF_STATUS_VALUES } from './constants.js';
 import { VERIFIED, definedKeys } from './families/specs.js';
 import { parseList, type ParsedEntry } from './families/parse.js';
 import { safeString, setOwn } from './utils.js';
+import { yamlLexicalOf } from './yaml-lexical.js';
 import type { OkfStatus, TrustTier, VerificationEvent } from './types.js';
 
 /** XSD `dateTime` lexical form (`YYYY-MM-DDThh:mm:ss[.s+][Z|±hh:mm]`). The zone is optional in XSD; OKF wants it explicit (§5). */
@@ -62,6 +63,10 @@ function isValidZone(zone?: string): boolean {
 export function dateTimeLexical(value: unknown): string | null {
   if (value instanceof Date) {
     if (Number.isNaN(value.getTime())) return null;
+    // A date-only or offset-less YAML timestamp is read as written, as its
+    // quoted form would be: no invented UTC offset, no date turned into a time.
+    const lexical = yamlLexicalOf(value);
+    if (lexical !== undefined && !hasExplicitOffset(lexical)) return lexical;
     const iso = value.toISOString(); // always `YYYY-MM-DDThh:mm:ss.sssZ`
     return value.getUTCMilliseconds() === 0 ? iso.replace('.000Z', 'Z') : iso;
   }
@@ -174,7 +179,9 @@ export function isStale(staleAfter: unknown, now: Date = new Date()): boolean {
   // Only a valid XSD value can be stale: `Date.parse` would silently roll an
   // impossible `2026-02-30` over to March and report it stale.
   if (!isXsdDateTime(lexical) && !isXsdDate(lexical)) return false;
-  const t = Date.parse(lexical);
+  // `Date.parse` reads an offset-less date-time as *local* time; read it as UTC
+  // so staleness does not depend on the machine's time zone.
+  const t = Date.parse(isXsdDateTime(lexical) && !hasExplicitOffset(lexical) ? `${lexical}Z` : lexical);
   if (Number.isNaN(t)) return false;
   return now.getTime() >= t;
 }

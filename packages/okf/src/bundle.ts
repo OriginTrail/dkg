@@ -14,6 +14,7 @@
 
 import { parseDocument, OkfDocumentError } from './document.js';
 import { mapConcept } from './mapping.js';
+import { OkfValueError } from './terms.js';
 import {
   isConceptFile,
   isReservedFile,
@@ -124,22 +125,40 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     return typeRelations.find((r) => r.from === fromType && r.to === toType)?.predicate;
   };
 
+  // A concept whose value no RDF term can hold (`OkfValueError`) is skipped
+  // with a warning. It must not stay a link target either, or the survivors
+  // would emit resolved links and lineage edges to a concept never imported:
+  // so failures are found first, dropped from the index, and the survivors
+  // mapped against the final index. Without failures that is a single pass.
+  // Any other exception is a defect and propagates.
+  type Outcome = { doc: OkfDocument; mapping: ConceptMapping } | { doc: OkfDocument; failure: OkfWarning };
+  const mapOrSkip = (doc: OkfDocument): Outcome => {
+    try {
+      return { doc, mapping: mapConcept(doc, iriByConceptId[doc.conceptId], exists, opts) };
+    } catch (err) {
+      if (!(err instanceof OkfValueError)) throw err;
+      return { doc, failure: { conceptId: doc.conceptId, code: 'unmappable-value', message: `could not be mapped (${err.message}); skipped` } };
+    }
+  };
+  let outcomes = docs.map(mapOrSkip);
+  if (outcomes.some((o) => 'failure' in o)) {
+    for (const o of outcomes) {
+      if ('failure' in o) {
+        delete iriByConceptId[o.doc.conceptId];
+        delete typeByConceptId[o.doc.conceptId];
+      }
+    }
+    outcomes = outcomes.map((o) => ('failure' in o ? o : { doc: o.doc, mapping: mapConcept(o.doc, iriByConceptId[o.doc.conceptId], exists, opts) }));
+  }
+
   const concepts: ConceptMapping[] = [];
   const quads: Quad[] = [];
-  for (const doc of docs) {
-    let mapping: ConceptMapping;
-    try {
-      mapping = mapConcept(doc, iriByConceptId[doc.conceptId], exists, opts);
-    } catch (err) {
-      // A value no RDF term can hold (a cyclic YAML alias, say) skips this
-      // concept with a warning; it never aborts the rest of the bundle.
-      warnings.push({
-        conceptId: doc.conceptId,
-        code: 'parse',
-        message: `could not be mapped (${err instanceof Error ? err.message.split('\n')[0] : safeString(err)}); skipped`,
-      });
+  for (const outcome of outcomes) {
+    if ('failure' in outcome) {
+      warnings.push(outcome.failure);
       continue;
     }
+    const { doc, mapping } = outcome;
     if (typeRelations.length > 0) {
       const fromType = typeByConceptId[doc.conceptId];
       for (const q of mapping.quads) {

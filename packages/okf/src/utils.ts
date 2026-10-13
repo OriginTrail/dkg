@@ -7,6 +7,8 @@
  * A test pins the behaviour against the same inputs the node validates.
  */
 
+import { yamlLexicalOf } from './yaml-lexical.js';
+
 const IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
 
 /** True when the string is a syntactically safe IRI with a scheme prefix. */
@@ -92,6 +94,10 @@ export function isMapping(value: unknown): value is Record<string, unknown> {
  * `String()` returns it; the rest get the generic `[object Object]` form.
  */
 export function safeString(value: unknown): string {
+  // An unquoted YAML timestamp reads as the text it was written as, not as
+  // `Date#toString()`, whose output depends on the machine's time zone.
+  const lexical = yamlLexicalOf(value);
+  if (lexical !== undefined) return lexical;
   try {
     return String(value);
   } catch {

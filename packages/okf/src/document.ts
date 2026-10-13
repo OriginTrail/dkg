@@ -19,9 +19,38 @@
  * applies the §9 consumer rule.
  */
 
-import { load as loadYaml } from 'js-yaml';
+import * as jsYaml from 'js-yaml';
 import type { OkfDocument } from './types.js';
 import { pathToConceptId } from './paths.js';
+import { isXsdDate, isXsdDateTime } from './trust.js';
+import { withYamlLexical } from './yaml-lexical.js';
+
+/** js-yaml's built-in timestamp type (exported at runtime, absent from its type declarations). */
+const BUILTIN_TIMESTAMP = (jsYaml as unknown as {
+  types: { timestamp: { resolve(data: string): boolean; construct(data: string): Date } };
+}).types.timestamp;
+
+/**
+ * The YAML timestamp type, validated before conversion. js-yaml's own type
+ * builds a `Date` through `Date.UTC`, which rolls an impossible `2026-02-30`
+ * over to March 2 and reads an offset-less value as UTC, before any check can
+ * see the producer's text. Here an unquoted timestamp whose text is not a
+ * valid xsd:dateTime / xsd:date stays the string it was — exactly what the
+ * quoted form gives — and a valid one becomes a `Date` that carries its
+ * original text (`yaml-lexical.ts`), so offset-less and date-only values are
+ * diagnosed and typed the same quoted or not. Valid values with an offset keep
+ * their usual UTC canonical form.
+ */
+const OKF_TIMESTAMP = new jsYaml.Type('tag:yaml.org,2002:timestamp', {
+  kind: 'scalar',
+  resolve: (data: string) => BUILTIN_TIMESTAMP.resolve(data),
+  construct: (data: string) =>
+    isXsdDateTime(data) || isXsdDate(data) ? withYamlLexical(BUILTIN_TIMESTAMP.construct(data), data) : data,
+  instanceOf: Date,
+});
+
+/** js-yaml's default schema with the validated timestamp type in place of the built-in one. */
+const OKF_SCHEMA = jsYaml.DEFAULT_SCHEMA.extend({ implicit: [OKF_TIMESTAMP] });
 
 const DELIM = '---';
 
@@ -65,7 +94,7 @@ export function parseDocument(bundlePath: string, text: string): OkfDocument {
   const fmText = lines.slice(1, endIdx).join('\n');
   let parsed: unknown;
   try {
-    parsed = loadYaml(fmText) ?? {};
+    parsed = jsYaml.load(fmText, { schema: OKF_SCHEMA }) ?? {};
   } catch (err) {
     throw new OkfDocumentError(
       `Invalid YAML frontmatter in ${bundlePath}: ${(err as Error).message}`,

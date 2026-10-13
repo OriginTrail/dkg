@@ -13,6 +13,9 @@ import {
   isAttestedComputationType,
   parseVerified,
   trustTierOf,
+  parseDocument,
+  familyDiagnostics,
+  frontmatterQuads,
 } from '../src/index.js';
 
 describe('dateTimeLexical (SPEC §5 timestamps)', () => {
@@ -171,5 +174,55 @@ describe('isAttestedComputationType (§10)', () => {
     expect(isAttestedComputationType('AttestedComputation')).toBe(true);
     expect(isAttestedComputationType('Metric')).toBe(false);
     expect(isAttestedComputationType(undefined)).toBe(false);
+  });
+});
+
+describe('unquoted YAML timestamps are read as written (validated before any Date conversion)', () => {
+  const fm = (yaml: string) => parseDocument('a.md', `---\n${yaml}\n---\nbody\n`).frontmatter;
+
+  it('keeps an impossible unquoted timestamp as the string it was, like its quoted form', () => {
+    for (const lexical of ['2026-02-30T00:00:00Z', '2026-13-40T25:70:70Z', '2023-02-29']) {
+      expect(fm(`v: ${lexical}`).v).toBe(lexical);
+      expect(fm(`v: '${lexical}'`).v).toBe(lexical);
+    }
+  });
+
+  it('keeps a YAML-only spelling (space separator, short offset) as a string', () => {
+    expect(fm('v: 2001-12-14 21:59:43.10 -5').v).toBe('2001-12-14 21:59:43.10 -5');
+  });
+
+  it('reads offset-less and date-only values as written, and canonicalises values with an offset', () => {
+    expect(dateTimeLexical(fm('v: 2026-12-31T00:00:00').v)).toBe('2026-12-31T00:00:00');
+    expect(dateTimeLexical(fm('v: 2026-06-15').v)).toBe('2026-06-15');
+    expect(dateTimeLexical(fm('v: 2026-06-30T14:00:00Z').v)).toBe('2026-06-30T14:00:00Z');
+    expect(dateTimeLexical(fm('v: 2026-06-25T09:00:00+02:00').v)).toBe('2026-06-25T07:00:00Z');
+  });
+
+  it('gives quoted and unquoted values the same diagnostics', () => {
+    const yaml = (q: string) =>
+      [`type: Metric`, `stale_after: ${q}2026-02-30T00:00:00Z${q}`, `generated: { by: human:a, at: ${q}2026-12-31T00:00:00${q} }`, `verified: { by: human:a, at: ${q}2026-06-15${q} }`].join('\n');
+    expect(familyDiagnostics(fm(yaml('')))).toEqual(familyDiagnostics(fm(yaml("'"))));
+    expect(familyDiagnostics(fm(yaml(''))).map((d) => d.message)).toEqual([
+      '`generated.at` "2026-12-31T00:00:00" has no explicit UTC offset (§5 requires one, e.g. 2026-06-30T14:00:00Z)',
+      '`verified[0].at` "2026-06-15" is not a valid ISO 8601 datetime (§5); kept as a plain literal',
+      '`stale_after` "2026-02-30T00:00:00Z" is not a valid ISO 8601 datetime (§5); kept as a plain literal',
+    ]);
+  });
+
+  it('writes a timestamp in a text field, or inside a value kept verbatim, as its original text', () => {
+    // a text field reads the original text, not Date#toString() (which depends on the time zone)
+    const quads = frontmatterQuads('urn:okf:a', fm('type: Metric\ntitle: 2026-06-30'));
+    expect(quads.find((q) => q.predicate === 'http://schema.org/name')?.object).toBe('"2026-06-30"');
+    // a value kept verbatim as JSON keeps each timestamp exactly as written
+    expect(JSON.stringify(fm('v: [2026-06-30T14:00:00Z, 2026-06-25T09:00:00+02:00]').v)).toBe('["2026-06-30T14:00:00Z","2026-06-25T09:00:00+02:00"]');
+  });
+});
+
+describe('staleness does not depend on the machine time zone', () => {
+  it('reads an offset-less stale_after as UTC', () => {
+    expect(isStale('2026-12-31T00:00:00', new Date('2026-12-30T23:59:59Z'))).toBe(false);
+    expect(isStale('2026-12-31T00:00:00', new Date('2026-12-31T00:00:00Z'))).toBe(true);
+    expect(isStale('2026-06-15', new Date('2026-06-15T00:00:00Z'))).toBe(true);
+    expect(isStale('2026-06-15', new Date('2026-06-14T23:59:59Z'))).toBe(false);
   });
 });

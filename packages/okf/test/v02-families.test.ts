@@ -956,9 +956,34 @@ describe('a malformed value never aborts the bundle', () => {
     const files = [IDX_V02(), { path: 'a.md', content: '---\ntype: Metric\nowner: &x\n  self: *x\n---\n\nbody\n' }, SIBLING];
     const r = importBundle(files);
     expect(r.concepts.map((c) => c.conceptId)).toEqual(['sibling']);
-    expect(r.warnings.find((w) => w.conceptId === 'a')).toMatchObject({ code: 'parse' });
+    expect(r.warnings.find((w) => w.conceptId === 'a')).toMatchObject({ code: 'unmappable-value' });
     expect(r.warnings.find((w) => w.conceptId === 'a')!.message).toMatch(/^could not be mapped \(.*circular.*\); skipped$/);
   });
+});
+
+describe('a skipped concept is not a link target', () => {
+  // The surviving concept names the skipped one through a source path and a
+  // body link; neither may become an edge, whichever file sorts first.
+  const CYCLIC = '---\ntype: Metric\nowner: &x\n  self: *x\n---\n\nbody\n';
+  const naming = (id: string) => `---\ntype: Metric\nsources:\n  - { id: s, resource: /${id}.md }\n---\n\nSee [it](/${id}.md).\n`;
+
+  for (const [survivor, skipped] of [['a', 'z'], ['z', 'a']]) {
+    it(`drops ${skipped}.md from the index so ${survivor}.md reports both references unresolved`, () => {
+      const r = importBundle([IDX_V02(), { path: `${survivor}.md`, content: naming(skipped) }, { path: `${skipped}.md`, content: CYCLIC }]);
+      expect(r.concepts.map((c) => c.conceptId)).toEqual([survivor]);
+      expect(Object.keys(r.iriByConceptId)).toEqual([survivor]);
+      const target = `urn:okf:${skipped}`;
+      expect(r.quads.filter((q) => q.object === target)).toEqual([]);
+      expect(r.concepts[0].trust.derivedFromConcepts).toEqual([]);
+      expect(r.warnings.map((w) => `${w.conceptId}|${w.code}|${w.message}`)).toEqual(
+        [
+          `${skipped}|unmappable-value|could not be mapped (value cannot be written as JSON: Converting circular structure to JSON); skipped`,
+          `${survivor}|broken-link|sources[0].resource "/${skipped}.md" does not resolve to a concept in the bundle (not an error, SPEC §6.1/§11)`,
+          `${survivor}|broken-link|unresolved cross-link "/${skipped}.md" (not in bundle — not an error, SPEC §6.1/§11)`,
+        ].sort((x, y) => (x.split('|')[0] < y.split('|')[0] ? -1 : x.split('|')[0] > y.split('|')[0] ? 1 : 0)),
+      );
+    });
+  }
 });
 
 describe('schema:isPartOf and schema:url on export', () => {
