@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
+import { sealPublicGraphSnapshot, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGAgent } from '../src/dkg-agent.js';
+import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
 import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 
 const graph = 'snapshot-ownership';
@@ -19,6 +21,7 @@ function fixture() {
     store: { insert: vi.fn(async () => {}) },
     router: { send: vi.fn(async () => Buffer.from(JSON.stringify(snapshot()))) },
     syncExactKnowledgeAssetsFromPeerDetailed: vi.fn(),
+    persistContextGraphSubscriptionState: vi.fn(async () => {}),
     subscribeToContextGraph: vi.fn(() => { generation++; a.subscribedContextGraphs.set(graph, { subscribed: true, onChainId: '1' }); }),
     recordCgWireId: vi.fn((_id: string, hash: string) => {
       a.subscribedContextGraphs.set(graph, { ...a.subscribedContextGraphs.get(graph), onChainHash: hash });
@@ -28,6 +31,42 @@ function fixture() {
 }
 const run = (a: any, mode: 'core-cache' | 'rpc-only') => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode});
 describe('public snapshot job ownership', () => {
+  it.each(['always-on', 'on-demand', 'core-hosted'] as const)('saves the complete binding according to %s intent after an empty job', async intent => {
+    const saved = new Map<string, ContextGraphSubscriptionRecord>();
+    const persistence = {
+      loadAll: async () => [...saved.values()],
+      save: async (row: ContextGraphSubscriptionRecord) => { saved.set(row.id, {...row}); },
+      delete: async (id: string) => { saved.delete(id); },
+    };
+    const chain = new MockChainAdapter();
+    Object.defineProperties(chain, { chainId: {value:'evm:31337'}, deploymentId: {value:'test'} });
+    Object.assign(chain, { readPublicGraphSnapshot: async () => snapshot() });
+    const create = () => DKGAgent.create({ name:'snapshot-persist-test', listenHost:'127.0.0.1', listenPort:0,
+      chainAdapter:chain, contextGraphSubscriptionStore:persistence, randomSamplingUseWorkerThread:false,
+      syncOnConnectEnabled:false, syncReconcilerEnabled:false, vmReconcilerEnabled:false });
+    const agent = await create();
+    try {
+      await agent.start();
+      agent.setContextGraphSubscription(graph, { subscribed:true, synced:false,
+        syncMode:intent === 'always-on' ? 'always-on' : 'on-demand', coreHosted:intent === 'core-hosted' }, {persist:false});
+      await expect(run(agent,'rpc-only')).resolves.toMatchObject({assets:0,current:true});
+      // An enqueued barrier drains the real persistence lane, including its freshness guard.
+      await (agent as any).enqueueContextGraphSubscriptionPersistWrite(graph, async () => {});
+      if(intent === 'on-demand') expect(saved.has(graph)).toBe(false);
+      else expect(saved.get(graph)).toMatchObject({id:graph,onChainId:'1',onChainHash:ethers.id(graph),
+        ...(intent === 'core-hosted' ? {coreHosted:true} : {subscribed:true})});
+    } finally { await agent.stop(); }
+    const restarted = await create();
+    try {
+      await restarted.start();
+      const restored = (restarted as any).subscribedContextGraphs.get(graph);
+      if(intent === 'on-demand') expect(restored).toBeUndefined();
+      // Startup retains the binding; fresh authority separately controls activation.
+      else expect(restored).toMatchObject({onChainId:'1',onChainHash:ethers.id(graph),syncMode:'always-on'});
+      if(intent === 'core-hosted') expect(saved.get(graph)?.coreHosted).toBe(true);
+    } finally { await restarted.stop(); }
+  });
+
   it('does not overwrite a conflicting existing name binding', async () => {
     const { a } = fixture();
     a.subscribedContextGraphs.set(graph, { subscribed: true, onChainId: '1', onChainHash: ethers.id('different-graph') });
