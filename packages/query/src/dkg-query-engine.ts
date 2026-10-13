@@ -1,3 +1,4 @@
+import { readScopedContentGraphCatalog } from './scoped-content-graph-catalog.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 import { storeOptions } from './query-store-options.js';
 import {
@@ -100,7 +101,6 @@ function sharedDiscoveryStoreOptions(
 interface StoreReadLane {
   query(sparql: string): Promise<StoreQueryResult>;
   listGraphsByPrefix(prefix: string): Promise<string[]>;
-  listGraphFamily(rootGraph: string): Promise<string[]>;
 }
 
 interface QueryStoreReadContext extends StoreReadLane {
@@ -115,7 +115,6 @@ function createStoreReadLane(
   return {
     query: (sparql) => store.query(sparql, options),
     listGraphsByPrefix: (prefix) => listGraphsByPrefix(store, prefix, options),
-    listGraphFamily: (rootGraph) => listGraphFamily(store, rootGraph, options),
   };
 }
 
@@ -424,6 +423,18 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         || initialGraphScope.graphTargets.some(
           (target) => target.kind !== 'iri' || !staticAllowedGraphs.includes(target.iri),
         );
+      const shouldExpandGraphVariables = options?.includeContextGraphPartitions === true
+        && initialGraphScope.graphVariables.length > 0 && !isSwmOnlyRoute;
+      // Broad variable scans already need a fresh scoped inventory. Reuse that
+      // inventory for memory routing within this request, avoiding another admission.
+      const scopedContentGraphs = shouldExpandGraphVariables
+        ? await this.resolveScopedContentGraphAllowList(effectiveContextGraphId, reads, subGraphName)
+        : undefined;
+      const discoverRouteGraphs = (prefix: string): Promise<string[]> => scopedContentGraphs
+        ? Promise.resolve(scopedContentGraphs.filter(
+            (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
+          ))
+        : this.discoverGraphsByPrefix(prefix, reads);
       // Per-KA SWM: when a route targets SWM, expand the allow-set with the discovered
       // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
       const swmRouted = (options?.includeSharedMemory ?? options?.includeWorkspace) || options?.graphSuffix === '_shared_memory';
@@ -434,10 +445,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // for GRAPH-variable scans on any route that reads the data graph.
       const dataRouted = options?.graphSuffix !== '_shared_memory';
       const vmPerKaGraphs = needsDiscovery && dataRouted
-        ? await this.discoverGraphsByPrefix(
-            `${dataGraph}/_verifiable_memory/`,
-            reads,
-          )
+        ? await discoverRouteGraphs(`${dataGraph}/_verifiable_memory/`)
         : [];
       const allowedGraphs = options?.includeSharedMemory ?? options?.includeWorkspace
         ? [dataGraph, ...vmPerKaGraphs, sharedMemoryGraph, ...swmPerKaGraphs]
@@ -450,16 +458,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           ))]
         : staticPrivateAllowList;
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
-      const shouldExpandGraphVariables =
-        options?.includeContextGraphPartitions === true
-        && initialGraphScope.graphVariables.length > 0;
-      const variableAllowedGraphs = shouldExpandGraphVariables
-        ? await this.resolveScopedGraphVariableAllowList(
-            effectiveContextGraphId,
-            explicitAllowedGraphs,
-            { subGraphName, isSwmOnlyRoute },
-            reads,
-          )
+      const variableAllowedGraphs = scopedContentGraphs
+        ? [...new Set([...explicitAllowedGraphs, ...scopedContentGraphs])]
         : explicitAllowedGraphs;
       // Explicit GRAPH IRIs remain limited to the static route-specific
       // allow-list. GRAPH variables only gain known same-CG content
@@ -1018,29 +1018,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return undefined;
   }
 
-  private async resolveScopedGraphVariableAllowList(
-    contextGraphId: string,
-    staticAllowedGraphs: string[],
-    opts: { subGraphName?: string; isSwmOnlyRoute: boolean },
-    reads: QueryStoreReadContext,
-  ): Promise<string[]> {
-    if (opts.isSwmOnlyRoute) {
-      return staticAllowedGraphs;
-    }
-
-    const allowed = new Set(staticAllowedGraphs);
-    const scopedContentGraphs = await this.resolveScopedContentGraphAllowList(
-      contextGraphId,
-      reads,
-      opts.subGraphName,
-    );
-    for (const graph of scopedContentGraphs) {
-      allowed.add(graph);
-    }
-
-    return [...allowed];
-  }
-
   private async resolveScopedContentGraphAllowList(
     contextGraphId: string,
     reads: QueryStoreReadContext,
@@ -1067,23 +1044,21 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     subGraphName?: string,
   ): Promise<string[]> {
     const allowed = new Set<string>();
-    const registeredSubGraphs = subGraphName
-      ? new Set([subGraphName])
-      : await this.discoverRegisteredSubGraphNames(contextGraphId, reads);
-    const registeredAssertionGraphs = await this.discoverRegisteredAssertionGraphs(
-      contextGraphId,
-      reads,
-    );
-    const knownChildContextGraphs = await this.discoverKnownChildContextGraphUris(
-      contextGraphId,
-      reads,
-    );
-    const allGraphs = await reads.listGraphFamily(
-      `did:dkg:context-graph:${contextGraphId}`,
-    );
+    const catalog = await readScopedContentGraphCatalog(contextGraphId, reads.query);
+    const registeredSubGraphs = subGraphName ? new Set([subGraphName]) : catalog.subGraphs;
+    const registeredAssertionGraphs = catalog.assertionGraphs;
+    const knownChildContextGraphs = catalog.childContextGraphs;
+    const allGraphs = catalog.graphs;
 
+    const dataGraph = subGraphName
+      ? contextGraphSubGraphUri(contextGraphId, subGraphName)
+      : contextGraphDataUri(contextGraphId);
     for (const graph of allGraphs) {
-      if (
+      // Preserve uniform-layout VM routing: these are the selected route's
+      // own per-KA graphs, even if payload metadata calls one a child CG.
+      const routeVmGraph = graph.startsWith(`${dataGraph}/_verifiable_memory/`)
+        && !graph.includes('/_meta') && !graph.includes('/staging/');
+      if (routeVmGraph ||
         isScopedContentGraph(
           graph,
           contextGraphId,
@@ -1123,60 +1098,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       }
     }
     return names;
-  }
-
-  private async discoverRegisteredAssertionGraphs(
-    contextGraphId: string,
-    reads: StoreReadLane,
-  ): Promise<Set<string>> {
-    const graphs = new Set<string>();
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const result = await reads.query(
-      `SELECT ?graph WHERE {
-        GRAPH <${assertSafeIri(metaGraph)}> {
-          ?assertion <http://dkg.io/ontology/assertionGraph> ?graph .
-        }
-      }`,
-    );
-    if (result.type !== 'bindings') return graphs;
-
-    for (const row of result.bindings) {
-      const graph = row['graph'];
-      if (typeof graph === 'string' && graph.length > 0) {
-        graphs.add(graph);
-      }
-    }
-    return graphs;
-  }
-
-  private async discoverKnownChildContextGraphUris(
-    contextGraphId: string,
-    reads: StoreReadLane,
-  ): Promise<Set<string>> {
-    const rootPrefix = `${contextGraphDataUri(contextGraphId)}/`;
-    const result = await reads.query(
-      `SELECT DISTINCT ?ctxGraph WHERE {
-        GRAPH ?g {
-          {
-            ?ctxGraph <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#ContextGraph> .
-          } UNION {
-            ?ctxGraph <https://dkg.network/ontology#registrationStatus> ?status .
-          }
-        }
-        FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
-        FILTER(STRSTARTS(STR(?ctxGraph), "${escapeSparqlLiteral(rootPrefix)}"))
-      }`,
-    );
-    const uris = new Set<string>();
-    if (result.type !== 'bindings') return uris;
-
-    for (const row of result.bindings) {
-      const uri = row['ctxGraph'];
-      if (typeof uri === 'string' && uri.length > 0) {
-        uris.add(uri);
-      }
-    }
-    return uris;
   }
 
   /**
@@ -1500,18 +1421,6 @@ async function listGraphsByPrefix(
   return store.listGraphsByPrefix
     ? store.listGraphsByPrefix(prefix, options)
     : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
-}
-
-async function listGraphFamily(
-  store: TripleStore,
-  rootGraph: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`, options);
-  if (await store.hasGraph(rootGraph, options)) {
-    graphs.unshift(rootGraph);
-  }
-  return graphs;
 }
 
 function mergeSharedMemoryAndDataResults(
