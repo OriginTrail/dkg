@@ -1146,6 +1146,46 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
+  // GET /api/context-graph/{id}/authority — targeted owner/operator diagnostics.
+  // Monitoring needs the current policy before and after each write. Do not
+  // enumerate unrelated graphs or turn a metadata lookup failure into public
+  // access. The native getters retain their write-invalidated authority view.
+  const authorityMatch = path.match(/^\/api\/context-graph\/([^/]+)\/authority$/);
+  if (req.method === "GET" && authorityMatch) {
+    const nodeAdmin = isNodeAdminCaller();
+    const caller = actor.authenticatedAgentAddress;
+    if (!nodeAdmin && !caller) {
+      return jsonResponse(res, 403, { error: 'Requires the graph owner or a node-level admin token' });
+    }
+    let contextGraphId: string;
+    try {
+      contextGraphId = decodeURIComponent(authorityMatch[1]);
+    } catch {
+      return jsonResponse(res, 400, { code: 'INVALID_CONTEXT_GRAPH_ID' });
+    }
+    try {
+      const signal = AbortSignal.timeout(10_000);
+      // An agent may inspect only a graph it curates. Check ownership before
+      // disclosing existence, policy, registration or membership. No inference
+      // from the graph's name or allowlist can grant this diagnostic access.
+      const ownerCurator = nodeAdmin ? undefined : await agent.getContextGraphCurator(contextGraphId, { signal });
+      if (!nodeAdmin && ownerCurator?.toLowerCase() !== 'did:dkg:agent:' + caller!.toLowerCase()) {
+        return jsonResponse(res, 403, { error: 'Requires the graph owner or a node-level admin token' });
+      }
+      if (!await agent.contextGraphExists(contextGraphId, { signal })) {
+        return jsonResponse(res, 404, { code: 'CONTEXT_GRAPH_NOT_FOUND' });
+      }
+      const accessPolicy = await agent.getExplicitAccessPolicy(contextGraphId, { signal });
+      const curator = ownerCurator ?? await agent.getContextGraphCurator(contextGraphId, { signal });
+      const onChainId = await agent.getContextGraphOnChainId(contextGraphId, { signal });
+      const allowedAgents = await agent.getContextGraphAllowedAgents(contextGraphId);
+      signal.throwIfAborted();
+      return jsonResponse(res, 200, { contextGraphId, accessPolicy, curator, onChainId, allowedAgents });
+    } catch {
+      return jsonResponse(res, 503, { code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' });
+    }
+  }
+
   // GET /api/context-graph/{id}/participants
   const listParticipantsMatch = path.match(/^\/api\/context-graph\/([^/]+)\/participants$/);
   if (req.method === "GET" && listParticipantsMatch) {

@@ -241,6 +241,7 @@ export default defineConfig({
           'test/daemon-sse-final-frame.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
+          'test/context-graph-authority-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/
           // wallets) — no hardhat.

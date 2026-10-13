@@ -11,7 +11,7 @@
 // this package use real HTTP servers / real Storage shims (no mocks).
 
 import React, { act } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 
 const fetchAgentsMock = vi.fn();
@@ -74,6 +74,7 @@ async function waitForAssertion(assertion: () => void): Promise<void> {
 }
 
 describe('PanelRight component', () => {
+  afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
     vi.clearAllMocks();
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -138,7 +139,10 @@ describe('PanelRight component', () => {
     apiFetchMemorySessionsMock.mockResolvedValue({ sessions: [] });
   });
 
-  it('renders local-LLM final tool metadata and clears the daemon-owned session', async () => {
+  it.each(['https', 'http', 'no-crypto'])('local-LLM send on %s exposes results or early errors', async (origin) => {
+    const crypto = globalThis.crypto;
+    if (origin === 'http') vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
+    if (origin === 'no-crypto') vi.stubGlobal('crypto', undefined);
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
       id: 'local-llm',
       name: 'DKG Local LLM',
@@ -197,6 +201,14 @@ describe('PanelRight component', () => {
       container.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')!
         .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
+    if (origin === 'no-crypto') {
+      await waitForAssertion(() => expect(container.textContent).toContain('This browser cannot generate a secure request ID.'));
+      expect(streamLocalAgentChatMock).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('List saved queries');
+      await act(async () => root.unmount());
+      container.remove();
+      return;
+    }
     await waitForAssertion(() => {
       expect(container.textContent).toContain('Catalog evidence');
       expect(container.textContent).toContain('Tools: dkg_query_catalog_list');
@@ -207,6 +219,9 @@ describe('PanelRight component', () => {
       'List saved queries',
       expect.objectContaining({ contextGraphId: 'testing' }),
     );
+
+    expect(streamLocalAgentChatMock.mock.calls.at(-1)?.[2].correlationId)
+      .toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i);
 
     await act(async () => {
       container.querySelector('.v10-agent-tab-menu-trigger')!
