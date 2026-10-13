@@ -229,7 +229,9 @@ describe('unquoted YAML timestamps are read as written (validated before any Dat
 describe('staleness does not depend on the machine time zone', () => {
   // An offset-less stale_after is read as UTC. On a UTC machine, reading it as
   // local time gives the same answers, so the boundaries are checked in a zone
-  // behind UTC and one ahead of it, switched for each test and restored after.
+  // behind UTC and one ahead of it, switched for each test and restored after
+  // (test files run in child processes, where the switch takes effect: see
+  // vitest.config.ts).
   function inZone(tz: string, run: () => void): void {
     const saved = process.env.TZ;
     process.env.TZ = tz;
