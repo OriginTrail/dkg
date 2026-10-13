@@ -27,12 +27,11 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only') {
   const a:any={started:true,vmReconcileRotationClosed:false,vmReconcileLifecycleGeneration:1,
     vmReconcileLifecycleController:new AbortController(),vmReconcilePhysicalRuns:new Set(),
     subscribedContextGraphs:new Map(),store,
+    getSubscribedContextGraphs: () => a.subscribedContextGraphs,
     contextGraphBindingState:{capture:()=>generation,isGenerationCurrent:(_:string,g:number)=>g===generation},
     chain:{chainId:'evm:31337',deploymentId:'test',readPublicGraphSnapshot:async()=>snapshot},
     router:{send:async()=>Buffer.from(JSON.stringify(snapshot))},
-    subscribeToContextGraph:()=>{generation++;a.subscribedContextGraphs.set(graph,{subscribed:true,onChainId:'1'});},
-    persistContextGraphSubscriptionState: async () => {},
-    recordCgWireId:(_:string,hash:string)=>{a.subscribedContextGraphs.set(graph,{...a.subscribedContextGraphs.get(graph),onChainHash:hash});},
+    subscribeToContextGraph:(_:string,binding:object)=>{generation++;a.subscribedContextGraphs.set(graph,{subscribed:true,...binding});},
   };
   // Stub only the already-verified transport boundary. The actual job owns the
   // trust marker, evidence authentication, failure and real atomic store writes.

@@ -1,6 +1,7 @@
 import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
 import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
+import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
   PublicGraphSnapshotCache,
@@ -130,25 +131,9 @@ export class PublicSnapshotMethods {
           const evidence = new PublicSnapshotEvidence(initial, isCurrent);
           // A validated public snapshot admits this job without scheduling the
           // daemon's separate legacy subscribe/catch-up pipeline.
-          if (!subscription?.subscribed || !subscription.onChainId || !subscription.onChainHash) {
-            control.admitSubscription(() => {
-              if (!subscription?.subscribed || !subscription.onChainId) {
-                this.subscribeToContextGraph(contextGraphId, {
-                  onChainId,
-                  persist: false,
-                  syncMode: "on-demand",
-                  trackSyncScope: false,
-                  deferSharedMemoryGossipSubscribe: true,
-                });
-              }
-              // Admit the complete authenticated binding before capturing the
-              // job's subscription fence. Historical discovery of this same
-              // binding must not need to replace the row during materialization.
-              if (!subscription?.onChainHash) this.recordCgWireId(contextGraphId, snapshot.nameHash);
-              // Persist the final row once; the canonical projection keeps on-demand intent local.
-              void this.persistContextGraphSubscriptionState(contextGraphId);
-            });
-          }
+          control.admitSubscription(() => {
+            admitAuthenticatedContextGraphSubscription(this, contextGraphId, { onChainId, onChainHash: snapshot.nameHash });
+          });
           assertCurrent();
           if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
           assertCurrent();
