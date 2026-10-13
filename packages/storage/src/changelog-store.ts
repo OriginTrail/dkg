@@ -415,7 +415,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     const touchedGraphs = [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))];
     for (const graph of touchedGraphs) this.assertNotReserved(graph, 'replaceAssetGroup');
     await this.runAtomicMutation({ operation: 'replaceAssetGroup', touchedGraphs, options,
-      execute: () => this.inner.replaceAssetGroup!(assets, options) });
+      execute: options => this.inner.replaceAssetGroup!(assets, options) });
   }
 
   async replaceGraphAndSubject(
