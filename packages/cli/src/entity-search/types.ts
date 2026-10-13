@@ -43,3 +43,26 @@ export function unitVector(value: unknown, dimensions: number): number[] {
   const norm = Math.hypot(...value);
   return value.map(v => v / norm);
 }
+
+export interface EntityIndexStatus {
+  indexId: string;
+  contextGraphId: string;
+  view: EntityIndexSpec['view'];
+  modelFingerprint: string;
+  indexedEntities: number;
+  scanComplete: boolean;
+  completedAt: string | null;
+  coverage: 'local-indexed-subset';
+  graphComplete: null;
+}
+export interface EntityReadinessResponse extends EntityIndexStatus {
+  ready: boolean;
+  observedAt: string;
+}
+export interface EntitySearchResponse extends EntityIndexStatus {
+  entities: Array<EntityDocument & { score: number }>;
+  staleCandidates: number;
+  observedAt: string;
+  freshness: 'candidates-revalidated';
+  exhaustive: false;
+}

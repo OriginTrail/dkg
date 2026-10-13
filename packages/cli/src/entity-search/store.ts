@@ -9,13 +9,29 @@ export interface IndexState {
 }
 export class EntityIndexStore {
   private db: Database.Database;
-  constructor(dir: string) {
+  constructor(dir: string, private readonly capacity = 100_000) {
+    if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100_000) throw new RangeError('Invalid entity index capacity');
     this.db = new Database(join(dir, 'entity-index.db'));
     this.db.pragma('journal_mode = WAL');
+    const legacy = this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'entity_documents'").get()
+      && !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'entity_scan_documents'").get();
     this.db.exec(`CREATE TABLE IF NOT EXISTS entity_indexes (id TEXT PRIMARY KEY, state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS entity_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
         document TEXT NOT NULL, vector TEXT NOT NULL, generation INTEGER NOT NULL,
+        PRIMARY KEY(index_id, entity_key));
+      CREATE TABLE IF NOT EXISTS entity_scan_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
+        document TEXT NOT NULL, vector TEXT NOT NULL, generation INTEGER NOT NULL,
         PRIMARY KEY(index_id, entity_key));`);
+    if (legacy) {
+      // Older partial scans mixed generations in the completed table. Revisit
+      // their cursor from the start so publication never drops the first pages.
+      this.db.transaction(() => {
+        for (const row of this.db.prepare('SELECT state FROM entity_indexes').all() as Array<{ state: string }>) {
+          const state: IndexState = JSON.parse(row.state);
+          if (!state.scanComplete) this.begin({ ...state, generation: state.generation + 1, cursor: null });
+        }
+      })();
+    }
   }
   state(id: string): IndexState | undefined {
     const row = this.db.prepare('SELECT state FROM entity_indexes WHERE id = ?').get(id) as { state: string } | undefined;
@@ -24,30 +40,46 @@ export class EntityIndexStore {
   save(state: IndexState): void {
     this.db.prepare('INSERT OR REPLACE INTO entity_indexes VALUES (?, ?)').run(state.id, JSON.stringify(state));
   }
+  /** A restart drops only the unfinished scan; the last completed index survives. */
+  begin(state: IndexState): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM entity_scan_documents WHERE index_id = ?').run(state.id);
+      this.save(state);
+    })();
+  }
+  private candidates = `SELECT * FROM entity_scan_documents WHERE index_id = @id
+    UNION ALL SELECT * FROM entity_documents WHERE index_id = @id AND entity_key NOT IN
+      (SELECT entity_key FROM entity_scan_documents WHERE index_id = @id)`;
   count(id: string): number {
-    return (this.db.prepare('SELECT count(*) AS n FROM entity_documents WHERE index_id = ?').get(id) as { n: number }).n;
+    return (this.db.prepare(`SELECT count(*) AS n FROM (${this.candidates})`).get({ id }) as { n: number }).n;
   }
   indexCount(): number { return (this.db.prepare('SELECT count(*) AS n FROM entity_indexes').get() as { n: number }).n; }
   cached(id: string, key: string): { document: EntityDocument; vector: number[] } | undefined {
-    const row = this.db.prepare('SELECT document, vector FROM entity_documents WHERE index_id = ? AND entity_key = ?')
-      .get(id, key) as { document: string; vector: string } | undefined;
+    const row = this.db.prepare(`SELECT document, vector FROM (${this.candidates}) WHERE entity_key = @key`)
+      .get({ id, key }) as { document: string; vector: string } | undefined;
     return row && { document: JSON.parse(row.document), vector: JSON.parse(row.vector) };
   }
   upsert(state: IndexState, doc: EntityDocument, vector: number[]): void {
-    if (this.count(state.id) >= 100_000 && !this.cached(state.id, documentKey(doc))) throw new EntitySearchError('ENTITY_INDEX_CAPACITY', 422);
-    this.db.prepare('INSERT OR REPLACE INTO entity_documents VALUES (?, ?, ?, ?, ?)')
-      .run(state.id, documentKey(doc), JSON.stringify(doc), JSON.stringify(vector), state.generation);
+    const key = documentKey(doc);
+    const count = (this.db.prepare('SELECT count(*) AS n FROM entity_scan_documents WHERE index_id = ?')
+      .get(state.id) as { n: number }).n;
+    if (count >= this.capacity && !this.db.prepare('SELECT 1 FROM entity_scan_documents WHERE index_id = ? AND entity_key = ?')
+      .get(state.id, key)) throw new EntitySearchError('ENTITY_INDEX_CAPACITY', 422);
+    this.db.prepare('INSERT OR REPLACE INTO entity_scan_documents VALUES (?, ?, ?, ?, ?)')
+      .run(state.id, key, JSON.stringify(doc), JSON.stringify(vector), state.generation);
   }
   finish(state: IndexState): void {
     this.db.transaction(() => {
-      this.db.prepare('DELETE FROM entity_documents WHERE index_id = ? AND generation != ?').run(state.id, state.generation);
+      this.db.prepare('DELETE FROM entity_documents WHERE index_id = ?').run(state.id);
+      this.db.prepare('INSERT INTO entity_documents SELECT * FROM entity_scan_documents WHERE index_id = ?').run(state.id);
+      this.db.prepare('DELETE FROM entity_scan_documents WHERE index_id = ?').run(state.id);
       this.save(state);
     })();
   }
   rank(id: string, query: number[], limit: number, signal: AbortSignal, deadline: number) {
     const best: Array<{ document: EntityDocument; score: number }> = [];
     const normalized = unitVector(query, query.length);
-    for (const raw of this.db.prepare('SELECT document, vector FROM entity_documents WHERE index_id = ?').iterate(id)) {
+    for (const raw of this.db.prepare(this.candidates).iterate({ id })) {
       checkDeadline(signal, deadline);
       const row = raw as { document: string; vector: string };
       const vector = unitVector(JSON.parse(row.vector), query.length);
