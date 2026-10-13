@@ -19,6 +19,7 @@ import {
 } from '../src/index.js';
 import type { BundleFile, Quad } from '../src/index.js';
 import { objs, IDX_V02, bundle, exportedFrontmatter } from './helpers/okf-v02-fixtures.js';
+
 const files = loadBundleDir(fileURLToPath(new URL('./fixtures/crypto_bitcoin', import.meta.url)));
 
 /**
@@ -333,5 +334,70 @@ describe('schema:isPartOf and schema:url on export', () => {
     const exported = exportBundle(first);
     expect(parseDocument('a.md', exported.find((f) => f.path === 'a.md')!.content).frontmatter.resource).toBe('tables/orders');
     expect(objs(importBundle(exported).quads, SCHEMA_URL, 'urn:okf:a')).toEqual(['"tables/orders"']);
+  });
+});
+
+describe('export depends only on which triples the graph holds', () => {
+  // A store returns rows in its own order; two nodes holding the same graph,
+  // on any backend, must export the same bundle.
+  const acme = loadBundleDir(fileURLToPath(new URL('./fixtures/acme_retail', import.meta.url)));
+  const mixed = bundle(
+    [
+      'type: Metric',
+      'title: Revenue',
+      'tags: [revenue, finance, headline]',
+      'zeta: last',
+      'alpha: first',
+      'authors: [human:b, human:a]',
+      'runtime: [second, first]',
+      'executor: { resource: https://x.example/run, retry: 2, backoff: linear }',
+    ].join('\n'),
+    '# Citations\n\n[1] [b](https://b.example/)\n[2] [a](https://a.example/)\n',
+  );
+  function shuffled<T>(items: T[], seed: number): T[] {
+    const out = [...items];
+    let x = seed;
+    for (let i = out.length - 1; i > 0; i--) {
+      x = (x * 1103515245 + 12345) % 2147483648;
+      const j = x % (i + 1);
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+  }
+
+  it('exports byte-identically from rows in any order', () => {
+    for (const bundleFiles of [files, acme, mixed]) {
+      const imported = importBundle(bundleFiles);
+      const direct = exportBundle(imported);
+      for (const seed of [7, 42, 2026]) {
+        expect(exportBundle(exportInputFromQuads(shuffled(imported.quads, seed)))).toEqual(direct);
+        expect(exportBundle(exportInputFromQuads([...imported.quads].reverse()))).toEqual(direct);
+      }
+    }
+  });
+
+  it('orders the collections RDF keeps no order for, and leaves a single JSON value as written', () => {
+    const fm = exportedFrontmatter(mixed);
+    expect(fm.tags).toEqual(['finance', 'headline', 'revenue']);
+    expect(fm.authors).toEqual(['human:a', 'human:b']);
+    // producer keys follow the known keys, in canonical order
+    const keys = Object.keys(fm);
+    expect(keys.indexOf('alpha')).toBeLessThan(keys.indexOf('zeta'));
+    expect(keys.indexOf('type')).toBeLessThan(keys.indexOf('alpha'));
+    // a family field kept verbatim as one JSON literal keeps its own order
+    expect(fm.runtime).toEqual(['second', 'first']);
+    // extension keys follow the family's own fields, in canonical order
+    expect(Object.keys(fm.executor as object)).toEqual(['resource', 'backoff', 'retry']);
+    const body = exportBundle(importBundle(mixed)).find((f) => f.path === 'metrics/revenue.md')!.content;
+    expect(body.indexOf('https://a.example/')).toBeLessThan(body.indexOf('https://b.example/'));
+  });
+
+  it('exports the same value for a single-valued field that holds two, whichever arrives first', () => {
+    const concept = (quads: Quad[]) => ({ concepts: [{ conceptId: 'x', iri: 'urn:okf:x', quads }] });
+    const typed: Quad = { subject: 'urn:okf:x', predicate: RDF_TYPE, object: 'http://schema.org/Thing' };
+    const a: Quad = { subject: 'urn:okf:x', predicate: SCHEMA_NAME, object: '"Alpha"' };
+    const b: Quad = { subject: 'urn:okf:x', predicate: SCHEMA_NAME, object: '"Beta"' };
+    const titleOf = (quads: Quad[]) => parseDocument('x.md', exportBundle(concept(quads)).find((f) => f.path === 'x.md')!.content).frontmatter.title;
+    expect(titleOf([typed, a, b])).toBe(titleOf([b, typed, a]));
   });
 });

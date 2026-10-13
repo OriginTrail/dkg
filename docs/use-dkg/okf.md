@@ -104,7 +104,7 @@ dkg okf export okf-demo ./out --sub-graph-name science
 
 Export reads a context graph view and writes an OKF v0.2 bundle to the output directory (the root `index.md` declares `okf_version: "0.2"`). Use export views to choose Working Memory, Shared Working Memory, or Verifiable Memory.
 
-Export is graph-faithful, not byte-faithful: bodies are regenerated structurally, the v0.2 families come back in their original order, derived triples (`okf:trustTier`, `prov:wasDerivedFrom`) are re-derived on the next import rather than written, and a concept that only carries a last-modified time (a v0.1 import) is written with the legacy `timestamp` key because `generated` requires a `by` actor the exporter will not invent.
+Export is graph-faithful, not byte-faithful: bodies are regenerated structurally, the v0.2 families come back in their original order, set-valued lists (`tags`, links, citations) and producer keys come back in a canonical order so the output depends only on which triples the graph holds, derived triples (`okf:trustTier`, `prov:wasDerivedFrom`) are re-derived on the next import rather than written, and a concept that only carries a last-modified time (a v0.1 import) is written with the legacy `timestamp` key because `generated` requires a `by` actor the exporter will not invent.
 
 ## Verify
 

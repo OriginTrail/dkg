@@ -114,10 +114,25 @@ function parentDirectoryIri(conceptId: string, iriBase: string): string | null {
   return slash === -1 ? null : `${iriBase}${conceptId.slice(0, slash)}`;
 }
 
+/** Total order on triples: subject, then predicate, then object term. */
+function byTriple(a: Quad, b: Quad): number {
+  if (a.subject !== b.subject) return a.subject < b.subject ? -1 : 1;
+  if (a.predicate !== b.predicate) return a.predicate < b.predicate ? -1 : 1;
+  return a.object < b.object ? -1 : a.object > b.object ? 1 : 0;
+}
+
 function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportContext): BundleFile {
   const bySubject = new Map<string, Quad[]>();
-  // A repeated triple is one triple (see `distinctTriples`), however the input was assembled.
-  for (const q of distinctTriples(c.quads)) {
+  // The graph is a set: a repeated triple is one triple, and the triples are
+  // read in a canonical order, so the bundle depends only on which triples
+  // the graph holds — never on the order a store happens to return them. That
+  // orders every collection RDF keeps no order for (producer keys, extension
+  // keys, tags, citations, values from several triples on one key) and makes
+  // a single-valued field that holds two values pick the same one every time.
+  // Family entries keep their order through the node index, family fields
+  // their definition order, and a value kept verbatim as one JSON literal its
+  // own internal order.
+  for (const q of distinctTriples(c.quads).sort(byTriple)) {
     if (!bySubject.has(q.subject)) bySubject.set(q.subject, []);
     bySubject.get(q.subject)!.push(q);
   }

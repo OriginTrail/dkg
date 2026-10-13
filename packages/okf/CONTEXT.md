@@ -169,8 +169,10 @@ it; the CLI summary reports it against the current time.
   bytes: free-form prose isn't recoverable from triples, so export regenerates
   bodies structurally, and a typed edge (e.g. `hasPart`) exports as a plain
   (untyped) OKF link because OKF can't express the relation type. The v0.2
-  families are rebuilt in their original entry order from the node IRIs. This
-  is a deliberate choice, not a defect; a future enhancement may have export
+  families are rebuilt in their original entry order from the node IRIs, and
+  everything the graph holds as a set is written in a canonical order, so export
+  depends only on which triples the graph holds, never on the order a store
+  returns them. This is a deliberate choice, not a defect; a future enhancement may have export
   *add* provenance (UAL / seal, e.g. a `verified` entry naming the DKG
   publisher) when serialising from a published graph.
 - **Diagnostics are shared.** `familyDiagnostics` (context-free shape checks)
@@ -232,10 +234,14 @@ it; the CLI summary reports it against the current time.
   and IRI-encoding `@`, spaces or `%` adds an invertibility problem for no
   consumer benefit today. A DID binding can be added as a separate, opt-in edge
   without changing these triples.
-- **`executor.receipt` order.** A multi-valued RDF property is unordered, so the
-  receipt field list comes back sorted from export (set semantics — it declares
-  the fields a run must return). `parameters`, `verified` and `sources` keep
-  their order because the entry index is in the node IRI.
+- **Set-valued order.** A multi-valued RDF property is unordered, so export
+  writes set-valued lists (`tags`, `authors`, `executor.receipt` — it declares
+  the fields a run must return — links, citations) and producer and extension
+  keys in a canonical order (by RDF term), not the order the source bundle or
+  the store happened to use. A single-valued field that somehow holds two
+  values exports the same one either way. `parameters`, `verified` and
+  `sources` keep their order because the entry index is in the node IRI, and a
+  value kept verbatim as one `rdf:JSON` literal keeps its internal order.
 - **Both `timestamp` and `generated` present.** Unusual (a migration leftover).
   `generated.at` → `schema:dateModified`; `timestamp` → `schema:timestamp` (the
   node extractor's own slug for that key), preserved and exported verbatim.

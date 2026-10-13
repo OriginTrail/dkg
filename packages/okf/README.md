@@ -124,9 +124,13 @@ rebuilt in their original order; derived triples (`okf:trustTier`,
 `prov:wasDerivedFrom`) are not written back and are re-derived on the next
 import. A concept that only carries a last-modified time (a v0.1 import) is
 written with the legacy `timestamp` key — `generated` requires a `by` actor and
-the exporter never invents provenance. Entry order is restored from the node
-IRIs, so it survives a graph that returns quads in any order. Known deviations:
-`executor.receipt` comes back sorted (set semantics), a repeated list value
+the exporter never invents provenance. A graph keeps no order, so export
+depends only on which triples it holds: entry order is restored from the node
+IRIs, and everything else is written in a canonical order, so two stores holding
+the same graph export the same bytes whatever order they return rows in. Known
+deviations: set-valued lists (`tags`, `authors`, `executor.receipt`, links,
+citations) and producer keys come back in canonical order (a value kept
+verbatim as one JSON literal keeps its own), a repeated list value
 (`tags: [a, a]`) comes back once, concept paths come back in the recommended
 absolute `/path.md` form, and an unquoted timestamp with an offset is folded to
 UTC (same instant).
