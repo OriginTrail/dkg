@@ -383,23 +383,30 @@ export function createSelectedSwmMetaFetcher(options: {
     // retain. A transfer that holds nothing yet has no prefix to protect, and
     // the continuation ledger grants no later pass to a round without
     // progress: yielding here would report a timed-out page for a peer that
-    // was never asked. Wait for the fetches in flight to settle instead, for
-    // as long as this round's work allowance lasts. A waiter holds no
-    // capacity, so it cannot keep a sibling from advancing.
-    while (
+    // was never asked. So while fetches are in flight it waits in line, and
+    // the budget hands it a whole allowance, never a share, once that leaves
+    // the transfers that are still fetching their manifest the room for
+    // their next pass. It gives up halfway through its work allowance, so
+    // that a transfer that does get the pool still has time to ask its peer.
+    if (
       reservation.exhaustion === 'shared'
       && state.nextOffset === 0
       && state.quads.length === 0
     ) {
       reservation.release();
-      const capacityFreed = await state.retentionLease.waitForSharedCapacity(
-        request.workAdmission.capTimeout(Number.MAX_SAFE_INTEGER),
+      const whole = await state.retentionLease.reserveWholeAllowance(
+        Math.floor(request.workAdmission.capTimeout(Number.MAX_SAFE_INTEGER) / 2),
         request.signal,
       );
-      // A recovery revoked while it waited neither reserves nor asks its peer.
-      request.signal?.throwIfAborted();
-      reservation = state.retentionLease.reserve();
-      if (!capacityFreed) break;
+      if (request.signal?.aborted) {
+        // A recovery revoked while it waited neither holds the pool nor asks
+        // its peer.
+        whole?.release();
+        request.signal.throwIfAborted();
+      }
+      // No grant: go on with what the pool has now, as a transfer that meets
+      // a held pool always did.
+      reservation = whole ?? state.retentionLease.reserve();
     }
     const exhaustion = reservation.exhaustion;
     if (exhaustion === 'shared') {
@@ -480,7 +487,7 @@ export function createSelectedSwmMetaFetcher(options: {
       const nextBytesEstimate = resumesPrefix
         ? state.bytesEstimate + fetchedBytesEstimate
         : fetchedBytesEstimate;
-      reservation.commitReplace(nextRows, nextBytesEstimate);
+      reservation.commitReplace(nextRows, nextBytesEstimate, fetched.completed);
       // This lease just grew, so any contention it waited through was the
       // transient kind. Start the stall counter over.
       state.sharedPoolYields = 0;

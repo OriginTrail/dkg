@@ -298,319 +298,385 @@ describe('selected SWM metadata retention contention', () => {
     expect(fetchPage.mock.calls[0]![0]!.maxAcceptedQuads).toBe(0);
   });
 
-  // The four cases below are about a pool that is reserved by fetches still in
+  // The cases below are about a pool that is reserved by fetches still in
   // flight, not held by retained prefixes. Every fetch reserves a whole prefix
   // allowance before it starts, so with the default limits the pool admits
   // three transfers at once however little they go on to retain.
-  const emptyPage = (contextGraphId: string) => ({
-    quads: [],
-    bytesReceived: 0,
-    resumedFromOffset: 0,
-    nextOffset: 0,
-    checkpointKey: `${contextGraphId}:checkpoint`,
-    completed: true,
-    timedOut: false,
+  const ALLOWANCE = 2;
+  const pool = (allowances: number) => createSelectedSwmMetaRetentionBudget({
+    maxRows: ALLOWANCE * allowances,
+    maxBytesEstimate: 1024 * 1024 * allowances,
+    maxPrefixRows: ALLOWANCE,
+    maxPrefixBytesEstimate: 1024 * 1024,
   });
+  const turn = () => new Promise((resolve) => setImmediate(resolve));
 
-  /** A holder whose one fetch stays in flight until `settle` is called. */
-  const holderInFlight = (
+  interface Page {
+    readonly rows: number;
+    readonly completed: boolean;
+  }
+  const EMPTY: Page = { rows: 0, completed: true };
+
+  /**
+   * One peer's transfer. Each call of `pass()` is one metadata fetch of the
+   * transfer; it stays in flight until `answer()` is called and then serves
+   * the next of `pages`, resuming after the rows the transfer already holds.
+   */
+  const transfer = (
     budget: ReturnType<typeof createSelectedSwmMetaRetentionBudget>,
-    page: (contextGraphId: string) => ReturnType<typeof emptyPage> | ReturnType<typeof row>[],
+    name: string,
+    pages: readonly Page[] = [EMPTY],
   ) => {
-    let settle!: () => void;
-    const gate = new Promise<void>((resolve) => { settle = resolve; });
-    let signalStarted!: () => void;
-    const started = new Promise<void>((resolve) => { signalStarted = resolve; });
-    const holder = createSelectedSwmMetaFetcher({
-      remotePeerId: 'peer-holder',
-      requesterScope: 'selected-swm-meta:retained:holder',
+    const asked: number[] = [];
+    const answers: Array<() => void> = [];
+    let held = 0;
+    const fetcher = createSelectedSwmMetaFetcher({
+      remotePeerId: `peer-${name}`,
+      requesterScope: `selected-swm-meta:retained:${name}`,
       retentionBudget: budget,
       deleteCheckpoint: vi.fn(),
-      fetchPage: async (req: { contextGraphId: string }) => {
-        signalStarted();
-        await gate;
-        const served = page(req.contextGraphId);
-        return Array.isArray(served)
-          ? {
-            quads: served,
-            bytesReceived: served.length,
-            resumedFromOffset: 0,
-            nextOffset: served.length,
-            checkpointKey: `${req.contextGraphId}:checkpoint`,
-            completed: false,
-            timedOut: true,
-          }
-          : served;
+      fetchPage: async (req: { contextGraphId: string; maxAcceptedQuads: number }) => {
+        const page = pages[asked.length]!;
+        asked.push(req.maxAcceptedQuads);
+        await new Promise<void>((resolve) => { answers.push(resolve); });
+        // The page fetcher refuses rows beyond what the reservation admits.
+        if (page.rows > req.maxAcceptedQuads) {
+          throw new SyncPageAccumulationLimitError('quads', page.rows, req.maxAcceptedQuads);
+        }
+        const resumedFromOffset = held;
+        held += page.rows;
+        return {
+          quads: Array.from({ length: page.rows }, () => row(req.contextGraphId)),
+          bytesReceived: page.rows,
+          resumedFromOffset,
+          nextOffset: held,
+          checkpointKey: `${req.contextGraphId}:checkpoint`,
+          completed: page.completed,
+          timedOut: !page.completed,
+        };
       },
     });
-    const outcome = holder.strategy.fetch(request('cg-holder', 'peer-holder'));
-    return { outcome, started, settle };
+    return {
+      /** What each fetch of this transfer was allowed to accept. */
+      asked,
+      pass: (overrides: Record<string, unknown> = {}) => fetcher.strategy.fetch({
+        ...request(`cg-${name}`, `peer-${name}`),
+        ...overrides,
+      }),
+      answer: () => answers.shift()!(),
+    };
   };
 
   it('asks its peer once the fetch in flight has settled instead of reporting a timed-out page', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 2,
-      maxBytesEstimate: 1024 * 1024,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 1024 * 1024,
-    });
-    const holder = holderInFlight(budget, emptyPage);
-    await holder.started;
-
-    const waiterFetch = vi.fn(async (req: { contextGraphId: string; maxAcceptedQuads: number }) => (
-      emptyPage(req.contextGraphId)
-    ));
-    const waiter = createSelectedSwmMetaFetcher({
-      remotePeerId: 'peer-waiter',
-      requesterScope: 'selected-swm-meta:retained:waiter',
-      retentionBudget: budget,
-      deleteCheckpoint: vi.fn(),
-      fetchPage: waiterFetch,
-    });
+    const budget = pool(1);
+    const holder = transfer(budget, 'holder');
+    const holding = holder.pass();
+    const waiter = transfer(budget, 'waiter');
     let settled = false;
-    const waiting = waiter.strategy.fetch(request('cg-waiter', 'peer-waiter'))
-      .finally(() => { settled = true; });
+    const waiting = waiter.pass().finally(() => { settled = true; });
     // The pool is reserved, not full: the waiter neither spends a fetch that
     // could accept nothing nor gives up on a peer it has not asked.
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(waiterFetch).not.toHaveBeenCalled();
+    await turn();
+    expect(waiter.asked).toEqual([]);
     expect(settled).toBe(false);
 
-    holder.settle();
+    holder.answer();
+    await turn();
+    expect(waiter.asked).toEqual([ALLOWANCE]);
+    waiter.answer();
     const outcome = await waiting;
 
-    expect(waiterFetch).toHaveBeenCalledTimes(1);
-    expect(waiterFetch.mock.calls[0]![0]!.maxAcceptedQuads).toBe(2);
     expect(outcome.continuationYielded).toBe(false);
     expect(outcome.result.completed).toBe(true);
     expect(outcome.result.timedOut).toBe(false);
-    await holder.outcome;
+    await holding;
   });
 
-  it('lets several waiting transfers through one after another', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 2,
-      maxBytesEstimate: 1024 * 1024,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 1024 * 1024,
-    });
-    const holder = holderInFlight(budget, emptyPage);
-    await holder.started;
+  it('lets waiting transfers through in turn, each with a whole allowance', async () => {
+    const budget = pool(1);
+    const holder = transfer(budget, 'holder');
+    const holding = holder.pass();
+    const waiters = ['a', 'b', 'c'].map((name) => transfer(budget, `waiter-${name}`));
+    const waiting = waiters.map((waiter) => waiter.pass());
+    await turn();
+    expect(waiters.map((waiter) => waiter.asked)).toEqual([[], [], []]);
 
-    let fetching = 0;
-    let mostAtOnce = 0;
-    const waiterFetch = vi.fn(async (req: { contextGraphId: string }) => {
-      fetching += 1;
-      mostAtOnce = Math.max(mostAtOnce, fetching);
-      await new Promise((resolve) => setImmediate(resolve));
-      fetching -= 1;
-      return emptyPage(req.contextGraphId);
-    });
-    const waiting = ['a', 'b', 'c'].map((name) => createSelectedSwmMetaFetcher({
-      remotePeerId: `peer-waiter-${name}`,
-      requesterScope: `selected-swm-meta:retained:waiter-${name}`,
-      retentionBudget: budget,
-      deleteCheckpoint: vi.fn(),
-      fetchPage: waiterFetch,
-    }).strategy.fetch(request(`cg-waiter-${name}`, `peer-waiter-${name}`)));
-    // Waiters that woke each other would spin here and starve the fetch in
-    // flight; a macrotask getting its turn shows that they are parked.
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(waiterFetch).not.toHaveBeenCalled();
-
-    holder.settle();
-    const outcomes = await Promise.all(waiting);
-
-    expect(waiterFetch).toHaveBeenCalledTimes(3);
-    // The pool admits one whole allowance: the waiters take it in turn.
-    expect(mostAtOnce).toBe(1);
-    for (const outcome of outcomes) {
+    let previous = holder;
+    for (const [index, waiter] of waiters.entries()) {
+      previous.answer();
+      await turn();
+      // The pool admits one allowance: the next in line has it, the rest wait.
+      expect(waiters.map((each) => each.asked.length))
+        .toEqual(waiters.map((_, position) => (position <= index ? 1 : 0)));
+      expect(waiter.asked).toEqual([ALLOWANCE]);
+      previous = waiter;
+    }
+    previous.answer();
+    for (const outcome of await Promise.all(waiting)) {
       expect(outcome.continuationYielded).toBe(false);
       expect(outcome.result.completed).toBe(true);
     }
-    await holder.outcome;
+    await holding;
   });
 
   it('still yields when the fetch in flight leaves the pool full of its prefix', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 2,
-      maxBytesEstimate: 1024 * 1024,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 1024 * 1024,
-    });
-    const holder = holderInFlight(
-      budget,
-      (contextGraphId) => [row(contextGraphId), row(contextGraphId)],
-    );
-    await holder.started;
-
-    const waiterFetch = vi.fn(async (req: { contextGraphId: string }) => emptyPage(req.contextGraphId));
-    const waiter = createSelectedSwmMetaFetcher({
-      remotePeerId: 'peer-waiter',
-      requesterScope: 'selected-swm-meta:retained:waiter',
-      retentionBudget: budget,
-      deleteCheckpoint: vi.fn(),
-      fetchPage: waiterFetch,
-    });
-    const waiting = waiter.strategy.fetch(request('cg-waiter', 'peer-waiter'));
-    holder.settle();
+    const budget = pool(1);
+    const holder = transfer(budget, 'holder', [{ rows: ALLOWANCE, completed: false }]);
+    const holding = holder.pass();
+    const waiter = transfer(budget, 'waiter');
+    const waiting = waiter.pass();
+    holder.answer();
     const outcome = await waiting;
 
     // Nothing is in flight any more and the sibling kept everything it had
     // reserved: that is the retained-prefix contention the yield exists for.
-    expect(waiterFetch).not.toHaveBeenCalled();
+    expect(waiter.asked).toEqual([]);
     expect(outcome.continuationYielded).toBe(true);
     expect(outcome.result.completed).toBe(false);
     expect(outcome.result.timedOut).toBe(true);
-    await holder.outcome;
+    await holding;
   });
 
-  it('stops waiting when the work allowance of its own round is spent', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 2,
-      maxBytesEstimate: 1024 * 1024,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 1024 * 1024,
-    });
-    const holder = holderInFlight(budget, emptyPage);
-    await holder.started;
+  it('leaves a transfer that is still fetching its manifest the room for its next pass', async () => {
+    // Three fetches hold the pool and a fourth transfer waits. The first
+    // fetch returns one row of a longer manifest. The row of its allowance
+    // that it did not use is free again, and its next pass needs it: a
+    // waiting transfer that took it would leave that pass with nothing, and
+    // the continuation loop would then stop on a pass without progress.
+    const budget = pool(3);
+    const continuing = transfer(budget, 'continuing', [
+      { rows: 1, completed: false },
+      { rows: 1, completed: true },
+    ]);
+    const firstPass = continuing.pass();
+    const others = [transfer(budget, 'other-a'), transfer(budget, 'other-b')];
+    const otherPasses = others.map((other) => other.pass());
+    const waiter = transfer(budget, 'waiter');
+    const waiting = waiter.pass();
+
+    continuing.answer();
+    expect((await firstPass).continuationYielded).toBe(true);
+    await turn();
+    expect(waiter.asked).toEqual([]);
+
+    const nextPass = continuing.pass();
+    await turn();
+    expect(continuing.asked).toEqual([ALLOWANCE, ALLOWANCE - 1]);
+    continuing.answer();
+    expect((await nextPass).result.completed).toBe(true);
+    // The manifest is complete and the waiter is still in line: two rows are
+    // retained, two fetches are in flight, and no whole allowance is free.
+    expect(waiter.asked).toEqual([]);
+
+    others[0]!.answer();
+    await turn();
+    expect(waiter.asked).toEqual([ALLOWANCE]);
+    waiter.answer();
+    others[1]!.answer();
+    expect((await waiting).result.completed).toBe(true);
+    await Promise.all(otherPasses);
+  });
+
+  it('keeps a waiting transfer in line for a whole allowance instead of starting it on a share', async () => {
+    // Two fetches hold the pool and a third transfer waits. The first fetch
+    // keeps one row, so one row is free while the other is still in flight.
+    // A waiting transfer that was let through on that row would fail closed
+    // on any longer manifest, after a real download, and so would the next
+    // one in line.
+    const budget = pool(2);
+    const first = transfer(budget, 'first', [{ rows: 1, completed: true }]);
+    const firstPass = first.pass();
+    const holder = transfer(budget, 'holder');
+    const holding = holder.pass();
+    const waiter = transfer(budget, 'waiter', [{ rows: ALLOWANCE, completed: true }]);
+    const waiting = waiter.pass();
+
+    first.answer();
+    await firstPass;
+    await turn();
+    expect(waiter.asked).toEqual([]);
+
+    holder.answer();
+    await turn();
+    expect(waiter.asked).toEqual([ALLOWANCE]);
+    waiter.answer();
+    expect((await waiting).result.completed).toBe(true);
+    await holding;
+  });
+
+  it('does not make a transfer wait that is handed a share of the pool at its start', async () => {
+    // One row of the pool is retained and one fetch is in flight, so one row
+    // is free. Only a pool that admits nothing made a transfer give up
+    // without asking: this one starts on the row at once, as it always did.
+    const budget = pool(2);
+    const retained = transfer(budget, 'retained', [{ rows: 1, completed: true }]);
+    const retaining = retained.pass();
+    retained.answer();
+    await retaining;
+    const holder = transfer(budget, 'holder');
+    const holding = holder.pass();
+
+    const arriving = transfer(budget, 'arriving', [{ rows: 1, completed: true }]);
+    const arrival = arriving.pass();
+    expect(arriving.asked).toEqual([1]);
+    arriving.answer();
+    expect((await arrival).result.completed).toBe(true);
+    holder.answer();
+    await holding;
+  });
+
+  it('starts on what the pool has when nothing is in flight, as before', async () => {
+    const budget = pool(2);
+    const retained = transfer(budget, 'retained', [{ rows: ALLOWANCE, completed: true }]);
+    const retaining = retained.pass();
+    retained.answer();
+    await retaining;
+    const partial = transfer(budget, 'partial', [{ rows: 1, completed: true }]);
+    const first = partial.pass();
+    partial.answer();
+    await first;
+
+    // One row is free and no fetch will free more. Waiting has no end that a
+    // fetch bounds, so the transfer starts on the row, as it always did.
+    const arriving = transfer(budget, 'arriving', [{ rows: 1, completed: true }]);
+    const arrival = arriving.pass();
+    await turn();
+    expect(arriving.asked).toEqual([1]);
+    arriving.answer();
+    expect((await arrival).result.completed).toBe(true);
+  });
+
+  it('gives up waiting halfway through the work allowance of its own round', async () => {
+    const budget = pool(1);
+    const holder = transfer(budget, 'holder');
+    const holding = holder.pass();
 
     const farDeadline = Date.now() + 60_000;
     const allowances = [
       // The round deadline itself is near.
-      composeSyncWorkAdmission({ deadline: Date.now() + 20 }),
+      composeSyncWorkAdmission({ deadline: Date.now() + 40 }),
       // The deadline is far, but the job window around the round is not.
       composeSyncWorkAdmission({
         deadline: farDeadline,
-        window: createSyncWorkAdmission(() => 20),
+        window: createSyncWorkAdmission(() => 40),
       }),
     ];
     for (const [index, workAdmission] of allowances.entries()) {
-      const waiterFetch = vi.fn(async (req: { contextGraphId: string }) => emptyPage(req.contextGraphId));
-      const waiter = createSelectedSwmMetaFetcher({
-        remotePeerId: `peer-waiter-${index}`,
-        requesterScope: `selected-swm-meta:retained:waiter-${index}`,
-        retentionBudget: budget,
-        deleteCheckpoint: vi.fn(),
-        fetchPage: waiterFetch,
-      });
+      const waiter = transfer(budget, `waiter-${index}`);
+      const startedAt = Date.now();
+      const outcome = await waiter.pass({ deadline: farDeadline, workAdmission });
 
-      const outcome = await waiter.strategy.fetch({
-        ...request(`cg-waiter-${index}`, `peer-waiter-${index}`),
-        deadline: farDeadline,
-        workAdmission,
-      });
-
-      expect(waiterFetch).not.toHaveBeenCalled();
+      // Half of it is kept for the fetch that a grant would start.
+      expect(Date.now() - startedAt).toBeLessThan(35);
+      expect(waiter.asked).toEqual([]);
       expect(outcome.continuationYielded).toBe(true);
       expect(outcome.result.timedOut).toBe(true);
     }
-    holder.settle();
-    await holder.outcome;
+    holder.answer();
+    await holding;
   });
 
   it('ends a parked transfer at once when its recovery is revoked, without asking its peer', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 2,
-      maxBytesEstimate: 1024 * 1024,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 1024 * 1024,
-    });
-    const holder = holderInFlight(budget, emptyPage);
-    await holder.started;
+    const budget = pool(1);
+    const holder = transfer(budget, 'holder');
+    const holding = holder.pass();
 
-    const revokedFetch = vi.fn(async (req: { contextGraphId: string }) => emptyPage(req.contextGraphId));
-    const revoked = createSelectedSwmMetaFetcher({
-      remotePeerId: 'peer-revoked',
-      requesterScope: 'selected-swm-meta:retained:revoked',
-      retentionBudget: budget,
-      deleteCheckpoint: vi.fn(),
-      fetchPage: revokedFetch,
-    });
+    const revoked = transfer(budget, 'revoked');
     const recovery = new AbortController();
-    const parked = revoked.strategy.fetch({
-      ...request('cg-revoked', 'peer-revoked'),
-      signal: recovery.signal,
-    });
-    await new Promise((resolve) => setImmediate(resolve));
+    const parked = revoked.pass({ signal: recovery.signal });
+    await turn();
 
     // The sibling is still fetching. The revoked transfer must not stay in
     // its peer's queue until that fetch, or its own deadline, ends.
     const revocation = new Error('recovery authority was revoked');
     recovery.abort(revocation);
     await expect(parked).rejects.toBe(revocation);
-    expect(revokedFetch).not.toHaveBeenCalled();
+    expect(revoked.asked).toEqual([]);
 
     // It left nothing behind in the pool: the next transfer takes the whole
     // allowance once the fetch in flight has settled.
-    const nextFetch = vi.fn(async (req: { contextGraphId: string; maxAcceptedQuads: number }) => (
-      emptyPage(req.contextGraphId)
-    ));
-    const next = createSelectedSwmMetaFetcher({
-      remotePeerId: 'peer-next',
-      requesterScope: 'selected-swm-meta:retained:next',
-      retentionBudget: budget,
-      deleteCheckpoint: vi.fn(),
-      fetchPage: nextFetch,
-    });
-    const waiting = next.strategy.fetch(request('cg-next', 'peer-next'));
-    holder.settle();
+    const next = transfer(budget, 'next');
+    const waiting = next.pass();
+    holder.answer();
+    await turn();
+    expect(next.asked).toEqual([ALLOWANCE]);
+    next.answer();
     await expect(waiting).resolves.toMatchObject({ continuationYielded: false });
-    expect(nextFetch.mock.calls[0]![0]!.maxAcceptedQuads).toBe(2);
-    await holder.outcome;
+    await holding;
+  });
+
+  it('releases an allowance that is granted in the same turn as the revocation', async () => {
+    const budget = pool(1);
+    // A fetch of another lease holds the pool. Its reservation is settled by
+    // hand, so that the grant and the revocation fall into one turn.
+    const inFlight = budget.lease().reserve();
+    const revoked = transfer(budget, 'revoked');
+    const recovery = new AbortController();
+    const parked = revoked.pass({ signal: recovery.signal });
+    await turn();
+
+    // The budget grants the allowance when the reservation settles. The
+    // transfer resumes on a later turn and finds its recovery gone.
+    inFlight.release();
+    const revocation = new Error('recovery authority was revoked');
+    recovery.abort(revocation);
+    await expect(parked).rejects.toBe(revocation);
+    expect(revoked.asked).toEqual([]);
+
+    // The grant did not stay behind: the next transfer starts at once.
+    const next = transfer(budget, 'next');
+    const following = next.pass();
+    await turn();
+    expect(next.asked).toEqual([ALLOWANCE]);
+    next.answer();
+    await following;
   });
 
   it('does not make a transfer that already holds a prefix wait for the fetch in flight', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 3,
-      maxBytesEstimate: 1024 * 1024,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 1024 * 1024,
-    });
-    const waiterFetch = vi.fn(async (req: { contextGraphId: string }) => ({
-      quads: [row(req.contextGraphId)],
-      bytesReceived: 1,
-      resumedFromOffset: 0,
-      nextOffset: 1,
-      checkpointKey: `${req.contextGraphId}:checkpoint`,
-      completed: false,
-      timedOut: true,
-    }));
-    const waiter = createSelectedSwmMetaFetcher({
-      remotePeerId: 'peer-waiter',
-      requesterScope: 'selected-swm-meta:retained:waiter',
-      retentionBudget: budget,
-      deleteCheckpoint: vi.fn(),
-      fetchPage: waiterFetch,
-    });
-    await waiter.strategy.fetch(request('cg-waiter', 'peer-waiter'));
-    expect(waiter.continuation('cg-waiter').progress).toBe(1);
-    waiterFetch.mockClear();
+    const budget = pool(1);
+    const waiter = transfer(budget, 'waiter', [
+      { rows: 1, completed: false },
+      { rows: 1, completed: true },
+    ]);
+    const firstPass = waiter.pass();
+    waiter.answer();
+    await firstPass;
 
-    const holder = holderInFlight(budget, emptyPage);
-    await holder.started;
+    // A second transfer starts on the row that is left, with nothing in
+    // flight, and so takes the room of the first one's next pass.
+    const holder = transfer(budget, 'holder');
+    const holding = holder.pass();
+    await turn();
+    expect(holder.asked).toEqual([1]);
 
     // Resolves while the sibling is still fetching: the prefix and its cursor
     // are what the yield protects, and the ledger grants this round a retry.
-    const outcome = await waiter.strategy.fetch(request('cg-waiter', 'peer-waiter'));
+    const outcome = await waiter.pass();
 
-    expect(waiterFetch).not.toHaveBeenCalled();
+    expect(waiter.asked).toEqual([ALLOWANCE]);
     expect(outcome.continuationYielded).toBe(true);
     expect(outcome.result.resumedFromOffset).toBe(1);
     expect(outcome.result.timedOut).toBe(true);
-    holder.settle();
-    await holder.outcome;
+    holder.answer();
+    await holding;
   });
 
-  it('never gives up on an unasked peer while a fetch is in flight, whatever the order of events', async () => {
-    // Seeded schedules: transfers start and fetches settle in a drawn order,
-    // against pools of one to three allowances, with peers that serve nothing,
-    // a complete manifest or a prefix that stays retained. Two properties
-    // must hold in every schedule. Every transfer ends once nothing is in
-    // flight any more (no waiter is left parked), and a transfer ends without
-    // having asked its peer only when no fetch was in flight at that moment:
-    // the pool was then held by retained prefixes, which is what the yield is
-    // for.
+  it('keeps the pool rules over seeded schedules of starts, answers and further passes', async () => {
+    // Transfers start, their fetches are answered and unfinished manifests
+    // are continued in a drawn order, against pools of one to three
+    // allowances. Peers serve nothing, a whole manifest, or a first part and
+    // then the rest. The test keeps its own count of the pool and checks, in
+    // every schedule:
+    //  1. Nothing stays parked: once no fetch is in flight, every pass ended.
+    //  2. A transfer that holds nothing ends without having asked its peer
+    //     only when no fetch was in flight for it to wait for.
+    //  3. A transfer that waited and is let through beside a fetch in flight
+    //     has a whole allowance, and the pool then still holds the rest of
+    //     the allowance of every transfer with an unfinished manifest.
+    //  4. So the next pass of an unfinished manifest is handed the whole rest
+    //     of its allowance. This holds until a transfer is handed a share of
+    //     the pool at its start, or after a wait that ended with nothing in
+    //     flight: that one takes what there is, as it always did.
     const seeded = (seed: number) => {
       let state = seed;
       return () => {
@@ -620,86 +686,189 @@ describe('selected SWM metadata retention contention', () => {
         return ((mixed ^ (mixed >>> 14)) >>> 0) / 4_294_967_296;
       };
     };
-    const turn = () => new Promise((resolve) => setImmediate(resolve));
     const allowanceRows = 4;
-    const allowanceBytes = 1024 * 1024;
-    let waitedForCapacity = 0;
+    const exercised = { waitedThenAsked: 0, nextPassesChecked: 0, endedUnasked: 0 };
 
-    for (let seed = 1; seed <= 80; seed += 1) {
+    for (let seed = 1; seed <= 400; seed += 1) {
       const next = seeded(seed);
       const pick = (count: number) => Math.floor(next() * count);
-      const poolAllowances = 1 + pick(3);
+      const allowances = 1 + pick(3);
       const budget = createSelectedSwmMetaRetentionBudget({
-        maxRows: allowanceRows * poolAllowances,
-        maxBytesEstimate: allowanceBytes * poolAllowances,
+        maxRows: allowanceRows * allowances,
+        maxBytesEstimate: 1024 * 1024 * allowances,
         maxPrefixRows: allowanceRows,
-        maxPrefixBytesEstimate: allowanceBytes,
+        maxPrefixBytesEstimate: 1024 * 1024,
       });
-      const inFlight = new Map<number, () => void>();
-      const ended: Array<{ askedPeer: boolean; inFlightWhenEnded: number }> = [];
-      const transfers = 3 + pick(8);
+      const at = (what: string) => `seed ${seed}: ${what}`;
 
-      const start = (transfer: number) => {
-        const servedRows = [0, 0, 0, 1, 2, allowanceRows][pick(6)]!;
-        const completed = servedRows === 0 || pick(2) === 0;
-        let askedPeer = false;
-        const startedWith = inFlight.size;
+      // The test's own count of the pool.
+      interface Counted {
+        held: number;
+        complete: boolean;
+        fetching: number | null;
+        passing: boolean;
+        resumes: number;
+        gone: boolean;
+        pass(): void;
+      }
+      const counted: Counted[] = [];
+      const answers = new Map<number, { answer(): void; startedInStep: number }>();
+      let step = 0;
+      let passesUnderWay = 0;
+      let tookWhatThereWas = false;
+      const free = () => allowanceRows * allowances - counted.reduce(
+        (sum, each) => sum + each.held + (each.fetching ?? 0),
+        0,
+      );
+      const unfinishedRooms = (except: Counted) => counted.reduce(
+        (sum, each) => (
+          each === except || each.gone || each.complete || each.held === 0 || each.fetching !== null
+            ? sum
+            : sum + allowanceRows - each.held
+        ),
+        0,
+      );
+
+      const start = (index: number) => {
+        const firstRows = [0, 0, 0, 1, 2, allowanceRows][pick(6)]!;
+        const firstIsAll = firstRows === 0 || pick(2) === 0;
+        const pages: Page[] = firstIsAll
+          ? [{ rows: firstRows, completed: true }]
+          : [
+            { rows: firstRows, completed: false },
+            { rows: pick(allowanceRows - firstRows + 1), completed: true },
+          ];
+        let served = 0;
+        let calledAtOnce = false;
         const fetcher = createSelectedSwmMetaFetcher({
-          remotePeerId: `peer-${transfer}`,
-          requesterScope: `selected-swm-meta:retained:${transfer}`,
+          remotePeerId: `peer-${index}`,
+          requesterScope: `selected-swm-meta:retained:${index}`,
           retentionBudget: budget,
           deleteCheckpoint: vi.fn(),
           fetchPage: async (req: { contextGraphId: string; maxAcceptedQuads: number }) => {
-            askedPeer = true;
-            await new Promise<void>((resolve) => { inFlight.set(transfer, resolve); });
-            // The page fetcher refuses rows beyond what the reservation admits.
-            if (servedRows > req.maxAcceptedQuads) {
-              throw new SyncPageAccumulationLimitError('quads', servedRows, req.maxAcceptedQuads);
+            const page = pages[served]!;
+            served += 1;
+            const freeBefore = free();
+            const fetchInFlight = [...answers.values()].some((other) => other.startedInStep < step);
+            if (self.held === 0) {
+              if (fetchInFlight && !calledAtOnce) {
+                expect(req.maxAcceptedQuads, at(`transfer ${index} waited and started on a share`))
+                  .toBe(allowanceRows);
+                expect(freeBefore - allowanceRows, at(`transfer ${index} waited and took unfinished room`))
+                  .toBeGreaterThanOrEqual(unfinishedRooms(self));
+                exercised.waitedThenAsked += 1;
+              } else if (
+                req.maxAcceptedQuads < allowanceRows
+                || freeBefore - req.maxAcceptedQuads < unfinishedRooms(self)
+              ) {
+                tookWhatThereWas = true;
+              }
+            } else if (!tookWhatThereWas) {
+              expect(req.maxAcceptedQuads, at(`next pass of transfer ${index}`))
+                .toBe(allowanceRows - self.held);
+              exercised.nextPassesChecked += 1;
             }
+            self.fetching = req.maxAcceptedQuads;
+            await new Promise<void>((resolve) => {
+              answers.set(index, { answer: resolve, startedInStep: step });
+            });
+            self.fetching = null;
+            // The page fetcher refuses rows beyond what the reservation admits,
+            // and the transfer then fails closed and gives its rows back.
+            if (page.rows > req.maxAcceptedQuads) {
+              self.held = 0;
+              self.gone = true;
+              throw new SyncPageAccumulationLimitError('quads', page.rows, req.maxAcceptedQuads);
+            }
+            const resumedFromOffset = self.held;
+            self.held += page.rows;
+            self.complete = page.completed;
             return {
-              quads: Array.from({ length: servedRows }, () => row(req.contextGraphId)),
-              bytesReceived: servedRows,
-              resumedFromOffset: 0,
-              nextOffset: servedRows,
+              quads: Array.from({ length: page.rows }, () => row(req.contextGraphId)),
+              bytesReceived: page.rows,
+              resumedFromOffset,
+              nextOffset: self.held,
               checkpointKey: `${req.contextGraphId}:checkpoint`,
-              completed,
-              timedOut: !completed,
+              completed: page.completed,
+              timedOut: !page.completed,
             };
           },
         });
-        const end = () => {
-          if (askedPeer && startedWith >= poolAllowances) waitedForCapacity += 1;
-          ended.push({ askedPeer, inFlightWhenEnded: inFlight.size });
+        const self: Counted = {
+          held: 0,
+          complete: false,
+          fetching: null,
+          passing: false,
+          resumes: 0,
+          gone: false,
+          pass: () => {
+            const servedBefore = served;
+            const heldBefore = self.held;
+            self.passing = true;
+            passesUnderWay += 1;
+            calledAtOnce = true;
+            const ended = () => {
+              self.passing = false;
+              passesUnderWay -= 1;
+              if (served !== servedBefore) return;
+              if (heldBefore === 0) {
+                // It never asked. Whatever is in flight now started in this
+                // very step, after the wait had ended for want of a fetch.
+                exercised.endedUnasked += 1;
+                for (const other of answers.values()) {
+                  expect(other.startedInStep, at(`transfer ${index} gave up beside a fetch in flight`))
+                    .toBe(step);
+                }
+              } else {
+                expect(tookWhatThereWas, at(`next pass of transfer ${index} found no room`)).toBe(true);
+              }
+            };
+            const passing = fetcher.strategy.fetch(request(`cg-${index}`, `peer-${index}`));
+            calledAtOnce = false;
+            void passing.then(ended, ended);
+          },
         };
-        void fetcher.strategy.fetch(request(`cg-${transfer}`, `peer-${transfer}`)).then(end, end);
+        counted.push(self);
+        self.pass();
       };
 
-      let started = 0;
-      // Each step starts one transfer or settles one fetch, so the loop ends
-      // after at most two steps a transfer.
-      for (let step = 0; step < 2 * transfers && (started < transfers || inFlight.size > 0); step += 1) {
-        if (started < transfers && (inFlight.size === 0 || pick(2) === 0)) {
-          start(started);
-          started += 1;
+      const transfers = 3 + pick(8);
+      // A transfer takes at most one start, two answers and two further
+      // passes, so the loop is bounded by six steps a transfer.
+      for (step = 1; step <= 6 * transfers; step += 1) {
+        const fetching = [...answers.keys()];
+        const unfinished = counted.filter((each) => (
+          !each.gone && !each.complete && each.held > 0 && !each.passing && each.resumes < 2
+        ));
+        const choices = [
+          ...(counted.length < transfers ? ['start'] : []),
+          ...(fetching.length > 0 ? ['answer'] : []),
+          ...(unfinished.length > 0 ? ['continue'] : []),
+        ];
+        if (choices.length === 0) break;
+        const choice = choices[pick(choices.length)]!;
+        if (choice === 'start') {
+          start(counted.length);
+        } else if (choice === 'answer') {
+          const answered = fetching[pick(fetching.length)]!;
+          const { answer } = answers.get(answered)!;
+          answers.delete(answered);
+          answer();
         } else {
-          const fetching = [...inFlight.keys()];
-          const settled = fetching[pick(fetching.length)]!;
-          const settle = inFlight.get(settled)!;
-          inFlight.delete(settled);
-          settle();
+          const continued = unfinished[pick(unfinished.length)]!;
+          continued.resumes += 1;
+          continued.pass();
         }
         await turn();
       }
-      await turn();
 
-      expect(inFlight.size, `seed ${seed}`).toBe(0);
-      expect(ended, `seed ${seed}`).toHaveLength(transfers);
-      for (const transfer of ended) {
-        if (!transfer.askedPeer) expect(transfer.inFlightWhenEnded, `seed ${seed}`).toBe(0);
-      }
+      expect(answers.size, at('fetches left in flight')).toBe(0);
+      expect(passesUnderWay, at('passes left parked')).toBe(0);
+      expect(counted, at('transfers started')).toHaveLength(transfers);
     }
-    // The schedules do exercise the wait: transfers that started against a
-    // pool reserved by fetches in flight went on to ask their peer.
-    expect(waitedForCapacity).toBeGreaterThan(20);
+    // The schedules reach the cases the rules are about.
+    expect(exercised.waitedThenAsked).toBeGreaterThan(100);
+    expect(exercised.nextPassesChecked).toBeGreaterThan(150);
+    expect(exercised.endedUnasked).toBeGreaterThan(100);
   });
 });

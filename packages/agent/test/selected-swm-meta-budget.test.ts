@@ -158,212 +158,286 @@ describe('selected SWM metadata retention budget', () => {
     waiter.release();
   });
 
-  it('waits for a sibling fetch in flight and resumes once it has committed', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 2,
-      maxBytesEstimate: 200,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 200,
-    });
-    const holder = budget.lease();
-    const waiter = budget.lease();
+  // The cases below are about a lease that has to wait for the pool. Every
+  // fetch reserves a whole prefix allowance before it starts, so a pool of
+  // three allowances admits three fetches at once however little they retain.
+  const pool = (allowances: number) => createSelectedSwmMetaRetentionBudget({
+    maxRows: 2 * allowances,
+    maxBytesEstimate: 200 * allowances,
+    maxPrefixRows: 2,
+    maxPrefixBytesEstimate: 200,
+  });
+  const turn = () => new Promise((resolve) => setImmediate(resolve));
 
-    // Every fetch reserves a whole prefix allowance before it starts, so one
-    // fetch in flight leaves the pool with nothing to hand out.
+  it('grants a waiting lease its whole allowance once the fetch in flight has committed', async () => {
+    const budget = pool(1);
+    const holder = budget.lease();
     const inFlight = holder.reserve();
-    const contended = waiter.reserve();
-    expect(contended.exhaustion).toBe('shared');
+    const second = budget.lease();
+    const contended = second.reserve();
+    expect(contended).toEqual(expect.objectContaining({ exhaustion: 'shared' }));
     contended.release();
 
-    let woken = false;
-    const waiting = waiter.waitForSharedCapacity(60_000).then((capacityFreed) => {
-      woken = true;
-      return capacityFreed;
+    let granted: unknown;
+    const waiting = second.reserveWholeAllowance(60_000).then((reservation) => {
+      granted = reservation;
+      return reservation;
     });
-    await Promise.resolve();
-    expect(woken).toBe(false);
+    await turn();
+    expect(granted).toBeUndefined();
 
-    inFlight.commitReplace(1, 100);
-    await expect(waiting).resolves.toBe(true);
-    // The waiter runs after the commit is applied: it sees what the sibling
-    // kept, not the allowance the sibling had reserved.
-    const admitted = waiter.reserve();
-    expect(admitted).toEqual(expect.objectContaining({
-      maxRows: 1,
-      maxBytesEstimate: 100,
-      exhaustion: null,
-    }));
-    admitted.release();
-    holder.release();
-    waiter.release();
-  });
-
-  it('wakes a waiter when a fetch is abandoned, its lease is dropped, or a prefix is handed back', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 3,
-      maxBytesEstimate: 300,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 200,
-    });
-    const retained = budget.lease();
-    retained.replace(1, 100);
-    const waiter = budget.lease();
-
-    const abandoned = budget.lease().reserve();
-    const afterAbandon = waiter.waitForSharedCapacity(60_000);
-    abandoned.release();
-    await expect(afterAbandon).resolves.toBe(true);
-
-    const dropped = budget.lease();
-    dropped.reserve();
-    const afterDrop = waiter.waitForSharedCapacity(60_000);
-    dropped.release();
-    await expect(afterDrop).resolves.toBe(true);
-
-    // A sibling still fetching keeps the waiter waiting; another lease that
-    // gives its rows back frees capacity in the meantime.
-    const stillFetching = budget.lease().reserve();
-    const afterHandBack = waiter.waitForSharedCapacity(60_000);
-    retained.replace(0, 0);
-    await expect(afterHandBack).resolves.toBe(true);
-    const admitted = waiter.reserve();
-    expect(admitted).toEqual(expect.objectContaining({ maxRows: 1, exhaustion: null }));
-    admitted.release();
-    stillFetching.release();
-    retained.release();
-    waiter.release();
-  });
-
-  it('does not wait when nothing bounded would free capacity', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    inFlight.commitReplace(0, 0);
+    const reservation = await waiting;
+    // The grant is a reservation: the lease does not have to ask again, and
+    // nobody else can take the allowance in between.
+    expect(reservation).toEqual(expect.objectContaining({
       maxRows: 2,
       maxBytesEstimate: 200,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 200,
-    });
+      exhaustion: null,
+    }));
+    expect(holder.reserve()).toEqual(expect.objectContaining({ exhaustion: 'shared' }));
+    reservation!.release();
+    holder.release();
+    second.release();
+  });
+
+  it('never grants a share of an allowance: it waits on, or reports that nothing is left to wait for', async () => {
+    const budget = pool(2);
+    const first = budget.lease();
+    const other = budget.lease();
+    const firstFetch = first.reserve();
+    const otherFetch = other.reserve();
+    const waiter = budget.lease();
+
+    let settled = false;
+    const waiting = waiter.reserveWholeAllowance(60_000).finally(() => { settled = true; });
+    // One row of the first allowance is kept, three are free while the other
+    // fetch is still in flight: less than a whole allowance, so no grant, and
+    // something is still in flight, so no refusal either.
+    firstFetch.commitReplace(1, 100);
+    await turn();
+    expect(settled).toBe(false);
+
+    // The other fetch keeps a prefix too. Two rows are free, which is a whole
+    // allowance, but not with the row each of the two unfinished transfers
+    // could still go on to claim. Nothing is in flight any more, so the wait
+    // ends without a grant.
+    otherFetch.commitReplace(1, 100);
+    await expect(waiting).resolves.toBeNull();
+    first.release();
+    other.release();
+    waiter.release();
+  });
+
+  it('keeps no room for a prefix that is a whole manifest', async () => {
+    const budget = pool(2);
+    const first = budget.lease();
+    const other = budget.lease();
+    const firstFetch = first.reserve();
+    const otherFetch = other.reserve();
+    const waiter = budget.lease();
+    const waiting = waiter.reserveWholeAllowance(60_000);
+
+    // Both peers answer with their whole manifest, one row each. Neither
+    // transfer will fetch more, so the two rows that are free are a whole
+    // allowance for the lease that waited.
+    firstFetch.commitReplace(1, 100, true);
+    otherFetch.commitReplace(1, 100, true);
+    const reservation = await waiting;
+    expect(reservation).toEqual(expect.objectContaining({ maxRows: 2, maxBytesEstimate: 200 }));
+    reservation!.release();
+    // A prefix replaced without that word is an unfinished one again, and the
+    // same two free rows are no whole allowance beside it.
+    first.replace(1, 100);
+    await expect(waiter.reserveWholeAllowance(60_000)).resolves.toBeNull();
+    first.release();
+    other.release();
+    waiter.release();
+  });
+
+  it('grants only what leaves a lease that holds a prefix the room it could still claim', async () => {
+    const budget = pool(3);
+    const continuing = budget.lease();
+    const firstSlice = continuing.reserve();
+    const fetching = [budget.lease().reserve(), budget.lease().reserve()];
+    const waiter = budget.lease();
+    const waiting = waiter.reserveWholeAllowance(60_000);
+    let granted = false;
+    void waiting.then(() => { granted = true; });
+
+    // The transfer keeps one row of a manifest it has not finished. The row
+    // it did not use is free again, and belongs to its next pass.
+    firstSlice.commitReplace(1, 100);
+    await turn();
+    expect(granted).toBe(false);
+    const nextPass = continuing.reserve();
+    expect(nextPass).toEqual(expect.objectContaining({ maxRows: 1, exhaustion: null }));
+    nextPass.release();
+
+    // An empty answer frees a whole allowance. Granting it still leaves the
+    // continuing transfer its row.
+    fetching[0]!.commitReplace(0, 0);
+    const reservation = await waiting;
+    expect(reservation).toEqual(expect.objectContaining({ maxRows: 2, maxBytesEstimate: 200 }));
+    expect(continuing.reserve()).toEqual(expect.objectContaining({ maxRows: 1, exhaustion: null }));
+    reservation!.release();
+    fetching[1]!.release();
+    continuing.release();
+    waiter.release();
+  });
+
+  it('grants in the order the leases started to wait', async () => {
+    const budget = pool(1);
+    const holder = budget.lease();
+    let inFlight = holder.reserve();
+    const order: string[] = [];
+    const leases = ['first', 'second', 'third'].map((name) => ({ name, lease: budget.lease() }));
+    const waits = leases.map(({ name, lease }) => lease.reserveWholeAllowance(60_000)
+      .then((reservation) => {
+        order.push(name);
+        return reservation;
+      }));
+
+    for (const wait of waits) {
+      inFlight.commitReplace(0, 0);
+      // One allowance, one grant: the others stay in line behind the fetch
+      // that the grant starts.
+      inFlight = (await wait)!;
+      await turn();
+    }
+    expect(order).toEqual(['first', 'second', 'third']);
+    inFlight.release();
+    holder.release();
+    for (const { lease } of leases) lease.release();
+  });
+
+  it('does not wait when nothing bounded would free the pool', async () => {
+    const budget = pool(1);
     const holder = budget.lease();
     const waiter = budget.lease();
 
     // A pool held by a retained prefix: only its owner or the retention clock
     // gives it back, and neither is bounded by a fetch.
     holder.replace(2, 200);
-    const contended = waiter.reserve();
-    expect(contended.exhaustion).toBe('shared');
-    contended.release();
-    await expect(waiter.waitForSharedCapacity(60_000)).resolves.toBe(false);
+    await expect(waiter.reserveWholeAllowance(60_000)).resolves.toBeNull();
+    holder.replace(0, 0);
 
-    // A reservation that admits nothing frees nothing when it settles. The
-    // holder is at its own ceiling, and the waiter's own reservation is not a
-    // sibling's.
-    const ownCeiling = holder.reserve();
-    expect(ownCeiling).toEqual(expect.objectContaining({ maxRows: 0, exhaustion: 'prefix' }));
-    await expect(waiter.waitForSharedCapacity(60_000)).resolves.toBe(false);
-    ownCeiling.release();
-    holder.release();
+    // A whole allowance that is free is handed out at once.
+    const free = await waiter.reserveWholeAllowance(60_000);
+    expect(free).toEqual(expect.objectContaining({ maxRows: 2, maxBytesEstimate: 200 }));
+    // The lease's own reservation is not a sibling's fetch.
+    await expect(waiter.reserveWholeAllowance(60_000)).resolves.toBeNull();
+    free!.release();
 
-    const own = waiter.reserve();
-    expect(own.exhaustion).toBeNull();
-    await expect(waiter.waitForSharedCapacity(60_000)).resolves.toBe(false);
-    own.release();
-
-    // No time left, and a lease that was released, never start a wait.
-    const inFlight = budget.lease().reserve();
-    await expect(waiter.waitForSharedCapacity(0)).resolves.toBe(false);
-    await expect(waiter.waitForSharedCapacity(Number.NaN)).resolves.toBe(false);
+    // No time left, an aborted signal and a released lease never start a wait.
+    const inFlight = holder.reserve();
+    await expect(waiter.reserveWholeAllowance(0)).resolves.toBeNull();
+    await expect(waiter.reserveWholeAllowance(Number.NaN)).resolves.toBeNull();
+    await expect(waiter.reserveWholeAllowance(60_000, AbortSignal.abort())).resolves.toBeNull();
     waiter.release();
-    await expect(waiter.waitForSharedCapacity(60_000)).resolves.toBe(false);
+    await expect(waiter.reserveWholeAllowance(60_000)).resolves.toBeNull();
     inFlight.release();
+    holder.release();
   });
 
-  it('stops waiting at its timeout and is not woken afterwards', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 2,
-      maxBytesEstimate: 200,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 200,
-    });
+  it('ends a wait at its timeout, when its signal aborts and when its lease is released', async () => {
+    const budget = pool(1);
     const holder = budget.lease();
-    const waiter = budget.lease();
     const inFlight = holder.reserve();
 
-    const outcomes: boolean[] = [];
-    await waiter.waitForSharedCapacity(5).then((capacityFreed) => outcomes.push(capacityFreed));
-    expect(outcomes).toEqual([false]);
+    const timedOut = budget.lease();
+    await expect(timedOut.reserveWholeAllowance(5)).resolves.toBeNull();
 
-    // The fetch settles later: the expired wait must not resolve a second time
-    // and a new wait starts from the pool as it is then.
+    const revoked = budget.lease();
+    const recovery = new AbortController();
+    const removeListener = vi.spyOn(recovery.signal, 'removeEventListener');
+    const parked = revoked.reserveWholeAllowance(60_000, recovery.signal);
+    recovery.abort();
+    await expect(parked).resolves.toBeNull();
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+
+    const dropped = budget.lease();
+    const abandoned = dropped.reserveWholeAllowance(60_000);
+    dropped.release();
+    await expect(abandoned).resolves.toBeNull();
+
+    // None of the three is still in line: the allowance that comes free goes
+    // to a lease that asks now.
     inFlight.release();
-    await Promise.resolve();
-    expect(outcomes).toEqual([false]);
-    await expect(waiter.waitForSharedCapacity(60_000)).resolves.toBe(false);
-    holder.release();
-    waiter.release();
+    const next = budget.lease();
+    await expect(next.reserveWholeAllowance(60_000))
+      .resolves.toEqual(expect.objectContaining({ maxRows: 2, maxBytesEstimate: 200 }));
+    for (const lease of [holder, timedOut, revoked, next]) lease.release();
   });
 
-  it('ends a wait when its signal aborts, and does not start one for an aborted signal', async () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 2,
-      maxBytesEstimate: 200,
-      maxPrefixRows: 2,
-      maxPrefixBytesEstimate: 200,
-    });
-    const inFlight = budget.lease().reserve();
+  it('decides again when a lease is dropped mid-fetch, a prefix is handed back or a probe at a ceiling settles', async () => {
+    const budget = pool(1);
     const waiter = budget.lease();
 
-    const revoked = new AbortController();
-    const outcomes: boolean[] = [];
-    const waiting = waiter.waitForSharedCapacity(60_000, revoked.signal)
-      .then((capacityFreed) => outcomes.push(capacityFreed));
-    await Promise.resolve();
-    expect(outcomes).toEqual([]);
-    revoked.abort();
-    await waiting;
-    expect(outcomes).toEqual([false]);
+    const dropped = budget.lease();
+    dropped.reserve();
+    const afterDrop = waiter.reserveWholeAllowance(60_000);
+    dropped.release();
+    (await afterDrop)!.release();
 
-    await expect(waiter.waitForSharedCapacity(60_000, revoked.signal)).resolves.toBe(false);
+    // A lease at its own ceiling still sends a fetch, with a reservation that
+    // admits nothing. It is a fetch in flight all the same: when the answer
+    // restarts its prefix from nothing, the pool is free.
+    const atCeiling = budget.lease();
+    atCeiling.replace(2, 200);
+    const probe = atCeiling.reserve();
+    expect(probe).toEqual(expect.objectContaining({ maxRows: 0, exhaustion: 'prefix' }));
+    const afterProbe = waiter.reserveWholeAllowance(60_000);
+    let decided = false;
+    void afterProbe.then(() => { decided = true; });
+    await turn();
+    expect(decided).toBe(false);
+    probe.commitReplace(0, 0);
+    (await afterProbe)!.release();
 
-    // A wait that ended on capacity no longer listens to its signal.
-    const later = new AbortController();
-    const removeListener = vi.spyOn(later.signal, 'removeEventListener');
-    const woken = waiter.waitForSharedCapacity(60_000, later.signal);
-    inFlight.release();
-    await expect(woken).resolves.toBe(true);
-    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
-    waiter.release();
+    // Handing a prefix back while another fetch is in flight frees room too.
+    const retained = budget.lease();
+    retained.replace(1, 100);
+    const stillFetching = budget.lease().reserve();
+    expect(stillFetching).toEqual(expect.objectContaining({ maxRows: 1, exhaustion: null }));
+    const afterHandBack = waiter.reserveWholeAllowance(60_000);
+    retained.replace(0, 0);
+    stillFetching.release();
+    (await afterHandBack)!.release();
+    for (const lease of [waiter, atCeiling, retained]) lease.release();
   });
 
-  it('does not let waiting leases wake each other while the fetch is still in flight', async () => {
-    // Rows and bytes are pooled separately. A lease that retries while the
-    // rows are taken can still be handed bytes, and gives them straight back.
+  it('holds nothing for a waiting lease, so waiting leases cannot keep each other waiting', async () => {
+    // Rows and bytes are pooled separately: with the rows taken a plain
+    // reservation would still be handed bytes. A lease that waits takes
+    // neither, and ends its wait with the last fetch in flight.
     const budget = createSelectedSwmMetaRetentionBudget({
       maxRows: 2,
       maxBytesEstimate: 400,
       maxPrefixRows: 2,
       maxPrefixBytesEstimate: 200,
     });
-    const inFlight = budget.lease().reserve();
+    const holder = budget.lease();
+    const inFlight = holder.reserve();
     const first = budget.lease();
     const second = budget.lease();
+    const outcomes: unknown[] = [];
+    const waits = [first, second].map((lease) => lease.reserveWholeAllowance(60_000)
+      .then((reservation) => outcomes.push(reservation)));
+    await turn();
+    expect(outcomes).toEqual([]);
+    // The bytes a third lease could still be handed are all there.
+    const third = budget.lease().reserve();
+    expect(third).toEqual(expect.objectContaining({ maxRows: 0, maxBytesEstimate: 200 }));
+    third.release();
+    await turn();
+    expect(outcomes).toEqual([]);
 
-    let wakes = 0;
-    const firstWait = first.waitForSharedCapacity(60_000).then(() => { wakes += 1; });
-    const retry = second.reserve();
-    expect(retry).toEqual(expect.objectContaining({
-      maxRows: 0,
-      maxBytesEstimate: 200,
-      exhaustion: 'shared',
-    }));
-    retry.release();
-    const secondWait = second.waitForSharedCapacity(60_000).then(() => { wakes += 1; });
-    await new Promise((resolve) => setImmediate(resolve));
-    // Nothing a fetch could use was freed, so nobody was woken: two waiters
-    // that woke each other would never let the fetch in flight finish.
-    expect(wakes).toBe(0);
-
-    inFlight.release();
-    await Promise.all([firstWait, secondWait]);
-    expect(wakes).toBe(2);
-    first.release();
-    second.release();
+    // The fetch keeps its two rows. No allowance is free and nothing is in
+    // flight: both waits end, in one decision, without a grant.
+    inFlight.commitReplace(2, 200);
+    await Promise.all(waits);
+    expect(outcomes).toEqual([null, null]);
+    for (const lease of [holder, first, second]) lease.release();
   });
 });
