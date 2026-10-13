@@ -16,22 +16,22 @@ function fixture() {
     started: true, vmReconcileRotationClosed: false, vmReconcileLifecycleGeneration: 1,
     vmReconcileLifecycleController: new AbortController(), vmReconcilePhysicalRuns: new Set(),
     subscribedContextGraphs: new Map(),
+    getSubscribedContextGraphs: () => a.subscribedContextGraphs,
     contextGraphBindingState: { capture: () => generation, isGenerationCurrent: (_: string, g: number) => g === generation },
     chain: { chainId: 'evm:31337', deploymentId: 'test', readPublicGraphSnapshot: vi.fn(async () => snapshot()) },
     store: { insert: vi.fn(async () => {}) },
     router: { send: vi.fn(async () => Buffer.from(JSON.stringify(snapshot()))) },
     syncExactKnowledgeAssetsFromPeerDetailed: vi.fn(),
     persistContextGraphSubscriptionState: vi.fn(async () => {}),
-    subscribeToContextGraph: vi.fn(() => { generation++; a.subscribedContextGraphs.set(graph, { subscribed: true, onChainId: '1' }); }),
-    recordCgWireId: vi.fn((_id: string, hash: string) => {
-      a.subscribedContextGraphs.set(graph, { ...a.subscribedContextGraphs.get(graph), onChainHash: hash });
-    }),
+    subscribeToContextGraph: vi.fn((_id: string, binding: object) => { generation++; a.subscribedContextGraphs.set(graph, { subscribed: true, ...binding }); }),
+    bindSubscriptionOnChainId: (_id: string, row: any, id: string) => { row.onChainId = id; },
+    setContextGraphSubscription: vi.fn((id: string, row: object) => { a.subscribedContextGraphs.set(id, row); return row; }),
   };
   return { a, invalidate: () => { generation++; a.subscribedContextGraphs.delete(graph); } };
 }
 const run = (a: any, mode: 'core-cache' | 'rpc-only') => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode});
 describe('public snapshot job ownership', () => {
-  it.each(['always-on', 'on-demand', 'core-hosted'] as const)('saves the complete binding according to %s intent after an empty job', async intent => {
+  it.each(['always-on', 'on-demand', 'core-hosted', 'inactive-core-hosted'] as const)('saves the complete binding according to %s intent after an empty job', async intent => {
     const saved = new Map<string, ContextGraphSubscriptionRecord>();
     const persistence = {
       loadAll: async () => [...saved.values()],
@@ -47,14 +47,19 @@ describe('public snapshot job ownership', () => {
     const agent = await create();
     try {
       await agent.start();
-      agent.setContextGraphSubscription(graph, { subscribed:true, synced:false,
-        syncMode:intent === 'always-on' ? 'always-on' : 'on-demand', coreHosted:intent === 'core-hosted' }, {persist:false});
+      agent.setContextGraphSubscription(graph, { subscribed:intent !== 'inactive-core-hosted', synced:false,
+        syncMode:intent === 'always-on' ? 'always-on' : 'on-demand', coreHosted:intent.endsWith('core-hosted') }, {persist:false});
+      const transition = vi.spyOn(agent, 'setContextGraphSubscription');
+      const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
       await expect(run(agent,'rpc-only')).resolves.toMatchObject({assets:0,current:true});
+      expect(transition.mock.calls.filter(([id]) => id === graph)).toHaveLength(1);
+      if (intent !== 'inactive-core-hosted') expect(subscribe).not.toHaveBeenCalled();
+      expect((agent as any).subscribedContextGraphs.get(graph)).toMatchObject({onChainId:'1',onChainHash:ethers.id(graph)});
       // An enqueued barrier drains the real persistence lane, including its freshness guard.
       await (agent as any).enqueueContextGraphSubscriptionPersistWrite(graph, async () => {});
       if(intent === 'on-demand') expect(saved.has(graph)).toBe(false);
       else expect(saved.get(graph)).toMatchObject({id:graph,onChainId:'1',onChainHash:ethers.id(graph),
-        ...(intent === 'core-hosted' ? {coreHosted:true} : {subscribed:true})});
+        ...(intent.endsWith('core-hosted') ? {coreHosted:true} : {subscribed:true})});
     } finally { await agent.stop(); }
     const restarted = await create();
     try {
@@ -63,7 +68,7 @@ describe('public snapshot job ownership', () => {
       if(intent === 'on-demand') expect(restored).toBeUndefined();
       // Startup retains the binding; fresh authority separately controls activation.
       else expect(restored).toMatchObject({onChainId:'1',onChainHash:ethers.id(graph),syncMode:'always-on'});
-      if(intent === 'core-hosted') expect(saved.get(graph)?.coreHosted).toBe(true);
+      if(intent.endsWith('core-hosted')) expect(saved.get(graph)?.coreHosted).toBe(true);
     } finally { await restarted.stop(); }
   });
 
@@ -71,7 +76,7 @@ describe('public snapshot job ownership', () => {
     const { a } = fixture();
     a.subscribedContextGraphs.set(graph, { subscribed: true, onChainId: '1', onChainHash: ethers.id('different-graph') });
     await expect(run(a, 'rpc-only')).rejects.toThrow('Graph name binding differs');
-    expect(a.recordCgWireId).not.toHaveBeenCalled();
+    expect(a.setContextGraphSubscription).not.toHaveBeenCalled();
     expect(a.syncExactKnowledgeAssetsFromPeerDetailed).not.toHaveBeenCalled();
   });
   it.each(['core-cache', 'rpc-only'] as const)('rejects deselected graphs before any %s read', async mode => {
