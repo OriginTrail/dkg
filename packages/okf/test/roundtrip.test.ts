@@ -564,3 +564,18 @@ describe('a last-modified time and a legacy timestamp both survive a round trip'
     expect(semantic(second.quads)).toBe(semantic(first.quads));
   });
 });
+
+describe('an Attested Computation typed by its full IRI is one before and after a round trip', () => {
+  it('counts the attestation and reports the missing runtime both times', () => {
+    const files = [IDX_V02(), { path: 'c.md', content: '---\ntype: http://schema.org/AttestedComputation\ntitle: C\n---\n\nbody\n' }];
+    const first = importBundle(files);
+    const second = importBundle(exportBundle(first));
+    const runtime = /`runtime` is required for an `Attested Computation`/;
+    for (const r of [first, second]) {
+      expect(r.concepts.map((c) => c.trust.attestedComputation)).toEqual([true]);
+      expect(r.warnings.some((w) => runtime.test(w.message))).toBe(true);
+    }
+    expect(validateBundle(files).warnings.some((w) => runtime.test(w))).toBe(true);
+    expect(semantic(second.quads)).toBe(semantic(first.quads));
+  });
+});

@@ -56,19 +56,23 @@ export function typeToIri(value: unknown): string | null {
 }
 
 /**
- * True when a `type` value names the spec's Attested Computation concept (§10).
- * Tolerant of the PascalCased spelling the rdf:type IRI carries (and that an
- * export of a pre-fix graph may have written back), so detection survives a
- * round trip.
+ * True when a `type` value names the spec's Attested Computation concept
+ * (§10): the spec spelling, its PascalCased form, or the full
+ * `http://schema.org/AttestedComputation` IRI, which all map to the same
+ * rdf:type, so detection agrees with the mapper and survives a round trip.
  */
 export function isAttestedComputationType(value: unknown): boolean {
   return isConceptType(value, OKF_ATTESTED_COMPUTATION_TYPE);
 }
 
-/** True when a `type` value names `typeName`, in its spec spelling or the PascalCased form its rdf:type IRI carries. */
+/**
+ * True when a `type` value names `typeName`: both map to the same rdf:type
+ * IRI (`typeToIri`), whichever supported spelling the value uses.
+ */
 export function isConceptType(value: unknown, typeName: string): boolean {
   if (value === undefined || value === null) return false;
-  return pascalCase(safeString(value)) === pascalCase(typeName);
+  const iri = typeToIri(value);
+  return iri !== null && iri === typeToIri(typeName);
 }
 
 /**

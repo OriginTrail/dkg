@@ -177,9 +177,14 @@ describe('lifecycle (§5.4, §5.5)', () => {
 });
 
 describe('isAttestedComputationType (§10)', () => {
-  it('matches the spec spelling and its PascalCased rdf:type form', () => {
+  it('matches every spelling that maps to its rdf:type: the spec spelling, its PascalCased form and the full IRI', () => {
     expect(isAttestedComputationType('Attested Computation')).toBe(true);
     expect(isAttestedComputationType('AttestedComputation')).toBe(true);
+    // the full IRI the mapper keeps as written, and the exporter writes back as the spec spelling
+    expect(isAttestedComputationType('http://schema.org/AttestedComputation')).toBe(true);
+    // a different IRI is a different type
+    expect(isAttestedComputationType('https://schema.org/AttestedComputation')).toBe(false);
+    expect(isAttestedComputationType('http://example.org/AttestedComputation')).toBe(false);
     expect(isAttestedComputationType('Metric')).toBe(false);
     expect(isAttestedComputationType(undefined)).toBe(false);
   });

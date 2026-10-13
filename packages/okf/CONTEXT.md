@@ -214,7 +214,10 @@ it; the CLI summary reports it against the current time.
   (`BigQueryDataset` exports as written). The one spec-defined type whose exact
   spelling carries meaning, `Attested Computation` (§10.5 discovery is by that
   string), is special-cased on export, and detection (`isAttestedComputationType`)
-  accepts both spellings.
+  accepts every spelling that maps to its rdf:type, the full
+  `http://schema.org/AttestedComputation` IRI included, so the summary and the
+  required-`runtime` diagnostic agree with the mapper before and after a round
+  trip.
 - **Root-relative vs. file-relative paths (upstream issue #29).** SPEC §6.2 says a
   path without a leading `/` is file-relative, but Google's own `acme_retail`
   bundle writes `policies/x.md` from `metrics/y.md` meaning bundle-root-relative.
