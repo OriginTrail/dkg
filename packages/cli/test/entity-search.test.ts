@@ -4,7 +4,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import Database from 'better-sqlite3';
+import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
+import { OxigraphStore, SparqlHttpStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import { EntityGraphReader, indexKey, parseSpec } from '../src/entity-search/documents.js';
 import { EntityIndexStore } from '../src/entity-search/store.js';
@@ -19,10 +21,13 @@ const spec = { contextGraphId: 'catalog', view: 'verifiable-memory' as const,
 const partition = 'did:dkg:context-graph:catalog/_verifiable_memory/a';
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-async function fixture(count = 3, capacity = 100_000) {
+async function fixture(count = 3, capacity = 100_000, http = false) {
   const dir = mkdtempSync(join(tmpdir(), 'entity-search-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-  const graph = new OxigraphStore(); cleanup.push(() => graph.close());
+  const endpoint = http ? await startOxigraphSparqlEndpoint() : undefined;
+  if (endpoint) cleanup.push(() => endpoint.close());
+  const graph = endpoint ? new SparqlHttpStore({ queryEndpoint: endpoint.queryEndpoint, updateEndpoint: endpoint.updateEndpoint }) : new OxigraphStore();
+  cleanup.push(() => graph.close());
   const engine = new DKGQueryEngine(graph);
   let permitted = true;
   let allowedCaller: string | undefined;
@@ -43,7 +48,7 @@ async function fixture(count = 3, capacity = 100_000) {
   const index = (restart = false) => service.index(spec, reader, restart, AbortSignal.timeout(5000), performance.now() + 5000);
   const search = (query = 'ocean') => service.search(indexKey(parseSpec(spec), embedder.fingerprint), spec.contextGraphId, query, 2,
     reader, AbortSignal.timeout(5000), performance.now() + 5000);
-  return { dir, graph, agent, embedder, store, service, reader, index, search, deny: () => { permitted = false; }, restrictTo: (caller: string) => { allowedCaller = caller; } };
+  return { dir, graph, endpoint, agent, embedder, store, service, reader, index, search, deny: () => { permitted = false; }, restrictTo: (caller: string) => { allowedCaller = caller; } };
 }
 
 describe('entity discovery using current scoped graph content', () => {
@@ -292,4 +297,65 @@ it('reports a pinned resident provider model ready and bounds streamed and decla
     fetch.mockResolvedValueOnce(new Response('x'.repeat(1024 * 1024 + 1), { headers }));
     await expect(provider.ready(AbortSignal.timeout(1000))).rejects.toMatchObject({ code: 'ENTITY_EMBEDDING_INVALID' });
   }
+});
+
+
+it('skips a 300 KiB stale HTTP document and preserves document-size errors during indexing', async () => {
+  const f = await fixture(3, 100_000, true); await f.index();
+  // Model data supplied by an external writer; DKG's own insert guard already
+  // refuses literals this large. Reads must still handle existing HTTP data.
+  f.endpoint!.store.update(`INSERT DATA { GRAPH <${partition}> {
+    <urn:entity:0> <urn:description> ${JSON.stringify('x'.repeat(300 * 1024))} } }`);
+  const result = await f.search();
+  expect(result.staleCandidates).toBe(1);
+  expect(result.entities.map(e => e.entityUri)).toEqual(['urn:entity:1', 'urn:entity:2']);
+  await expect(f.index(true)).rejects.toMatchObject({ code: 'ENTITY_DOCUMENT_TOO_LARGE', status: 422 });
+  f.deny(); await expect(f.search()).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
+});
+
+it('sends distinct query/document prefixes without silent truncation', async () => {
+  const config = { provider: 'ollama' as const, model: 'test', digest: 'a'.repeat(64), dimensions: 2,
+    queryPrefix: 'query: ', documentPrefix: 'document: ' };
+  const provider = new LocalEntityEmbedder(config);
+  const fetch = vi.fn(async (url: string, _init?: RequestInit) => url.endsWith('/api/tags')
+    ? Response.json({ models: [{ name: 'test:latest', digest: config.digest }] })
+    : Response.json({ embeddings: [[1, 1]] }));
+  vi.stubGlobal('fetch', fetch);
+  await provider.embed('ocean', 'query', AbortSignal.timeout(1000));
+  await provider.embed('ocean', 'document', AbortSignal.timeout(1000));
+  const posted = fetch.mock.calls.filter(([url]) => url.endsWith('/api/embed'));
+  expect(posted).toHaveLength(2);
+  expect(posted.map(([, init]) => JSON.parse(init!.body as string))).toEqual([
+    { model: 'test:latest', input: 'query: ocean', truncate: false, keep_alive: '5m' },
+    { model: 'test:latest', input: 'document: ocean', truncate: false, keep_alive: '5m' },
+  ]);
+});
+
+it('ranks by cosine rather than vector magnitude through SQLite', async () => {
+  const f = await fixture(2);
+  f.embedder.embed.mockImplementation(async text => text.includes('ocean') ? [1, 1] : [100, 0]);
+  await f.index();
+  const result = await f.search('ocean');
+  expect(result.entities.map(e => e.entityUri)).toEqual(['urn:entity:0', 'urn:entity:1']);
+  expect(result.entities[0].score).toBeCloseTo(1, 10);
+  expect(result.entities[1].score).toBeCloseTo(Math.SQRT1_2, 10);
+});
+
+it('migrates legacy counters while preserving completed and interrupted scan data', async () => {
+  const f = await fixture(10); await f.index(); await f.index(); await f.index(true);
+  const id = indexKey(parseSpec(spec), f.embedder.fingerprint);
+  const db = new Database(join(f.dir, 'entity-index.db'));
+  try {
+    for (const table of ['entity_documents', 'entity_scan_documents']) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN generation INTEGER NOT NULL DEFAULT 7`);
+    }
+    const state = { ...f.store.state(id), generation: 7 };
+    db.prepare('UPDATE entity_indexes SET state = ? WHERE id = ?').run(JSON.stringify(state), id);
+  } finally { db.close(); }
+  const migrated = new EntityIndexStore(f.dir); cleanup.push(() => migrated.close());
+  expect(migrated.state(id)).not.toHaveProperty('generation');
+  expect(migrated.count(id)).toBe(10);
+  const service = new EntitySearchService(migrated, f.embedder);
+  expect(await service.index(spec, f.reader, false, AbortSignal.timeout(5000), performance.now() + 5000))
+    .toMatchObject({ scanComplete: true, indexedEntities: 10 });
 });
