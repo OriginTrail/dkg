@@ -28,7 +28,7 @@ describe(`scoped catalog on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, () => {
         { graph: childMeta, subject: child, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://dkg.network/ontology#ContextGraph' },
         { graph: statusMeta, subject: statusChild, predicate: 'https://dkg.network/ontology#registrationStatus', object: '"registered"' },
         ...Object.entries({ kaUal: 'urn:recovered:asset', contentScopeVersion: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
-          contextGraph: root, status: '"confirmed"', chainSnapshotDigest: '"fixture-proof"', assertionGraph: recovered, subGraphName: '"recovered"',
+          contextGraph: root, status: '"confirmed"', chainSnapshotDigest: '"fixture-proof"', assertionGraph: recovered, subGraphName: '"recovered"', authenticatedSubGraphName: '"recovered"',
         }).map(([predicate, object]) => ({ graph: meta, subject: 'urn:recovered:asset', predicate: `http://dkg.io/ontology/${predicate}`, object })),
       ]);
       await store.update(`CREATE SILENT GRAPH <${empty}>`);
