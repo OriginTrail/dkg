@@ -152,6 +152,7 @@ export class PublicSnapshotMethods {
               if (!subscription?.subscribed || !subscription.onChainId) {
                 this.subscribeToContextGraph(contextGraphId, {
                   onChainId,
+                  persist: false,
                   syncMode: "on-demand",
                   trackSyncScope: false,
                   deferSharedMemoryGossipSubscribe: true,
@@ -161,6 +162,8 @@ export class PublicSnapshotMethods {
               // job's subscription fence. Historical discovery of this same
               // binding must not need to replace the row during materialization.
               if (!subscription?.onChainHash) this.recordCgWireId(contextGraphId, snapshot.nameHash);
+              // Persist the final row once; the canonical projection keeps on-demand intent local.
+              void this.persistContextGraphSubscriptionState(contextGraphId);
             });
           }
           assertCurrent();
