@@ -1,6 +1,6 @@
 import { withAdmittedReadCancellation } from '../admitted-read-cancellation.js';
 import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
-import { validateAtomicAssetGroup, buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { performance } from 'node:perf_hooks';
 import { QueryReadAdmission } from '../query-read-admission.js';
 import type {
@@ -475,7 +475,6 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
-    validateAtomicAssetGroup(assets);
     statements.checkIris.replaceAssetGroup(assets);
     let published = false;
     try {

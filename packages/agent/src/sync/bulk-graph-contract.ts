@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash } from 'node:crypto';
-import { BULK_GRAPH_MAX_ASSETS, BULK_GRAPH_CHUNK_BYTES, validateContextGraphId } from '@origintrail-official/dkg-core';
+import { BULK_GRAPH_MAX_ASSETS, BULK_GRAPH_CHUNK_BYTES, parseDeterministicKnowledgeAssetUal, validateContextGraphId } from '@origintrail-official/dkg-core';
 import { ATOMIC_ASSET_GROUP_MAX_ASSETS } from '@origintrail-official/dkg-storage';
 import { EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES } from './wire-compression.js';
-import { requireExactAssetUals } from './exact-assets.js';
 export const BULK_STAGING_BYTES = 16 * 1024 * 1024;
 export const BULK_STAGING_ASSETS = 32;
 export const BULK_GROUP_ASSETS = ATOMIC_ASSET_GROUP_MAX_ASSETS;
@@ -17,7 +16,10 @@ export function validateBulkGraphRequest(value: unknown): BulkGraphRequest {
     || typeof v.snapshotDigest !== 'string' || !/^(0x)?[a-f0-9]{64}$/i.test(v.snapshotDigest)
     || !Array.isArray(v.assetUals) || !v.assetUals.length || v.assetUals.length > BULK_GRAPH_MAX_ASSETS)
     throw new Error('Invalid bulk graph request');
-  const assetUals = v.assetUals.map(ual => requireExactAssetUals([ual])[0]!);
+  const assetUals = v.assetUals.map(ual => {
+    if (typeof ual !== 'string') throw new Error('Invalid bulk asset identity');
+    return parseDeterministicKnowledgeAssetUal(ual).ual;
+  });
   if (new Set(assetUals).size !== assetUals.length || assetUals.some((a,i) => a !== v.assetUals[i])) throw new Error('Noncanonical bulk graph selection');
   return { version: 1, contextGraphId: v.contextGraphId, snapshotDigest: v.snapshotDigest, assetUals };
 }
