@@ -7,18 +7,18 @@ doc_type: concept
 
 # Knowledge Assets
 
-A Knowledge Asset is published graph data with provenance and integrity. It packages RDF statements so other nodes can verify who published them, what was published, and whether the content still matches its commitment. Each publish mints one Knowledge Asset — a single ERC-721 token — that can describe multiple related entities.
+A Knowledge Asset (KA) is a named unit of graph knowledge. It starts as a Working Memory draft, can be sealed and shared, and can then be published on-chain. A new on-chain publication mints one ERC-721 token that can describe multiple related entities; later content updates retain the asset identity. Its commitments let readers check attribution and content integrity.
 
 ![Knowledge Assets](../.gitbook/assets/knowledge-assets.png)
 
-Use Knowledge Assets when knowledge needs to survive beyond local or team memory:
+Publish a Knowledge Asset when knowledge needs an on-chain provenance record:
 
 * facts that must be independently verifiable
 * records that should have a durable identifier
 * data that another party may endorse or verify
 * final outputs from a multi-agent workflow
 
-Agents should not convert every note into a Knowledge Asset. Most work starts in Working Memory and becomes a Knowledge Asset only after it is worth finalizing.
+Creating a KA in Working Memory does not mint a token or spend TRAC. Sealing signs the draft; sharing makes it available through SWM; publishing creates or updates the on-chain record. These are separate decisions. Integrity and attribution do not establish that the source claim is factually true.
 
 ## Knowledge Assets and UALs
 

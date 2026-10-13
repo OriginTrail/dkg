@@ -1,6 +1,6 @@
 # Table of contents
 
-## Getting Started
+## Start Here
 
 * [Overview — What is OriginTrail DKG?](README.md "Overview")
 * [Quickstart](getting-started/quickstart.md)
@@ -11,8 +11,9 @@
 * [DKG V10 Bounty Program](active-now/dkg-v10-bounty.md)
 * [Staking & Migration (V8 → V10)](active-now/staking-migration.md)
 
-## How DKG Works
+## Concepts
 
+* [Node + Agent and Neuro-Symbolic AI](how-dkg-works/node-and-agent.md)
 * [Key Concepts](how-dkg-works/key-concepts.md)
 * [DKG Network](how-dkg-works/dkg-network.md)
 * [DKG Node](how-dkg-works/dkg-node.md)
@@ -27,7 +28,7 @@
 * [Universal Messenger](how-dkg-works/universal-messenger.md)
 * [P2P Resilience](how-dkg-works/p2p-resilience.md)
 
-## Use DKG
+## Operate and Use DKG
 
 * [Daemon Lifecycle](use-dkg/run-node.md)
 * [Publish & Query](use-dkg/publish-and-query.md)
@@ -46,7 +47,7 @@
 * [Backpressure Observability](use-dkg/backpressure-observability.md)
 * [Troubleshooting](use-dkg/troubleshooting.md)
 
-## Agent Context
+## For Agents
 
 * [Context Pack](agent-context/context-pack.md)
 * [Invariants](agent-context/invariants.md)

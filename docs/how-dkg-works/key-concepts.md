@@ -17,9 +17,11 @@ flowchart LR
   SWM --> VM["Verifiable Memory<br/>chain-anchored Knowledge Assets"]
 ```
 
+For the complete working environment, start with [Node + agent](node-and-agent.md).
+
 ## Core concepts
 
-<table><thead><tr><th width="220">Concept</th><th>Role</th></tr></thead><tbody><tr><td><strong>DKG network</strong></td><td>The peer-to-peer and on-chain system where agents exchange, verify, and finalize knowledge.</td></tr><tr><td><strong>DKG node</strong></td><td>Local daemon that owns storage, networking, auth, wallets, API routes, the Node UI, and agent integrations.</td></tr><tr><td><strong>Context Graph</strong></td><td>A scoped knowledge domain. The Node UI may call this a project.</td></tr><tr><td><strong>Memory layers</strong></td><td>Working Memory is private, Shared Working Memory is peer-visible, Verifiable Memory is network-stored and chain-anchored.</td></tr><tr><td><strong>Knowledge Assets</strong></td><td>Published RDF statements with ownership, provenance, and cryptographic integrity.</td></tr><tr><td><strong>Agents</strong></td><td>OpenClaw, Hermes, MCP clients, and custom agents use the node as their shared context layer.</td></tr><tr><td><strong>Conviction</strong></td><td>TRAC commitment mechanisms that align publishers and stakers with long-term network use.</td></tr></tbody></table>
+<table><thead><tr><th width="220">Concept</th><th>Role</th></tr></thead><tbody><tr><td><strong>DKG network</strong></td><td>The peer-to-peer and on-chain system where agents exchange, verify, and finalize knowledge.</td></tr><tr><td><strong>DKG node</strong></td><td>Local daemon that owns storage, networking, auth, wallets, API routes, the Node UI, and agent integrations.</td></tr><tr><td><strong>Context Graph</strong></td><td>A scoped knowledge domain. The Node UI may call this a project.</td></tr><tr><td><strong>Memory layers</strong></td><td>Working Memory is private, Shared Working Memory is peer-visible, Verifiable Memory is network-stored and chain-anchored.</td></tr><tr><td><strong>Knowledge Assets</strong></td><td>Named graph knowledge created in WM, then optionally sealed, shared, and published on-chain.</td></tr><tr><td><strong>Agents</strong></td><td>OpenClaw, Hermes, MCP clients, and custom agents use the node as their shared context layer.</td></tr><tr><td><strong>Conviction</strong></td><td>TRAC commitment mechanisms that align publishers and stakers with long-term network use.</td></tr></tbody></table>
 
 ### Agent
 
@@ -51,7 +53,7 @@ An integration connects an outside workflow to a DKG node through a public inter
 
 ### Knowledge Asset
 
-A Knowledge Asset is published graph data with provenance and integrity commitments. It is the durable unit that survives beyond local memory and can be independently verified. Each publish mints one Knowledge Asset as a single ERC-721 token, which can describe multiple related entities.
+A Knowledge Asset starts as a named Working Memory draft. Sealing commits to its content; sharing exposes it through SWM; a first on-chain publication mints one ERC-721 token, which can describe multiple related entities. Published updates retain the asset identity. See [Knowledge Assets](knowledge-assets.md).
 
 ### UAL
 
