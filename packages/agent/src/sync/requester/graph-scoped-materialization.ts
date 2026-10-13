@@ -50,6 +50,8 @@ const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
 const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
 
 export interface VerifiedGraphScopedAsset {
+  /** Named VM scope validated at the durable verification boundary. */
+  subGraphName?: string;
   contextGraphId: string;
   ual: string;
   assertionVersion: bigint;
@@ -164,7 +166,7 @@ export async function authenticateVerifiedGraphScopedAsset(
       asset: {
         ...asset,
         metadataQuads: overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(asset.metadataQuads,
-          { ual: asset.ual, metaGraph: asset.metaGraph, receivedAt }, { status: 'tentative' }),
+          { ual: asset.ual, metaGraph: asset.metaGraph, receivedAt, subGraphName: asset.subGraphName }, { status: 'tentative' }),
       },
       onChainContextGraphId: null,
     };
@@ -331,7 +333,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     asset: {
       ...asset,
       metadataQuads: overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(asset.metadataQuads,
-        { ual: asset.ual, metaGraph: asset.metaGraph, receivedAt }, {
+        { ual: asset.ual, metaGraph: asset.metaGraph, receivedAt, subGraphName: asset.subGraphName }, {
           status: 'confirmed', materializedVersion: { blockNumber: materializedBlock, txIndex: materializedTxIndex },
           confirmation: claimed.kind === 'finalized-materialization'
             ? { kind: 'finalized-materialization' }
