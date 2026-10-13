@@ -164,6 +164,7 @@
     "test/e2e-sub-graph-gossip.test.ts": 21967,
     "test/e2e-sub-graphs.test.ts": 9147,
     "test/e2e-subscription-persist-lifecycle.test.ts": 9915,
+    "test/e2e-swm-relay-only.test.ts": 86000,
     "test/e2e-workspace.test.ts": 10208,
     "test/encrypt-inline-policy.test.ts": 443,
     "test/encryption-coercion.test.ts": 11,

@@ -72,6 +72,7 @@ import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { noteCatalogHeadReplayFollower, sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
 import { yieldMainThread } from './main-thread-time-slice.js';
 import {
   isApprovedPrivateReplicaDelegationActive,
@@ -4264,11 +4265,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         if (admission.newlyQueued) {
           void admission.completion
             .then((result) => {
+              // A peer that asks for a graph's catalog heads under the policy this node holds follows the graph.
+              noteCatalogHeadReplayFollower(sharedMemoryFollowersOf(this), this.rfc64PublicCatalogServiceV1?.acceptedPolicySnapshot(request.networkId, request.contextGraphId)?.policyDigest, request, remotePeerId);
               if (result.announced > 0) {
-                this.log.info(
-                  ctx,
-                  `Replayed ${result.announced} RFC-64 catalog head(s) to ${remotePeerId.slice(-8)}`,
-                );
+                this.log.info(ctx, `Replayed ${result.announced} RFC-64 catalog head(s) to ${remotePeerId.slice(-8)}`);
               }
             })
             .catch((error: unknown) => {

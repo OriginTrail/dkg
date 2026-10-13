@@ -262,6 +262,7 @@ import {
   type SwmAckQuorum,
 } from './swm/ack-quorum.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
+import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
   BEACON_REANNOUNCE_INTERVAL_MS,
@@ -3320,6 +3321,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peerId: this.peerId,
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
+      // The peer follows the graph: a share into it goes to this peer too (read at the share, no cache).
+      onSharedMemoryRequestAuthorized: (contextGraphId, remotePeerId) => {
+        sharedMemoryFollowersOf(this).note(contextGraphId, remotePeerId);
+      },
       onExperimentalExactBatchResources: resolveExactBatchStreamEnabled()
         && this.config.nodeRole === 'core'
         ? (resources) => {

@@ -99,6 +99,10 @@ export interface RealChainAgentOptions {
   readonly dataDir?: string;
   /** Left unset when omitted (the agent then keeps its subscriptions in memory only). */
   readonly contextGraphSubscriptionStore?: DKGAgentConfig['contextGraphSubscriptionStore'];
+  /** Left unset when omitted (the agent then reserves no relay circuit). */
+  readonly relayPeers?: DKGAgentConfig['relayPeers'];
+  /** Left unset when omitted (the agent then announces the addresses it listens on). */
+  readonly announceAddresses?: DKGAgentConfig['announceAddresses'];
 }
 
 /** What `startNode` returns: the started agent, its chain adapter and its default agent address. */
@@ -132,6 +136,8 @@ export class RealChainAgents {
       ...(options.contextGraphSubscriptionStore === undefined
         ? {}
         : { contextGraphSubscriptionStore: options.contextGraphSubscriptionStore }),
+      ...(options.relayPeers === undefined ? {} : { relayPeers: options.relayPeers }),
+      ...(options.announceAddresses === undefined ? {} : { announceAddresses: options.announceAddresses }),
       chainConfig: realChainConfig(options.operationalKey),
     });
     this.agents.push(agent);

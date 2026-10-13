@@ -360,6 +360,7 @@ export default defineConfig({
       "test/swm-sender-key-stale-target.test.ts",
       "test/swm-sender-key-peer-routes.test.ts",
       "test/swm-sender-key-overlapping-shares.test.ts",
+      "test/swm-shares-through-relay.test.ts",
       // #2827 — SWM authority and plaintext decisions for a joined member of a
       // public, unregistered context graph.
       "test/public-unregistered-member-swm.test.ts",
