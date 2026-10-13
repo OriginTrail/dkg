@@ -405,3 +405,22 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });
 });
+
+
+it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
+  'keeps %s retryable for strict reads of an absent graph', async reason => {
+    const fixture = runtimePrivateQueryAgent({ subscribed: false });
+    Object.assign(fixture.agent, {
+      resolveContextGraphReadAuthority: async () => ({ outcome: 'unavailable', source: 'registered-chain', reason }),
+      localContextGraphProvenance: { hasLocalCreate: () => false },
+      contextGraphExists: async () => false,
+    });
+    const query = () => QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'absent-graph' });
+    await expect(query()).resolves.toEqual({ bindings: [] });
+    await expect(QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'absent-graph', accessDenied: 'error' }))
+      .rejects.toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true, reason });
+    expect(fixture.queryEngine.query).not.toHaveBeenCalled();
+  },
+);

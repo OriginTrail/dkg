@@ -1,6 +1,6 @@
 import { EntityGraphReader, documentKey, indexKey, parseSpec, PAGE_SIZE } from './documents.js';
 import { EntityIndexStore, type IndexState } from './store.js';
-import { EntitySearchError, checkDeadline, unitVector, type EntityEmbedder, type EntityIndexSpec } from './types.js';
+import { EntitySearchError, checkDeadline, unitVector, type EntityEmbedder, type EntityIndexSpec, type EntityIndexStatus, type EntityReadinessResponse, type EntitySearchResponse, type EntityDocument } from './types.js';
 
 /** Lifecycle-owned service. Index pages are explicit operator work; reads never start a rebuild. */
 export class EntitySearchService {
@@ -8,7 +8,7 @@ export class EntitySearchService {
   private searches = 0;
   private preparing = false;
   constructor(readonly store: EntityIndexStore, readonly embedder: EntityEmbedder) {}
-  async index(rawSpec: unknown, reader: EntityGraphReader, restart: boolean, signal: AbortSignal, deadline: number) {
+  async index(rawSpec: unknown, reader: EntityGraphReader, restart: boolean, signal: AbortSignal, deadline: number): Promise<EntityIndexStatus> {
     const spec = parseSpec(rawSpec as EntityIndexSpec), id = indexKey(spec, this.embedder.fingerprint);
     if (this.preparing || this.busy.size) throw new EntitySearchError('ENTITY_INDEX_BUSY', 429);
     this.busy.add(id);
@@ -19,7 +19,7 @@ export class EntitySearchService {
       if (!state || restart) {
         state = { id, spec, fingerprint: this.embedder.fingerprint, generation: (state?.generation ?? 0) + 1,
           cursor: null, scanComplete: false, completedAt: null };
-        this.store.save(state);
+        this.store.begin(state);
       }
       if (state.scanComplete) return this.status(state);
       const page = await reader.page(spec, state.cursor, signal, deadline);
@@ -41,14 +41,14 @@ export class EntitySearchService {
       return this.status(state);
     } finally { this.busy.delete(id); }
   }
-  private status(state: IndexState) {
+  private status(state: IndexState): EntityIndexStatus {
     return { indexId: state.id, contextGraphId: state.spec.contextGraphId, view: state.spec.view,
       modelFingerprint: state.fingerprint, indexedEntities: this.store.count(state.id), scanComplete: state.scanComplete,
       completedAt: state.completedAt, coverage: 'local-indexed-subset' as const, graphComplete: null };
   }
   /** A fresh residency check, with explicit bounded warm-up outside a query's budget. */
   async readiness(id: string, contextGraphId: string, warmup: boolean, reader: EntityGraphReader,
-    signal: AbortSignal, deadline: number) {
+    signal: AbortSignal, deadline: number): Promise<EntityReadinessResponse> {
     if (!/^[a-f0-9]{64}$/.test(id)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
     if (this.preparing || (warmup && (this.searches > 0 || this.busy.size > 0))) throw new EntitySearchError('ENTITY_SEARCH_BUSY', 429);
     if (warmup) this.preparing = true;
@@ -64,7 +64,7 @@ export class EntitySearchService {
     } finally { if (warmup) this.preparing = false; }
   }
   async search(id: string, contextGraphId: string, query: string, limit: number, reader: EntityGraphReader,
-    signal: AbortSignal, deadline: number) {
+    signal: AbortSignal, deadline: number): Promise<EntitySearchResponse> {
     if (!/^[a-f0-9]{64}$/.test(id) || typeof query !== 'string' || !query.trim() || query.length > 6000
       || !Number.isInteger(limit) || limit < 1 || limit > 20) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
     if (this.preparing || this.searches >= 2) throw new EntitySearchError('ENTITY_SEARCH_BUSY', 429);
@@ -79,7 +79,12 @@ export class EntitySearchService {
       const entities = [];
       let staleCandidates = 0;
       for (const candidate of candidates) {
-        const current = await reader.document(state.spec, candidate.document, signal, deadline);
+        let current: EntityDocument | null;
+        try { current = await reader.document(state.spec, candidate.document, signal, deadline); }
+        catch (error) {
+          if (!(error instanceof EntitySearchError) || error.code !== 'ENTITY_DOCUMENT_TOO_LARGE') throw error;
+          staleCandidates++; continue;
+        }
         if (!current || current.contentHash !== candidate.document.contentHash) { staleCandidates++; continue; }
         entities.push({ ...current, score: candidate.score });
         if (entities.length === limit) break;
