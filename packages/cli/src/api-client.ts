@@ -15,10 +15,7 @@ import type {
   PersistedLiftJob,
   PublicationPricingPolicy,
 } from '@origintrail-official/dkg-publisher';
-import {
-  isSafeJobId,
-  SAFE_JOB_ID_ERROR,
-} from '@origintrail-official/dkg-publisher';
+import { isSafeJobId, SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
 import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import type { ContextGraphJoinResult } from './context-graph-join-result.js';
