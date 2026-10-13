@@ -507,6 +507,16 @@ async function fetchAuthoritativeMetaSnapshot(
   if (!admitted) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
+    if (options.requirePublicDefinition === true && controlMetaQuads.length === 0) {
+      // The public bootstrap asks connected peers in turn, and every peer that
+      // does not hold the graph answers with a complete, empty page. That is a
+      // miss, not a snapshot that was refused.
+      agent.log.info(
+        ctx,
+        `Peer ${curatorPeerId.slice(-8)} holds no definition of "${contextGraphId}"`,
+      );
+      return undefined;
+    }
     agent.log.warn(
       ctx,
       `Rejected curator metadata snapshot for "${contextGraphId}": missing an unambiguous public definition or the complete private definition and approved-member delegation proof`,

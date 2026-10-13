@@ -651,4 +651,111 @@ describe('Rfc64SeedFetchMethods replica fetch outcomes', () => {
     expect(hit.log.info).toHaveBeenCalledOnce();
     expect(String(hit.log.info.mock.calls[0]?.[1])).toContain('peer-a');
   });
+
+  it('leads every later window for a scope with the peer that served its seed', async () => {
+    // A node with eight cores and four edges connected. The author is an edge
+    // and the only holder of the seed and of the graph's definition. The seed
+    // fetch reaches it in the first window; the metadata bootstrap selects
+    // next, runs once, and the rotation alone would hand it the two other
+    // edges.
+    const CAP = RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1;
+    const cores = Array.from({ length: CAP }, (_, index) => `peer-core-${index}`);
+    const edges = ['peer-edge-a', 'peer-edge-author', 'peer-edge-c', 'peer-edge-d'];
+    let connected = [...cores, ...edges];
+    const libp2p = {
+      peerId: { toString: () => 'peer-self' },
+      getPeers: () => connected.map((peerId) => ({ toString: () => peerId })),
+    };
+    const scope = { contextGraphId: CONTEXT_GRAPH_ID };
+
+    const rotationOnly = createFetchAgent({ libp2p, corePeerIds: cores });
+    expect(rotationOnly.agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope))
+      .toContain('peer-edge-author');
+    expect(rotationOnly.agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope))
+      .not.toContain('peer-edge-author');
+
+    const seed = await mintSeed();
+    const { agent } = createFetchAgent({
+      service: service({
+        remotePeerId: 'peer-edge-author',
+        seed: { canonicalBytes: seed.canonicalEnvelopeBytes, policyDigest: seed.policyDigest },
+      }),
+      libp2p,
+      corePeerIds: cores,
+      rejectedPeerIds: ['peer-edge-d'],
+    });
+    await expect(agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('fetched');
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const window = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope);
+      expect(window[0]).toBe('peer-edge-author');
+      expect(window).toHaveLength(CAP);
+      expect(new Set(window).size).toBe(CAP);
+      expect(window).not.toContain('peer-edge-d');
+    }
+    // The hint belongs to the scope that was fetched.
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()[0]).toBe('peer-core-0');
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({
+      contextGraphId: `${OWNER}/other-scope`,
+    })[0]).toBe('peer-core-0');
+    // A source that is no longer connected is not asked, and not dialed.
+    connected = connected.filter((peerId) => peerId !== 'peer-edge-author');
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope))
+      .not.toContain('peer-edge-author');
+  });
+
+  it('gives a configured complete provider precedence over the seed source and never lists it twice', async () => {
+    const seed = await mintSeed();
+    const libp2p = {
+      peerId: { toString: () => 'peer-self' },
+      getPeers: () => ['peer-core-a', 'peer-edge-a', 'peer-provider'].map((peerId) => ({ toString: () => peerId })),
+    };
+    const fetchedFrom = (remotePeerId: string) => createFetchAgent({
+      service: service({
+        remotePeerId,
+        seed: { canonicalBytes: seed.canonicalEnvelopeBytes, policyDigest: seed.policyDigest },
+      }),
+      libp2p,
+      corePeerIds: ['peer-core-a'],
+      completeProviders: { [CONTEXT_GRAPH_ID]: ['peer-provider'] },
+    });
+
+    const fromEdge = fetchedFrom('peer-edge-a');
+    await fromEdge.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID);
+    expect(fromEdge.agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID }))
+      .toEqual(['peer-provider', 'peer-edge-a', 'peer-core-a']);
+
+    const fromProvider = fetchedFrom('peer-provider');
+    await fromProvider.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID);
+    expect(fromProvider.agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID }))
+      .toEqual(['peer-provider', 'peer-core-a', 'peer-edge-a']);
+  });
+
+  it('bounds the remembered seed sources and forgets the oldest scope first', async () => {
+    const seed = await mintSeed();
+    const { agent } = createFetchAgent({
+      service: service({
+        remotePeerId: 'peer-edge-author',
+        seed: { canonicalBytes: seed.canonicalEnvelopeBytes, policyDigest: seed.policyDigest },
+      }),
+      libp2p: {
+        peerId: { toString: () => 'peer-self' },
+        getPeers: () => ['peer-core-a', 'peer-edge-author'].map((peerId) => ({ toString: () => peerId })),
+      },
+      corePeerIds: ['peer-core-a'],
+    });
+    const graphs = Array.from({ length: 1_025 }, (_, index) => `${OWNER}/remembered-${index}`);
+    for (const contextGraphId of graphs) {
+      await expect(agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(contextGraphId))
+        .resolves.toBe('fetched');
+    }
+
+    // The newest scope still leads with its seed source; the oldest fell back
+    // to the plain order, cores first.
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: graphs.at(-1)! }))
+      .toEqual(['peer-edge-author', 'peer-core-a']);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: graphs[0]! }))
+      .toEqual(['peer-core-a', 'peer-edge-author']);
+  });
 });
