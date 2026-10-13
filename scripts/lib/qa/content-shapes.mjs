@@ -165,7 +165,10 @@ export const isWithin = (graph, sharedMemoryGraph) => graph === sharedMemoryGrap
 const printable = value => JSON.stringify(value).replace(/[^\x20-\x7e]/g, c => `${BS}u{${c.codePointAt(0).toString(16)}}`);
 
 // rows: [{ g, p, o }] for one subject. Every statement of the shape must be in
-// that shared memory with the value it was written with.
+// that shared memory with the value it was written with, and with no other
+// value: a node that answers the written text AND a corrupted copy of it holds
+// corrupted content. The same value in two lexical forms (two graphs of a
+// store that rewrites one of them) is one value.
 export function checkRows(key, rows, sharedMemoryGraph) {
   const statements = shape(key).statements;
   const shared = rows.filter(row => isWithin(bare(cellText(row.g)), sharedMemoryGraph));
@@ -174,8 +177,10 @@ export function checkRows(key, rows, sharedMemoryGraph) {
   for (const statement of statements) {
     const found = shared.filter(row => bare(cellText(row.p)) === statement.predicate);
     if (found.length === 0) { missing.push(statement.predicate.slice(P.length)); continue; }
-    if (!found.some(row => sameValue(statement, literalOf(row.o)))) {
-      different.push(`${statement.predicate.slice(P.length)}: wrote ${printable(statement.value)}, read ${found.map(row => printable(cellText(row.o))).join(' | ')}`);
+    const others = found.filter(row => !sameValue(statement, literalOf(row.o)));
+    if (others.length) {
+      const read = [...new Set(others.map(row => printable(cellText(row.o))))].join(' | ');
+      different.push(`${statement.predicate.slice(P.length)}: wrote ${printable(statement.value)}, read ${read}${others.length < found.length ? ' beside the written value' : ''}`);
     }
   }
   if (missing.length === statements.length) {

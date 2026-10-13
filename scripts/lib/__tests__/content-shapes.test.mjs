@@ -125,6 +125,32 @@ test('absent, partial and different are told apart', () => {
   assert.ok(isWithin(`${ROOT}/0xabc/1`, ROOT) && isWithin(ROOT, ROOT) && !isWithin(`${ROOT}_meta`, ROOT));
 });
 
+test('a written value beside another value is not the written value', () => {
+  const beside = (key, predicate, term, graph = ROOT) => [...rowsOf(key, ROOT), { g: `${graph}/0xabc/8`, p: predicate, o: term }];
+  // The reviewer's case: the text with its tabs AND a copy with the tabs flattened.
+  const flattened = checkRows('tabs', beside('tabs', 'urn:issue3198:row', '"name value unit"'), ROOT);
+  assert.equal(flattened.verdict, 'different');
+  assert.match(flattened.detail, /^row: wrote "name\\tvalue\\tunit", read .*name value unit.* beside the written value$/);
+  assert.equal(checkRows('control', beside('control', 'urn:issue3198:note', '"startend"'), ROOT).verdict, 'different');
+  assert.equal(checkRows('typed', beside('typed', 'urn:issue3198:amount', typedAs('101', 'double')), ROOT).verdict, 'different');
+  assert.equal(checkRows('typed', beside('typed', 'urn:issue3198:amount', typedAs('100', 'integer')), ROOT).verdict, 'different');
+  assert.equal(checkRows('plain', beside('plain', 'urn:issue3198:label', '"first plain asset "'), ROOT).verdict, 'different');
+  // Each wrong value is named once, however many graphs repeat it.
+  const repeated = checkRows('plain', [...beside('plain', 'urn:issue3198:label', '"x"'), { g: `${ROOT}/0xabc/9`, p: 'urn:issue3198:label', o: '"x"' }], ROOT);
+  assert.equal(repeated.detail.match(/"\\"x\\""/g).length, 1, repeated.detail);
+
+  // One value in two lexical forms is one value: a store that rewrites the literal in one of two graphs.
+  assert.equal(checkRows('typed', beside('typed', 'urn:issue3198:amount', typedAs('100.0', 'double')), ROOT).verdict, 'present');
+  assert.equal(checkRows('typed', beside('typed', 'urn:issue3198:observedAt', typedAs('2026-10-12T13:08:51.000Z', 'dateTime')), ROOT).verdict, 'present');
+  assert.equal(checkRows('tabs', [...rowsOf('tabs', ROOT), ...rowsOf('tabs', ROOT)], ROOT).verdict, 'present');
+  // A value outside the shared memory that was asked for is not this check's business.
+  assert.equal(checkRows('tabs', beside('tabs', 'urn:issue3198:row', '"name value unit"', SUB), ROOT).verdict, 'present');
+  assert.equal(checkRows('tabs', beside('tabs', 'urn:issue3198:row', '"name value unit"', 'did:dkg:context-graph:0xabc/graph/_working_memory'), ROOT).verdict, 'present');
+  // Something missing is still reported as missing first: the node may not be done.
+  const partial = checkRows('typed', beside('typed', 'urn:issue3198:amount', typedAs('7', 'double')).filter(row => row.p !== 'urn:issue3198:window'), ROOT);
+  assert.equal(partial.verdict, 'partial');
+});
+
 test('the command line answers with the exit codes the shell script reads', () => {
   const run = (args, input = '') => spawnSync(process.execPath, [cli, ...args], { input, encoding: 'utf8' });
   assert.deepEqual(run(['list']).stdout.trim().split('\n'), SHAPES.map(s => s.key));
