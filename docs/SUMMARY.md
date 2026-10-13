@@ -6,6 +6,15 @@
 * [Quickstart](getting-started/quickstart.md)
 * [Terms & Conditions](getting-started/dkg-v10-t-c.md)
 
+## Connect Agents and Systems
+
+* [Choose a Connection](integrations/README.md)
+* [Hermes](integrations/hermes.md)
+* [OpenClaw](integrations/openclaw.md)
+* [Prime Agent](integrations/prime-agent.md)
+* [MCP Clients](integrations/mcp.md)
+* [Run a Local LLM](use-dkg/local-llm.md)
+
 ## Active Now
 
 * [DKG V10 Bounty Program](active-now/dkg-v10-bounty.md)
@@ -49,6 +58,7 @@
 
 ## For Agents
 
+* [Local LLM Agent Runbook](use-dkg/local-llm-agent-runbook.md)
 * [Context Pack](agent-context/context-pack.md)
 * [Invariants](agent-context/invariants.md)
 * [Publish Lifecycle Language](agent-context/publish-lifecycle-language.md)

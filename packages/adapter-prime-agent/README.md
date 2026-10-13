@@ -3,10 +3,12 @@
 Collocates a **Prime Intellect Prime Agent** with a DKG V10 node, the way
 `adapter-hermes` collocates a Hermes agent.
 
-**Status: Stage 1 — transport.** The bridge, discovery, setup lifecycle and
-daemon plumbing are implemented and tested. Memory election hooks, the Python
-kernel skill and the Node UI panel are staged (see
-[`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md)).
+**Status: transport and Node UI chat available.** Setup, per-session bridge
+discovery, daemon routing, and the connected-agent panel are implemented.
+Automatic memory election and the model-facing Python skill remain staged.
+See the [user guide](../../docs/integrations/prime-agent.md) for prerequisites,
+setup, verification, and disconnect; see
+[`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) for stage detail.
 
 Design: [`docs/DESIGN.md`](docs/DESIGN.md) ·
 Transport decision: [ADR 0007](../../docs/adr/0007-prime-agent-adapter-transport.md) ·
