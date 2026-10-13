@@ -3,19 +3,25 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import { createSelectedSwmMetaFetcher } from '../src/sync/selected-swm-meta-fetcher.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 import { SyncPageAccumulationLimitError } from '../src/sync/requester/page-fetch.js';
+import { composeSyncWorkAdmission, createSyncWorkAdmission } from '../src/sync/work-admission.js';
 
 const testContext = {
   operationId: 'selected-meta-contention-test',
   operationName: 'sync',
 } as OperationContext;
 
-const request = (contextGraphId: string, remotePeerId: string) => ({
-  ctx: testContext,
-  remotePeerId,
-  contextGraphId,
-  graphUri: 'urn:meta',
-  deadline: Date.now() + 60_000,
-});
+const request = (contextGraphId: string, remotePeerId: string) => {
+  const deadline = Date.now() + 60_000;
+  return {
+    ctx: testContext,
+    remotePeerId,
+    contextGraphId,
+    graphUri: 'urn:meta',
+    deadline,
+    // As the requester composes it: the round deadline is the work allowance.
+    workAdmission: composeSyncWorkAdmission({ deadline }),
+  };
+};
 
 const row = (contextGraphId: string) => ({
   subject: `urn:${contextGraphId}`,
@@ -459,7 +465,7 @@ describe('selected SWM metadata retention contention', () => {
     await holder.outcome;
   });
 
-  it('stops waiting at the deadline of its own round', async () => {
+  it('stops waiting when the work allowance of its own round is spent', async () => {
     const budget = createSelectedSwmMetaRetentionBudget({
       maxRows: 2,
       maxBytesEstimate: 1024 * 1024,
@@ -469,24 +475,88 @@ describe('selected SWM metadata retention contention', () => {
     const holder = holderInFlight(budget, emptyPage);
     await holder.started;
 
-    const waiterFetch = vi.fn(async (req: { contextGraphId: string }) => emptyPage(req.contextGraphId));
-    const waiter = createSelectedSwmMetaFetcher({
-      remotePeerId: 'peer-waiter',
-      requesterScope: 'selected-swm-meta:retained:waiter',
+    const farDeadline = Date.now() + 60_000;
+    const allowances = [
+      // The round deadline itself is near.
+      composeSyncWorkAdmission({ deadline: Date.now() + 20 }),
+      // The deadline is far, but the job window around the round is not.
+      composeSyncWorkAdmission({
+        deadline: farDeadline,
+        window: createSyncWorkAdmission(() => 20),
+      }),
+    ];
+    for (const [index, workAdmission] of allowances.entries()) {
+      const waiterFetch = vi.fn(async (req: { contextGraphId: string }) => emptyPage(req.contextGraphId));
+      const waiter = createSelectedSwmMetaFetcher({
+        remotePeerId: `peer-waiter-${index}`,
+        requesterScope: `selected-swm-meta:retained:waiter-${index}`,
+        retentionBudget: budget,
+        deleteCheckpoint: vi.fn(),
+        fetchPage: waiterFetch,
+      });
+
+      const outcome = await waiter.strategy.fetch({
+        ...request(`cg-waiter-${index}`, `peer-waiter-${index}`),
+        deadline: farDeadline,
+        workAdmission,
+      });
+
+      expect(waiterFetch).not.toHaveBeenCalled();
+      expect(outcome.continuationYielded).toBe(true);
+      expect(outcome.result.timedOut).toBe(true);
+    }
+    holder.settle();
+    await holder.outcome;
+  });
+
+  it('ends a parked transfer at once when its recovery is revoked, without asking its peer', async () => {
+    const budget = createSelectedSwmMetaRetentionBudget({
+      maxRows: 2,
+      maxBytesEstimate: 1024 * 1024,
+      maxPrefixRows: 2,
+      maxPrefixBytesEstimate: 1024 * 1024,
+    });
+    const holder = holderInFlight(budget, emptyPage);
+    await holder.started;
+
+    const revokedFetch = vi.fn(async (req: { contextGraphId: string }) => emptyPage(req.contextGraphId));
+    const revoked = createSelectedSwmMetaFetcher({
+      remotePeerId: 'peer-revoked',
+      requesterScope: 'selected-swm-meta:retained:revoked',
       retentionBudget: budget,
       deleteCheckpoint: vi.fn(),
-      fetchPage: waiterFetch,
+      fetchPage: revokedFetch,
     });
-
-    const outcome = await waiter.strategy.fetch({
-      ...request('cg-waiter', 'peer-waiter'),
-      deadline: Date.now() + 20,
+    const recovery = new AbortController();
+    const parked = revoked.strategy.fetch({
+      ...request('cg-revoked', 'peer-revoked'),
+      signal: recovery.signal,
     });
+    await new Promise((resolve) => setImmediate(resolve));
 
-    expect(waiterFetch).not.toHaveBeenCalled();
-    expect(outcome.continuationYielded).toBe(true);
-    expect(outcome.result.timedOut).toBe(true);
+    // The sibling is still fetching. The revoked transfer must not stay in
+    // its peer's queue until that fetch, or its own deadline, ends.
+    const revocation = new Error('recovery authority was revoked');
+    recovery.abort(revocation);
+    await expect(parked).rejects.toBe(revocation);
+    expect(revokedFetch).not.toHaveBeenCalled();
+
+    // It left nothing behind in the pool: the next transfer takes the whole
+    // allowance once the fetch in flight has settled.
+    const nextFetch = vi.fn(async (req: { contextGraphId: string; maxAcceptedQuads: number }) => (
+      emptyPage(req.contextGraphId)
+    ));
+    const next = createSelectedSwmMetaFetcher({
+      remotePeerId: 'peer-next',
+      requesterScope: 'selected-swm-meta:retained:next',
+      retentionBudget: budget,
+      deleteCheckpoint: vi.fn(),
+      fetchPage: nextFetch,
+    });
+    const waiting = next.strategy.fetch(request('cg-next', 'peer-next'));
     holder.settle();
+    await expect(waiting).resolves.toMatchObject({ continuationYielded: false });
+    expect(nextFetch.mock.calls[0]![0]!.maxAcceptedQuads).toBe(2);
     await holder.outcome;
   });
 

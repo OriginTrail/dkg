@@ -33,12 +33,12 @@ export interface SelectedSwmMetaRetentionLease {
    *
    * Resolves `true` as soon as shared capacity may have grown (a reservation
    * was committed or released, or a lease gave rows back), so a new
-   * `reserve()` is worth trying. Resolves `false` after `timeoutMs`, and at
-   * once when no other lease has capacity reserved: the pool is then held by
-   * retained prefixes, which only their owners or the retention clock give
-   * back, so there is nothing bounded to wait for.
+   * `reserve()` is worth trying. Resolves `false` after `timeoutMs`, when
+   * `signal` aborts, and at once when no other lease has capacity reserved:
+   * the pool is then held by retained prefixes, which only their owners or
+   * the retention clock give back, so there is nothing bounded to wait for.
    */
-  waitForSharedCapacity(timeoutMs: number): Promise<boolean>;
+  waitForSharedCapacity(timeoutMs: number, signal?: AbortSignal): Promise<boolean>;
   /** Atomically replace this lease's retained size after a fetched tail. */
   replace(rows: number, bytesEstimate: number): void;
   release(): void;
@@ -239,25 +239,25 @@ export function createSelectedSwmMetaRetentionBudget(
             release: releaseReservation,
           };
         },
-        waitForSharedCapacity(timeoutMs) {
+        waitForSharedCapacity(timeoutMs, signal) {
           const siblingFetchInFlight = [...reservations.values()].some((reservation) => (
             reservation.owner !== id && admitsRows(reservation)
           ));
-          if (released || !(timeoutMs > 0) || !siblingFetchInFlight) {
+          if (released || signal?.aborted || !(timeoutMs > 0) || !siblingFetchInFlight) {
             return Promise.resolve(false);
           }
           return new Promise<boolean>((resolve) => {
             const finish = (capacityFreed: boolean) => {
               clearTimeout(timer);
               capacityWaiters.delete(wake);
+              signal?.removeEventListener('abort', giveUp);
               resolve(capacityFreed);
             };
             const wake = () => finish(true);
-            const timer = setTimeout(
-              () => finish(false),
-              Math.min(timeoutMs, MAX_CAPACITY_WAIT_MS),
-            );
+            const giveUp = () => finish(false);
+            const timer = setTimeout(giveUp, Math.min(timeoutMs, MAX_CAPACITY_WAIT_MS));
             timer.unref?.();
+            signal?.addEventListener('abort', giveUp, { once: true });
             capacityWaiters.add(wake);
           });
         },

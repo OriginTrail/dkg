@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { InMemoryPeerSyncLease, runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
+import {
+  Rfc64SwmRecoveryTargetLeaseV1,
+  Rfc64SwmRecoveryTargetRevokedErrorV1,
+} from '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
   PEER,
@@ -185,6 +189,77 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
         expect(classifySharedMemoryFreshness(round.shared, { complete: true }))
           .toMatchObject({ completedWithoutFailure: true, timedOut: false });
       }
+    } finally {
+      releaseOpening();
+      await harness.close();
+    }
+  });
+
+  it('ends a waiting round when its graph recovery is revoked, while the pool is still held', async () => {
+    const publicCg = 'selected-revoked-while-waiting';
+    const peers = Array.from({ length: 4 }, (_, index) => `12D3KooWRevokedWhileWaitingPeer${index}`);
+    let releaseOpening!: () => void;
+    const openingRelease = new Promise<void>((resolve) => { releaseOpening = resolve; });
+    let signalPoolReserved!: () => void;
+    const poolReserved = new Promise<void>((resolve) => { signalPoolReserved = resolve; });
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: snapshotManifest(publicCg, 0),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      completeSwmProviders: [],
+      reportEmptyResponse: true,
+      onMetaFetch: async ({ fetch }) => {
+        if (fetch === 3) signalPoolReserved();
+        await openingRelease;
+      },
+    });
+    // One revocable lease a round, in the order the rounds start.
+    const leases: AbortController[] = [];
+    Reflect.set(harness.agent, 'acquireRfc64SwmRecoveryTargetLeaseV1', (
+      target: { contextGraphId: string },
+    ) => {
+      const lease = new AbortController();
+      leases.push(lease);
+      return new Rfc64SwmRecoveryTargetLeaseV1(
+        target.contextGraphId,
+        lease.signal,
+        () => !lease.signal.aborted,
+      );
+    });
+
+    try {
+      const walk = peers.map((remotePeerId) => callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          remotePeerId,
+          selectedSwmPriority: true,
+          priority: 2_000,
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
+        },
+      ));
+      await poolReserved;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(harness.probes.metaFetches()).toBe(3);
+
+      // The fourth round waits for the pool. Its recovery authority goes away
+      // (an unsubscribe, say) while the three fetches are still in flight.
+      leases[3]!.abort(new Rfc64SwmRecoveryTargetRevokedErrorV1(publicCg));
+      const revoked = await walk[3]!;
+
+      // The round is over although nothing has freed the pool, it did not ask
+      // its peer, and it does not count as an answer.
+      expect(harness.probes.metaFetches()).toBe(3);
+      expect(revoked.scopeComplete).toBe(false);
+      expect(revoked.shared).toMatchObject({
+        completedPhases: 0,
+        emptyResponses: 0,
+        failedPhases: 1,
+        timedOutPhases: 0,
+      });
+      releaseOpening();
+      const others = await Promise.all(walk.slice(0, 3));
+      for (const round of others) expect(round.shared).toMatchObject({ emptyResponses: 1, failedPhases: 0 });
     } finally {
       releaseOpening();
       await harness.close();

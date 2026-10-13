@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createSelectedSwmMetaRetentionBudget,
 } from '../src/sync/selected-swm-meta-budget.js';
@@ -297,6 +297,38 @@ describe('selected SWM metadata retention budget', () => {
     expect(outcomes).toEqual([false]);
     await expect(waiter.waitForSharedCapacity(60_000)).resolves.toBe(false);
     holder.release();
+    waiter.release();
+  });
+
+  it('ends a wait when its signal aborts, and does not start one for an aborted signal', async () => {
+    const budget = createSelectedSwmMetaRetentionBudget({
+      maxRows: 2,
+      maxBytesEstimate: 200,
+      maxPrefixRows: 2,
+      maxPrefixBytesEstimate: 200,
+    });
+    const inFlight = budget.lease().reserve();
+    const waiter = budget.lease();
+
+    const revoked = new AbortController();
+    const outcomes: boolean[] = [];
+    const waiting = waiter.waitForSharedCapacity(60_000, revoked.signal)
+      .then((capacityFreed) => outcomes.push(capacityFreed));
+    await Promise.resolve();
+    expect(outcomes).toEqual([]);
+    revoked.abort();
+    await waiting;
+    expect(outcomes).toEqual([false]);
+
+    await expect(waiter.waitForSharedCapacity(60_000, revoked.signal)).resolves.toBe(false);
+
+    // A wait that ended on capacity no longer listens to its signal.
+    const later = new AbortController();
+    const removeListener = vi.spyOn(later.signal, 'removeEventListener');
+    const woken = waiter.waitForSharedCapacity(60_000, later.signal);
+    inFlight.release();
+    await expect(woken).resolves.toBe(true);
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
     waiter.release();
   });
 
