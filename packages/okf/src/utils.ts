@@ -1,12 +1,16 @@
 /**
- * Small, dependency-free helpers shared by the mapper.
+ * Small helpers shared by the mapper.
  *
- * `isSafeIri` is replicated verbatim from `dkg-core`'s `sparql-safe.ts` so the
- * pure mapper has zero runtime cross-package dependency and stays unit-testable
- * in isolation (the package intentionally does not import the node at runtime).
- * A test pins the behaviour against the same inputs the node validates.
+ * Literal terms are written in the DKG's canonical RDF literal form, by the
+ * shared formatter in `dkg-rdf-utils` (a dependency-free leaf package), so the
+ * quads the mapper emits are the ones the stores return, and export reads both
+ * with the same parser. `isSafeIri` is replicated verbatim from `dkg-core`'s
+ * `sparql-safe.ts`, so the package never imports the node at runtime and stays
+ * unit-testable in isolation. A test pins it against the inputs the node
+ * validates.
  */
 
+import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { yamlLexicalOf } from './yaml-lexical.js';
 
 const IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
@@ -17,14 +21,14 @@ export function isSafeIri(value: string): boolean {
   return IRI_SCHEME_RE.test(value);
 }
 
-/** N-Triples/quad-encoding of a plain string literal: `"escaped"`. */
+/** N-Triples/quad-encoding of a plain string literal: `"escaped"`, in the canonical form. */
 export function literalTerm(value: string): string {
-  return JSON.stringify(value);
+  return formatCanonicalRdfLiteralTerm({ kind: 'plain', value });
 }
 
-/** N-Triples/quad-encoding of a typed literal: `"lexical"^^<datatype>`. */
+/** N-Triples/quad-encoding of a typed literal: `"lexical"^^<datatype>`, in the canonical form. */
 export function typedLiteralTerm(lexical: string, datatypeIri: string): string {
-  return `${JSON.stringify(lexical)}^^<${datatypeIri}>`;
+  return formatCanonicalRdfLiteralTerm({ kind: 'typed', value: lexical, datatype: datatypeIri });
 }
 
 /**
