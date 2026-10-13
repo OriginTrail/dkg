@@ -236,7 +236,7 @@ interface OutboundStreamOpenOptions {
   excludeConnections?: WeakSet<ReusableConnection>;
   /** Ordinary sends enable this on a later retry after a normal dial failed. */
   allowLimitedWithDirectAddrs?: boolean;
-  /** Duplex scopes can try a final relay route before entering their callback. */
+  /** Duplex scopes and single-use sends use an open relay route once the dial failed. */
   afterDialFailure: 'throw' | 'reuse-limited';
   /** Sends forward an exhausted resolver signal to the dial's error boundary. */
   cancelledResolution: 'throw' | 'dial-with-signal';
@@ -922,7 +922,7 @@ export class ProtocolRouter {
         } catch (error) {
           if (options.afterDialFailure === 'throw') throw error;
           if (signal.aborted) throw asAbortError(signal.reason);
-          // No application bytes have been sent. A duplex scope may use an
+          // No application bytes have been sent, so the caller may use an
           // existing relay after the normal dial actually failed.
           reused = await tryReuseExistingConnection(getConnections, protocolId, signal,
             { ...reuseOptions, allowLimitedWithDirectAddrs: true });
@@ -1209,13 +1209,13 @@ export class ProtocolRouter {
       let attemptedNormalDial = false;
       try {
         // Re-prime on each cold retry, while warm reuse skips resolution.
-        // A failed normal dial unlocks limited reuse on the next attempt;
-        // unlike a duplex scope, send() keeps its existing retry/backoff gate.
+        // A failed normal dial unlocks limited reuse on the next attempt. A
+        // single-use payload has no next attempt, so it reuses within this one.
         const opened = await openStream({
           resolverTimeoutMs: remaining,
           allowLimitedWithDirectAddrs: normalDialFailed,
           excludeConnections: triedConnections,
-          afterDialFailure: 'throw',
+          afterDialFailure: singleUsePayload ? 'reuse-limited' : 'throw',
           cancelledResolution: 'dial-with-signal',
           onNormalDial: () => { attemptedNormalDial = true; },
         });
