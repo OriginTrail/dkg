@@ -21,9 +21,16 @@
 # here therefore boots on an EMPTY journal (BLAZEGRAPH_KEEP_JOURNAL=1 keeps the
 # previous one), so a devnet never reads the graphs of the chain before it.
 #
+# `stop` signals only a JVM that `start` of this script launched for this
+# checkout: it finds it by a marker on the JVM's command line. It never trusts
+# the pid file (a recorded pid can belong to another process by now) or the
+# port (anything can listen there), so a Blazegraph started by hand, or any
+# other service on the port, is left running and reported.
+#
 # Environment:
 #   BLAZEGRAPH_JAR           an existing standalone JAR to run, instead of
 #                            downloading one into .devnet/blazegraph-native
+#                            (a relative path is taken from the caller's directory)
 #   BLAZEGRAPH_PORT          port to listen on (default 9999, loopback only);
 #                            start the devnet with the same DEVNET_BLAZEGRAPH_PORT
 #   BLAZEGRAPH_HEAP          JVM heap limit (default 1g)
@@ -35,7 +42,16 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BZ_DIR="$REPO_ROOT/.devnet/blazegraph-native"
-JAR="${BLAZEGRAPH_JAR:-$BZ_DIR/blazegraph-2.1.6.jar}"
+# The JVM is started from $BZ_DIR (its journal lands in the working directory),
+# so a JAR given relative to where the caller stands is made absolute here.
+case "${BLAZEGRAPH_JAR:-}" in
+  "") JAR="$BZ_DIR/blazegraph-2.1.6.jar" ;;
+  /*) JAR="$BLAZEGRAPH_JAR" ;;
+  *)  JAR="$PWD/$BLAZEGRAPH_JAR" ;;
+esac
+# On the command line of every JVM this script starts, and the only thing
+# `stop` goes by. Blazegraph ignores the property.
+OWNER_MARKER="-Ddkg.devnet.blazegraph.home=$BZ_DIR"
 PIDFILE="$BZ_DIR/blazegraph.pid"
 LOG="$BZ_DIR/blazegraph.log"
 PORT="${BLAZEGRAPH_PORT:-9999}"
@@ -47,6 +63,15 @@ log() { echo "[bz-native] $*"; }
 status_url() { echo "http://127.0.0.1:$PORT/$CTX/status"; }
 ns_url() { echo "http://127.0.0.1:$PORT/$CTX/namespace"; }
 is_up() { curl -sf --max-time 4 "$(status_url)" >/dev/null 2>&1; }
+# The pids of the JVMs this script started for this checkout, one per line.
+own_pids() {
+  local pid args
+  while read -r pid args; do
+    case "$args" in *"$OWNER_MARKER"*) echo "$pid" ;; esac
+  done <<EOF
+$(ps axww -o pid=,args= 2>/dev/null)
+EOF
+}
 
 seed_namespace() {
   local ns="$1"
@@ -73,7 +98,11 @@ seed_namespace() {
 cmd_start() {
   mkdir -p "$BZ_DIR"
   if is_up; then
-    log "already serving on :$PORT/$CTX — its namespaces keep what an earlier devnet wrote; run '$0 stop' first for an empty store"
+    if [ -n "$(own_pids)" ]; then
+      log "already serving on :$PORT/$CTX — its namespaces keep what an earlier devnet wrote; run '$0 stop' first for an empty store"
+    else
+      log "a Blazegraph this script did not start is serving on :$PORT/$CTX — it is used as it is, and '$0 stop' will not stop it"
+    fi
   else
     command -v java >/dev/null 2>&1 || { log "FATAL: no 'java' on PATH (need a native JDK)"; exit 1; }
     if [ ! -f "$JAR" ]; then
@@ -86,10 +115,9 @@ cmd_start() {
       log "removed the journal of the previous run"
     fi
     log "booting native Blazegraph on 127.0.0.1:$PORT (host JVM: $(java -version 2>&1 | head -1))"
-    # `exec` makes the recorded pid the JVM itself (not a wrapper shell that
-    # `stop` would kill while the JVM lives on), and leaves no process holding
-    # the caller's stdout once this script returns.
-    ( cd "$BZ_DIR" && exec nohup java -server -Xmx"${BLAZEGRAPH_HEAP:-1g}" -Djetty.host=127.0.0.1 -Djetty.port="$PORT" -jar "$JAR" > "$LOG" 2>&1 < /dev/null ) &
+    # `exec` makes the recorded pid the JVM itself, not a wrapper shell, and
+    # leaves no process holding the caller's stdout once this script returns.
+    ( cd "$BZ_DIR" && exec nohup java -server "$OWNER_MARKER" -Xmx"${BLAZEGRAPH_HEAP:-1g}" -Djetty.host=127.0.0.1 -Djetty.port="$PORT" -jar "$JAR" > "$LOG" 2>&1 < /dev/null ) &
     echo $! > "$PIDFILE"
     local i
     for i in $(seq 1 40); do is_up && break; sleep 2; done
@@ -106,17 +134,24 @@ cmd_start() {
 }
 
 cmd_stop() {
-  # Stop the JVM that listens on OUR port (whoever started it) and the one this
-  # script recorded. Another Blazegraph on this host, on another port, belongs
-  # to somebody else and is never signalled.
-  local pid stopped=""
-  for pid in $({ lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null; cat "$PIDFILE" 2>/dev/null; } | sort -u); do
-    case "$(ps -p "$pid" -o args= 2>/dev/null)" in
-      *java*.jar*) kill "$pid" 2>/dev/null && stopped="$stopped $pid" ;;
-    esac
+  # Only a JVM that carries OWNER_MARKER is ours to signal (see the header).
+  local pid stopped="" waited
+  for pid in $(own_pids); do
+    kill "$pid" 2>/dev/null && stopped="$stopped $pid"
   done
-  if [ -n "$stopped" ]; then log "stopped (pid$stopped)"; else log "not running"; fi
+  # A `start` right after must not find the old JVM still answering.
+  for pid in $stopped; do
+    waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 15 ]; do sleep 1; waited=$((waited + 1)); done
+  done
   rm -f "$PIDFILE"
+  if [ -n "$stopped" ]; then
+    log "stopped (pid$stopped)"
+  elif is_up; then
+    log "not started by this script: a Blazegraph answers on :$PORT/$CTX and was left running"
+  else
+    log "not running"
+  fi
 }
 
 cmd_status() {
