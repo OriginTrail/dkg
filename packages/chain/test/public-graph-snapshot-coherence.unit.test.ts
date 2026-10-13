@@ -92,3 +92,19 @@ it.each(['hub','inventory','assets'] as const)('cancels sibling %s calls on pres
   expect(cancelled).toHaveLength(started.length-1);
   expect(active).toBe(0);expect(fallback.send).not.toHaveBeenCalled();
 });
+
+it.each([false, true])('rejects wrong-chain RPC before statements (healthy fallback=%s)', async fallback => {
+  const wrong = fixture(false, false, 1), healthy = fixture(false, false, 1);
+  wrong.provider.send = vi.fn(async () => '0x1');
+  healthy.provider.send = vi.fn(healthy.provider.send);
+  wrong.a.providers = fallback ? [wrong.provider, healthy.provider] : [wrong.provider];
+  const read = wrong.a.readPublicGraphSnapshot('coherent-snapshot', '1');
+  if (fallback) {
+    await expect(read).resolves.toMatchObject({chainId:'evm:31337',assets:[{id:'1'}, {id:'2'}]});
+    expect(healthy.provider.send).toHaveBeenCalledWith('eth_chainId', []);
+    expect(healthy.blockReads.length).toBeGreaterThan(0);
+    expect(healthy.reads.length).toBeGreaterThan(0);
+  } else await expect(read).rejects.toThrow('unavailable');
+  expect(wrong.provider.send).toHaveBeenCalledWith('eth_chainId', []);
+  expect(wrong.blockReads).toEqual([]); expect(wrong.reads).toEqual([]);
+});

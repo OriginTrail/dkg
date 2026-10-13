@@ -80,7 +80,8 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     for (let n = 1; n <= 12; n++) {
       const id = (BigInt(signer.address) << 96n) | BigInt(n);
       const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
-      const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
+      const subGraphName = n === 3 ? 'code' : undefined;
+      const assertionGraph = `did:dkg:context-graph:${graph}${subGraphName ? '/' + subGraphName : ''}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
       const data: Quad[] = [
         {
           subject: `urn:entity:${n}`,
@@ -89,6 +90,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
           graph: assertionGraph,
         },
       ];
+      if (subGraphName) data.push({subject:`urn:entity:${n}`,predicate:'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',object:'http://schema.org/Thing',graph:assertionGraph});
       const privateRoot = n === 12 ? new Uint8Array(32).fill(7) : undefined;
       const root = computeFlatKCRootV10(data, privateRoot ? [privateRoot] : []);
       await (
@@ -117,6 +119,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
             contextGraphId: graph,
             ual,
             assertionGraph,
+            subGraphName,
             merkleRoot: root,
             publisherPeerId: "fixture",
             accessPolicy: "public",
@@ -124,7 +127,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
             timestamp: new Date(),
             assertionVersion: 1,
             authorAddress: signer.address,
-            publicTripleCount: 1,
+            publicTripleCount: data.length,
             privateTripleCount: privateRoot ? 1 : 0,
             privateMerkleRoot: privateRoot,
           },
@@ -277,6 +280,10 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       },
     );
     expect(accepted.bindings?.length).toBe(12);
+    const namedVm = await receiver.query('SELECT ?entity WHERE {?entity a <http://schema.org/Thing>}', {
+      contextGraphId:graph,view:'verifiable-memory',chainEvidenceMode:'core-cache',
+    });
+    expect(namedVm.bindings).toEqual([{entity:'urn:entity:3'}]);
     // The remote protocol has no evidence-acceptance field yet, so it must
     // refuse marked graphs rather than silently weakening the caller's trust.
     for (const response of [
@@ -318,6 +325,8 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       current: true,
     });
     expect(rpcReads).toHaveBeenCalledTimes(2);
+    const entities = await core.findEntitiesByType(rpcReceiver.peerId, graph, 'http://schema.org/Thing');
+    expect(entities).toMatchObject({status:'OK',entityUris:['urn:entity:3']});
     console.log(
       JSON.stringify({
         measurement: "local-independent-snapshot-recovery",

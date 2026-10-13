@@ -5783,7 +5783,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       (id, onChainId, signal) => this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
     );
     return {
-      lifetime: 'exchange',
+      admitVerifiedPage() { /* Ordinary exchanges preserve verified legacy compatibility. */ },
       coalescing: evidence ? 'owner-only' : 'allowed',
       isRegisteredPublic: async (id, signal) => evidence?.usableFor(id, signal) === true
         || (await this.resolveRegisteredContextGraphAuthority(id, { authorityReadMode: 'finalized-index-or-live', signal })).kind === 'public',
@@ -6288,7 +6288,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         : undefined,
       durableMetaContinuation,
       stopOnBackoffWorthyFailure,
-      requireAuthenticatedGraphScopedAssets: authority.lifetime === 'snapshot-job',
+      admitVerifiedPage: page => authority.admitVerifiedPage(page),
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
       storeInsert: ({ quads, signal: operationSignal }) => {
         return this.insertSyncedQuadsAndInvalidateListCache(quads, {
