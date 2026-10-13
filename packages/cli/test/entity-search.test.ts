@@ -19,14 +19,15 @@ const spec = { contextGraphId: 'catalog', view: 'verifiable-memory' as const,
 const partition = 'did:dkg:context-graph:catalog/_verifiable_memory/a';
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-async function fixture(count = 3) {
+async function fixture(count = 3, capacity = 100_000) {
   const dir = mkdtempSync(join(tmpdir(), 'entity-search-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const graph = new OxigraphStore(); cleanup.push(() => graph.close());
   const engine = new DKGQueryEngine(graph);
   let permitted = true;
+  let allowedCaller: string | undefined;
   const agent = { query: vi.fn(async (sparql, options) => {
-    if (!permitted) throw Object.assign(new Error('denied'), { code: 'QUERY_ACCESS_DENIED' });
+    if (!permitted || (allowedCaller !== undefined && options?.callerAgentAddress !== allowedCaller)) throw Object.assign(new Error('denied'), { code: 'QUERY_ACCESS_DENIED' });
     return withPublicSnapshotQueryTrust(graph, options.contextGraphId, options.chainEvidenceMode, () => engine.query(sparql, options));
   }) };
   for (let i = 0; i < count; i++) await graph.insert([
@@ -37,12 +38,12 @@ async function fixture(count = 3) {
     { graph: 'did:dkg:context-graph:other/_verifiable_memory/a', subject: 'urn:secret', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:Topic' }]);
   const embedder = { fingerprint: 'test-model-v1', dimensions: 2, ready: vi.fn(async () => true),
     embed: vi.fn(async (text: string) => text.includes('ocean') ? [1, 0] : [0, 1]) };
-  const store = new EntityIndexStore(dir); cleanup.push(() => store.close());
+  const store = new EntityIndexStore(dir, capacity); cleanup.push(() => store.close());
   const service = new EntitySearchService(store, embedder), reader = new EntityGraphReader(agent as never, 'reader');
   const index = (restart = false) => service.index(spec, reader, restart, AbortSignal.timeout(5000), performance.now() + 5000);
   const search = (query = 'ocean') => service.search(indexKey(parseSpec(spec), embedder.fingerprint), spec.contextGraphId, query, 2,
     reader, AbortSignal.timeout(5000), performance.now() + 5000);
-  return { dir, graph, agent, embedder, store, service, reader, index, search, deny: () => { permitted = false; } };
+  return { dir, graph, agent, embedder, store, service, reader, index, search, deny: () => { permitted = false; }, restrictTo: (caller: string) => { allowedCaller = caller; } };
 }
 
 describe('entity discovery using current scoped graph content', () => {
@@ -100,11 +101,11 @@ describe('entity discovery using current scoped graph content', () => {
   });
 });
 
-function request(f, body, kind: 'anonymous' | 'nodeOperator' = 'anonymous', path = '/api/entities/search') {
+function request(f, body, kind: 'anonymous' | 'nodeOperator' | 'agent' = 'anonymous', path = '/api/entities/search', agentAddress = 'allowed-agent') {
   const req = Object.assign(new EventEmitter(), { method: 'POST', aborted: false, __dkgPrebufferedBody: Buffer.from(JSON.stringify(body)) });
   const res = Object.assign(new EventEmitter(), { destroyed: false, writableEnded: false, statusCode: 0, body: '',
     writeHead(status: number) { this.statusCode = status; return this; }, end(body: string) { this.body = body; this.writableEnded = true; } });
-  return { res, ctx: { req, res, path, agent: f.agent, entitySearch: f.service, authentication: requestAuthentication({ kind }) } as unknown as RequestContext };
+  return { res, ctx: { req, res, path, agent: f.agent, entitySearch: f.service, authentication: requestAuthentication(kind === 'agent' ? { kind, agentAddress } : { kind }) } as unknown as RequestContext };
 }
 it('requires operator authority to index and exposes bounded typed search outcomes', async () => {
   const f = await fixture();
@@ -224,21 +225,71 @@ it('reports disabled, wrong-scope, method and timeout outcomes separately', asyn
   expect(JSON.parse(late.res.body).code).toBe('QUERY_DEADLINE_EXCEEDED');
 });
 
-it('enforces persisted core trust on entity indexing, cached search and readiness', async () => {
-  const f = await fixture();
-  const indexed = await f.index(); // Cache predates the import marker.
-  await markCoreTrustedGraph(f.graph,'catalog');
-  for (const route of ['index','search','readiness']) {
-    const body = route === 'index' ? spec : {contextGraphId:'catalog',indexId:indexed.indexId,query:'ocean'};
-    for (const mode of [undefined,'rpc-only','core-cache','unknown']) {
-      const r = request(f,{...body,...(mode === undefined ? {} : {chainEvidenceMode:mode})},'nodeOperator',`/api/entities/${route}`);
-      await handleEntityRoutes(r.ctx);
-      expect(r.res.statusCode).toBe(mode === 'core-cache' ? 200 : mode === 'unknown' ? 400 : 409);
-      if(mode === 'core-cache') expect(JSON.parse(r.res.body).chainEvidenceMode).toBe('core-cache');
-      else if(mode !== 'unknown') expect(JSON.parse(r.res.body).code).toBe('CORE_CACHE_QUERY_TRUST_REQUIRED');
-    }
+
+it('replaces a full index without pruning its completed generation before the rescan succeeds', async () => {
+  const f = await fixture(9, 9);
+  await f.index(); await f.index();
+  const id = indexKey(parseSpec(spec), f.embedder.fingerprint);
+  const removed = { entityUri: 'urn:entity:0', sourceGraph: partition };
+  await f.graph.delete([{ graph: partition, subject: removed.entityUri, predicate: 'urn:description', object: '"ocean science"' }]);
+  await f.graph.insert([
+    { graph: partition, subject: 'urn:new', predicate: 'urn:description', object: '"new ocean"' },
+    { graph: partition, subject: 'urn:new', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:Topic' },
+  ]);
+  expect(await f.index(true)).toMatchObject({ scanComplete: false });
+  expect(f.store.cached(id, JSON.stringify([partition, removed.entityUri]))).toBeDefined();
+  // Repeated interrupted restarts reuse one bounded scratch generation.
+  await f.index(true);
+  expect(await f.index()).toMatchObject({ scanComplete: true, indexedEntities: 9 });
+  expect(f.store.cached(id, JSON.stringify([partition, removed.entityUri]))).toBeUndefined();
+  expect((await f.search()).entities.some(e => e.entityUri === 'urn:new')).toBe(true);
+});
+
+it('skips an oversized changed candidate while preserving valid hits and real read failures', async () => {
+  const f = await fixture(); await f.index();
+  await f.graph.insert([{ graph: partition, subject: 'urn:entity:0', predicate: 'urn:description', object: JSON.stringify('x'.repeat(17_000)) }]);
+  const result = await f.search();
+  expect(result).toMatchObject({ staleCandidates: 1 });
+  expect(result.entities).toHaveLength(2);
+  expect(result.entities.every(e => e.entityUri !== 'urn:entity:0')).toBe(true);
+  const failure = Object.assign(new Error('store offline'), { code: 'STORE_UNAVAILABLE' });
+  vi.spyOn(f.reader, 'document').mockRejectedValueOnce(failure);
+  await expect(f.search()).rejects.toBe(failure);
+  f.deny(); await expect(f.search()).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
+});
+
+it('uses the authenticated agent for search revalidation and readiness authorization', async () => {
+  const f = await fixture(); const indexed = await f.index();
+  f.restrictTo('allowed-agent');
+  const body = { contextGraphId: 'catalog', indexId: indexed.indexId, query: 'ocean' };
+  f.agent.query.mockClear(); f.embedder.embed.mockClear();
+  const allowed = request(f, body, 'agent'); await handleEntityRoutes(allowed.ctx);
+  expect(allowed.res.statusCode).toBe(200);
+  expect(f.agent.query.mock.calls.length).toBeGreaterThan(1);
+  expect(f.agent.query.mock.calls.every(([, o]) => o.callerAgentAddress === 'allowed-agent')).toBe(true);
+  const ready = request(f, { ...body, warmup: true }, 'agent', '/api/entities/readiness');
+  await handleEntityRoutes(ready.ctx); expect(JSON.parse(ready.res.body).ready).toBe(true);
+  f.agent.query.mockClear(); f.embedder.embed.mockClear(); f.embedder.ready.mockClear();
+  for (const path of ['/api/entities/search', '/api/entities/readiness']) {
+    const denied = request(f, { ...body, warmup: true }, 'agent', path, 'outsider-agent');
+    await handleEntityRoutes(denied.ctx);
+    expect(denied.res.statusCode).toBe(403);
+    expect(JSON.parse(denied.res.body)).not.toHaveProperty('entities');
   }
-  f.deny();
-  const denied = request(f,{...spec,chainEvidenceMode:'core-cache'},'nodeOperator','/api/entities/index');
-  await handleEntityRoutes(denied.ctx); expect(denied.res.statusCode).toBe(403);
+  expect(f.agent.query.mock.calls).toHaveLength(2);
+  expect(f.agent.query.mock.calls.every(([q, o]) => q.endsWith('LIMIT 0') && o.callerAgentAddress === 'outsider-agent')).toBe(true);
+  expect(f.embedder.embed).not.toHaveBeenCalled(); expect(f.embedder.ready).not.toHaveBeenCalled();
+});
+
+it('reports a pinned resident provider model ready and bounds streamed and declared bodies', async () => {
+  const config = { provider: 'ollama' as const, model: 'test', digest: 'a'.repeat(64), dimensions: 2 };
+  const provider = new LocalEntityEmbedder(config);
+  const models = { models: [{ name: 'test:latest', digest: config.digest }] };
+  const fetch = vi.fn().mockResolvedValueOnce(Response.json(models)).mockResolvedValueOnce(Response.json(models));
+  vi.stubGlobal('fetch', fetch);
+  expect(await provider.ready(AbortSignal.timeout(1000))).toBe(true);
+  for (const headers of [{ 'Content-Length': String(1024 * 1024 + 1) }, {}]) {
+    fetch.mockResolvedValueOnce(new Response('x'.repeat(1024 * 1024 + 1), { headers }));
+    await expect(provider.ready(AbortSignal.timeout(1000))).rejects.toMatchObject({ code: 'ENTITY_EMBEDDING_INVALID' });
+  }
 });

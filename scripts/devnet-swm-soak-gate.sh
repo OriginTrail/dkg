@@ -31,12 +31,25 @@ agent_address() {
 # goes to the peers its author reaches at that moment, and nothing sends it
 # again to a peer that connects later. A node that an earlier suite restarted
 # dials its bootstrap peers only, so node 6 dials node 5 here instead of
-# relying on a connection that something else happened to open.
-PEER5=$(api 5 GET /api/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["peerId"])')
-connect_body=$(python3 -c 'import json,sys; print(json.dumps({"peerId":sys.argv[1]}))' "$PEER5")
-connect_response=$(api 6 POST /api/connect "$connect_body") || connect_response=""
-printf '%s' "$connect_response" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("connected") is True else 1)' 2>/dev/null \
-  || { echo "SWM soak peers are not connected: node6 could not dial node5: $connect_response" >&2; exit 1; }
+# relying on a connection that something else happened to open. It dials an
+# address node 5 reports for itself: a node that was restarted a moment ago
+# cannot resolve another edge node by its peer id yet.
+PEER5_ADDRESS=$(api 5 GET /api/status | python3 -c '
+import json,sys
+direct=[a for a in json.load(sys.stdin).get("multiaddrs",[]) if "/p2p-circuit" not in a]
+loopback=[a for a in direct if a.startswith("/ip4/127.0.0.1/")]
+print((loopback or direct or [""])[0])')
+[ -n "$PEER5_ADDRESS" ] || { echo "SWM soak peers are not connected: node5 reports no direct address" >&2; exit 1; }
+connect_body=$(python3 -c 'import json,sys; print(json.dumps({"multiaddr":sys.argv[1]}))' "$PEER5_ADDRESS")
+connected=false
+for attempt in $(seq 1 6); do
+  connect_response=$(API_MAX_TIME=30 api 6 POST /api/connect "$connect_body" 2>/dev/null) || connect_response=""
+  if printf '%s' "$connect_response" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("connected") is True else 1)' 2>/dev/null; then
+    connected=true; break
+  fi
+  sleep 5
+done
+[ "$connected" = true ] || { echo "SWM soak peers are not connected: node6 could not dial node5 at $PEER5_ADDRESS: $connect_response" >&2; exit 1; }
 
 CURATOR=$(agent_address 5)
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
