@@ -12,111 +12,39 @@
  * presentational and are not reconstructed — round-trip equivalence is asserted
  * over the semantic (non-`hasSection`) quad set.
  *
- * v0.2 families are rebuilt from their predicates and skolemized nodes
- * (`families.ts`), in the entry order baked into the node IRIs. Derived
- * triples (`okf:trustTier`, `prov:wasDerivedFrom`) are not written back; the
- * next import re-derives them. A concept that only carries a last-modified
- * time (a v0.1 import) is written with the legacy `timestamp` key, since
- * `generated` requires a `by` actor (§5.2) and the exporter never invents one.
+ * This module rebuilds the base fields, body and indexes; the v0.2 families
+ * are rebuilt by `families/decode.ts` from the same definitions the importer
+ * encodes with, in the entry order baked into the node IRIs. A concept that
+ * only carries a last-modified time (a v0.1 import) is written with the legacy
+ * `timestamp` key, since `generated` requires a `by` actor (§5.2) and the
+ * exporter never invents one.
  *
- * This module is pure: it consumes an `ExportInput` and returns `BundleFile[]`.
- * The `dkg okf export` command feeds it quads fetched from a Context Graph via
- * SPARQL; the same function powers the offline round-trip test.
+ * Pure: `exportBundle` consumes an `ExportInput` and returns `BundleFile[]`.
+ * `exportInputFromQuads` builds that input from a graph's quads — the
+ * `dkg okf export` command feeds it the quads of a Context Graph view.
  */
 
 import { dump as dumpYaml } from 'js-yaml';
 import {
   RDF_TYPE,
-  RDF_JSON,
   SCHEMA_NS,
   SCHEMA_NAME,
   SCHEMA_DESCRIPTION,
   SCHEMA_KEYWORDS,
-  SCHEMA_IDENTIFIER,
   SCHEMA_MENTIONS,
   SCHEMA_HAS_PART,
   SCHEMA_IS_PART_OF,
   SCHEMA_DATE_MODIFIED,
   SCHEMA_URL,
   SCHEMA_CITATION,
-  PROV_WAS_DERIVED_FROM,
-  OKF_GENERATED_BY,
-  OKF_VERIFICATION,
-  OKF_VERIFIED_BY,
-  OKF_VERIFIED_AT,
-  OKF_TRUST_TIER,
-  OKF_STATUS,
-  OKF_STALE_AFTER,
-  OKF_SOURCE,
-  OKF_RESOURCE,
-  OKF_AUTHOR,
-  OKF_USAGE_COUNT,
-  OKF_USAGE_WINDOW_FROM,
-  OKF_USAGE_WINDOW_TO,
-  OKF_RUNTIME,
-  OKF_PARAMETER,
-  OKF_PARAMETER_TYPE,
-  OKF_REQUIRED,
-  OKF_COMPUTATION,
-  OKF_EXECUTOR_RESOURCE,
-  OKF_EXECUTOR_RECEIPT,
-  OKF_ATTESTER_RESOURCE,
   OKF_ATTESTED_COMPUTATION_TYPE,
   OKF_TARGET_VERSION,
-  XSD_INTEGER,
-  XSD_DECIMAL,
-  XSD_BOOLEAN,
+  SECTION_GENID_INFIX,
   DEFAULT_IRI_BASE,
 } from './constants.js';
-import { okfExtensionKey } from './extensions.js';
+import { accumulate, conceptIdFromIri, literalValue, orderKeys, termValue, type ExportContext } from './decode-terms.js';
+import { decodeFamilies } from './families/decode.js';
 import type { BundleFile, ExportInput, OkfMappingOptions, Quad } from './types.js';
-
-const LITERAL_RE = /^("(?:\\.|[^"\\])*")(?:\^\^<[^>]*>|@[A-Za-z-]+)?$/;
-const TYPED_LITERAL_RE = /^("(?:\\.|[^"\\])*")\^\^<([^>]*)>$/;
-const NODE_INDEX_RE = /_(\d+)$/;
-
-/** Lexical value of a literal term, or `null` if the term is an IRI / blank node. */
-function literalValue(term: string): string | null {
-  if (!term.startsWith('"')) return null;
-  const m = term.match(LITERAL_RE);
-  if (!m) return null;
-  return JSON.parse(m[1]) as string;
-}
-
-/**
- * Recover the native value of a known typed literal so producer-defined
- * numeric / boolean / object keys survive the round-trip. Import maps `count: 3`
- * → `"3"^^xsd:integer` and `{a: 1}` → `"{\"a\":1}"^^rdf:JSON`; without this,
- * export would emit YAML strings, which re-import as plain literals (datatype
- * and structure lost). Returns `null` for unknown datatypes / plain literals
- * so callers fall back to the lexical string.
- */
-function typedValue(term: string): { value: unknown } | null {
-  const m = term.match(TYPED_LITERAL_RE);
-  if (!m) return null;
-  const lexical = JSON.parse(m[1]) as string;
-  switch (m[2]) {
-    case XSD_INTEGER: {
-      const n = Number(lexical);
-      return Number.isInteger(n) ? { value: n } : null;
-    }
-    case XSD_DECIMAL: {
-      const n = Number(lexical);
-      return Number.isFinite(n) ? { value: n } : null;
-    }
-    case XSD_BOOLEAN:
-      return lexical === 'true' ? { value: true } : lexical === 'false' ? { value: false } : null;
-    case RDF_JSON: {
-      try {
-        return { value: JSON.parse(lexical) as unknown };
-      } catch {
-        return null;
-      }
-    }
-    default:
-      return null;
-  }
-}
 
 /**
  * Spec-defined type names whose exact spelling carries meaning for consumers
@@ -134,67 +62,6 @@ function typeValue(object: string): string {
   return SPEC_TYPE_NAMES[local] ?? local;
 }
 
-function conceptIdFromIri(iri: string, iriBase: string): string | null {
-  return iri.startsWith(iriBase) ? iri.slice(iriBase.length) : null;
-}
-
-/** What one export run knows: the IRI namespace and the exact set of concept IRIs being written. */
-interface ExportContext {
-  iriBase: string;
-  /** Subject IRIs of the concepts in this export — the only IRIs a path-valued field may be rewritten to a path for. */
-  conceptIris: ReadonlySet<string>;
-}
-
-/**
- * Object term → YAML value. Literals become their typed native value or lexical
- * string; IRIs are written as given, except that for path-valued fields
- * (`pathForm`) an IRI that is one of the exported concepts is written back as
- * its recommended absolute bundle path `/<conceptId>.md` (SPEC §6.1/§6.2).
- * Membership is checked against the exported concept set, not just the IRI
- * namespace: with `iriBase: "https://example.org/"` an external
- * `https://example.org/docs/external` source must survive verbatim, or
- * re-import would read a broken path and lose its `prov:wasDerivedFrom` edge.
- */
-function termValue(term: string, ctx: ExportContext, pathForm = false): unknown {
-  if (term.startsWith('"')) {
-    const typed = typedValue(term);
-    return typed ? typed.value : (literalValue(term) ?? term);
-  }
-  if (pathForm && ctx.conceptIris.has(term)) {
-    const id = conceptIdFromIri(term, ctx.iriBase);
-    if (id !== null) return `/${id}.md`;
-  }
-  return term;
-}
-
-/** Accumulate a (possibly multi-valued) key: scalar on first sight, list thereafter. */
-function accumulate(target: Record<string, unknown>, key: string, value: unknown): void {
-  if (key in target) {
-    const cur = target[key];
-    target[key] = Array.isArray(cur) ? [...cur, value] : [cur, value];
-  } else {
-    target[key] = value;
-  }
-}
-
-/** Entry order baked into a family node IRI (`…_<n>`); unknown → last. */
-function nodeIndex(iri: string): number {
-  const m = iri.match(NODE_INDEX_RE);
-  return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
-}
-
-function byNodeIndex(a: string, b: string): number {
-  return nodeIndex(a) - nodeIndex(b) || (a < b ? -1 : a > b ? 1 : 0);
-}
-
-/** Place `known` keys first (in the given order), then everything else in insertion order. */
-function orderKeys(obj: Record<string, unknown>, known: string[]): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const k of known) if (k in obj) out[k] = obj[k];
-  for (const k of Object.keys(obj)) if (!(k in out)) out[k] = obj[k];
-  return out;
-}
-
 /** Predicates handled explicitly on the concept subject; any other `schema:` predicate is a producer key. */
 const CONCEPT_PREDICATES = new Set([
   RDF_TYPE,
@@ -209,110 +76,46 @@ const CONCEPT_PREDICATES = new Set([
   SCHEMA_CITATION,
 ]);
 
-/** Producer-defined keys of a family on one subject: its `okf:<familyKey>.<key>` extension predicates (extensions.ts). */
-function familyExtensions(quads: Quad[], familyKey: string, ctx: ExportContext): Record<string, unknown> {
-  const extras: Record<string, unknown> = {};
-  for (const q of quads) {
-    const key = okfExtensionKey(familyKey, q.predicate);
-    if (key !== null) accumulate(extras, key, termValue(q.object, ctx));
-  }
-  return extras;
-}
-
-function verificationEntry(quads: Quad[], ctx: ExportContext): Record<string, unknown> {
-  const entry: Record<string, unknown> = {};
-  for (const q of quads) {
-    if (q.predicate === OKF_VERIFIED_BY) entry.by = termValue(q.object, ctx);
-    else if (q.predicate === OKF_VERIFIED_AT) entry.at = termValue(q.object, ctx);
-  }
-  return orderKeys({ ...entry, ...familyExtensions(quads, 'verified', ctx) }, ['by', 'at']);
-}
-
-/** `usage_window` on one subject (concept or source node): its bounds plus its producer extensions (§5.1). */
-function usageWindow(quads: Quad[], ctx: ExportContext): Record<string, unknown> | null {
-  const w: Record<string, unknown> = {};
-  for (const q of quads) {
-    if (q.predicate === OKF_USAGE_WINDOW_FROM) w.from = termValue(q.object, ctx);
-    else if (q.predicate === OKF_USAGE_WINDOW_TO) w.to = termValue(q.object, ctx);
-  }
-  Object.assign(w, familyExtensions(quads, 'usage_window', ctx));
-  return Object.keys(w).length > 0 ? orderKeys(w, ['from', 'to']) : null;
-}
-
-function sourceEntry(quads: Quad[], ctx: ExportContext): Record<string, unknown> {
-  const entry: Record<string, unknown> = {};
-  for (const q of quads) {
-    switch (q.predicate) {
-      case SCHEMA_IDENTIFIER:
-        entry.id = termValue(q.object, ctx);
-        break;
-      case OKF_RESOURCE:
-        entry.resource = termValue(q.object, ctx, true);
-        break;
-      case SCHEMA_NAME:
-        entry.title = termValue(q.object, ctx);
-        break;
-      case OKF_AUTHOR:
-        entry.author = termValue(q.object, ctx);
-        break;
-      case OKF_USAGE_COUNT:
-        entry.usage_count = termValue(q.object, ctx);
-        break;
-      case SCHEMA_DATE_MODIFIED:
-        entry.last_modified = termValue(q.object, ctx);
-        break;
-    }
-  }
-  const window = usageWindow(quads, ctx);
-  if (window) entry.usage_window = window;
-  return orderKeys({ ...entry, ...familyExtensions(quads, 'sources', ctx) }, [
-    'id',
-    'resource',
-    'title',
-    'author',
-    'usage_count',
-    'last_modified',
-    'usage_window',
-  ]);
-}
-
-function parameterEntry(quads: Quad[], ctx: ExportContext): Record<string, unknown> {
-  const entry: Record<string, unknown> = {};
-  for (const q of quads) {
-    if (q.predicate === SCHEMA_NAME) entry.name = termValue(q.object, ctx);
-    else if (q.predicate === OKF_PARAMETER_TYPE) entry.type = termValue(q.object, ctx);
-    else if (q.predicate === OKF_REQUIRED) entry.required = termValue(q.object, ctx);
-  }
-  return orderKeys({ ...entry, ...familyExtensions(quads, 'parameters', ctx) }, ['name', 'type', 'required']);
-}
+/**
+ * Frontmatter key order: required/recommended, then the §10 contract, then the
+ * §5 families (SPEC §4.1 / Appendix A order). Producer keys follow.
+ */
+const CONCEPT_KEY_ORDER = [
+  'type',
+  'resource',
+  'title',
+  'description',
+  'tags',
+  'runtime',
+  'parameters',
+  'computation',
+  'executor',
+  'attester',
+  'generated',
+  'timestamp',
+  'verified',
+  'status',
+  'stale_after',
+  'sources',
+  'usage_window',
+];
 
 function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportContext): BundleFile {
-  const { iriBase } = ctx;
   const bySubject = new Map<string, Quad[]>();
   for (const q of c.quads) {
     if (!bySubject.has(q.subject)) bySubject.set(q.subject, []);
     bySubject.get(q.subject)!.push(q);
   }
-  const nodeQuads = (node: string): Quad[] => bySubject.get(node) ?? [];
+  const conceptQuads = bySubject.get(c.iri) ?? [];
 
   const frontmatter: Record<string, unknown> = {};
   const tags: string[] = [];
   const edges: string[] = [];
   const citations: string[] = [];
   const extras: Record<string, unknown> = {};
-
-  let generatedBy: unknown = null;
   let dateModified: unknown = null;
-  const generatedExtras: Record<string, unknown> = {};
-  const verificationNodes: string[] = [];
-  const sourceNodes: string[] = [];
-  const parameterNodes: string[] = [];
-  const executor: Record<string, unknown> = {};
-  const receipt: string[] = [];
-  const attester: Record<string, unknown> = {};
-  const usageWindowQuads: Quad[] = [];
 
-  for (const q of bySubject.get(c.iri) ?? []) {
+  for (const q of conceptQuads) {
     switch (q.predicate) {
       case RDF_TYPE:
         frontmatter.type = typeValue(q.object);
@@ -339,7 +142,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         // Both are cross-concept edges → reconstruct as body links. OKF links are
         // untyped (SPEC §6.1), so a typed relation (e.g. hasPart) deliberately
         // exports as a plain link; the DKG-side typing is not OKF-expressible.
-        const id = conceptIdFromIri(q.object, iriBase);
+        const id = conceptIdFromIri(q.object, ctx.iriBase);
         if (id) edges.push(id);
         break;
       }
@@ -348,118 +151,24 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
       case SCHEMA_CITATION:
         citations.push(literalValue(q.object) ?? q.object);
         break;
-      case OKF_GENERATED_BY:
-        generatedBy = termValue(q.object, ctx);
-        break;
-      case OKF_VERIFICATION:
-        verificationNodes.push(q.object);
-        break;
-      case OKF_SOURCE:
-        sourceNodes.push(q.object);
-        break;
-      case OKF_PARAMETER:
-        parameterNodes.push(q.object);
-        break;
-      case OKF_TRUST_TIER:
-      case PROV_WAS_DERIVED_FROM:
-        break; // derived at import; re-derived on the next import
-      case OKF_STATUS:
-        frontmatter.status = termValue(q.object, ctx);
-        break;
-      case OKF_STALE_AFTER:
-        frontmatter.stale_after = termValue(q.object, ctx);
-        break;
-      case OKF_USAGE_WINDOW_FROM:
-      case OKF_USAGE_WINDOW_TO:
-        usageWindowQuads.push(q);
-        break;
-      case OKF_RUNTIME:
-        frontmatter.runtime = termValue(q.object, ctx);
-        break;
-      case OKF_COMPUTATION:
-        frontmatter.computation = termValue(q.object, ctx, true);
-        break;
-      case OKF_EXECUTOR_RESOURCE:
-        executor.resource = termValue(q.object, ctx, true);
-        break;
-      case OKF_EXECUTOR_RECEIPT:
-        receipt.push(String(termValue(q.object, ctx)));
-        break;
-      case OKF_ATTESTER_RESOURCE:
-        attester.resource = termValue(q.object, ctx, true);
-        break;
-      default: {
-        const generatedKey = okfExtensionKey('generated', q.predicate);
-        const executorKey = okfExtensionKey('executor', q.predicate);
-        const attesterKey = okfExtensionKey('attester', q.predicate);
-        if (generatedKey !== null) {
-          accumulate(generatedExtras, generatedKey, termValue(q.object, ctx));
-        } else if (executorKey !== null) {
-          accumulate(executor, executorKey, termValue(q.object, ctx));
-        } else if (attesterKey !== null) {
-          accumulate(attester, attesterKey, termValue(q.object, ctx));
-        } else if (okfExtensionKey('usage_window', q.predicate) !== null) {
-          usageWindowQuads.push(q);
-        } else if (q.predicate.startsWith(SCHEMA_NS) && !CONCEPT_PREDICATES.has(q.predicate)) {
+      default:
+        if (q.predicate.startsWith(SCHEMA_NS) && !CONCEPT_PREDICATES.has(q.predicate)) {
           // Producer-defined key: typed scalars and rdf:JSON objects come back
           // as native values so the datatype / structure survives re-import.
           accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
         }
-      }
+      // okf:* family predicates are decoded below; derived triples are not read back.
     }
   }
   if (tags.length > 0) frontmatter.tags = tags;
 
-  // Attested Computation contract (§10.2).
-  if (parameterNodes.length > 0) {
-    frontmatter.parameters = parameterNodes.sort(byNodeIndex).map((n) => parameterEntry(nodeQuads(n), ctx));
-  }
-  if (receipt.length > 0) executor.receipt = [...receipt].sort();
-  if (Object.keys(executor).length > 0) frontmatter.executor = orderKeys(executor, ['resource', 'receipt']);
-  if (Object.keys(attester).length > 0) frontmatter.attester = orderKeys(attester, ['resource']);
-
-  // Trust (§5.2): `generated` needs a `by`; a bare last-modified time (a v0.1
-  // import) is written with the legacy `timestamp` key instead (§13.1).
-  if (generatedBy !== null || Object.keys(generatedExtras).length > 0) {
-    const generated: Record<string, unknown> = {};
-    if (generatedBy !== null) generated.by = generatedBy;
-    if (dateModified !== null) generated.at = dateModified;
-    frontmatter.generated = orderKeys({ ...generated, ...generatedExtras }, ['by', 'at']);
-  } else if (dateModified !== null) {
-    frontmatter.timestamp = dateModified;
-  }
-  if (verificationNodes.length > 0) {
-    frontmatter.verified = verificationNodes.sort(byNodeIndex).map((n) => verificationEntry(nodeQuads(n), ctx));
-  }
-  // Provenance (§5.1).
-  if (sourceNodes.length > 0) {
-    frontmatter.sources = sourceNodes.sort(byNodeIndex).map((n) => sourceEntry(nodeQuads(n), ctx));
-  }
-  const window = usageWindow(usageWindowQuads, ctx);
-  if (window) frontmatter.usage_window = window;
+  const families = decodeFamilies(conceptQuads, (node) => bySubject.get(node) ?? [], ctx);
+  Object.assign(frontmatter, families);
+  // §13.1: a last-modified time with no `generated` (which needs a `by`) is the legacy `timestamp`.
+  if (!('generated' in families) && dateModified !== null) frontmatter.timestamp = dateModified;
   Object.assign(frontmatter, extras);
 
-  // Stable key order: required/recommended, then the §10 contract, then the §5
-  // families (SPEC §4.1 / Appendix A order), then producer extras.
-  const ordered = orderKeys(frontmatter, [
-    'type',
-    'resource',
-    'title',
-    'description',
-    'tags',
-    'runtime',
-    'parameters',
-    'computation',
-    'executor',
-    'attester',
-    'generated',
-    'timestamp',
-    'verified',
-    'status',
-    'stale_after',
-    'sources',
-    'usage_window',
-  ]);
+  const ordered = orderKeys(frontmatter, CONCEPT_KEY_ORDER);
 
   const yaml = dumpYaml(ordered, { sortKeys: false, lineWidth: -1 }).trimEnd();
 
@@ -529,4 +238,37 @@ export function exportBundle(input: ExportInput, opts: OkfMappingOptions = {}): 
   const concepts = input.concepts.map((c) => reconstructConcept(c, ctx));
   const indexes = regenerateIndexes(input.concepts.map((c) => c.conceptId));
   return [...concepts, ...indexes].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * Rebuild the exporter's input from the quads of a graph (e.g. every subject
+ * under `iriBase` in one Context Graph view), in any order.
+ *
+ * A concept is a subject under `iriBase` that carries an `rdf:type`. A
+ * skolemized node (`<conceptIri>/.well-known/genid/…`: a body section, or a
+ * v0.2 verification / source / parameter entry) belongs to the concept its IRI
+ * starts with and is attached to it, so the families can be rebuilt; it is
+ * never itself a concept, which would otherwise export as a stray
+ * `.well-known/genid/*.md` file. This is the package's own reading of the IRI
+ * layout the importer mints, so graph consumers need not reproduce it.
+ */
+export function exportInputFromQuads(quads: readonly Quad[], opts: Pick<OkfMappingOptions, 'iriBase'> = {}): ExportInput {
+  const iriBase = opts.iriBase ?? DEFAULT_IRI_BASE;
+  const rootQuads = new Map<string, Quad[]>();
+  const nodeQuadsByOwner = new Map<string, Quad[]>();
+  for (const q of quads) {
+    const infixAt = q.subject.indexOf(SECTION_GENID_INFIX);
+    const target = infixAt === -1 ? rootQuads : nodeQuadsByOwner;
+    const key = infixAt === -1 ? q.subject : q.subject.slice(0, infixAt);
+    if (!target.has(key)) target.set(key, []);
+    target.get(key)!.push(q);
+  }
+  const concepts: ExportInput['concepts'] = [...rootQuads.entries()]
+    .filter(([iri, qs]) => iri.startsWith(iriBase) && qs.some((q) => q.predicate === RDF_TYPE))
+    .map(([iri, qs]) => ({
+      conceptId: iri.slice(iriBase.length),
+      iri,
+      quads: [...qs, ...(nodeQuadsByOwner.get(iri) ?? [])],
+    }));
+  return { concepts };
 }

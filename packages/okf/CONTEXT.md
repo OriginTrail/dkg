@@ -56,13 +56,31 @@ edges. Superseded in v0.2 by `sources` (§13.1) but still parsed.
 One of the optional frontmatter groups SPEC §5 and §10 define — provenance
 (`sources`, `usage_window`), trust (`generated`, `verified`), lifecycle
 (`status`, `stale_after`) and the Attested Computation contract (`runtime`,
-`parameters`, `computation`, `executor`, `attester`). Mapped by `families.ts`
-into the `okf:` namespace (`http://dkg.io/ontology/okf/`) plus `prov:` and the
-existing `schema:` terms. Single values sit flat on the concept; each entry of a
+`parameters`, `computation`, `executor`, `attester`). Mapped into the `okf:`
+namespace (`http://dkg.io/ontology/okf/`) plus `prov:` and the existing
+`schema:` terms. Single values sit flat on the concept; each entry of a
 list-valued family (`sources`, `verified`, `parameters`) becomes a **family
 node** — a skolemized IRI `<conceptIri>/.well-known/genid/okf{src,ver,param}_<id>_<n>`
 typed `okf:Source` / `okf:Verification` / `okf:Parameter`, with the entry index
 `n` in the IRI so export restores the original order.
+
+**Family definition** (`src/families/specs.ts`):
+The one declaration of a family: its shape (scalar, mapping or list), its
+ordered field → predicate table with each field's kind (text, token, actor,
+date, integer, boolean, path, text-list), and its diagnostic wording. The
+encoder (`families/encode.ts`), the decoder (`families/decode.ts`), the shape
+diagnostics (`families/diagnostics.ts`) and the verification parser
+(`parseVerified`) all read it, so adding or changing a field is one edit.
+Field order is also the key order export writes. The two operations that are
+not field mappings stay explicit in the encoder: a `derivesLineage` field adds
+`prov:wasDerivedFrom`, and `verified` materialises the trust tier.
+
+**Parsed list** (`parseList`):
+The single classification of a list family's entries — which are mappings,
+which become nodes, at which index. `parseVerified` is its `verified` view;
+the RDF, the summary counts and the diagnostics all read it, so an invalid
+first entry followed by a valid verifier yields one node at index 1, one
+counted verification, and a warning that names `verified[0]`.
 
 **Actor** (§7):
 The string convention `human:<id>` / `process:<id>` / `<producer>/<version>`
@@ -122,6 +140,11 @@ it; the CLI summary reports it against the current time.
 - **Derived triples** (`okf:trustTier`, `prov:wasDerivedFrom`) are consumer
   derivations, so export never writes them back; the next import re-derives
   them. Round trip is therefore graph-equal.
+- **Graph → export input** is the package's job (`exportInputFromQuads`): a
+  concept is a typed subject under the IRI base, and every skolemized node is
+  attached to the concept its IRI starts with. `dkg okf export` only converts
+  the daemon's SPARQL bindings to quads, so no graph consumer has to decode the
+  mapper's IRI layout itself.
 - **`generated.at` and the legacy `timestamp`** both land on
   `schema:dateModified`, so a mixed v0.1 / v0.2 corpus is uniformly queryable
   by one last-modified predicate. `generated.at` wins when both are present;

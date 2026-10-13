@@ -49,25 +49,59 @@ export {
 export { parseDocument, OkfDocumentError } from './document.js';
 export { frontmatterQuads, mapFrontmatter, parseBody, mapConcept, summarizeTrust } from './mapping.js';
 export type { FrontmatterContext, FrontmatterMapping } from './mapping.js';
-export { familyQuads, familyDiagnostics, sourceIds, V02_FAMILY_KEYS } from './families.js';
-export type { FamilyResult } from './families.js';
+export {
+  familyQuads,
+  encodeFamily,
+  decodeFamilies,
+  familyDiagnostics,
+  sourceIds,
+  parseList,
+  FAMILY_SPECS,
+  FAMILY_BY_KEY,
+  V02_FAMILY_KEYS,
+  GENERATED,
+  VERIFIED,
+  STATUS,
+  STALE_AFTER,
+  SOURCES,
+  USAGE_WINDOW,
+  RUNTIME,
+  PARAMETERS,
+  COMPUTATION,
+  EXECUTOR,
+  ATTESTER,
+} from './families/index.js';
+export type {
+  FamilyResult,
+  FamilySpec,
+  FieldSpec,
+  FieldKind,
+  ScalarFamilySpec,
+  MappingFamilySpec,
+  ListFamilySpec,
+  ParsedEntry,
+  ParsedList,
+} from './families/index.js';
 export {
   dateTimeLexical,
   isXsdDateTime,
   isXsdDate,
   hasExplicitOffset,
   actorKind,
+  parseVerified,
   normalizeVerified,
+  trustTierOf,
   deriveTrustTier,
   conceptStatus,
   isKnownStatus,
   isStale,
 } from './trust.js';
+export type { ParsedVerification } from './trust.js';
 export { valueToTerms, dateTerm, actorTerm, pathFieldTerm, typeToIri, isAttestedComputationType } from './terms.js';
 export { okfExtensionPredicate, okfExtensionKey, okfExtensionPrefix } from './extensions.js';
 export type { PathContext, PathFieldTerm } from './terms.js';
 export { importBundle } from './bundle.js';
-export { exportBundle } from './export.js';
+export { exportBundle, exportInputFromQuads } from './export.js';
 export { validateBundle } from './validation.js';
 export { quadsToNQuads } from './nquads.js';
 export { loadBundleDir, loadBundleDirWithReport } from './loader.js';

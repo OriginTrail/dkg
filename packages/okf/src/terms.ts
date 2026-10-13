@@ -18,10 +18,7 @@ import { isSafeIri, literalTerm, typedLiteralTerm, pascalCase, camelCase } from 
 import { dateTimeLexical, isXsdDate, isXsdDateTime } from './trust.js';
 import type { Quad } from './types.js';
 
-/** A YAML mapping (not a list, not a Date). */
-export function isMapping(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);
-}
+export { isMapping } from './utils.js';
 
 export function toArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [value];

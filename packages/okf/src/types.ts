@@ -94,6 +94,8 @@ export type OkfStatus = 'draft' | 'stable' | 'deprecated';
 
 /** One normalised `verified[]` event (SPEC §5.2). */
 export interface VerificationEvent {
+  /** Position of the entry in the frontmatter list (0 for a bare mapping); its node IRI carries the same index. */
+  index: number;
   /** Actor (§7), e.g. `human:jsmith@acme`, `process:finance-nightly`, `reference_agent/gemini-2.5-pro`. */
   by: string;
   /** ISO 8601 lexical of the confirmation instant, or `null` when absent/unparseable. */

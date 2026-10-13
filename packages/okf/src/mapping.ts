@@ -15,7 +15,7 @@
  *   - `generated.at` (v0.2 §5.2), or the legacy v0.1 `timestamp` it supersedes
  *     (§13.1), is the last-modified time → `schema:dateModified`;
  *   - the v0.2 provenance / trust / lifecycle / attestation families (§5, §10)
- *     are mapped by `families.ts` — flat predicates for single values, one
+ *     are mapped by `families/` from one definition per family — flat predicates for single values, one
  *     skolemized node per list entry, typed edges for bundle paths.
  */
 
@@ -48,8 +48,8 @@ import {
   toArray,
   type PathContext,
 } from './terms.js';
-import { V02_FAMILY_KEYS, familyQuads, familyDiagnostics, sourceIds, declaresSources } from './families.js';
-import { dateTimeLexical, deriveTrustTier, normalizeVerified, conceptStatus } from './trust.js';
+import { SOURCES, V02_FAMILY_KEYS, familyQuads, familyDiagnostics, parseList, sourceIds, declaresSources } from './families/index.js';
+import { dateTimeLexical, parseVerified, trustTierOf, conceptStatus } from './trust.js';
 import type {
   OkfDocument,
   OkfMappingOptions,
@@ -156,7 +156,7 @@ export function mapFrontmatter(
       }
       default: {
         if (V02_FAMILY_KEYS.has(key)) {
-          const r = familyQuads(iri, key, value, frontmatter, pathCtx);
+          const r = familyQuads(iri, key, value, pathCtx);
           out.push(...r.quads);
           derived.push(...r.derivedFromConcepts);
           warnings.push(...r.warnings);
@@ -190,19 +190,17 @@ export function summarizeTrust(
   const by = generated?.by;
   const generatedBy = by !== undefined && by !== null && String(by).trim() !== '' ? String(by).trim() : null;
   const generatedAt = (generated ? dateTimeLexical(generated.at) : null) ?? dateTimeLexical(frontmatter.timestamp);
-  const sourcesRaw: unknown[] = Array.isArray(frontmatter.sources)
-    ? frontmatter.sources
-    : isMapping(frontmatter.sources)
-      ? [frontmatter.sources]
-      : [];
+  // The same parses the RDF mapping uses, so the counts match the nodes minted.
+  const { events } = parseVerified(frontmatter.verified);
+  const sources = parseList(SOURCES, frontmatter.sources).entries.filter((e) => e.mapping !== null).length;
   return {
-    tier: deriveTrustTier(frontmatter.verified),
+    tier: trustTierOf(events),
     status: conceptStatus(frontmatter),
     staleAfter: dateTimeLexical(frontmatter.stale_after),
     generatedBy,
     generatedAt,
-    verifications: normalizeVerified(frontmatter.verified).length,
-    sources: sourcesRaw.filter(isMapping).length,
+    verifications: events.length,
+    sources,
     derivedFromConcepts: [...new Set(derivedFromConcepts)].sort(),
     attestedComputation: isAttestedComputationType(frontmatter.type),
   };

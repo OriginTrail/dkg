@@ -11,6 +11,8 @@ import {
   isKnownStatus,
   isStale,
   isAttestedComputationType,
+  parseVerified,
+  trustTierOf,
 } from '../src/index.js';
 
 describe('dateTimeLexical (SPEC §5 timestamps)', () => {
@@ -83,7 +85,7 @@ describe('actor convention (§7)', () => {
 describe('normalizeVerified (§5.2)', () => {
   it('treats a bare { by, at } mapping as a one-element list', () => {
     const events = normalizeVerified({ by: 'human:ahormati', at: '2026-06-25T09:00:00Z' });
-    expect(events).toEqual([{ by: 'human:ahormati', at: '2026-06-25T09:00:00Z', extra: {} }]);
+    expect(events).toEqual([{ index: 0, by: 'human:ahormati', at: '2026-06-25T09:00:00Z', extra: {} }]);
   });
   it('keeps every well-formed list entry, with extras preserved', () => {
     const events = normalizeVerified([
@@ -98,6 +100,32 @@ describe('normalizeVerified (§5.2)', () => {
     expect(normalizeVerified([{ at: '2026-06-25T09:00:00Z' }, 'nope', { by: '' }])).toEqual([]);
     expect(normalizeVerified(true)).toEqual([]);
     expect(normalizeVerified(undefined)).toEqual([]);
+  });
+});
+
+describe('parseVerified: the single interpretation of `verified` (§5.2)', () => {
+  it('reports the shape, every entry, and the usable events with their original indexes', () => {
+    const parsed = parseVerified([{ at: '2026-06-26T02:00:00Z' }, 'nope', { by: ' human:a ', note: 'x' }]);
+    expect(parsed.shape).toBe('list');
+    expect(parsed.entries.map((e) => [e.index, e.mapping !== null, e.usable])).toEqual([
+      [0, true, false],
+      [1, false, false],
+      [2, true, true],
+    ]);
+    expect(parsed.events).toEqual([{ index: 2, by: 'human:a', at: null, extra: { note: 'x' } }]);
+  });
+  it('distinguishes absent, bare-mapping and invalid shapes', () => {
+    expect(parseVerified(undefined).shape).toBe('absent');
+    expect(parseVerified(null).shape).toBe('absent');
+    expect(parseVerified({ by: 'process:p' }).shape).toBe('mapping');
+    expect(parseVerified({ by: 'process:p' }).events.map((e) => e.index)).toEqual([0]);
+    expect(parseVerified(true)).toEqual({ shape: 'invalid', entries: [], events: [] });
+  });
+  it('is what the compatibility views read', () => {
+    const value = [{ by: 'process:p' }, { by: 'human:h' }];
+    expect(normalizeVerified(value)).toEqual([...parseVerified(value).events]);
+    expect(deriveTrustTier(value)).toBe(trustTierOf(parseVerified(value).events));
+    expect(trustTierOf([])).toBe('unverified');
   });
 });
 

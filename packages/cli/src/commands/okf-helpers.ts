@@ -7,10 +7,9 @@
  */
 
 import {
+  exportInputFromQuads,
   isStale,
-  RDF_TYPE,
   SCHEMA_NS,
-  SECTION_GENID_INFIX,
   type BundleImport,
   type ExportInput,
   type Quad,
@@ -160,43 +159,28 @@ function unwrapIri(term: string): string {
 }
 
 /**
- * Rebuild the exporter's input from `?s ?p ?o` bindings fetched for one
- * Context Graph view (every subject under `iriBase`).
- *
- * Only real concept roots become concepts: subjects under the IRI base that
- * carry an rdf:type. The skolemized nodes (`<conceptIri>/.well-known/genid/…`:
- * body sections and the OKF v0.2 verification / source / parameter nodes) are
- * attached to the concept that owns them so the exporter can rebuild the v0.2
- * families — rather than being treated as concepts, which would rebuild them
- * as standalone `.well-known/genid/*.md` files that were never concepts.
- * Bindings with an empty cell are skipped. Pure; no daemon.
+ * `?s ?p ?o` bindings from one Context Graph view → quads. The daemon returns
+ * cells as bare strings or SPARQL-JSON objects, and IRIs raw or bracketed;
+ * both are normalised. Bindings with an empty cell are skipped. Pure; no daemon.
  */
-export function exportInputFromBindings(bindings: Array<Record<string, unknown>>, iriBase: string): ExportInput {
-  const quadsBySubject = new Map<string, Quad[]>();
-  const nodeQuadsByOwner = new Map<string, Quad[]>();
+export function quadsFromBindings(bindings: Array<Record<string, unknown>>): Quad[] {
+  const quads: Quad[] = [];
   for (const b of bindings) {
     const s = cell(b.s);
     const p = cell(b.p);
     const o = cell(b.o);
     if (!s || !p || !o) continue;
-    const subject = unwrapIri(s);
-    const quad: Quad = { subject, predicate: unwrapIri(p), object: o };
-    const infixAt = subject.indexOf(SECTION_GENID_INFIX);
-    if (infixAt !== -1) {
-      const owner = subject.slice(0, infixAt);
-      if (!nodeQuadsByOwner.has(owner)) nodeQuadsByOwner.set(owner, []);
-      nodeQuadsByOwner.get(owner)!.push(quad);
-      continue;
-    }
-    if (!quadsBySubject.has(subject)) quadsBySubject.set(subject, []);
-    quadsBySubject.get(subject)!.push(quad);
+    quads.push({ subject: unwrapIri(s), predicate: unwrapIri(p), object: o });
   }
-  const concepts: ExportInput['concepts'] = [...quadsBySubject.entries()]
-    .filter(([iri, quads]) => iri.startsWith(iriBase) && quads.some((q) => q.predicate === RDF_TYPE))
-    .map(([iri, quads]) => ({
-      conceptId: iri.slice(iriBase.length),
-      iri,
-      quads: [...quads, ...(nodeQuadsByOwner.get(iri) ?? [])],
-    }));
-  return { concepts };
+  return quads;
+}
+
+/**
+ * The exporter's input for a Context Graph view's bindings. Root discovery and
+ * the attachment of each skolemized family / section node to its concept are
+ * the OKF package's own reading of its IRI layout (`exportInputFromQuads`);
+ * the CLI only converts the daemon's bindings.
+ */
+export function exportInputFromBindings(bindings: Array<Record<string, unknown>>, iriBase: string): ExportInput {
+  return exportInputFromQuads(quadsFromBindings(bindings), { iriBase });
 }

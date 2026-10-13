@@ -51,6 +51,13 @@ import {
   okfExtensionPredicate,
   okfExtensionKey,
   isSafeIri,
+  exportInputFromQuads,
+  familyQuads,
+  decodeFamilies,
+  FAMILY_SPECS,
+  FAMILY_BY_KEY,
+  V02_FAMILY_KEYS,
+  DKG_HAS_SECTION,
 } from '../src/index.js';
 import type { BundleFile, Quad } from '../src/index.js';
 
@@ -59,6 +66,8 @@ const DT = (lex: string) => `"${lex}"^^<${XSD_DATE_TIME}>`;
 const objs = (quads: Quad[], predicate: string, subject = IRI) =>
   quads.filter((q) => q.subject === subject && q.predicate === predicate).map((q) => q.object);
 const node = (tag: string, i: number) => `${IRI}${SECTION_GENID_INFIX}${tag}metrics_revenue_${i}`;
+
+const IDX_V02 = (): BundleFile => ({ path: 'index.md', content: '---\nokf_version: "0.2"\n---\n\n# Root\n' });
 
 /** A two-concept bundle: the subject under test plus a policy it can derive from. */
 function bundle(frontmatterYaml: string, body = 'body\n'): BundleFile[] {
@@ -602,6 +611,121 @@ describe('export restores family entry order from the node IRIs, whatever order 
       );
       expectOriginalOrder(exportWith(quads));
     }
+  });
+});
+
+describe('one verification boundary: RDF, summary and diagnostics agree on which entry is which', () => {
+  it('keeps the node index of a valid verifier that follows an invalid entry', () => {
+    const { c, r } = conceptOf(bundle('type: Metric\nverified:\n  - { at: 2026-06-26T02:00:00Z }\n  - { by: human:a, at: 2026-06-27T02:00:00Z }'));
+    // the RDF: one Verification node, at index 1 — the entry's position in the list
+    expect(objs(c.quads, OKF_VERIFICATION)).toEqual([node(GENID_TAGS.verification, 1)]);
+    expect(objs(c.quads, OKF_VERIFIED_BY, node(GENID_TAGS.verification, 1))).toEqual(['"human:a"']);
+    expect(objs(c.quads, OKF_TRUST_TIER)).toEqual(['"human-reviewed"']);
+    // the summary counts the same single event
+    expect(c.trust).toMatchObject({ tier: 'human-reviewed', verifications: 1 });
+    // the diagnostics name the skipped entry by the same index
+    expect(r.warnings.map((w) => w.message)).toContain('`verified[0].by` is missing (§5.2); the event cannot name a verifier and is skipped');
+    // and export writes back only the usable event
+    expect(exportedFrontmatter(bundle('type: Metric\nverified:\n  - { at: 2026-06-26T02:00:00Z }\n  - { by: human:a, at: 2026-06-27T02:00:00Z }')).verified).toEqual([
+      { by: 'human:a', at: '2026-06-27T02:00:00Z' },
+    ]);
+  });
+});
+
+describe('family definitions drive both directions', () => {
+  // One sample value per family, covering every field kind. Encoding with
+  // familyQuads and decoding with decodeFamilies must give the value back.
+  const SAMPLES: Record<string, unknown> = {
+    generated: { by: 'human:a', at: '2026-06-30T14:00:00Z', model: 'm' },
+    verified: [{ by: 'process:p', at: '2026-06-25T09:00:00Z' }, { by: 'human:h', at: '2026-06-26T09:00:00Z', note: 'ok' }],
+    status: 'deprecated',
+    stale_after: '2026-12-31T00:00:00Z',
+    sources: [
+      {
+        id: 's',
+        resource: 'https://x.example/s',
+        title: 'S',
+        author: 'team:t',
+        usage_count: 5,
+        last_modified: '2026-05-30T00:00:00Z',
+        usage_window: { from: '2026-05-01T00:00:00Z', to: '2026-05-31T00:00:00Z', population: 'prod' },
+        credibility_note: 'n',
+      },
+    ],
+    usage_window: { from: '2026-06-01T00:00:00Z', to: '2026-06-30T00:00:00Z', population: 'all' },
+    runtime: 'bigquery',
+    parameters: [{ name: 'year', type: 'integer', required: true, default: 2026 }],
+    computation: 'references/sql/revenue.sql',
+    executor: { resource: 'https://x.example/run', receipt: ['executed_sql', 'job_id'], timeout_s: 30 },
+    attester: { resource: 'https://x.example/attest.py', strict: true },
+  };
+  const ctx = { conceptId: 'm', iriBase: 'urn:okf:', conceptExists: () => false };
+  const decodeCtx = { iriBase: 'urn:okf:', conceptIris: new Set(['urn:okf:m']) };
+
+  it('declares every v0.2 family exactly once', () => {
+    expect(FAMILY_SPECS.map((s) => s.key).sort()).toEqual([...V02_FAMILY_KEYS].sort());
+    expect(Object.keys(SAMPLES).sort()).toEqual([...V02_FAMILY_KEYS].sort());
+    for (const spec of FAMILY_SPECS) {
+      if (spec.shape === 'scalar') continue;
+      const predicates = spec.fields.map((f) => f.predicate);
+      expect(new Set(predicates).size).toBe(predicates.length);
+      expect(FAMILY_BY_KEY.get(spec.key)).toBe(spec);
+    }
+  });
+
+  for (const key of Object.keys(SAMPLES)) {
+    it(`round-trips the ${key} family through its definition`, () => {
+      const quads = familyQuads('urn:okf:m', key, SAMPLES[key], ctx).quads;
+      const bySubject = new Map<string, Quad[]>();
+      for (const q of quads) bySubject.set(q.subject, [...(bySubject.get(q.subject) ?? []), q]);
+      const decoded = decodeFamilies(bySubject.get('urn:okf:m') ?? [], (n) => bySubject.get(n) ?? [], decodeCtx);
+      expect(decoded[key]).toEqual(SAMPLES[key]);
+    });
+  }
+});
+
+describe('exportInputFromQuads: the package rebuilds concepts from a graph in any order', () => {
+  const BASE = 'https://example.org/';
+  const files: BundleFile[] = [
+    IDX_V02(),
+    {
+      path: 'a.md',
+      content: '---\ntype: Metric\nverified:\n  - { by: human:a }\n  - { by: process:b }\nsources:\n  - { id: s0, resource: /b.md }\n---\n\n# Notes\n\nbody\n',
+    },
+    { path: 'b.md', content: '---\ntype: Attested Computation\nruntime: dbt\nparameters:\n  - { name: year }\n  - { name: region }\n---\n\nbody\n' },
+  ];
+  const imported = importBundle(files, { iriBase: BASE });
+  const sectionNode = '/.well-known/genid/' + GENID_TAGS.section;
+  const semantic = (quads: Quad[]) =>
+    quadsToNQuads(quads.filter((q) => !q.subject.includes(sectionNode) && q.predicate !== DKG_HAS_SECTION));
+
+  it('selects typed roots under the base and attaches every node to its owner', () => {
+    const noise: Quad[] = [
+      { subject: `${BASE}untyped`, predicate: SCHEMA_NAME, object: '"no rdf:type"' },
+      { subject: 'urn:elsewhere:x', predicate: RDF_TYPE, object: 'http://schema.org/Thing' },
+    ];
+    const input = exportInputFromQuads([...noise, ...[...imported.quads].reverse()], { iriBase: BASE });
+    expect(input.concepts.map((c) => c.conceptId).sort()).toEqual(['a', 'b']);
+    for (const c of input.concepts) {
+      expect(c.iri).toBe(BASE + c.conceptId);
+      for (const q of c.quads) expect(q.subject === c.iri || q.subject.startsWith(`${c.iri}/.well-known/genid/`)).toBe(true);
+    }
+    const a = input.concepts.find((c) => c.conceptId === 'a')!;
+    expect(a.quads.some((q) => q.subject.includes(GENID_TAGS.verification))).toBe(true);
+    expect(a.quads.some((q) => q.subject.includes(GENID_TAGS.parameter))).toBe(false);
+  });
+
+  it('round-trips the semantic graph from shuffled quads under a custom base', () => {
+    let x = 99;
+    const shuffledQuads = [...imported.quads];
+    for (let i = shuffledQuads.length - 1; i > 0; i--) {
+      x = (x * 1103515245 + 12345) % 2147483648;
+      const j = x % (i + 1);
+      [shuffledQuads[i], shuffledQuads[j]] = [shuffledQuads[j], shuffledQuads[i]];
+    }
+    const exported = exportBundle(exportInputFromQuads(shuffledQuads, { iriBase: BASE }), { iriBase: BASE });
+    expect(exported.some((f) => f.path.includes('.well-known'))).toBe(false);
+    expect(semantic(importBundle(exported, { iriBase: BASE }).quads)).toBe(semantic(imported.quads));
   });
 });
 

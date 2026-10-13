@@ -18,7 +18,7 @@
  */
 
 import { parseDocument, OkfDocumentError } from './document.js';
-import { familyDiagnostics } from './families.js';
+import { familyDiagnostics } from './families/index.js';
 import { isConceptFile, isReservedFile, isValidSegment, basename, pathToConceptId } from './paths.js';
 import { OKF_KNOWN_VERSIONS, OKF_TARGET_VERSION } from './constants.js';
 import type { BundleFile, ConformanceReport } from './types.js';

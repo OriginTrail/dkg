@@ -1,0 +1,151 @@
+/**
+ * Context-free shape checks for the OKF v0.2 families (SPEC §5, §10), driven
+ * by the definitions in `specs.ts`. These are SHOULD-level producer rules: a
+ * consumer MUST NOT reject for any of them (§11), so every finding is a
+ * warning. Shared by `validateBundle` and the mapper so the two never disagree.
+ *
+ * Generic rules: a family of the wrong shape (`shapeNote`), a list entry that
+ * is not a mapping (`entryNote`), a blank required field (`requiredNote`), an
+ * invalid date, a non-integer integer. Two rules are specific and stay
+ * explicit: `status` must be a §5.4 value, and an Attested Computation needs a
+ * `runtime` (§10.2).
+ */
+
+import { dateTimeLexical, hasExplicitOffset, isKnownStatus, isXsdDateTime } from '../trust.js';
+import { isAttestedComputationType } from '../terms.js';
+import { isBlank, isMapping } from '../utils.js';
+import type { OkfWarning } from '../types.js';
+import { parseList } from './parse.js';
+import {
+  FAMILY_SPECS,
+  RUNTIME,
+  SOURCES,
+  STATUS,
+  USAGE_WINDOW,
+  type FamilySpec,
+  type FieldSpec,
+  type ListFamilySpec,
+  type MappingFamilySpec,
+} from './specs.js';
+
+type Diagnostic = Pick<OkfWarning, 'code' | 'message'>;
+
+function checkDateTime(field: string, value: unknown, out: Diagnostic[]): void {
+  if (value === undefined || value === null) return;
+  const lexical = dateTimeLexical(value);
+  if (lexical === null || !isXsdDateTime(lexical)) {
+    out.push({
+      code: 'malformed-family',
+      message: `${field} "${String(value)}" is not a valid ISO 8601 datetime (§5); kept as a plain literal`,
+    });
+    return;
+  }
+  if (!hasExplicitOffset(lexical)) {
+    out.push({
+      code: 'malformed-family',
+      message: `${field} "${lexical}" has no explicit UTC offset (§5 requires one, e.g. 2026-06-30T14:00:00Z)`,
+    });
+  }
+}
+
+/** The backticked name of a field in a message. */
+function fieldLabel(spec: FamilySpec, label: string, field: FieldSpec): string {
+  if (spec.shape === 'scalar') return `\`${label}\``;
+  // Kept exactly as the hand-written checks reported it, so this refactor
+  // changes no output; the next commit makes usage_window match the others.
+  if (spec === USAGE_WINDOW) return `\`${label}\`.${field.key}`;
+  return `\`${label}.${field.key}\``;
+}
+
+function checkField(spec: FamilySpec, field: FieldSpec, value: unknown, label: string, out: Diagnostic[]): void {
+  if (value === undefined || value === null) return;
+  const name = fieldLabel(spec, label, field);
+  if (field.kind === 'date') checkDateTime(name, value, out);
+  else if (field.kind === 'integer' && !(typeof value === 'number' && Number.isInteger(value))) {
+    out.push({ code: 'malformed-family', message: `${name} should be an integer (${spec.section})` });
+  }
+}
+
+function checkEntry(
+  spec: MappingFamilySpec | ListFamilySpec,
+  obj: Record<string, unknown>,
+  label: string,
+  out: Diagnostic[],
+): void {
+  for (const field of spec.fields) {
+    const value = obj[field.key];
+    if (field.requiredNote && isBlank(value)) {
+      out.push({ code: 'malformed-family', message: `\`${label}.${field.key}\` ${field.requiredNote}` });
+    }
+    checkField(spec, field, value, label, out);
+  }
+  if (spec.shape === 'list') {
+    for (const nested of spec.nested ?? []) {
+      const value = obj[nested.key];
+      if (value !== undefined && value !== null) checkFamily(nested, value, `${label}.${nested.key}`, out);
+    }
+  }
+}
+
+function checkFamily(spec: FamilySpec, value: unknown, label: string, out: Diagnostic[]): void {
+  switch (spec.shape) {
+    case 'scalar': {
+      if (spec === STATUS) {
+        const s = String(value).trim();
+        if (!isKnownStatus(s)) {
+          out.push({ code: 'malformed-family', message: `\`status\` "${s}" is not one of draft | stable | deprecated (§5.4); kept verbatim` });
+        }
+      }
+      checkField(spec, spec.field, value, label, out);
+      break;
+    }
+    case 'mapping':
+      if (!isMapping(value)) out.push({ code: 'malformed-family', message: `\`${label}\` ${spec.shapeNote}` });
+      else checkEntry(spec, value, label, out);
+      break;
+    case 'list': {
+      const parsed = parseList(spec, value);
+      if (parsed.shape === 'invalid') {
+        out.push({ code: 'malformed-family', message: `\`${label}\` ${spec.shapeNote}` });
+        break;
+      }
+      for (const entry of parsed.entries) {
+        const entryLabel = `${label}[${entry.index}]`;
+        if (entry.mapping === null) out.push({ code: 'malformed-family', message: `\`${entryLabel}\` ${spec.entryNote}` });
+        else checkEntry(spec, entry.mapping, entryLabel, out);
+      }
+      break;
+    }
+  }
+}
+
+/**
+ * Shape diagnostics for every v0.2 family a concept carries, in the order of
+ * `FAMILY_SPECS`. Never rejects (§11).
+ */
+export function familyDiagnostics(frontmatter: Record<string, unknown>): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  for (const spec of FAMILY_SPECS) {
+    if (spec === RUNTIME && isAttestedComputationType(frontmatter.type) && isBlank(frontmatter.runtime)) {
+      out.push({ code: 'malformed-family', message: '`runtime` is required for an `Attested Computation` concept (§10.2)' });
+    }
+    const value = frontmatter[spec.key];
+    if (value !== undefined && value !== null) checkFamily(spec, value, spec.key, out);
+  }
+  return out;
+}
+
+/** The `sources[].id` labels a body footnote may join against (§5.1). */
+export function sourceIds(frontmatter: Record<string, unknown>): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of parseList(SOURCES, frontmatter.sources).entries) {
+    const id = entry.mapping?.id;
+    if (id !== undefined && id !== null) ids.add(String(id));
+  }
+  return ids;
+}
+
+/** True when the document declares a `sources` family at all (footnote checks apply only then). */
+export function declaresSources(frontmatter: Record<string, unknown>): boolean {
+  return frontmatter.sources !== undefined && frontmatter.sources !== null;
+}

@@ -7,6 +7,8 @@
  */
 
 import { OKF_STATUS_VALUES } from './constants.js';
+import { VERIFIED, definedKeys } from './families/specs.js';
+import { parseList, type ParsedEntry } from './families/parse.js';
 import type { OkfStatus, TrustTier, VerificationEvent } from './types.js';
 
 /** XSD `dateTime` lexical form (`YYYY-MM-DDThh:mm:ss[.s+][Z|±hh:mm]`). The zone is optional in XSD; OKF wants it explicit (§5). */
@@ -98,30 +100,40 @@ export function actorKind(actor: string): 'human' | 'process' | 'agent' {
   return 'agent';
 }
 
-function isMapping(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);
+/** The `verified` family (§5.2) as one parse: the shape, every entry as written, and the usable events. */
+export interface ParsedVerification {
+  /** `absent`: no `verified` key. `invalid`: neither a mapping nor a list (kept verbatim). */
+  readonly shape: 'absent' | 'list' | 'mapping' | 'invalid';
+  /** Every entry with its index, usable or not (diagnostics report the unusable ones). */
+  readonly entries: readonly ParsedEntry[];
+  /** The entries that name a verifier, normalised, each keeping its original index. */
+  readonly events: readonly VerificationEvent[];
 }
 
 /**
- * Normalise a `verified` value into a list of events (§5.2): a bare `{ by, at }`
- * mapping MUST be treated as a one-element list; a list is taken as-is;
- * anything else (absent, scalar) yields no events. Entries that are not
- * mappings or lack `by` are dropped — they carry no verifier and so cannot
- * contribute to a tier (§5.3). The raw entry count is reported separately by
- * the validator so malformed entries are surfaced, never silently lost.
+ * The single interpretation of `verified` (§5.2). A bare `{ by, at }` mapping
+ * is a one-element list; an entry that is not a mapping, or has no `by`,
+ * names no verifier and is not an event. Which entries are usable is decided
+ * by the `verified` family spec (`families/specs.ts`) through `parseList`, the
+ * same classification the RDF mapping, the diagnostics and the summary counts
+ * read, so an event keeps the index of its node IRI.
  */
-export function normalizeVerified(value: unknown): VerificationEvent[] {
-  const raw: unknown[] = Array.isArray(value) ? value : isMapping(value) ? [value] : [];
-  const out: VerificationEvent[] = [];
-  for (const entry of raw) {
-    if (!isMapping(entry)) continue;
-    const by = entry.by;
-    if (by === undefined || by === null || String(by).trim() === '') continue;
+export function parseVerified(value: unknown): ParsedVerification {
+  if (value === undefined || value === null) return { shape: 'absent', entries: [], events: [] };
+  const parsed = parseList(VERIFIED, value);
+  const known = definedKeys(VERIFIED);
+  const events = parsed.entries.flatMap((entry): VerificationEvent[] => {
+    if (!entry.usable || entry.mapping === null) return [];
     const extra: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(entry)) if (k !== 'by' && k !== 'at') extra[k] = v;
-    out.push({ by: String(by).trim(), at: dateTimeLexical(entry.at), extra });
-  }
-  return out;
+    for (const [k, v] of Object.entries(entry.mapping)) if (!known.has(k)) extra[k] = v;
+    return [{ index: entry.index, by: String(entry.mapping.by).trim(), at: dateTimeLexical(entry.mapping.at), extra }];
+  });
+  return { shape: parsed.shape, entries: parsed.entries, events };
+}
+
+/** The usable verification events of a `verified` value (§5.2): `parseVerified(value).events`. */
+export function normalizeVerified(value: unknown): VerificationEvent[] {
+  return [...parseVerified(value).events];
 }
 
 /**
@@ -129,10 +141,14 @@ export function normalizeVerified(value: unknown): VerificationEvent[] {
  * non-`human:` verifiers only ⇒ `machine-confirmed`; any `human:<id>` verifier
  * ⇒ `human-reviewed`. Advisory, not access control.
  */
-export function deriveTrustTier(verified: unknown): TrustTier {
-  const events = normalizeVerified(verified);
+export function trustTierOf(events: readonly Pick<VerificationEvent, 'by'>[]): TrustTier {
   if (events.length === 0) return 'unverified';
   return events.some((e) => actorKind(e.by) === 'human') ? 'human-reviewed' : 'machine-confirmed';
+}
+
+/** The §5.3 trust tier of a `verified` value. */
+export function deriveTrustTier(verified: unknown): TrustTier {
+  return trustTierOf(parseVerified(verified).events);
 }
 
 /** Lifecycle status (§5.4). Absent ⇒ `stable`. An unknown value is returned verbatim (tolerated). */

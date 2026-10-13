@@ -78,3 +78,13 @@ export function dedupeQuads<T extends { subject: string; predicate: string; obje
   }
   return out;
 }
+
+/** A YAML mapping (not a list, not a Date). */
+export function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);
+}
+
+/** Absent, or a value whose string form is empty after trimming (the spec's "missing"). */
+export function isBlank(value: unknown): boolean {
+  return value === undefined || value === null || String(value).trim() === '';
+}
