@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { quadsToNQuads } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { createAssetPayloadVerifier } from '../src/sync/requester/asset-payload-verifier.js';
 import type { VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
@@ -31,6 +31,10 @@ describe('bulk group independent parsed heap fence', () => {
   it('splits real verified assets before 64 MiB or eight members', async () => {
     const worker = new SyncVerifyWorker(), assets = [], stages = [];
     const cg = 'heap-fixture', address = '0x0000000000000000000000000000000000000001';
+    // Golden root for the 200 public triples below (the graph is not hashed).
+    // The real worker recomputes it for every asset. Avoid hashing the same
+    // 12 MB fixture again in the coverage-instrumented test thread six times.
+    const root = Buffer.from('adc2431ba3d563c081f0ed5fad9b3b7783fede8feb978602d194c142cf4ed361', 'hex');
     const uals = [1, 2, 3, 4, 5, 6].map(id => `did:dkg:base:84532/${address}/${id}`);
     const verify = createAssetPayloadVerifier({ contextGraphId: cg, assetUals: uals,
       ctx: createOperationContext('sync'), parseAndFilter: worker.parseAndFilter.bind(worker),
@@ -42,7 +46,6 @@ describe('bulk group independent parsed heap fence', () => {
         // Few large valid literals exercise the real 64 MiB fence without
         // hundreds of thousands of Merkle leaves under CI coverage.
         const data = Array.from({ length: 200 }, (_, n) => ({ graph, subject: `urn:s:${n}`, predicate: 'urn:p', object: JSON.stringify('x'.repeat(60_000)) }));
-        const root = computeFlatKCRootV10(data, []);
         const meta = generateGraphKnowledgeAssetMetadata({ contextGraphId: cg, ual, assertionGraph: graph,
           assertionVersion: 1, publicTripleCount: data.length, privateTripleCount: 0, merkleRoot: root,
           authorAddress: address, publisherPeerId: 'fixture', accessPolicy: 'public', allowedPeers: [], timestamp: new Date(),
