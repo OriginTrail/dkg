@@ -1,3 +1,4 @@
+import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 import {
   CclResourceNotFoundError,
   ContextGraphPolicyAuthorizationError,
@@ -7,7 +8,7 @@ import {
   readBody,
   SMALL_BODY_BYTES,
 } from '../http-utils.js';
-import type { RequestContext } from './context.js';
+import { type RequestContext } from './context.js';
 
 async function dispatchCclRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, url, path, requestAgentAddress } = ctx;
@@ -77,6 +78,10 @@ async function dispatchCclRoutes(ctx: RequestContext): Promise<void> {
   }
 
   if (req.method === 'GET' && path === '/api/ccl/policy/list') {
+    const contextGraphId = url.searchParams.get('contextGraphId');
+    if (contextGraphId !== null || !hasNodeOperatorReadAccess(ctx)) {
+      if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
+    }
     const policies = await agent.listCclPolicies({
       contextGraphId: url.searchParams.get('contextGraphId') ?? undefined,
       name: url.searchParams.get('name') ?? undefined,
@@ -95,6 +100,7 @@ async function dispatchCclRoutes(ctx: RequestContext): Promise<void> {
         error: 'Missing required query params: contextGraphId, name',
       });
     }
+    if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
     const policy = await agent.resolveCclPolicy({
       contextGraphId,
       name,
@@ -126,6 +132,7 @@ async function dispatchCclRoutes(ctx: RequestContext): Promise<void> {
         error: 'facts must be an array when provided',
       });
     }
+    if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
     const result = publishResult
       ? await agent.evaluateAndPublishCclPolicy({
         contextGraphId,
@@ -155,6 +162,7 @@ async function dispatchCclRoutes(ctx: RequestContext): Promise<void> {
         error: 'Missing required query param: contextGraphId',
       });
     }
+    if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
     const evaluations = await agent.listCclEvaluations({
       contextGraphId,
       policyUri: url.searchParams.get('policyUri') ?? undefined,

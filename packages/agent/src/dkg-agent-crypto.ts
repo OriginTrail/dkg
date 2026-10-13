@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Workspace-encryption / sender-key subsystem extracted from dkg-agent.ts as
  * a mixin holder: recipient/gate resolution, on-chain access-policy reads,
@@ -106,7 +105,6 @@ import {
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
-  resolveWorkspaceAgentRecipientKeys,
   isWorkspaceAgentEncryptionKeyMissingError,
   WorkspaceAgentEncryptionKeyMissingError,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -164,6 +162,7 @@ import {
   type SwmRegisteredAuthorityReadOptions,
   type SwmTransportAuthority,
 } from './internal/context-graph-authority/swm-transport-authority.js';
+import { noRosterFrom } from './internal/context-graph-authority/unanswered-authority-read.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -888,7 +887,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       { signal: options.signal },
     );
     if (registered.kind === 'private') return [...registered.participantAgents];
-    if (registered.kind !== 'unregistered') return null;
+    if (registered.kind !== 'unregistered') return noRosterFrom(contextGraphId, registered);
     const metadataRevision = this.contextGraphMetaProjection
       .readContextGraphAuthorityFactsRevision(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
@@ -899,7 +898,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (currentRegistered.kind === 'private') {
       return [...currentRegistered.participantAgents];
     }
-    if (currentRegistered.kind !== 'unregistered') return null;
+    if (currentRegistered.kind !== 'unregistered') return noRosterFrom(contextGraphId, currentRegistered);
     return this.contextGraphMetaProjection
       .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
       ? metadataGate
@@ -1889,7 +1888,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         for (const agentAddress of participantAgents) {
           let agentRecipients: WorkspaceAgentRecipient[];
           try {
-            agentRecipients = await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress);
+            agentRecipients = await projection.recipientKeyCollect.resolve(agentAddress);
           } catch (error) {
             if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
             missingKeys.push(...error.agentAddresses);
@@ -1918,7 +1917,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         }
         return {
           resolution: { requiresEncryption: true, recipients: [firstRecipient, ...remainingRecipients] },
-          stayedCurrent: () => attemptRevision === projection.recipientKeyRouteFence.revision
+          stayedCurrent: () => projection.recipientKeyRouteFence.hasPendingWrites !== true
+            && attemptRevision === projection.recipientKeyRouteFence.revision
             && attemptGate === projection.peerGateRevision.read(input.contextGraphId),
         };
       };
@@ -2074,6 +2074,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       !state
       || state.membershipHash !== membershipHash
       || state.recipientRouteHash !== recipientRouteHash
+      || state.chainKeyMatchesIndex !== true
     ) {
       const pruned = this.prunePendingSenderKeysForEpochRotation({
         contextGraphId: input.contextGraphId,
@@ -2107,8 +2108,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       });
     }
 
+    // Shares into one graph overlap. Each takes its key and index here, before the next
+    // await, so that no two encrypt with the same pair and the key keeps step with the index.
+    const { chainKey, nextMessageIndex: messageIndex } = state;
+    state.chainKey = ratchetSwmSenderChainKey(chainKey);
+    state.nextMessageIndex = messageIndex + 1;
     const encrypted = await encryptSwmSenderKeyMessage({
-      chainKey: state.chainKey,
+      chainKey,
       plaintext: input.plaintext,
       senderSigningSecretKey: state.senderSigningSecretKey,
       contextGraphId: state.contextGraphId,
@@ -2116,10 +2122,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       senderAgentAddress: state.senderAgentAddress,
       epochId: state.epochId,
       membershipHash: state.membershipHash,
-      messageIndex: state.nextMessageIndex,
+      messageIndex,
     });
-    state.chainKey = encrypted.nextChainKey;
-    state.nextMessageIndex += 1;
     await this.saveSwmSenderKeyState();
     this.logSwmSenderKeyDebugEncryptedPayload(ctx, encrypted.message);
 
@@ -2157,6 +2161,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         subGraphName: input.subGraphName,
         recipients: input.recipients,
       }),
+      chainKeyMatchesIndex: true,
       chainKey,
       nextMessageIndex: 0,
       senderSigningSecretKey: senderSigningKeypair.secretKey,

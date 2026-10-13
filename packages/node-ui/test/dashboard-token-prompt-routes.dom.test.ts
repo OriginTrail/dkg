@@ -12,6 +12,7 @@ import { forgetEnteredApiToken } from '../src/ui/lib/apiToken.js';
 
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: { fetchStatus: vi.fn(async () => ({ synced: true, peers: 0 })) },
+  detectMockMode: async () => false,
   isUsingMocks: () => false,
   subscribeMockMode: () => () => {},
 }));

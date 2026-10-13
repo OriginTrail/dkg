@@ -7,7 +7,10 @@ import {
   isRfc64SharedProjectionStreamCapabilityV1,
   SparqlHttpStore,
   SyncSharedProjectionStoreV1,
+  withManagedOxigraphRuntimeStoreConfigV1,
 } from '../src/index.js';
+// Not re-exported from src/index.js: the hook accessor is internal to the package.
+import { getManagedOxigraphRuntimeHooksV1 } from '../src/managed-oxigraph-runtime-store.js';
 import { runRfc64HttpProjectionCapabilityConformance } from './helpers/rfc64-http-projection-capability-conformance.js';
 import {
   createRfc64SharedProjectionTestFixture,
@@ -201,6 +204,40 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
       await store?.close();
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it('preserves authenticated runtime hooks while replacing store decorators', () => {
+    const config = createManagedOxigraphRuntimeStoreConfigV1({
+      backend: 'sparql-http',
+      options: {
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        managedByDkg: true,
+      },
+      largeLiteralStorage: { enabled: false },
+      graphSetIndex: false,
+      changelog: false,
+    }, {
+      getRecoveryState: () => ({ recovering: false, generation: 7 }),
+    });
+    const updated = withManagedOxigraphRuntimeStoreConfigV1(config, {
+      changelog: true,
+    });
+
+    expect(updated.options).toEqual(config.options);
+    expect(updated.largeLiteralStorage).toEqual(config.largeLiteralStorage);
+    expect(updated.graphSetIndex).toBe(config.graphSetIndex);
+    expect(updated.changelog).toBe(true);
+    // Without this the test would pass even if the rewrite minted an empty
+    // hook set, which is the one thing its title claims to cover.
+    expect(getManagedOxigraphRuntimeHooksV1(updated)?.getRecoveryState?.()).toEqual({
+      recovering: false,
+      generation: 7,
+    });
+
+    const copied = { ...config };
+    expect(() => withManagedOxigraphRuntimeStoreConfigV1(copied, {})).toThrow(
+      'managed Oxigraph runtime config has no authenticated control plane',
+    );
   });
 
   it('uses the frozen query and managed-Oxigraph-specific request headers', async () => {

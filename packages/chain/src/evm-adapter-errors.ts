@@ -11,6 +11,8 @@
  */
 import { ethers, ErrorFragment, Interface } from 'ethers';
 import {
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
   messageIndicatesNoFundedPublisherWallet,
@@ -397,10 +399,10 @@ export class InsufficientPublisherFundsError extends Error {
 
 /** A strict publish cannot prove PCA coverage while its chain reads are unavailable. */
 export class PcaFundingUnknownError extends Error {
-  readonly code = 'PCA_FUNDING_UNKNOWN';
+  readonly code = PCA_FUNDING_UNKNOWN_CODE;
   readonly readCode?: string;
   constructor(readCode?: string) {
-    super('PCA funding verification is inconclusive; retry when chain reads recover.');
+    super(PCA_FUNDING_UNKNOWN_MESSAGE);
     this.name = 'PcaFundingUnknownError';
     this.readCode = readCode;
   }

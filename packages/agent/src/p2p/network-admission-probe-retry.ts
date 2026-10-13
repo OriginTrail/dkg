@@ -89,10 +89,11 @@ export class NetworkAdmissionProbeRetryState {
     peerId: CanonicalPeerId,
     reason: string,
     kind: NetworkAdmissionProbeBackoffKind,
+    maxDelayMs?: number,
   ): void {
     const previous = this.peers.get(peerId);
     const consecutiveFailures = (previous?.history.consecutiveFailures ?? 0) + 1;
-    const delayMs = this.backoffDelayMs(consecutiveFailures, kind);
+    const delayMs = Math.min(this.backoffDelayMs(consecutiveFailures, kind), maxDelayMs ?? Infinity);
 
     if (previous) {
       this.peers.delete(peerId);

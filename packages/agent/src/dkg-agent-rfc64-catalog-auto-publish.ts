@@ -83,6 +83,7 @@ import {
 } from './rfc64/finalized-private-placement-repair-store-v1.js';
 import { loadExactAppliedCatalogRowsV1 } from
   './rfc64/applied-catalog-authority-transition-v1.js';
+import { catalogPlacementTimingV1, type CatalogPlacementAttemptV1 } from './internal/catalog-placement-timing.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -785,11 +786,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical post-confirmation observer. Public SWM-only lanes retract the
-   * pending row. A finalized private lane appends the now-chain-backed
-   * placement to its durable recovery catalog while retaining its tier-neutral
-   * author-inventory row. The irreversible publish response never waits for
-   * this observer.
+   * Canonical post-confirmation observer. A public SWM-only lane retracts the
+   * pending row, and the publication waits for that. A finalized private lane
+   * keeps its tier-neutral row, stores the durable marker of its now-chain-backed
+   * placement and asks the catalog supervisor for it: the publication waits
+   * for that one write, never for a placement attempt or the start of one.
    */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
@@ -816,6 +817,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
       return;
     }
+    const placementWait = catalogPlacementTimingV1(this).beginWait(confirmedSeal, params.ctx);
     const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
     const assetKey = rfc64SwmInventoryAssetKeyV1({
       contextGraphId,
@@ -842,6 +844,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     // Fence every confirmed version, including confirmation-gated finalized
     // private repairs, until the asset-tail repair and queued observers drain.
     // Newer assertion versions use distinct fence entries and remain eligible.
+    // The fence is set before the first await and outlives this call.
     if (params.shareOperationId !== undefined) {
       shadowRuntime.markVmConfirmed(
         assetKey,
@@ -849,34 +852,34 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         params.shareOperationId,
       );
     }
-    let finalizedPrivateAttempt: Promise<void> | null = null;
+    let markerStored = false;
     try {
-      await shadowRuntime.runExclusive(
-        assetKey,
-        async () => {
-          if (finalizedPrivateInventoryScope !== null) {
-            const persistence = this.rfc64PersistenceV1;
-            if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-            const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
-              version: 1,
-              contextGraphId: contextGraphId as ContextGraphIdV1,
-              authorAddress: confirmedSeal.authorAddress,
-              inventoryScope: finalizedPrivateInventoryScope,
-              assertionCoordinate,
-              assertionVersion: confirmedSeal.assertionVersion,
-              kaUal: confirmedSeal.kaUal,
-              sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal),
-            });
-            // This durable marker is the restart boundary: pre-confirmation
-            // rows have none, while every admitted post-confirmation placement
-            // survives a crash or transient signing/catalog failure.
-            await persistence.finalizedPrivatePlacementRepairs.put(repair);
-            finalizedPrivateAttempt = this.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({
-              repair,
-              ctx: params.ctx,
-            }).whenAttempted;
-            return;
-          }
+      if (finalizedPrivateInventoryScope !== null) {
+        const persistence = this.rfc64PersistenceV1;
+        if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+        const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
+          version: 1,
+          contextGraphId: contextGraphId as ContextGraphIdV1,
+          authorAddress: confirmedSeal.authorAddress,
+          inventoryScope: finalizedPrivateInventoryScope,
+          assertionCoordinate,
+          assertionVersion: confirmedSeal.assertionVersion,
+          kaUal: confirmedSeal.kaUal,
+          sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal),
+        });
+        // GH#3081 — the terminal boundary of a confirmed private publication.
+        // This durable marker is the restart boundary: pre-confirmation rows
+        // have none, while every post-confirmation placement survives a crash
+        // or transient signing/catalog failure. The supervisor alone owns the
+        // attempt, its retries and its drain: nothing here waits for it, or
+        // queues on the asset tail that a running placement holds.
+        await persistence.finalizedPrivatePlacementRepairs.put(repair);
+        markerStored = true;
+        placementWait.requested();
+        const request = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
+        if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
+      } else {
+        await shadowRuntime.runExclusive(assetKey, async () => {
           const result = await this.removeRfc64SwmAuthorInventoryShadowV1({
             contextGraphId,
             subGraphName,
@@ -889,21 +892,23 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
               ctx: params.ctx,
             });
           }
-        },
-      );
-      await finalizedPrivateAttempt;
+        });
+      }
     } catch (cause) {
-      this.log.warn(
-        params.ctx,
-        `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
+      placementWait.observer.released(); // A request that threw has no waiter to release it later.
+      const failed = finalizedPrivateInventoryScope === null ? 'SWM inventory shadow removal escaped its failure boundary'
+        : markerStored ? 'finalized-private placement could not be requested; its durable marker stays for the next pass or start'
+          : 'finalized-private placement was not recorded, so nothing owes it';
+      this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 ${failed}: ${cause instanceof Error ? cause.message : String(cause)}`);
     }
+    placementWait.end(this.log);
   }
 
-  /** Idempotent durable repair body owned by the catalog supervisor. */
-  async repairRfc64FinalizedPrivateCatalogPlacementV1(
+  /** Idempotent durable repair body owned by the catalog supervisor, charged to the attempt it admitted. */
+  protected async repairObservedRfc64FinalizedPrivateCatalogPlacementV1(
     this: DKGAgent,
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+    placement: CatalogPlacementAttemptV1,
   ): Promise<'repaired' | 'already-complete'> {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
@@ -914,7 +919,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
     let outcome: 'repaired' | 'already-complete' | null = null;
     await rfc64SwmInventoryShadowRuntimeV1(this).runExclusive(assetKey, async () => {
-      const applied = await this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair);
+      const applied = await this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
       if (applied === null) {
         await persistence.finalizedPrivatePlacementRepairs.delete(repair);
         outcome = 'already-complete';

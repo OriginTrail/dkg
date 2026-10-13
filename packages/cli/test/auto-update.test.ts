@@ -2305,6 +2305,21 @@ describe('autoupdater hardening', () => {
     }
   });
 
+  it('aborts before build or swap when stale identity cleanup and its fallback fail', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    _autoUpdateIo.rm = (async (path: unknown) => {
+      if (String(path).endsWith('/packages/cli/build-info.json')) throw new Error('EACCES: stale identity');
+    }) as any;
+    execFileImpl = async (file, args) => {
+      if (file === 'git' && args[0] === 'clean') throw new Error('fallback refused');
+      return { stdout: '', stderr: '' };
+    };
+    expect(await performUpdate(AU, () => {})).toBe(false);
+    expect(execCalls.some(({ cmd }) => cmd.includes('pnpm install') || cmd.includes('pnpm build'))).toBe(false);
+    expect(swapSlotCalls).toEqual([]);
+  });
+
   it('aborts the update if pre-build clean fails (no swap of a potentially dirty slot)', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');

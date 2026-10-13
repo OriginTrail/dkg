@@ -30,7 +30,7 @@
  * the same kill switch and bytecode check.
  */
 
-import { Contract, ethers } from 'ethers';
+import { type Contract, ethers } from 'ethers';
 import type { JsonRpcProvider } from 'ethers';
 
 import {
@@ -52,16 +52,8 @@ import {
   withDetachedRpcRequestContext,
 } from './rpc-request-transport.js';
 
-/** Multicall3 is deployed at this address on every chain that has it. */
-export const MULTICALL3_ADDRESS = '0xcA11bde05977b3631167028862bE2a173976CA11';
-
-/** keccak256 of the canonical Multicall3 runtime bytecode (3,808 bytes). */
-export const MULTICALL3_RUNTIME_CODE_HASH =
-  '0xd5c15df687b16f2ff992fc8d767b4216323184a2bbc6ee2f9c398c318e770891';
-
-const MULTICALL3_ABI = [
-  'function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)',
-] as const;
+import { MULTICALL3_ADDRESS, MULTICALL3_RUNTIME_CODE_HASH, createMulticall3, staticAggregate3, decodeContractResult } from './evm-multicall-wire.js';
+export { MULTICALL3_ADDRESS, MULTICALL3_RUNTIME_CODE_HASH } from './evm-multicall-wire.js';
 
 /** The physical request's label and usage consumer. */
 export const MULTICALL3_AGGREGATE_READ = 'multicall3.aggregate3';
@@ -223,29 +215,12 @@ export type AggregateRequestSender = (
   request: (multicall3: Contract) => Promise<readonly BatchedContractCallResult[]>,
 ) => Promise<readonly BatchedContractCallResult[]>;
 
-/** `aggregate3` as a view, every inner call allowed to fail on its own. */
-async function staticAggregate3(
-  multicall3: Contract,
-  calls: readonly BatchedContractCall[],
-  blockTag?: number,
-): Promise<readonly BatchedContractCallResult[]> {
-  const innerCalls = calls.map(({ target, callData }) => ({ target, allowFailure: true, callData }));
-  const results = await (blockTag === undefined
-    ? multicall3.aggregate3.staticCall(innerCalls)
-    : multicall3.aggregate3.staticCall(innerCalls, { blockTag })
-  ) as ReadonlyArray<{ success: unknown; returnData: unknown }>;
-  return results.map(({ success, returnData }) => ({
-    success: success === true,
-    returnData: String(returnData),
-  }));
-}
-
 type Multicall3State = 'unchecked' | 'checking' | 'present';
 
 export class BackgroundContractReadBatching {
   readonly #deps: BackgroundContractReadBatchingDeps;
   readonly #now: () => number;
-  readonly #multicall3 = new Contract(MULTICALL3_ADDRESS, MULTICALL3_ABI);
+  readonly #multicall3 = createMulticall3();
   readonly #descriptor = createRpcReadDescriptor(MULTICALL3_AGGREGATE_READ);
   readonly #batcher: ContractReadBatcher;
   #multicall3State: Multicall3State = 'unchecked';
@@ -294,8 +269,7 @@ export class BackgroundContractReadBatching {
       callData,
       decode: (returnData) => {
         // A contract method call unwraps a single output; so does this.
-        const result = contractInterface.decodeFunctionResult(method, returnData);
-        return (result.length === 1 ? result[0] : result) as T;
+        return decodeContractResult(contractInterface, method, returnData) as T;
       },
       // A fallback runs under its caller's own request policy and attribution.
       direct: bindActiveRpcRequestScope(read.direct),

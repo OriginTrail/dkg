@@ -15,10 +15,7 @@ import type {
   PersistedLiftJob,
   PublicationPricingPolicy,
 } from '@origintrail-official/dkg-publisher';
-import {
-  isSafeJobId,
-  SAFE_JOB_ID_ERROR,
-} from '@origintrail-official/dkg-publisher';
+import { isSafeJobId, SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
 import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import type { ContextGraphJoinResult } from './context-graph-join-result.js';
@@ -1518,9 +1515,11 @@ export class ApiClient {
     return this.get(`/api/agent/${encodeURIComponent(address)}/encryption-keys`);
   }
 
-  async publisherJobs(status?: string): Promise<{ jobs: any[] }> {
-    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
-    return this.get(`/api/publisher/jobs${qs}`);
+  async publisherJobs(status?: string, contextGraphId?: string): Promise<{ jobs: any[] }> {
+    const qs = new URLSearchParams();
+    if (status) qs.set('status', status);
+    if (contextGraphId) qs.set('contextGraphId', contextGraphId);
+    return this.get(`/api/publisher/jobs${qs.size ? `?${qs}` : ''}`);
   }
 
   // GH#2270 — `retryState` is the daemon's DERIVED answer to "will this node retry this

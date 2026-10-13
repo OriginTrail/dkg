@@ -1,3 +1,5 @@
+import type { KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
+import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 // daemon/routes/knowledge-assets-import.ts
 //
 // Collection-level import-artifact + semantic-enrichment routes for the
@@ -39,8 +41,6 @@ import {
   safeParseJson,
   safeDecodeURIComponent,
   validateOptionalSubGraphName,
-  validateRequiredContextGraphId,
-  normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   oversizedRdfLiteralResponseBody,
   SMALL_BODY_BYTES,
@@ -2234,25 +2234,16 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
 // (daemon/routes/assertion.ts): identical name + contextGraphId + subGraphName
 // validation, extractionStatus map lookup, 404 mapping, and response shape. The
 // dispatcher passes the already-decoded `name`.
-export async function handleKaExtractionStatus(ctx: RequestContext, name: string): Promise<void> {
-  const { res, url, extractionStatus, requestAgentAddress } = ctx;
-  const assertionName = name;
-  const nameVal = validateAssertionName(assertionName);
-  if (!nameVal.valid)
-    return jsonResponse(res, 400, {
-      error: `Invalid assertion name: ${nameVal.reason}`,
-    });
-  const contextGraphId =
-    url.searchParams.get("contextGraphId") ??
-    url.searchParams.get("contextGraphId");
-  if (!validateRequiredContextGraphId(contextGraphId, res)) return;
-  const normalizedContextGraphId = normalizeContextGraphIdOrUri(contextGraphId!);
-  const subGraphName = url.searchParams.get("subGraphName") ?? undefined;
-  if (!validateOptionalSubGraphName(subGraphName, res)) return;
+export async function handleKaExtractionStatus(
+  ctx: RequestContext,
+  target: Pick<KnowledgeAssetReadTarget, 'cg' | 'name' | 'subGraphName'> & { readonly agentAddress: string },
+): Promise<void> {
+  const { res, extractionStatus } = ctx;
+  const { cg: normalizedContextGraphId, name: assertionName, agentAddress, subGraphName } = target;
 
   const assertionUri = contextGraphAssertionUri(
     normalizedContextGraphId,
-    requestAgentAddress,
+    agentAddress,
     assertionName,
     subGraphName,
   );
