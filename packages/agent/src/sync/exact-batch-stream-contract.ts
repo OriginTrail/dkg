@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+import { decodeAssetPayload } from './requester/asset-payload-verifier.js';
 import { requireExactAssetUals } from './exact-assets.js';
-import { decodeNegotiatedExactSyncResponse, EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES } from './wire-compression.js';
+import { EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES } from './wire-compression.js';
 
 import {
   EXACT_BATCH_FRAME_KIND, EXACT_BATCH_MAX_ASSETS,
@@ -22,8 +23,6 @@ export interface ReceivedExactBatchAsset {
   /** One unchanged negotiated exact-sync response, not the whole batch. */
   readonly dataBytes: Uint8Array;
   readonly chunkCount: number;
-  /** Bulk directory bound; absent on the unchanged exact v1 path. */
-  readonly plainBytes?: number;
 }
 interface Slot {
   metadata: Uint8Array; chunks: Uint8Array[]; bytes: number; chunkCount: number;
@@ -181,5 +180,5 @@ export function isRecoverableExactBatchRefusal(code: ExactBatchRefusal | undefin
 }
 
 export function decodeExactBatchAsset(asset: ReceivedExactBatchAsset, options: { readonly signal?: AbortSignal } = {}) {
-  return decodeNegotiatedExactSyncResponse(asset.dataBytes, { allowCompression: true, signal: options.signal });
+  return decodeAssetPayload(asset.dataBytes, options.signal);
 }
