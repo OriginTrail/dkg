@@ -168,3 +168,30 @@ it('owns a cancelled prepared-read reservation until the disk read settles', asy
   } finally {finish();}
   await rejected;expect(f.budget.stats()).toEqual(baseline);
 });
+
+it.each(['metadata', 'data'] as const)('never reuses or publishes disk content with an unstable %s revision', async kind => {
+  const f = fixture(4), directory = mkdtempSync(join(tmpdir(), 'prepared-unstable-'));
+  let stable = true;
+  Object.assign(f.store, { getWriteRevision: (graph: string) => ({ generation: 1,
+    stable: stable || (kind === 'metadata' ? !graph.endsWith('/_meta') : graph !== f.graph) }) });
+  const disk = createPreparedContentCache(resolvePreparedContentCacheConfig({ enabled: true, directory })!);
+  const get = vi.spyOn(disk, 'get'), put = vi.spyOn(disk, 'put');
+  const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget, preparedContentCache: disk });
+  try {
+    const seeded = (await restart().acquireEncoded(f))!;
+    await seeded.assertCurrent(); seeded.release();
+    expect(put).toHaveBeenCalledTimes(1);
+    get.mockClear(); put.mockClear(); stable = false; f.reads.length = 0;
+    const successful = restart(), fresh = (await successful.acquireEncoded(f))!;
+    expect(fresh.wholePayloadExports).toBe(1);
+    await fresh.assertCurrent(); fresh.release();
+    expect(successful.stats().preparedCacheHits).toBe(0);
+    expect(f.reads.some(read => !read.options?.source?.endsWith('.metadata'))).toBe(true);
+    expect(get).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled();
+    f.payload[0]!.object = '"corrupted data"';
+    const corrupt = restart();
+    await expect(corrupt.acquireEncoded(f)).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
+    expect(corrupt.stats().preparedCacheHits).toBe(0);
+    expect(get).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
