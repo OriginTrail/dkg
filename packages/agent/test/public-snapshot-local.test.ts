@@ -196,6 +196,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     expect(independent.inventoryDigest).toBe(
       (await adapter.readPublicGraphSnapshot(graph, onChainId)).inventoryDigest,
     );
+
     const privateCreated = await adapter.createOnChainContextGraph({
       participantAgents: [],
       metadataBatchId: 0n,
@@ -236,18 +237,32 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     } finally { authentication.mockRestore(); }
   }, 180_000);
 
-  it.each(['stream-required', 'legacy'] as const)('rejects unanchored exact content without replacing local data (%s)', async transport => {
+  it.each(['stream-required', 'legacy', 'legacy-envelope'] as const)('rejects unanchored exact content without replacing local data (%s)', async scenario => {
+    const transport = scenario === 'legacy-envelope' ? 'legacy' : scenario;
     const f = await fixture('exact');
     const independent = await f.adapter.readPublicGraphSnapshot(graph, f.onChainId);
-    const { supplier, sink, mismatchStore, ual, beforeRows, rows } = await mismatchedSnapshotMember(f, transport === 'legacy' ? 12 : 1, transport);
+    const { supplier, sink, mismatchStore, ual, beforeRows, rows, changed, metadata } = await mismatchedSnapshotMember(f, scenario === 'legacy-envelope' ? 2 : transport === 'legacy' ? 12 : 1, scenario);
     const writes = vi.spyOn(mismatchStore, 'replaceGraphAndSubject');
-    const evidence = new PublicSnapshotEvidence({ snapshot: independent, mode: 'core-cache', sourceCore: supplier.peerId }, () => true);
+    const evidence = new PublicSnapshotEvidence({ snapshot: independent, mode: 'rpc-only', sourceCore: null }, () => true);
     const authenticate = vi.spyOn(evidence, 'authenticate');
+    if (scenario === 'legacy-envelope') {
+      // A controlled malicious peer reply, with real worker, RPC evidence and store.
+      vi.spyOn(sink as any, 'fetchSyncPages').mockImplementation(async (...args: any[]) => {
+        const phase = args[4], quads = phase === 'meta' ? metadata : changed;
+        return {quads,bytesReceived:0,resumedFromOffset:0,nextOffset:quads.length,
+          checkpointKey:`malicious:${phase}`,completed:true,timedOut:false};
+      });
+    }
     const rejected = await sink.syncExactKnowledgeAssetsFromPeerDetailed(supplier.peerId, graph, [ual], {
       forceFreshExactSession: true, exactRecoveryTransportMode: transport, totalTimeoutMs: 15000,
       recoveryAuthority: evidence,
     });
-    expect(authenticate).toHaveBeenCalled();
+    expect(await rows()).toEqual(beforeRows);
+    if (scenario === 'legacy-envelope') {
+      expect(rejected.result.complete).toBe(false);
+      expect(rejected.result.failedPhases).toBeGreaterThan(0);
+      expect(authenticate).not.toHaveBeenCalled();
+    } else expect(authenticate).toHaveBeenCalled();
     expect(rejected.committedExactAssetUals ?? []).toEqual([]);
     expect(writes).not.toHaveBeenCalled();
     expect(await rows()).toEqual(beforeRows);

@@ -248,3 +248,23 @@ function stripLiteral(raw: string): string {
   const match = raw.match(/^"(.*)"(?:\^\^.*|@.*)?$/);
   return match ? match[1]! : raw;
 }
+
+/** Validate the whole verified page before the first commit, including mixed legacy/V2 replies. */
+export function assertGraphScopedRecoveryWritable(
+  partition: ReturnType<typeof partitionVerifiedGraphScopedAssets>,
+  policy: { requireAuthenticated: boolean; challengePinned: boolean; canStore: boolean; canAuthenticateChallenge: boolean },
+): void {
+  if (policy.requireAuthenticated && (partition.remainingData.length || partition.remainingMeta.length)) {
+    throw Object.assign(new Error('Snapshot recovery requires authenticated graph-scoped rows'),
+      { code: 'SNAPSHOT_UNAUTHENTICATED_ROWS' });
+  }
+  if (!partition.assets.length) return;
+  if (!policy.challengePinned && !policy.canStore) {
+    throw Object.assign(new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
+      { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
+  }
+  if (policy.challengePinned && !policy.canAuthenticateChallenge) {
+    throw Object.assign(new Error('Challenge-pinned durable sync requires a proof-only authentication path'),
+      { code: 'VM_CHALLENGE_AUTHENTICATION_UNSUPPORTED' });
+  }
+}

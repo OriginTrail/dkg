@@ -158,7 +158,12 @@ export async function mismatchedSnapshotMember(f: Awaited<ReturnType<typeof publ
   const privateRoot = n === 12 ? new Uint8Array(32).fill(7) : undefined;
   const changed: Quad[] = [{subject:`urn:entity:${n}`,predicate:"http://schema.org/name",object:'"Unanchored replacement"',graph:assertionGraph}];
   const root = computeFlatKCRootV10(changed, privateRoot ? [privateRoot] : []);
-  const metadata = generateGraphKnowledgeAssetMetadata({contextGraphId:graph,ual,assertionGraph,merkleRoot:root,publisherPeerId:"fixture",accessPolicy:"public",allowedPeers:[],timestamp:new Date(),assertionVersion:1,authorAddress:signer.address,publicTripleCount:1,privateTripleCount:privateRoot?1:0,privateMerkleRoot:privateRoot}, {status:"confirmed",confirmation:{kind:"finalized-materialization",provenance:{batchId:BigInt(n),materializedVersion:{blockNumber:0,txIndex:0}}}});
+  let metadata = generateGraphKnowledgeAssetMetadata({contextGraphId:graph,ual,assertionGraph,merkleRoot:root,publisherPeerId:"fixture",accessPolicy:"public",allowedPeers:[],timestamp:new Date(),assertionVersion:1,authorAddress:signer.address,publicTripleCount:1,privateTripleCount:privateRoot?1:0,privateMerkleRoot:privateRoot}, {status:"confirmed",confirmation:{kind:"finalized-materialization",provenance:{batchId:BigInt(n),materializedVersion:{blockNumber:0,txIndex:0}}}});
+  if (label === 'legacy-envelope') {
+    metadata = [['kaUal',ual],['assertionGraph',assertionGraph],['rootEntity',changed[0]!.subject],
+      ['merkleRoot',JSON.stringify(ethers.hexlify(root).slice(2))]].map(([key,value]) =>
+      ({subject:ual,predicate:`http://dkg.io/ontology/${key}`,object:value!,graph:metaGraph}));
+  }
   await source.replaceGraphAndSubject(assertionGraph, changed, metaGraph, ual, metadata);
   // A fresh supplier has no encoded cache for the original content.
   const supplier = await make(`MismatchSource-${label}`, "core", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.DEPLOYER)),source);
@@ -172,5 +177,5 @@ export async function mismatchedSnapshotMember(f: Awaited<ReturnType<typeof publ
   sink.subscribeToContextGraph(graph,{onChainId,syncMode:"on-demand",trackSyncScope:false});
   await sink.connectTo(supplier.multiaddrs.find(a=>a.includes("/tcp/")&&!a.includes("/p2p-circuit"))!);
   const rows = () => mismatchStore.query(`SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <${metaGraph}> || STRSTARTS(STR(?g), "did:dkg:context-graph:${graph}/_verifiable_memory/")) } ORDER BY ?g ?s ?p ?o`);
-  return { supplier, sink, mismatchStore, ual, beforeRows: await rows(), rows };
+  return { supplier, sink, mismatchStore, ual, beforeRows: await rows(), rows, changed, metadata };
 }
