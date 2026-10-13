@@ -1,4 +1,5 @@
 import { assertSafeIri, contextGraphMetaUri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { stripSparqlLiteralValue } from './query-binding.js';
 
 /** Shared registration rule for lightweight view discovery and the combined catalog. */
 export function registeredSubGraphPattern(contextGraphId: string): string {
@@ -7,6 +8,6 @@ export function registeredSubGraphPattern(contextGraphId: string): string {
   }`;
 }
 export function decodeRegisteredSubGraphName(value: string | undefined): string | undefined {
-  const name = (value ?? '').replace(/^"/, '').replace(/"(?:\^\^<[^>]+>|@[a-zA-Z-]+)?$/, '');
+  const name = stripSparqlLiteralValue(value);
   return validateSubGraphName(name).valid ? name : undefined;
 }

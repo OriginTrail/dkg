@@ -1,4 +1,5 @@
 import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
+import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
@@ -1332,11 +1333,6 @@ function isKnownChildContextGraphPartition(graph: string, knownChildContextGraph
 
 function isStagingGraphTail(tail: string): boolean {
   return tail.startsWith('_verifiable_memory/staging/') || tail.includes('/_verifiable_memory/staging/');
-}
-
-function stripSparqlLiteralValue(value: string | undefined): string {
-  if (!value) return '';
-  return value.replace(/^"/, '').replace(/"(?:\^\^<[^>]+>|@[a-zA-Z-]+)?$/, '');
 }
 
 function parseCanonicalIntegerBinding(value: string | undefined): bigint | undefined {
