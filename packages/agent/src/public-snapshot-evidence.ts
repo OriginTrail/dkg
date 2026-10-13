@@ -72,7 +72,13 @@ export async function assertPublicSnapshotQueryTrust(
 }
 /** Owned by one explicit public job, never installed as a shared/global chain adapter. */
 export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
-  readonly lifetime = 'snapshot-job' as const;
+  admitVerifiedPage(page: Parameters<DurableRecoveryAuthority['admitVerifiedPage']>[0]): void {
+    if (!this.isCurrent()) throw new Error('Snapshot job is no longer current');
+    if (page.remainingData.length || page.remainingMeta.length) {
+      throw Object.assign(new Error('Snapshot recovery requires authenticated graph-scoped rows'),
+        { code: 'SNAPSHOT_UNAUTHENTICATED_ROWS' });
+    }
+  }
   readonly coalescing = 'owner-only' as const;
   readonly assets: Map<string, PublicGraphSnapshot["assets"][number]>;
   constructor(

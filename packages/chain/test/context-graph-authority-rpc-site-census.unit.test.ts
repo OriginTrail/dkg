@@ -13,7 +13,7 @@ const residualCensus = [
   ['packages/publisher/src/workspace-handler.ts', 'hostEnvelope', 'this.getContextGraphAgentGateAddresses'],
   ['packages/agent/src/dkg-agent-query.ts', 'readRegistered', 'this.resolveRegisteredContextGraphAuthority'],
   ['packages/agent/src/dkg-agent-query.ts', 'readLocalGate', 'this.getContextGraphAgentGateAddresses'],
-  ['packages/agent/src/dkg-agent-lifecycle.ts', 'remoteQuery', 'this.isContextGraphPublicOnChain'],
+  ['packages/agent/src/remote-query-handler.ts', 'remoteQuery', 'agent.isContextGraphPublicOnChain'],
   ['packages/agent/src/dkg-agent-lifecycle.ts', 'joinResume', 'this.resolveContextGraphReadAuthority'],
   ['packages/agent/src/dkg-agent-lifecycle.ts', 'sharedMemoryRead', 'this.canReadContextGraph'],
   ['packages/agent/src/dkg-agent-cg-registry.ts', 'samplingBinding', 'this.readLiveOnChainAccessPolicy'],
@@ -35,7 +35,7 @@ describe('Context Graph authority RPC residual-site census', () => {
     (relativePath, site, callee) => {
       const source = readFileSync(`${REPO_ROOT}${relativePath}`, 'utf8');
       expect(source).toMatch(new RegExp(
-        `withRpcUsageSite\\(\\s*CG_AUTH_RPC_SITES\\.${site},\\s*\\(\\) => ${escapeRegExp(callee)}\\(`,
+        `withRpcUsageSite\\(\\s*(?:CG_AUTH_RPC_SITES|CONTEXT_GRAPH_AUTHORITY_RPC_SITES)\\.${site},\\s*\\(\\) => ${escapeRegExp(callee)}\\(`,
       ));
     },
   );
