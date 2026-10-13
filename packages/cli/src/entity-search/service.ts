@@ -1,6 +1,6 @@
 import { EntityGraphReader, documentKey, indexKey, parseSpec, PAGE_SIZE } from './documents.js';
 import { EntityIndexStore, type IndexState } from './store.js';
-import { EntitySearchError, checkDeadline, unitVector, type EntityEmbedder, type EntityIndexSpec, type EntityIndexStatus, type EntityReadinessResponse, type EntitySearchResponse, type EntityDocument } from './types.js';
+import { EntitySearchError, checkDeadline, unitVector, type EntityEmbedder, type EntityIndexStatus, type EntityReadinessResponse, type EntitySearchResponse, type EntityDocument } from './types.js';
 
 /** Lifecycle-owned service. Index pages are explicit operator work; reads never start a rebuild. */
 export class EntitySearchService {
@@ -9,7 +9,7 @@ export class EntitySearchService {
   private preparing = false;
   constructor(readonly store: EntityIndexStore, readonly embedder: EntityEmbedder) {}
   async index(rawSpec: unknown, reader: EntityGraphReader, restart: boolean, signal: AbortSignal, deadline: number): Promise<EntityIndexStatus> {
-    const spec = parseSpec(rawSpec as EntityIndexSpec), id = indexKey(spec, this.embedder.fingerprint);
+    const spec = parseSpec(rawSpec), id = indexKey(spec, this.embedder.fingerprint);
     if (this.preparing || this.busy.size) throw new EntitySearchError('ENTITY_INDEX_BUSY', 429);
     this.busy.add(id);
     try {
