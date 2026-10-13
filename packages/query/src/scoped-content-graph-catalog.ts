@@ -2,13 +2,14 @@ import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './regis
 import { assertSafeIri, contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { nonEmptyNamedGraphEnumerationPattern, type QueryResult } from '@origintrail-official/dkg-storage';
 
-/** One fresh store admission for the inventory and its scope authority.
+/** One fresh store admission for scope authority and optional physical inventory.
  * UNION keeps these independent sets separate; joining them would multiply rows.
  * The caller retains all filtering and the existing all-writers memo contract.
  */
 export async function readScopedContentGraphCatalog(
   contextGraphId: string,
   query: (sparql: string) => Promise<QueryResult>,
+  includeInventory = true,
 ): Promise<{
   graphs: Set<string>;
   subGraphs: Set<string>;
@@ -18,11 +19,12 @@ export async function readScopedContentGraphCatalog(
   const root = assertSafeIri(contextGraphDataUri(contextGraphId));
   const meta = assertSafeIri(contextGraphMetaUri(contextGraphId));
   const prefix = escapeSparqlLiteral(`${root}/`);
-  const result = await query(`SELECT DISTINCT ?graph ?name ?assertionGraph ?ctxGraph WHERE {
-    {
+  const inventory = includeInventory ? `{
       ${nonEmptyNamedGraphEnumerationPattern('graph')}
       FILTER(?graph = <${root}> || STRSTARTS(STR(?graph), "${prefix}"))
-    } UNION {
+    } UNION` : '';
+  const result = await query(`SELECT DISTINCT ${includeInventory ? '?graph ' : ''}?name ?assertionGraph ?ctxGraph WHERE {
+    ${inventory} {
       ${registeredSubGraphPattern(contextGraphId)}
     } UNION {
       GRAPH <${meta}> { ?assertion <http://dkg.io/ontology/assertionGraph> ?assertionGraph . }

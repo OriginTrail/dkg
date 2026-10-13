@@ -25,8 +25,14 @@ describe('fresh dynamic scoped query admission', () => {
       // Raw query remains deliberately unfiltered; enumeration owns visibility.
       expect((await base.query(`SELECT ?s WHERE { GRAPH <${hidden}> { ?s ?p ?o } }`)).type).toBe('bindings');
       expect(await store.listGraphs()).not.toContain(hidden);
+      const query = vi.spyOn(store, 'query'), list = vi.spyOn(store, 'listGraphsByPrefix');
       const result = await new DKGQueryEngine(store).query(QUERY, OPTIONS);
       expect(result.bindings).toEqual([{ g: publicGraph, name: '"value"' }]);
+      if (kind === 'unknown') {
+        expect(list).toHaveBeenCalledTimes(1);
+        expect(query.mock.calls[0]![0]).not.toContain('GRAPH ?graph');
+        expect(query.mock.calls[0]![0]).toContain('?assertionGraph');
+      }
     } finally { await store.close(); }
   });
   it('uses one fresh inventory for combined VM and SWM variable routes', async () => {

@@ -989,14 +989,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     subGraphName?: string,
   ): Promise<ScopedContentGraphDiscoverySnapshot> {
     const allowed = new Set<string>();
-    const catalog = await readScopedContentGraphCatalog(contextGraphId, reads.query);
+    const visible = this.store.graphEnumerationVisibility;
+    const [catalog, filteredInventory] = await Promise.all([
+      readScopedContentGraphCatalog(contextGraphId, reads.query, Boolean(visible)),
+      visible ? undefined : reads.listGraphsByPrefix(contextGraphDataUri(contextGraphId)),
+    ]);
     const registeredSubGraphs = subGraphName ? new Set([subGraphName]) : catalog.subGraphs;
     const registeredAssertionGraphs = catalog.assertionGraphs;
     const knownChildContextGraphs = catalog.childContextGraphs;
-    const visible = this.store.graphEnumerationVisibility;
     const allGraphs = visible
       ? [...catalog.graphs].filter(graph => visible.call(this.store, graph))
-      : await reads.listGraphsByPrefix(contextGraphDataUri(contextGraphId));
+      : filteredInventory!;
 
     for (const graph of allGraphs) {
       if (
