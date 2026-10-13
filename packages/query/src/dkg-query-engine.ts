@@ -1,3 +1,4 @@
+import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog } from './scoped-content-graph-catalog.js';
@@ -88,56 +89,6 @@ export interface ViewResolution {
    * assertions) and verifiable-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
-}
-
-function sharedDiscoveryStoreOptions(
-  options: StoreQueryOptions | undefined,
-): StoreQueryOptions | undefined {
-  if (!options?.priority && !options?.source) return undefined;
-  return {
-    priority: options.priority,
-    source: options.source,
-  };
-}
-
-interface StoreReadLane {
-  query(sparql: string): Promise<StoreQueryResult>;
-  listGraphsByPrefix(prefix: string): Promise<string[]>;
-}
-
-interface QueryStoreReadContext extends StoreReadLane {
-  readonly signal: AbortSignal | undefined;
-  readonly shared: StoreReadLane & { readonly cacheKey: string };
-}
-
-function createStoreReadLane(
-  store: TripleStore,
-  options: StoreQueryOptions | undefined,
-): StoreReadLane {
-  return {
-    query: (sparql) => store.query(sparql, options),
-    listGraphsByPrefix: (prefix) => listGraphsByPrefix(store, prefix, options),
-  };
-}
-
-function createQueryStoreReadContext(
-  store: TripleStore,
-  queryOptions: QueryOptions | undefined,
-): QueryStoreReadContext {
-  const options = storeOptions(queryOptions);
-  const lane = createStoreReadLane(store, options);
-  const sharedOptions = sharedDiscoveryStoreOptions(options);
-  return {
-    ...lane,
-    signal: options?.signal,
-    shared: {
-      ...createStoreReadLane(store, sharedOptions),
-      cacheKey: JSON.stringify([
-        sharedOptions?.priority ?? 'normal',
-        sharedOptions?.source ?? null,
-      ]),
-    },
-  };
 }
 
 /**
@@ -382,7 +333,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (prepared.wordTokens.has('SERVICE')) {
       throw new Error('SPARQL rejected: SERVICE clauses are not allowed');
     }
-    const reads = createQueryStoreReadContext(this.store, options);
     const guard = validateReadOnlySparql(prepared);
     if (!guard.safe) {
       throw new Error(`SPARQL rejected: ${guard.reason}`);
@@ -391,6 +341,19 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Active UCHAR syntax is materialized once, immediately before the final
     // caller query crosses the store boundary.
     const initialGraphScope = prepareGraphScope(prepared);
+    // Only group plans whose fresh catalog supplies the entire inventory. Other
+    // routes may use a decorator's shared refresh flight; admitting those before
+    // waiting for the flight could deadlock against its queued store work.
+    const ownsAdmission = Boolean(this.store.withQueryReadAdmission && this.store.graphEnumerationVisibility
+      && options?.contextGraphId && options.includeContextGraphPartitions
+      && !options.view && !options.includePrivate && options.graphSuffix !== '_shared_memory'
+      && initialGraphScope.graphVariables.length > 0);
+    const reads = createQueryStoreReadContext(this.store, options, listGraphsByPrefix, ownsAdmission);
+    const work = () => this.queryPrepared(initialGraphScope, options, reads);
+    return ownsAdmission ? this.store.withQueryReadAdmission!(work, storeOptions(options)) : work();
+  }
+
+  private async queryPrepared(initialGraphScope: PreparedGraphScope, options: QueryOptions | undefined, reads: QueryStoreReadContext): Promise<QueryResult> {
     let routedScope = initialGraphScope;
 
     // ── V10 view-based routing ────────────────────────────────────────
@@ -969,6 +932,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     reads: QueryStoreReadContext,
     subGraphName?: string,
   ): Promise<ScopedContentGraphDiscoverySnapshot> {
+    // Admission-owned work cannot be shared with another caller or outlive its
+    // original signal. Keep fresh authority and the caller query in this plan.
+    if (reads.ownsAdmission) return this.discoverScopedContentGraphDiscovery(contextGraphId, reads, subGraphName);
     const contentKey = JSON.stringify([contextGraphId, subGraphName ?? null]);
     const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
     return this.scopedContentGraphDiscoveryMemo.get({

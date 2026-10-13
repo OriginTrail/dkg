@@ -155,6 +155,12 @@ export interface UpdateOptions extends QueryOptions {
 }
 
 export interface TripleStore {
+  /** Execute a fresh read plan in one admission, at the supplied priority and
+   * original deadline. Reads still go through this store's decorators; no
+   * authorization or results may be cached by this capability. Implementations
+   * serialize underlying reads and retain ownership through cancellation.
+   */
+  withQueryReadAdmission?<T>(work: () => Promise<T>, options?: QueryOptions): Promise<T>;
   /** Present only when query response limits are enforced before decoding. */
   readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
 

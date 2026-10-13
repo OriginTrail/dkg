@@ -260,9 +260,11 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   private reconcilePending = false;
 
   readonly graphEnumerationVisibility;
+  readonly withQueryReadAdmission;
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.withQueryReadAdmission = inner.withQueryReadAdmission?.bind(inner);
     this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !this.isReservedGraph(graph));
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);

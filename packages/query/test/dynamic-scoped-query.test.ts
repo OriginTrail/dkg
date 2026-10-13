@@ -11,6 +11,39 @@ const OPTIONS = { contextGraphId: ID, includeContextGraphPartitions: true };
 const QUERY = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${NAME}> ?name } }`;
 
 describe('fresh dynamic scoped query admission', () => {
+  it.each([true, false])('groups only a complete fresh catalog and refreshes the next request (visibility=%s)', async visible => {
+    const adapter = new OxigraphStore();
+    let owned = false;
+    const admission = vi.fn(async (work: () => Promise<unknown>) => {
+      owned = true;
+      try { return await work(); } finally { owned = false; }
+    });
+    const reads: boolean[] = [];
+    const store = new Proxy(adapter, { get(target, key) {
+      if (key === 'withQueryReadAdmission') return admission;
+      if (key === 'graphEnumerationVisibility' && !visible) return undefined;
+      const value = Reflect.get(target, key, target);
+      if (key === 'query') return (...args: Parameters<TripleStore['query']>) => {
+        reads.push(owned); return target.query(...args);
+      };
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const graph = `${ROOT}/_verifiable_memory/a/1`;
+    try {
+      await adapter.insert([{ graph, subject: 'urn:item', predicate: NAME, object: '"visible"' }]);
+      const engine = new DKGQueryEngine(store);
+      expect((await engine.query(QUERY, OPTIONS)).bindings).toHaveLength(1);
+      await adapter.dropGraph(graph);
+      expect((await engine.query(QUERY, OPTIONS)).bindings).toEqual([]);
+      expect(admission).toHaveBeenCalledTimes(visible ? 2 : 0);
+      expect(reads.length).toBeGreaterThanOrEqual(4);
+      expect(reads.every(value => value === visible)).toBe(true);
+      // Explicit/view/private routes may await shared decorator refreshes.
+      admission.mockClear();
+      await engine.query(QUERY, { ...OPTIONS, includePrivate: true });
+      expect(admission).not.toHaveBeenCalled();
+    } finally { await adapter.close(); }
+  });
   it.each(['changelog', 'index-outside', 'index-inside', 'unknown'] as const)('keeps reserved VM partitions invisible through %s enumeration', async kind => {
     const base = new OxigraphStore(), hidden = `${ROOT}/_verifiable_memory/a/1`, publicGraph = `${ROOT}/_verifiable_memory/a/2`;
     await base.insert([hidden, publicGraph].map(graph => ({ graph, subject: 'urn:item', predicate: NAME, object: '"value"' })));

@@ -267,9 +267,11 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   private pendingFullRefresh: PendingFullRefreshSource | null = null;
 
   readonly graphEnumerationVisibility;
+  readonly withQueryReadAdmission;
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.withQueryReadAdmission = inner.withQueryReadAdmission?.bind(inner);
     this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isAtomicGraphReplaceStagingGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
