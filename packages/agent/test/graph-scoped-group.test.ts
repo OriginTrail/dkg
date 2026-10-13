@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OxigraphStore, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, OxigraphStore, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { parseNQuadsTextTolerant } from '../../storage/src/nquads-text.js';
+import { replaceLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
 import { materializeVerifiedGraphScopedGroup } from '../src/sync/requester/graph-scoped-group.js';
 import { materializeVerifiedGraphScopedAsset, type VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 
 const stores: OxigraphStore[] = [];
-afterEach(async () => { for (const store of stores.splice(0)) await store.close(); });
+afterEach(async () => { vi.unstubAllGlobals(); for (const store of stores.splice(0)) await store.close(); });
 function setup() {
   const store = new OxigraphStore(); stores.push(store);
   const asset = (n: number, version = 1): VerifiedGraphScopedAsset => ({
@@ -20,6 +22,71 @@ function setup() {
 }
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
 describe('group materialization fences and physical completion', () => {
+  it('quarantines a confirmed Blazegraph publication despite failed cleanup, before releasing locks', async () => {
+    const { store, group, asset } = setup();
+    const cleanupEntered = deferred(), releaseCleanup = deferred();
+    let revoked = false, cleanupFailed = false;
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      const body = String(init.body);
+      if (init.headers['Content-Type'] === 'application/n-quads') await store.insert(parseNQuadsTextTolerant(body));
+      else if (body.startsWith('ASK')) {
+        const reply = await store.query(body);
+        if (reply.type !== 'boolean') throw new Error('Expected receipt');
+        revoked = reply.value;
+        return new Response(JSON.stringify({ boolean: reply.value }));
+      } else if (body.startsWith('DROP SILENT GRAPH') && !cleanupFailed) {
+        cleanupFailed = true;
+        cleanupEntered.resolve(); await releaseCleanup.promise;
+        return new Response('', { status: 500 });
+      } else await store.update(body);
+      return new Response('');
+    }));
+    const transport = new BlazegraphStore('http://fixture.invalid/sparql');
+    store.replaceAssetGroup = transport.replaceAssetGroup.bind(transport);
+    const run = materializeVerifiedGraphScopedGroup({ store, assets: group,
+      assertCurrent: () => {}, shouldQuarantineCommitted: () => revoked });
+    try {
+      await Promise.race([cleanupEntered.promise, run]);
+      let newerStarted = false;
+      const singletonWrite = store.replaceGraphAndSubject.bind(store);
+      vi.spyOn(store, 'replaceGraphAndSubject').mockImplementation(async (...args) => {
+        newerStarted = true;
+        expect(await store.countQuads('urn:data:1')).toBe(0);
+        expect(await store.countQuads('urn:data:2')).toBe(0);
+        return singletonWrite(...args);
+      });
+      const newer = materializeVerifiedGraphScopedAsset({ store, asset: asset(2, 2) });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(newerStarted).toBe(false);
+      releaseCleanup.resolve();
+      expect(await run).toEqual(['quarantined', 'quarantined']);
+      expect(await newer).toBe('applied');
+    } finally { releaseCleanup.resolve(); await transport.close(); }
+  });
+
+  it.each(['singleton', 'group'] as const)('retains same-version metadata and trusted controls through %s', async mode => {
+    const { store, asset } = setup();
+    const member = asset(1);
+    const control = (name: string, object: string) => ({ graph: member.metaGraph, subject: member.ual,
+      predicate: `http://dkg.io/ontology/${name}`, object: JSON.stringify(object) });
+    const trusted = [...member.metadataQuads, control('accessPolicy', 'allowList'), control('allowedPeer', 'trusted'), control('publisherPeerId', 'publisher')];
+    // This trusted confirmed timestamp must survive a same-version replay.
+    const published = control('publishedAt', '2026-01-01T00:00:00Z');
+    await store.insert([...trusted, published]);
+    await replaceLocallyTrustedKnowledgeAssetControls(store, member.ual, trusted);
+    const poisoned = { ...member, metadataQuads: [...member.metadataQuads,
+      control('accessPolicy', 'public'), control('allowedPeer', 'untrusted')] };
+    if (mode === 'singleton') expect(await materializeVerifiedGraphScopedAsset({ store, asset: poisoned })).toBe('applied');
+    else expect(await materializeVerifiedGraphScopedGroup({ store, assets: [poisoned],
+      assertCurrent: () => {}, shouldQuarantineCommitted: () => false })).toEqual(['applied']);
+    const result = await store.query(`SELECT ?p ?o WHERE { GRAPH <${member.metaGraph}> { <${member.ual}> ?p ?o } }`);
+    expect(result).toMatchObject({ bindings: expect.arrayContaining([
+      { p: published.predicate, o: published.object },
+      { p: control('accessPolicy', '').predicate, o: '"allowList"' },
+      { p: control('allowedPeer', '').predicate, o: '"trusted"' },
+    ]) });
+    expect(JSON.stringify(result)).not.toContain('untrusted');
+  });
   it('drains the dispatched transaction on cancellation and retains every member lock', async () => {
     const { store, group, asset } = setup(); const controller = new AbortController();
     const entered = deferred(), release = deferred(); const write = store.replaceAssetGroup.bind(store);

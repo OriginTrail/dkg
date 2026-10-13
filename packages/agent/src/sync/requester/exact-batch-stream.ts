@@ -18,16 +18,18 @@ import { assertNoLegacyRfc64ControlGraphs, partitionVerifiedGraphScopedAssets } 
 /** Agent consumes the public operations of Core's fixed wire session. */
 export type ExactBatchAgentSession = Pick<ExactBatchTransportSession, 'signal' | 'windowSize' | 'assetUals' | 'next' | 'send'>;
 export type ExactBatchStage = 'decode' | 'parse' | 'verify' | 'authenticate-and-store';
-export interface ExactBatchVerifiedReceiverOptions {
+export interface ExactBatchAssetVerifierOptions {
   readonly contextGraphId: string;
   readonly assetUals: readonly string[];
   readonly ctx: Parameters<DurableSyncContext['processDurableBatchInWorker']>[2];
   readonly parseAndFilter: (text: string, graph: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
   readonly processDurableBatchInWorker: DurableSyncContext['processDurableBatchInWorker'];
+  readonly onStage?: (stage: ExactBatchStage, assetIndex: number, durationMs: number) => void;
+}
+export interface ExactBatchVerifiedReceiverOptions extends ExactBatchAssetVerifierOptions {
   /** The normal host callback, including chain/binding fences, atomic write and retirement. */
   readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
   readonly authenticationDeadline: () => number;
-  readonly onStage?: (stage: ExactBatchStage, assetIndex: number, durationMs: number) => void;
   /** Observation only, after the normal store callback; progress is returned separately. */
   readonly onCommitted?: (assetUal: string) => void;
 }
@@ -107,8 +109,8 @@ const MAX_PARSED_HEAP = 32 * 1024 * 1024;
 const MAX_ROWS = 100_000;
 const UTF8 = new TextDecoder('utf-8', { fatal: true });
 
-/** Normal worker and graph-scoped callback; no direct INSERT or authority bypass. */
-export function createExactBatchAssetVerifier(options: ExactBatchVerifiedReceiverOptions) {
+/** Decode and verify only; callers own authentication and materialization. */
+export function createExactBatchAssetVerifier(options: ExactBatchAssetVerifierOptions) {
   return async (received: ReceivedExactBatchAsset, signal?: AbortSignal) => {
     signal?.throwIfAborted();
     let started = performance.now();

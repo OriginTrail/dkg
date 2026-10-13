@@ -8,7 +8,7 @@ import { BULK_GROUP_ASSETS, BULK_GROUP_EXPANDED_BYTES, BULK_GROUP_HEAP_BYTES,
   BULK_STAGING_ASSETS, BULK_STAGING_BYTES, bulkChunkHash, readBulkJson, parseBulkAssetHeader,
   type BulkGraphRequest, type BulkAssetHeader } from '../bulk-graph-contract.js';
 import { estimateQuadHeapBytes } from '../memory-telemetry.js';
-import { createExactBatchAssetVerifier, type ExactBatchVerifiedReceiverOptions } from './exact-batch-stream.js';
+import { createExactBatchAssetVerifier, type ExactBatchAssetVerifierOptions } from './exact-batch-stream.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
 interface Staged { index: number; path: string; header: BulkAssetHeader; chunks: number }
@@ -35,7 +35,7 @@ export async function exchangeBulkGraphVerified(router: ProtocolRouter, peer: st
 }
 /** Disk staging and one bounded verifier/group writer overlap the continuous network reader. */
 export async function consumeBulkGraph(session: BulkGraphSession, request: BulkGraphRequest, options: {
-  stagingRoot: string; verification: ExactBatchVerifiedReceiverOptions;
+  stagingRoot: string; verification: ExactBatchAssetVerifierOptions;
   commit: (assets: readonly VerifiedGraphScopedAsset[], signal: AbortSignal) => Promise<void>;
   onMetrics?: (metrics: BulkGraphMetrics) => void;
 }) {

@@ -38,8 +38,6 @@ export async function recoverPublicSnapshotBulk(agent: DKGAgent, options: {
         verification: { contextGraphId, assetUals: request.assetUals, ctx,
           parseAndFilter: (text, graph, cg) => agent.getOrCreateSyncVerifyWorker().parseAndFilter(text, graph, cg),
           processDurableBatchInWorker: agent.processDurableBatchInWorker.bind(agent),
-          authenticationDeadline: () => options.deadline,
-          storeGraphScopedAsset: async () => { throw new Error('Bulk verification cannot dispatch a singleton write'); },
         },
         commit: async (assets, commitSignal) => {
           assertCurrent();
