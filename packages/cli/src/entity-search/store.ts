@@ -13,37 +13,39 @@ export class EntityIndexStore {
     if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100_000) throw new RangeError('Invalid entity index capacity');
     this.db = new Database(join(dir, 'entity-index.db'));
     this.db.pragma('journal_mode = WAL');
-    const legacy = this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'entity_documents'").get()
-      && !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'entity_scan_documents'").get();
-    this.db.exec(`CREATE TABLE IF NOT EXISTS entity_indexes (id TEXT PRIMARY KEY, state TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS entity_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
-        document TEXT NOT NULL, vector TEXT NOT NULL,
-        PRIMARY KEY(index_id, entity_key));
-      CREATE TABLE IF NOT EXISTS entity_scan_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
-        document TEXT NOT NULL, vector TEXT NOT NULL,
-        PRIMARY KEY(index_id, entity_key));`);
-    // Compatibility only: table membership now owns unfinished/completed scans.
+    try { this.migrate(); }
+    catch (error) { this.db.close(); throw error; }
+  }
+  private migrate(): void {
+    const version = this.db.pragma('user_version', { simple: true }) as number;
+    if (version === 1) return;
+    if (version !== 0) throw new Error(`Unsupported entity index schema version: ${version}`);
+    // Version 0 covers the previously unversioned completed-only and split-scan
+    // formats. Inspect and upgrade those shapes once, atomically with the marker.
     this.db.transaction(() => {
+      const legacy = this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'entity_documents'").get()
+        && !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'entity_scan_documents'").get();
+      this.db.exec(`CREATE TABLE IF NOT EXISTS entity_indexes (id TEXT PRIMARY KEY, state TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS entity_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
+          document TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(index_id, entity_key));
+        CREATE TABLE IF NOT EXISTS entity_scan_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
+          document TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(index_id, entity_key));`);
       for (const table of ['entity_documents', 'entity_scan_documents']) {
         const columns = this.db.pragma(`table_info(${table})`) as Array<{ name: string }>;
         if (columns.some(column => column.name === 'generation')) this.db.exec(`ALTER TABLE ${table} DROP COLUMN generation`);
       }
       for (const row of this.db.prepare('SELECT state FROM entity_indexes').all() as Array<{ state: string }>) {
         const state = JSON.parse(row.state) as IndexState & { generation?: number };
-        if ('generation' in state) { delete state.generation; this.save(state); }
+        delete state.generation;
+        // Completed-only legacy scans have no independent checkpoint payload.
+        // Retain their visible documents and revisit the unfinished scan from zero.
+        if (legacy && !state.scanComplete) state.cursor = null;
+        this.save(state);
       }
+      this.db.pragma('user_version = 1');
     })();
-    if (legacy) {
-      // Older partial scans mixed generations in the completed table. Revisit
-      // their cursor from the start so publication never drops the first pages.
-      this.db.transaction(() => {
-        for (const row of this.db.prepare('SELECT state FROM entity_indexes').all() as Array<{ state: string }>) {
-          const state: IndexState = JSON.parse(row.state);
-          if (!state.scanComplete) this.begin({ ...state, cursor: null });
-        }
-      })();
-    }
   }
+
   state(id: string): IndexState | undefined {
     const row = this.db.prepare('SELECT state FROM entity_indexes WHERE id = ?').get(id) as { state: string } | undefined;
     return row ? JSON.parse(row.state) : undefined;

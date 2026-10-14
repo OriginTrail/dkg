@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
 import { resolveRandomSamplingBinding, type RandomSamplingHandle } from '../src/random-sampling-bind.js';
 import { createRandomSamplingEligibilityResolver } from '../src/random-sampling-eligibility.js';
@@ -261,6 +262,7 @@ describe('Random Sampling proof-time exact repair', () => {
           getKAContextGraphId,
         } as never,
         asset: {
+      merkleRootHex: fixtureRoot(metadataQuads),
           contextGraphId,
           ual: assetUal,
           assertionVersion: 1n,
