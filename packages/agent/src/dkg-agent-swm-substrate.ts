@@ -926,6 +926,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (!isRegistered) await this.reconcileSwmHostModeSubscription(contextGraphId);
       return;
     }
+    authorityRead.logAnswer({ session, canUseSharedMemory, isRegistered, log: this.log, ctx });
     if (!canUseSharedMemory) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
@@ -970,9 +971,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         session.swmHostModeCurated.delete(hostKey);
         session.swmHostModeHandlers.delete(hostKey);
         this.enqueueHostModePersistence(contextGraphId, false);
-        this.log.warn(ctx, `SWM gossip unsubscribed for "${contextGraphId}": local node is no longer authorized`);
-      } else {
-        this.log.warn(ctx, `SWM gossip subscription denied for "${contextGraphId}": local node is not authorized`);
       }
       // OT-RFC-38 LU-6: even if the local node is not a CG member,
       // a CORE node may still serve as a ciphertext host for the
