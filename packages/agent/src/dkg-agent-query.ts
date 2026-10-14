@@ -425,6 +425,7 @@ export class QueryMethods extends DKGAgentBase {
       contextGraphId?: string;
       /** Security consumers must distinguish a denied dataset from no matches. */
       accessDenied?: 'empty' | 'error';
+      requireCompleteGraphScope?: boolean;
       /** Suppress caller-supplied query text in normal query diagnostics. */
       redactQuery?: boolean;
       maxResponseBytes?: number;
@@ -702,6 +703,7 @@ export class QueryMethods extends DKGAgentBase {
       opts.signal?.throwIfAborted();
       return this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,
+      requireCompleteGraphScope: opts.requireCompleteGraphScope,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,

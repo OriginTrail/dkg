@@ -40,6 +40,8 @@ import type { ApprovedMemberAcceptance } from
 export type ConfirmContextGraphMetadataInput =
   | {
       readonly purpose?: 'read';
+      /** Shared-memory admission preserves dependency outages instead of presenting denial. */
+      readonly unavailable?: 'error';
       readonly rejectUnregisteredPlaceholder?: boolean;
     }
   | {
@@ -108,14 +110,25 @@ export async function confirmContextGraphMetadataV1(
   const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean'
     && unregisteredPlaceholderResult.value === true;
   let hasActivePublicOnChainProof: boolean | undefined;
+  let proofUnavailable = false;
+  const readPublicProof = async () => {
+    let proof: ActivePublicContextGraphChainProof;
+    try { proof = await dependencies.resolveActivePublicChainProof(); }
+    catch { proof = { state: 'unknown', reason: 'rpc-failure' }; }
+    dependencies.signal?.throwIfAborted();
+    proofUnavailable = proof.state === 'unknown';
+    return proof.state === 'public';
+  };
+  const unconfirmed = () => {
+    dependencies.signal?.throwIfAborted();
+    if (proofUnavailable && input.unavailable === 'error') throw new Error('Context Graph metadata chain proof unavailable');
+    return false;
+  };
   if (
     hasUnregisteredPlaceholder
     && input.rejectUnregisteredPlaceholder === true
   ) {
-    hasActivePublicOnChainProof = await dependencies
-      .resolveActivePublicChainProof()
-      .then((proof) => proof.state === 'public')
-      .catch(() => false);
+    hasActivePublicOnChainProof = await readPublicProof();
   }
 
   const authoritativeDefinition = await findAuthoritativeDefinition(
@@ -137,9 +150,7 @@ export async function confirmContextGraphMetadataV1(
   }
 
   if (hasActivePublicOnChainProof === undefined) {
-    hasActivePublicOnChainProof = await dependencies.resolveActivePublicChainProof()
-      .then((proof) => proof.state === 'public')
-      .catch(() => false);
+    hasActivePublicOnChainProof = await readPublicProof();
   }
   if (hasActivePublicOnChainProof) return true;
 
@@ -156,10 +167,10 @@ export async function confirmContextGraphMetadataV1(
       )
     )
   ) {
-    return false;
+    return unconfirmed();
   }
 
-  if (await dependencies.isPrivateContextGraph(contextGraphId)) return false;
+  if (await dependencies.isPrivateContextGraph(contextGraphId)) return unconfirmed();
 
   const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
   const ontologyResult = await dependencies.store.query(
@@ -170,7 +181,8 @@ export async function confirmContextGraphMetadataV1(
     }`,
     { source: 'agent.contextGraph.confirmedMeta.ontologyDeclaration', signal: dependencies.signal },
   );
-  return ontologyResult.type === 'boolean' && ontologyResult.value === true;
+  if (ontologyResult.type === 'boolean' && ontologyResult.value === true) return true;
+  return unconfirmed();
 }
 
 /** This node's approved-member proof for the graph, when it holds an approval. */
