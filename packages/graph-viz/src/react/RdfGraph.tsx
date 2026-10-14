@@ -75,6 +75,10 @@ export function RdfGraph({
   const initialFitDoneRef = useRef(false);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const callbacks = useRef({ onNodeClick, onNodeHover, onNodeUnhover });
+  callbacks.current = { onNodeClick, onNodeHover, onNodeUnhover };
+  const rendering = useRef({ viewConfig, nodeColors: options.style?.nodeColors });
+  rendering.current = { viewConfig, nodeColors: options.style?.nodeColors };
 
   // Create/destroy viz instance
   useEffect(() => {
@@ -88,17 +92,17 @@ export function RdfGraph({
 
     unsubs.push(viz.on('node:click', (node) => {
       setSelectedNode(node);
-      onNodeClick?.(node);
+      callbacks.current.onNodeClick?.(node);
     }));
 
     unsubs.push(viz.on('node:hover', (node) => {
       setHoveredNode(node);
-      onNodeHover?.(node);
+      callbacks.current.onNodeHover?.(node);
     }));
 
     unsubs.push(viz.on('node:unhover', (node) => {
       setHoveredNode(null);
-      onNodeUnhover?.(node);
+      callbacks.current.onNodeUnhover?.(node);
     }));
 
     unsubs.push(viz.on('background:click', () => {
@@ -121,37 +125,41 @@ export function RdfGraph({
 
     // Clear previous data
     viz.model.clear();
+    setSelectedNode(null);
+    setHoveredNode(null);
+    const controller = new AbortController();
 
     const loadData = async () => {
       if (typeof data === 'string') {
         switch (format) {
           case 'ntriples':
-            await viz.loadNTriples(data);
+            await viz.loadNTriples(data, controller.signal);
             break;
           case 'nquads':
-            await viz.loadNQuads(data);
+            await viz.loadNQuads(data, controller.signal);
             break;
           case 'turtle':
-            await viz.loadTurtle(data);
+            await viz.loadTurtle(data, controller.signal);
             break;
           case 'jsonld':
-            await viz.loadJsonLd(data);
+            await viz.loadJsonLd(data, controller.signal);
             break;
           default:
-            await viz.loadNTriples(data);
+            await viz.loadNTriples(data, controller.signal);
         }
       } else if (Array.isArray(data)) {
         viz.loadTriples(data);
       }
+      if (controller.signal.aborted) return;
 
       // Apply per-node color overrides (e.g. trust-level coloring)
-      if (options.style?.nodeColors) {
-        viz.styleEngine.setNodeColors(options.style.nodeColors);
+      if (rendering.current.nodeColors) {
+        viz.styleEngine.setNodeColors(rendering.current.nodeColors);
       }
 
       // Apply view config after loading data
-      if (viewConfig) {
-        viz.applyView(viewConfig);
+      if (rendering.current.viewConfig) {
+        viz.applyView(rendering.current.viewConfig);
       }
     };
 
@@ -171,9 +179,9 @@ export function RdfGraph({
       if (!cancelled) console.error('[RdfGraph] Error loading data:', err);
     });
 
-    return () => { cancelled = true; if (fitTimer) clearTimeout(fitTimer); };
+    return () => { cancelled = true; controller.abort(); if (fitTimer) clearTimeout(fitTimer); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, format, viewConfig]);
+  }, [data, format]);
 
   // Apply view config changes independently (when data hasn't changed)
   const prevViewConfigRef = useRef(viewConfig);
@@ -185,6 +193,13 @@ export function RdfGraph({
     viz.applyView(viewConfig);
     viz.refresh();
   }, [viewConfig]);
+
+  useEffect(() => {
+    const viz = vizRef.current;
+    if (!viz) return;
+    viz.styleEngine.setNodeColors(options.style?.nodeColors ?? {});
+    viz.refresh();
+  }, [options.style?.nodeColors]);
 
   // Camera focus on a specific node. Re-fires whenever `initialFocus`
   // changes — useful for "pan to the selected entity" behaviours where

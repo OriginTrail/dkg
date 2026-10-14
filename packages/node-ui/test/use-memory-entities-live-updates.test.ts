@@ -4,6 +4,7 @@ import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
+import { invalidateQueryCache } from '../src/ui/api.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -82,6 +83,7 @@ describe('useMemoryEntities live updates', () => {
   let revision = 1;
 
   beforeEach(() => {
+    invalidateQueryCache();
     vi.useFakeTimers();
     MockEventSource.instances = [];
     (globalThis as any).EventSource = MockEventSource;
@@ -114,7 +116,7 @@ describe('useMemoryEntities live updates', () => {
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
 
     revision = 2;
@@ -127,14 +129,14 @@ describe('useMemoryEntities live updates', () => {
       });
       vi.advanceTimersByTime(349);
     });
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
 
     await act(async () => {
       vi.advanceTimersByTime(1);
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(6);
+    expect(fetch).toHaveBeenCalledTimes(8);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
   });
 
@@ -155,7 +157,7 @@ describe('useMemoryEntities live updates', () => {
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
   });
 });

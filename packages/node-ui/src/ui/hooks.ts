@@ -32,16 +32,18 @@ export function useFetch<T>(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const generationRef = useRef(0);
 
   const load = useCallback(async () => {
+    const generation = ++generationRef.current;
     try {
       const result = await fetcher();
-      if (mountedRef.current) {
+      if (mountedRef.current && generation === generationRef.current) {
         setData(result);
         setError(null);
       }
     } catch (err: any) {
-      if (mountedRef.current) {
+      if (mountedRef.current && generation === generationRef.current) {
         if (err?.status === 401) {
           const hasToken = currentApiToken() !== undefined;
           // Reload once to pick up a rotated token — but only when the token
@@ -58,12 +60,13 @@ export function useFetch<T>(
         setError(err.message);
       }
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (mountedRef.current && generation === generationRef.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
   useEffect(() => {
+    generationRef.current++;
     mountedRef.current = true;
     setLoading(true);
     load();
@@ -91,6 +94,7 @@ export function useFetch<T>(
     if (typeof document === 'undefined' || !document.hidden) startTimer();
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      generationRef.current++;
       mountedRef.current = false;
       stopTimer();
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);

@@ -45,6 +45,7 @@ export default defineConfig({
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
           'test/backpressure-route.test.ts',
+          'test/notifications-route-bounded.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',

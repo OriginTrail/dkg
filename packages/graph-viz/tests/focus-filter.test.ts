@@ -46,6 +46,17 @@ describe('FocusFilter', () => {
     expect(result.nodes.size).toBeLessThanOrEqual(5);
   });
 
+  it('reselects a valid focal resource when refreshed data replaces the old graph', () => {
+    buildStar(model, 'urn:old-hub', 10);
+    const filter = new FocusFilter({ maxNodes: 5, hops: 1 });
+    expect(filter.compute(model).nodes.has('urn:old-hub')).toBe(true);
+    model.clear(); buildStar(model, 'urn:new-hub', 10);
+    const result = filter.compute(model);
+    expect(result.nodes.has('urn:new-hub')).toBe(true);
+    expect(result.nodes.size).toBe(5);
+    expect(result.nodes.has('urn:old-hub')).toBe(false);
+  });
+
   it('respects hops config — only includes nodes within N hops', () => {
     buildChain(model, 20);
     const filter = new FocusFilter({ maxNodes: 5, hops: 1, focalNode: 'urn:node10' });
