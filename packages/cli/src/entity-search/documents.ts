@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isSafeIri, sparqlIri, sparqlString } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { EntitySearchError, checkDeadline, type EntityDocument, type EntityIndexSpec } from './types.js';
+import { EntitySearchError, checkDeadline, type EntityDocument, type EntityIndexSpec, type EntityIdentity } from './types.js';
 
 export const PAGE_SIZE = 8;
 export const MAX_DOCUMENT_ROWS = 256;
@@ -41,11 +41,11 @@ function selection(spec: EntityIndexSpec, graphOperand: string): string {
 }
 export class EntityGraphReader {
   constructor(private agent: { query: OmitThisParameter<DKGAgent['query']> }, readonly callerAgentAddress?: string, private priority: 'normal' | 'background' = 'normal', private chainEvidenceMode?: 'core-cache' | 'rpc-only') {}
-  async query(spec: EntityIndexSpec, sparql: string, signal: AbortSignal, deadline: number) {
+  async query(spec: EntityIndexSpec, sparql: string, signal: AbortSignal, deadline: number, maxResponseBytes = 256 * 1024) {
     checkDeadline(signal, deadline);
     const result = await this.agent.query(sparql, { contextGraphId: spec.contextGraphId, view: spec.view,
       includeContextGraphPartitions: true, callerAgentAddress: this.callerAgentAddress,
-      accessDenied: 'error', redactQuery: true, chainEvidenceMode: this.chainEvidenceMode, signal, source: 'api.entities', priority: this.priority, maxResponseBytes: 256 * 1024 });
+      accessDenied: 'error', redactQuery: true, chainEvidenceMode: this.chainEvidenceMode, signal, source: 'api.entities', priority: this.priority, maxResponseBytes });
     checkDeadline(signal, deadline);
     return result.bindings;
   }
@@ -53,12 +53,11 @@ export class EntityGraphReader {
     // Always traverse the normal graph/view guard, including empty and stale indexes.
     await this.query(spec, 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 0', signal, deadline);
   }
-  async page(spec: EntityIndexSpec, after: string | null, signal: AbortSignal, deadline: number) {
+  async page(spec: EntityIndexSpec, after: EntityIdentity | null, signal: AbortSignal, deadline: number) {
     let cursor = '';
     if (after) {
-      const [graph, entity] = JSON.parse(after) as string[];
-      cursor = `FILTER(STR(?sourceGraph) > ${sparqlString(graph)} ||
-        (STR(?sourceGraph) = ${sparqlString(graph)} && STR(?entity) > ${sparqlString(entity)}))`;
+      cursor = `FILTER(STR(?sourceGraph) > ${sparqlString(after.sourceGraph)} ||
+        (STR(?sourceGraph) = ${sparqlString(after.sourceGraph)} && STR(?entity) > ${sparqlString(after.entityUri)}))`;
     }
     const rows = await this.query(spec, `SELECT DISTINCT ?sourceGraph ?entity WHERE {
       ${selection(spec, '?sourceGraph')} ${cursor} } ORDER BY STR(?sourceGraph) STR(?entity) LIMIT ${PAGE_SIZE}`, signal, deadline);
@@ -81,8 +80,15 @@ export class EntityGraphReader {
       chars += size;
     }
     if (sizes.length > MAX_DOCUMENT_ROWS || chars > 16384) throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
-    const rows = await this.query(spec, `SELECT DISTINCT ?p ?value WHERE {
-      ${selected} } ORDER BY ?p ?value LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline);
+    let rows;
+    try {
+      rows = await this.query(spec, `SELECT DISTINCT ?p ?value WHERE {
+        ${selected} } ORDER BY ?p ?value LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline, 16_384);
+    } catch (error) {
+      if ((error as { code?: string })?.code === 'STORE_RESPONSE_TOO_LARGE')
+        throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
+      throw error;
+    }
     if (!rows.length) return null;
     if (rows.length > MAX_DOCUMENT_ROWS) throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
     // Preserve predicate names in the embedding input; do not flatten unrelated entities.

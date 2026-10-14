@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { createHash } from 'node:crypto';
 import { ethers } from "ethers";
 import {
   sealPublicGraphSnapshot,
@@ -34,6 +35,18 @@ const reseal = (patch: object) => {
 };
 const bytes = (s: unknown) => Buffer.from(JSON.stringify(s));
 describe("public graph snapshot contract", () => {
+  it('seals equivalent object orderings to the existing version-1 digest format', () => {
+    const { inventoryDigest, snapshotDigest, ...input } = make();
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    expect(inventoryDigest).toBe(hash(input.assets));
+    expect(snapshotDigest).toBe(hash({ ...input, inventoryDigest }));
+    const reordered = Object.fromEntries(Object.entries({ ...input,
+      assets: input.assets.map(a => ({ version: a.version, root: a.root, id: a.id })),
+    }).reverse()) as typeof input;
+    expect(sealPublicGraphSnapshot(reordered)).toEqual(make());
+    expect(normalizePublicGraphSnapshot({ ...reordered, snapshotDigest, inventoryDigest }, { ...scope, now: 2000 }))
+      .toEqual(make());
+  });
   it("accepts a scoped coherent inventory and detaches/freezes it", () => {
     const raw = make();
     const decoded = decodePublicGraphSnapshot(bytes(raw), {
@@ -68,7 +81,7 @@ describe("public graph snapshot contract", () => {
     { unexpected: true },
   ])("rejects malformed or stale facts %j", (patch) => {
     expect(() =>
-      decodePublicGraphSnapshot(bytes(reseal(patch)), {
+      decodePublicGraphSnapshot(bytes({ ...reseal(patch), ...patch }), {
         ...scope,
         now: 8000,
       }),

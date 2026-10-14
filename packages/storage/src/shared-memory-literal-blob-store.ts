@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { LiteralHydrationBudget, readLiteralBlobBounded } from './bounded-literal-hydration.js';
 import type {
   ConstructResult,
   Quad,
@@ -218,14 +219,14 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
       const result = await this.inner.query(sparql, options);
-      return this.hydrateQueryResult(result);
+      return this.hydrateQueryResult(result, options);
     }
 
     const [original, placeholder] = await Promise.all([
       this.inner.query(sparql, options),
       this.inner.query(rewritten, options),
     ]);
-    return this.hydrateQueryResult(mergeQueryResults(original, placeholder));
+    return this.hydrateQueryResult(mergeQueryResults(original, placeholder), options);
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
@@ -339,41 +340,42 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     return [pattern, placeholderPattern];
   }
 
-  private async hydrateQueryResult(result: QueryResult): Promise<QueryResult> {
+  private async hydrateQueryResult(result: QueryResult, options?: QueryOptions): Promise<QueryResult> {
     if (result.type === 'boolean') return result;
     const cache = new Map<string, Promise<string>>();
+    const budget = new LiteralHydrationBudget(options?.maxResponseBytes);
 
     if (result.type === 'bindings') {
-      const bindings = await Promise.all(
-        result.bindings.map(async (row) => {
+      const bindings: Record<string, string>[] = [];
+      for (const row of result.bindings) {
           const hydrated: Record<string, string> = {};
           for (const [key, value] of Object.entries(row)) {
-            hydrated[key] = await this.hydrateTerm(value, cache);
+            hydrated[key] = await this.hydrateTerm(value, cache, budget, options?.signal);
           }
-          return hydrated;
-        }),
-      );
+          bindings.push(hydrated);
+      }
       return { type: 'bindings', bindings } satisfies SelectResult;
     }
 
-    const quads = await Promise.all(
-      result.quads.map(async (quad) => ({
+    const quads: Quad[] = [];
+    for (const quad of result.quads) quads.push({
         ...quad,
-        object: await this.hydrateTerm(quad.object, cache),
-      })),
-    );
+        object: await this.hydrateTerm(quad.object, cache, budget, options?.signal),
+    });
     return { type: 'quads', quads } satisfies ConstructResult;
   }
 
-  private async hydrateTerm(term: string, cache: Map<string, Promise<string>>): Promise<string> {
+  private async hydrateTerm(term: string, cache: Map<string, Promise<string>>, budget: LiteralHydrationBudget, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const hash = externalLiteralRefHash(term);
-    if (!hash) return term;
+    if (!hash) return budget.consume(term);
     let pending = cache.get(hash);
     if (!pending) {
-      pending = this.readBlob(hash);
+      pending = budget.remaining === undefined ? this.readBlob(hash)
+        : readLiteralBlobBounded(this.blobPath(hash), hash, budget.remaining, signal);
       cache.set(hash, pending);
     }
-    return pending;
+    return budget.consume(await pending);
   }
 
   private rewriteLargeLiteralConstants(sparql: string): string | undefined {

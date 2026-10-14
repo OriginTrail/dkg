@@ -2,7 +2,7 @@ import { authenticatedAgentAddress, canAdministerNode } from '../../auth.js';
 import { EntityGraphReader } from '../../entity-search/documents.js';
 import { parseEntityOperation } from '../../entity-search/requests.js';
 import type { EntityOperation } from '../../entity-search/types.js';
-import { EntitySearchError } from '../../entity-search/types.js';
+import { EntitySearchError, checkDeadline } from '../../entity-search/types.js';
 import { jsonResponse, readBody, safeParseJson, SMALL_BODY_BYTES, validateRequiredContextGraphId,
   respondIfStoreUnavailable, respondIfContextGraphReadAuthorityUnavailable } from '../http-utils.js';
 import { createStoreQueryRequestLifecycle, isApiQueryCallerDisconnected } from '../store-query-lifecycle.js';
@@ -38,6 +38,7 @@ export async function handleEntityRoutes(ctx: RequestContext): Promise<void> {
       case 'readiness': reply = await entitySearch.readiness(operation.request, reader, signal, deadline); break;
       case 'search': reply = await entitySearch.search(operation.request, reader, signal, deadline); break;
     }
+    checkDeadline(signal, deadline);
     jsonResponse(res, 200, { version: 1, ...reply, chainEvidenceMode: operation.request.chainEvidenceMode });
   } catch (error) {
     if (lifecycle.signal.aborted || isApiQueryCallerDisconnected(error)) return;
