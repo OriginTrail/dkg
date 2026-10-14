@@ -447,7 +447,7 @@ it.each(['complete', 'page'] as const)('never claims a complete %s result after 
     await store.insert([{ subject: 'urn:vm-only', predicate: 'urn:p', object: '"match"',
       graph: 'did:dkg:context-graph:test/_verifiable_memory/a' }]);
     const engine = new DKGQueryEngine(store);
-    const agent = { queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+    const agent = { store, queryEngine: engine, log: { info() {} }, peerId: 'fixture',
       resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public',
         source: 'registered-chain', reason: 'fixture', metadataBootstrap: 'eligible' }),
       subscribedContextGraphs: new Map() };
@@ -474,8 +474,9 @@ it.each(['unknown', 'thrown', 'ontology'] as const)('preserves metadata chain-pr
       if (proof === 'thrown') throw new Error('RPC unavailable');
       return { state: 'unknown', reason: 'rpc-failure' };
     },
-    store: { query: async (_sparql: string, options: { source: string }) => ({ type: 'boolean',
-      value: proof === 'ontology' && options.source.endsWith('ontologyDeclaration') }) },
+    store: { query: async (sparql: string, options: { source: string }) => sparql.startsWith('SELECT ?mode')
+      ? { type: 'bindings', bindings: [] }
+      : { type: 'boolean', value: proof === 'ontology' && options.source.endsWith('ontologyDeclaration') } },
     chain: {}, localApprovedAgentByCG: new Map(), subscribedContextGraphs: new Map(),
     isPrivateContextGraph: async () => false,
   };
