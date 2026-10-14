@@ -1,4 +1,5 @@
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
+import { PublicSnapshotAdmission } from './public-snapshot-admission.js';
 import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
@@ -31,9 +32,10 @@ export class PublicSnapshotMethods {
       void operation.finally(() => this.vmReconcilePhysicalRuns.delete(operation)).catch(() => {});
       return operation;
     });
+    const admission = new PublicSnapshotAdmission();
     this.router.register(
       PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
-      async (data) => {
+      async (data, peer) => {
         try {
           const request = decodePublicGraphSnapshotRequest(data);
           if (
@@ -47,6 +49,7 @@ export class PublicSnapshotMethods {
             request.contextGraphId,
             request.onChainId,
             request.refresh,
+            () => admission.acquire(peer.toString()),
           );
           if (lifetime !== this.vmReconcileLifecycleGeneration
             || !this.contextGraphBindingState.isGenerationCurrent(request.contextGraphId, generation)

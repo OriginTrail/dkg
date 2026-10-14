@@ -89,17 +89,17 @@ describe('public snapshot job ownership', () => {
   });
   it("refuses a retained inactive source and fences a source deselected during a read", async () => {
     const {a,invalidate} = fixture(); a.config={nodeRole:'core'};
-    let handler!: (bytes: Uint8Array) => Promise<Uint8Array>;
+    let handler!: (bytes: Uint8Array, peer: { toString(): string }) => Promise<Uint8Array>;
     a.router.register=(_p:string,h: typeof handler)=>{handler=h;};
     PublicSnapshotMethods.prototype.startPublicGraphSnapshots.call(a);
     const wire=Buffer.from(JSON.stringify({...request, trustedCorePeerIds:undefined,version:1,refresh:false}));
     a.subscribedContextGraphs.set(graph,{subscribed:false,coreHosted:false});
-    expect(JSON.parse(new TextDecoder().decode(await handler(wire)))).toEqual({unavailable:true});
+    expect(JSON.parse(new TextDecoder().decode(await handler(wire, { toString: () => "peer-a" })))).toEqual({unavailable:true});
     expect(a.chain.readPublicGraphSnapshot).not.toHaveBeenCalled();
     a.subscribedContextGraphs.set(graph,{subscribed:true,onChainId:'1'});
     let release!: (s: ReturnType<typeof snapshot>)=>void;
     a.chain.readPublicGraphSnapshot.mockImplementationOnce(()=>new Promise(resolve=>{release=resolve;}));
-    const pending=handler(wire); invalidate(); release(snapshot());
+    const pending=handler(wire, { toString: () => "peer-a" }); invalidate(); release(snapshot());
     expect(JSON.parse(new TextDecoder().decode(await pending))).toEqual({unavailable:true});
   });
   it.each(['subscription', 'lifetime'] as const)('retires a held initial read when %s changes', async change => {
