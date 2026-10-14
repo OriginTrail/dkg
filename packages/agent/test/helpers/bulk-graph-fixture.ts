@@ -25,7 +25,7 @@ const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanups.reverse()) await close(); cleanups.length = 0; });
 export async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
   beforePublish?: () => Promise<void>; onControl?: (frame: BulkGraphFrame) => void;
-  beforeSend?: (frame: BulkGraphFrame) => Promise<void>; observe?: () => unknown;
+  beforeSend?: (frame: BulkGraphFrame) => Promise<void>; afterSend?: (frame: BulkGraphFrame) => Promise<void>; observe?: () => unknown;
   payloadBytes?: readonly number[]; expandedLengthMismatch?: boolean; tamperDigest?: 'asset' | 'chunk';
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(),'dkg-bulk-test-')); cleanups.push(() => rm(directory,{recursive:true,force:true}));
@@ -69,10 +69,10 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
   registerSyncHandler({register:()=>{},protocolSync:'/fixture',syncDeniedResponse:'denied',syncPageSize:500,sharedMemoryTtlMs:0,
     store:source,peerId:nodes[1]!.peerId,parseSyncRequest:parse,authorizeSyncRequest:async()=>true,
     logWarn:()=>{},logDebug:()=>{},onExperimentalExactBatchResources:r=>{resources=r;}});
-  const exports: number[] = [];
+  const exports: number[] = [], responderErrors: unknown[] = [];
   let markPrefixCommitted!: () => void;
   const prefixCommitted = new Promise<void>(resolve => { markPrefixCommitted = resolve; });
-  if (hooks.tamperDigest || hooks.beforeSend) {
+  if (hooks.tamperDigest || hooks.beforeSend || hooks.afterSend) {
     const register = server.registerDuplexStream.bind(server);
     server.registerDuplexStream = (protocol, prepare, respond, options) => register(protocol, prepare, async context => {
       const session = context.continuation as unknown as BulkGraphSession, send = session.send.bind(session);
@@ -84,9 +84,10 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
           const payload = JSON.parse(Buffer.from(frame.payload).toString()); payload.digest = '0'.repeat(64);
           return send({ ...frame, payload: Buffer.from(JSON.stringify(payload)) });
         }
-        return send(frame);
+        await send(frame);
+        await hooks.afterSend?.(frame);
       };
-      return respond(context);
+      try { return await respond(context); } catch (error) { responderErrors.push(error); throw error; }
     }, options);
   }
   registerPublicBulkGraph(server,{admission:resources,
@@ -139,5 +140,5 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
         heaps.push(assets.flatMap(a => [...a.dataQuads, ...a.metadataQuads]).reduce((n, q) => n + estimateQuadHeapBytes(q), 0));
         return authenticated;
       }});
-  return {run,cancellation,source,target,groups,heaps,exports,uals,router,worker,directory,byId, supplierPeer: nodes[1]!.peerId};
+  return {exportCache: resources.exportCache, responderErrors,run,cancellation,source,target,groups,heaps,exports,uals,router,worker,directory,byId, supplierPeer: nodes[1]!.peerId};
 }

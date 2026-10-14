@@ -4,6 +4,42 @@ import { BulkGraphPartialError } from '../src/sync/requester/bulk-graph-stream.j
 import { fixture, cg } from './helpers/bulk-graph-fixture.js';
 
 describe('bulk public graph stream over real Noise sockets and verifier', () => {
+  it.each(['cold', 'warm'] as const)('fences %s source changes during DATA before publication and releases the real lease', async mode => {
+    const sent: BulkGraphFrame[] = [], controls: BulkGraphFrame[] = [];
+    let changed = false;
+    const f = await fixture(1, -1, false, {
+      onControl: frame => { controls.push(frame); },
+      afterSend: async frame => {
+        sent.push(frame);
+        if (frame.kind === K.DATA && !changed) {
+          changed = true;
+          await f.source.insert([{ graph: `did:dkg:context-graph:${cg}/_meta`, subject: f.uals[0]!,
+            predicate: 'urn:source:generation', object: '"changed after DATA"' }]);
+        }
+      },
+    });
+    if (mode === 'warm') {
+      const lease = await f.exportCache.acquireEncoded({ contextGraphId: cg, assetUal: f.uals[0]! });
+      expect(lease).not.toBeNull();
+      try { await lease!.assertCurrent(); } finally { lease!.release(); }
+    }
+    const before = f.exportCache.stats(), releases = vi.fn();
+    const acquire = f.exportCache.acquireEncoded.bind(f.exportCache);
+    vi.spyOn(f.exportCache, 'acquireEncoded').mockImplementation(async request => {
+      const lease = await acquire(request); if (!lease) return null;
+      return { ...lease, release() { releases(); lease.release(); } };
+    });
+    await expect(f.run()).rejects.toBeInstanceOf(BulkGraphPartialError);
+    await expect.poll(() => f.responderErrors).toEqual([expect.objectContaining({ code: 'SYNC_EXACT_EXPORT_CHANGED' })]);
+    expect(sent.some(frame => frame.kind === K.DATA)).toBe(true);
+    expect(sent.some(frame => frame.kind === K.ASSET_END)).toBe(false);
+    expect(controls.some(frame => frame.kind === K.COMMIT)).toBe(false);
+    expect(await f.target.countQuads()).toBe(0); expect(f.groups).toEqual([]);
+    expect(releases).toHaveBeenCalledOnce();
+    const after = f.exportCache.stats();
+    expect(after.exports - before.exports).toBe(mode === 'cold' ? 1 : 0);
+    expect(after.encodedCacheHits - before.encodedCacheHits).toBe(mode === 'warm' ? 1 : 0);
+  }, 30_000);
   it('publishes a timed group while the next frame and chunk end are withheld', async () => {
     const controls: BulkGraphFrame[] = [];
     let release!: () => void;
