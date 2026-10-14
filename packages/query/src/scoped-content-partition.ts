@@ -14,8 +14,9 @@ export function classifyScopedContentGraph(
   knownChildContextGraphs: Set<string>,
 ): ContentPartition | undefined {
   const root = contextGraphDataUri(contextGraphId);
-  const admit = (kind: ContentPartition['kind'], subGraphName?: string): ContentPartition =>
-    Object.freeze({ graph, kind, ...(subGraphName ? { subGraphName } : {}) });
+  const admit = (kind: ContentPartition['kind'], subGraphName?: string, draftTail?: string): ContentPartition =>
+    Object.freeze({ graph, kind, ...(subGraphName ? { subGraphName } : {}),
+      ...(draftTail ? { draftOwner: draftTail.split('/')[1] } : {}) });
   if (graph === root) return admit('content');
   if (!graph.startsWith(`${root}/`)) return undefined;
   if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return undefined;
@@ -33,7 +34,7 @@ export function classifyScopedContentGraph(
 
   if (tail.startsWith('_shared_memory/')) return admit('shared');
   if (tail.startsWith('_verifiable_memory/')) return admit('verified');
-  if (isDraft(tail)) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs) ? admit('draft') : undefined;
+  if (isDraft(tail)) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs) ? admit('draft', undefined, tail) : undefined;
 
   const slash = tail.indexOf('/');
   const firstSegment = slash >= 0 ? tail.slice(0, slash) : tail;
@@ -45,7 +46,7 @@ export function classifyScopedContentGraph(
   if (!remaining) return admit('content', firstSegment);
   if (remaining.startsWith('_shared_memory/')) return admit('shared', firstSegment);
   if (remaining.startsWith('_verifiable_memory/')) return admit('verified', firstSegment);
-  if (isDraft(remaining)) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs) ? admit('draft', firstSegment) : undefined;
+  if (isDraft(remaining)) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs) ? admit('draft', firstSegment, remaining) : undefined;
   return undefined;
 }
 
