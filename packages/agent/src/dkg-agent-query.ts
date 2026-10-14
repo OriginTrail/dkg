@@ -693,6 +693,11 @@ export class QueryMethods extends DKGAgentBase {
     // `canonicaliseWmId`), so A-1 isolation is unaffected.
     const wmAddressAliases = opts.view === 'working-memory'
       ? resolveWmIdentity(effectiveWmAddress).aliases : undefined;
+    // Ordinary dashboard scans may read only the authenticated caller's drafts.
+    // Explicit exclusion (the bounded product route) grants no draft owners.
+    const partitionOwner = callerAgentAddressStr ?? this.defaultAgentAddress ?? this.peerId;
+    const authorizedWorkingMemoryOwners = opts.excludeWorkingMemoryPartitions === true || !partitionOwner
+      ? undefined : [partitionOwner, ...(resolveWmIdentity(partitionOwner).aliases ?? [])];
 
     const execute = () => {
       opts.signal?.throwIfAborted();
@@ -702,6 +707,7 @@ export class QueryMethods extends DKGAgentBase {
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
       excludeWorkingMemoryPartitions: opts.excludeWorkingMemoryPartitions ?? true,
+      authorizedWorkingMemoryOwners,
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,
