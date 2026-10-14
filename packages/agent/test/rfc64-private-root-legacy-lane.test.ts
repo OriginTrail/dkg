@@ -25,6 +25,7 @@ interface Internals {
   contextGraphNameCommitment(contextGraphId: string): string;
   rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId: string): boolean;
   rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId: string): Promise<boolean>;
+  resolvePrivateRootSwmLegacyLaneV1(contextGraphId: string): Promise<import("../src/swm-read-admission.js").SwmReadAdmission>;
   getCgMeta(contextGraphId: string): Promise<Record<string, unknown>>;
   getOwnCgMetaFacts(contextGraphId: string): Promise<Record<string, unknown>>;
   listLocalAgents(): Array<{ agentAddress: string }>;
@@ -297,7 +298,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
 
   it('admits SWM for a member of a blocked private graph through the legacy checks', async () => {
     vi.spyOn(internals, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(false);
-    const lane = vi.spyOn(internals, 'rfc64PrivateRootSwmOnLegacyLaneV1').mockResolvedValue(true);
+    const lane = vi.spyOn(internals, 'resolvePrivateRootSwmLegacyLaneV1').mockResolvedValue({ outcome: 'allowed' });
     vi.spyOn(internals, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
     const canRead = vi.spyOn(internals, 'canReadContextGraph').mockResolvedValue(true);
     await expect(internals.canUseSharedMemoryForContextGraph(PRIVATE_CG)).resolves.toBe(true);
@@ -308,7 +309,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     await expect(internals.canUseSharedMemoryForContextGraph(PRIVATE_CG)).resolves.toBe(false);
 
     // A refusal that is not a blocked private graph stands without a read.
-    lane.mockResolvedValue(false);
+    lane.mockResolvedValue({ outcome: 'denied' });
     canRead.mockClear();
     await expect(internals.canUseSharedMemoryForContextGraph(PRIVATE_CG)).resolves.toBe(false);
     expect(canRead).not.toHaveBeenCalled();
