@@ -1,4 +1,4 @@
-import { resolveWithinAbort, isQueryAccessDeniedError, QUERY_ACCESS_DENIED_CODE, QUERY_ACCESS_DENIED_MESSAGE } from '@origintrail-official/dkg-core';
+import { startRequestAbortLifecycle, resolveWithinAbort, isQueryAccessDeniedError, QUERY_ACCESS_DENIED_CODE, QUERY_ACCESS_DENIED_MESSAGE } from '@origintrail-official/dkg-core';
 import { randomUUID } from 'node:crypto';
 import { authenticatedAgentAddress } from '../../auth.js';
 import {
@@ -39,8 +39,8 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
   }
   const lifecycle = createStoreQueryRequestLifecycle(req, res, 'api.query.bounded');
   const deadlineAt = performance.now() + query.timeoutMs;
-  const deadline = AbortSignal.timeout(query.timeoutMs);
-  const signal = AbortSignal.any([lifecycle.signal, deadline]);
+  const abortLifecycle = startRequestAbortLifecycle(query.timeoutMs, [lifecycle.signal]);
+  const { signal, deadline } = abortLifecycle;
   const callerAgentAddress = authenticatedAgentAddress(authentication);
   try {
     const options = {
@@ -81,5 +81,5 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
     if (respondIfContextGraphReadAuthorityUnavailable(res, error)) return;
     if (respondToQueryFailure(res, error)) return;
     jsonResponse(res, 503, { code: 'QUERY_UNAVAILABLE', error: 'Local query unavailable', retryable: true });
-  } finally { lifecycle.dispose(); }
+  } finally { abortLifecycle.release(); lifecycle.dispose(); }
 }
