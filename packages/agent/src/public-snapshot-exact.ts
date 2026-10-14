@@ -3,7 +3,9 @@ import type { DKGAgent } from './dkg-agent.js';
 import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 
 export type PublicSnapshotExactHost = {
-  syncExactKnowledgeAssetsFromPeerDetailed: OmitThisParameter<DKGAgent['syncExactKnowledgeAssetsFromPeerDetailed']>;
+  syncExactKnowledgeAssetsFromPeerDetailed: (peer: string, contextGraphId: string, uals: string[],
+    options: Parameters<DKGAgent['syncExactKnowledgeAssetsFromPeerDetailed']>[3],
+  ) => ReturnType<DKGAgent['syncExactKnowledgeAssetsFromPeerDetailed']>;
 };
 
 export async function recoverPublicSnapshotExact(agent: PublicSnapshotExactHost, options: PublicSnapshotRecoveryOptions): Promise<PublicSnapshotRecoveryResult> {
