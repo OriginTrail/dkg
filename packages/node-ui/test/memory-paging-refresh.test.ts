@@ -13,6 +13,7 @@ const owner = '0x1111111111111111111111111111111111111111'; const cg = `${owner}
 let store: OxigraphStore; let engine: DKGQueryEngine; let root: Root; let container: HTMLDivElement; let memory: MemoryData;
 let holdOldPage: boolean; let resolveOldPage: (() => void) | undefined;
 let holdRefresh: boolean; let resolveRefresh: (() => void) | undefined;
+let failShared: boolean;
 let requests: Array<{ contextGraphId: string; sparql: string }>;
 function Probe({ id = cg, catalog = false }: { id?: string; catalog?: boolean }) {
   memory = useMemoryEntities(id, { includeQueryCatalog: catalog });
@@ -33,12 +34,15 @@ async function seed(id: string, count: number) {
 beforeEach(() => {
   invalidateQueryCache(); store = new OxigraphStore(); engine = new DKGQueryEngine(store);
   holdOldPage = false; resolveOldPage = undefined;
-  holdRefresh = false; resolveRefresh = undefined; requests = [];
+  holdRefresh = false; resolveRefresh = undefined; failShared = false; requests = [];
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
   vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
     const request = JSON.parse(String(init.body));
     requests.push(request);
+    if (failShared && request.sparql.includes('STRENDS(STR(?g), "/_shared_memory")')) {
+      return new Response('Temporarily unavailable', { status: 503 });
+    }
     if (holdRefresh && !resolveRefresh && request.contextGraphId === cg && request.sparql.includes('SELECT DISTINCT') && request.sparql.includes('"/_working_memory/"')) {
       await new Promise<void>(resolve => { resolveRefresh = resolve; });
     }
@@ -51,6 +55,25 @@ beforeEach(() => {
 });
 afterEach(async () => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 describe('memory continuation and refresh with the scoped native store', () => {
+  it.each([1, 6])('can retry a failed layer alongside clipped blanks across %i partitions', async partitions => {
+    await seed(cg, partitions); const base = `did:dkg:context-graph:${cg}`;
+    await store.insert([
+      ...Array.from({ length: 5001 }, (_, i) => ({ subject: `_:blank${i}`, predicate: 'urn:p', object: '"blank"', graph: `${base}/_working_memory/${owner}/00` })),
+      { subject: 'urn:shared', predicate: 'urn:p', object: '"shared"', graph: `${base}/_shared_memory/${owner}/00` },
+    ]);
+    failShared = true;
+    await act(async () => root.render(React.createElement(Probe)));
+    expect(memory.layerStatus.swm).toBe('error'); expect(memory.limitMessage).toBeTruthy();
+    expect(memory.hasMore).toBe(partitions > 5);
+    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry memory read');
+    expect(retry).toBeDefined();
+    failShared = false;
+    await act(async () => retry!.click());
+    expect(memory.layerStatus.swm).toBe('ok');
+    expect(memory.graphTriples.some(triple => triple.subject === 'urn:shared')).toBe(true);
+    expect(memory.limitMessage).toBeTruthy();
+    expect([...container.querySelectorAll('button')].map(button => button.textContent)).toEqual(partitions > 5 ? ['Load more graph data'] : []);
+  });
   it('keeps a clipped blank read partial after all IRI continuation pages finish', async () => {
     await seed(cg, 1); const graph = `did:dkg:context-graph:${cg}/_working_memory/${owner}/00`;
     await store.insert([
