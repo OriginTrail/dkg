@@ -2,6 +2,7 @@ import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
+import { contentPartitionLayer, selectContentPartitions, type ContentPartitionSelection } from './content-partition-policy.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource,
@@ -451,7 +452,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         ? await this.resolveScopedGraphVariableAllowList(
             effectiveContextGraphId,
             explicitAllowedGraphs,
-            { subGraphName, isSwmOnlyRoute },
+            { subGraphName, isSwmOnlyRoute, selection: options?.excludeWorkingMemoryPartitions ? 'published-content' : 'all-content' },
             reads,
           )
         : explicitAllowedGraphs;
@@ -462,9 +463,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
       routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
         initialGraphScope,
-        options?.excludeWorkingMemoryPartitions
-          ? variableAllowedGraphs.filter(graph => !/(?:^|\/)(?:_working_memory|assertion)(?:\/|$)/.test(graph))
-          : variableAllowedGraphs,
+        variableAllowedGraphs,
       ));
     }
 
@@ -974,7 +973,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async resolveScopedGraphVariableAllowList(
     contextGraphId: string,
     staticAllowedGraphs: string[],
-    opts: { subGraphName?: string; isSwmOnlyRoute: boolean },
+    opts: { subGraphName?: string; isSwmOnlyRoute: boolean; selection: ContentPartitionSelection },
     reads: QueryStoreReadContext,
   ): Promise<string[]> {
     if (opts.isSwmOnlyRoute) {
@@ -991,7 +990,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       allowed.add(graph);
     }
 
-    return [...allowed];
+    return selectContentPartitions([...allowed], contextGraphId, opts.selection);
   }
 
   private async resolveScopedContentGraphAllowList(
@@ -1359,7 +1358,7 @@ function isScopedContentGraph(
   if (!subGraphName) {
     if (tail.startsWith('_shared_memory/')) return true;
     if (tail.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(tail);
-    if (tail.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
+    if (contentPartitionLayer(tail) === 'draft') return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
   }
 
   const slash = tail.indexOf('/');
@@ -1373,7 +1372,7 @@ function isScopedContentGraph(
   if (!remaining) return true;
   if (remaining.startsWith('_shared_memory/')) return true;
   if (remaining.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(remaining);
-  if (remaining.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
+  if (contentPartitionLayer(remaining) === 'draft') return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
   return false;
 }
 

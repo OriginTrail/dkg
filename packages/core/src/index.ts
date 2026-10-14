@@ -313,7 +313,7 @@ export {
   type RetryOptions,
 } from './retry.js';
 export { resolveWithinAbort } from './abort-boundary.js';
-export { isTransportTimeoutError } from './request-abort-lifecycle.js';
+export { isTransportTimeoutError, startRequestAbortLifecycle, type RequestAbortLifecycle } from './request-abort-lifecycle.js';
 export {
   RetryQueue,
   type RetryEntry,
