@@ -2,7 +2,7 @@ import { selectContentPartitions, type ContentPartition } from './content-partit
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
-import { readScopedContentGraphCatalog, readViewGraphAuthority, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
+import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
 import { storeOptions } from './query-store-options.js';
@@ -68,7 +68,6 @@ import {
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
-import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 
 export { ScopedQueryViolationError } from './scoped-query-error.js';
@@ -471,7 +470,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const sparql = initialScope.source;
     const fanOut = !options.subGraphName && !options.verifiedGraph
       && !(view === 'working-memory' && options.assertionName);
-    const subGraphs = fanOut ? (await readViewGraphAuthority(contextGraphId, catalogReads.query)).subGraphs : [];
+    const subGraphs = fanOut ? await readRegisteredViewSubGraphs(contextGraphId, catalogReads.query) : [];
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
     // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
     // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass
@@ -744,17 +743,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   private async discoverGraphsByPrefix(
     prefix: string,
-    reads: QueryStoreReadContext | StoreReadLane,
+    reads: StoreReadLane,
   ): Promise<string[]> {
-    // GraphSetIndexStore coalesces refreshes by priority. Never let that shared
-    // upstream flight capture one HTTP caller's disconnect signal; race the
-    // individual caller locally while priority/source stay on the shared lane.
-    const sharedReads = 'shared' in reads ? reads.shared : reads;
-    const callerSignal = 'shared' in reads ? reads.signal : undefined;
-    const allGraphs = await raceAgainstCallerAbort(
-      sharedReads.listGraphsByPrefix(prefix),
-      callerSignal,
-    );
+    const allGraphs = await reads.listGraphsByPrefix(prefix);
     return filterRouteGraphsByPrefix(allGraphs, prefix);
   }
 

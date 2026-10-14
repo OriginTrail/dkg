@@ -48,6 +48,8 @@ it('keeps fresh view authority outside the caller result byte budget', async () 
     expect((await engine.query(query, { ...options, verifiedGraph: undefined })).bindings.map(row => row.name).sort())
       .toEqual(['"code"', '"visible"']);
     expect(calls).toHaveLength(3);
+    expect(calls[0]!.sparql).not.toContain('?ctxGraph');
+    expect(calls[0]!.sparql).toContain('http://schema.org/name');
     expect(calls[1]!.sparql).toContain('?ctxGraph');
     expect(calls[1]!.options?.maxResponseBytes).toBe(QUERY_CATALOG_MAX_RESPONSE_BYTES);
     await adapter.insert([{ graph, subject: 'urn:large', predicate: name, object: `"${'x'.repeat(2048)}"` }]);

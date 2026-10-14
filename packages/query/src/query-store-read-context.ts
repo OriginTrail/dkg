@@ -1,3 +1,4 @@
+import { raceAgainstCallerAbort } from './caller-abort.js';
 import type { TripleStore, QueryResult as StoreQueryResult, QueryOptions as StoreQueryOptions } from '@origintrail-official/dkg-storage';
 import type { QueryOptions } from './query-engine.js';
 import { storeOptions } from './query-store-options.js';
@@ -44,15 +45,18 @@ export function createQueryStoreReadContext(
   const options = storeOptions(queryOptions);
   const lane = createStoreReadLane(store, options);
   const sharedOptions = sharedDiscoveryStoreOptions(options);
+  const sharedLane = createStoreReadLane(store, sharedOptions);
   // Fresh catalog authority shares the owner and cancellation, but has the
   // independent catalog budget rather than the caller-derived result ceiling.
   const catalogOptions = { ...options, maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES };
   return {
     ...lane,
+    // Enumeration may share an upstream refresh, but each caller owns its abort race.
+    listGraphsByPrefix: prefix => raceAgainstCallerAbort(sharedLane.listGraphsByPrefix(prefix), options?.signal),
     signal: options?.signal,
     catalog: createStoreReadLane(store, catalogOptions),
     shared: {
-      ...createStoreReadLane(store, sharedOptions),
+      ...sharedLane,
       cacheKey: JSON.stringify([
         sharedOptions?.priority ?? 'normal',
         sharedOptions?.source ?? null,

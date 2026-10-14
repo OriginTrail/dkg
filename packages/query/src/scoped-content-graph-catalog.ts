@@ -1,4 +1,4 @@
-import { registeredSubGraphBranches, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
+import { registeredSubGraphPattern, registeredSubGraphBranches, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { assertSafeIri, contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { nonEmptyNamedGraphEnumerationPattern, type QueryResult } from '@origintrail-official/dkg-storage';
 
@@ -48,24 +48,16 @@ export async function readScopedContentGraphCatalog(
   return catalog;
 }
 
-/** View routing needs sub-graph authority and child-CG fences, not assertion inventory. */
-export async function readViewGraphAuthority(
-  contextGraphId: string,
-  query: (sparql: string) => Promise<QueryResult>,
-): Promise<{ subGraphs: Set<string>; childContextGraphs: Set<string> }> {
-  const root = assertSafeIri(contextGraphDataUri(contextGraphId));
-  const branches = [...registeredSubGraphBranches(contextGraphId), ...childContextGraphBranches(root)];
-  const result = await query(`SELECT DISTINCT ?name ?ctxGraph WHERE {
-    ${branches.map(branch => `{ ${branch} }`).join(' UNION ')}
-  }`);
-  const authority = { subGraphs: new Set<string>(), childContextGraphs: new Set<string>() };
-  if (result.type !== 'bindings') return authority;
-  for (const row of result.bindings) {
+/** Only sub-graph names are needed before enumeration; child authority is read afterward. */
+export async function readRegisteredViewSubGraphs(contextGraphId: string,
+  query: (sparql: string) => Promise<QueryResult>): Promise<Set<string>> {
+  const result = await query(`SELECT DISTINCT ?name WHERE { ${registeredSubGraphPattern(contextGraphId)} }`);
+  const names = new Set<string>();
+  if (result.type === 'bindings') for (const row of result.bindings) {
     const name = decodeRegisteredSubGraphName(row.name);
-    if (name !== undefined) authority.subGraphs.add(name);
-    if (row.ctxGraph) authority.childContextGraphs.add(row.ctxGraph);
+    if (name !== undefined) names.add(name);
   }
-  return authority;
+  return names;
 }
 
 /** Read the child fence after candidate discovery; an earlier fence can race registration. */
