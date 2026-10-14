@@ -218,3 +218,14 @@ export function hasErrorCode(err: unknown, code: string): boolean {
     (err as NodeJS.ErrnoException).code === code
   );
 }
+
+/** Strict query denial is opt-in; legacy callers retain empty-per-form results. */
+export const QUERY_ACCESS_DENIED_CODE = 'QUERY_ACCESS_DENIED';
+export const QUERY_ACCESS_DENIED_MESSAGE = 'Context Graph read denied';
+export class QueryAccessDeniedError extends Error {
+  readonly code = QUERY_ACCESS_DENIED_CODE;
+  constructor() { super(QUERY_ACCESS_DENIED_MESSAGE); this.name = 'QueryAccessDeniedError'; }
+}
+export function isQueryAccessDeniedError(error: unknown): error is { code: typeof QUERY_ACCESS_DENIED_CODE } {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === QUERY_ACCESS_DENIED_CODE;
+}
