@@ -22,14 +22,14 @@ describe('bulk group independent parsed heap fence', () => {
     const group = new BulkCommitGroup(async members => { sizes.push(members.length); events.push('commit'); });
     for (let index = 0; index < 9; index++) {
       events.push('credit');
-      await group.append({ dataQuads: [], metadataQuads: [] } as unknown as VerifiedGraphScopedAsset,
-        { index, path: 'consumed', chunks: 1, header: { encodedBytes: 1, plainBytes: 1, offset: index, digest: '0'.repeat(64), metadata: '' } });
+      await group.append({ asset: { dataQuads: [], metadataQuads: [] } as unknown as VerifiedGraphScopedAsset,
+        index, encodedBytes: 1, plainBytes: 1 });
     }
     await group.flush(); expect(sizes).toEqual([8, 1]);
     expect(events.indexOf('commit')).toBe(8);
   });
   it('splits real verified assets before 64 MiB or eight members', async () => {
-    const worker = new SyncVerifyWorker(), assets = [], stages = [];
+    const worker = new SyncVerifyWorker(), assets = [], sizes = [];
     const cg = 'heap-fixture', address = '0x0000000000000000000000000000000000000001';
     // Golden root for the 200 public triples below (the graph is not hashed).
     // The real worker recomputes it for every asset. Avoid hashing the same
@@ -58,9 +58,7 @@ describe('bulk group independent parsed heap fence', () => {
         } });
         assets.push(await verify({ assetIndex: index, assetUal: ual, metadataBytes: metadata,
           dataBytes: plain }));
-        stages.push({ index, path: 'fixture-consumed', chunks: Math.ceil(body.length / 65536), header: {
-          encodedBytes: body.length, plainBytes: plain.length, offset: 0, digest: '0'.repeat(64), metadata: metadata.toString('base64'),
-        } });
+        sizes.push({ index, encodedBytes: body.length, plainBytes: plain.length });
       }
       const heaps = assets.map(a => [...a.dataQuads, ...a.metadataQuads].reduce((n, q) => n + estimateQuadHeapBytes(q), 0));
       expect(heaps.every(n => n < 32 * 1024 * 1024)).toBe(true);
@@ -71,7 +69,7 @@ describe('bulk group independent parsed heap fence', () => {
         const heap = members.reduce((n, m) => n + heaps[uals.indexOf(m.asset.ual)]!, 0);
         expect(heap).toBeLessThanOrEqual(64 * 1024 * 1024);
       });
-      for (const [index, asset] of assets.entries()) await group.append(asset, stages[index]!);
+      for (const [index, asset] of assets.entries()) await group.append({ asset, ...sizes[index]! });
       await group.flush();
       expect(groups).toEqual([5, 1]);
     } finally { await worker.close(); }
