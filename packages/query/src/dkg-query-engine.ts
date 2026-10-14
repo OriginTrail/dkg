@@ -1,7 +1,7 @@
 import { contentPartitionLayer, selectContentPartitions } from './content-partition-policy.js';
 import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
-import { readScopedContentGraphCatalog, readViewGraphAuthority } from './scoped-content-graph-catalog.js';
+import { readScopedContentGraphCatalog, readViewGraphAuthority, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
 import { storeOptions } from './query-store-options.js';
@@ -469,7 +469,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     catalogReads: StoreReadLane,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
-    const catalog = await readViewGraphAuthority(contextGraphId, catalogReads.query);
+    const fanOut = !options.subGraphName && !options.verifiedGraph
+      && !(view === 'working-memory' && options.assertionName);
+    const subGraphs = fanOut ? (await readViewGraphAuthority(contextGraphId, catalogReads.query)).subGraphs : [];
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
     // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
     // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass
@@ -528,8 +530,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // `verifiedGraph` VM read — it is already pinned to one graph (like a
     // by-name WM read); fanning out would broaden it across every sub-graph's
     // VM partition and return unrelated rows.
-    if (!options.subGraphName && !options.verifiedGraph && !(view === 'working-memory' && options.assertionName)) {
-      for (const sub of catalog.subGraphs) {
+    if (fanOut) {
+      for (const sub of subGraphs) {
         const subResolution = resolveViewGraphs(view, contextGraphId, {
           agentAddress: options.agentAddress,
           subGraphName: sub,
@@ -560,7 +562,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     // Parent authorization never grants access to a registered child context graph.
-    const children = catalog.childContextGraphs;
+    const children = await readChildContextGraphAuthority(contextGraphId, catalogReads.query);
     const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
     allGraphs.length = 0;
     allGraphs.push(...dedupedGraphs);

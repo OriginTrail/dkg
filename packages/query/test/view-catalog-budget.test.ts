@@ -5,7 +5,7 @@ import { QUERY_CATALOG_MAX_RESPONSE_BYTES } from '../src/query-store-read-contex
 
 afterEach(() => vi.unstubAllGlobals());
 
-it('reuses view authority once without charging its bytes to the caller result', async () => {
+it('keeps fresh view authority outside the caller result byte budget', async () => {
   const adapter = new OxigraphStore(), controller = new AbortController();
   const id = 'view-budget', root = `did:dkg:context-graph:${id}`, name = 'urn:name';
   const graph = `${root}/_verifiable_memory/team-a`, child = `${root}/child`;
@@ -47,7 +47,9 @@ it('reuses view authority once without charging its bytes to the caller result',
     calls.length = 0;
     expect((await engine.query(query, { ...options, verifiedGraph: undefined })).bindings.map(row => row.name).sort())
       .toEqual(['"code"', '"visible"']);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
+    expect(calls[1]!.sparql).toContain('?ctxGraph');
+    expect(calls[1]!.options?.maxResponseBytes).toBe(QUERY_CATALOG_MAX_RESPONSE_BYTES);
     await adapter.insert([{ graph, subject: 'urn:large', predicate: name, object: `"${'x'.repeat(2048)}"` }]);
     await expect(engine.query(query, options)).rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
   } finally { await adapter.close(); }
@@ -73,7 +75,7 @@ it.each(['view', 'dynamic'] as const)('bounds streamed %s catalog bytes before d
     const request = fetcher.mock.calls[0] as unknown as [unknown, RequestInit];
     const catalogQuery = String(request[1].body);
     expect(catalogQuery).toContain(route === 'dynamic' ? '?assertionGraph' : '?ctxGraph');
-    expect(catalogQuery).toContain('http://schema.org/name');
+    if (route === 'dynamic') expect(catalogQuery).toContain('http://schema.org/name');
     expect(fetcher).toHaveBeenCalledOnce(); // The caller query never ran.
     expect(cancel).toHaveBeenCalledOnce();
     expect(produced).toBeLessThanOrEqual(QUERY_CATALOG_MAX_RESPONSE_BYTES + 2 * chunk.byteLength);

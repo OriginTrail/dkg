@@ -68,6 +68,16 @@ export async function readViewGraphAuthority(
   return authority;
 }
 
+/** Read the child fence after candidate discovery; an earlier fence can race registration. */
+export async function readChildContextGraphAuthority(contextGraphId: string,
+  query: (sparql: string) => Promise<QueryResult>): Promise<Set<string>> {
+  const root = assertSafeIri(contextGraphDataUri(contextGraphId));
+  const result = await query(`SELECT DISTINCT ?ctxGraph WHERE {
+    ${childContextGraphBranches(root).map(branch => `{ ${branch} }`).join(' UNION ')}
+  }`);
+  return new Set(result.type === 'bindings' ? result.bindings.flatMap(row => row.ctxGraph ? [row.ctxGraph] : []) : []);
+}
+
 function childContextGraphBranches(root: string): string[] {
   const prefix = escapeSparqlLiteral(`${root}/`);
   return ['a <https://dkg.network/ontology#ContextGraph>', '<https://dkg.network/ontology#registrationStatus> ?status'].map(pattern => `
