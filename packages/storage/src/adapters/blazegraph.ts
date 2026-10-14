@@ -494,7 +494,15 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
             if (receipt.type !== 'boolean' || !receipt.value) throw new Error('Bulk group publication receipt missing');
             confirmed = true;
           },
-          cleanup: () => this.postWriteRequest(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group'),
+          cleanup: async () => {
+            // Reclamation owns a fresh bounded lifetime, even after publication
+            // expires or its caller cancels. Keep this physical scheduler slot;
+            // only owned staging is dropped, and publication is never retried.
+            const cleanupDeadline = createStoreOperationDeadline(this.operationTimeoutMs, undefined, 'replaceAssetGroup');
+            try {
+              await this.postWriteRequest(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE, cleanupDeadline, 'bulk group');
+            } finally { cleanupDeadline.dispose(); }
+          },
         });
       });
     } catch (error) {

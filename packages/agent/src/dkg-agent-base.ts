@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from './agent-work-lifetime.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
@@ -1130,8 +1131,8 @@ export class DKGAgentBase {
   protected vmReconcileScheduling?: VmReconcileSchedulingRuntime<ContextGraphReconcileResult>;
   /** Closed dispatcher retained until every physically active worker settles. */
   protected vmReconcileRetirement: Promise<void> | null = null;
-  /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
-  protected readonly vmReconcilePhysicalRuns = new Set<Promise<unknown>>();
+  /** Node-owned cancellation, generation fencing and physical retirement. */
+  protected readonly workLifetime = new AgentWorkLifetime();
   /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */
   protected readonly graphScopedStorePhysicalRuns = new Set<Promise<unknown>>();
   protected graphScopedStoreClosed = false;
@@ -1274,10 +1275,6 @@ export class DKGAgentBase {
   static readonly CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
   /** Late exact responses must not mutate rotation state after shutdown begins. */
   protected vmReconcileRotationClosed = false;
-  /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
-  protected vmReconcileLifecycleGeneration = 0;
-  /** Abortable boundary paired with the generation guard for restart-safe async work. */
-  protected vmReconcileLifecycleController = new AbortController();
   /**
    * Phase D/A4 — one owned per-CG active-fetch cooldown record. Keeping the
    * timestamp and lifecycle owner together makes it impossible for stale
