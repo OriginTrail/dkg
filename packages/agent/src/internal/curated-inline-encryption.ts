@@ -9,6 +9,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { sliceIntoCiphertextChunks } from '../dkg-agent-helpers.js';
+import type { WorkspaceGossipSigner } from '../external-author-signing.js';
 
 /** What both hooks of one publish attempt encrypt with: one sender-key epoch and the id its AEAD binds to. */
 export interface CuratedInlineContext {
@@ -22,7 +23,7 @@ export interface CuratedChunkEmitterHost {
   readonly gossip: { publish(topic: string, data: Uint8Array): Promise<unknown> };
   gossipWireIdFor(contextGraphId: string): string;
   canonicalChunkStoreCgIdOrNull(contextGraphId: string): string | null;
-  resolveWorkspaceGossipSigningAgent(contextGraphId: string): Promise<{ agentAddress: string; privateKey: string } | null | undefined>;
+  resolveWorkspaceGossipSigningAgent(contextGraphId: string): Promise<WorkspaceGossipSigner | null | undefined>;
 }
 
 export function buildInlinePayload(resolved: CuratedInlineContext | undefined) {
@@ -48,7 +49,6 @@ export async function buildInlineChunked(
       `allowed agent before publishing.`,
     );
   }
-  const signerWallet = new ethers.Wallet(signer.privateKey);
   const signerAgentAddress = signer.agentAddress;
   const ctx = createOperationContext('publish');
   const gossip = host.gossip;
@@ -112,7 +112,7 @@ export async function buildInlineChunked(
         payload,
         i,
       );
-      const signature = await signerWallet.signMessage(signingPayload);
+      const signature = await signer.signMessage(signingPayload);
       const envelope = encodeGossipEnvelope({
         version: GOSSIP_ENVELOPE_VERSION,
         type: GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,

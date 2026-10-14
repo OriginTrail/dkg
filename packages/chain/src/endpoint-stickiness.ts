@@ -26,7 +26,7 @@
  *     - `transparentRead` — a TIP-sensitive read (current head / latest block):
  *       canonical order AND no state mutation (a lagging preferred would make the
  *       tip non-monotonic; and it must not clear a preference the heavy paths rely on).
- *     - `nonceWrite`      — `populateAndSign`: prefer ONLY a WRITE-proven backend.
+ *     - `nonceWrite`      — `prepareTransaction`: prefer ONLY a WRITE-proven backend.
  *     - `write`           — accepted broadcast: nonce-free, prefer the
  *       last-good backend; BUT if the primary takes over a write as a fallback
  *       (the preferred backend failed the write op), the preferred backend's nonce
