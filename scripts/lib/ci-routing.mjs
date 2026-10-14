@@ -422,6 +422,12 @@ export const PATH_TRIGGERS = Object.freeze([
   // Files other packages load by relative path, outside their declared
   // dependencies.
   {
+    patterns: [/^packages\/publisher\/src\/(?:metadata|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
+    lanes: ['kosava_node_ui'],
+    evmScopes: [],
+    reason: 'the UI reserved-UAL regression loads the publisher metadata writer and its helpers',
+  },
+  {
     patterns: [/^packages\/agent\/src\/sync\/(?:exact-assets|exact-batch-stream-contract|wire-compression)\.ts$/],
     lanes: ['tornado_core'],
     evmScopes: [],
