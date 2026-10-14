@@ -1,3 +1,4 @@
+import { createRecoveryAuthority } from '../../src/durable-recovery-authority.js';
 import { ethers } from 'ethers';
 import { vi } from 'vitest';
 
@@ -94,7 +95,11 @@ export function createExactBatchHostFixture(cleanups: Array<() => Promise<void>>
   const run = (exactAssetSelection = selection as typeof selection | ReturnType<typeof createChallengePinnedExactAssetSelection>, exactRecoveryTransportMode: ExactRecoveryTransportMode = 'stream-preferred',
     handedOver: { registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence; operationFetchDeadline?: number; signal?: AbortSignal } = {}) => (
     LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(host, ctx, 'fixture-source', CG, 1,
-      { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted, operationFetchDeadline: handedOver.operationFetchDeadline, signal: handedOver.signal, recoveryAuthority: LifecycleSyncMethods.prototype.createRecoveryAuthority.call(host, ctx, handedOver) })
+      { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted, operationFetchDeadline: handedOver.operationFetchDeadline, signal: handedOver.signal, recoveryAuthority: createRecoveryAuthority({ chain: host.chain,
+        verifyContextGraphBinding: (id, onChainId, signal) => host.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+        resolveAuthority: (id, signal) => host.resolveRegisteredContextGraphAuthority(id, { authorityReadMode: 'finalized-index-or-live', signal }),
+        warn: message => host.log.warn(ctx, message),
+      }, handedOver) })
   );
   const frames: ExactBatchFrame[] = items.flatMap((item, assetIndex) => [
     { kind: K.META, assetIndex, sequence: 0, payload: new TextEncoder().encode(item.meta.map(quadToNQuad).join('\n') + '\n') },

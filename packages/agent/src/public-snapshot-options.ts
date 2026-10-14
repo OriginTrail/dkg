@@ -1,5 +1,5 @@
 import { validateContextGraphId } from '@origintrail-official/dkg-core';
-import type { PublicSnapshotMode } from './public-snapshot-evidence.js';
+import { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 
 export interface PublicSnapshotSyncOptions {
   contextGraphId: string;
@@ -17,7 +17,7 @@ export function normalizePublicSnapshotSyncOptions(input: unknown): PublicSnapsh
   const mode = value.mode ?? 'core-cache';
   if (typeof value.contextGraphId !== 'string' || !validateContextGraphId(value.contextGraphId).valid
     || typeof value.onChainId !== 'string' || !/^[1-9][0-9]{0,77}$/.test(value.onChainId)
-    || (mode !== 'core-cache' && mode !== 'rpc-only')
+    || !isPublicSnapshotMode(mode)
     || !Array.isArray(value.trustedCorePeerIds)
     || value.trustedCorePeerIds.some(peer => typeof peer !== 'string' || !peer.length || peer.length > 256)
     || (value.signal !== undefined && !(value.signal instanceof AbortSignal))) throw new Error('Invalid snapshot job');
