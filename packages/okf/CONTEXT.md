@@ -302,9 +302,10 @@ it; the CLI summary reports it against the current time.
   `generated: { at }` comes back inside `generated`, and one value two owners
   share (`generated.at` and `dateModified` on the same time) comes back under
   both keys. A graph written before values were marked (a v0.1 import, or one
-  before `okf:generatedAt`) is read for compatibility, by what each owner can
-  write: a non-empty `rdf:JSON` array is a `generated.at` kept verbatim (no
-  producer key writes one); the legacy `timestamp` is never there beside a
+  before `okf:generatedAt`) has its owners inferred before decoding (see
+  *Ownership is normalized before decoding*), by what each owner can write: a
+  non-empty `rdf:JSON` array is a `generated.at` kept verbatim (no producer
+  key writes one); the legacy `timestamp` is never there beside a
   `generated.at` that gives a time, and is otherwise the canonical last typed
   date, else plain text; every other value is a producer value. There, two
   unmarked dates (a v0.1 `timestamp` and an unquoted `dateModified`) cannot be
@@ -402,11 +403,25 @@ it; the CLI summary reports it against the current time.
   predicate as the family's when the ownership marker names it; every other
   value there is a producer value. So `generated: [a]` beside `Generated: x`
   comes back as both, `Generated: { by: … }` never comes back as provenance,
-  and `Generated: []` stays a producer key. A graph written before values
-  were marked is read for compatibility: there only one non-empty `rdf:JSON`
-  array, which no producer key yields, is taken as the family's on the
-  concept, and an unmarked single value stays a producer value (same graph,
-  marker aside).
+  and `Generated: []` stays a producer key. In a graph written before values
+  were marked, only one non-empty `rdf:JSON` array, which no producer key
+  yields, is taken as the family's on the concept, and an unmarked single
+  value stays a producer value (same graph, marker aside).
+- **Ownership is normalized before decoding.** Export reads one ownership
+  representation: the markers a graph written now carries. A graph written
+  before values were marked names fewer owners, so one step,
+  `normalizeOwnership` (`src/families/ownership.ts`), runs before any family
+  reader and adds the marker of every owner a graph leaves unnamed, inferred
+  from what each owner can write (the rules above), and the legacy
+  `timestamp`'s too, which the encoder leaves unmarked. The family readers
+  then read declared ownership alone. It never adds a marker where the graph
+  has one, keeps every precedence (a family's fields or list entries beat a
+  value kept verbatim, a declared marker beats an inferred one, a value kept
+  verbatim has no `at`), and passes the graph's quads on as the same objects;
+  the markers it adds are internal to decoding and never stored or exported.
+  On a list entry's node, which carries no producer keys, the value on a
+  nested family's predicate is the family's; a node holding two (only a
+  merged graph does) reads the canonical last, as any single value does.
 - **Each triple once.** The mapper deduplicates its output per concept: a store
   holds a set, so two `sources` naming one resource give two `okf:Source` nodes
   but a single `prov:wasDerivedFrom` edge. Without this the expected count in

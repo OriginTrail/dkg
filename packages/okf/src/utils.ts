@@ -105,6 +105,11 @@ export function dedupeQuads<T extends { subject: string; predicate: string; obje
   return out;
 }
 
+/** The last item, the one a single-valued field reads back when the graph holds several. */
+export function last<T>(items: readonly T[]): T | undefined {
+  return items[items.length - 1];
+}
+
 /** A YAML mapping (not a list, not a Date). */
 export function isMapping(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);

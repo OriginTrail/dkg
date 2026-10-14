@@ -129,9 +129,9 @@ maps to the same triple as before (a v0.1 bundle changes only where a producer
 key lands on `schema:dateModified`, whose values gain their marker); it is
 named (`okf:legacyTimestamp`) only where a producer value holds the same term.
 Export reads the markers, so every value comes back under its own key with its
-own RDF kind, and a graph written before them is read for compatibility (an
-unmarked time is the legacy `timestamp`, any other unmarked value a producer
-value).
+own RDF kind. A graph written before them has the markers it lacks inferred
+before decoding (an unmarked time is the legacy `timestamp`, any other
+unmarked value a producer value), so it reads like one written now.
 
 **Each triple once.** An RDF store holds a set, so the mapper emits every
 triple once: two sources naming the same resource yield two `okf:Source` nodes

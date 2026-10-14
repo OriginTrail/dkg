@@ -2,17 +2,17 @@
  * Reading one family's fields back from RDF, shared by the family decoder
  * (`decode.ts`) and the `generated` / `timestamp` codec (`generated.ts`):
  * field predicates and `okf:<familyKey>.<key>` extensions on one subject, and
- * a value the encoder kept verbatim on the family key's generic predicate.
- * Every reader reports the quads it read.
+ * a value the encoder kept verbatim on the family key's generic predicate, by
+ * its marker. Every reader reports the quads it read, and reads declared
+ * ownership alone: `ownership.ts` names every owner a graph leaves unnamed
+ * before any of them runs.
  */
 
-import { RDF_JSON } from '../constants.js';
 import { keptVerbatimPredicate, okfExtensionKey } from '../extensions.js';
 import { genericPredicate } from '../terms.js';
-import { dict, isMapping } from '../utils.js';
-import { literalDatatype, oneOrMany, orderKeys, termValue, ValueBuckets, type ExportContext, type TermForm } from '../decode-terms.js';
+import { dict, last } from '../utils.js';
+import { orderKeys, termValue, ValueBuckets, type ExportContext, type TermForm } from '../decode-terms.js';
 import type { Quad } from '../types.js';
-import { parseList } from './parse.js';
 import type { FamilySpec, FieldSpec, ListFamilySpec, MappingFamilySpec } from './specs.js';
 
 /** A value read back, and the quads it was read from. */
@@ -94,13 +94,6 @@ export function decodeMapping(spec: MappingFamilySpec, quads: readonly Quad[], c
   return isPresent(spec, decoded) ? { value: orderKeys(decoded.value, spec.fields.map((f) => f.key)), quads: decoded.quads } : null;
 }
 
-/** Whether the family keeps `value` verbatim: it is no value of the family's own shape. */
-function keepsVerbatim(spec: FamilySpec, value: unknown): boolean {
-  if (spec.shape === 'mapping') return !isMapping(value);
-  if (spec.shape === 'list') return parseList(spec, value).shape === 'invalid';
-  return false;
-}
-
 /**
  * A family's value kept verbatim (`encode.ts`), or `null`. The encoder marks
  * it (`keptVerbatimPredicate`, the same object term as its queryable copy on
@@ -108,31 +101,14 @@ function keepsVerbatim(spec: FamilySpec, value: unknown): boolean {
  * value even when a producer key of the same camelCase (`Sources`) shares the
  * predicate; both triples are the family's, and every other value on the
  * predicate is a producer value, which the exporter writes back under a
- * spelling of its own.
- *
- * A graph written before values were marked is read for compatibility. On an
- * entry node every triple on the predicate is the family's, since a node
- * carries no producer keys. On the concept only what no producer key yields
- * is: one non-empty `rdf:JSON` array the family keeps verbatim (a producer
- * key's list is one triple per item, and an empty one is `[]`). An unmarked
- * single value stays a producer value: a graph the mapper writes now marks
- * every value a family keeps.
+ * spelling of its own. A graph written before values were marked has its
+ * markers added before decoding (`ownership.ts`).
  */
-export function keptVerbatim(spec: FamilySpec, quads: readonly Quad[], ctx: ExportContext, on: 'node' | 'concept'): Read | null {
-  const predicate = genericPredicate(spec.key);
+export function keptVerbatim(spec: FamilySpec, quads: readonly Quad[], ctx: ExportContext): Read | null {
   const markers = quads.filter((q) => q.predicate === keptVerbatimPredicate(spec.key));
-  const marked = markers[markers.length - 1];
-  if (marked) {
-    const copies = quads.filter((q) => q.predicate === predicate && q.object === marked.object);
-    return { value: termValue(marked.object, ctx), quads: [...markers, ...copies] };
-  }
-  const onPredicate = quads.filter((q) => q.predicate === predicate);
-  if (on === 'node') {
-    return onPredicate.length > 0 ? { value: oneOrMany(onPredicate.map((q) => termValue(q.object, ctx))), quads: onPredicate } : null;
-  }
-  const lists = onPredicate.filter((q) => {
-    const value = termValue(q.object, ctx);
-    return literalDatatype(q.object) === RDF_JSON && Array.isArray(value) && value.length > 0 && keepsVerbatim(spec, value);
-  });
-  return lists.length === 1 ? { value: termValue(lists[0].object, ctx), quads: lists } : null;
+  const marked = last(markers);
+  if (!marked) return null;
+  const predicate = genericPredicate(spec.key);
+  const copies = quads.filter((q) => q.predicate === predicate && q.object === marked.object);
+  return { value: termValue(marked.object, ctx), quads: [...markers, ...copies] };
 }

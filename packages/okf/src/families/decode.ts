@@ -6,7 +6,9 @@
  * and returns the frontmatter value with fields in definition order followed
  * by extensions, or a value of the wrong shape the encoder kept verbatim on
  * the family key's generic predicate (`decode-fields.ts`). `generated` and the
- * legacy `timestamp` are read back by their codec (`generated.ts`). It reports
+ * legacy `timestamp` are read back by their codec (`generated.ts`). Ownership
+ * is made explicit first (`ownership.ts`), so every reader reads the markers a
+ * graph written now carries, whenever the graph was written. It reports
  * every concept quad it read, so the exporter reads only the rest, as base
  * fields and producer keys, and needs no knowledge of the families. Derived
  * triples (`okf:trustTier`, `prov:wasDerivedFrom`) are never read back; the
@@ -18,6 +20,7 @@ import { dict } from '../utils.js';
 import type { Quad } from '../types.js';
 import { decodeFields, decodeMapping, formOf, keptVerbatim, type Read } from './decode-fields.js';
 import { decodeGenerated } from './generated.js';
+import { normalizeOwnership } from './ownership.js';
 import { FAMILY_SPECS, GENERATED, type ListFamilySpec, type ScalarFamilySpec } from './specs.js';
 
 /** What the families of one concept read back as. */
@@ -36,7 +39,7 @@ function decodeEntry(
   const { fields, extensions } = decodeFields(spec, quads, ctx);
   const nested = dict();
   for (const n of spec.nested ?? []) {
-    const value = decodeMapping(n, quads, ctx) ?? keptVerbatim(n, quads, ctx, 'node');
+    const value = decodeMapping(n, quads, ctx) ?? keptVerbatim(n, quads, ctx);
     if (value) nested[n.key] = value.value;
   }
   return orderKeys(Object.assign(dict(), fields, nested, extensions), [
@@ -62,10 +65,13 @@ function decodeScalar(spec: ScalarFamilySpec, quads: readonly Quad[], ctx: Expor
  * is the concept; `nodeQuads` returns the quads of one entry node.
  */
 export function decodeFamilies(
-  conceptQuads: readonly Quad[],
-  nodeQuads: (node: string) => readonly Quad[],
+  graphConceptQuads: readonly Quad[],
+  graphNodeQuads: (node: string) => readonly Quad[],
   ctx: ExportContext,
 ): DecodedFamilies {
+  // Every owner named first, so a graph written before values were marked
+  // reads as one written now, and each reader below reads declared ownership.
+  const { conceptQuads, nodeQuads } = normalizeOwnership(graphConceptQuads, graphNodeQuads, ctx);
   const frontmatter = dict();
   const consumed = new Set<Quad>();
   const put = (key: string, read: Read): void => {
@@ -86,7 +92,7 @@ export function decodeFamilies(
         break;
       }
       case 'mapping': {
-        const found = decodeMapping(spec, conceptQuads, ctx) ?? keptVerbatim(spec, conceptQuads, ctx, 'concept');
+        const found = decodeMapping(spec, conceptQuads, ctx) ?? keptVerbatim(spec, conceptQuads, ctx);
         if (found) put(spec.key, found);
         break;
       }
@@ -97,7 +103,7 @@ export function decodeFamilies(
           put(spec.key, { value: nodes.map((node) => decodeEntry(spec, nodeQuads(node), ctx)), quads: links });
           break;
         }
-        const kept = keptVerbatim(spec, conceptQuads, ctx, 'concept');
+        const kept = keptVerbatim(spec, conceptQuads, ctx);
         if (kept) put(spec.key, kept);
         break;
       }

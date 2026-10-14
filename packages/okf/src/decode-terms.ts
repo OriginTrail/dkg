@@ -54,6 +54,12 @@ export function isStringLiteral(term: string): boolean {
   return literal?.kind === 'plain' || (literal?.kind === 'typed' && literal.datatype === XSD_STRING_DATATYPE);
 }
 
+/** Whether a term is a typed xsd:dateTime / xsd:date literal, as the date encoder types a valid date. */
+export function isTypedDate(term: string): boolean {
+  const datatype = literalDatatype(term);
+  return datatype === XSD_DATE_TIME || datatype === XSD_DATE;
+}
+
 /** Lexical value of a literal term, or `null` for an IRI / blank node or a literal that does not parse. */
 export function literalValue(term: string): string | null {
   return parseLiteral(term)?.value ?? null;

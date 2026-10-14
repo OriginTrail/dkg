@@ -16,19 +16,11 @@
  * to its key.
  */
 
-import {
-  OKF_GENERATED_AT,
-  OKF_LEGACY_TIMESTAMP,
-  OKF_PRODUCER_DATE_MODIFIED,
-  RDF_JSON,
-  SCHEMA_DATE_MODIFIED,
-  XSD_DATE,
-  XSD_DATE_TIME,
-} from '../constants.js';
-import { isStringLiteral, literalDatatype, orderKeys, termValue, type ExportContext } from '../decode-terms.js';
+import { OKF_GENERATED_AT, OKF_LEGACY_TIMESTAMP, OKF_PRODUCER_DATE_MODIFIED, SCHEMA_DATE_MODIFIED } from '../constants.js';
+import { termValue, type ExportContext } from '../decode-terms.js';
 import { dateTerm, genericPredicate, genericQuads, valueToTerms } from '../terms.js';
 import { dateTimeLexical } from '../timestamps.js';
-import { dict, isBlank, isMapping } from '../utils.js';
+import { isBlank, isMapping, last } from '../utils.js';
 import type { Quad } from '../types.js';
 import { decodeMapping, keptVerbatim, type Read } from './decode-fields.js';
 import { prepareFamily, type PreparedQuad } from './encode.js';
@@ -104,76 +96,28 @@ export function lastModifiedOf(frontmatter: Record<string, unknown>): string | n
 
 /**
  * Export: `generated` and the legacy `timestamp` from a concept's quads, and
- * the quads each was read from. Ownership is read, not inferred: `generated`
- * is its fields (`at` on `okf:generatedAt`), the timestamp an
- * `okf:legacyTimestamp` value, and each is read with its copy on
- * `schema:dateModified`, unless a producer value holds the same term
- * (`okf:producerDateModified`): that copy is left to the exporter, which
- * writes it back under the producer's key. Values no marker names are read
- * for compatibility (`readUnmarked`).
+ * the quads each was read from, every owner named (`ownership.ts`):
+ * `generated` is its fields (`at` on `okf:generatedAt`) or a value kept
+ * verbatim, the timestamp an `okf:legacyTimestamp` value, and each is read
+ * with its copy on `schema:dateModified`, unless a producer value holds the
+ * same term (`okf:producerDateModified`): that copy is left to the exporter,
+ * which writes it back under the producer's key.
  */
 export function decodeGenerated(conceptQuads: readonly Quad[], ctx: ExportContext): Array<[string, Read]> {
   const on = (predicate: string) => conceptQuads.filter((q) => q.predicate === predicate);
-  const at = on(OKF_GENERATED_AT);
-  const marked = on(OKF_LEGACY_TIMESTAMP);
   const producer = new Set(on(OKF_PRODUCER_DATE_MODIFIED).map((q) => q.object));
-  const named = new Set([...producer, ...at.map((q) => q.object), ...marked.map((q) => q.object)]);
   const copies = on(SCHEMA_DATE_MODIFIED);
   const copiesOf = (term: string) => (producer.has(term) ? [] : copies.filter((q) => q.object === term));
-  const unmarked = readUnmarked(copies.filter((q) => !named.has(q.object)), at, ctx);
   const out: Array<[string, Read]> = [];
 
   const mapping = decodeMapping(GENERATED, conceptQuads, ctx);
-  const kept = mapping ? null : keptVerbatim(GENERATED, conceptQuads, ctx, 'concept');
-  const keptAt = kept ? undefined : unmarked.at;
-  if (kept) out.push([GENERATED.key, kept]);
-  else if (mapping || keptAt) {
-    const value = Object.assign(dict(), mapping?.value);
-    if (keptAt) value.at = termValue(keptAt.object, ctx, 'date');
-    const quads = [...(mapping?.quads ?? []), ...(keptAt ? [keptAt] : []), ...at.flatMap((q) => copiesOf(q.object))];
-    out.push([GENERATED.key, { value: orderKeys(value, GENERATED.fields.map((f) => f.key)), quads }]);
-  }
+  const generated = mapping
+    ? { value: mapping.value, quads: [...mapping.quads, ...on(OKF_GENERATED_AT).flatMap((q) => copiesOf(q.object))] }
+    : keptVerbatim(GENERATED, conceptQuads, ctx);
+  if (generated) out.push([GENERATED.key, generated]);
 
-  const timestamp = last(marked) ?? unmarked.timestamp;
+  const marked = on(OKF_LEGACY_TIMESTAMP);
+  const timestamp = last(marked);
   if (timestamp) out.push(['timestamp', { value: termValue(timestamp.object, ctx, 'date'), quads: [...marked, ...copiesOf(timestamp.object)] }]);
   return out;
-}
-
-/**
- * Compatibility: the values on `schema:dateModified` no marker names. A graph
- * the mapper writes now leaves only the legacy `timestamp` unmarked; one
- * written before values were marked (by the v0.1 mapper, or before
- * `okf:generatedAt`) leaves `generated.at` and producer values unmarked too,
- * so their owners are inferred from what each can write:
- *
- *   - a non-empty `rdf:JSON` array is a `generated.at` kept verbatim, when no
- *     `okf:generatedAt` names one: a producer key's list is one triple per
- *     item, and the timestamp writes a time;
- *   - the legacy `timestamp` is never there beside a `generated.at` that gives
- *     a time (it supersedes it, §13.1); otherwise it is one of the terms its
- *     date encoder writes, the canonical last typed date, else the canonical
- *     last plain literal;
- *   - every other value is a producer value, left to the exporter.
- */
-function readUnmarked(unmarked: readonly Quad[], at: readonly Quad[], ctx: ExportContext): { at?: Quad; timestamp?: Quad } {
-  const timestamp = () => last(unmarked.filter((q) => isTypedDate(q.object))) ?? last(unmarked.filter((q) => isStringLiteral(q.object)));
-  if (at.length > 0) return at.some((q) => literalDatatype(q.object) !== RDF_JSON) ? {} : { timestamp: timestamp() };
-  return { at: last(unmarked.filter((q) => isNonEmptyList(q.object, ctx))), timestamp: timestamp() };
-}
-
-/** The last quad in canonical order, the one a single-valued field reads back. */
-function last(quads: readonly Quad[]): Quad | undefined {
-  return quads[quads.length - 1];
-}
-
-function isNonEmptyList(term: string, ctx: ExportContext): boolean {
-  if (literalDatatype(term) !== RDF_JSON) return false;
-  const value = termValue(term, ctx);
-  return Array.isArray(value) && value.length > 0;
-}
-
-/** Whether a term is a typed xsd:dateTime / xsd:date literal, as the date encoder types a valid date. */
-function isTypedDate(term: string): boolean {
-  const datatype = literalDatatype(term);
-  return datatype === XSD_DATE_TIME || datatype === XSD_DATE;
 }
