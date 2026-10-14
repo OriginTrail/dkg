@@ -1,6 +1,6 @@
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
-import { classifyScopedContentGraph } from './scoped-content-partition.js';
+import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { selectContentPartitions, type ContentPartition, type ContentPartitionSelection } from './content-partition-policy.js';
 import { storeOptions } from './query-store-options.js';
 import {
