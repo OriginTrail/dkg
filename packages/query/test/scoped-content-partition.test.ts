@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classifyScopedContentGraph } from '../src/scoped-content-partition.js';
+import { selectContentPartitions } from '../src/content-partition-policy.js';
 
 describe('normalized content partition scope', () => {
   const root = 'did:dkg:context-graph:team/graph';
@@ -25,5 +26,20 @@ describe('normalized content partition scope', () => {
   it('excludes known child graphs even when their name is a registered subgraph', () => {
     expect(classifyScopedContentGraph(`${root}/code/_verifiable_memory/a`, 'team/graph',
       new Set(['code']), new Set(), new Set([`${root}/code`]))).toBeUndefined();
+  });
+  it.each(['_working_memory', 'assertion'])('retains ownerless historical %s drafts only for all access', tail => {
+    for (const sub of ['', 'code']) {
+      const graph = `${root}/${sub ? `${sub}/` : ''}${tail}`;
+      const partition = classifyScopedContentGraph(graph, 'team/graph', new Set(['code']),
+        new Set([graph]), new Set());
+      expect(partition).toEqual({ graph, kind: 'draft', draftOwner: null, broadScopeEligible: true,
+        ...(sub ? { subGraphName: sub } : {}) });
+      expect(Object.isFrozen(partition)).toBe(true);
+      const partitions = [partition!];
+      expect(selectContentPartitions(partitions, { kind: 'all' })).toEqual([graph]);
+      expect(selectContentPartitions(partitions, { kind: 'none' })).toEqual([]);
+      expect(selectContentPartitions(partitions, { kind: 'owners', owners: ['', 'agent-a'] })).toEqual([]);
+      expect(selectContentPartitions(partitions, { kind: 'all' }, 'other')).toEqual([]);
+    }
   });
 });
