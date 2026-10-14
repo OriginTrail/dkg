@@ -151,6 +151,28 @@ it.each(['index', 'readiness', 'search'])('enforces and labels %s evidence mode 
     expect(f.store.count(indexed.indexId)).toBe(3);
   }
 });
+it.each(['index', 'readiness', 'search'] as const)('takes %s policy from each request when reusing one reader', async operation => {
+  const f = await fixture();
+  await markCoreTrustedGraph(f.graph, spec.contextGraphId);
+  const signal = new AbortController().signal, deadline = performance.now() + 5000;
+  const indexed = await f.service.index(parseIndexRequest({ ...spec, chainEvidenceMode: 'core-cache' }), f.reader, signal, deadline);
+  expect(f.store.state(indexed.indexId)?.spec).toEqual(parseSpec(spec));
+  expect(indexed.indexId).toBe(indexKey(parseSpec(spec), f.embedder.fingerprint));
+  for (const mode of ['rpc-only', 'core-cache', undefined] as const) {
+    f.agent.query.mockClear();
+    const input = { ...spec, indexId: indexed.indexId, query: 'ocean', chainEvidenceMode: mode };
+    const pending = operation === 'index'
+      ? f.service.index(parseIndexRequest(input), f.reader, signal, deadline)
+      : operation === 'readiness'
+        ? f.service.readiness(parseReadinessRequest(input), f.reader, signal, deadline)
+        : f.service.search(parseSearchRequest(input), f.reader, signal, deadline);
+    if (mode === 'core-cache') await expect(pending).resolves.toMatchObject({ indexId: indexed.indexId });
+    else await expect(pending).rejects.toMatchObject({ code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
+    expect(f.agent.query).toHaveBeenCalled();
+    expect(f.agent.query.mock.calls.every(([, options]) => options.chainEvidenceMode === (mode ?? 'rpc-only'))).toBe(true);
+    expect(f.store.state(indexed.indexId)?.spec).not.toHaveProperty('chainEvidenceMode');
+  }
+});
 it('requires operator authority to index and exposes bounded typed search outcomes', async () => {
   const f = await fixture();
   const denied = request(f, spec, 'anonymous', '/api/entities/index'); await handleEntityRoutes(denied.ctx); expect(denied.res.statusCode).toBe(403);

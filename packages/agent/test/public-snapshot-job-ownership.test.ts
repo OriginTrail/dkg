@@ -1,6 +1,14 @@
+vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
+  return { ...actual, exchangeExperimentalExactBatch: vi.fn() };
+});
+import { exchangeExperimentalExactBatch } from '@origintrail-official/dkg-core';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
+import { CG, ctx, createExactBatchHostFixture, storedRows } from './_helpers/exact-batch-host.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { getEventListeners } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { sealPublicGraphSnapshot, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -152,4 +160,80 @@ describe('public snapshot job ownership', () => {
     expect(a.router.send).not.toHaveBeenCalled();
   });
 
+});
+
+const transportCleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  for (const close of transportCleanups.splice(0)) await close();
+  vi.restoreAllMocks(); vi.unstubAllEnvs();
+  vi.mocked(exchangeExperimentalExactBatch).mockReset();
+});
+
+describe('nonempty snapshot cancellation through exact materialization', () => {
+  it.each(['caller', 'binding'] as const)('keeps physical ownership and fences later assets after %s cancellation', async change => {
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+    const f = createExactBatchHostFixture(transportCleanups), a = f.host;
+    a.started = true;
+    a.subscribedContextGraphs.set(CG, { subscribed: true, onChainId: '14' });
+    const pinned = sealPublicGraphSnapshot({ version: 1, chainId: a.chain.chainId,
+      deploymentId: a.chain.deploymentId, contextGraphId: CG, onChainId: '14', nameHash: ethers.id(CG),
+      contextGraphStorage: `0x${'1'.repeat(40)}`, assetStorage: `0x${'2'.repeat(40)}`,
+      blockNumber: '123', blockHash: `0x${'a'.repeat(64)}`, finalityConfirmations: 1,
+      observedAt: Date.now(), expiresAt: Date.now() + 120000, accessPolicy: 0,
+      assets: f.items.map(item => ({ id: item.kaId.toString(), root: ethers.hexlify(item.root), version: '1' })) });
+    a.chain.readPublicGraphSnapshot = vi.fn(async () => pinned);
+    let authority!: import('../src/durable-recovery-authority.js').DurableRecoveryAuthority;
+    // Only transport/chain responses are fixtures. Exercise the real receive
+    // worker, job evidence authentication, physical fence and atomic store path.
+    a.syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async (_peer, _graph, uals, options) => {
+      authority = options.recoveryAuthority;
+      return LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(a, ctx, 'fixture-source', CG, 1, {
+        ...options, exactAssetSelection: createUalOnlyExactAssetSelection(uals),
+        fetchTimeoutMs: 120000, authenticationTimeoutMs: 30000,
+      });
+    });
+    let entered!: () => void, release!: () => void;
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const replace = f.store.replaceGraphAndSubject!.bind(f.store);
+    const writes = vi.spyOn(f.store, 'replaceGraphAndSubject').mockImplementation(async (...args) => {
+      entered(); await held; return replace(...args);
+    });
+    const caller = new AbortController();
+    const job = PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {
+      contextGraphId: CG, onChainId: '14', trustedCorePeerIds: ['fixture-source'], mode: 'rpc-only', signal: caller.signal,
+    });
+    let settled = false;
+    const outcome = job.then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
+    try {
+      await Promise.race([writing, outcome.then(result => {
+        if ('error' in result) throw result.error;
+        throw new Error('Snapshot completed before the held write');
+      })]);
+      expect(authority.isRegisteredPublic(CG)).toBe(true);
+      expect(a.workLifetime.physicalRuns.size).toBe(1);
+      expect(a.graphScopedStorePhysicalRuns.size).toBeGreaterThan(0);
+      if (change === 'caller') caller.abort(new Error('caller canceled snapshot'));
+      else a.contextGraphBindingState.invalidate(CG);
+      expect(authority.isRegisteredPublic(CG)).toBe(false);
+      let drained = false;
+      const drain = a.workLifetime.drain().then(() => { drained = true; });
+      await Promise.resolve(); await Promise.resolve();
+      expect(settled).toBe(false); expect(drained).toBe(false);
+      expect(writes).toHaveBeenCalledTimes(1);
+      release();
+      expect(await outcome).toHaveProperty('error');
+      await drain;
+      // The first atomic write had legitimately crossed its commit boundary.
+      // Cancellation preserves it, but must never materialize the second asset.
+      expect(await storedRows(f.store, f.items[0]!.graph)).toBe(1);
+      expect(await storedRows(f.store, f.items[1]!.graph)).toBe(0);
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(a.syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(1);
+      expect(a.chain.readPublicGraphSnapshot).toHaveBeenCalledTimes(1);
+      expect(a.workLifetime.physicalRuns.size).toBe(0);
+      expect(a.graphScopedStorePhysicalRuns.size).toBe(0);
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+    } finally { release(); await outcome; }
+  });
 });
