@@ -7,7 +7,9 @@ doc_type: how-to
 
 # Turn a document into agent knowledge
 
-**Outcome:** import a document into Working Memory, inspect what was extracted, and let an agent answer from that evidence. Start with a healthy node and the exact Context Graph ID from the [quickstart](../getting-started/quickstart.md). Use documents you intend this node and its configured extraction providers to process.
+Turn a project note into knowledge your agent can connect to other records. Import the document, inspect its extracted relationships, and have the agent answer with a source. When the contribution is ready, you can share it so other participants can use the same evidence.
+
+Start with a healthy node and the exact Context Graph ID from the [quickstart](../getting-started/quickstart.md). Use documents you intend this node and its configured extraction providers to process.
 
 ## Supply a small document
 
@@ -46,7 +48,7 @@ Confirm what the pipeline actually extracted. Structural Markdown extraction may
 
 Ask the agent to read the completed import artifact through its discovered artifact-reading tool, inspect the KA, and propose missing relationships with source provenance. Review the proposed facts before it writes them. To learn a deterministic graph representation first, use the [five-triple fixture](../getting-started/quickstart.md#3-write-a-small-inspectable-fact).
 
-Use stable IRIs for entities, predicates with documented meanings, and source identifiers for assertions. Two similar labels are not proof that two entities are identical. Keep source statements separate from model-inferred relationships.
+Use stable IRIs for entities, predicates with documented meanings, and source identifiers for assertions. These let a later query connect the imported knowledge to other contributions. Two similar labels are not proof that two entities are identical. Keep source statements separate from model-inferred relationships, so a reader can tell which evidence supports each claim.
 
 ## Retrieve, update, and share
 

@@ -7,6 +7,8 @@ doc_type: how-to
 
 # Connect an MCP client
 
+Use DKG knowledge from the agent client you already work in. MCP exposes node tools so the agent can query relationships, inspect sources, and contribute knowledge through the normal sharing and publication lifecycle.
+
 Use an installed MCP-aware client such as Cursor, Claude Code, Claude Desktop, Windsurf, VS Code with Copilot, Cline, or Codex CLI. DKG supplies tools over MCP stdio; the client supplies the model and conversation.
 
 ```bash

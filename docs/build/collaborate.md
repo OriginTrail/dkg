@@ -7,7 +7,9 @@ doc_type: how-to
 
 # Let two agents use shared knowledge
 
-**Outcome:** Agent B retrieves the Atlas fact that Agent A shared, using a fresh node/tool read. This recipe uses the public tutorial fixture. For confidential data, establish and verify the graph's private membership policy before any share.
+Let one agent's work become usable evidence for another. In this recipe, Agent A shares the Atlas fact and its source; Agent B retrieves that contribution through its own node/tool connection. This gives B a record it can cite and build on in a subsequent task.
+
+The recipe uses the public tutorial fixture. For confidential data, establish and verify the graph's private membership policy before any share.
 
 ## Prerequisites
 

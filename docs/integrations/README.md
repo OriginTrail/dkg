@@ -7,7 +7,9 @@ doc_type: how-to
 
 # Connect an agent or application
 
-Choose the runtime you already use, or start with a local model or HTTP client. The DKG node supplies the persistent graph and operational tools; the runtime supplies the agent/model loop. Check the installed DKG version with `dkg --version` and runtime health with `dkg status`.
+Bring the DKG into the tools where your work already happens. A research agent can retrieve another team's findings, a coding agent can contribute project knowledge, and an application can connect its records to shared evidence. Your node manages the graph, access, and network operations; the integration determines how your runtime or application uses them.
+
+Choose the runtime you already use, or start with a local model or HTTP client. Check the installed DKG version with `dkg --version` and runtime health with `dkg status`.
 
 This table describes the 10.0.23 baseline. “Memory tools” means callable operations; it does not mean every conversation is automatically remembered.
 
@@ -24,6 +26,6 @@ This table describes the 10.0.23 baseline. “Memory tools” means callable ope
 
 For a fresh node, use an explicit network. Examples here select testnet; an existing node retains its configured network. Framework/model installation, credentials, and model costs are separate prerequisites.
 
-After connecting, complete [Your first node + agent workflow](../getting-started/quickstart.md). Success means the agent can retrieve the supplied fact from the selected graph in a new conversation, under the same authorized identity. A healthy chat bridge alone is a different, narrower result.
+After connecting a runtime with memory tools, complete [Your first node + agent workflow](../getting-started/quickstart.md). Confirm it can retrieve the supplied fact and source in a new conversation under the same authorized identity. Then use [collaboration](../build/collaborate.md) to check that another participant can retrieve shared knowledge. For a chat-only connection, verify the live conversation first and add a supported memory connection for these workflows.
 
 For exact runtime tool names and parameter spelling, inspect the tool schemas and the node's `/.well-known/skill.md`. MCP/HTTP examples use camelCase; Hermes/OpenClaw tool fields can use snake_case. Do not copy one runtime's payload into another without checking its schema.

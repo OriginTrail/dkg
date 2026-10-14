@@ -7,6 +7,8 @@ doc_type: how-to
 
 # Connect Hermes
 
+Connect Hermes so its agents can retain project knowledge, query shared evidence, and contribute findings through your DKG node. You can continue using Hermes while choosing when knowledge stays private or becomes part of a collaboration.
+
 Prerequisites: a working Hermes installation and configured model access. The DKG adapter can bootstrap a node and configure the selected Hermes profile. The 10.0.23 baseline supports DKG memory tools, primary-memory integration, and Node UI chat through the local bridge or configured gateway.
 
 ```bash

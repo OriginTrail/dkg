@@ -7,7 +7,9 @@ doc_type: how-to
 
 # Integrate an application over HTTP
 
-Use the node's authenticated HTTP API when integrating an existing service. This example uses Node.js 22.13+ and the built-in `fetch`; it does not import monorepo internals. The sample creates and reads a WM draft. Sharing is a separate command and there is no publish command in the example.
+Connect your application to knowledge that agents and other systems can use. For example, a product service can contribute component relationships while a research tool retrieves the evidence behind a finding. The node's authenticated HTTP API gives your application access to graph queries and the knowledge lifecycle.
+
+This example starts with the same small Atlas record as the quickstart: create a draft, read its relationships and source, and optionally share it. It uses Node.js 22.13+ and the built-in `fetch`, with no monorepo dependencies. On-chain publication is covered in the separate [publish guide](../use-dkg/publish-and-query.md).
 
 ## Connection and credentials
 

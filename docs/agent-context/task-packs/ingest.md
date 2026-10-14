@@ -7,6 +7,8 @@ doc_type: playbook
 
 # Ingest knowledge
 
+Prepare a contribution that another reader can understand and connect to related knowledge. Preserve entity identifiers, relationships, and source evidence throughout the import.
+
 **Inputs:** approved source, exact target graph, KA name, intended extraction pipeline, and allowed memory transition. Follow [the document guide](../../build/import-documents.md).
 
 1. Discover the installed import tools and available extraction pipelines. Establish whether the pipeline calls an external model before sending confidential content to it.

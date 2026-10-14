@@ -7,7 +7,9 @@ doc_type: how-to
 
 # Your first node + agent workflow
 
-**Outcome:** store a small project fact, have your agent retrieve it in a fresh conversation, and optionally share it. This tutorial uses public sample data and does not publish Knowledge Assets on-chain. Commands use a POSIX shell; Windows users can follow them in WSL2.
+Start with a contribution your agent can inspect and use: a small project fact with a source. You will store it in your node, retrieve it through an agent in a fresh conversation, and then choose whether to share it. This is the first step toward working with knowledge that other participants can use and build on.
+
+The tutorial uses public sample data and covers private drafts and optional sharing. Publishing a Knowledge Asset on-chain is a separate continuation. Commands use a POSIX shell; Windows users can follow them in WSL2.
 
 Prerequisites: Node.js 22.13+ (or 23.4+), npm 10+, and a supported agent runtime if you want the conversational step. The command surface below is based on DKG 10.0.23. Check [feature availability](../references/availability.md) before using newer features.
 
@@ -84,7 +86,7 @@ A different agent identity may have different WM access. Persistence across conv
 
 ## 5. Optionally share the sample
 
-Share only when you want participants to see these sample facts:
+Sharing turns this draft into a contribution that authorized participants can use. When you want to share the sample, seal it and make it available through the Context Graph:
 
 ```bash
 dkg ka finalize atlas -c "$CG"
@@ -101,4 +103,4 @@ Expect one row: `Atlas`, `Oxigraph`, `https://example.org/dkg-tutorial/source`. 
 - [Integrate an application](../build/http-application.md).
 - [Publish selected knowledge](../use-dkg/publish-and-query.md) when on-chain provenance is intended and funded.
 
-You have completed the first-use workflow when a fresh conversation retrieves the expected answer and source from the node. Sharing and paid publication are separate continuations.
+You have completed the first-use workflow when a fresh conversation retrieves the expected answer and source from the node. Continue with another agent to prove it can use your shared contribution, or import knowledge from your own project. Publish selected results when others need a durable provenance record.

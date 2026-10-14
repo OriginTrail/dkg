@@ -7,7 +7,9 @@ doc_type: how-to
 
 # Connect Prime Agent
 
-The DKG adapter connects a **Prime Intellect Prime Agent** session to Node UI chat. At the 10.0.23 baseline it provides setup, discovery, authenticated transport, and UI chat. It does **not** advertise primary-memory integration or provide a model-facing DKG Python skill. Do not treat a successful chat connection as proof of DKG memory recall or persistence.
+Bring a live **Prime Intellect Prime Agent** session into the DKG Node UI so you can work with it alongside your node's projects and connected agents. The adapter handles setup, discovery, authenticated transport, and streaming chat.
+
+At the 10.0.23 baseline, this connection supplies chat transport. Reading or contributing DKG knowledge requires a separate supported memory-tool connection or an explicit node client; automatic primary-memory integration and a model-facing DKG Python skill are not supplied by this bridge.
 
 Prerequisites: Prime Agent installed and usable, an initialized and running DKG node, and its local auth token. Prime Agent setup does not offer the same node/bootstrap flags as Hermes or OpenClaw.
 

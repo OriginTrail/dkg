@@ -7,13 +7,13 @@ doc_type: concept
 
 # Knowledge Commerce
 
-Knowledge commerce is the roadmap path where agents can pay for access to useful knowledge, verify what they received, and feed the result back into their own memory workflows.
+A participant may contribute valuable knowledge, specialize in graph reasoning, or offer a model that helps others analyze the graph. Knowledge commerce is the direction in which those contributions and capabilities become services other participants can discover and pay to use.
 
-The DKG role is not only payment. The DKG provides the graph substrate, provenance, access policy, and verification path around the transaction.
+The DKG gives this exchange a shared knowledge structure, attributable participants, and provenance that consumers can inspect. An agent could combine a graph query from one provider with analysis from another, then retain the sources behind the result. The service and payment workflows are under development.
 
 For the broader public direction, see the [NeuroSymbolic Marketplace RFC](https://github.com/OriginTrail/OT-RFC-repository/tree/main/RFCs/OT-RFC-27_NeuroSymbolic_Marketplace) and [feature availability](../references/availability.md). The RFC covers knowledge and inference services; x402 is a separate payment integration direction, not a synonym for the marketplace.
 
-## Intended Flow
+## A possible paid-access exchange
 
 ```mermaid
 sequenceDiagram
@@ -32,7 +32,7 @@ sequenceDiagram
 
 ## Current status
 
-The current codebase reserves payment-proof and x402-related hooks, and the public roadmap describes knowledge-service and context-oracle directions. These docs should treat x402 knowledge commerce as a roadmap integration direction until the public node API and operator workflow are finalized.
+The public roadmap describes knowledge-service and context-oracle directions, and the codebase includes payment-proof and x402-related hooks. The diagram illustrates a possible paid-access exchange; it is not the complete marketplace settlement design or a released endpoint contract. Use the [roadmap](roadmap-and-convergence.md#knowledge-and-intelligence-services-across-the-network) for the broader service direction and prototype evidence.
 
 Current DKG V10 users should rely on:
 
@@ -43,6 +43,6 @@ Current DKG V10 users should rely on:
 
 ## x402
 
-x402 is an HTTP payment pattern for agent-to-agent or client-to-service payments. In the V10 roadmap, x402 is expected to support paid access to knowledge endpoints and premium graph data. When that surface becomes operational, this page should move from concept to a linked `use-dkg` workflow with exact commands and API payloads.
+x402 is an HTTP payment pattern for agent-to-agent or client-to-service payments. In the V10 roadmap, it is a possible way to pay for knowledge endpoints and premium graph data. A usable integration will need the serving node's supported endpoint, access policy, payment requirements, and verification procedure.
 
 Until then, do not build an integration that assumes every DKG node exposes a production x402 paid-access endpoint.

@@ -7,7 +7,9 @@ doc_type: how-to
 
 # Bring Google OKF knowledge into DKG
 
-**Outcome:** map a small Open Knowledge Format bundle to RDF, inspect it in WM, then optionally share, query, verify, and export it. OKF is the portable content format; the DKG supplies graph operations and the optional publication/provenance lifecycle.
+Bring knowledge from a Google Open Knowledge Format bundle into a graph that agents can query and share. The bundle's concepts and links become contributions you can inspect, connect to other knowledge, and publish with provenance when appropriate.
+
+This tutorial maps two linked concepts to RDF, inspects them in Working Memory, then walks through optional sharing, querying, completeness verification, and export. OKF provides the portable content format; DKG connects that content to a collaborative knowledge lifecycle.
 
 Use a healthy node and create a separate graph:
 

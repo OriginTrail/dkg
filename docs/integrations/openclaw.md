@@ -7,6 +7,8 @@ doc_type: how-to
 
 # Connect OpenClaw
 
+Give your OpenClaw agents a shared knowledge workflow: preserve useful findings, retrieve the evidence behind a decision, and contribute records other authorized participants can use.
+
 Prerequisites: an installed, working OpenClaw runtime and configured model access. The DKG adapter supplies memory tools, a memory provider, and a Node UI chat channel.
 
 ```bash

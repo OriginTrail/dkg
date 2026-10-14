@@ -7,6 +7,8 @@ doc_type: playbook
 
 # Collaborate through a Context Graph
 
+Use another participant's contribution as evidence for the current task, and preserve its source when returning or extending the result.
+
 **Inputs:** producer and consumer identities, nodes/networks, exact graph ID, access policy, and intended shared content. Follow [the human recipe](../../build/collaborate.md).
 
 1. Establish whether this is two clients on one node or two nodes. Do not claim replication from a same-node read.

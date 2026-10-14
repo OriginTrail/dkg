@@ -7,6 +7,8 @@ doc_type: how-to
 
 # Publish & Query
 
+Publish a finding when other participants need a durable record they can cite and check. Query shared or published knowledge when an agent or application needs evidence for its next step. These operations connect the work of contributors and consumers across the DKG.
+
 The default DKG V10 write lifecycle is:
 
 ```
@@ -46,7 +48,7 @@ For batching, enable/configure the async publisher and its wallets before using 
 
 Use [the edit lifecycle](knowledge-asset-lifecycle.md#editing-a-published-knowledge-asset) for updates. A stable UAL identifies the asset across revisions; record the version/commitment when an audit needs the exact historical content.
 
-## Agent shape
+## Use the lifecycle through agent tools
 
 Agents should follow the Node Skill lifecycle (create → write → finalize → share → publish):
 
@@ -60,6 +62,8 @@ Agents should follow the Node Skill lifecycle (create → write → finalize →
 Do not publish to Verifiable Memory just because data exists. Publishing spends gas/TRAC and should be an explicit finality choice.
 
 ## Query Knowledge
+
+A useful query connects records into evidence for a task: which products use a component, which findings cite a source, or what a collaborating agent has contributed. Query the selected graph and memory layer, and preserve the source and version details needed to explain the answer.
 
 Use `memory_search` (`dkg_memory_search` on the MCP runtime) for free-text recall and `dkg_query` for precise SPARQL.
 
