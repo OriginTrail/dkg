@@ -299,23 +299,25 @@ it('forwards the authenticated caller and response ceiling through scoped agent 
   } finally { await store.close(); }
 });
 
-it('excludes another agent drafts from bounded partition scans without narrowing dashboard scans', async () => {
+it.each(['_working_memory/agent-b/1', 'assertion/agent-b/draft', 'code/_working_memory/agent-b/1', 'code/assertion/agent-b/draft'])('excludes %s drafts and children while preserving valid CG IDs and dashboard scans', async draftTail => {
   const store = new OxigraphStore(), engine = new DKGQueryEngine(store);
-  const root = 'did:dkg:context-graph:test', draft = `${root}/_working_memory/agent-b/1`;
-  const graphs = [draft, `${draft}/details`, `${root}/_shared_memory/a`, `${root}/_verifiable_memory/a`];
-  const agent = { queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+  const contextGraphId = 'team/assertion/policies', root = `did:dkg:context-graph:${contextGraphId}`, draft = `${root}/${draftTail}`;
+  const graphs = [draft, `${draft}/_named_graph/details`, `${root}/_shared_memory/a`, `${root}/_verifiable_memory/a`, `${root}/_shared_memory/assertion/1`, root];
+  const agent = { store, queryEngine: engine, log: { info() {} }, peerId: 'fixture',
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' }),
     subscribedContextGraphs: new Map() };
   const query = QueryMethods.prototype.query.bind(agent as never);
   try {
     await store.insert([
       { graph: `${root}/_meta`, subject: 'urn:draft', predicate: 'http://dkg.io/ontology/assertionGraph', object: draft },
+      { graph: `${root}/_meta`, subject: `${root}/code`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph' },
+      { graph: `${root}/_meta`, subject: `${root}/code`, predicate: 'http://schema.org/name', object: '"code"' },
       ...graphs.map((graph, i) => ({ graph, subject: `urn:item:${i}`, predicate: 'urn:p', object: '"value"' })),
     ]);
     const sparql = 'SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o } }';
-    const dashboard = await query(sparql, { contextGraphId: 'test', includeContextGraphPartitions: true, callerAgentAddress: 'agent-a' });
-    expect(dashboard.bindings.map(row => row.g)).toContain(draft);
-    const read = context({ query }, { sparql, includeContextGraphPartitions: true, excludeWorkingMemoryPartitions: false }, 'agent-a');
+    const dashboard = await query(sparql, { contextGraphId, includeContextGraphPartitions: true, callerAgentAddress: 'agent-a' });
+    expect(dashboard.bindings.map(row => row.g)).toEqual(expect.arrayContaining(graphs));
+    const read = context({ query }, { contextGraphId, sparql, includeContextGraphPartitions: true, excludeWorkingMemoryPartitions: false }, 'agent-a');
     await handleBoundedQueryRoutes(read.ctx);
     expect(read.res.statusCode, read.res.body).toBe(200);
     expect(JSON.parse(read.res.body).result.bindings.map(row => row.g).sort()).toEqual(graphs.slice(2).sort());
