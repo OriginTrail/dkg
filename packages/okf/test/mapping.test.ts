@@ -12,7 +12,7 @@ import {
 const Q = (quads: { predicate: string; object: string }[], predicate: string) =>
   quads.filter((q) => q.predicate === predicate).map((q) => q.object);
 
-describe('frontmatterQuads (locked OKF → RDF table, ADR 0005)', () => {
+describe('frontmatterQuads (locked OKF → RDF table, ADR 0008)', () => {
   const iri = 'urn:okf:datasets/crypto_bitcoin';
   const fm = {
     type: 'BigQuery Dataset',

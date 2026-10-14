@@ -4,7 +4,7 @@
  * One OKF concept document maps to one Knowledge Asset subject IRI plus a set
  * of content + linkage quads. The mapping reuses the node Markdown extractor's
  * predicate vocabulary (so an OKF import and a native Markdown import converge),
- * with the OKF-specific deltas recorded in `docs/adr/0005-okf-rdf-mapping.md`:
+ * with the OKF-specific deltas recorded in `docs/adr/0008-okf-rdf-mapping.md`:
  *
  *   - body links are real Markdown links `[text](path)` (OKF §5), NOT the
  *     extractor's `[[wikilinks]]`, so we resolve them with a real Markdown AST
@@ -107,7 +107,7 @@ function valueToTerms(value: unknown): string[] {
   return [literalTerm(JSON.stringify(value))];
 }
 
-/** Map the YAML frontmatter to quads (SPEC §4.1; see the locked table in ADR 0005). */
+/** Map the YAML frontmatter to quads (SPEC §4.1; see the locked table in ADR 0008). */
 export function frontmatterQuads(iri: string, frontmatter: Record<string, unknown>): Quad[] {
   const out: Quad[] = [];
   for (const [key, value] of Object.entries(frontmatter)) {
