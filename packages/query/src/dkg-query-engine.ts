@@ -1,4 +1,4 @@
-import { createStoreReadLane, createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
+import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
@@ -305,7 +305,7 @@ export function resolveViewGraphs(
 }
 
 type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
-type QueryExecutionContext = { reads: StoreReadLane } & (
+type QueryExecutionContext = { reads: StoreReadLane; catalog: StoreReadLane } & (
   { kind: 'unscoped' | 'view' } |
   { kind: 'scoped'; plan: ScopedQueryReadPlan; variableContentGraphs: readonly string[] }
 );
@@ -352,29 +352,24 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       Boolean(this.store.withQueryReadAdmission && this.store.graphEnumerationVisibility));
-    if (plan.kind === 'scoped' && plan.discovery.mode === 'admission-owned') {
-      return this.store.withQueryReadAdmission!(async () => {
-        const caller = createStoreReadLane(this.store, storeOptions(options));
-        // Discovery shares the owner, priority and cancellation, but the caller's
-        // result ceiling applies only to caller-derived reads, not the catalog.
-        const { maxResponseBytes: _callerLimit, ...discoveryOptions } = storeOptions(options) ?? {};
-        const catalogReads = createStoreReadLane(this.store, discoveryOptions);
-        const discovery = await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, catalogReads);
-        return this.queryPrepared(initialGraphScope, options, this.prepareScopedExecution(plan, caller, discovery));
-      }, storeOptions(options));
-    }
-    const reads = createQueryStoreReadContext(this.store, options);
-    const discovery = plan.kind === 'scoped' && plan.discovery.expandGraphVariables
-      ? await this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads) : undefined;
-    const context: QueryExecutionContext = plan.kind === 'scoped'
-      ? this.prepareScopedExecution(plan, reads, discovery) : { kind: plan.kind, reads };
-    return this.queryPrepared(initialGraphScope, options, context);
+    const owned = plan.kind === 'scoped' && plan.discovery.mode === 'admission-owned';
+    const execute = async () => {
+      const reads = createQueryStoreReadContext(this.store, options);
+      const discovery = plan.kind === 'scoped' && plan.discovery.expandGraphVariables
+        ? owned ? await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, reads.catalog)
+          : await this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads)
+        : undefined;
+      const context: QueryExecutionContext = plan.kind === 'scoped'
+        ? this.prepareScopedExecution(plan, reads, discovery) : { kind: plan.kind, reads, catalog: reads.catalog };
+      return this.queryPrepared(initialGraphScope, options, context);
+    };
+    return owned ? this.store.withQueryReadAdmission!(execute, storeOptions(options)) : execute();
   }
 
-  private prepareScopedExecution(plan: ScopedQueryReadPlan, reads: StoreReadLane,
+  private prepareScopedExecution(plan: ScopedQueryReadPlan, reads: QueryStoreReadContext,
     discovery?: ScopedContentGraphDiscoverySnapshot): QueryExecutionContext {
     if (plan.discovery.expandGraphVariables && !discovery) throw new Error('Scoped expansion requires discovery authority');
-    return { kind: 'scoped', plan,
+    return { kind: 'scoped', plan, catalog: reads.catalog,
       // Routing consumes one discovery callback for owned and memoized inventories.
       reads: discovery ? { query: reads.query,
         listGraphsByPrefix: async prefix => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads,
@@ -434,6 +429,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         effectiveContextGraphId,
         options,
         reads,
+        context.catalog,
       );
     }
 
@@ -492,13 +488,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     contextGraphId: string,
     options: QueryOptions,
     reads: StoreReadLane,
+    catalogReads: StoreReadLane,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
-    // Authority discovery retains caller cancellation/priority, with the store's
-    // own response budget. The caller ceiling only bounds caller-derived reads.
-    const { maxResponseBytes: _callerLimit, ...authorityOptions } = storeOptions(options) ?? {};
-    const authorityReads = createStoreReadLane(this.store, authorityOptions);
-    const catalog = await readScopedContentGraphCatalog(contextGraphId, authorityReads.query, false);
+    const catalog = await readScopedContentGraphCatalog(contextGraphId, catalogReads.query, false);
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
     // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
     // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass

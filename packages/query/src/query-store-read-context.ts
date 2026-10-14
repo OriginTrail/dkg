@@ -19,6 +19,7 @@ export interface StoreReadLane {
 
 export interface QueryStoreReadContext extends StoreReadLane {
   readonly signal: AbortSignal | undefined;
+  readonly catalog: StoreReadLane;
   readonly shared: StoreReadLane & { readonly cacheKey: string };
 }
 
@@ -39,9 +40,13 @@ export function createQueryStoreReadContext(
   const options = storeOptions(queryOptions);
   const lane = createStoreReadLane(store, options);
   const sharedOptions = sharedDiscoveryStoreOptions(options);
+  // Fresh catalog authority shares the owner and cancellation, but has the
+  // store's catalog budget rather than the caller-derived result ceiling.
+  const { maxResponseBytes: _callerLimit, ...catalogOptions } = options ?? {};
   return {
     ...lane,
     signal: options?.signal,
+    catalog: createStoreReadLane(store, catalogOptions),
     shared: {
       ...createStoreReadLane(store, sharedOptions),
       cacheKey: JSON.stringify([
