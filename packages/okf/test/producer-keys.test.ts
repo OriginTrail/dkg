@@ -69,6 +69,27 @@ describe('a producer key never overwrites a family or base field of the same nam
   });
 });
 
+describe('a family list kept verbatim survives a producer value on its predicate', () => {
+  // `generated: [a]` is one rdf:JSON array on schema:generated, and
+  // `Generated: x` a plain value beside it: the array is the family's, the
+  // rest is the producer key's, and both come back.
+  for (const [family, producer, yaml] of [
+    ['generated', 'Generated', 'generated: [a]\nGenerated: x'],
+    ['generated', 'Generated', 'generated: []\nGenerated: x'],
+    ['executor', 'Executor', 'executor: [/policies/revenue-recognition.md]\nExecutor: x'],
+    ['attester', 'Attester', 'attester: [{ resource: https://x.example/a }]\nAttester: x'],
+  ]) {
+    it(`keeps ${yaml.split('\n')[0]} beside ${producer}: x`, () => {
+      const { files, first, second } = roundTrip(yaml);
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      expect(second.warnings).toEqual(first.warnings);
+      const fm = exportedFrontmatter(files);
+      expect(Array.isArray(fm[family])).toBe(true);
+      expect(fm[producer]).toBe('x');
+    });
+  }
+});
+
 describe('the exporter and the importer agree on which keys are producer keys', () => {
   it('lands a value on schema:<camelKey> exactly when readsAsProducerKey says so', () => {
     // A list of mappings: no base field or family maps it the generic way.

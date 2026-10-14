@@ -359,8 +359,11 @@ it; the CLI summary reports it against the current time.
   the name capitalised (`Sources`, `Status`, `Type`), so neither value
   replaces the other. The legacy `timestamp` keeps its key when a
   `generated.at` supersedes it. The family decoder claims a value on its
-  predicate only when it is one the family itself keeps verbatim, in one
-  triple, so `Generated: { by: … }` never comes back as provenance.
+  predicate only when it is unambiguous: a list the family kept verbatim (one
+  `rdf:JSON` array, which no producer key yields), even beside producer
+  values, or the one triple on the predicate holding a value the family keeps
+  verbatim. So `generated: [a]` beside `Generated: x` comes back as both, and
+  `Generated: { by: … }` never comes back as provenance.
 - **Each triple once.** The mapper deduplicates its output per concept: a store
   holds a set, so two `sources` naming one resource give two `okf:Source` nodes
   but a single `prov:wasDerivedFrom` edge. Without this the expected count in

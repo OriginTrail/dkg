@@ -6,11 +6,11 @@
  * Every reader reports the quads it read.
  */
 
-import { SCHEMA_NS } from '../constants.js';
+import { RDF_JSON, SCHEMA_NS } from '../constants.js';
 import { okfExtensionKey } from '../extensions.js';
 import { genericPredicate } from '../terms.js';
 import { dict, isMapping } from '../utils.js';
-import { accumulate, orderKeys, termValue, type ExportContext, type TermForm } from '../decode-terms.js';
+import { accumulate, literalDatatype, orderKeys, termValue, type ExportContext, type TermForm } from '../decode-terms.js';
 import type { Quad } from '../types.js';
 import { parseList } from './parse.js';
 import type { FamilySpec, FieldSpec, ListFamilySpec, MappingFamilySpec } from './specs.js';
@@ -107,28 +107,34 @@ function keepsVerbatim(spec: FamilySpec, value: unknown): boolean {
  * On an entry node they are all the family's, since a node carries no
  * producer keys. On the concept that predicate is also the one a producer key
  * of the same camelCase uses (`Sources`), so only an unambiguous value is the
- * family's: where the key reads back as the family key (`generated`), one
- * triple holding a value the family keeps verbatim (the encoder writes
- * exactly one); where it does not (`usage_window` → `usageWindow`), a list,
- * one `rdf:JSON` array, which no producer key yields (a producer key's list is
- * one triple per item). Anything else is a producer value, which the exporter
- * writes back under a spelling of its own.
+ * family's:
+ *
+ *   - a list, one `rdf:JSON` array the family keeps verbatim, whatever else
+ *     shares the predicate: no producer key yields one, since a producer
+ *     key's list is one triple per item;
+ *   - where the key reads back as the family key (`generated`), the one
+ *     triple on the predicate, holding a value the family keeps verbatim (the
+ *     encoder writes exactly one).
+ *
+ * Anything else is a producer value, which the exporter writes back under a
+ * spelling of its own.
  */
 export function keptVerbatim(spec: FamilySpec, quads: readonly Quad[], ctx: ExportContext, on: 'node' | 'concept'): Read | null {
   const predicate = genericPredicate(spec.key);
   const onPredicate = quads.filter((q) => q.predicate === predicate);
-  if (on === 'concept' && predicate === SCHEMA_NS + spec.key) {
-    if (onPredicate.length !== 1) return null;
-    const value = termValue(onPredicate[0].object, ctx);
-    return keepsVerbatim(spec, value) ? { value, quads: onPredicate } : null;
+  if (on === 'node') {
+    const kept = dict();
+    for (const q of onPredicate) accumulate(kept, spec.key, termValue(q.object, ctx));
+    return onPredicate.length > 0 ? { value: kept[spec.key], quads: onPredicate } : null;
   }
-  const kept = dict();
-  const read: Quad[] = [];
-  for (const q of onPredicate) {
+  const lists = onPredicate.filter((q) => {
     const value = termValue(q.object, ctx);
-    if (on === 'concept' && !Array.isArray(value)) continue;
-    accumulate(kept, spec.key, value);
-    read.push(q);
+    return literalDatatype(q.object) === RDF_JSON && Array.isArray(value) && keepsVerbatim(spec, value);
+  });
+  if (lists.length === 1) return { value: termValue(lists[0].object, ctx), quads: lists };
+  if (predicate === SCHEMA_NS + spec.key && onPredicate.length === 1) {
+    const value = termValue(onPredicate[0].object, ctx);
+    if (keepsVerbatim(spec, value)) return { value, quads: onPredicate };
   }
-  return read.length > 0 ? { value: kept[spec.key], quads: read } : null;
+  return null;
 }
