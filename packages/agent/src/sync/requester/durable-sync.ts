@@ -41,7 +41,6 @@ import type {
 } from './graph-scoped-materialization.js';
 import {
   assertNoLegacyRfc64ControlGraphs,
-  assertGraphScopedRecoveryWritable,
   partitionVerifiedGraphScopedAssets,
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
@@ -1339,11 +1338,12 @@ async function runDurableSyncWithBudget(
         processed.verifiedGraphScopedDataGraphs ?? [],
       );
       context.admitVerifiedPage?.(partitioned);
-      assertGraphScopedRecoveryWritable(partitioned, {
-        challengePinned: exactAssetSelection?.kind === 'challenge-pinned',
-        canStore: storeGraphScopedAsset !== undefined,
-        canAuthenticateChallenge: authenticateChallengePinnedAsset !== undefined,
-      });
+      if (partitioned.assets.length && exactAssetSelection?.kind !== 'challenge-pinned' && !storeGraphScopedAsset)
+        throw Object.assign(new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
+          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
+      if (partitioned.assets.length && exactAssetSelection?.kind === 'challenge-pinned' && !authenticateChallengePinnedAsset)
+        throw Object.assign(new Error('Challenge-pinned durable sync requires a proof-only authentication path'),
+          { code: 'VM_CHALLENGE_AUTHENTICATION_UNSUPPORTED' });
       // A rootless manifest contains only exact graph assets in the DATA
       // ordering. When there are no deferred legacy rows, each authenticated
       // atomic materialization is therefore a durable continuation boundary.
