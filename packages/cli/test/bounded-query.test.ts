@@ -290,7 +290,7 @@ it('forwards the authenticated caller and response ceiling through scoped agent 
     grantScope: options.callerAgentAddress === 'member' ? 'caller' : 'none',
     source: 'registered-chain', reason: 'private-roster', metadataBootstrap: 'forbidden',
   }));
-  const agent = { queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+  const agent = { store, queryEngine: engine, log: { info() {} }, peerId: 'fixture',
     resolveContextGraphReadAuthority: authority, subscribedContextGraphs: new Map() };
   const routeAgent = { query: QueryMethods.prototype.query.bind(agent as never) };
   try {
