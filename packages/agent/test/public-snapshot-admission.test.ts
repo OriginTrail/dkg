@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { PublicSnapshotServingRuntime } from '../src/public-snapshot-serving-runtime.js';
-const lifetime = () => ({ signal: new AbortController().signal, physicalRuns: new Set<Promise<unknown>>() });
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
+const lifetime = () => new AgentWorkLifetime();
 
 function snapshot(id: string, now: number) {
   return sealPublicGraphSnapshot({ version: 1, chainId: 'evm:31337', deploymentId: 'test',
