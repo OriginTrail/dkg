@@ -15,12 +15,15 @@ class ControlledStream extends EventTarget {
   maxReadBufferLength = 0; maxWriteBufferLength = 0;
   pending?: { resolve: (item: IteratorResult<Uint8Array>) => void; reject: (error: Error) => void };
   failure?: Error;
+  drain?: { resolve: () => void; reject: (error: Error) => void };
+  onDrain = vi.fn(() => new Promise<void>((resolve, reject) => { this.drain = { resolve, reject }; }));
   send = vi.fn(() => true);
   close = vi.fn(async () => { this.status = 'closed'; });
   returned = vi.fn();
   abort = vi.fn((error: Error) => {
     this.status = 'closed'; this.failure = error;
     this.pending?.reject(error); this.pending = undefined;
+    this.drain?.reject(error); this.drain = undefined;
   });
   deliver() {
     if (!this.pending) throw new Error('Expected a pending stream read');
@@ -52,6 +55,21 @@ function fixture() {
 afterEach(() => vi.useRealTimers());
 
 describe('bulk graph read-idle and original total deadlines', () => {
+  it.each(['before', 'after'] as const)('bounds stalled writes %s sending without holding the one-hour allowance', async phase => {
+    const { stream, session } = fixture();
+    stream.writableNeedsDrain = phase === 'before';
+    stream.send.mockReturnValue(false);
+    const pending = expect(session.send(frame)).rejects.toThrow('Bulk graph write-idle deadline exceeded');
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(stream.abort).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(stream.abort).toHaveBeenCalledOnce();
+    expect(stream.send).toHaveBeenCalledTimes(phase === 'before' ? 0 : 1);
+    expect(stream.drain).toBeUndefined();
+    await session.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it('aborts and settles an idle pending read at 120 seconds and disposes its iterator', async () => {
     const { stream, session } = fixture();
     const pending = expect(session.next()).rejects.toThrow('Bulk graph idle deadline exceeded');

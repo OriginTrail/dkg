@@ -28,9 +28,14 @@ export class BulkGraphSession {
   }
   async send(frame: BulkGraphFrame): Promise<void> {
     this.signal.throwIfAborted();
-    if (this.stream.writableNeedsDrain) await this.stream.onDrain({ signal: this.signal });
-    if (!this.stream.send(encodeBulkGraphFrame(frame))) await this.stream.onDrain({ signal: this.signal });
+    if (this.stream.writableNeedsDrain) await this.drain();
+    if (!this.stream.send(encodeBulkGraphFrame(frame))) await this.drain();
     this.signal.throwIfAborted();
+  }
+  private async drain(): Promise<void> {
+    const timeout = setTimeout(() => this.abort(new Error('Bulk graph write-idle deadline exceeded')), 120_000);
+    try { await this.stream.onDrain({ signal: this.signal }); }
+    finally { clearTimeout(timeout); }
   }
   abort(error: unknown): void { this.stream.abort(error instanceof Error ? error : new Error('Bulk graph cancelled')); }
   /** Called only after the router physically closes/aborts the stream. */
