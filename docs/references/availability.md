@@ -23,7 +23,7 @@ Use the running node's version and discovered capabilities. A supported baseline
 | [MCP clients](../integrations/mcp.md) | released baseline | 10.0.23 | Source reviewed; client conversation pending | DKG maintainers | 2026-10-13 |
 | [Local models](../use-dkg/local-llm.md) | released baseline | 10.0.23 | Source reviewed; model execution pending | DKG maintainers | 2026-10-13 |
 | [External signer](availability.md) | source only | Not a released baseline | On main after 10.0.23 (PR #3177); absent from this canary baseline | DKG maintainers | 2026-10-13 |
-| [NeuroSymbolic Marketplace direction](../how-dkg-works/roadmap-and-convergence.md) | proposal | Not a released baseline | Public RFC; prototype evidence does not establish general release availability | DKG maintainers | 2026-10-13 |
+| [Neuro-symbolic reasoning, GNNs, and marketplace direction](../how-dkg-works/roadmap-and-convergence.md) | proposal | Not a released baseline | Public architecture and RFC reviewed; integrated reasoning/GNN services not claimed as released | DKG maintainers | 2026-10-14 |
 
 The runtime checks below used an isolated, unfunded Edge node, the published 10.0.23 package, Oxigraph, and testnet configuration with relays disabled. They establish local CLI/HTTP behavior, not peer replication, a framework conversation, production load, or paid on-chain publication. See the [validation record](https://github.com/OriginTrail/dkg/blob/testnet-canary/docs/reports/docs-builder-validation.md).
 

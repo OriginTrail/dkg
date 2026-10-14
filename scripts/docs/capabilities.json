@@ -128,13 +128,13 @@
     ]
   },
   {
-    "name": "NeuroSymbolic Marketplace direction",
+    "name": "Neuro-symbolic reasoning, GNNs, and marketplace direction",
     "page": "docs/how-dkg-works/roadmap-and-convergence.md",
     "availability": "proposal",
     "baseline": null,
     "owner": "DKG maintainers",
-    "reviewedOn": "2026-10-13",
-    "validation": "Public RFC; prototype evidence does not establish general release availability",
+    "reviewedOn": "2026-10-14",
+    "validation": "Public architecture and RFC reviewed; integrated reasoning/GNN services not claimed as released",
     "sources": [
       "docs/how-dkg-works/roadmap-and-convergence.md"
     ]

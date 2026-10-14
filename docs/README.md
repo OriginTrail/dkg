@@ -5,11 +5,13 @@ audience: human+agent
 doc_type: concept
 ---
 
-# OriginTrail DKG: nodes, agents, and verifiable knowledge
+# OriginTrail DKG: a shared knowledge network for AI
 
-Build AI systems that combine agents and models with structured, queryable knowledge. Your **DKG node** manages memory, identity, access, and network participation. Your **agents** use it to retrieve evidence, build knowledge, collaborate, and publish selected results.
+The **OriginTrail Decentralized Knowledge Graph (DKG)** connects people, organizations, and AI agents through a network of shared, verifiable knowledge. Participants contribute what they know, discover knowledge from others, and build on it across applications and organizations—with ways to trace its origin and check its integrity.
 
-Think of your working environment as **node + agent**. The node is the persistent knowledge infrastructure; an agent runtime supplies the model and tool loop. You can connect an existing runtime, run a local model through DKG's tools, or integrate your own application. One node can serve several agents; connecting an agent does not make its identity the same as the node's.
+Knowledge contributed by one agent can become the starting point for another. A research finding can inform a new investigation. A product record can connect to evidence from its suppliers. Teams can bring their knowledge together while choosing what to keep private, what to share, and what to publish with an independently checkable record.
+
+Your **node + agent** is how you participate. The node connects you to the DKG network and manages your knowledge, identity, and access. Your agent uses that connection to explore relationships, contribute findings, and work with knowledge shared by other participants. Connect the agent runtime you already use, run a local model, or bring the DKG into your own application.
 
 | Start with your goal | Next step |
 | --- | --- |
@@ -19,13 +21,21 @@ Think of your working environment as **node + agent**. The node is the persisten
 | I want to understand the architecture | [Node + agent and neuro-symbolic AI](how-dkg-works/node-and-agent.md) |
 | I operate network infrastructure | [Daemon lifecycle](use-dkg/run-node.md) |
 
-## What makes this neuro-symbolic?
+## Knowledge that others can build on
 
-The **neural** part interprets questions and documents, proposes useful relationships, and explains results. The **symbolic** part represents those relationships as graph data and executes explicit queries over them. An agent can inspect the evidence behind an answer instead of relying only on what its model remembers.
+Consider agents working on a product investigation. One team contributes the component relationships; another shares test results. An agent with access to both can connect a failed test to the affected products and trace the answer back to the contributing records. The useful result comes from bringing those contributions together.
 
-For example, a research agent records which source supports a finding. Another agent queries the relationships between findings and sources, checks the evidence, and produces a cited answer. The DKG preserves the shared knowledge across conversations and agent frameworks.
+The DKG gives this collaboration a common graph structure and a publication path with cryptographic provenance. Knowledge can travel between teams and agent frameworks with its relationships and source references intact. Published records let a reader check who committed which version of the content. Those checks support review and corroboration; assessing whether a claim is true also requires examining its evidence. See [Agents & Trust](how-dkg-works/agents-and-trust.md).
 
-Graph queries do not make every model answer correct. A cryptographic commitment proves integrity and attribution under the protocol; it does not prove the factual truth of a claim. Validation, review, corroboration, and reasoning rules need their own evidence and policies. See [Agents & Trust](how-dkg-works/agents-and-trust.md).
+## A growing foundation for neuro-symbolic AI
+
+Shared knowledge is also a foundation for reasoning and learning. Language models can interpret questions, propose hypotheses, and explain findings. Knowledge graphs make entities, relationships, and evidence explicit, so an agent can follow connections and inspect the basis of an answer.
+
+The DKG's neuro-symbolic direction builds on that foundation with **graph reasoning** and **graph neural networks (GNNs)**. Rule-based reasoning can derive conclusions from connected facts and explicit rules. GNNs learn patterns in graph structure to help identify relevant relationships, rank candidates, or suggest links to investigate. Bringing these capabilities together allows predictions, logical derivations, and source evidence to play distinct roles in an agent's work.
+
+The network makes this more powerful: contributions from different participants can become inputs to new analyses, and useful results can be shared back for others to inspect and build on. The ambition is a network where knowledge and the ability to use it grow together.
+
+Start today with the graph queries, agent connections, and sharing/publication workflows in these guides. Integrated graph reasoning and GNN services are part of the evolving [neuro-symbolic roadmap](how-dkg-works/roadmap-and-convergence.md#reasoning-and-learning-over-shared-knowledge); the [availability reference](references/availability.md) records the current implementation and validation status.
 
 ## Three memory layers, one knowledge lifecycle
 
@@ -47,16 +57,16 @@ flowchart LR
 
 A **Context Graph** scopes a project, team, or application. A **Knowledge Asset (KA)** is a named unit of knowledge through this lifecycle. A draft KA already exists in WM; on-chain publication mints or updates its durable asset record. [Learn the lifecycle](how-dkg-works/memory-layers.md).
 
-## Choose an Edge or Core node
+## Join the network with an Edge or Core node
 
-Most builders start with an **Edge Node**, the local gateway for their agents and applications. **Core Nodes** supply network infrastructure, including storage and protocol services, with additional registration and funding requirements. Both fit the node + agent model; the node role and the agent framework are separate choices.
+Most builders start with an **Edge Node**, their connection to the DKG for agents and applications. **Core Nodes** provide the network infrastructure that stores and serves published knowledge, with additional registration and funding requirements. Together, they connect the people and agents contributing knowledge with those who use it. The node role and the agent framework are separate choices.
 
 ## Build something useful
 
-- Give an agent a persistent project knowledge base.
-- Connect research or coding agents through a shared Context Graph.
-- Import [Google Open Knowledge Format bundles](use-dkg/okf.md) into queryable Knowledge Assets.
-- Integrate a business application through authenticated node APIs.
-- Publish selected outputs with an independently checkable provenance record.
+- Connect research agents so one team can build on another's findings and sources.
+- Bring supplier, product, or project knowledge together in a shared Context Graph.
+- Import [Google Open Knowledge Format bundles](build/okf-tutorial.md) into knowledge your agents can query and share.
+- Connect an existing application to shared knowledge through authenticated node APIs.
+- Publish useful results with a provenance record that other participants can check.
 
 Start with the [quickstart](getting-started/quickstart.md). Consult the [roadmap](how-dkg-works/roadmap-and-convergence.md) for proposals and the [DKG v10 bounty](active-now/dkg-v10-bounty.md) for the current program.

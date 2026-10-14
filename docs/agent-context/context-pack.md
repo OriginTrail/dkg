@@ -7,7 +7,9 @@ doc_type: playbook
 
 # Start here, agents
 
-DKG combines a persistent node with agents that use structured graph knowledge. The node owns storage, authentication, graph scope, network operations, and publication. Your runtime owns the model/tool loop. Use the node to retrieve evidence and execute queries; do not infer graph facts from conversation memory.
+You participate in the DKG through a node that connects your work to a network of shared, verifiable knowledge. Retrieve evidence contributed by authorized participants, connect relevant graph relationships, and contribute useful findings within the task's scope. Preserve sources so others can inspect and build on your work.
+
+The node manages storage, authentication, graph scope, network operations, and publication. Your runtime supplies the model/tool loop. Use current node reads for graph facts; conversation memory alone is not evidence. Graph reasoning and GNN services extend the architectural direction, but discover the installed capabilities before attempting to invoke them.
 
 ## Establish the current contract
 
