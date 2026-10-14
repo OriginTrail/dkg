@@ -109,7 +109,7 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
     observe();
     await options.reconcile?.(authenticated, signal);
     signal.throwIfAborted();
-    for (const { staged } of members) await session.send({ kind: K.COMMIT, index: staged.index, sequence: staged.header.encodedBytes, payload: new Uint8Array() });
+    for (const { index, encodedBytes } of members) await session.send({ kind: K.COMMIT, index, sequence: encodedBytes, payload: new Uint8Array() });
     observe();
   });
   try {
@@ -130,7 +130,7 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
       // It is deliberately not durable coverage; only COMMIT has that meaning.
       await rm(staged.path); queue.consumed(staged.header.encodedBytes);
       await session.send({ kind: K.CREDIT, index: staged.index, sequence: staged.header.encodedBytes, payload: new Uint8Array() });
-      await group.append(asset, staged);
+      await group.append({ asset, index: staged.index, encodedBytes: staged.header.encodedBytes, plainBytes: staged.header.plainBytes });
     }
     await group.flush();
     if (committed.length !== metrics.receivedAssets) throw new Error('Bulk chunk contains uncommitted assets');
