@@ -67,8 +67,13 @@ it.each(['view', 'dynamic'] as const)('bounds streamed %s catalog bytes before d
     const options = route === 'view'
       ? { contextGraphId: 'bounded', view: 'verifiable-memory' as const, verifiedGraph: 'a' }
       : { contextGraphId: 'bounded', includeContextGraphPartitions: true };
-    await expect(engine.query('SELECT ?s WHERE { ?s ?p ?o }', { ...options, maxResponseBytes: 1024 }))
-      .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
+    const query = route === 'dynamic' ? 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }' : 'SELECT ?s WHERE { ?s ?p ?o }';
+    await expect(engine.query(query, { ...options, maxResponseBytes: 1024 }))
+      .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE', maxBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES });
+    const request = fetcher.mock.calls[0] as unknown as [unknown, RequestInit];
+    const catalogQuery = String(request[1].body);
+    expect(catalogQuery).toContain(route === 'dynamic' ? '?assertionGraph' : '?ctxGraph');
+    expect(catalogQuery).toContain('http://schema.org/name');
     expect(fetcher).toHaveBeenCalledOnce(); // The caller query never ran.
     expect(cancel).toHaveBeenCalledOnce();
     expect(produced).toBeLessThanOrEqual(QUERY_CATALOG_MAX_RESPONSE_BYTES + 2 * chunk.byteLength);

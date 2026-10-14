@@ -4,7 +4,9 @@ import type { PreparedGraphScope } from './sparql-graph-scope.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 
 type ScopedRoute = ReturnType<typeof staticScopedRouteGraphs>;
-export type QueryReadPlan = { kind: 'unscoped' | 'view' } | {
+export type QueryReadPlan = { kind: 'unscoped' } | {
+  kind: 'view'; options: QueryOptions & { contextGraphId: string; view: NonNullable<QueryOptions['view']> };
+} | {
   kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
   execution: ScopedRoute['execution']; partitionSelection: ContentPartitionSelection;
   discovery: {
@@ -17,7 +19,11 @@ export type QueryReadPlan = { kind: 'unscoped' | 'view' } | {
 /** Resolve route policy once; execution and admission consume the same decision. */
 export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOptions | undefined,
   supportsCompleteAdmission: boolean): QueryReadPlan {
-  if (!options?.contextGraphId || options.view) return { kind: options?.view ? 'view' : 'unscoped' };
+  if (options?.view) {
+    if (!options.contextGraphId) throw new Error(`view '${options.view}' requires a contextGraphId to scope the query`);
+    return { kind: 'view', options: { ...options, contextGraphId: options.contextGraphId, view: options.view } };
+  }
+  if (!options?.contextGraphId) return { kind: 'unscoped' };
   const { execution, ...graphs } = staticScopedRouteGraphs(options.contextGraphId, options);
   const allowed = [...graphs.staticContentGraphs, ...graphs.metaAllowList, ...graphs.staticPrivateAllowList];
   const needsDiscovery = !scope.hasGraphClause

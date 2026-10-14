@@ -306,10 +306,9 @@ export function resolveViewGraphs(
 }
 
 type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
-type QueryExecutionContext = { reads: StoreReadLane; catalog: StoreReadLane } & (
-  { kind: 'unscoped' | 'view' } |
-  { kind: 'scoped'; plan: ScopedQueryReadPlan; variableContentGraphs: readonly string[] }
-);
+type QueryExecutionContext = {
+  plan: QueryReadPlan; reads: StoreReadLane; catalog: StoreReadLane; variableContentGraphs: readonly string[];
+};
 
 /**
  * Local-only query engine that executes SPARQL against this node's own
@@ -356,21 +355,21 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const owned = plan.kind === 'scoped' && plan.discovery.mode === 'admission-owned';
     const execute = async () => {
       const reads = createQueryStoreReadContext(this.store, options);
-      const discovery = plan.kind === 'scoped' && plan.discovery.expandGraphVariables
-        ? owned ? await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, reads.catalog)
-          : await this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads)
-        : undefined;
       const context: QueryExecutionContext = plan.kind === 'scoped'
-        ? this.prepareScopedExecution(plan, reads, discovery) : { kind: plan.kind, reads, catalog: reads.catalog };
+        ? await this.prepareScopedExecution(plan, reads)
+        : { plan, reads, catalog: reads.catalog, variableContentGraphs: [] };
       return this.queryPrepared(initialGraphScope, options, context);
     };
     return owned ? this.store.withQueryReadAdmission!(execute, storeOptions(options)) : execute();
   }
 
-  private prepareScopedExecution(plan: ScopedQueryReadPlan, reads: QueryStoreReadContext,
-    discovery?: ScopedContentGraphDiscoverySnapshot): QueryExecutionContext {
-    if (plan.discovery.expandGraphVariables && !discovery) throw new Error('Scoped expansion requires discovery authority');
-    return { kind: 'scoped', plan, catalog: reads.catalog,
+  private async prepareScopedExecution(plan: ScopedQueryReadPlan, reads: QueryStoreReadContext): Promise<QueryExecutionContext> {
+    const discovery = plan.discovery.expandGraphVariables
+      ? plan.discovery.mode === 'admission-owned'
+        ? await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, reads.catalog)
+        : await this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads)
+      : undefined;
+    return { plan, catalog: reads.catalog,
       // Routing consumes one discovery callback for owned and memoized inventories.
       reads: discovery ? { query: reads.query,
         listGraphsByPrefix: async prefix => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads,
@@ -381,13 +380,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   private async queryPrepared(initialGraphScope: PreparedGraphScope, options: QueryOptions | undefined,
     context: QueryExecutionContext): Promise<QueryResult> {
-    const { reads } = context;
+    const { reads, plan } = context;
     let routedScope = initialGraphScope;
 
     // ── V10 view-based routing ────────────────────────────────────────
-    const effectiveContextGraphId = options?.contextGraphId;
-    if (context.kind === 'scoped') {
-      const { plan } = context;
+    if (plan.kind === 'scoped') {
       const { staticContentGraphs, subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
       const partitions = new Map<string, string[]>();
       for (const { root, prefix } of plan.discovery.contentPrefixes) {
@@ -412,34 +409,15 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       ));
     }
 
-    if (options?.view) {
-      if (!effectiveContextGraphId) {
-        throw new Error(
-          `view '${options.view}' requires a contextGraphId to scope the query`,
-        );
-      }
-      // GH #184 — `subGraphName` + `view` is now supported: the view scopes to
-      // the named sub-graph's per-layer partitions (handled in queryWithView /
-      // resolveViewGraphs). Validate the name shape before routing.
-      if (options.subGraphName) {
-        const v = validateSubGraphName(options.subGraphName);
-        if (!v.valid) throw new Error(v.reason);
-      }
-      return this.queryWithView(
-        initialGraphScope,
-        options.view,
-        effectiveContextGraphId,
-        options,
-        reads,
-        context.catalog,
-      );
+    if (plan.kind === 'view') {
+      return this.queryWithView(initialGraphScope, plan.options.view, plan.options.contextGraphId, plan.options, reads, context.catalog);
     }
 
     // ── Legacy routing (V9 compat) ────────────────────────────────────
     let effectiveScope = routedScope;
 
-    if (context.kind === 'scoped') {
-      const route = context.plan.execution;
+    if (plan.kind === 'scoped') {
+      const route = plan.execution;
       const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
         routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads));
       if (route.kind === 'combined') {
