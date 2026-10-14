@@ -71,13 +71,25 @@ import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
  * The `removeApiPort` failure stays swallowed: this runs before the cleanup
  * IIFE, and it is idempotent with the later `cleanupStateFiles()` call, so a
  * failure here lands us exactly where a failed late removal would.
+ *
+ * `endShareAdmissionWaits` runs first too (GH#3052): a share held back by a
+ * legacy SWM fence is refused at once from here on, so the promote worker
+ * records its job and retries it after the restart, instead of the shutdown
+ * deadline cutting the promote off in the middle (which leaves the job to an
+ * operator). A failure there is logged and does not stop the shutdown.
  */
 export async function beginGracefulShutdown(deps: {
   state: { catchupAcceptingJobs: boolean };
   removeApiPort: () => Promise<void>;
   log: (message: string) => void;
+  endShareAdmissionWaits?: () => void;
 }): Promise<void> {
   deps.state.catchupAcceptingJobs = false;
+  try {
+    deps.endShareAdmissionWaits?.();
+  } catch (err: any) {
+    deps.log(`Share admission wait shutdown error: ${err?.message ?? String(err)}`);
+  }
   deps.log('Shutting down...');
   await deps.removeApiPort().catch((err: any) =>
     deps.log(`Early api.port cleanup error: ${err?.message ?? String(err)}`),

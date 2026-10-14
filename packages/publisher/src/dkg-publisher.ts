@@ -9115,7 +9115,7 @@ export class DKGPublisher implements Publisher {
     // failed promotion cannot strand a durable false-incomplete witness. The
     // resolver itself may conservatively hydrate process-local state and must be
     // idempotent because retries reuse operationId. A resolver that can refuse
-    // for a passing reason is first given its short wait.
+    // for a passing reason is first given its wait.
     if (opts?.subGraphName === undefined) {
       await this.resolveDurableRootPromotionAtomicCompanion?.awaitAdmission?.({
         contextGraphId, kaUal: contentScope.ual,
