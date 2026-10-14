@@ -2769,7 +2769,7 @@ export class DKGAgent extends DKGAgentBase {
     // its drain joins the shutdown fence below, so store and network teardown
     // (and a same-process restart's first fetch) never overlap it.
     const onDemandPhonebookDrain = peekOnDemandAgentsPhonebook(this)?.close() ?? null;
-    const authorityAndCacheDrain = Promise.all([
+    const authorityAndCacheDrain = Promise.allSettled([
       this.syncResponderPreparedCacheOwner?.closeAndDrain(),
       this.authorityIndexSnapshotRuntime?.close(),
       this.chain.contextGraphAuthorityIndexSnapshots?.close(),
