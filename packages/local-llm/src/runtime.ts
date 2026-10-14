@@ -13,7 +13,8 @@ import {
   type ToolProfile,
 } from './tool-router.js';
 import { NOOP_TRACE, type InteractionTrace } from './text-trace.js';
-import type { DkgLocalLlmDomainProfile } from './domain-profile.js';
+import { assertRequiredDomainTools, type DkgLocalLlmDomainProfile } from './domain-profile.js';
+import { ContextRecovery } from './context-recovery.js';
 import {
   rewriteCompactPredicatesForDkg,
   referencesUnresolvedContextGraphAlias,
@@ -24,7 +25,10 @@ import {
 import {
   DEFAULT_MAX_MODEL_RESPONSE_BYTES,
   readModelResponseTextBounded,
+  normalizeFinalAnswer,
+  throwModelResponseError,
 } from './model-response.js';
+export { normalizeFinalAnswer } from './model-response.js';
 
 export interface McpClientLike {
   listTools(options?: { signal?: AbortSignal }): Promise<{ tools: McpToolDefinition[] }>;
@@ -112,10 +116,13 @@ export interface DkgLocalLlmOptions {
 
 export interface DkgLocalLlmRunOptions {
   signal?: AbortSignal;
+  /** Return the authoritative evidence of this turn for native Program persistence. */
+  captureEvidence?: boolean;
 }
 
 export interface DkgLocalLlmResult {
   answer: string;
+  evidence?: DkgChatEvidence[];
   profile: Exclude<ToolProfile, 'auto'>;
   toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>;
   traceFile?: string;
@@ -307,30 +314,6 @@ function assistantToolMessage(toolCall: ToolCall): ChatMessage {
   };
 }
 
-export function normalizeFinalAnswer(value: string): string {
-  const withoutControls = [...value]
-    .filter((character) => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return !(
-        codePoint <= 0x08
-        || codePoint === 0x0b
-        || codePoint === 0x0c
-        || (codePoint >= 0x0e && codePoint <= 0x1f)
-        || codePoint === 0x7f
-        || (codePoint >= 0x200b && codePoint <= 0x200d)
-        || codePoint === 0x2060
-        || codePoint === 0xfeff
-      );
-    })
-    .join('');
-  return withoutControls
-    .replace(/<\|[^|>]{1,80}\|>/g, '')
-    .split('\n')
-    .filter((line) => !/^\s*[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F\s]{2,}\s*$/u.test(line))
-    .join('\n')
-    .trim();
-}
-
 export class DkgLocalLlmRuntime {
   private readonly mcp: McpClientLike;
   private readonly fetcher: typeof fetch;
@@ -409,6 +392,7 @@ export class DkgLocalLlmRuntime {
     if (!this.tools.length) {
       throw new Error('MCP tools/list returned no tools compatible with the strict Context Graph scope.');
     }
+    assertRequiredDomainTools(this.domainProfile, this.tools);
     this.toolRouter = createToolRouter(this.tools);
   }
 
@@ -578,7 +562,7 @@ export class DkgLocalLlmRuntime {
     signal?.throwIfAborted();
     if (!response.ok) {
       await this.trace.write(`LLM HTTP ERROR ${round}`, { status: response.status, body: raw });
-      throw new Error(`Local LLM endpoint returned ${response.status}: ${raw}`);
+      throwModelResponseError(response.status, raw);
     }
 
     let parsed: OpenAiCompatibleResponse;
@@ -635,8 +619,7 @@ export class DkgLocalLlmRuntime {
     }
 
     const priorSession = this.renderSessionContext();
-    const systemContext = [
-      dkgLocalLlmSystemContext({
+    const currentSystemContext = dkgLocalLlmSystemContext({
         projectId: this.projectId,
         profile: route.profile,
         toolNames: route.tools.map((tool) => tool.name),
@@ -644,7 +627,9 @@ export class DkgLocalLlmRuntime {
         addendum: [this.domainProfile?.systemContext, this.systemContextAddendum]
           .filter(Boolean)
           .join('\n\n'),
-      }),
+      });
+    const systemContext = [
+      currentSystemContext,
       ...(priorSession ? [SESSION_CONTEXT, priorSession] : []),
     ].join('\n\n');
     const messages: ChatMessage[] = [
@@ -665,6 +650,7 @@ export class DkgLocalLlmRuntime {
     let requireTool = route.profile !== 'chat';
     let finalOnly = false;
     let truncationRetryUsed = false;
+    const contextRecovery = new ContextRecovery(Boolean(priorSession), this.trace);
 
     const scheduleRepair = async (
       reason: string,
@@ -701,14 +687,27 @@ export class DkgLocalLlmRuntime {
             ? []
             : openAiTools;
       const toolChoice = routedTools.length ? (requireTool ? 'required' : 'auto') : undefined;
-      const response = await this.callModel(
-        messages,
-        routedTools,
-        toolChoice,
-        round,
-        route.profile === 'chat' ? Math.min(this.maxTokens, 256) : this.maxTokens,
-        signal,
-      );
+      let response: OpenAiCompatibleResponse;
+      try {
+        response = await this.callModel(
+          messages, routedTools, toolChoice, round,
+          route.profile === 'chat' ? Math.min(this.maxTokens, 256) : this.maxTokens,
+          signal,
+        );
+      } catch (error) {
+        const finishFromEvidence = await contextRecovery.recover(
+          error, messages, currentSystemContext, sessionEvidence.length > 0, routedTools.length > 0,
+        );
+        if (finishFromEvidence) {
+          finalOnly = true;
+          requireTool = false;
+          pinnedToolName = undefined;
+        }
+        // At most two explicit pre-inference rejections can reach here. They
+        // do not spend an orchestration round or repeat any completed MCP call.
+        round--;
+        continue;
+      }
       const choice = response.choices?.[0];
       const assistant = choice?.message;
       if (!assistant) throw new Error('Local LLM endpoint returned no assistant choice.');
@@ -745,7 +744,8 @@ export class DkgLocalLlmRuntime {
         if (!answer) throw new Error('Local LLM endpoint returned an empty final answer.');
         await this.trace.write('FINAL ANSWER', answer);
         await this.rememberTurn(prompt, answer, sessionEvidence, signal);
-        return { answer, profile: route.profile, toolCalls: executed, traceFile: this.trace.filePath };
+        return { answer, profile: route.profile, toolCalls: executed, traceFile: this.trace.filePath,
+          ...(options.captureEvidence ? { evidence: sessionEvidence.map(item => ({ ...item, arguments: { ...item.arguments } })) } : {}) };
       }
 
       if (!routedTools.length) {

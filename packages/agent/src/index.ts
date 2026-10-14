@@ -22,6 +22,7 @@ export {
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   generateAgentToken, hashAgentToken,
+  agentKeystorePath, readAgentKeystore, assertKeystoreHoldsNoPayerKey,
   ensureWorkspaceEncryptionKey,
   appendCustodialWorkspaceEncryptionKey,
   revokeCustodialWorkspaceEncryptionKey,
