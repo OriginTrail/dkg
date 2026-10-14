@@ -16,12 +16,12 @@ export interface ContentPartition {
   readonly kind: 'content' | 'draft' | 'shared' | 'verified';
   readonly subGraphName?: string;
   readonly draftOwner?: string;
-  readonly subGraphRegistered?: boolean;
+  readonly broadScopeEligible: boolean;
 }
 /** Apply caller policy to classified discovery, before merging static route graphs. */
 export function selectContentPartitions(partitions: readonly ContentPartition[],
   draftAccess: DraftAccessPolicy, subGraphName?: string): string[] {
-  return partitions.filter(partition => (subGraphName ? partition.subGraphName === subGraphName : partition.subGraphRegistered !== false)
+  return partitions.filter(partition => (subGraphName ? partition.subGraphName === subGraphName : partition.broadScopeEligible)
     && (partition.kind !== 'draft' || draftAccess.kind === 'all'
       || (draftAccess.kind === 'owners' && partition.draftOwner !== undefined
         && draftAccess.owners.some(owner => knowledgeAssetAgentAddressesEqual(owner, partition.draftOwner!)))))

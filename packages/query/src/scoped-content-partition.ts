@@ -15,7 +15,8 @@ export function classifyScopedContentGraph(
 ): ContentPartition | undefined {
   const root = contextGraphDataUri(contextGraphId);
   const admit = (kind: ContentPartition['kind'], subGraphName?: string, draftTail?: string): ContentPartition =>
-    Object.freeze({ graph, kind, ...(subGraphName ? { subGraphName, subGraphRegistered: registeredSubGraphs.has(subGraphName) } : {}),
+    Object.freeze({ graph, kind, broadScopeEligible: subGraphName === undefined || registeredSubGraphs.has(subGraphName),
+      ...(subGraphName ? { subGraphName } : {}),
       ...(draftTail ? { draftOwner: draftTail.split('/')[1] } : {}) });
   if (graph === root) return admit('content');
   if (!graph.startsWith(`${root}/`)) return undefined;
