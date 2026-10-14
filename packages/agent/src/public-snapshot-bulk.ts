@@ -12,7 +12,7 @@ export type PublicSnapshotBulkHost = {
   store: DKGAgent['store'];
   router: Pick<DKGAgent['router'], 'probeProtocol' | 'withDuplexStream'>;
   getOrCreateSyncVerifyWorker: () => Pick<ReturnType<DKGAgent['getOrCreateSyncVerifyWorker']>, 'parseAndFilter'>;
-} & { [K in 'ensurePeerConnected' | 'getPeerProtocols' | 'processDurableBatchInWorker'
+} & { [K in 'ensurePeerConnected' | 'processDurableBatchInWorker'
   | 'reconcileAfterGraphScopedMaterialization']: OmitThisParameter<DKGAgent[K]> };
 
 /** One explicit public job, one configured supplier. No background or private sync policy changes. */
@@ -29,14 +29,12 @@ export async function recoverPublicSnapshotBulk(agent: PublicSnapshotBulkHost, o
     try {
       await agent.ensurePeerConnected(peer, { signal });
       signal.throwIfAborted(); assertCurrent();
-      const protocols = await agent.getPeerProtocols(peer);
-      signal.throwIfAborted(); assertCurrent();
-      // Identify may still be in flight. Negotiate the live handler before
-      // excluding a configured core, without sending an application request.
+      // A cached advertisement and a best-effort dial do not prove reachability.
+      // Negotiate every candidate's live handler before pinning a supplier,
+      // without sending an application request.
       const remaining = options.deadline - Date.now();
       if (remaining <= 0) throw new Error('Bulk snapshot deadline exceeded');
-      const supported = protocols.includes(BULK_GRAPH_PROTOCOL) ||
-        await agent.router.probeProtocol(peer, BULK_GRAPH_PROTOCOL, Math.min(3_000, remaining), signal) === 'supported';
+      const supported = await agent.router.probeProtocol(peer, BULK_GRAPH_PROTOCOL, Math.min(3_000, remaining), signal) === 'supported';
       signal.throwIfAborted(); assertCurrent();
       if (supported) { supplier = peer; break; }
     } catch {
