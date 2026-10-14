@@ -61,12 +61,10 @@ export interface ContextGraphMetadataConfirmationDependencies {
 export type ContextGraphMetadataConfirmation =
   | { readonly outcome: 'confirmed' | 'unconfirmed' }
   | { readonly outcome: 'unavailable'; readonly source: 'chain-proof';
-      readonly proof: Extract<ActivePublicContextGraphChainProof, { state: 'unknown' }> }
-  | { readonly outcome: 'unavailable'; readonly source: 'dependency'; readonly error: unknown };
+      readonly proof: Extract<ActivePublicContextGraphChainProof, { state: 'unknown' }> };
 
 /** Legacy boolean presentation preserves its fail-closed chain-proof behavior. */
 export function confirmedMetadataBoolean(result: ContextGraphMetadataConfirmation): boolean {
-  if (result.outcome === 'unavailable' && result.source === 'dependency') throw result.error;
   return result.outcome === 'confirmed';
 }
 
@@ -86,12 +84,9 @@ export async function resolveContextGraphMetadataConfirmationV1(
 ): Promise<ContextGraphMetadataConfirmation> {
   dependencies.signal?.throwIfAborted();
   try {
-    const result = await resolveMetadataConfirmation(dependencies, contextGraphId, input);
+    return await resolveMetadataConfirmation(dependencies, contextGraphId, input);
+  } finally {
     dependencies.signal?.throwIfAborted();
-    return result;
-  } catch (error) {
-    dependencies.signal?.throwIfAborted();
-    return { outcome: 'unavailable', source: 'dependency', error };
   }
 }
 
