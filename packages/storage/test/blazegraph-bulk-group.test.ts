@@ -162,6 +162,45 @@ describe('Blazegraph confirmed bulk publication', () => {
     } finally { await store.close(); }
   });
 
+  it.each(['deadline', 'caller-abort'] as const)('cleans owned staging after publication %s without replay', async cause => {
+    const caller = new AbortController();
+    const cancellation = new Error('caller cancelled publication');
+    let publicationSignal!: AbortSignal;
+    let cleanupSignal!: AbortSignal;
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
+      healthReservedSlots: 0, normalReservedSlots: 0, backgroundReservedSlots: 0 });
+    const admissions = vi.spyOn(scheduler, 'run');
+    const request = vi.fn().mockResolvedValueOnce(new Response(''))
+      .mockImplementationOnce(async (_url, init) => {
+        publicationSignal = init.signal;
+        if (cause === 'caller-abort') queueMicrotask(() => caller.abort(cancellation));
+        return new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+        });
+      }).mockImplementationOnce(async (_url, init) => {
+        cleanupSignal = init.signal;
+        expect(publicationSignal.aborted).toBe(true);
+        expect(cleanupSignal.aborted).toBe(false);
+        expect(store.getPressureSnapshot().normalInflight).toBe(1);
+        return new Response('');
+      });
+    vi.stubGlobal('fetch', request);
+    const store = new BlazegraphStore('http://fixture.invalid/sparql', { timeout: 40, scheduler });
+    try {
+      const error = await store.replaceAssetGroup(members, { signal: caller.signal }).catch(error => error);
+      expect(error).toBe(publicationSignal.reason);
+      if (cause === 'caller-abort') expect(error).toBe(cancellation);
+      else expect(error).toMatchObject({ outcome: 'indeterminate' });
+      expect(request).toHaveBeenCalledTimes(3);
+      const cleanup = String(request.mock.calls[2]![1].body);
+      expect(cleanup.split(';').every(line => /^\s*DROP SILENT GRAPH <urn:dkg:/.test(line))).toBe(true);
+      expect(cleanup).not.toContain('<urn:data>'); expect(cleanup).not.toContain('<urn:meta>');
+      expect(cleanupSignal).not.toBe(publicationSignal);
+      expect(admissions).toHaveBeenCalledTimes(1);
+      expect(store.getPressureSnapshot().normalInflight).toBe(0);
+    } finally { await store.close(); }
+  });
+
   it('cleans only owned staging after a settled publication failure, retaining the first error', async () => {
     const failure = new Error('publication failed');
     const request = vi.fn().mockResolvedValueOnce(new Response('')).mockRejectedValueOnce(failure)
