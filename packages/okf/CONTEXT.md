@@ -221,7 +221,9 @@ it; the CLI summary reports it against the current time.
   do not conflate the two. WM/SWM data carries no on-chain verification.
 - **`type` normalisation.** A bare `type` value is PascalCased into the schema.org
   namespace (`BigQuery Dataset` → `http://schema.org/BigQueryDataset`); a full IRI
-  `type` is used unchanged. Round-trips losslessly because PascalCase of the local
+  `type` the node accepts is used unchanged, and a malformed one
+  (`https://example.org/%zz`) is PascalCased like a bare name, with a warning.
+  Round-trips losslessly because PascalCase of the local
   name is idempotent — except that the original spacing is not recoverable
   (`BigQueryDataset` exports as written). The one spec-defined type whose exact
   spelling carries meaning, `Attested Computation` (§10.5 discovery is by that

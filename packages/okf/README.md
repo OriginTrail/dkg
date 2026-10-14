@@ -73,7 +73,7 @@ verified one, and is never rejected — SPEC §11).
 | OKF (SPEC) | RDF on the concept subject | Notes |
 |---|---|---|
 | `type` | `rdf:type schema:<PascalCase>` | `Attested Computation` ↔ `schema:AttestedComputation` (exact spelling restored on export) |
-| `title`, `description`, `tags`, `resource` | `schema:name`, `schema:description`, `schema:keywords`, `schema:url` | unchanged from v0.1 |
+| `title`, `description`, `tags`, `resource` | `schema:name`, `schema:description`, `schema:keywords`, `schema:url` | as in v0.1; `resource` is an IRI only when the node accepts it (see *An IRI the node accepts*) |
 | `generated.at` / legacy `timestamp` (§5.2, §13.1) | `schema:dateModified` (xsd:dateTime); `generated.at` also on `okf:generatedAt` | one predicate to query for both versions; `generated.at` wins, a leftover `timestamp` is kept as `schema:timestamp` (see *Last-modified times*) |
 | `generated.by` (§5.2, §7) | `okf:generatedBy` (actor literal) | extra keys inside `generated` → `okf:generated.<key>` (see *Family extensions*) |
 | `verified[]` (§5.2) | `okf:verification → okf:Verification` node: `okf:verifiedBy`, `okf:verifiedAt` | a bare `{ by, at }` is a one-element list; entry order is in the node IRI |
