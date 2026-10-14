@@ -1,6 +1,7 @@
+import { reserveBulkStagingDirectory } from './bulk-staging-directory.js';
 // SPDX-License-Identifier: Apache-2.0
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
+import { open, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_KIND as K, exchangeBulkGraph,
   type BulkGraphSession, type ProtocolRouter, type DuplexStreamOptions } from '@origintrail-official/dkg-core';
@@ -41,8 +42,7 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
   reconcile?: (assets: readonly VerifiedGraphScopedAsset[], signal: AbortSignal) => Promise<void>;
   onMetrics?: (metrics: BulkGraphMetrics) => void;
 }) {
-  await mkdir(options.stagingRoot, { recursive: true, mode: 0o700 });
-  const directory = await mkdtemp(join(options.stagingRoot, 'chunk-'));
+  const directory = await reserveBulkStagingDirectory(options.stagingRoot);
   const queue = new BulkStagingQueue(session.signal);
   const signal = queue.signal;
   const metrics: BulkGraphMetrics = { encodedBytes: 0, receivedAssets: 0, verifiedAssets: 0, committedAssets: 0,

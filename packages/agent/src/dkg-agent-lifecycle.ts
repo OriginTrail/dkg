@@ -10995,7 +10995,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<boolean> {
     const admission = await this.resolveSharedMemoryReadAdmission(contextGraphId, opts);
     opts.signal?.throwIfAborted();
-    if (admission.outcome === 'unavailable') throw admission.error;
+    if (admission.outcome === 'unavailable' && admission.source !== 'legacy-membership') throw admission.error;
     return admission.outcome === 'allowed';
   }
 
@@ -11003,6 +11003,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision } = {},
   ): Promise<SwmReadAdmission> {
     return resolveSharedMemoryAdmission({
+      signal: opts.signal,
       acceptedAuthority: () => { opts.signal?.throwIfAborted(); return this.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId, opts); },
       legacyLane: () => this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, opts),
       confirmedMetadata: () => this.hasConfirmedSharedMemoryMetaState(contextGraphId, opts),

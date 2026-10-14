@@ -4,7 +4,7 @@ import { BULK_GRAPH_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
   createOperationContext, registerBulkGraphResponder, type ProtocolRouter, type BulkGraphSession } from '@origintrail-official/dkg-core';
 import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson, encodeBulkRefusal, encodeBulkChunkEnd,
   validateBulkGraphRequest, type BulkGraphRequest } from '../bulk-graph-contract.js';
-import type { PublicAssetResponderOptions } from './public-asset-responder.js';
+import type { PublicAssetResponderOptions, PublicAssetServingOptions } from './public-asset-responder.js';
 
 import { observeExactBatch as observe } from '../exact-batch-observation.js';
 const EMPTY = new Uint8Array();
@@ -26,7 +26,7 @@ export function registerPublicBulkGraph(router: ProtocolRouter, options: PublicA
     session.signal, () => servePublicBulkChunk(request, session, options)));
 }
 
-export async function servePublicBulkChunk(request: BulkGraphRequest, session: BulkGraphSession, options: PublicAssetResponderOptions): Promise<void> {
+export async function servePublicBulkChunk(request: BulkGraphRequest, session: Pick<BulkGraphSession, 'signal' | 'next' | 'send'>, options: PublicAssetServingOptions): Promise<void> {
   const context = createOperationContext('sync');
   const hash = bulkChunkHash(request);
   // Encoded prefix offsets are the single ledger for sent, credited and durable progress.

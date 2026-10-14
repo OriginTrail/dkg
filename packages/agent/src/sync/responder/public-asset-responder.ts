@@ -5,11 +5,9 @@ import type { ExactAssetExportCache, ExactAssetExportFallbackReason, ExactAssetE
 import type { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
 
-export interface PublicAssetResponderOptions {
+export interface PublicAssetServingOptions {
   /** Shared existing responder budget/cache, not a second unaccounted cache. */
-  readonly exportCache: ExactAssetExportCache;
-  readonly admission: Pick<ExperimentalExactBatchResponderResources, 'withPreAuthorizationAdmission' | 'withAuthorizedResponseAdmission'>;
-  readonly authorizeSyncRequest: (request: SyncRequestEnvelope, peerId: string, options: { signal?: AbortSignal }) => Promise<boolean>;
+  readonly exportCache: Pick<ExactAssetExportCache, 'acquireEncoded'>;
   /** Positive normal CG policy read: the experimental pilot serves public CGs only. */
   readonly isPublicContextGraph: (contextGraphId: string, signal: AbortSignal) => Promise<boolean>;
   readonly servingWithheld?: (contextGraphId: string) => boolean;
@@ -19,4 +17,10 @@ export interface PublicAssetResponderOptions {
   readonly onPayload?: (assetIndex: number, plainBytes: number, encodedBytes: number, context: OperationContext) => void;
   /** Local closed reason bound to the request's operation and canonical asset index. */
   readonly onFallback?: (reason: ExactAssetExportFallbackReason, assetIndex: number, context: OperationContext, budgetReason?: SyncRowSnapshotBudgetError['reason']) => unknown;
+}
+
+/** Registration owns authentication and admission; the serving worker consumes their result. */
+export interface PublicAssetResponderOptions extends PublicAssetServingOptions {
+  readonly admission: Pick<ExperimentalExactBatchResponderResources, 'withPreAuthorizationAdmission' | 'withAuthorizedResponseAdmission'>;
+  readonly authorizeSyncRequest: (request: SyncRequestEnvelope, peerId: string, options: { signal?: AbortSignal }) => Promise<boolean>;
 }
