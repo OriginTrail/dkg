@@ -546,7 +546,8 @@ export class QueryMethods extends DKGAgentBase {
         callerAgentAddress: callerAgentAddressStr, readAuthority: scopedReadAuthority, signal: opts.signal,
       });
       opts.signal?.throwIfAborted();
-      if (admission.outcome === 'unavailable' && opts.accessDenied === 'error') throw admission.error;
+      if (admission.outcome === 'unavailable'
+        && (admission.source !== 'legacy-membership' || opts.accessDenied === 'error')) throw admission.error;
       if (admission.outcome !== 'allowed') {
         this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
         return deniedResult(sparql, opts.accessDenied);

@@ -809,6 +809,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {}): Promise<SwmReadAdmission> {
     const localAgents = [this.defaultAgentAddress, ...this.listLocalAgents().map(({ agentAddress }) => agentAddress)];
     return resolvePrivateRootLegacyLaneAdmission({
+      signal: options.signal,
       authorityId: () => this.rfc64PrivateRootLegacyLaneAuthorityIdV1(contextGraphId),
       mergedMembership: async id => isLocalPrivateMember(await this.getCgMeta(id, options), localAgents),
       ownMembership: async id => isLocalPrivateMember(await this.getOwnCgMetaFacts(id, options), localAgents),
