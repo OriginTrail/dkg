@@ -173,6 +173,7 @@ it('local inference pins the model digest and dimensions and refuses remote infe
   const provider = new LocalEntityEmbedder(config);
   const fetch = vi.fn().mockResolvedValueOnce(Response.json({ models: [{ name: 'test:latest', digest: config.digest }] }))
     .mockResolvedValueOnce(Response.json({ embeddings: [[1, 0]] }))
+    .mockResolvedValueOnce(Response.json({ models: [{ name: 'test:latest', digest: config.digest }] }))
     .mockResolvedValueOnce(Response.json({ models: [] }));
   vi.stubGlobal('fetch', fetch);
   expect(await provider.embed('science', 'query', AbortSignal.timeout(1000))).toEqual([1, 0]);
@@ -390,8 +391,8 @@ it('sends distinct query/document prefixes without silent truncation', async () 
   const posted = fetch.mock.calls.filter(([url]) => url.endsWith('/api/embed'));
   expect(posted).toHaveLength(2);
   expect(posted.map(([, init]) => JSON.parse(init!.body as string))).toEqual([
-    { model: 'test:latest', input: 'query: ocean', truncate: false, keep_alive: '5m' },
-    { model: 'test:latest', input: 'document: ocean', truncate: false, keep_alive: '5m' },
+    { model: `sha256:${config.digest}`, input: 'query: ocean', truncate: false, keep_alive: '5m' },
+    { model: `sha256:${config.digest}`, input: 'document: ocean', truncate: false, keep_alive: '5m' },
   ]);
 });
 
