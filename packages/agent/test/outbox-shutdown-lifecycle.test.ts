@@ -633,7 +633,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
 });
 
 
-it('drains the registered sync cache before dependency teardown and fences a restart', async () => {
+it.each([false, true])('drains the registered sync cache before teardown even when authority close fails=%s', async authorityFails => {
   const agent = syntheticShutdownAgent();
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
@@ -646,16 +646,21 @@ it('drains the registered sync cache before dependency teardown and fences a res
     node: { libp2p: { getPeers: () => [] }, stop: stopNode }, finalizationRuntime: new FinalizationRuntime(),
     store: { close: closeStore }, log: { warn: vi.fn() }, syncResponderPreparedCacheOwner: { closeAndDrain },
   });
+  if (authorityFails) agent.chain.contextGraphAuthorityIndexSnapshots = {
+    close: vi.fn(async () => { throw new Error('authority-close-fixture'); }),
+  };
   let stopped = false;
   const stopping = agent.stop().then(() => { stopped = true; });
-  expect(closeAndDrain).toHaveBeenCalledOnce();
-  await Promise.resolve();
-  expect(stopped).toBe(false);
-  expect(stopNode).not.toHaveBeenCalled(); expect(closeStore).not.toHaveBeenCalled();
-  expect(agent.started).toBe(true);
-  await agent.start();
-  expect(agent.syncResponderPreparedCacheOwner.closeAndDrain).toBe(closeAndDrain);
-  expect(stopped).toBe(false);
-  release(); await stopping;
+  try {
+    expect(closeAndDrain).toHaveBeenCalledOnce();
+    // Let every other shutdown await progress while the cache drain is held.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(stopped).toBe(false);
+    expect(stopNode).not.toHaveBeenCalled(); expect(closeStore).not.toHaveBeenCalled();
+    expect(agent.started).toBe(true);
+    await agent.start();
+    expect(agent.syncResponderPreparedCacheOwner.closeAndDrain).toBe(closeAndDrain);
+    expect(stopped).toBe(false);
+  } finally { release(); await stopping; }
   expect(stopped).toBe(true); expect(closeStore).toHaveBeenCalledOnce();
 });
