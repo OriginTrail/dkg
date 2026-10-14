@@ -156,7 +156,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     vi.restoreAllMocks();
     stubAuthority({});
     await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(true);
-    expect(internals.getOwnCgMetaFacts).toHaveBeenCalledWith(PRIVATE_CG);
+    expect(internals.getOwnCgMetaFacts).toHaveBeenCalledWith(PRIVATE_CG, {});
   });
 
   // The membership reads await the store, and RFC-64 authority can change
@@ -250,7 +250,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     internals.wireIdToLocalCgId.set(wire, PRIVATE_CG);
     try {
       await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(wire)).resolves.toBe(true);
-      expect(internals.getCgMeta).toHaveBeenCalledWith(PRIVATE_CG);
+      expect(internals.getCgMeta).toHaveBeenCalledWith(PRIVATE_CG, {});
     } finally {
       internals.wireIdToLocalCgId.delete(wire);
     }
