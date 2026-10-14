@@ -34,8 +34,12 @@ setting absent, which disables the routes. No model is downloaded automatically.
 
 The first implementation supports an explicitly configured local Ollama server
 at a literal loopback address. It never falls back to a remote or billed service.
-The provider checks the installed model digest before each embedding and validates
-finite, nonzero vectors with the configured dimensions. A model, prefix, or
+The provider requires Ollama support for local manifest digest references
+(`sha256:<digest>`). It submits inference using that immutable reference and
+checks the configured tag's digest before and after inference. An older provider
+that cannot resolve the reference returns `ENTITY_EMBEDDING_UNAVAILABLE`; there
+is no fallback to a mutable tag. Vectors are accepted only after these checks,
+with finite, nonzero values and the configured dimensions. A model, prefix, or
 selection change produces a different index identity. A digest change is an
 explicit error; update configuration and build the new index. Choose a model
 whose context fits the selected entity text: inference must reject oversized
