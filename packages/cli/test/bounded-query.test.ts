@@ -301,6 +301,25 @@ it.each(['unavailable', 'nonmember'] as const)('distinguishes legacy shared-memo
 });
 
 
+it('propagates metadata confirmation outages for both legacy and bounded shared-memory queries', async () => {
+  const failure = new Error('STORE_UNAVAILABLE');
+  const execute = vi.fn();
+  const agent = { queryEngine: { query: execute }, log: { info() {} }, peerId: 'fixture',
+    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', source: 'system', reason: 'fixture' }),
+    resolveAcceptedRfc64SharedMemoryAuthorityV1: () => undefined,
+    resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
+    hasConfirmedSharedMemoryMetaState: async () => { throw failure; },
+    subscribedContextGraphs: new Map(),
+  };
+  const query = QueryMethods.prototype.query.bind(agent as never);
+  await expect(query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'test', view: 'shared-working-memory' })).rejects.toBe(failure);
+  const read = context({ query }, { view: 'shared-working-memory' }, 'member');
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(read.res.statusCode).toBe(503);
+  expect(JSON.parse(read.res.body).code).toBe('QUERY_UNAVAILABLE');
+  expect(execute).not.toHaveBeenCalled();
+});
+
 it('forwards the authenticated caller and response ceiling through scoped agent admission', async () => {
   const store = new OxigraphStore();
   const engine = new DKGQueryEngine(store);
@@ -367,10 +386,10 @@ it.each(['_working_memory/agent-b/1', 'assertion/agent-b/draft', 'code/_working_
   } finally { await store.close(); }
 });
 
-it.each([undefined, 'agent-a', 'legacy-peer', 'agent-b'])('keeps dashboard WM reads scoped to caller %s, including identity aliases', async callerAgentAddress => {
+it.each([undefined, 'agent-a', 'legacy-peer', 'agent-b', '0x52908400098527886E0F7030069857D2E4169EE7'])('keeps dashboard WM reads scoped to caller %s, including identity aliases', async callerAgentAddress => {
   const store = new OxigraphStore(), engine = new DKGQueryEngine(store);
   const contextGraphId = 'team/assertion/policies', root = `did:dkg:context-graph:${contextGraphId}`;
-  const owners = ['agent-a', 'legacy-peer', 'agent-b'];
+  const owners = ['agent-a', 'legacy-peer', 'agent-b', '0x52908400098527886e0f7030069857d2e4169ee7', 'Legacy-Peer'];
   const drafts = owners.flatMap(owner => ['', 'code/'].flatMap(prefix =>
     [`${root}/${prefix}assertion/${owner}/draft`, `${root}/${prefix}_working_memory/${owner}/1`]));
   const graphs = drafts.flatMap(graph => [graph, `${graph}/_named_graph/details`]);
@@ -389,7 +408,8 @@ it.each([undefined, 'agent-a', 'legacy-peer', 'agent-b'])('keeps dashboard WM re
     // The dashboard joins lifecycle metadata to a graph variable, across root,
     // sub-graph, name-keyed, per-KA and named-graph child layouts.
     const sparql = `SELECT ?g ?s WHERE { GRAPH <${root}/_meta> { ?g <http://dkg.io/ontology/memoryLayer> "WM" } GRAPH ?g { ?s <urn:p> ?o } }`;
-    const expectedOwners = callerAgentAddress === 'agent-b' ? ['agent-b'] : ['agent-a', 'legacy-peer'];
+    const expectedOwners = callerAgentAddress?.startsWith('0x') ? [callerAgentAddress.toLowerCase()]
+      : callerAgentAddress === 'agent-b' ? ['agent-b'] : ['agent-a', 'legacy-peer'];
     const expected = graphs.filter(graph => expectedOwners.some(owner => graph.includes(`/${owner}/`))).sort();
     const ordinary = await query(sparql, { contextGraphId, includeContextGraphPartitions: true,
       callerAgentAddress, agentAddress: 'untrusted-other-owner' });
