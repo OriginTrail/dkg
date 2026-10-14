@@ -22,7 +22,7 @@ beforeEach(() => {
   Observer.instances = []; renderers.two = []; renderers.three = []; renderers.init = undefined;
   vi.stubGlobal('ResizeObserver', Observer);
 });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 
 describe('visualizer lifecycle', () => {
@@ -63,5 +63,57 @@ describe('visualizer lifecycle', () => {
     viz.destroy(); resolve(); await flush();
     expect(renderers.three[0].render).not.toHaveBeenCalled();
     expect(renderers.three[0].destroy).toHaveBeenCalledOnce();
+  });
+
+  it('releases a failed 3D renderer and renders the loaded data with the 2D fallback', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    renderers.init = async () => { throw new Error('WebGL unavailable'); };
+    const viz = new RdfGraphViz(document.createElement('div'), { renderer: '3d' });
+    viz.loadTriples([{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }]);
+    await vi.waitFor(() => expect(renderers.two).toHaveLength(1)); await flush();
+    expect(renderers.three[0].destroy).toHaveBeenCalledOnce();
+    expect(renderers.two[0].render).toHaveBeenCalled();
+    viz.destroy(); expect(renderers.two[0].destroy).toHaveBeenCalledOnce();
+  });
+
+  it('does not allocate a fallback after failure of an already-destroyed 3D view', async () => {
+    let reject!: (reason: Error) => void;
+    renderers.init = () => new Promise<void>((_, fail) => { reject = fail; });
+    const viz = new RdfGraphViz(document.createElement('div'), { renderer: '3d' });
+    await vi.waitFor(() => expect(renderers.three).toHaveLength(1));
+    viz.destroy(); reject(new Error('late WebGL failure')); await flush();
+    expect(renderers.two).toHaveLength(0);
+    expect(renderers.three[0].destroy).toHaveBeenCalledOnce();
+  });
+
+  it('applies deferred camera settings only while the view is still alive', async () => {
+    let resolve!: () => void;
+    renderers.init = () => new Promise<void>(r => { resolve = r; });
+    const viz = new RdfGraphViz(document.createElement('div'), { renderer: '3d' });
+    viz.autoFitDisabled = true;
+    await vi.waitFor(() => expect(renderers.three).toHaveLength(1));
+    resolve(); await flush();
+    expect(renderers.three[0].autoFitDisabled).toBe(true);
+    viz.applyView({ name: 'animated view', animation: { fadeIn: true } } as any);
+    viz.destroy(); await flush();
+    expect(renderers.three[0].destroy).toHaveBeenCalledOnce();
+  });
+
+  it('loads each RDF format and suppresses canceled asynchronous parses', async () => {
+    const viz = new RdfGraphViz(document.createElement('div'));
+    await viz.loadNQuads('<urn:s> <urn:p> <urn:o> <urn:g> .');
+    expect(viz.model.nodes.has('urn:s')).toBe(true);
+    await viz.loadTurtle('@prefix ex: <urn:example:> . ex:a ex:p ex:b .');
+    expect(viz.model.nodes.has('urn:example:a')).toBe(true);
+    await viz.loadJsonLd({ '@id': 'urn:json', 'urn:p': { '@id': 'urn:target' } });
+    expect(viz.model.nodes.has('urn:json')).toBe(true);
+    const before = viz.model.nodes.size;
+    const controller = new AbortController(); controller.abort();
+    await viz.loadNQuads('<urn:old> <urn:p> <urn:o> <urn:g> .', controller.signal);
+    await viz.loadTurtle('<urn:old> <urn:p> <urn:o> .', controller.signal);
+    await viz.loadJsonLd({ '@id': 'urn:old', 'urn:p': { '@id': 'urn:target' } }, controller.signal);
+    expect(viz.model.nodes.size).toBe(before);
+    expect(viz.model.nodes.has('urn:old')).toBe(false);
+    viz.destroy();
   });
 });

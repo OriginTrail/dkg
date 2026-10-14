@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({ viz: null as any }));
 vi.mock('../src/core/rdf-graph-viz.js', () => ({ RdfGraphViz: class {
   handlers = new Map<string, (value: any) => void>();
   clear = vi.fn(); loadTriples = vi.fn(); loadNTriples = vi.fn(async () => {});
+  loadNQuads = vi.fn(async () => {}); loadTurtle = vi.fn(async () => {}); loadJsonLd = vi.fn(async () => {});
   model = { clear: this.clear };
   applyView = vi.fn(); refresh = vi.fn(); destroy = vi.fn();
   styleEngine = { setNodeColors: vi.fn() };
@@ -45,5 +46,38 @@ describe('React graph updates', () => {
     expect(signal.aborted).toBe(true);
     expect(state.viz.handlers.size).toBe(0);
     expect(state.viz.destroy).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['nquads', 'loadNQuads'], ['turtle', 'loadTurtle'], ['jsonld', 'loadJsonLd'],
+  ] as const)('forwards cancellation to %s loading and keeps style/view updates independent', async (format, method) => {
+    const view = { name: 'current view' } as any;
+    const colors = { 'urn:s': '#0088ff' };
+    await act(async () => root.render(React.createElement(RdfGraph, {
+      data: 'source document', format, viewConfig: view, options: { style: { nodeColors: colors } },
+    })));
+    expect(state.viz[method]).toHaveBeenCalledOnce();
+    const signal = state.viz[method].mock.calls[0][1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    expect(state.viz.styleEngine.setNodeColors).toHaveBeenCalledWith(colors);
+    expect(state.viz.applyView).toHaveBeenCalledWith(view);
+    act(() => root.unmount()); expect(signal.aborted).toBe(true);
+  });
+
+  it('uses current hover callbacks without retaining removed handlers', async () => {
+    const old = vi.fn(); const hover = vi.fn(); const unhover = vi.fn();
+    const data = [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }];
+    await act(async () => root.render(React.createElement(RdfGraph, { data, onNodeHover: old })));
+    await act(async () => root.render(React.createElement(RdfGraph, {
+      data, onNodeHover: hover, onNodeUnhover: unhover,
+    })));
+    act(() => {
+      state.viz.handlers.get('node:hover')({ id: 'urn:s' });
+      state.viz.handlers.get('node:unhover')({ id: 'urn:s' });
+      state.viz.handlers.get('background:click')({ x: 0, y: 0 });
+    });
+    expect(old).not.toHaveBeenCalled();
+    expect(hover).toHaveBeenCalledOnce(); expect(unhover).toHaveBeenCalledOnce();
+    expect(state.viz.loadTriples).toHaveBeenCalledOnce();
   });
 });
