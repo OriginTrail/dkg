@@ -24,7 +24,8 @@ function Scene({ dataImages = false }: { dataImages?: boolean }) {
     <div ref={container} style={{ width: 700, height: 500 }} /></>;
 }
 const view = new URLSearchParams(location.search).get('view');
-createRoot(document.getElementById('root')!).render(view === 'assertions'
+const LargeGraph = view === 'large-graph' ? (await import('./large-graph.js')).LargeGraph : null;
+createRoot(document.getElementById('root')!).render(LargeGraph ? <LargeGraph /> : view === 'assertions'
   ? <AssertionsList contextGraphId={cg} layer="wm" onComplete={() => {}} /> : view === 'scene-data'
   ? <Scene dataImages /> : view === 'scene' ? <Scene /> : view === 'agent'
   ? <AgentProfilePage contextGraphId={cg} agentUri="urn:dkg:agent:late-author" /> : <MemoryStackView />);

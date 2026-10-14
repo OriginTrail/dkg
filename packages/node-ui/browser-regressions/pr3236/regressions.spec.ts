@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { OxigraphStore } from '../../../storage/dist/index.js';
 import { DKGQueryEngine } from '../../../query/dist/dkg-query-engine.js';
 const owner = '0x1111111111111111111111111111111111111111'; const cg = `${owner}/browser-preview`;
@@ -28,6 +28,40 @@ test.beforeEach(async ({ page }) => {
   });
 });
 test.afterEach(async () => { await store.close(); });
+async function assertLargeGraphControl(page: Page, input: 'mouse' | 'touch') {
+  await page.route('https://fonts.googleapis.com/**', route => route.abort());
+  await page.route('https://fonts.gstatic.com/**', route => route.abort());
+  await page.goto('/?view=large-graph');
+  const showAll = page.getByRole('button', { name: 'Show all loaded nodes (3,001)', exact: true });
+  await expect(page.locator('.v10-graph-view canvas').first()).toBeVisible();
+  expect(await page.locator('.v10-graph-overlay').evaluate(node => getComputedStyle(node).pointerEvents)).toBe('none');
+  expect(await showAll.evaluate(node => getComputedStyle(node).pointerEvents)).toBe('auto');
+  const point = await page.locator('.v10-graph-legend > span').evaluate(node => {
+    const rect = node.getClientRects()[0]; const x = rect.x + rect.width / 2; const y = rect.y + rect.height / 2;
+    const underneath = document.elementFromPoint(x, y)!;
+    (window as any).graphPointerDownCount = 0;
+    underneath.addEventListener('pointerdown', () => { (window as any).graphPointerDownCount++; }, { once: true });
+    return { x, y, onGraph: underneath.closest('.v10-graph-view') !== null };
+  });
+  expect(point.onGraph).toBe(true);
+  if (input === 'mouse') await page.mouse.click(point.x, point.y);
+  else await page.touchscreen.tap(point.x, point.y);
+  expect(await page.evaluate(() => (window as any).graphPointerDownCount)).toBe(1);
+  if (input === 'mouse') await showAll.click();
+  else await showAll.tap();
+  await expect(page.getByText('Showing all 3,001 loaded nodes.', { exact: true })).toBeVisible();
+}
+test.describe('large graph control with the application stylesheet', () => {
+  test.use({ hasTouch: true });
+  test('mouse can show all loaded nodes while legend text remains click-through', async ({ page }) => {
+    test.setTimeout(60_000);
+    await assertLargeGraphControl(page, 'mouse');
+  });
+  test('touch can show all loaded nodes while legend text remains click-through', async ({ page }) => {
+    test.setTimeout(60_000);
+    await assertLargeGraphControl(page, 'touch');
+  });
+});
 test('native publisher literal UALs render and copy as lexical identifiers', async ({ page }) => {
   const ual = `did:dkg:evm:31337/${owner}/7`;
   await store.insert([{ subject: `urn:dkg:assertion:${cg}:${owner}:00`, predicate: 'http://dkg.io/ontology/reservedUal',
