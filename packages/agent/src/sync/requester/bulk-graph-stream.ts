@@ -134,6 +134,9 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
     }
     await group.flush();
     if (committed.length !== metrics.receivedAssets) throw new Error('Bulk chunk contains uncommitted assets');
+    await reader;
+    // Cleanup is part of the observed result: failures retain durable progress.
+    await rm(directory, { recursive: true });
     return { committedAssetUals: committed, metrics };
   } catch (error) {
     queue.fail(error); session.abort(error);
@@ -142,6 +145,5 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
     // No writer/verifier is detached. Retain staging on failure for diagnosis;
     // successful chunks own and remove only their now-empty temporary directory.
     await reader;
-    if (queue.completed && !signal.aborted && committed.length === metrics.receivedAssets) await rm(directory, { recursive: true });
   }
 }
