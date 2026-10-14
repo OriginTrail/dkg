@@ -5,6 +5,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import { QueryMethods } from '../../agent/src/dkg-agent-query.js';
 import { LifecycleSyncMethods } from '../../agent/src/dkg-agent-lifecycle.js';
+import { SwmSubstrateMethods } from '../../agent/src/dkg-agent-swm-substrate.js';
 import { handleBoundedQueryRoutes } from '../src/daemon/routes/bounded-query.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -70,12 +71,14 @@ describe('bounded local query contract', () => {
     await store.insert([
       { subject: 'urn:a', predicate: 'urn:p', object: '"one"', graph: 'urn:g' },
       { subject: 'urn:b', predicate: 'urn:p', object: '"two"', graph: 'urn:g' },
+      { subject: 'urn:c', predicate: 'urn:p', object: '"three"', graph: 'urn:g' },
     ]);
     try {
       const bounded = boundSelect('SELECT ?s WHERE { GRAPH <urn:g> { ?s <urn:p> ?o } } # trailing comment', 1);
       const result = await store.query(bounded.sparql);
       expect(result.type).toBe('bindings');
       if (result.type !== 'bindings') throw new Error('expected bindings');
+      expect(result.bindings).toHaveLength(2);
       expect(boundedResult(result.bindings, 1)).toEqual({ ok: false, code: 'QUERY_RESULT_TOO_LARGE' });
       const complete = boundedResult(result.bindings, 2);
       expect(complete.ok).toBe(true);
@@ -261,6 +264,32 @@ it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
   },
 );
 
+it.each(['unavailable', 'nonmember'] as const)('distinguishes legacy shared-memory metadata %s at the bounded route', async outcome => {
+  const member = '0x1111111111111111111111111111111111111111';
+  const meta = { accessPolicy: 'private', allowedAgents: [member], participantAgents: [], curators: [], creators: [], revokedAgents: [] };
+  const execute = vi.fn(async () => ({ bindings: [] }));
+  const agent = { queryEngine: { query: execute }, log: { info() {} }, peerId: 'fixture',
+    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'private-roster' }),
+    resolveAcceptedRfc64SharedMemoryAuthorityV1: () => false,
+    canUseSharedMemoryForContextGraph: LifecycleSyncMethods.prototype.canUseSharedMemoryForContextGraph,
+    rfc64PrivateRootSwmOnLegacyLaneV1: SwmSubstrateMethods.prototype.rfc64PrivateRootSwmOnLegacyLaneV1,
+    rfc64PrivateRootLegacyLaneAuthorityIdV1: () => 'test', listLocalAgents: () => [{ agentAddress: member }],
+    getCgMeta: async () => meta,
+    getOwnCgMetaFacts: async () => {
+      if (outcome === 'unavailable') throw new Error('metadata store unavailable');
+      return { ...meta, allowedAgents: [] };
+    },
+    subscribedContextGraphs: new Map(),
+  };
+  const read = context({ query: QueryMethods.prototype.query.bind(agent as never) }, { view: 'shared-working-memory' }, member);
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(read.res.statusCode).toBe(outcome === 'unavailable' ? 503 : 403);
+  expect(JSON.parse(read.res.body).code).toBe(outcome === 'unavailable' ? 'QUERY_UNAVAILABLE' : 'QUERY_ACCESS_DENIED');
+  expect(execute).not.toHaveBeenCalled();
+  // Existing boolean callers retain their conservative unavailable-as-false contract.
+  expect(await agent.rfc64PrivateRootSwmOnLegacyLaneV1.call(agent as never, 'test')).toBe(false);
+});
+
 
 it('forwards the authenticated caller and response ceiling through scoped agent admission', async () => {
   const store = new OxigraphStore();
@@ -315,8 +344,12 @@ it.each(['_working_memory/agent-b/1', 'assertion/agent-b/draft', 'code/_working_
       ...graphs.map((graph, i) => ({ graph, subject: `urn:item:${i}`, predicate: 'urn:p', object: '"value"' })),
     ]);
     const sparql = 'SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o } }';
-    const dashboard = await query(sparql, { contextGraphId, includeContextGraphPartitions: true, callerAgentAddress: 'agent-a' });
+    // Trusted engine inventory retains drafts; ordinary agent reads cannot use
+    // the broad partition option to bypass owner-specific working-memory reads.
+    const dashboard = await engine.query(sparql, { contextGraphId, includeContextGraphPartitions: true });
     expect(dashboard.bindings.map(row => row.g)).toEqual(expect.arrayContaining(graphs));
+    const ordinary = await query(sparql, { contextGraphId, includeContextGraphPartitions: true, callerAgentAddress: 'agent-a' });
+    expect(ordinary.bindings.map(row => row.g).sort()).toEqual(graphs.slice(2).sort());
     const read = context({ query }, { contextGraphId, sparql, includeContextGraphPartitions: true, excludeWorkingMemoryPartitions: false }, 'agent-a');
     await handleBoundedQueryRoutes(read.ctx);
     expect(read.res.statusCode, read.res.body).toBe(200);
