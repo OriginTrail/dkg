@@ -14,9 +14,8 @@ export function classifyScopedContentGraph(
   knownChildContextGraphs: Set<string>,
 ): ContentPartition | undefined {
   const root = contextGraphDataUri(contextGraphId);
-  const admit = (kind: ContentPartition['kind'], subGraphName?: string, draftTail?: string): ContentPartition =>
-    Object.freeze({ graph, kind, ...(subGraphName ? { subGraphName } : {}),
-      ...(draftTail ? { draftOwner: draftTail.split('/')[1] } : {}) });
+  const admit = (kind: Exclude<ContentPartition['kind'], 'draft'>, subGraphName?: string): ContentPartition =>
+    Object.freeze({ graph, kind, ...(subGraphName ? { subGraphName } : {}) });
   if (graph === root) return admit('content');
   if (!graph.startsWith(`${root}/`)) return undefined;
   if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return undefined;
@@ -46,7 +45,8 @@ export function classifyScopedContentGraph(
   if (partition.startsWith('_shared_memory/')) return admit('shared', subGraphName);
   if (partition.startsWith('_verifiable_memory/')) return admit('verified', subGraphName);
   if (isDraft(partition) && isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs)) {
-    return admit('draft', subGraphName, partition);
+    return Object.freeze({ graph, kind: 'draft', draftOwner: partition.split('/')[1] ?? null,
+      ...(subGraphName ? { subGraphName } : {}) });
   }
   return undefined;
 }
