@@ -55,7 +55,7 @@ node http-app.mjs share
 node http-app.mjs read shared-working-memory
 ```
 
-The client checks HTTP errors and partial `207` results, uses a bounded request timeout, and never retries a mutation automatically. It is a minimal example, not a background ingestion service.
+The client checks HTTP errors and partial `207` results, uses a bounded request timeout, and never retries a mutation automatically. A share succeeds only when the response confirms `swmShared: true`; an error-free HTTP 200 alone does not establish completion. A committed replay can succeed with zero newly promoted triples. It is a minimal example, not a background ingestion service.
 
 `share` calls the node's seal-before-share route directly. If a response is lost or bookkeeping fails after the share commits, inspect the existing KA, then rerun `share` with the same Context Graph ID and KA name. The route can resume the existing share even after WM is empty. Do not rerun `write` or finalize an empty draft as a prerequisite for that recovery.
 
@@ -70,7 +70,7 @@ All JSON writes send `Content-Type: application/json` and a bearer token.
 | Write | `POST /api/knowledge-assets/atlas-app/wm/write` | `{ "contextGraphId": "<id>", "quads": [...] }` | Written count; inspect contents |
 | Read graph | `POST /api/query` | `{ "contextGraphId": "<id>", "view": "working-memory", "sparql": "..." }` | `result.type` and `result.bindings` |
 | Seal | `POST /api/knowledge-assets/atlas-app/wm/finalize` | `{ "contextGraphId": "<id>" }` | Seal metadata and author |
-| Share | `POST /api/knowledge-assets/atlas-app/swm/share` | `{ "contextGraphId": "<id>", "entities": "all" }` | Completion without nested errors |
+| Share | `POST /api/knowledge-assets/atlas-app/swm/share` | `{ "contextGraphId": "<id>", "entities": "all" }` | `swmShared: true` without nested errors |
 
 A quad is `{ "subject": "<IRI>", "predicate": "<IRI>", "object": "<IRI or RDF literal>" }`. For a string literal the object includes RDF quotes, for example `"object": "\"Atlas\""`. The node controls WM graph placement; do not invent per-quad graph routing. Query views are `working-memory`, `shared-working-memory`, and `verifiable-memory`; specify the exact Context Graph with the view.
 

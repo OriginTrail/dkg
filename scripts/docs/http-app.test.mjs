@@ -112,6 +112,18 @@ test('complete write accepts empty error collections and reads the stored draft'
     `${ka}/wm/quads?contextGraphId=${contextGraphId}`]);
 });
 
+for (const swmShared of [false, undefined]) {
+  test(`share rejects HTTP 200 without confirmed completion: swmShared=${swmShared}`, async t => {
+    const { requests, run } = await responder(t, () => ({ body: { swmShared, promotedCount: 0 } }));
+    const result = await run('share');
+    assert.equal(result.error?.code, 1, result.stderr);
+    assert.match(result.stderr, /Share did not complete/);
+    assert.equal(result.stdout, '');
+    assert.deepEqual(requests, [{ method: 'POST', path: `${ka}/swm/share`,
+      authorization: `Bearer ${token}`, body: { contextGraphId, entities: 'all' } }]);
+  });
+}
+
 for (const outcome of ['success', 'lost response', 'partial response', 'bookkeeping error']) {
   test(`explicit share retry resumes the same committed operation after ${outcome}`, async t => {
     let wmTriples = 5;
