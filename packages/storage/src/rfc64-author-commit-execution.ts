@@ -22,8 +22,7 @@ export interface Rfc64AuthorCommitCasExecutionV1 {
 export async function executeRfc64AuthorCommitCasV1(
   execution: Rfc64AuthorCommitCasExecutionV1,
 ): Promise<Rfc64AuthorCommitCasResultV1> {
-  const committed = await executeReceiptConfirmedPublication<undefined, boolean>({
-    withScope: work => work(undefined),
+  const committed = await executeReceiptConfirmedPublication<boolean>({
     publish: async () => { await execution.executeUpdate(); },
     readReceipt: async () => normalizeRfc64AuthorCommitReceipt(await execution.readReceipt()),
     cleanup: execution.cleanup,
