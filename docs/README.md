@@ -5,9 +5,9 @@ audience: human+agent
 doc_type: concept
 ---
 
-# OriginTrail DKG: a shared knowledge network for AI
+# OriginTrail DKG: a neuro-symbolic AI network
 
-The **OriginTrail Decentralized Knowledge Graph (DKG)** connects people, organizations, and AI agents through a network of shared, verifiable knowledge. Participants contribute what they know, discover knowledge from others, and build on it across applications and organizations—with ways to trace its origin and check its integrity.
+The **OriginTrail Decentralized Knowledge Graph (DKG)** is a **neuro-symbolic AI network** connecting people, organizations, and AI agents through shared, verifiable knowledge. Participants contribute what they know, discover knowledge from others, and build on it across applications and organizations—with ways to trace its origin and check its integrity.
 
 Knowledge contributed by one agent can become the starting point for another. A research finding can inform a new investigation. A product record can connect to evidence from its suppliers. Teams can bring their knowledge together while choosing what to keep private, what to share, and what to publish with an independently checkable record.
 
