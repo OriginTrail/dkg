@@ -1,3 +1,6 @@
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
+import { authenticateDurableGraphScopedAsset } from './durable-recovery-authentication.js';
 import type { partitionVerifiedGraphScopedAssets } from './sync/requester/verified-asset-preparation.js';
 import type { VmRecoveryRegisteredPublicEvidence } from "./vm-recovery-pass-authority.js";
 import type { AuthenticatedGraphScopedAsset, VerifiedGraphScopedAsset } from './sync/requester/graph-scoped-materialization.js';
@@ -36,5 +39,37 @@ export function memoizeRecoveryBindingProof(
       if (proofs.get(key) === proof) proofs.delete(key);
       throw error;
     }
+  };
+}
+
+export interface RecoveryAuthorityDependencies {
+  readonly chain: ChainAdapter;
+  verifyContextGraphBinding(id: string, onChainId: string, signal?: AbortSignal): Promise<boolean>;
+  resolveAuthority(id: string, signal?: AbortSignal): Promise<RegisteredContextGraphAuthority>;
+  warn(message: string): void;
+}
+
+/** Construct an exchange-owned policy without exposing lifecycle internals on DKGAgent. */
+export function createRecoveryAuthority(
+  dependencies: RecoveryAuthorityDependencies, input: DurableRecoveryInput = {},
+): DurableRecoveryAuthority {
+  if (input.recoveryAuthority) {
+    if (input.registeredPublicEvidence) throw new Error('Conflicting durable recovery authorities');
+    return input.recoveryAuthority;
+  }
+  const evidence = input.registeredPublicEvidence;
+  const verifyContextGraphBinding = memoizeRecoveryBindingProof(dependencies.verifyContextGraphBinding);
+  return {
+    admitVerifiedPage() { /* Ordinary exchanges preserve verified legacy compatibility. */ },
+    coalescing: evidence ? 'owner-only' : 'allowed',
+    isRegisteredPublic: async (id, signal) => evidence?.usableFor(id, signal) === true
+      || (await dependencies.resolveAuthority(id, signal)).kind === 'public',
+    authenticate: (asset, deadline, signal) => authenticateDurableGraphScopedAsset({
+      chain: dependencies.chain, asset, verifyContextGraphBinding, deadline, signal,
+      onRetry: (error, attempt, maxAttempts) => dependencies.warn(
+        `Retrying graph-scoped durable authentication for ${asset.ual} `
+        + `after transient chain verification failure (${attempt}/${maxAttempts}): `
+        + `${error instanceof Error ? error.message : String(error)}`),
+    }),
   };
 }
