@@ -40,7 +40,7 @@ export function bulkGraphTransportOptions(timeoutMs: number, signal?: AbortSigna
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3_600_000) throw new RangeError('Invalid bulk graph deadline');
   return { timeoutMs, signal, maxRequestBytes: BULK_GRAPH_REQUEST_BYTES, maxReadBufferBytes: 2 * (BULK_GRAPH_REQUEST_BYTES + 20) };
 }
-export async function exchangeBulkGraph<T>(router: ProtocolRouter, peer: string, request: Uint8Array,
+export async function exchangeBulkGraph<T>(router: Pick<ProtocolRouter, 'withDuplexStream'>, peer: string, request: Uint8Array,
   options: DuplexStreamOptions, consume: (session: BulkGraphSession) => Promise<T>): Promise<T> {
   let session: BulkGraphSession | undefined;
   try {

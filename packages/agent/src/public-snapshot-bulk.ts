@@ -8,8 +8,15 @@ import { type BulkGraphRequest } from './sync/bulk-graph-contract.js';
 import { exchangeBulkGraphVerified, type BulkGraphMetrics } from './sync/requester/bulk-graph-stream.js';
 import { materializeVerifiedGraphScopedGroup } from './sync/requester/graph-scoped-group.js';
 
+export type PublicSnapshotBulkHost = {
+  store: DKGAgent['store'];
+  router: Pick<DKGAgent['router'], 'probeProtocol' | 'withDuplexStream'>;
+  getOrCreateSyncVerifyWorker: () => Pick<ReturnType<DKGAgent['getOrCreateSyncVerifyWorker']>, 'parseAndFilter'>;
+} & { [K in 'ensurePeerConnected' | 'getPeerProtocols' | 'processDurableBatchInWorker'
+  | 'reconcileAfterGraphScopedMaterialization']: OmitThisParameter<DKGAgent[K]> };
+
 /** One explicit public job, one configured supplier. No background or private sync policy changes. */
-export async function recoverPublicSnapshotBulk(agent: DKGAgent, options: PublicSnapshotRecoveryOptions & {
+export async function recoverPublicSnapshotBulk(agent: PublicSnapshotBulkHost, options: PublicSnapshotRecoveryOptions & {
   deadline: number; dataDir: string | undefined;
   shouldQuarantineCommitted: () => boolean; onCommitted: () => void;
   log: (message: string) => void;

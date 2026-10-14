@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import * as fallbackPlanner from '../src/atomic-asset-group.js';
 import * as bulkPlanner from '../src/adapters/bulk-asset-group.js';
+import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
@@ -63,6 +64,26 @@ describe('Blazegraph confirmed bulk publication', () => {
       expect(plan).toHaveBeenCalledTimes(1); expect(fetcher).toHaveBeenCalledTimes(fallback ? 1 : 4);
       expect(admissions).toHaveBeenCalledTimes(1); expect(fallbackPlan).toHaveBeenCalledTimes(fallback ? 1 : 0);
     } finally { release(); await occupying; await store.close(); }
+  });
+
+  it('publishes a bounded group whose native escaping exceeds the upload allowance', async () => {
+    const target = new OxigraphStore();
+    const assets = [1, 2].map(id => ({ graphUri: `urn:data:${id}`, metaGraphUri: 'urn:meta', metadataSubject: `urn:asset:${id}`,
+      graphQuads: Array.from({ length: 66 }, (_, n) => ({ graph: `urn:data:${id}`, subject: `urn:s:${id}:${n}`,
+        predicate: 'urn:p', object: JSON.stringify('\u007f'.repeat(60_000)) })), metadataQuads: [],
+    }));
+    const fetcher = vi.fn(async (_url, init) => {
+      expect(new Headers(init.headers).get('content-type')).toContain('sparql-update');
+      expect(Buffer.byteLength(init.body)).toBeLessThanOrEqual(fallbackPlanner.ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES);
+      await target.update(init.body); return new Response('');
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const store = new BlazegraphStore('http://fixture.invalid/sparql');
+    try {
+      await store.replaceAssetGroup(assets);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      for (const asset of assets) expect(await target.countQuads(asset.graphUri)).toBe(66);
+    } finally { await store.close(); await target.close(); }
   });
 
   it('selects SPARQL fallback for value aliases before any native upload', async () => {
