@@ -83,9 +83,17 @@ if (values['api-url']) {
     const result = app(['share']).result;
     assert.equal(result.swmShared, true);
     assert.equal(result.sealed, true);
+    assert.ok(result.shareOperationId, 'A committed share must identify its operation');
+    const wm = await request(`/api/knowledge-assets/atlas-app/wm/quads?${new URLSearchParams({ contextGraphId: cg })}`);
+    assert.equal(wm.count, 0, 'Share must empty the WM draft before testing a retry');
+    const replay = app(['share']).result;
+    assert.equal(replay.swmShared, true);
+    assert.equal(replay.promotedCount, 0, 'Retry must not promote a second copy');
+    assert.equal(replay.shareOperationId, result.shareOperationId, 'Retry must preserve the committed operation');
     assertAtlas(app(['read', 'shared-working-memory']));
   }
   report.live = { graph: cg, wmTriples: 5, freshProcessRead: 'passed',
-    sealAndLocalShare: values.share ? 'passed' : 'not requested' };
+    sealAndLocalShare: values.share ? 'passed' : 'not requested',
+    committedShareReplay: values.share ? 'passed' : 'not requested' };
 }
 console.log(JSON.stringify(report, null, 2));

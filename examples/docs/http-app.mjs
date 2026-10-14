@@ -52,7 +52,8 @@ if (operation === 'write') {
   const result = await request(`${path}/wm/quads?${new URLSearchParams({ contextGraphId })}`);
   console.log(JSON.stringify({ layer: 'working-memory', ...result }, null, 2));
 } else if (operation === 'share') {
-  await request(`${path}/wm/finalize`, { contextGraphId });
+  // The share route seals an editable draft and resumes an existing share when
+  // WM is empty. A separate finalize would block that recovery with ASSERTION_EMPTY.
   const result = await request(`${path}/swm/share`, { contextGraphId, entities: 'all' });
   console.log(JSON.stringify({ layer: 'shared-working-memory', result }, null, 2));
 } else {

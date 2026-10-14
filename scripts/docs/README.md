@@ -15,11 +15,12 @@ Run these tools with Node.js 22.13+ (check `node --version` in the shell running
 ```bash
 node scripts/docs/check.mjs --write
 node scripts/docs/check.mjs
+node --test scripts/docs/*.test.mjs
 ```
 
-The writer refreshes the availability page and tool/route map. The checker validates published local file links/navigation, capability records, generated output freshness, and parity between the inline Turtle and supplied fixture. It deliberately does not crawl external URLs, validate every fragment anchor, infer semantic truth from prose, or execute a daemon. `docs/reports`, ADRs, and engineering archives stay outside GitBook navigation.
+The writer refreshes only the tables between `BEGIN GENERATED` and `END GENERATED` markers in the availability page and tool/route map. Edit explanatory prose directly in Markdown; keep capability status and validation facts in `capabilities.json`. Missing, duplicate, or reversed markers fail validation rather than replacing a page. The checker validates published local file links/navigation, capability records, generated table freshness, and parity between the inline Turtle and supplied fixture. It deliberately does not crawl external URLs, validate every fragment anchor, infer semantic truth from prose, or execute a daemon. `docs/reports`, ADRs, and engineering archives stay outside GitBook navigation.
 
-The `Documentation contracts` workflow runs these static checks on relevant PRs with read-only permissions and no secrets.
+The `Documentation contracts` workflow runs these checks and focused regression tests on relevant PRs with read-only permissions and no secrets. The tests run the HTTP client against a loopback responder to check incomplete responses and explicit share recovery, and run the generator in temporary fixtures to verify that prose survives regeneration. They do not substitute for released-node integration tests.
 
 ## Released-package smoke
 
@@ -40,7 +41,7 @@ node scripts/docs/smoke.mjs \
   --allow-write --share
 ```
 
-The script creates a uniquely named sample graph. It checks the HTTP application's five WM triples, the expected query row from separate client processes, and optional sealing/SWM readback. It never publishes to chain and does not delete existing state. The sample remains in the isolated home for inspection; stop that test daemon when finished.
+The script creates a uniquely named sample graph. It checks the HTTP application's five WM triples, the expected query row from separate client processes, and optional sealing/SWM readback. With `--share`, it also checks that WM is empty and an explicit retry returns the same share operation without promoting more triples. It never publishes to chain and does not delete existing state. The sample remains in the isolated home for inspection; stop that test daemon when finished.
 
 Record the package/version, platform, backend, command results, and exclusions in a dated validation report. Do not label fresh-process retrieval as a framework conversation test or a local share as peer replication. A complete release check also exercises an installed framework in a fresh conversation, the two-node recipe, and any separately authorized funded publication flow.
 

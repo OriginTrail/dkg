@@ -24,5 +24,6 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/docs/check.mjs
+      - run: node --test scripts/docs/*.test.mjs
       - run: node --check examples/docs/http-app.mjs
       - run: node --check scripts/docs/smoke.mjs
