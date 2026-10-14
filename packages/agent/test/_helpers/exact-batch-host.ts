@@ -13,6 +13,7 @@ import { ContextGraphMetaProjection } from '../../src/context-graph-meta-project
 import { createProjectionMutationObserver } from '../../src/internal/projection-mutation-observer.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../../src/internal/context-graph-cache-invalidating-store.js';
 import { ContextGraphBindingState } from '../../src/context-graph-binding-state.js';
+import { AgentWorkLifetime } from '../../src/agent-work-lifetime.js';
 import { ContextGraphResolveMethods } from '../../src/dkg-agent-cg-resolve.js';
 import { LifecycleSyncMethods } from '../../src/dkg-agent-lifecycle.js';
 import { SyncVerifyWorker } from '../../src/sync-verify-worker.js';
@@ -82,6 +83,7 @@ export function createExactBatchHostFixture(cleanups: Array<() => Promise<void>>
     fetchSyncPages: vi.fn(), insertSyncedQuadsAndInvalidateListCache: vi.fn(),
     subscribedContextGraphs: new Map([[CG, { onChainId: '14' }]]),
     contextGraphBindingState: new ContextGraphBindingState(), graphScopedStoreClosed: false,
+    workLifetime: new AgentWorkLifetime(),
     captureExperimentalExactBatchRefusalScope: LifecycleSyncMethods.prototype.captureExperimentalExactBatchRefusalScope,
     graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
     reconcileAfterGraphScopedMaterialization: LifecycleSyncMethods.prototype.reconcileAfterGraphScopedMaterialization,
