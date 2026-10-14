@@ -338,7 +338,7 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
 
   it('fails explicitly when shared memory access is denied before querying', async () => {
     const fixture = runtimePrivateQueryAgent();
-    Object.assign(fixture.agent, { canUseSharedMemoryForContextGraph: async () => false });
+    Object.assign(fixture.agent, { resolveSharedMemoryReadAdmission: async () => ({ outcome: 'denied' }) });
     await expect(QueryMethods.prototype.query.call(fixture.agent as never,
       'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: RUNTIME_PRIVATE_CG,
         view: 'shared-working-memory', callerAgentAddress: REMOTE_MEMBER, accessDenied: 'error',
