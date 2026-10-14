@@ -10,7 +10,7 @@ import { prepareFamily, resolveReferences, type FamilyResult, type PreparedQuad 
 import { FAMILY_BY_KEY } from './specs.js';
 
 export * from './specs.js';
-export { parseList, type ParsedEntry, type ParsedList } from './parse.js';
+export { parseList, type ParsedEntry, type ParsedList, type SkippedEntry, type UsableEntry } from './parse.js';
 export { prepareFamily, resolveReferences, type FamilyResult, type PathReference, type PreparedQuad } from './encode.js';
 export { decodeFamilies } from './decode.js';
 export { familyDiagnostics, sourceIds, declaresSources } from './diagnostics.js';

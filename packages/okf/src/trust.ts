@@ -45,7 +45,7 @@ export function parseVerified(value: unknown): ParsedVerification {
   const parsed = parseList(VERIFIED, value);
   const known = definedKeys(VERIFIED);
   const events = parsed.entries.flatMap((entry): VerificationEvent[] => {
-    if (!entry.usable || entry.mapping === null) return [];
+    if (!entry.usable) return [];
     // A plain object for the public `extra`, built by defining properties
     // (`Object.fromEntries`), so a `__proto__` or `constructor` key is an
     // ordinary own key, in the order it was written.

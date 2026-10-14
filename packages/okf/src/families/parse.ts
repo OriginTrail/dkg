@@ -8,20 +8,36 @@
 import { isBlank, isMapping, isScalar } from '../utils.js';
 import type { ListFamilySpec } from './specs.js';
 
-export interface ParsedEntry {
+/**
+ * One entry of a list family, classified once: a usable entry (a mapping whose
+ * every `skipEntryWhenBlank` field holds one non-blank value) becomes a node,
+ * and only it carries a node number; a skipped one is any other mapping or
+ * not a mapping at all. Narrowing on `usable` gives the mapping and the
+ * number together.
+ */
+export type ParsedEntry = UsableEntry | SkippedEntry;
+
+interface EntryPosition {
   /** Position in the frontmatter list (0 for a bare mapping); warnings name the entry by it. */
   readonly index: number;
+}
+
+export interface UsableEntry extends EntryPosition {
+  readonly usable: true;
+  readonly mapping: Record<string, unknown>;
+  /**
+   * The number its node IRI carries: its position among the usable entries.
+   * A skipped entry takes no number, so the IRIs are the same after an
+   * export, which writes only the usable entries, and a re-import.
+   */
+  readonly node: number;
+}
+
+export interface SkippedEntry extends EntryPosition {
+  readonly usable: false;
   /** The entry when it is a mapping, else `null`. */
   readonly mapping: Record<string, unknown> | null;
-  /** Whether the entry becomes a node: a mapping whose every `skipEntryWhenBlank` field holds one non-blank value. */
-  readonly usable: boolean;
-  /**
-   * The number its node IRI carries: its position among the usable entries,
-   * or `null` when it is skipped. A skipped entry takes no number, so the IRIs
-   * are the same after an export, which writes only the usable entries, and
-   * a re-import.
-   */
-  readonly node: number | null;
+  readonly node: null;
 }
 
 export interface ParsedList {
@@ -40,10 +56,10 @@ export function parseList(spec: ListFamilySpec, value: unknown): ParsedList {
   let nodes = 0;
   const entries = raw.map((entry, index): ParsedEntry => {
     const mapping = isMapping(entry) ? entry : null;
-    const usable =
-      mapping !== null &&
-      spec.fields.every((f) => !f.skipEntryWhenBlank || (isScalar(mapping[f.key]) && !isBlank(mapping[f.key])));
-    return { index, mapping, usable, node: usable ? nodes++ : null };
+    if (mapping !== null && spec.fields.every((f) => !f.skipEntryWhenBlank || (isScalar(mapping[f.key]) && !isBlank(mapping[f.key])))) {
+      return { index, mapping, usable: true, node: nodes++ };
+    }
+    return { index, mapping, usable: false, node: null };
   });
   return { shape: Array.isArray(value) ? 'list' : 'mapping', entries };
 }

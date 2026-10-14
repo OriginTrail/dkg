@@ -181,7 +181,7 @@ function encodeList(enc: Encoding, spec: ListFamilySpec, value: unknown): void {
   }
   let nodes = 0;
   for (const entry of parsed.entries) {
-    if (entry.node === null || entry.mapping === null) continue;
+    if (!entry.usable) continue;
     nodes += 1;
     const node = nodeIri(enc.iri, spec.tag, enc.conceptId, entry.node);
     enc.out.push({ subject: enc.iri, predicate: spec.link, object: node });
