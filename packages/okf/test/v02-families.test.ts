@@ -657,13 +657,17 @@ describe('the family decoder owns what the encoder keeps for a family', () => {
     expect(quads.filter((q) => q.predicate === usageWindow).every((q) => decoded.consumed.has(q))).toBe(true);
   });
 
-  it('leaves a single value on the same predicate to the exporter, as the producer key it also is', () => {
-    for (const yaml of ['usage_window: Q2', 'usageWindow: Q2']) {
-      const quads = conceptQuads(yaml);
-      const decoded = decodeFamilies(quads, () => [], decodeCtx);
-      expect('usage_window' in decoded.frontmatter).toBe(false);
-      expect(quads.some((q) => q.predicate === usageWindow && decoded.consumed.has(q))).toBe(false);
-    }
+  it('reads a single value back by its ownership marker, and leaves an unmarked one to the exporter', () => {
+    // `usage_window: Q2` is the family's, marked as such; `usageWindow: Q2` is a
+    // producer key on the same predicate, with no marker.
+    const kept = conceptQuads('usage_window: Q2');
+    const decodedKept = decodeFamilies(kept, () => [], decodeCtx);
+    expect(decodedKept.frontmatter.usage_window).toBe('Q2');
+    expect(kept.filter((q) => q.predicate === usageWindow).every((q) => decodedKept.consumed.has(q))).toBe(true);
+    const producer = conceptQuads('usageWindow: Q2');
+    const decodedProducer = decodeFamilies(producer, () => [], decodeCtx);
+    expect('usage_window' in decodedProducer.frontmatter).toBe(false);
+    expect(producer.some((q) => q.predicate === usageWindow && decodedProducer.consumed.has(q))).toBe(false);
   });
 
   it('reads a lone generated.at back as the legacy timestamp and consumes it', () => {

@@ -48,3 +48,16 @@ export function okfExtensionKey(familyKey: string, predicate: string): string | 
     return encoded;
   }
 }
+
+/**
+ * The ownership marker of a family value kept verbatim (a value of the wrong
+ * shape, `families/encode.ts`): `okf:keptVerbatim.<familyKey>`, beside the
+ * queryable copy on `schema:<camelKey>`, holding the same object term. A
+ * producer key of the same camelCase (`Sources`) lands on that `schema:`
+ * predicate too; the marker says which value is the family's, so export
+ * reads it back without inferring ownership from the value's shape. No
+ * family is named `keptVerbatim`, so it never reads as an extension.
+ */
+export function keptVerbatimPredicate(familyKey: string): string {
+  return `${OKF_NS}keptVerbatim.${encodeURIComponent(familyKey)}`;
+}

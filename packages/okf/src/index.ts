@@ -66,7 +66,7 @@ export {
 } from './trust.js';
 export type { ParsedVerification } from './trust.js';
 export { valueToTerms, dateTerm, actorTerm, pathFieldTerm, typeToIri, isAttestedComputationType, OkfValueError } from './terms.js';
-export { okfExtensionPredicate, okfExtensionKey, okfExtensionPrefix } from './extensions.js';
+export { okfExtensionPredicate, okfExtensionKey, okfExtensionPrefix, keptVerbatimPredicate } from './extensions.js';
 export type { PathContext, PathFieldTerm } from './terms.js';
 export { importBundle } from './bundle.js';
 export { exportBundle, exportInputFromQuads } from './export.js';

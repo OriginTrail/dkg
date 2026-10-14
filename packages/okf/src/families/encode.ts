@@ -33,7 +33,7 @@ import {
   XSD_BOOLEAN,
   XSD_INTEGER,
 } from '../constants.js';
-import { okfExtensionPredicate } from '../extensions.js';
+import { keptVerbatimPredicate, okfExtensionPredicate } from '../extensions.js';
 import { genericPredicate, genericQuads, dateTerm, jsonTerm, pathFieldTerm, toArray, valueToTerms, type PathContext } from '../terms.js';
 import { deriveTrustTier } from '../trust.js';
 import { isBlank, isMapping, isScalar, literalTerm, safeString, sanitizeForBlank, typedLiteralTerm } from '../utils.js';
@@ -156,13 +156,18 @@ function encodeFields(
 /**
  * A family value of the wrong shape, kept verbatim under the family key's
  * generic predicate: a single value as its own term, anything else as one
- * `rdf:JSON` literal, never split into items. Export then restores the whole
+ * `rdf:JSON` literal, never split into items. Each term is marked as the
+ * family's (`keptVerbatimPredicate`), so ownership is read, not inferred. Export then restores the whole
  * value: a list stays a list, so `generated: [{ by: … }]` never comes back as
  * a valid `generated` mapping that would invent provenance.
  */
 function keepVerbatim(enc: Encoding, subject: string, key: string, value: unknown): void {
-  if (isScalar(value)) enc.out.push(...genericQuads(subject, key, value));
-  else enc.out.push({ subject, predicate: genericPredicate(key), object: jsonTerm(value) });
+  const terms = isScalar(value) ? genericQuads(subject, key, value).map((q) => q.object) : [jsonTerm(value)];
+  for (const object of terms) {
+    enc.out.push({ subject, predicate: genericPredicate(key), object });
+    // The family owns this value, said explicitly: a producer key may share the predicate.
+    enc.out.push({ subject, predicate: keptVerbatimPredicate(key), object });
+  }
 }
 
 function encodeMapping(enc: Encoding, spec: MappingFamilySpec, subject: string, value: unknown, label: string): void {

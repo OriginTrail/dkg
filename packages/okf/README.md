@@ -87,7 +87,8 @@ verified one, and is never rejected — SPEC §11).
 | `executor`, `attester` (§10.2) | `okf:executorResource`, `okf:executorReceipt` (one per field), `okf:attesterResource` | extra keys → `okf:executor.<key>` / `okf:attester.<key>` |
 | body links (§6.1) | `schema:mentions` (untyped; opt-in `--relate` typing) | unchanged |
 | legacy `# Citations` (§13.1) | `schema:citation` | still parsed for v0.1 documents |
-| producer-defined keys (§4.1) | `schema:<camelKey>` | scalars typed; nested mappings as `rdf:JSON` literals so they round-trip as objects |
+| producer-defined keys (§4.1) | `schema:<camelKey>` | scalars typed; nested mappings as `rdf:JSON` literals so they round-trip as objects; an empty list as one `[]` |
+| a family value of the wrong shape (§11) | `schema:<camelKey>`, plus `okf:keptVerbatim.<familyKey>` holding the same term | kept verbatim with a warning; the marker says the value is the family's, since a producer key of the same camelCase (`Sources`) shares the `schema:` predicate |
 
 **Path-valued fields** (`resource`, `sources[].resource`, `computation`,
 `executor.resource`, `attester.resource` — §6.2) resolve against the bundle: a
@@ -155,7 +156,8 @@ that names no concept, and an `okf_version` this consumer does not know (the
 bundle is still consumed best-effort, §12). A family given a value of the wrong
 shape (`generated: [{ by: … }]`, `usage_window: Q2`) keeps it verbatim under
 `schema:<camelKey>`, whole: one term for a single value, one `rdf:JSON` literal
-for anything else, so it exports as written and warns again on re-import.
+for anything else, marked as the family's (`okf:keptVerbatim.<familyKey>`), so
+it exports as written, under its own key, and warns again on re-import.
 
 ## Docs
 

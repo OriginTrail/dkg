@@ -1,7 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   exportBundle,
+  exportInputFromQuads,
   importBundle,
+  keptVerbatimPredicate,
+  okfExtensionKey,
+  parseDocument,
+  OKF_NS,
   mapFrontmatter,
   OKF_RESOURCE,
   OKF_SOURCE,
@@ -16,6 +21,7 @@ import {
 import { readsAsProducerKey } from '../src/mapping.js';
 import { genericQuads } from '../src/terms.js';
 import { IRI, bundle, exportedFrontmatter, objs, semantic } from './helpers/okf-v02-fixtures.js';
+import type { Quad } from '../src/index.js';
 
 // A producer key is kept as `schema:<camelKey>`, so `Sources` lands on the
 // predicate `sources` would read back as. Export must write it back under a
@@ -121,6 +127,76 @@ describe('an empty list is a value, for a producer key too', () => {
     const fm = exportedFrontmatter(files);
     expect(fm.owners).toEqual([]);
     expect(fm.nested).toEqual([[], 'a']);
+  });
+});
+
+describe('a family value kept verbatim is marked as the family\'s', () => {
+  const marker = (family: string) => keptVerbatimPredicate(family);
+
+  it('writes the marker beside the queryable copy, with the same term', () => {
+    const { first } = roundTrip('generated: [a]\nGenerated: x');
+    const kept = `"[\\"a\\"]"^^<${RDF_JSON}>`;
+    expect(objs(first.quads, marker('generated'))).toEqual([kept]);
+    expect(objs(first.quads, SCHEMA_NS + 'generated').sort()).toEqual(['"x"', kept].sort());
+  });
+
+  it('never reads the marker as a family extension', () => {
+    for (const family of V02_FAMILY_KEYS) {
+      for (const other of V02_FAMILY_KEYS) expect(okfExtensionKey(family, marker(other))).toBeNull();
+    }
+    expect(V02_FAMILY_KEYS).not.toContain('keptVerbatim');
+  });
+
+  it('brings back what shape inference could not tell apart', () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['usage_window: Q2', { usage_window: 'Q2' }],
+      ['sources: nope\nSources: x', { sources: 'nope', Sources: 'x' }],
+      ['Generated: []', { Generated: [] }],
+    ];
+    for (const [yaml, expected] of cases) {
+      const { files, first, second } = roundTrip(yaml);
+      expect(semantic(second.quads), yaml).toBe(semantic(first.quads));
+      expect(second.warnings, yaml).toEqual(first.warnings);
+      expect(exportedFrontmatter(files), yaml).toMatchObject(expected);
+    }
+  });
+
+  it('still reads a graph written before values were marked', () => {
+    const unmarked = (quads: Quad[]) => quads.filter((q) => !q.predicate.startsWith(OKF_NS + 'keptVerbatim.'));
+    for (const yaml of ['generated: [a]\nGenerated: x', 'generated: x', 'sources: nope\nSources: x']) {
+      const files = bundle(`type: Metric\n${yaml}`);
+      const graph = unmarked(importBundle(files).quads);
+      const exported = exportBundle(exportInputFromQuads(graph));
+      expect(semantic(unmarked(importBundle(exported).quads)), yaml).toBe(semantic(graph));
+    }
+    // a non-empty list no producer key yields is still the family's
+    const fm = parseDocument('metrics/revenue.md', exportBundle(exportInputFromQuads(unmarked(importBundle(bundle('type: Metric\ngenerated: [a]')).quads))).find((f) => f.path === 'metrics/revenue.md')!.content).frontmatter;
+    expect(fm.generated).toEqual(['a']);
+  });
+
+  it('exports every collision the same from rows in any order', () => {
+    const shuffled = <T,>(items: T[], seed: number): T[] => {
+      const out = [...items];
+      let x = seed;
+      for (let i = out.length - 1; i > 0; i--) {
+        x = (x * 1103515245 + 12345) % 2147483648;
+        const j = x % (i + 1);
+        [out[i], out[j]] = [out[j], out[i]];
+      }
+      return out;
+    };
+    for (const yaml of [
+      'sources: [{ resource: https://example.org/source }]\nSources: producer-value',
+      'generated: [a]\nGenerated: x',
+      'generated: [a]\nGenerated: []',
+      'sources: nope\nSources: x',
+      'title: Real\nType: x\nTitle: y',
+      "generated: [a]\ntimestamp: '2026-01-01T00:00:00Z'\nTimestamp: producer-value",
+    ]) {
+      const imported = importBundle(bundle(`type: Metric\n${yaml}`));
+      const direct = exportBundle(imported);
+      for (const seed of [7, 42, 2026]) expect(exportBundle(exportInputFromQuads(shuffled(imported.quads, seed))), yaml).toEqual(direct);
+    }
   });
 });
 

@@ -340,23 +340,17 @@ it; the CLI summary reports it against the current time.
   kept verbatim under the generic predicate on the entry's node, warned about,
   and written back under their own key on export. Entry nodes carry no other
   `schema:` producer keys, so the read-back is unambiguous.
-- **A wrong-shaped family value is kept whole.** A family given a value of the
-  wrong shape keeps it verbatim under `schema:<camelKey>`: a single value as its
-  own term, anything else as one `rdf:JSON` literal, never split into items, so
-  a list holding one mapping (`generated: [{ by: … }]`) exports as that list
-  and never comes back as a valid family that would replace the kept triple
-  and invent provenance. Single-word families (`generated`, `verified`,
-  `sources`, …) are written back under their own key, since camelCase leaves it
-  unchanged.
-- **A wrong-shaped top-level `usage_window`** sits on `schema:usageWindow`, the
-  predicate a producer key named `usageWindow` uses. A list
-  (`usage_window: [ … ]`) is one `rdf:JSON` array, which no producer key
-  yields (a producer key's list is one triple per item), so export writes it
-  back under `usage_window` and the shape warning recurs. A single value
-  (`usage_window: Q2`) is the very triple a `usageWindow` producer key
-  produces, so export writes it back as that producer key: the graph
-  round-trips exactly, but the frontmatter key changes and the shape warning
-  does not recur on re-import.
+- **A wrong-shaped family value is kept whole, and marked.** A family given a
+  value of the wrong shape keeps it verbatim under `schema:<camelKey>`: a
+  single value as its own term, anything else as one `rdf:JSON` literal, never
+  split into items, so a list holding one mapping (`generated: [{ by: … }]`)
+  exports as that list and never comes back as a valid family that would
+  replace the kept triple and invent provenance. Each kept term is also
+  written on `okf:keptVerbatim.<familyKey>`, the family's ownership marker:
+  `schema:<camelKey>` is shared with any producer key of the same camelCase
+  (`Sources`, `usageWindow`), and the marker says which value is the family's,
+  so export reads it back under the family's own key (`usage_window: Q2` stays
+  `usage_window`) instead of inferring ownership from the value's shape.
 - **A producer key named like a family or base field.** A producer key is kept
   as `schema:<camelKey>`, so `Sources` lands on the predicate a `sources` value
   kept verbatim uses, and `Type`, `Title`, `Tags` or `Resource` on one that
@@ -365,13 +359,15 @@ it; the CLI summary reports it against the current time.
   name, or, where the importer reads that name as a base field or a family,
   the name capitalised (`Sources`, `Status`, `Type`), so neither value
   replaces the other. The legacy `timestamp` keeps its key when a
-  `generated.at` supersedes it. The family decoder claims a value on its
-  predicate only when it is unambiguous: a list the family kept verbatim (one
-  `rdf:JSON` array; a producer key yields one only for an empty list, so a
-  non-empty array is the family's, and an empty one is when no other array is
-  there), even beside producer values, or the one triple on the predicate
-  holding a value the family keeps verbatim. So `generated: [a]` beside `Generated: x` comes back as both, and
-  `Generated: { by: … }` never comes back as provenance.
+  `generated.at` supersedes it. The family decoder takes a value on its
+  predicate as the family's when the ownership marker names it; every other
+  value there is a producer value. So `generated: [a]` beside `Generated: x`
+  comes back as both, `Generated: { by: … }` never comes back as provenance,
+  and `Generated: []` stays a producer key. A graph written before values
+  were marked is read for compatibility: there only one non-empty `rdf:JSON`
+  array, which no producer key yields, is taken as the family's on the
+  concept, and an unmarked single value stays a producer value (same graph,
+  marker aside).
 - **Each triple once.** The mapper deduplicates its output per concept: a store
   holds a set, so two `sources` naming one resource give two `okf:Source` nodes
   but a single `prov:wasDerivedFrom` edge. Without this the expected count in
