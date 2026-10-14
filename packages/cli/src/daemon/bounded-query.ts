@@ -1,5 +1,5 @@
 import { isPublicSnapshotMode, type PublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
-import { prepareSparql, prepareSparqlQuery } from '@origintrail-official/dkg-rdf-utils/sparql';
+import { prepareSparql, prepareSparqlQuery, boundPreparedSelect } from '@origintrail-official/dkg-rdf-utils/sparql';
 
 export const BOUNDED_QUERY_VERSION = 1;
 export const BOUNDED_QUERY_MAX_ROWS = 8192;
@@ -56,23 +56,11 @@ export function boundSelect(sparql: unknown, maxRows: unknown, mode: 'complete' 
   const query = prepareSparqlQuery(prepared);
   if (query.operation !== 'SELECT') throw new Error('Only read-only SELECT queries are supported');
   if (!query.where || query.hasDatasetClause) throw new Error('A scoped WHERE clause is required');
-  let insertion = sparql.length;
-  let ordered = false;
-  for (const [i, token] of prepared.tokens.entries()) {
-    if (token.kind !== 'word') continue;
-    if (token.upper === 'SERVICE') throw new Error('Remote SERVICE queries are not supported');
-    if (query.structure.braces.depthBefore[i] !== 0) continue;
-    if (['LIMIT', 'OFFSET'].includes(token.upper)) {
-      throw new Error('Use maxRows; top-level LIMIT and OFFSET are not supported');
-    }
-    if (token.upper === 'VALUES') insertion = Math.min(insertion, token.start);
-    const next = prepared.tokens[i + 1];
-    if (token.upper === 'ORDER' && next?.kind === 'word' && next.upper === 'BY') ordered = true;
-  }
-  if (mode === 'page' && !ordered) throw new Error('Page mode requires a top-level ORDER BY');
-  // VALUES follows solution modifiers in SPARQL 1.1. Newlines also close comments.
-  const modifiers = `\nLIMIT ${maxRows + 1}${offset ? ` OFFSET ${offset}` : ''}\n`;
-  return { sparql: sparql.slice(0, insertion) + modifiers + sparql.slice(insertion), maxRows };
+  if (query.hasServiceClause) throw new Error('Remote SERVICE queries are not supported');
+  const { hasLimit, hasOffset, hasOrderBy } = query.solutionModifiers;
+  if (hasLimit || hasOffset) throw new Error('Use maxRows; top-level LIMIT and OFFSET are not supported');
+  if (mode === 'page' && !hasOrderBy) throw new Error('Page mode requires a top-level ORDER BY');
+  return { sparql: boundPreparedSelect(query, maxRows + 1, offset), maxRows };
 }
 
 export function boundedResult(bindings: Array<Record<string, unknown>>, maxRows: number) {
