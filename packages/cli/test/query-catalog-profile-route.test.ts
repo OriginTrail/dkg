@@ -4,6 +4,7 @@ import {
   buildQueryCatalogWrite,
   QUERY_CATALOG_READ_CAPABILITIES,
   QUERY_CATALOG_SCHEMA_VERSION,
+  queryCatalogProfileUri,
 } from '@origintrail-official/dkg-core/query-catalog';
 import { StoreSchedulerBusyError, type Quad } from '@origintrail-official/dkg-storage';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
@@ -190,6 +191,27 @@ function writeContext(
 }
 
 describe('/api/profile/query-catalog/read', () => {
+  it('filters one catalog before every layer read and safely encodes its identity', async () => {
+    const agent = fakeCatalogAgent();
+    const slug = 'current"> } ?x ?y ?z { #';
+    const {context,response}=requestContext('/api/profile/query-catalog/read',{contextGraphId:CONTEXT_GRAPH_ID,catalogSlug:slug},agent);
+    await handleMemoryRoutes(context);
+    expect(response.statusCode).toBe(200);
+    const pattern=`VALUES ?catalog { <${queryCatalogProfileUri(CONTEXT_GRAPH_ID,'catalog',slug)}> }`;
+    for(const [sparql,options] of agent.query.mock.calls){
+      expect(sparql).toContain(pattern);expect(options).toMatchObject({contextGraphId:CONTEXT_GRAPH_ID,subGraphName:'meta'});
+    }
+    expect(agent.query).toHaveBeenCalledTimes(3);
+    expect(agent.store.query.mock.calls[0][0]).toContain(pattern);
+  });
+
+  it('rejects invalid catalog filters without querying data', async () => {
+    for(const catalogSlug of ['',42,'x'.repeat(513)]){
+      const agent=fakeCatalogAgent();const {context,response}=requestContext('/api/profile/query-catalog/read',{contextGraphId:CONTEXT_GRAPH_ID,catalogSlug},agent);
+      await handleMemoryRoutes(context);expect(response.statusCode).toBe(400);
+      expect(agent.query).not.toHaveBeenCalled();expect(agent.store.query).not.toHaveBeenCalled();
+    }
+  });
   it('denies an agent-scoped private catalog read before querying any graph', async () => {
     const agent = fakeCatalogAgent();
     agent.resolveAgentByToken.mockReturnValue('0x1111111111111111111111111111111111111111');
@@ -436,7 +458,7 @@ describe('/api/profile/query-catalog/read', () => {
     }));
     await handleMemoryRoutes(large.context);
     expect(large.response.statusCode).toBe(413);
-    expect(JSON.parse(large.response.body)).toMatchObject({ limitBytes: 1024 * 1024 });
+    expect(JSON.parse(large.response.body)).toMatchObject({ limitBytes: 2 * 1024 * 1024 });
   });
 });
 
