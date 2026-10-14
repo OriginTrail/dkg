@@ -39,7 +39,7 @@ For remote access, use an operator-configured HTTPS endpoint. Opening a public p
 
 ## Run the supplied client
 
-Get [`http-app.mjs`](https://github.com/OriginTrail/dkg/blob/testnet-canary/examples/docs/http-app.mjs) and [`atlas-query.rq`](https://github.com/OriginTrail/dkg/blob/testnet-canary/examples/docs/atlas-query.rq) from the same reviewed repository revision and save them together. From that directory:
+Get [`http-app.mjs`](https://github.com/OriginTrail/dkg/blob/main/examples/docs/http-app.mjs) and [`atlas-query.rq`](https://github.com/OriginTrail/dkg/blob/main/examples/docs/atlas-query.rq) from the same reviewed repository revision and save them together. From that directory:
 
 ```bash
 node http-app.mjs write

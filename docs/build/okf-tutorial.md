@@ -18,7 +18,7 @@ dkg context-graph create okf-atlas
 CG='<exact ID printed by create>'
 ```
 
-Download the supplied [`okf-atlas` folder](https://github.com/OriginTrail/dkg/tree/testnet-canary/examples/docs/okf-atlas) from the reviewed repository revision. It contains an index and two linked concepts, Atlas and Oxigraph. These are fictional tutorial records, with their own explicit frontmatter. The upstream format reference is [Google's OKF specification](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md).
+Download the supplied [`okf-atlas` folder](https://github.com/OriginTrail/dkg/tree/main/examples/docs/okf-atlas) from the reviewed repository revision. It contains an index and two linked concepts, Atlas and Oxigraph. These are fictional tutorial records, with their own explicit frontmatter. The upstream format reference is [Google's OKF specification](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md).
 
 ## Preview, then import privately into WM
 

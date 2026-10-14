@@ -30,7 +30,7 @@ Start or reload a Prime Agent session so the installed extension runs. Open the 
 
 Send a message from the Node UI and confirm that it reaches the Prime Agent session you are using and streams a reply. With multiple live sessions, unaddressed messages route to the most recently active session. An explicit session ID overrides that routing; the current panel has no session picker.
 
-Use `dkg prime-agent doctor` for diagnostics. The bridge binds loopback and requires a bridge token. A busy session can return `429`; let the existing turn finish before resending. Setup/reload problems and upstream runtime assumptions are documented in the [adapter reference](https://github.com/OriginTrail/dkg/blob/testnet-canary/packages/adapter-prime-agent/README.md).
+Use `dkg prime-agent doctor` for diagnostics. The bridge binds loopback and requires a bridge token. A busy session can return `429`; let the existing turn finish before resending. Setup/reload problems and upstream runtime assumptions are documented in the [adapter reference](https://github.com/OriginTrail/dkg/blob/main/packages/adapter-prime-agent/README.md).
 
 For the [memory quickstart](../getting-started/quickstart.md), use a separate supported MCP/framework memory connection or your own explicit node client. This bridge alone supplies chat transport.
 

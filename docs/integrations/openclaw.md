@@ -24,7 +24,7 @@ Setup configures and starts the DKG node and registers the adapter. Restart the 
 
 In OpenClaw, call the discovered DKG status tool and list the authorized Context Graphs. In the Node UI, open the connected agent chat and send a message. Reload the UI and check conversation persistence. Then complete the [quickstart](../getting-started/quickstart.md), retrieving the graph fact in a new conversation.
 
-If the adapter is missing, inspect the plugin registration and gateway logs. If another memory provider owns the slot, inspect that setting rather than assuming setup changed it as intended. Port overrides and channel configuration are covered in the [adapter reference](https://github.com/OriginTrail/dkg/blob/testnet-canary/packages/adapter-openclaw/README.md).
+If the adapter is missing, inspect the plugin registration and gateway logs. If another memory provider owns the slot, inspect that setting rather than assuming setup changed it as intended. Port overrides and channel configuration are covered in the [adapter reference](https://github.com/OriginTrail/dkg/blob/main/packages/adapter-openclaw/README.md).
 
 ## Disconnect
 

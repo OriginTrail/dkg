@@ -30,7 +30,7 @@ hermes gateway run --replace -v
 
 Confirm node health, adapter verification, and a chat reply from the connected profile. Then complete the [quickstart](../getting-started/quickstart.md) and repeat its query in a fresh conversation. Check both memory tool access and the actual memory provider; successful chat alone does not verify memory persistence.
 
-If chat is unavailable, check the selected profile and bridge/gateway health with `dkg hermes doctor`. See the [adapter reference](https://github.com/OriginTrail/dkg/blob/testnet-canary/packages/adapter-hermes/README.md) for runtime prerequisites, profiles, transport modes, and configuration.
+If chat is unavailable, check the selected profile and bridge/gateway health with `dkg hermes doctor`. See the [adapter reference](https://github.com/OriginTrail/dkg/blob/main/packages/adapter-hermes/README.md) for runtime prerequisites, profiles, transport modes, and configuration.
 
 ## Disconnect
 

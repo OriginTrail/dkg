@@ -72,7 +72,7 @@ dkg ka query atlas -c "$CG"
 
 Expect **five triples** containing the project name, its database relationship, the database name, and its source. This is a WM draft. If a write fails, inspect the same named KA before retrying; do not create duplicate assets to hide a partial operation.
 
-The same fixture is maintained in the repository at [`examples/docs/atlas.ttl`](https://github.com/OriginTrail/dkg/blob/testnet-canary/examples/docs/atlas.ttl).
+The same fixture is maintained in the repository at [`examples/docs/atlas.ttl`](https://github.com/OriginTrail/dkg/blob/main/examples/docs/atlas.ttl).
 
 ## 4. Ask your agent, then start a fresh conversation
 
