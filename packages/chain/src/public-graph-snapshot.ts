@@ -23,6 +23,9 @@ export interface PublicGraphSnapshot {
   readonly inventoryDigest: string;
   readonly snapshotDigest: string;
 }
+declare const acceptedSnapshot: unique symbol;
+/** Validated, detached and deeply immutable; only normalization creates this value. */
+export type AcceptedPublicGraphSnapshot = PublicGraphSnapshot & { readonly [acceptedSnapshot]: true };
 export interface PublicGraphSnapshotAsset {
   readonly id: string;
   readonly root: string;
@@ -77,7 +80,7 @@ export interface PublicGraphSnapshotScope {
 export function decodePublicGraphSnapshot(
   bytes: Uint8Array,
   expected: PublicGraphSnapshotScope,
-): PublicGraphSnapshot {
+): AcceptedPublicGraphSnapshot {
   if (!bytes.length || bytes.length > PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES)
     throw new Error("Snapshot size exceeds bound");
   return normalizePublicGraphSnapshot(
@@ -88,7 +91,7 @@ export function decodePublicGraphSnapshot(
 export function normalizePublicGraphSnapshot(
   input: unknown,
   expected: PublicGraphSnapshotScope,
-): PublicGraphSnapshot {
+): AcceptedPublicGraphSnapshot {
   const s = input as PublicGraphSnapshot;
   if (
     !s ||
@@ -168,7 +171,7 @@ export function normalizePublicGraphSnapshot(
     throw new Error("Snapshot size exceeds bound");
   for (const asset of canonical.assets) Object.freeze(asset);
   Object.freeze(canonical.assets);
-  return Object.freeze(canonical);
+  return Object.freeze(canonical) as AcceptedPublicGraphSnapshot;
 }
 
 /** Bounded per-node warm cache; failures never replace the last good snapshot or extend its age. */
