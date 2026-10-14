@@ -125,7 +125,7 @@ describe('shared-memory gossip reconcile whose authority check gets no answer', 
       await host.reconcile();
       expect(host.subscribed()).toBe(true);
       const failure = new Error('STORE_UNAVAILABLE');
-      const confirmation = vi.fn(async () => ({ outcome: 'unavailable' as const, source: 'dependency' as const, error: failure }));
+      const confirmation = vi.fn(async () => { throw failure; });
       host.internals.resolveMetadataConfirmation = confirmation;
       await expect(host.reconcile()).rejects.toBe(failure);
       expect(confirmation).toHaveBeenCalledTimes(1);

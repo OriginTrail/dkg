@@ -11022,7 +11022,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const admission = await this.resolveSharedMemoryReadAdmission(contextGraphId, opts);
     opts.signal?.throwIfAborted();
     // Existing lifecycle boolean callers fail closed while observations retain outages.
-    if (admission.outcome === 'unavailable' && admission.source === 'read-authority' && admission.kind === 'decision' && opts.readAuthority === undefined) {
+    if (admission.outcome === 'unavailable' && admission.source === 'read-authority' && opts.readAuthority === undefined) {
       observedReadAuthorityDecision(contextGraphId, admission.decision);
       return false;
     }

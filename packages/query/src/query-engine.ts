@@ -35,8 +35,6 @@ export interface QueryOptions {
    * to their selected graph set unless this is true.
    */
   includeContextGraphPartitions?: boolean;
-  /** Legacy trusted-engine boundary option. Explicit true excludes every discovered draft. */
-  excludeWorkingMemoryPartitions?: boolean;
   /** Internal draft policy derived from caller identity; never accept from HTTP input. */
   draftAccess?: DraftAccessPolicy;
   /**
