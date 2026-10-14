@@ -2214,6 +2214,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         repairMissingKnowledgeAsset: (input) => this.repairRandomSamplingKnowledgeAsset(input),
       }),
     });
+    this.workLifetime.open();
     this.openVmReconcileRotationState();
     this.finalizationRuntime.markStarted({
       localPeerId: this.peerId,
@@ -6006,7 +6007,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       binding: this.contextGraphBindingState.currentBindingFor(contextGraphId, this.subscribedContextGraphs.get(contextGraphId)),
       bindingGeneration: this.contextGraphBindingState.capture(contextGraphId),
       selectedBindingGeneration: this.selectedVmReconcileCursors?.get(contextGraphId)?.bindingGeneration,
-      lifecycleGeneration: this.vmReconcileLifecycleGeneration,
+      lifecycleGeneration: this.workLifetime.generation,
     });
   }
 

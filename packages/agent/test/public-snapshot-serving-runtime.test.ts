@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 // SPDX-License-Identifier: Apache-2.0
 import { PublicSnapshotServingRuntime } from '../src/public-snapshot-serving-runtime.js';
 import { getEventListeners } from 'node:events';
@@ -27,7 +28,7 @@ const make = () =>
     accessPolicy: 0,
     assets: [{ id: "1", root: `0x${"b".repeat(64)}`, version: "1" }],
   });
-const lifetime = () => ({ signal: new AbortController().signal, physicalRuns: new Set<Promise<unknown>>() });
+const lifetime = () => new AgentWorkLifetime();
 describe("public snapshot serving cache", () => {
   it("coalesces cold readers and serves a warm snapshot without more reads", async () => {
     let now = 1000;
@@ -87,40 +88,44 @@ describe("public snapshot serving cache", () => {
 
 describe('public snapshot serving lifecycle', () => {
   it('holds physical ownership through shutdown until an abort-ignoring reader settles', async () => {
-    const stop = new AbortController(), physicalRuns = new Set<Promise<unknown>>();
+    const stop = new AgentWorkLifetime(), physicalRuns = stop.physicalRuns;
     let release!: (value: ReturnType<typeof make>) => void;
     let signal!: AbortSignal;
     const read = vi.fn((_id: string, _chain: string, current: AbortSignal) => {
       signal = current;
       return new Promise<ReturnType<typeof make>>(resolve => { release = resolve; });
     });
-    const runtime = new PublicSnapshotServingRuntime(read, { signal: stop.signal, physicalRuns }, () => 1000);
+    const runtime = new PublicSnapshotServingRuntime(read, stop, () => 1000);
     const pending = runtime.get('peer-a', 'g', '1');
     const reason = new Error('node stopped');
     const rejected = expect(pending).rejects.toBe(reason);
     expect(physicalRuns.size).toBe(1);
     expect(getEventListeners(stop.signal, 'abort')).toHaveLength(1);
-    stop.abort(reason);
+    stop.close(reason);
     expect(signal.aborted).toBe(true);
     expect(physicalRuns.size).toBe(1);
     await expect(runtime.get('peer-b', 'g', '1')).rejects.toBe(reason);
-    const drained = Promise.allSettled(physicalRuns);
+    const drained = stop.drain();
+    const stoppedSignal = stop.signal;
+    stop.open();
+    // Reopening the node cannot revive a serving runtime from its prior run.
+    await expect(runtime.get('peer-b', 'g', '1')).rejects.toBe(reason);
     release(make()); await rejected; await drained;
     expect(read).toHaveBeenCalledTimes(1);
     expect(physicalRuns.size).toBe(0);
-    expect(getEventListeners(stop.signal, 'abort')).toHaveLength(0);
+    expect(getEventListeners(stoppedSignal, 'abort')).toHaveLength(0);
   });
 
   it('uses one 110-second build deadline and releases it after physical settlement', async () => {
     vi.useFakeTimers();
     try {
-      const stop = new AbortController(), physicalRuns = new Set<Promise<unknown>>();
+      const stop = new AgentWorkLifetime(), physicalRuns = stop.physicalRuns;
       let release!: (value: ReturnType<typeof make>) => void;
       let signal!: AbortSignal;
       const runtime = new PublicSnapshotServingRuntime((_id, _chain, current) => {
         signal = current;
         return new Promise(resolve => { release = resolve; });
-      }, { signal: stop.signal, physicalRuns }, () => 1000);
+      }, stop, () => 1000);
       const pending = runtime.get('peer-a', 'g', '1');
       const rejected = expect(pending).rejects.toBeInstanceOf(Error);
       expect(vi.getTimerCount()).toBe(1);
@@ -137,9 +142,9 @@ describe('public snapshot serving lifecycle', () => {
   });
 
   it('releases admission and listeners when a reader throws synchronously', async () => {
-    const stop = new AbortController(), physicalRuns = new Set<Promise<unknown>>();
+    const stop = new AgentWorkLifetime(), physicalRuns = stop.physicalRuns;
     const read = vi.fn(() => { throw new Error('sync RPC failure'); });
-    const runtime = new PublicSnapshotServingRuntime(read, { signal: stop.signal, physicalRuns });
+    const runtime = new PublicSnapshotServingRuntime(read, stop);
     await expect(runtime.get('peer-a', 'g', '1')).rejects.toThrow('sync RPC failure');
     await expect(runtime.get('peer-a', 'other', '1')).rejects.toThrow('sync RPC failure');
     expect(read).toHaveBeenCalledTimes(2);

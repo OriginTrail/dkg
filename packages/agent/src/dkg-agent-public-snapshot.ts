@@ -25,7 +25,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
       return;
     const runtime = new PublicSnapshotServingRuntime(
       (id, onChainId, signal) => this.chain.readPublicGraphSnapshot!(id, onChainId, { signal }),
-      { signal: this.vmReconcileLifecycleController.signal, physicalRuns: this.vmReconcilePhysicalRuns },
+      this.workLifetime,
     );
     this.router.register(
       PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
@@ -38,14 +38,14 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           )
             throw new Error("Unavailable");
           const generation = this.contextGraphBindingState.capture(request.contextGraphId);
-          const lifetime = this.vmReconcileLifecycleGeneration;
+          const lifetime = this.workLifetime.generation;
           const snapshot = await runtime.get(
             peer.toString(),
             request.contextGraphId,
             request.onChainId,
             request.refresh,
           );
-          if (lifetime !== this.vmReconcileLifecycleGeneration
+          if (lifetime !== this.workLifetime.generation
             || !this.contextGraphBindingState.isGenerationCurrent(request.contextGraphId, generation)
             || !(this.subscribedContextGraphs.get(request.contextGraphId)?.subscribed
               || this.subscribedContextGraphs.get(request.contextGraphId)?.coreHosted)) throw new Error("Unavailable");
@@ -69,32 +69,32 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     const normalized = normalizePublicSnapshotSyncOptions(options);
     const { contextGraphId, onChainId, mode, trustedCorePeerIds: peers } = normalized;
     if (jobs.has(this)) throw new Error("A snapshot job is already running");
-    if (!this.started || this.vmReconcileRotationClosed) throw new Error("Node is stopping");
+    if (!this.started || this.workLifetime.closed) throw new Error("Node is stopping");
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
     if (subscription && (!subscription.subscribed && !subscription.coreHosted))
       throw new Error("Graph subscription is inactive");
     if (subscription?.onChainId && subscription.onChainId !== onChainId)
       throw new Error("Graph binding differs from requested snapshot");
-    const lifetime = this.vmReconcileLifecycleGeneration;
+    const lifetime = this.workLifetime.generation;
     jobs.add(this);
     const startedAt = Date.now();
     const lifecycle = startRequestAbortLifecycle(3_600_000, [
-      this.vmReconcileLifecycleController.signal, options.signal,
+      this.workLifetime.signal, options.signal,
     ]);
     const { signal } = lifecycle;
     try {
       return await runGraphScopedPhysicalOperation({
         contextGraphId, signal,
-        isClosed: () => !this.started || this.vmReconcileRotationClosed,
+        isClosed: () => !this.started || this.workLifetime.closed,
         captureSubscription: () => this.subscribedContextGraphs.get(contextGraphId),
         captureBindingGeneration: () => this.contextGraphBindingState.capture(contextGraphId),
         isBindingGenerationCurrent: generation => this.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation),
-        assertLifecycleCurrent: () => { if (lifetime !== this.vmReconcileLifecycleGeneration) throw new Error("Snapshot job ownership changed"); },
+        assertLifecycleCurrent: () => { if (lifetime !== this.workLifetime.generation) throw new Error("Snapshot job ownership changed"); },
         closedError: () => new Error("Node is stopping"),
         bindingChangedError: () => new Error("Snapshot job ownership changed"),
         asAbortError: reason => new Error("Snapshot job ownership changed", { cause: reason }),
-        track: run => { this.vmReconcilePhysicalRuns.add(run); },
-        untrack: run => { this.vmReconcilePhysicalRuns.delete(run); },
+        track: run => { this.workLifetime.track(run); },
+        untrack: run => { this.workLifetime.physicalRuns.delete(run); },
         operation: async control => {
           const assertCurrent = control.assertCurrent;
           const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
