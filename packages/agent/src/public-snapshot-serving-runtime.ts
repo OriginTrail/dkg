@@ -1,3 +1,4 @@
+import type { AgentWorkLifetime } from './agent-work-lifetime.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { PublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
@@ -15,9 +16,10 @@ export class PublicSnapshotServingRuntime {
       onChainId: string,
       signal: AbortSignal,
     ) => Promise<PublicGraphSnapshot>,
-    private readonly lifetime: { signal: AbortSignal; physicalRuns: Set<Promise<unknown>> },
+    private readonly lifetime: AgentWorkLifetime,
     private readonly clock: () => number = Date.now,
-  ) { this.admission = new PublicSnapshotAdmission(clock); }
+  ) { this.admission = new PublicSnapshotAdmission(clock); this.signal = lifetime.signal; }
+  private readonly signal: AbortSignal;
   private readonly admission: PublicSnapshotAdmission;
   private sequence = 0;
   async get(peer: string, id: string, onChainId: string, refresh = false): Promise<PublicGraphSnapshot> {
@@ -26,7 +28,7 @@ export class PublicSnapshotServingRuntime {
     // own ordering domain. Never compare clocks belonging to different nodes.
     const minimum = refresh ? this.sequence + 1 : 0;
     for (;;) {
-      this.lifetime.signal.throwIfAborted();
+      this.signal.throwIfAborted();
       const cached = this.entries.get(key);
       if (cached && cached.sequence >= minimum
         && this.clock() - cached.snapshot.observedAt < 30_000 && this.clock() < cached.snapshot.expiresAt) return cached.snapshot;
@@ -38,7 +40,7 @@ export class PublicSnapshotServingRuntime {
       }
       if (this.pending.size >= 2) throw new Error("Snapshot builder busy");
       const release = this.admission.acquire(peer);
-      const lifecycle = startRequestAbortLifecycle(110_000, [this.lifetime.signal]);
+      const lifecycle = startRequestAbortLifecycle(110_000, [this.signal]);
       const sequence = ++this.sequence;
       let read: Promise<PublicGraphSnapshot>;
       try { read = this.read(id, onChainId, lifecycle.signal); }
@@ -53,10 +55,9 @@ export class PublicSnapshotServingRuntime {
         return snapshot;
       }).finally(() => {
         this.pending.delete(key);
-        this.lifetime.physicalRuns.delete(operation);
         lifecycle.release(); release();
       });
-      this.lifetime.physicalRuns.add(operation);
+      this.lifetime.track(operation);
       this.pending.set(key, { promise: operation, sequence });
       return operation;
     }

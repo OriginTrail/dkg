@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -26,8 +27,8 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only') {
   const snapshot=sealPublicGraphSnapshot({version:1,chainId:'evm:31337',deploymentId:'test',contextGraphId:graph,onChainId:'1',nameHash:ethers.id(graph),contextGraphStorage:address,assetStorage:address,blockNumber:'10',blockHash:`0x${'a'.repeat(64)}`,finalityConfirmations:1,observedAt:Date.now(),expiresAt:Date.now()+120000,accessPolicy:0,
     assets:Array.from({length:count},(_,i)=>({id:((BigInt(address)<<96n)|BigInt(i+1)).toString(),root,version:'1'}))});
   const assets=new Map(Array.from({length:11},(_,i)=>{const a=asset(i+1);return [a.ual,a];}));
-  const a:any={started:true,vmReconcileRotationClosed:false,vmReconcileLifecycleGeneration:1,
-    vmReconcileLifecycleController:new AbortController(),vmReconcilePhysicalRuns:new Set(),
+  const a:any={started:true,vmReconcileRotationClosed:false,workLifetime: new AgentWorkLifetime(),
+
     subscribedContextGraphs:new Map(),store,
     contextGraphBindingState:{capture:()=>generation,isGenerationCurrent:(_:string,g:number)=>g===generation},
     chain:{chainId:'evm:31337',deploymentId:'test',readPublicGraphSnapshot:async()=>snapshot},
@@ -68,7 +69,7 @@ describe('partial public snapshot durable trust',()=>{
       const a=fixture(store,'core-cache');
       await expect(run(a,'core-cache')).rejects.toThrow('10/11 committed');
       expect(a.syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(3);
-      expect(a.vmReconcilePhysicalRuns.size).toBe(0);
+      expect(a.workLifetime.physicalRuns.size).toBe(0);
       await checkGuard(store);
       await store.close();
       store=new OxigraphStore(join(dir,'store.nq'));

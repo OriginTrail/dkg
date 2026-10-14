@@ -363,7 +363,7 @@ export class VmPromotionMethods extends DKGAgentBase {
 
   /** Background RPC class and store lane for every audit read and write. */
   runVmPromotionInBackground<T>(this: DKGAgent, work: () => Promise<T>): Promise<T> {
-    const signal = this.vmReconcileLifecycleController?.signal;
+    const signal = this.workLifetime?.signal;
     return withOwnedRpcRequestContext(
       { requestClass: 'background', ...(signal ? { signal } : {}) },
       () => withDefaultStoreWorkPriority('background', work),
@@ -1244,7 +1244,7 @@ export class VmPromotionMethods extends DKGAgentBase {
 
   /** The lane a declined update's prior-version promotion runs in (see {@link promoteStorageAckPriorVersion}). */
   runStorageAckPriorVersionPromotion<T>(this: DKGAgent, work: () => Promise<T>): Promise<T> {
-    const signal = this.vmReconcileLifecycleController?.signal;
+    const signal = this.workLifetime?.signal;
     return withOwnedRpcRequestContext(
       { requestClass: 'foreground', admissionPriority: 'authority', ...(signal ? { signal } : {}) },
       () => withDefaultStoreWorkPriority('normal', work),

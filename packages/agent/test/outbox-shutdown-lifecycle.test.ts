@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
@@ -449,7 +450,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     Object.assign(agent, {
       started: true,
       chainPoller: null,
-      vmReconcilePhysicalRuns: new Set([physical]),
+      workLifetime: Object.assign(new AgentWorkLifetime(), { physicalRuns: new Set([physical]) }),
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
@@ -464,7 +465,10 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     });
 
     try {
-      await expect(agent.stop()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+      const stopping = agent.stop();
+      expect(agent.workLifetime.closed).toBe(true);
+      expect(agent.workLifetime.generation).toBe(1);
+      await expect(stopping).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
       expect(stopNode).not.toHaveBeenCalled();
       expect(closeStore).not.toHaveBeenCalled();
 
