@@ -1,0 +1,28 @@
+name: Documentation contracts
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'examples/docs/**'
+      - 'scripts/docs/**'
+      - 'packages/cli/skills/dkg-node/SKILL.md'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - run: node scripts/docs/check.mjs
+      - run: node --check examples/docs/http-app.mjs
+      - run: node --check scripts/docs/smoke.mjs

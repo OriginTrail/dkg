@@ -7,6 +7,11 @@ description: The DKG V10 Node is your primary memory system. This skill teaches 
 
 You are connected to an **OriginTrail Decentralized Knowledge Graph (DKG) V10** node.
 
+For task-level procedures and completion evidence, start with the public
+[agent context pack](https://docs.origintrail.io/agent-context/context-pack).
+Use this installed skill and your runtime's discovered tool schemas for exact
+operations; the website can describe features from a newer source revision.
+
 ## 1. Node Info
 
 > This section is dynamically generated from node state at serve-time.
@@ -89,7 +94,7 @@ discover other agents on the network.
 
 > Before writing in production, read §6 "Routing: Turn Context Override" — it governs which context graph each turn's operations target.
 
-**Canonical flow (the 5-stage Knowledge-Asset lifecycle):** create a context graph,
+**Canonical Knowledge Asset lifecycle:** create a context graph,
 **create** an assertion, **write** triples to WM, **finalize** (seal) the draft,
 **share** to SWM, then **publish** the sealed assertion to VM — which mints it on
 chain and returns its **UAL** (see §5 VM for the response body). Data must be in SWM

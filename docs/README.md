@@ -2,88 +2,71 @@
 status: current
 version: v10
 audience: human+agent
-doc_type: overview
-description: Give your AI agents the ultimate memory that survives the session.
-icon: book-open
+doc_type: concept
 ---
 
-# Overview — What is OriginTrail DKG?
+# OriginTrail DKG: a neuro-symbolic AI network
 
-<figure><img src=".gitbook/assets/DKGV10 Memory Layers.png" alt="DKG v10 — 3 Memory Layers for your AI agents to work in"><figcaption><p>DKG v10 — 3 Memory Layers for your AI</p></figcaption></figure>
+The **OriginTrail Decentralized Knowledge Graph (DKG)** is a **neuro-symbolic AI network** connecting people, organizations, and AI agents through shared, verifiable knowledge. Participants contribute what they know, discover knowledge from others, and build on it across applications and organizations—with ways to trace its origin and check its integrity.
 
-OriginTrail Decentralized Knowledge Graph (DKG) is an open, peer-to-peer network that provides AI agents with a **3-layered memory with built-in trust**.
+Knowledge contributed by one agent can become the starting point for another. A research finding can inform a new investigation. A product record can connect to evidence from its suppliers. Teams can bring their knowledge together while choosing what to keep private, what to share, and what to publish with an independently checkable record.
 
-Agents can:
+Your **node + agent** is how you participate. The node connects you to the DKG network and manages your knowledge, identity, and access. Your agent uses that connection to explore relationships, contribute findings, and work with knowledge shared by other participants. Connect the agent runtime you already use, run a local model, or bring the DKG into your own application.
 
-* Write _private drafts._
-* _Share knowledge_ with specific peers.
-* _Anchor verified facts_ on-chain.
+| Start with your goal | Next step |
+| --- | --- |
+| I want my agent to remember and use knowledge | [Quickstart](getting-started/quickstart.md) |
+| I am giving this task to an agent | [Agent context pack](agent-context/context-pack.md) |
+| I am integrating an existing system | [API reference](references/api.md) and [packages](references/packages.md) |
+| I want to understand the architecture | [Node + agent and neuro-symbolic AI](how-dkg-works/node-and-agent.md) |
+| I operate network infrastructure | [Daemon lifecycle](use-dkg/run-node.md) |
 
-All as structured, queryable graph data that any agent or application can read.
+## Knowledge that others can build on
 
-Unlike vendor-managed memory products that lock knowledge inside a single platform, DKG is infrastructure:&#x20;
+Consider agents working on a product investigation. One team contributes the component relationships; another shares test results. An agent with access to both can connect a failed test to the affected products and trace the answer back to the contributing records. The useful result comes from bringing those contributions together.
 
-* Your agents _own their data._
-* Your nodes _run your memory._
-* Every piece of knowledge carries a _verifiable trace_ of _who wrote it_ and _when_.
+The DKG gives this collaboration a common graph structure and a publication path with cryptographic provenance. Knowledge can travel between teams and agent frameworks with its relationships and source references intact. Published records let a reader check who committed which version of the content. Those checks support review and corroboration; assessing whether a claim is true also requires examining its evidence. See [Agents & Trust](how-dkg-works/agents-and-trust.md).
 
-## Why do your agents need DKG?
+## A growing foundation for neuro-symbolic AI
 
-Every major AI lab has shipped memory for their own assistants. It works well for one user, one agent, one platform.
+Shared knowledge is also a foundation for reasoning and learning. Language models can interpret questions, propose hypotheses, and explain findings. Knowledge graphs make entities, relationships, and evidence explicit, so an agent can follow connections and inspect the basis of an answer.
 
-The moment you have multiple agents collaborating — or knowledge that needs to be trusted by someone who didn't create it — that model breaks down. There's no shared context, no provenance, no way to know if what one agent wrote is something another agent should act on.
+The DKG's neuro-symbolic direction builds on that foundation with **graph reasoning** and **graph neural networks (GNNs)**. Rule-based reasoning can derive conclusions from connected facts and explicit rules. GNNs learn patterns in graph structure to help identify relevant relationships, rank candidates, or suggest links to investigate. Bringing these capabilities together allows predictions, logical derivations, and source evidence to play distinct roles in an agent's work.
 
-DKG exists to fix that. It gives your agents:
+The network makes this more powerful: contributions from different participants can become inputs to new analyses, and useful results can be shared back for others to inspect and build on. The ambition is a network where knowledge and the ability to use it grow together.
 
-* **A place to think privately** — local working memory that costs nothing and stays on your node.
-* **A way to collaborate** — shared context that flows between agents and peers without touching a blockchain.
-* **A trust anchor** — on-chain verification for knowledge that needs to be durable, auditable, and open to anyone.
+Start today with the graph queries, agent connections, and sharing/publication workflows in these guides. Integrated graph reasoning and GNN services are part of the evolving [neuro-symbolic roadmap](how-dkg-works/roadmap-and-convergence.md#reasoning-and-learning-over-shared-knowledge); the [availability reference](references/availability.md) records the current implementation and validation status.
 
-If you're building agents that do research, coordinate with other agents, or produce knowledge that matters beyond a single session — DKG is the memory layer designed for that.
+## Three memory layers, one knowledge lifecycle
 
-## How does DKG work?
+| Layer | Use it for | Visibility and cost |
+| --- | --- | --- |
+| **Working Memory (WM)** | Private drafts, imports, and work in progress | Local to the node and authorized agent scope; no on-chain publication fee |
+| **Shared Working Memory (SWM)** | Knowledge that other participants should use | Shared through the Context Graph's supported policy; no on-chain publication fee |
+| **Verifiable Memory (VM)** | Selected records needing on-chain provenance | Chain-anchored; reads follow access policy; gas/TRAC apply |
 
-#### Three memory layers
-
-DKG organizes knowledge into three memory layers rather than collapsing everything into a single memory bucket. Every piece of knowledge starts private and can be promoted toward verification as it matures.
-
-* **Working Memory** — _Private, local, free._ Your agent's scratchpad. Write drafts, ingest documents, stage knowledge before sharing it. Nothing leaves your node. No cost, no coordination overhead. This is where all knowledge starts.
-* **Shared Working Memory** — _Collaborative, gossip-replicated, no charge._ Selectively share knowledge with specific peers (other agents) without publishing to a blockchain. Multiple agents can read from and write to the same Context Graph. This is where collective intelligence happens before anything needs to be verified.
-* **Verifiable Memory** — _**Blockchain-anchored, cryptographically provable.**_ Promote knowledge that needs a durable, independently verifiable record. Each published version is bound to an on-chain commitment; later updates create an auditable new committed state instead of silently rewriting history. Query access follows the Context Graph's policy. Trust level is explicit: self-attested, endorsed, partially verified, or consensus verified.
-
-<table><thead><tr><th width="167">Layer</th><th width="183">Scope</th><th width="79">Cost</th><th width="164">Trust</th><th>Persistence</th></tr></thead><tbody><tr><td><strong>Working Memory (WM)</strong></td><td>Private to your agent</td><td>Free</td><td>Self-attested</td><td>Local, survives restarts</td></tr><tr><td><strong>Shared Working Memory (SWM)</strong></td><td>Visible to context-graph peers</td><td>Free</td><td>Self-attested, gossip-replicated</td><td>TTL-bounded</td></tr><tr><td><strong>Verifiable Memory (VM)</strong></td><td>Network-queryable, chain-anchored</td><td>Gas + TRAC</td><td>Self-attested → endorsed → consensus-verified</td><td>Durable</td></tr></tbody></table>
-
-Agents can therefore collaborate before finality, and humans can decide when knowledge deserves the cost and permanence of publication.
+Local compute, storage, or a model provider can still cost money. A memory layer is not an access policy: publication does not by itself make private content publicly readable. SWM retention and availability also differ from a published record's storage commitment.
 
 ```mermaid
 flowchart LR
-  A["Agent drafts a finding"] --> WM["Working Memory<br/>private"]
-  WM --> SWM["Shared Working Memory<br/>peer-visible"]
-  SWM --> VM["Verifiable Memory<br/>chain-anchored"]
+  A[Agent drafts knowledge] --> WM[Create and write a KA in WM]
+  WM --> S[Seal the draft]
+  S --> SWM[Share to SWM]
+  SWM --> VM[Publish to VM when intended]
 ```
 
-> ## Documentation Index
->
-> Start from [`SUMMARY.md`](SUMMARY.md) for the complete documentation map or [`agent-context/context-pack.md`](agent-context/context-pack.md) for compact agent context.
+A **Context Graph** scopes a project, team, or application. A **Knowledge Asset (KA)** is a named unit of knowledge through this lifecycle. A draft KA already exists in WM; on-chain publication mints or updates its durable asset record. [Learn the lifecycle](how-dkg-works/memory-layers.md).
 
-#### The DKG node
+## Join the network with an Edge or Core node
 
-A DKG node is the local gateway into the DKG network. It lets agents and applications write private working memory, share selected knowledge with peers, and finalize durable records on-chain as Knowledge Assets.
+Most builders start with an **Edge Node**, their connection to the DKG for agents and applications. **Core Nodes** provide the network infrastructure that stores and serves published knowledge, with additional registration and funding requirements. Together, they connect the people and agents contributing knowledge with those who use it. The node role and the agent framework are separate choices.
 
-You run a node to participate in the network. For most builders, this means running an Edge Node — a lightweight client optimized for application integration. Core Nodes are the infrastructure layer that stakes TRAC and supports the broader network.
+## Build something useful
 
-## What can you do with DKG?
+- Connect research agents so one team can build on another's findings and sources.
+- Bring supplier, product, or project knowledge together in a shared Context Graph.
+- Import [Google Open Knowledge Format bundles](build/okf-tutorial.md) into knowledge your agents can query and share.
+- Connect an existing application to shared knowledge through authenticated node APIs.
+- Publish useful results with a provenance record that other participants can check.
 
-<table><thead><tr><th width="315">Workflow</th><th>Typical action</th><th width="167">Memory layer</th></tr></thead><tbody><tr><td>Capture notes, imports, findings, or agent state</td><td>Create a Knowledge Asset and write triples locally.</td><td>Working Memory</td></tr><tr><td>Share selected knowledge with teammates or peer nodes</td><td>Share a Knowledge Asset or subscribe peers to a Context Graph.</td><td>Shared Working Memory</td></tr><tr><td>Create durable, verifiable graph records</td><td>Publish selected shared memory as Knowledge Assets.</td><td>Verifiable Memory</td></tr><tr><td>Connect agent frameworks</td><td>Use MCP, Hermes, OpenClaw, CLI, or HTTP API.</td><td>Node gateway</td></tr><tr><td>Govern publication authority</td><td>Use curated Context Graphs and Publishing Conviction Accounts.</td><td>Context Graph policy and PCA</td></tr></tbody></table>
-
-### Ideas to get you started
-
-* **Research agents that build on each other's work:** An agent ingests sources into Working Memory, distills findings into Shared Working Memory for teammates or other agents to query, and promotes validated conclusions to Verifiable Memory as a citable knowledge artifact. → _All three memory layers_
-* **Multi-agent task coordination:** Multiple agents working on a long-horizon task share a Context Graph in Shared Working Memory. Each agent reads the latest state written by others, avoiding duplicate work and conflicting outputs. → _Shared Working Memory_
-* **Auditable AI decision traces:** An agent publishes its reasoning steps and decisions as Knowledge Assets anchored on-chain. Any downstream system — or human auditor — can query what the agent concluded, when, and from what sources. → _Verifiable Memory_
-* **Personal knowledge bases that agents can query:** Ingest documents, notes, and structured data into Working Memory on your node. Your agents query it via SPARQL — structured, precise retrieval rather than fuzzy vector search. → _Working Memory_
-* **Cross-team knowledge sharing without a central platform:** Teams share a Context Graph in Shared Working Memory. When knowledge is ready to be trusted beyond the team, it gets promoted to Verifiable Memory — no central database, no single point of failure. → _Shared Working Memory → Verifiable Memory_
-
-## Next steps
-
-<table data-view="cards"><thead><tr><th></th><th></th><th data-hidden data-card-target data-type="content-ref"></th></tr></thead><tbody><tr><td><h4>▷ Quickstart</h4></td><td>Connect your AI agent to the DKG</td><td><a href="getting-started/quickstart.md">quickstart.md</a></td></tr><tr><td><h4>⚙︎ How does it work?</h4></td><td>Understand the DKG architecture &#x26; concepts</td><td><a href="how-dkg-works/key-concepts.md">key-concepts.md</a></td></tr><tr><td><h4>$ Apply for the DKG v10 bounty</h4></td><td>Build a DKG v10 integration and compete for $TRAC 150,000</td><td><a href="active-now/dkg-v10-bounty.md">dkg-v10-bounty.md</a></td></tr></tbody></table>
+Start with the [quickstart](getting-started/quickstart.md). Consult the [roadmap](how-dkg-works/roadmap-and-convergence.md) for proposals and the [DKG v10 bounty](active-now/dkg-v10-bounty.md) for the current program.
