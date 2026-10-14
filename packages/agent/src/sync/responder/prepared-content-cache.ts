@@ -20,6 +20,7 @@ export interface PreparedContent {
   readonly plainBytes: number;
 }
 export interface PreparedContentCache {
+  /** Each hit transfers ownership of fresh bytes; callers may mutate the returned body. */
   get(key: string): Promise<PreparedContent | null>;
   put(key: string, value: PreparedContent): Promise<void>;
 }
@@ -179,7 +180,7 @@ export function createPreparedContentCache(
           const body = Buffer.alloc(manifest.encodedBytes);
           if ((await handle.read(body, 0, body.length, 4 + length)).bytesRead !== body.length
             || digest(body) !== manifest.sha256) return null;
-          result = { body: new Uint8Array(body), plainBytes: manifest.plainBytes };
+          result = { body: new Uint8Array(body.buffer, body.byteOffset, body.byteLength), plainBytes: manifest.plainBytes };
           return result;
         } finally {
           await handle.close();

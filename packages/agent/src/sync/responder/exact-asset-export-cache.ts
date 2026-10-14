@@ -578,7 +578,7 @@ export function createBoundedExactAssetExportCache(params: {
           if (prepared) {
             if (sourceRevision(request.graph, metadata.metaGraph).key !== revision) throw changed();
             // Keep the read reservation as response ownership even if memory retention declines.
-            const body = prepared.body.slice();
+            const body = prepared.body; // get() transfers ownership; retention below makes its own copy.
             retainEncoded(key, body, prepared.plainBytes, metadata.identity);
             const response = createEncodedResponseLease({ metadata: metaBytes, body, plainBytes: prepared.plainBytes,
               identity: metadata.identity, wholePayloadExports: 0, encodingDurationMs: 0 }, {

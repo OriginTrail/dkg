@@ -119,6 +119,22 @@ function useFakeClock(): void {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('shared-memory gossip reconcile whose authority check gets no answer', () => {
+  it('keeps its subscription when metadata confirmation fails and recovers on the next check', async () => {
+    const host = await subscribedHost([publicGraph]);
+    try {
+      await host.reconcile();
+      expect(host.subscribed()).toBe(true);
+      const failure = new Error('STORE_UNAVAILABLE');
+      host.internals.hasConfirmedSharedMemoryMetaState = async () => { throw failure; };
+      await expect(host.reconcile()).rejects.toBe(failure);
+      expect(host.subscribed()).toBe(true);
+      expect(host.manager.unsubscribe).not.toHaveBeenCalled();
+      host.internals.hasConfirmedSharedMemoryMetaState = async () => true;
+      await host.reconcile();
+      expect(host.subscribed()).toBe(true);
+    } finally { await host.close(); }
+  });
+
   it('keeps a subscription it holds and asks again on its own', async () => {
     const host = await subscribedHost([publicGraph, notAdmitted, publicGraph]);
     const { authorityReads, manager, logged } = host;

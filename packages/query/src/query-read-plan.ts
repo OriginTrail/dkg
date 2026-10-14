@@ -1,4 +1,4 @@
-import type { ContentPartitionSelection } from './content-partition-policy.js';
+import { resolveDraftAccessPolicy, type DraftAccessPolicy } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
 import type { PreparedGraphScope } from './sparql-graph-scope.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
@@ -8,7 +8,7 @@ export type QueryReadPlan = { kind: 'unscoped' } | {
   kind: 'view'; options: QueryOptions & { contextGraphId: string; view: NonNullable<QueryOptions['view']> };
 } | {
   kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
-  execution: ScopedRoute['execution']; partitionSelection: ContentPartitionSelection;
+  execution: ScopedRoute['execution']; draftAccess: DraftAccessPolicy;
   discovery: {
     catalog: 'none' | 'shared' | 'admission-owned';
     contentPrefixes: readonly { root: string; prefix: string }[];
@@ -37,7 +37,7 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     .filter(target => target.family !== 'data' || !graphs.isSwmOnlyRoute)
     .map(({ root, family }) => ({ root, prefix: `${root}/${family === 'data' ? '_verifiable_memory/' : ''}` })) : [];
   return { kind: 'scoped', contextGraphId: options.contextGraphId, graphs, execution,
-    partitionSelection: options.excludeWorkingMemoryPartitions ? 'published-content' : 'all-content',
+    draftAccess: resolveDraftAccessPolicy(options),
     discovery: { contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,
       // Other routes can depend on a decorator refresh queued behind an owned slot.
       catalog: !expandGraphVariables ? 'none'

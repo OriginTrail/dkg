@@ -1,3 +1,4 @@
+import type { DraftAccessPolicy } from './content-partition-policy.js';
 import type { Quad, StoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
@@ -32,10 +33,10 @@ export interface QueryOptions {
    * to their selected graph set unless this is true.
    */
   includeContextGraphPartitions?: boolean;
-  /** Restrict expanded partitions to published content plus explicitly authorized owner drafts. */
+  /** Legacy trusted-engine boundary option. Explicit true excludes every discovered draft. */
   excludeWorkingMemoryPartitions?: boolean;
-  /** Internal agent-derived owner grant, applied after discovery; never accept from HTTP input. */
-  authorizedWorkingMemoryOwners?: readonly string[];
+  /** Internal draft policy derived from caller identity; never accept from HTTP input. */
+  draftAccess?: DraftAccessPolicy;
   /**
    * Opt-in: allow the scoped query to explicitly reference the context
    * graph's own `_private` partition (`<cg>/_private`, or the sub-graph

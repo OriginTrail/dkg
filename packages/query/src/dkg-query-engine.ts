@@ -363,7 +363,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const lane = discovery ? { query: reads.query,
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
       const variableContentGraphs = discovery ? selectContentPartitions(
-        discovery.partitions, plan.partitionSelection, plan.graphs.subGraphName, options?.authorizedWorkingMemoryOwners) : [];
+        discovery.partitions, plan.draftAccess, plan.graphs.subGraphName) : [];
       return this.executeScoped(scope, options, plan, lane, variableContentGraphs);
     };
     // One strategy owns catalog loading and the caller's admission lifetime.
