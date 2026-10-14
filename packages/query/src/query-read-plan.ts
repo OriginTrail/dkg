@@ -1,3 +1,4 @@
+import type { ContentPartitionSelection } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
 import type { PreparedGraphScope } from './sparql-graph-scope.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
@@ -5,7 +6,7 @@ import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 type ScopedRoute = ReturnType<typeof staticScopedRouteGraphs>;
 export type QueryReadPlan = { kind: 'unscoped' | 'view' } | {
   kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
-  execution: ScopedRoute['execution'];
+  execution: ScopedRoute['execution']; partitionSelection: ContentPartitionSelection;
   discovery: {
     mode: 'admission-owned' | 'shared'; expandGraphVariables: boolean;
     contentPrefixes: readonly { root: string; prefix: string }[];
@@ -30,6 +31,7 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     .filter(target => target.family !== 'data' || !graphs.isSwmOnlyRoute)
     .map(({ root, family }) => ({ root, prefix: `${root}/${family === 'data' ? '_verifiable_memory/' : ''}` })) : [];
   return { kind: 'scoped', contextGraphId: options.contextGraphId, graphs, execution,
+    partitionSelection: options.excludeWorkingMemoryPartitions ? 'published-content' : 'all-content',
     discovery: { expandGraphVariables, contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,
       // Other routes can depend on a decorator refresh queued behind an owned slot.
       mode: supportsCompleteAdmission && expandGraphVariables && !options.includePrivate

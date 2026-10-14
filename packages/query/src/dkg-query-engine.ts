@@ -1,3 +1,4 @@
+import { contentPartitionLayer, selectContentPartitions } from './content-partition-policy.js';
 import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readViewGraphAuthority } from './scoped-content-graph-catalog.js';
@@ -373,7 +374,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // Routing consumes one discovery callback for owned and memoized inventories.
       reads: discovery ? { query: reads.query,
         listGraphsByPrefix: async prefix => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads,
-      variableContentGraphs: discovery ? scopedContentGraphs(discovery, plan.contextGraphId, plan.graphs.subGraphName) : [],
+      variableContentGraphs: discovery ? selectContentPartitions(
+        scopedContentGraphs(discovery, plan.contextGraphId, plan.graphs.subGraphName), plan.contextGraphId, plan.partitionSelection) : [],
     };
   }
 
@@ -406,9 +408,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
       routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
         initialGraphScope,
-        options?.excludeWorkingMemoryPartitions
-          ? variableAllowedGraphs.filter(graph => !/(?:^|\/)(?:_working_memory|assertion)(?:\/|$)/.test(graph))
-          : variableAllowedGraphs,
+        variableAllowedGraphs,
       ));
     }
 
@@ -1180,7 +1180,7 @@ function isScopedContentGraph(
   if (!subGraphName) {
     if (tail.startsWith('_shared_memory/')) return true;
     if (tail.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(tail);
-    if (tail.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
+    if (contentPartitionLayer(tail) === 'draft') return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
   }
 
   const slash = tail.indexOf('/');
@@ -1194,7 +1194,7 @@ function isScopedContentGraph(
   if (!remaining) return true;
   if (remaining.startsWith('_shared_memory/')) return true;
   if (remaining.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(remaining);
-  if (remaining.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
+  if (contentPartitionLayer(remaining) === 'draft') return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
   return false;
 }
 

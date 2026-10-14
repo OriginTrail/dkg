@@ -347,23 +347,20 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     const cache = new Map<string, Promise<string>>();
     const budget = new LiteralHydrationBudget(options?.maxResponseBytes);
 
+    const map = async <T, R>(values: T[], hydrate: (value: T) => Promise<R>): Promise<R[]> => {
+      if (budget.limit === undefined) return Promise.all(values.map(hydrate));
+      const hydrated: R[] = [];
+      for (const value of values) hydrated.push(await hydrate(value));
+      return hydrated;
+    };
+    const term = (value: string) => this.hydrateTerm(value, cache, budget, options?.signal);
     if (result.type === 'bindings') {
-      const bindings: Record<string, string>[] = [];
-      for (const row of result.bindings) {
-          const hydrated: Record<string, string> = {};
-          for (const [key, value] of Object.entries(row)) {
-            hydrated[key] = await this.hydrateTerm(value, cache, budget, options?.signal);
-          }
-          bindings.push(hydrated);
-      }
+      const bindings = await map(result.bindings, async row => Object.fromEntries(
+        await map(Object.entries(row), async ([key, value]) => [key, await term(value)]),
+      ));
       return { type: 'bindings', bindings } satisfies SelectResult;
     }
-
-    const quads: Quad[] = [];
-    for (const quad of result.quads) quads.push({
-        ...quad,
-        object: await this.hydrateTerm(quad.object, cache, budget, options?.signal),
-    });
+    const quads = await map(result.quads, async quad => ({ ...quad, object: await term(quad.object) }));
     return { type: 'quads', quads } satisfies ConstructResult;
   }
 
@@ -373,8 +370,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     if (!hash) return budget.consume(term);
     let pending = cache.get(hash);
     if (!pending) {
-      pending = budget.remaining === undefined ? this.readBlob(hash)
-        : readLiteralBlobBounded(this.blobPath(hash), hash, budget.remaining, signal);
+      pending = this.readBlob(hash, { maxBytes: budget.remaining, signal });
       cache.set(hash, pending);
     }
     return budget.consume(await pending);
@@ -407,12 +403,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     await this.readBlob(hash);
   }
 
-  private async readBlob(hash: string): Promise<string> {
+  private async readBlob(hash: string, constraints?: { maxBytes?: number; signal?: AbortSignal }): Promise<string> {
     assertSha256Hex(hash);
     const path = this.blobPath(hash);
     let content: string;
     try {
-      content = await readFile(path, 'utf8');
+      constraints?.signal?.throwIfAborted();
+      content = constraints?.maxBytes === undefined
+        ? await readFile(path, { encoding: 'utf8', signal: constraints?.signal })
+        : await readLiteralBlobBounded(path, constraints.maxBytes, constraints.signal);
+      constraints?.signal?.throwIfAborted();
     } catch (err) {
       if (isNodeError(err, 'ENOENT')) {
         throw new Error(`SWM external literal blob missing for sha256:${hash} at ${path}`);
