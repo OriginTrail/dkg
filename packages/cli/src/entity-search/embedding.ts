@@ -68,14 +68,18 @@ export class LocalEntityEmbedder implements EntityEmbedder {
     return model;
   }
   async ready(signal: AbortSignal): Promise<boolean> {
-    const model = await this.model(signal);
+    await this.model(signal);
     const running = models(await this.json('/api/ps', signal));
-    return running.some(v => v.name === model && v.digest === this.config.digest) === true;
+    return running.some(v => v.digest === this.config.digest) === true;
   }
   async embed(text: string, kind: 'query' | 'document', signal: AbortSignal): Promise<number[]> {
-    const model = await this.model(signal);
+    await this.model(signal);
     const prefix = kind === 'query' ? this.config.queryPrefix : this.config.documentPrefix;
+    // Tag checks alone cannot detect A -> B -> A during inference. Require an
+    // immutable local manifest reference; unsupported providers fail closed.
+    const model = `sha256:${this.config.digest}`;
     const reply = await this.json('/api/embed', signal, { model, input: (prefix ?? '') + text, truncate: false, keep_alive: '5m' });
+    await this.model(signal);
     return embedding(reply, this.dimensions);
   }
 }
