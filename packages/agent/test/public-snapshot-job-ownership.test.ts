@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -15,8 +16,8 @@ function snapshot(extra = false) {
 function fixture() {
   let generation = 0;
   const a: any = {
-    started: true, vmReconcileRotationClosed: false, vmReconcileLifecycleGeneration: 1,
-    vmReconcileLifecycleController: new AbortController(), vmReconcilePhysicalRuns: new Set(),
+    started: true, vmReconcileRotationClosed: false, workLifetime: new AgentWorkLifetime(),
+
     subscribedContextGraphs: new Map(),
     getSubscribedContextGraphs: () => a.subscribedContextGraphs,
     contextGraphBindingState: { capture: () => generation, isGenerationCurrent: (_: string, g: number) => g === generation },
@@ -85,11 +86,11 @@ describe('public snapshot job ownership', () => {
   });
   it('releases caller and node lifetime listeners after an empty job settles', async () => {
     const { a } = fixture(), caller = new AbortController();
-    const lifetime = a.vmReconcileLifecycleController.signal;
+    const lifetime = a.workLifetime.signal;
     await PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, { ...request, mode: 'rpc-only', signal: caller.signal });
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
     expect(getEventListeners(lifetime, 'abort')).toHaveLength(0);
-    expect(a.vmReconcilePhysicalRuns.size).toBe(0);
+    expect(a.workLifetime.physicalRuns.size).toBe(0);
   });
 
   it.each(['core-cache', 'rpc-only'] as const)('rejects deselected graphs before any %s read', async mode => {
@@ -110,11 +111,11 @@ describe('public snapshot job ownership', () => {
     let release!: (s: ReturnType<typeof snapshot>)=>void;
     a.chain.readPublicGraphSnapshot.mockImplementationOnce(()=>new Promise(resolve=>{release=resolve;}));
     const pending=handler(wire, { toString: () => "peer-a" });
-    expect(getEventListeners(a.vmReconcileLifecycleController.signal, 'abort')).toHaveLength(1);
+    expect(getEventListeners(a.workLifetime.signal, 'abort')).toHaveLength(1);
     invalidate(); release(snapshot());
     expect(JSON.parse(new TextDecoder().decode(await pending))).toEqual({unavailable:true});
-    expect(getEventListeners(a.vmReconcileLifecycleController.signal, 'abort')).toHaveLength(0);
-    expect(a.vmReconcilePhysicalRuns.size).toBe(0);
+    expect(getEventListeners(a.workLifetime.signal, 'abort')).toHaveLength(0);
+    expect(a.workLifetime.physicalRuns.size).toBe(0);
   });
   it.each(['subscription', 'lifetime'] as const)('retires a held initial read when %s changes', async change => {
     const {a,invalidate} = fixture();
@@ -122,12 +123,12 @@ describe('public snapshot job ownership', () => {
     a.chain.readPublicGraphSnapshot.mockImplementationOnce(() => new Promise(resolve => {release = resolve;}));
     const job = run(a, 'rpc-only'); const rejected = expect(job).rejects.toThrow('ownership');
     await Promise.resolve();
-    expect(a.vmReconcilePhysicalRuns.size).toBe(1);
+    expect(a.workLifetime.physicalRuns.size).toBe(1);
     if(change === 'subscription') invalidate();
-    else { a.vmReconcileLifecycleController.abort(); a.vmReconcileLifecycleGeneration++; a.vmReconcileLifecycleController = new AbortController(); }
+    else { a.workLifetime.close(); a.workLifetime.open(); }
     release(snapshot()); await rejected;
     expect(a.subscribeToContextGraph).not.toHaveBeenCalled(); expect(a.store.insert).not.toHaveBeenCalled();
-    expect(a.syncExactKnowledgeAssetsFromPeerDetailed).not.toHaveBeenCalled(); expect(a.vmReconcilePhysicalRuns.size).toBe(0);
+    expect(a.syncExactKnowledgeAssetsFromPeerDetailed).not.toHaveBeenCalled(); expect(a.workLifetime.physicalRuns.size).toBe(0);
   });
   it.each(['core-cache', 'rpc-only'] as const)('keeps completed snapshot separate from changed current coverage in %s mode', async mode => {
     const {a} = fixture();

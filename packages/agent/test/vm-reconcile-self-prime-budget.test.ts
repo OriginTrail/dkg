@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -16,8 +17,7 @@ interface Internals {
   localContextGraphProvenance: { recordLocalCreate(id: string): void };
   node: unknown;
   vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
-  vmReconcileLifecycleController: AbortController;
-  vmReconcilePhysicalRuns: Set<Promise<unknown>>;
+  workLifetime: AgentWorkLifetime;
   resolveVmReconcileTarget(cg: string, isCurrent?: () => boolean, signal?: AbortSignal): Promise<unknown>;
   runVmReconcileSweep(): Promise<void>;
   scheduleVmReconcileSweep(): void;
@@ -45,7 +45,7 @@ async function fixture(unbound: number, maxPending = 64) {
   agents.push(agent);
   const internals = agent as unknown as Internals;
   internals.node = { peerId: '12D3KooWSelfPrimeBudget', libp2p: { getPeers: () => [] } };
-  internals.openVmReconcileRotationState();
+  internals.workLifetime.open(); internals.openVmReconcileRotationState();
   for (let i = 0; i < unbound; i++) internals.subscribedContextGraphs.set(`cg-${i}`, { subscribed: true });
   const order: string[] = [];
   const canRead = vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
@@ -53,7 +53,7 @@ async function fixture(unbound: number, maxPending = 64) {
     order.push(`resolve:${id}`); return null;
   });
   const installDispatcher = () => {
-    const signal = internals.vmReconcileLifecycleController.signal;
+    const signal = internals.workLifetime.signal;
     const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async (cg) => {
       order.push(`dispatch:${cg}`);
       await internals.resolveVmReconcileTarget(cg, () => !signal.aborted, signal);
@@ -154,7 +154,7 @@ it('enforces the production unbound batch size through the agent-owned runtime',
     peerId: '12D3KooWProductionSelfPrimeBudget',
     libp2p: { getPeers: () => [] },
   };
-  internals.openVmReconcileRotationState();
+  internals.workLifetime.open(); internals.openVmReconcileRotationState();
   for (let i = 0; i < count; i++) {
     internals.subscribedContextGraphs.set(`production-cg-${i}`, { subscribed: true });
   }
@@ -183,7 +183,7 @@ it('forwards the configured periodic bound cap through the production runtime fa
       peerId: '12D3KooWProductionBoundTimerCap',
       libp2p: { getPeers: () => [] },
     };
-    internals.openVmReconcileRotationState();
+    internals.workLifetime.open(); internals.openVmReconcileRotationState();
     for (let i = 0; i < 5; i++) {
       internals.subscribedContextGraphs.set(`bound-cg-${i}`, {
         subscribed: true,
@@ -206,7 +206,7 @@ it('caps discovery attempts through the production runtime factory', async () =>
   agents.push(agent);
   const internals = agent as unknown as Internals;
   internals.node = { peerId: '12D3KooWSelfPrimeBudget', libp2p: { getPeers: () => [] } };
-  internals.openVmReconcileRotationState();
+  internals.workLifetime.open(); internals.openVmReconcileRotationState();
   const budget = DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE;
   expect(budget).toBe(8);
   for (let i = 0; i < budget * 3 + 3; i++) {
@@ -301,10 +301,10 @@ it.each(['binding', 'read-authority'])('stops during %s lookup and starts a new 
   try {
     internals.scheduleVmReconcileSweep();
     await vi.waitFor(() => expect(blocked.mock.calls.length).toBe(1));
-    internals.closeVmReconcileRotationState();
+    internals.workLifetime.close(); internals.closeVmReconcileRotationState();
     await internals.vmReconcileScheduling.close();
     expect(resolve.mock.calls.length).toBe(stage === 'binding' ? 1 : 0);
-    internals.openVmReconcileRotationState();
+    internals.workLifetime.open(); internals.openVmReconcileRotationState();
     installDispatcher();
     resolve.mockClear();
     internals.scheduleVmReconcileSweep();
@@ -504,11 +504,11 @@ it.each(['fulfilled', 'rejected'])('retires a %s authority read before shutdown'
   const run = internals.resolveVmReconcileTarget('cg-0').catch(() => undefined);
   try {
     await vi.waitFor(() => expect(canRead).toHaveBeenCalledOnce());
-    expect(internals.vmReconcilePhysicalRuns.has(authority)).toBe(true);
+    expect(internals.workLifetime.physicalRuns.has(authority)).toBe(true);
     if (outcome === 'fulfilled') fulfill(true);
     else reject(new Error('authority unavailable'));
     await run;
-    expect(internals.vmReconcilePhysicalRuns.size).toBe(0);
+    expect(internals.workLifetime.physicalRuns.size).toBe(0);
   } finally { fulfill(false); await run; }
 });
 
@@ -560,7 +560,7 @@ it('releases a capacity-waiting sweep on lifecycle closure without admitting its
   const sweep = internals.runVmReconcileSweep();
   try {
     await vi.waitFor(() => expect(canRead).toHaveBeenCalledOnce());
-    internals.closeVmReconcileRotationState();
+    internals.workLifetime.close(); internals.closeVmReconcileRotationState();
     await internals.vmReconcileScheduling.close();
     await sweep;
     expect(order.filter(key => key.startsWith('dispatch:'))).toEqual(['dispatch:bound-0']);

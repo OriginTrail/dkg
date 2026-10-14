@@ -187,15 +187,15 @@ describe('exact VM recovery lifecycle', () => {
     );
     try {
       await agent.start();
-      const initialGeneration = (agent as any).vmReconcileLifecycleGeneration;
+      const initialGeneration = (agent as any).workLifetime.generation;
       await agent.stop();
       expect((agent as any).vmReconcileRotationClosed).toBe(true);
-      expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).workLifetime.generation).toBe(initialGeneration + 1);
       expect((agent as any).contextGraphMembershipPersistence.status().closed).toBe(true);
 
       await agent.start();
       expect((agent as any).vmReconcileRotationClosed).toBe(false);
-      expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).workLifetime.generation).toBe(initialGeneration + 1);
       expect((agent as any).vmReconcileScheduling.snapshot().closed).toBe(false);
       expect((agent as any).contextGraphMembershipPersistence.status().closed).toBe(false);
       const upsertsBeforeRestartProbe = membershipUpsert.mock.calls.length;
