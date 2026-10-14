@@ -4,11 +4,11 @@ import { knowledgeAssetAgentAddressesEqual } from '@origintrail-official/dkg-cor
 export type DraftAccessPolicy = { readonly kind: 'all' | 'none' }
   | { readonly kind: 'owners'; readonly owners: readonly string[] };
 
-/** Normalize the trusted-engine legacy default once; explicit exclusion always wins. */
+/** Normalize the trusted-engine default; external adapters supply their caller policy. */
 export function resolveDraftAccessPolicy(options?: {
-  draftAccess?: DraftAccessPolicy; excludeWorkingMemoryPartitions?: boolean;
+  draftAccess?: DraftAccessPolicy;
 }): DraftAccessPolicy {
-  return options?.excludeWorkingMemoryPartitions ? { kind: 'none' } : options?.draftAccess ?? { kind: 'all' };
+  return options?.draftAccess ?? { kind: 'all' };
 }
 
 export interface ContentPartition {
