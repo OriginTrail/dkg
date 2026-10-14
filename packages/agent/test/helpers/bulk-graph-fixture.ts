@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { startOxigraphSparqlEndpoint } from '../../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DKGNode, LibP2PNetwork, ProtocolRouter, createOperationContext, BULK_GRAPH_KIND as K, type BulkGraphFrame, type BulkGraphSession,
+import { DKGNode, LibP2PNetwork, ProtocolRouter, PeerResolver, createOperationContext, BULK_GRAPH_KIND as K, type BulkGraphFrame, type BulkGraphSession,
   bulkGraphTransportOptions, MemoryLayer, knowledgeAssetLayerGraphUri, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, quadsToNQuads } from '@origintrail-official/dkg-storage';
 import { generateGraphKnowledgeAssetMetadata, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
@@ -60,9 +60,10 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
   const nodes = [0,1].map(() => new DKGNode({listenAddresses:['/ip4/127.0.0.1/tcp/0'],enableMdns:false}));
   for (const node of nodes) { await node.start(); cleanups.push(() => node.stop()); }
   const network = new LibP2PNetwork(nodes[0]!);
-  const router = new ProtocolRouter(nodes[0]!, {network,peerResolver:{resolve:async()=>{
-    await network.addKnownAddresses(nodes[1]!.peerId,[nodes[1]!.multiaddrs[0]!]); return [nodes[1]!.multiaddrs[0]!];
-  }},isPeerAccepted:async()=>true,isPeerKnownRejected:()=>false});
+  await network.addKnownAddresses(nodes[1]!.peerId, [nodes[1]!.multiaddrs[0]!]);
+  const peerResolver = new PeerResolver({ network, registry: { lookup: async () => [nodes[1]!.multiaddrs[0]!] },
+    agentDirectory: { findRelayForPeer: async () => null } });
+  const router = new ProtocolRouter(nodes[0]!, {network,peerResolver,isPeerAccepted:async()=>true,isPeerKnownRejected:()=>false});
   const server = new ProtocolRouter(nodes[1]!,{isPeerAccepted:async()=>true,isPeerKnownRejected:()=>false});
   let resources!: ExperimentalExactBatchResponderResources;
   registerSyncHandler({register:()=>{},protocolSync:'/fixture',syncDeniedResponse:'denied',syncPageSize:500,sharedMemoryTtlMs:0,
