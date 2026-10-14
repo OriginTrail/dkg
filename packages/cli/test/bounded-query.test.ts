@@ -372,3 +372,41 @@ it.each(['_working_memory/agent-b/1', 'assertion/agent-b/draft', 'code/_working_
     expect(JSON.parse(read.res.body).result.bindings.map(row => row.g).sort()).toEqual(graphs.slice(2).sort());
   } finally { await store.close(); }
 });
+
+it.each([undefined, 'agent-a', 'legacy-peer', 'agent-b'])('keeps dashboard WM reads scoped to caller %s, including identity aliases', async callerAgentAddress => {
+  const store = new OxigraphStore(), engine = new DKGQueryEngine(store);
+  const contextGraphId = 'team/assertion/policies', root = `did:dkg:context-graph:${contextGraphId}`;
+  const owners = ['agent-a', 'legacy-peer', 'agent-b'];
+  const drafts = owners.flatMap(owner => ['', 'code/'].flatMap(prefix =>
+    [`${root}/${prefix}assertion/${owner}/draft`, `${root}/${prefix}_working_memory/${owner}/1`]));
+  const graphs = drafts.flatMap(graph => [graph, `${graph}/_named_graph/details`]);
+  const agent = { store, queryEngine: engine, log: { info() {} }, peerId: 'legacy-peer', defaultAgentAddress: 'agent-a',
+    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' }),
+    subscribedContextGraphs: new Map() };
+  const query = QueryMethods.prototype.query.bind(agent as never);
+  try {
+    await store.insert([
+      ...drafts.map((graph, i) => ({ graph: `${root}/_meta`, subject: `urn:draft:${i}`, predicate: 'http://dkg.io/ontology/assertionGraph', object: graph })),
+      ...graphs.map(graph => ({ graph: `${root}/_meta`, subject: graph, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"WM"' })),
+      { graph: `${root}/_meta`, subject: `${root}/code`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph' },
+      { graph: `${root}/_meta`, subject: `${root}/code`, predicate: 'http://schema.org/name', object: '"code"' },
+      ...graphs.map((graph, i) => ({ graph, subject: `urn:item:${i}`, predicate: 'urn:p', object: '"value"' })),
+    ]);
+    // The dashboard joins lifecycle metadata to a graph variable, across root,
+    // sub-graph, name-keyed, per-KA and named-graph child layouts.
+    const sparql = `SELECT ?g ?s WHERE { GRAPH <${root}/_meta> { ?g <http://dkg.io/ontology/memoryLayer> "WM" } GRAPH ?g { ?s <urn:p> ?o } }`;
+    const expectedOwners = callerAgentAddress === 'agent-b' ? ['agent-b'] : ['agent-a', 'legacy-peer'];
+    const expected = graphs.filter(graph => expectedOwners.some(owner => graph.includes(`/${owner}/`))).sort();
+    const ordinary = await query(sparql, { contextGraphId, includeContextGraphPartitions: true,
+      callerAgentAddress, agentAddress: 'untrusted-other-owner' });
+    expect(ordinary.bindings.map(row => row.g).sort()).toEqual(expected);
+    // Reusing discovery must not retain the previous caller's draft permission.
+    const other = await query(sparql, { contextGraphId, includeContextGraphPartitions: true, callerAgentAddress: 'outsider' });
+    expect(other.bindings).toEqual([]);
+    const read = context({ query }, { contextGraphId, sparql, maxRows: 100, includeContextGraphPartitions: true,
+      excludeWorkingMemoryPartitions: false, authorizedWorkingMemoryOwners: owners }, callerAgentAddress);
+    await handleBoundedQueryRoutes(read.ctx);
+    expect(read.res.statusCode, read.res.body).toBe(200);
+    expect(JSON.parse(read.res.body).result.bindings).toEqual([]);
+  } finally { await store.close(); }
+});
