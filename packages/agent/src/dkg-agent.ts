@@ -260,7 +260,6 @@ import { createSwmRecoveryMutationRuntimeV1 } from
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
-import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import {
   resolveSyncContextGraphPriorities,
   validateSyncResponderSnapshotLimitsConfig,
@@ -2770,7 +2769,8 @@ export class DKGAgent extends DKGAgentBase {
     // its drain joins the shutdown fence below, so store and network teardown
     // (and a same-process restart's first fetch) never overlap it.
     const onDemandPhonebookDrain = peekOnDemandAgentsPhonebook(this)?.close() ?? null;
-    const authorityIndexSnapshotDrain = Promise.all([
+    const authorityAndCacheDrain = Promise.all([
+      this.syncResponderPreparedCacheOwner?.closeAndDrain(),
       this.authorityIndexSnapshotRuntime?.close(),
       this.chain.contextGraphAuthorityIndexSnapshots?.close(),
       peekFinalizedAuthorityColdResolution(this)?.whenIdle(),
@@ -2871,7 +2871,7 @@ export class DKGAgent extends DKGAgentBase {
       }
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain, this.closeOwedLegacySwmRetirementsV1()];
-    drains.push(authorityIndexSnapshotDrain);
+    drains.push(authorityAndCacheDrain);
     if (onDemandPhonebookDrain) drains.push(onDemandPhonebookDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (rehydrationPromotionDrain) drains.push(rehydrationPromotionDrain);

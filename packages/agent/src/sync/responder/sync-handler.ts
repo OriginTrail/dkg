@@ -438,7 +438,7 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
   });
 }
 
-export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
+export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeAndDrain(): Promise<void> } {
   const {
     register,
     protocolSync,
@@ -1098,4 +1098,5 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       throw preLimiterErr;
     }
   }));
+  return { closeAndDrain: () => preparedContentCache?.closeAndDrain() ?? Promise.resolve() };
 }
