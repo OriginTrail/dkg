@@ -549,6 +549,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
     // ── Legacy routing (V9 compat) ────────────────────────────────────
     let effectiveScope = routedScope;
+    const fallbackPolicy = options?.requireCompleteGraphScope ? 'preserve-scope' : 'compatibility';
 
     if (effectiveContextGraphId) {
       const dataGraph = options?.subGraphName
@@ -565,7 +566,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           routedScope,
           vmGraphsInc.length > 0 ? [dataGraph, ...vmGraphsInc] : [],
           dataGraph,
-          'deduplicated-values-union',
+          'deduplicated-values-union', fallbackPolicy,
         ));
         // Per-KA SWM: union the discovered …/_shared_memory/{addr}/{number} graphs.
         const swmGraphs = await this.discoverGraphsByPrefix(
@@ -576,7 +577,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           routedScope,
           swmGraphs,
           sharedMemoryGraph,
-          'union-only',
+          'union-only', fallbackPolicy,
         ));
         // Both are graph-wrapped forms of the CALLER's query, so they carry
         // the same provenance as execAndNormalize (PR #2330 review — this
@@ -597,7 +598,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           routedScope,
           swmGraphs,
           sharedMemoryGraph,
-          'union-only',
+          'union-only', fallbackPolicy,
         ));
       } else {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
@@ -609,7 +610,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           routedScope,
           vmGraphs.length > 0 ? [dataGraph, ...vmGraphs] : [],
           dataGraph,
-          'deduplicated-values-union',
+          'deduplicated-values-union', fallbackPolicy,
         ));
       }
     }

@@ -32,21 +32,22 @@ export function classifyScopedContentGraph(
     return undefined;
   }
 
-  if (tail.startsWith('_shared_memory/')) return admit('shared');
-  if (tail.startsWith('_verifiable_memory/')) return admit('verified');
-  if (isDraft(tail)) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs) ? admit('draft', undefined, tail) : undefined;
-
-  const slash = tail.indexOf('/');
-  const firstSegment = slash >= 0 ? tail.slice(0, slash) : tail;
-  const remaining = slash >= 0 ? tail.slice(slash + 1) : '';
-  if (!registeredSubGraphs.has(firstSegment) || !validateSubGraphName(firstSegment).valid) {
-    return undefined;
+  // Normalize the optional registered subgraph coordinate once. Partition
+  // semantics and draft ownership are identical below root and subgraphs.
+  let partition = tail;
+  let subGraphName: string | undefined;
+  const first = tail.split('/', 1)[0];
+  if (!first.startsWith('_') && first !== 'assertion') {
+    if (!registeredSubGraphs.has(first) || !validateSubGraphName(first).valid) return undefined;
+    subGraphName = first;
+    partition = tail.length === first.length ? '' : tail.slice(first.length + 1);
   }
-
-  if (!remaining) return admit('content', firstSegment);
-  if (remaining.startsWith('_shared_memory/')) return admit('shared', firstSegment);
-  if (remaining.startsWith('_verifiable_memory/')) return admit('verified', firstSegment);
-  if (isDraft(remaining)) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs) ? admit('draft', firstSegment, remaining) : undefined;
+  if (!partition) return admit('content', subGraphName);
+  if (partition.startsWith('_shared_memory/')) return admit('shared', subGraphName);
+  if (partition.startsWith('_verifiable_memory/')) return admit('verified', subGraphName);
+  if (isDraft(partition) && isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs)) {
+    return admit('draft', subGraphName, partition);
+  }
   return undefined;
 }
 
