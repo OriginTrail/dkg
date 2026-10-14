@@ -32,7 +32,8 @@
 export function nonEmptyNamedGraphEnumerationPattern(variable = 'g'): string {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) throw new TypeError('Invalid graph variable');
   const graph = `?${variable}`;
-  return `GRAPH ${graph} {} FILTER EXISTS { SELECT ${graph} WHERE { GRAPH ${graph} { ?s ?p ?o } } LIMIT 1 }`;
+  const probe = ['s', 'p', 'o'].map(name => `?${name === variable ? '_' : ''}${name}`).join(' ');
+  return `GRAPH ${graph} {} FILTER EXISTS { SELECT ${graph} WHERE { GRAPH ${graph} { ${probe} } } LIMIT 1 }`;
 }
 export const NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY =
   `SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern()} }`;

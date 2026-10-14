@@ -589,7 +589,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     // Parent authorization never grants access to a registered child context graph.
-    const children = await this.discoverKnownChildContextGraphUris(contextGraphId, reads);
+    const { childContextGraphs: children } = await readScopedContentGraphCatalog(contextGraphId, reads.query, false);
     const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
     allGraphs.length = 0;
     allGraphs.push(...dedupedGraphs);
