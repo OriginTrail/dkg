@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolvePrivateRootLegacyLaneAdmission, resolveSharedMemoryAdmission } from '../src/swm-read-admission.js';
+import { resolvePrivateRootLegacyLaneAdmission, resolveSharedMemoryAdmission, sharedMemoryAdmissionError } from '../src/swm-read-admission.js';
 
 describe('shared memory admission dependency outcomes', () => {
   it('identifies each unavailable dependency without turning it into a denial', async () => {
@@ -11,9 +11,17 @@ describe('shared memory admission dependency outcomes', () => {
     const reads = { acceptedAuthority: () => undefined, legacyLane: legacy,
       confirmedMetadata: async () => ({ outcome: 'confirmed' as const }), readAuthority: async () => ({ outcome: 'allowed' as const, grantScope: 'public' as const, source: 'system' as const, reason: 'fixture', metadataBootstrap: 'eligible' as const }) };
     await expect(resolveSharedMemoryAdmission({ ...reads, confirmedMetadata: fail }))
-      .resolves.toEqual({ outcome: 'unavailable', source: 'confirmed-metadata', error });
+      .resolves.toEqual({ outcome: 'unavailable', source: 'confirmed-metadata', confirmation: { outcome: 'unavailable', source: 'dependency', error } });
+    const returned = await resolveSharedMemoryAdmission({ ...reads,
+      confirmedMetadata: async () => ({ outcome: 'unavailable', source: 'dependency', error }) });
+    const thrown = await resolveSharedMemoryAdmission({ ...reads, confirmedMetadata: fail });
+    expect(thrown).toEqual(returned);
+    if (thrown.outcome !== 'unavailable') throw new Error('missing unavailable fact');
+    expect(sharedMemoryAdmissionError('test', thrown)).toBe(error);
+    await expect(resolveSharedMemoryAdmission({ ...reads, acceptedAuthority: () => { throw error; } }))
+      .resolves.toEqual({ outcome: 'unavailable', source: 'read-authority', kind: 'dependency', error });
     await expect(resolveSharedMemoryAdmission({ ...reads, readAuthority: fail }))
-      .resolves.toEqual({ outcome: 'unavailable', source: 'read-authority', error });
+      .resolves.toEqual({ outcome: 'unavailable', source: 'read-authority', kind: 'dependency', error });
   });
 
   it('retains the canonical metadata proof and authority decision', async () => {
@@ -27,7 +35,7 @@ describe('shared memory admission dependency outcomes', () => {
     expect(metadata).toEqual({ outcome: 'unavailable', source: 'confirmed-metadata', confirmation });
     if ('confirmation' in metadata && metadata.confirmation.source === 'chain-proof') expect(metadata.confirmation.proof).toBe(proof);
     const authority = await resolveSharedMemoryAdmission({ ...reads, confirmedMetadata: async () => ({ outcome: 'confirmed' }) });
-    expect(authority).toEqual({ outcome: 'unavailable', source: 'read-authority', decision });
+    expect(authority).toEqual({ outcome: 'unavailable', source: 'read-authority', kind: 'decision', decision });
     if ('decision' in authority) expect(authority.decision).toBe(decision);
   });
 

@@ -5,7 +5,7 @@ export { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './dur
 import { createRecoveryAuthority, memoizeRecoveryBindingProof, type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
 import { createRemoteQueryHandler } from "./remote-query-handler.js";
 import { observedReadAuthorityDecision } from './internal/context-graph-authority/unanswered-authority-read.js';
-import { resolveSharedMemoryAdmission, sharedMemoryAdmissionError, type SwmReadAdmission } from './swm-read-admission.js';
+import { resolveSharedMemoryAdmission, sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed, type SwmReadAdmission } from './swm-read-admission.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -11000,11 +11000,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const admission = await this.resolveSharedMemoryReadAdmission(contextGraphId, opts);
     opts.signal?.throwIfAborted();
     // Existing lifecycle boolean callers fail closed while observations retain outages.
-    if ('decision' in admission && opts.readAuthority === undefined) {
+    if (admission.outcome === 'unavailable' && admission.source === 'read-authority' && admission.kind === 'decision' && opts.readAuthority === undefined) {
       observedReadAuthorityDecision(contextGraphId, admission.decision);
       return false;
     }
-    if (admission.outcome === 'unavailable' && admission.source !== 'legacy-membership') throw sharedMemoryAdmissionError(contextGraphId, admission);
+    if (admission.outcome === 'unavailable' && !sharedMemoryAdmissionFailsClosed(admission)) throw sharedMemoryAdmissionError(contextGraphId, admission);
     return admission.outcome === 'allowed';
   }
 
