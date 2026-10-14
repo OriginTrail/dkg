@@ -279,7 +279,9 @@ it; the CLI summary reports it against the current time.
   parameter `default` is no set: it is the one value a computation receives,
   so it is a field of its own (`schema:defaultValue`, kind `value`) kept
   whole, a list or mapping as one `rdf:JSON` literal; `[US]` stays a list and
-  `[2, 1, 2]` keeps its order and repeats. A family extension's list
+  `[2, 1, 2]` keeps its order and repeats. An explicit `default: null` is a
+  value too, kept as one `null`, while an omitted default writes nothing. A
+  family extension's list
   (`executor.retries: [1, 2]`) is still one triple per item.
 - **Both `timestamp` and `generated` present.** Unusual (a migration leftover).
   One codec, `src/families/generated.ts`, owns this rule in both directions:

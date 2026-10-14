@@ -121,9 +121,15 @@ function fieldTerms(field: FieldSpec, value: unknown): string[] | null {
   }
 }
 
-/** One field on `subject`. `label` names it in warnings (`computation`, `sources[3].resource`). */
+/**
+ * One field on `subject`. `label` names it in warnings (`computation`,
+ * `sources[3].resource`). An absent field writes nothing, and so does a
+ * `null`, except in a `value` field, where it is the value given (a
+ * parameter `default: null` is no omitted default), kept as one `null`
+ * (`rdf:JSON`).
+ */
 function encodeField(enc: Encoding, field: FieldSpec, subject: string, value: unknown, label: string): void {
-  if (value === undefined || value === null) return;
+  if (value === undefined || (value === null && field.kind !== 'value')) return;
   if (field.omitWhenBlank && isBlank(value)) return;
   const terms = fieldTerms(field, value);
   if (terms === null) {

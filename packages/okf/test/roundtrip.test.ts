@@ -20,7 +20,7 @@ import {
   okfExtensionPredicate,
 } from '../src/index.js';
 import type { BundleFile, Quad } from '../src/index.js';
-import { objs, IDX_V02, bundle, exportedFrontmatter, DT, semantic } from './helpers/okf-v02-fixtures.js';
+import { objs, IDX_V02, bundle, exportedFrontmatter, DT, semantic, shuffled } from './helpers/okf-v02-fixtures.js';
 
 const files = loadBundleDir(fileURLToPath(new URL('./fixtures/crypto_bitcoin', import.meta.url)));
 
@@ -177,13 +177,7 @@ describe('exportInputFromQuads: the package rebuilds concepts from a graph in an
   });
 
   it('round-trips the semantic graph from shuffled quads under a custom base', () => {
-    let x = 99;
-    const shuffledQuads = [...imported.quads];
-    for (let i = shuffledQuads.length - 1; i > 0; i--) {
-      x = (x * 1103515245 + 12345) % 2147483648;
-      const j = x % (i + 1);
-      [shuffledQuads[i], shuffledQuads[j]] = [shuffledQuads[j], shuffledQuads[i]];
-    }
+    const shuffledQuads = shuffled(imported.quads, 99);
     const exported = exportBundle(exportInputFromQuads(shuffledQuads, { iriBase: BASE }), { iriBase: BASE });
     expect(exported.some((f) => f.path.includes('.well-known'))).toBe(false);
     expect(semantic(importBundle(exported, { iriBase: BASE }).quads)).toBe(semantic(imported.quads));
@@ -356,17 +350,6 @@ describe('export depends only on which triples the graph holds', () => {
     ].join('\n'),
     '# Citations\n\n[1] [b](https://b.example/)\n[2] [a](https://a.example/)\n',
   );
-  function shuffled<T>(items: T[], seed: number): T[] {
-    const out = [...items];
-    let x = seed;
-    for (let i = out.length - 1; i > 0; i--) {
-      x = (x * 1103515245 + 12345) % 2147483648;
-      const j = x % (i + 1);
-      [out[i], out[j]] = [out[j], out[i]];
-    }
-    return out;
-  }
-
   it('exports byte-identically from rows in any order', () => {
     for (const bundleFiles of [files, acme, mixed]) {
       const imported = importBundle(bundleFiles);

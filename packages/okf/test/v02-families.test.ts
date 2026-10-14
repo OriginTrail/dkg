@@ -53,7 +53,7 @@ import {
 import * as okfPublic from '../src/index.js';
 import { decodeFamilies, prepareFamily, resolveReferences, FAMILY_SPECS, FAMILY_BY_KEY, VERIFIED } from '../src/families/index.js';
 import type { Quad } from '../src/index.js';
-import { DT, IDX_V02, objs, node, bundle, conceptOf, exportedFrontmatter, semantic } from './helpers/okf-v02-fixtures.js';
+import { DT, IDX_V02, objs, node, bundle, conceptOf, exportedFrontmatter, semantic, shuffled } from './helpers/okf-v02-fixtures.js';
 
 describe('§5.2 generated / legacy timestamp', () => {
   it('maps generated.by → okf:generatedBy and generated.at → schema:dateModified (canonical lexical)', () => {
@@ -500,6 +500,8 @@ describe('a parameter default is one value, kept whole', () => {
     ['[2, 1, 2]', [2, 1, 2]],
     ['[[1, 2], [3]]', [[1, 2], [3]]],
     ['{ a: 1, b: [x, y] }', { a: 1, b: ['x', 'y'] }],
+    // an explicit null is the value given, not an omitted default
+    ['null', null],
   ] as const) {
     it(`keeps default: ${yaml} through import, export and re-import`, () => {
       const files = withDefault(yaml);
@@ -515,6 +517,13 @@ describe('a parameter default is one value, kept whole', () => {
       expect(exportBundle(second)).toEqual(exported);
     });
   }
+
+  it('writes nothing for an omitted default', () => {
+    const files = bundle('type: Attested Computation\nruntime: bigquery\nparameters:\n  - { name: p, type: string }');
+    const c = importBundle(files).concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(objs(c.quads, SCHEMA_DEFAULT_VALUE, node(GENID_TAGS.parameter, 0))).toEqual([]);
+    expect('default' in (exportedFrontmatter(files).parameters as Array<Record<string, unknown>>)[0]).toBe(false);
+  });
 
   it('keeps a scalar default typed, and the receipt a set', () => {
     const files = bundle([
@@ -570,18 +579,6 @@ describe('export restores family entry order from the node IRIs, whatever order 
     '  - { id: s1, resource: https://x.example/1 }',
     '  - { id: s2, resource: https://x.example/2 }',
   ].join('\n');
-
-  /** Deterministic Fisher–Yates with a small LCG, so the test is reproducible. */
-  function shuffled<T>(items: T[], seed: number): T[] {
-    const out = [...items];
-    let x = seed;
-    for (let i = out.length - 1; i > 0; i--) {
-      x = (x * 1103515245 + 12345) % 2147483648;
-      const j = x % (i + 1);
-      [out[i], out[j]] = [out[j], out[i]];
-    }
-    return out;
-  }
 
   const imported = importBundle(bundle(ORDERED));
   const concept = imported.concepts.find((x) => x.conceptId === 'metrics/revenue')!;

@@ -75,7 +75,8 @@ export type FieldKind =
   /**
    * One value of any type, kept whole: a scalar as its typed term, a list or
    * mapping as one `rdf:JSON` literal, so its shape, order and repeats
-   * survive (a parameter `default` of `[US]` or `[2, 1, 2]`).
+   * survive (a parameter `default` of `[US]` or `[2, 1, 2]`), and an explicit
+   * `null` as one `null` literal, so it stays apart from an omitted value.
    */
   | 'value'
   /** One plain literal per element; set semantics, so it decodes sorted. */
