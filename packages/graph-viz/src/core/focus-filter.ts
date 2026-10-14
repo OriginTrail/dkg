@@ -45,7 +45,7 @@ export class FocusFilter {
   } {
     // A refresh can replace every URI while keeping the same number of triples.
     // Reusing an absent focal node would otherwise produce an empty large graph.
-    if (this._focalNode && !model.nodes.has(this._focalNode)) this._focalNode = null;
+    if (model.nodes.size > 0 && this._focalNode && !model.nodes.has(this._focalNode)) this._focalNode = null;
     // If graph is small enough, show everything
     if (model.nodes.size <= this._config.maxNodes) {
       this._enabled = false;

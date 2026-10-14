@@ -33,6 +33,7 @@ export class WebGL3DRenderer implements RendererBackend {
   private _styleEngine: StyleEngine;
   private _events: GraphEventEmitter;
   private _currentNodes = new Map<string, ForceNode>();
+  private _nodeImageUrls = new Map<string, string>();
   private _positionCache = new Map<string, {
     x?: number;
     y?: number;
@@ -235,6 +236,16 @@ export class WebGL3DRenderer implements RendererBackend {
       if (collapsedNodeIds?.has(id)) continue;
       const existing = this._currentNodes.get(id);
       const cached = this._positionCache.get(id);
+      // The scene mapper owns objects by ForceNode identity. Reusing a Sprite
+      // with a replacement node makes removal of the old owner detach it.
+      // GraphNode decorations can mutate in place, so compare the last
+      // rendered URL snapshot rather than the mutable _graphNode reference.
+      if (existing && this._nodeImageUrls.get(id) === (gn.imageUrl ?? '')) {
+        existing._graphNode = gn;
+        if (this._iconSprites.has(id)) this._createIconSprite(gn);
+        newNodes.set(id, existing);
+        continue;
+      }
       newNodes.set(id, {
         id,
         x: existing?.x ?? cached?.x ?? (Math.random() - 0.5) * 300,
@@ -264,6 +275,7 @@ export class WebGL3DRenderer implements RendererBackend {
     }
 
     this._currentNodes = newNodes;
+    this._nodeImageUrls = new Map([...newNodes].map(([id, node]) => [id, node._graphNode?.imageUrl ?? '']));
     const freshCache = new Map<string, { x?: number; y?: number; vx?: number; vy?: number; fx?: number | null; fy?: number | null }>();
     for (const [id, node] of newNodes) {
       freshCache.set(id, {
@@ -282,9 +294,7 @@ export class WebGL3DRenderer implements RendererBackend {
     }
     for (const [id, icon] of this._iconSprites) {
       if (newNodes.get(id)?._graphNode?.imageUrl === icon.url) continue;
-      icon.sprite.parent?.remove(icon.sprite);
-      icon.sprite.material.dispose();
-      this._iconMaterials.delete(icon.sprite.material);
+      this._disposeIcon(icon.sprite);
       this._iconSprites.delete(id);
     }
     for (const [url, texture] of this._textureCache) {
@@ -355,6 +365,7 @@ export class WebGL3DRenderer implements RendererBackend {
     this._svgImages.clear();
     for (const sprite of this._labelSprites.values()) this._disposeLabel(sprite);
     for (const texture of this._textureCache.values()) texture.dispose();
+    for (const icon of this._iconSprites.values()) this._disposeIcon(icon.sprite);
     for (const material of this._iconMaterials) material.dispose();
     this._iconMaterials.clear();
     this._iconSprites.clear();
@@ -375,6 +386,7 @@ export class WebGL3DRenderer implements RendererBackend {
       this._graph = null;
     }
     this._currentNodes.clear();
+    this._nodeImageUrls.clear();
     this._positionCache.clear();
     this._labelSprites.clear();
     this._textureCache.clear();
@@ -383,6 +395,17 @@ export class WebGL3DRenderer implements RendererBackend {
   // ──────────────────────────────────────────
   // Icon sprites — only created for nodes with imageUrl
   // ──────────────────────────────────────────
+
+  private _disposeIcon(sprite: any): void {
+    sprite.parent?.remove(sprite);
+    const material = sprite.material;
+    material?.dispose();
+    this._iconMaterials.delete(material);
+    // three-forcegraph disposes both material and map when retiring its
+    // owner. The renderer owns shared textures, so do not let that retirement
+    // dispose a texture that another live icon still uses (or dispose twice).
+    sprite.material = null;
+  }
 
   private _createIconSprite(node: GraphNode): any {
     const THREE = this._THREE;

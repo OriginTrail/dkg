@@ -50,10 +50,11 @@ describe('renderer hit regions and resources', () => {
     const renderer = new WebGL3DRenderer(config()); const internal = renderer as any;
     internal._graph = graph.chain;
     const sprite = label(); const texture = { dispose: vi.fn() };
+    const removedMaterial = sprite.material;
     internal._iconSprites.set('urn:gone', { url: 'gone.png', sprite });
     internal._iconMaterials.add(sprite.material); internal._textureCache.set('gone.png', texture);
     renderer.render(new Map(), new Map());
-    expect(sprite.material.dispose).toHaveBeenCalledOnce(); expect(texture.dispose).toHaveBeenCalledOnce();
+    expect(removedMaterial.dispose).toHaveBeenCalledOnce(); expect(texture.dispose).toHaveBeenCalledOnce();
     expect(internal._iconSprites.size).toBe(0); expect(internal._textureCache.size).toBe(0);
     const remaining = label(); internal._labelSprites.set('urn:remaining', remaining);
     const cancel = vi.spyOn(globalThis, 'cancelAnimationFrame'); internal._fadeFrame = 7;
@@ -94,8 +95,9 @@ describe('renderer hit regions and resources', () => {
     renderer.render(new Map([[peer.id, peer]]), new Map());
     expect(disposeFirst).toHaveBeenCalledOnce();
     expect(disposeTexture).not.toHaveBeenCalled();
-    renderer.render(new Map(), new Map());
-    renderer.destroy();
+    // Leave the second icon/texture live until teardown, so destroy's resource
+    // loops are independently covered rather than just graph replacement.
+    renderer.destroy(); renderer.destroy();
     expect(disposeSecond).toHaveBeenCalledOnce();
     expect(disposeTexture).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);

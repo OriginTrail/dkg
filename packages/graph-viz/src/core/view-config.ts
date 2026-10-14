@@ -237,6 +237,8 @@ export interface ViewConfig {
 
 // --- ViewConfig Applicator ---
 
+const viewBaselines = new WeakMap<GraphNode, Pick<GraphNode, 'imageUrl' | 'sizeMultiplier' | 'riskScore' | 'isHighRisk'>>();
+
 /**
  * Apply a ViewConfig to a loaded graph model.
  *
@@ -246,6 +248,14 @@ export interface ViewConfig {
  * Call this AFTER loading triples into the model, BEFORE refresh().
  */
 export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
+  // Decorations replace the previous view. Keep the ingested image/flags as
+  // the baseline, keyed by node object so replacement data starts afresh.
+  for (const node of model.nodes.values()) {
+    const previous = viewBaselines.get(node);
+    if (previous) Object.assign(node, previous);
+    else viewBaselines.set(node, { imageUrl: node.imageUrl, sizeMultiplier: node.sizeMultiplier,
+      riskScore: node.riskScore, isHighRisk: node.isHighRisk });
+  }
   // 1. Focal entity
   if (config.focal) {
     const focalNode = findNodeAcrossNamespaces(model, config.focal.uri);
