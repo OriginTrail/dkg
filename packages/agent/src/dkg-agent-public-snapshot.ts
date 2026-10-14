@@ -6,7 +6,7 @@ import {
   PublicGraphSnapshotCache,
   PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
 } from "@origintrail-official/dkg-chain";
-import { buildKnowledgeAssetUalFromOnChainIdV1 } from "@origintrail-official/dkg-core";
+import { startRequestAbortLifecycle, buildKnowledgeAssetUalFromOnChainIdV1 } from "@origintrail-official/dkg-core";
 import { runGraphScopedPhysicalOperation } from "./sync/requester/graph-scoped-operation-fence.js";
 import type { DKGAgent } from "./dkg-agent.js";
 import {
@@ -24,13 +24,14 @@ export class PublicSnapshotMethods {
   startPublicGraphSnapshots(this: DKGAgent): void {
     if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
       return;
-    const cache = new PublicGraphSnapshotCache((id, onChainId, signal) => {
-      const operation = this.chain.readPublicGraphSnapshot!(id, onChainId, {
-        signal: AbortSignal.any([signal, this.vmReconcileLifecycleController.signal]),
-      });
-      this.vmReconcilePhysicalRuns.add(operation);
-      void operation.finally(() => this.vmReconcilePhysicalRuns.delete(operation)).catch(() => {});
-      return operation;
+    const cache = new PublicGraphSnapshotCache(async (id, onChainId, signal) => {
+      const lifecycle = startRequestAbortLifecycle(110_000, [signal, this.vmReconcileLifecycleController.signal]);
+      try {
+        const operation = this.chain.readPublicGraphSnapshot!(id, onChainId, { signal: lifecycle.signal });
+        this.vmReconcilePhysicalRuns.add(operation);
+        try { return await operation; }
+        finally { this.vmReconcilePhysicalRuns.delete(operation); }
+      } finally { lifecycle.release(); }
     });
     const admission = new PublicSnapshotAdmission();
     this.router.register(
@@ -84,11 +85,10 @@ export class PublicSnapshotMethods {
     const lifetime = this.vmReconcileLifecycleGeneration;
     jobs.add(this);
     const startedAt = Date.now();
-    const timeout = AbortSignal.timeout(3_600_000);
-    const signal = AbortSignal.any([
-      this.vmReconcileLifecycleController.signal, timeout,
-      ...(options.signal ? [options.signal] : []),
+    const lifecycle = startRequestAbortLifecycle(3_600_000, [
+      this.vmReconcileLifecycleController.signal, options.signal,
     ]);
+    const { signal } = lifecycle;
     try {
       return await runGraphScopedPhysicalOperation({
         contextGraphId, signal,
@@ -180,6 +180,7 @@ export class PublicSnapshotMethods {
         },
       });
     } finally {
+      lifecycle.release();
       jobs.delete(this);
     }
   }
