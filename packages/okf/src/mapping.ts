@@ -28,7 +28,6 @@ import {
   SCHEMA_DESCRIPTION,
   SCHEMA_KEYWORDS,
   SCHEMA_MENTIONS,
-  SCHEMA_DATE_MODIFIED,
   SCHEMA_URL,
   SCHEMA_CITATION,
   SCHEMA_IS_PART_OF,
@@ -41,8 +40,6 @@ import { conceptIdToIri, resolveLinkTarget } from './paths.js';
 import { dedupeQuads, isBlank, isSafeIri, isScalar, literalTerm, safeString, sanitizeForBlank } from './utils.js';
 import {
   typeToIri,
-  dateTerm,
-  genericQuads,
   isAttestedComputationType,
   isMapping,
   toArray,
@@ -59,6 +56,7 @@ import {
   declaresSources,
   type PreparedQuad,
 } from './families/index.js';
+import { lastModifiedOf, timestampIsProducerKey, timestampQuads } from './families/generated.js';
 import { dateTimeLexical } from './timestamps.js';
 import { parseVerified, trustTierOf, conceptStatus } from './trust.js';
 import type {
@@ -141,7 +139,7 @@ const BASE_KEYS: ReadonlySet<string> = new Set(['type', 'title', 'description', 
  * a key.
  */
 export function readsAsProducerKey(key: string, frontmatter: Record<string, unknown>): boolean {
-  if (key === 'timestamp') return generatedAtOf(frontmatter) !== null;
+  if (key === 'timestamp') return timestampIsProducerKey(frontmatter);
   return !BASE_KEYS.has(key) && !FAMILY_BY_KEY.has(key);
 }
 
@@ -152,8 +150,6 @@ export function readsAsProducerKey(key: string, frontmatter: Record<string, unkn
  */
 function prepareFrontmatter(iri: string, frontmatter: Record<string, unknown>, conceptId: string): PreparedQuad[] {
   const out: PreparedQuad[] = [];
-  // v0.2 `generated.at` supersedes the v0.1 `timestamp` (§13.1).
-  const generatedAt = generatedAtOf(frontmatter);
 
   for (const [key, value] of Object.entries(frontmatter)) {
     if (value === null || value === undefined) continue;
@@ -179,17 +175,10 @@ function prepareFrontmatter(iri: string, frontmatter: Record<string, unknown>, c
           out.push({ subject: iri, predicate: SCHEMA_KEYWORDS, object: literalTerm(safeString(tag)) });
         }
         break;
-      case 'timestamp': {
-        // Legacy v0.1 last-modified (§13.1). When `generated.at` is present it
-        // wins; the leftover `timestamp` is then preserved as a producer key.
-        if (generatedAt !== null) {
-          out.push(...genericQuads(iri, key, value));
-          break;
-        }
-        const t = dateTerm(value);
-        if (t) out.push({ subject: iri, predicate: SCHEMA_DATE_MODIFIED, object: t });
+      case 'timestamp':
+        // Legacy v0.1 last-modified, or a producer key when `generated.at` supersedes it (§13.1).
+        out.push(...timestampQuads(iri, frontmatter, value));
         break;
-      }
       case 'resource': {
         const r = safeString(value);
         out.push({ subject: iri, predicate: SCHEMA_URL, object: isSafeIri(r) ? r : literalTerm(r) });
@@ -206,15 +195,6 @@ function resolveFrontmatter(iri: string, prepared: readonly PreparedQuad[], ctx:
   // An RDF store holds a set: emit each triple once (two sources naming one
   // resource would otherwise yield two identical prov:wasDerivedFrom edges).
   return { quads: dedupeQuads(r.quads), derivedFromConcepts: [...new Set(r.derivedFromConcepts)].sort(), warnings: r.warnings };
-}
-
-/**
- * `generated.at` when it gives a last-modified time, which then supersedes the
- * v0.1 `timestamp` (§13.1); a blank one is missing (§11) and does not.
- */
-function generatedAtOf(frontmatter: Record<string, unknown>): string | null {
-  const at = isMapping(frontmatter.generated) ? frontmatter.generated.at : undefined;
-  return isBlank(at) ? null : dateTimeLexical(at);
 }
 
 /** Quads-only view of `mapFrontmatter` (kept for API compatibility). */
@@ -234,7 +214,7 @@ export function summarizeTrust(
   const generated = isMapping(frontmatter.generated) ? frontmatter.generated : null;
   const by = generated?.by;
   const generatedBy = isScalar(by) && !isBlank(by) ? safeString(by).trim() : null;
-  const generatedAt = generatedAtOf(frontmatter) ?? dateTimeLexical(frontmatter.timestamp);
+  const generatedAt = lastModifiedOf(frontmatter);
   // The same parses the RDF mapping uses, so the counts match the nodes minted.
   const { events } = parseVerified(frontmatter.verified);
   const sources = parseList(SOURCES, frontmatter.sources).entries.filter((e) => e.mapping !== null).length;

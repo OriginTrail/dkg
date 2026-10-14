@@ -110,19 +110,6 @@ export interface MappingFamilySpec extends FamilyBase {
   readonly fields: readonly FieldSpec[];
   /** Diagnostic wording when the value is not a mapping (it is then kept verbatim). */
   readonly shapeNote: string;
-  /**
-   * When set, a decoded family exists only if one of these fields, or an
-   * extension, is present. `generated` needs its `by` (§5.2): a bare
-   * last-modified time exports as the legacy `timestamp` instead.
-   */
-  readonly presentWith?: readonly string[];
-  /**
-   * §13.1: when the family is not there (`presentWith`), this field reads
-   * back under the legacy `key` instead: `generated.at` as `timestamp`. When
-   * the concept also keeps a producer value under that key (which only this
-   * field makes), the field reads back inside the family instead.
-   */
-  readonly legacy?: { readonly field: string; readonly key: string };
 }
 
 /** A list of entries, one skolemized node each: `verified`, `sources`, `parameters`. */
@@ -154,8 +141,6 @@ export const GENERATED: MappingFamilySpec = {
   section: '§5.2',
   shape: 'mapping',
   shapeNote: 'must be a `{ by, at }` mapping (§5.2); preserved verbatim',
-  presentWith: ['by'],
-  legacy: { field: 'at', key: 'timestamp' },
   fields: [
     { key: 'by', predicate: OKF_GENERATED_BY, kind: 'actor', requiredNote: 'is required within `generated` (§5.2)', omitWhenBlank: true },
     { key: 'at', predicate: SCHEMA_DATE_MODIFIED, kind: 'date' },

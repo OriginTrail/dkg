@@ -259,6 +259,9 @@ it; the CLI summary reports it against the current time.
   `sources` keep their order because the node IRI numbers the entries, and a
   value kept verbatim as one `rdf:JSON` literal keeps its internal order.
 - **Both `timestamp` and `generated` present.** Unusual (a migration leftover).
+  One codec, `src/families/generated.ts`, owns this rule in both directions:
+  the mapper's `timestamp` triples, the summary's last-modified time, whether
+  `timestamp` is a producer key, and how export gives each value back.
   `generated.at` → `schema:dateModified`; `timestamp` → `schema:timestamp` (the
   node extractor's own slug for that key), preserved and exported verbatim.
   Export writes both back even when `generated` has no `by`: since only a

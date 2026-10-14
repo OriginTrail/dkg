@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { exportBundle, importBundle, SCHEMA_DATE_MODIFIED } from '../src/index.js';
+import { exportBundle, importBundle, SCHEMA_DATE_MODIFIED, SCHEMA_NS } from '../src/index.js';
+import { generatedAtOf, lastModifiedOf, timestampIsProducerKey, timestampQuads } from '../src/families/generated.js';
 import { bundle, exportedFrontmatter, objs, DT, semantic } from './helpers/okf-v02-fixtures.js';
 
 // `generated.at` and the v0.1 `timestamp` share `schema:dateModified` (§13.1):
@@ -79,5 +80,23 @@ describe('a structured generated.at stays inside generated through a round trip'
     expect(fm.generated).toMatchObject({ by: 'human:a', at: ['2026-06-30T00:00:00Z'] });
     expect(fm.timestamp).toBe('2026-01-01T00:00:00Z');
     expect(objs(second.concepts.find((x) => x.conceptId === 'metrics/revenue')!.quads, SCHEMA_DATE_MODIFIED)).toContain(DT('2026-01-01T00:00:00Z'));
+  });
+});
+
+describe('one codec owns the generated / timestamp rule', () => {
+  it('decides precedence once, for the mapper, the summary and the producer-key check', () => {
+    const iri = 'urn:okf:x';
+    const cases: Array<{ fm: Record<string, unknown>; supersedes: boolean; lastModified: string }> = [
+      { fm: { generated: { at: '2026-06-30T00:00:00Z' }, timestamp: '2026-01-01T00:00:00Z' }, supersedes: true, lastModified: '2026-06-30T00:00:00Z' },
+      { fm: { timestamp: '2026-01-01T00:00:00Z' }, supersedes: false, lastModified: '2026-01-01T00:00:00Z' },
+      { fm: { generated: { at: '' }, timestamp: '2026-01-01T00:00:00Z' }, supersedes: false, lastModified: '2026-01-01T00:00:00Z' },
+      { fm: { generated: { at: ['2026-06-30T00:00:00Z'] }, timestamp: '2026-01-01T00:00:00Z' }, supersedes: false, lastModified: '2026-01-01T00:00:00Z' },
+    ];
+    for (const { fm, supersedes, lastModified } of cases) {
+      expect(generatedAtOf(fm) !== null).toBe(supersedes);
+      expect(timestampIsProducerKey(fm)).toBe(supersedes);
+      expect(timestampQuads(iri, fm, fm.timestamp).map((q) => q.predicate)).toEqual([supersedes ? SCHEMA_NS + 'timestamp' : SCHEMA_DATE_MODIFIED]);
+      expect(lastModifiedOf(fm)).toBe(lastModified);
+    }
   });
 });
