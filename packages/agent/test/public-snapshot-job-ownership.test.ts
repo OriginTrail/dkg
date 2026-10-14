@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
@@ -25,6 +26,15 @@ function fixture() {
 }
 const run = (a: any, mode: 'core-cache' | 'rpc-only') => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode});
 describe('public snapshot job ownership', () => {
+  it('releases caller and node lifetime listeners after an empty job settles', async () => {
+    const { a } = fixture(), caller = new AbortController();
+    const lifetime = a.vmReconcileLifecycleController.signal;
+    await PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, { ...request, mode: 'rpc-only', signal: caller.signal });
+    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+    expect(getEventListeners(lifetime, 'abort')).toHaveLength(0);
+    expect(a.vmReconcilePhysicalRuns.size).toBe(0);
+  });
+
   it.each(['core-cache', 'rpc-only'] as const)('rejects deselected graphs before any %s read', async mode => {
     const {a} = fixture(); a.subscribedContextGraphs.set(graph, { subscribed: false, coreHosted: false });
     await expect(run(a, mode)).rejects.toThrow('inactive');
@@ -42,8 +52,12 @@ describe('public snapshot job ownership', () => {
     a.subscribedContextGraphs.set(graph,{subscribed:true,onChainId:'1'});
     let release!: (s: ReturnType<typeof snapshot>)=>void;
     a.chain.readPublicGraphSnapshot.mockImplementationOnce(()=>new Promise(resolve=>{release=resolve;}));
-    const pending=handler(wire, { toString: () => "peer-a" }); invalidate(); release(snapshot());
+    const pending=handler(wire, { toString: () => "peer-a" });
+    expect(getEventListeners(a.vmReconcileLifecycleController.signal, 'abort')).toHaveLength(1);
+    invalidate(); release(snapshot());
     expect(JSON.parse(new TextDecoder().decode(await pending))).toEqual({unavailable:true});
+    expect(getEventListeners(a.vmReconcileLifecycleController.signal, 'abort')).toHaveLength(0);
+    expect(a.vmReconcilePhysicalRuns.size).toBe(0);
   });
   it.each(['subscription', 'lifetime'] as const)('retires a held initial read when %s changes', async change => {
     const {a,invalidate} = fixture();
