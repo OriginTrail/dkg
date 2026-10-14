@@ -113,14 +113,14 @@ describe('persistent prepared content', () => {
     expect(await f.cache.get('b')).toBeNull();
     expect(await f.cache.get('a')).toEqual(value);
   });
-  it('accounts for physical replacement bytes while evicting to the byte limit', async () => {
+  it('declines replacement when its temporary file cannot fit the physical byte limit', async () => {
     const f = await fixture({ maxBytes: 800 });
     await f.cache.put('a', value); await f.cache.put('b', value);
     await f.cache.put('b', { body: new Uint8Array(500), plainBytes: 500 });
     const sizes = await Promise.all((await readdir(f.directory)).map(async name => (await stat(join(f.directory, name))).size));
     expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(800);
-    expect(await f.cache.get('a')).toBeNull();
-    expect((await f.cache.get('b'))!.body).toHaveLength(500);
+    expect(await f.cache.get('a')).toEqual(value);
+    expect(await f.cache.get('b')).toEqual(value);
   });
   it('fails open on unavailable IO without modifying other files', async () => {
     const f = await fixture(); const file = join(f.directory, 'file'); await writeFile(file, 'keep');
