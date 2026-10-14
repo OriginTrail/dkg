@@ -71,6 +71,7 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
 
+import { ScopedQueryViolationError } from './scoped-query-error.js';
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
 /** Upstream statuses that mean the SUBMITTED query was malformed. */
@@ -808,7 +809,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // rows, reject the unsupported shape explicitly so the caller gets a
     // clear error instead of wrong data.
     if (hasCrossGraphUnsafeModifier(scope)) {
-      throw new Error(
+      throw new ScopedQueryViolationError(
         'Multi-graph query combines an inner UNION with a solution-set ' +
           'modifier (DISTINCT/ORDER BY/LIMIT/OFFSET/GROUP BY/aggregate). ' +
           'This shape cannot be evaluated across graphs without corrupting ' +
