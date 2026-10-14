@@ -237,7 +237,20 @@ export interface ViewConfig {
 
 // --- ViewConfig Applicator ---
 
-const viewBaselines = new WeakMap<GraphNode, Pick<GraphNode, 'imageUrl' | 'sizeMultiplier' | 'riskScore' | 'isHighRisk'>>();
+type NodeDecorations = Pick<GraphNode, 'imageUrl' | 'sizeMultiplier' | 'riskScore' | 'isHighRisk'>;
+const viewBaselines = new WeakMap<GraphNode, { data: NodeDecorations; imageOverridden: boolean }>();
+
+/** Record the current RDF-derived image without replacing an active view icon. */
+export function updateDataImageUrl(node: GraphNode, imageUrl: string | null): void {
+  const baseline = viewBaselines.get(node);
+  if (baseline) baseline.data.imageUrl = imageUrl;
+  if (!baseline?.imageOverridden) node.imageUrl = imageUrl;
+}
+
+function setViewImageUrl(node: GraphNode, imageUrl: string): void {
+  node.imageUrl = imageUrl;
+  viewBaselines.get(node)!.imageOverridden = true;
+}
 
 /**
  * Apply a ViewConfig to a loaded graph model.
@@ -248,13 +261,15 @@ const viewBaselines = new WeakMap<GraphNode, Pick<GraphNode, 'imageUrl' | 'sizeM
  * Call this AFTER loading triples into the model, BEFORE refresh().
  */
 export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
-  // Decorations replace the previous view. Keep the ingested image/flags as
-  // the baseline, keyed by node object so replacement data starts afresh.
+  // Decorations replace the previous view. Ingestion updates the data image
+  // baseline even when the current view masks it with an icon.
   for (const node of model.nodes.values()) {
-    const previous = viewBaselines.get(node);
-    if (previous) Object.assign(node, previous);
-    else viewBaselines.set(node, { imageUrl: node.imageUrl, sizeMultiplier: node.sizeMultiplier,
-      riskScore: node.riskScore, isHighRisk: node.isHighRisk });
+    const baseline = viewBaselines.get(node);
+    if (baseline) {
+      Object.assign(node, baseline.data);
+      baseline.imageOverridden = false;
+    } else viewBaselines.set(node, { data: { imageUrl: node.imageUrl, sizeMultiplier: node.sizeMultiplier,
+      riskScore: node.riskScore, isHighRisk: node.isHighRisk }, imageOverridden: false });
   }
   // 1. Focal entity
   if (config.focal) {
@@ -262,7 +277,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
     if (focalNode) {
       focalNode.sizeMultiplier = config.focal.sizeMultiplier ?? 1.5;
       if (config.focal.image) {
-        focalNode.imageUrl = config.focal.image;
+        setViewImageUrl(focalNode, config.focal.image);
       }
     }
   }
@@ -278,7 +293,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
       for (const edge of platformEdges) {
         const platformId = edge.target.split('/').pop() ?? '';
         if (config.platformIcons.icons[platformId]) {
-          node.imageUrl = config.platformIcons.icons[platformId];
+          setViewImageUrl(node, config.platformIcons.icons[platformId]);
           break;
         }
       }
@@ -287,7 +302,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
       if (!node.imageUrl && config.platformIcons.urlFallbacks) {
         for (const [substr, platformKey] of Object.entries(config.platformIcons.urlFallbacks)) {
           if (node.id.includes(substr) && config.platformIcons.icons[platformKey]) {
-            node.imageUrl = config.platformIcons.icons[platformKey];
+            setViewImageUrl(node, config.platformIcons.icons[platformKey]);
             break;
           }
         }
@@ -443,7 +458,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
           || config.nodeTypes[`vocab:${shortType}`]
           || config.nodeTypes[shortType];
         if (typeConfig?.icon) {
-          node.imageUrl = typeConfig.icon;
+          setViewImageUrl(node, typeConfig.icon);
           break;
         }
       }

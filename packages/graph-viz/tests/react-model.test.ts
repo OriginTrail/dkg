@@ -16,6 +16,42 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('React wrapper with the real graph model', () => {
+  it('keeps an image resolved after the first view across subsequent view changes', () => {
+    const viz = new RdfGraphViz(container);
+    try {
+      viz.loadTriples([{ subject: 'urn:person', predicate: 'urn:name', object: 'Person' }]);
+      viz.applyView({ name: 'Initial' });
+      const person = viz.model.nodes.get('urn:person')!;
+      expect(person.imageUrl).toBeNull();
+      const image = 'https://example.test/photo one.png';
+      viz.addTriples([{ subject: person.id, predicate: 'https://schema.org/image', object: image }]);
+      expect(person.imageUrl).toBe(image);
+      viz.applyView({ name: 'Next' });
+      expect(viz.model.nodes.get(person.id)).toBe(person);
+      expect(person.properties.get('https://schema.org/image')?.[0].value).toBe(image);
+      expect(person.imageUrl).toBe(image);
+      viz.applyView({ name: 'Override', focal: { uri: person.id, image: 'view.png' } });
+      viz.applyView({ name: 'Default' });
+      expect(person.imageUrl).toBe(image);
+    } finally { viz.destroy(); }
+  });
+  it('preserves an active view image but restores newly ingested RDF images when the view changes', () => {
+    const viz = new RdfGraphViz(container);
+    try {
+      viz.loadTriples([{ subject: 'urn:person', predicate: 'urn:name', object: 'Person' }]);
+      viz.applyView({ name: 'Override', focal: { uri: 'urn:person', image: 'view.png' } });
+      const person = viz.model.nodes.get('urn:person')!;
+      const image = 'https://example.test/photo two.png';
+      const triple = { subject: person.id, predicate: 'https://schema.org/image', object: image };
+      viz.addTriples([triple]);
+      expect(person.imageUrl).toBe('view.png');
+      viz.applyView({ name: 'Default' });
+      expect(person.imageUrl).toBe(image);
+      viz.removeTriples([triple]);
+      viz.applyView({ name: 'After removal' });
+      expect(person.imageUrl).toBeNull();
+    } finally { viz.destroy(); }
+  });
   it('replaces and removes view decorations while preserving model identity and data images', async () => {
     const loaded = vi.spyOn(RdfGraphViz.prototype, 'loadTriples');
     vi.spyOn(HexagonPainter.prototype, 'resolveImageUrl').mockImplementation(node => node.id === 'urn:b' ? 'https://example.invalid/data.png' : null);

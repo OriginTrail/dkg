@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '../../storage/dist/index.js';
 import { DKGQueryEngine } from '../../query/dist/dkg-query-engine.js';
+import { generateAssertionCreatedMetadata } from '../../publisher/dist/metadata.js';
 import { listAssertionsPage, fetchAssertionPageCounts } from '../src/ui/assertions-page.js';
 import { invalidateQueryCache } from '../src/ui/api.js';
 import { fetchMemoryEntity, readMemoryGraphPage } from '../src/ui/hooks/useMemoryEntities.js';
@@ -44,6 +45,32 @@ beforeEach(() => {
 afterEach(async () => { vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 
 describe('assertion pages against the native scoped query engine', () => {
+  it.each(['', '^^<http://www.w3.org/2001/XMLSchema#string>', '@en'])('decodes publisher reserved UAL literals with suffix %s without changing graph IRIs', async suffix => {
+    const name = 'publisher-reservation'; const id = iri(name);
+    const ual = `did:dkg:evm:31337/${owner}/7`;
+    const metadata = generateAssertionCreatedMetadata({ contextGraphId: cg, agentAddress: owner,
+      assertionName: name, kaNumber: 7, reservedUal: ual, timestamp: new Date('2026-10-14T00:00:00Z') },
+      { provenanceEvents: false });
+    const graph = metadata.find(quad => quad.predicate === dkg + 'assertionGraph')!.object;
+    expect(metadata.find(quad => quad.predicate === dkg + 'reservedUal')!.object).toBe(JSON.stringify(ual));
+    await store.insert([
+      ...metadata.map(quad => quad.predicate === dkg + 'reservedUal' ? { ...quad, object: quad.object + suffix } : quad),
+      { subject: 'urn:record', predicate: 'urn:value', object: '"fact"', graph },
+    ]);
+    const page = await listAssertionsPage(cg, 'wm');
+    expect(page.items).toEqual([{ name, graphUri: id, reservedUal: ual, dataGraphUri: graph, tripleCount: 1 }]);
+    expect(page.nextCursor).toBeUndefined(); expect(failures).toEqual([]);
+  });
+  it('preserves lexical standard SPARQL JSON bindings and graph cursors', async () => {
+    const ual = `did:dkg:evm:31337/${owner}/7`; const id = iri('standard'); const graph = content('standard');
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ result: { type: 'bindings', bindings: [
+      { g: { type: 'uri', value: id }, dg: { type: 'uri', value: graph }, ual: { type: 'literal', value: ual } },
+      { g: { type: 'uri', value: iri('standard-later') } },
+    ] } })));
+    const page = await listAssertionsPage(cg, 'wm', { pageSize: 1, includeCounts: false });
+    expect(page.items).toEqual([{ name: 'standard', graphUri: id, dataGraphUri: graph, reservedUal: ual }]);
+    expect(page.nextCursor).toBe(id);
+  });
   it.each(['$&', '$$', '$`', "$'", '$1'])('preserves %s in literal keyset cursors', async token => {
     const graph = content('replacement-cursor');
     await store.insert([

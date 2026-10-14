@@ -28,6 +28,34 @@ test.beforeEach(async ({ page }) => {
   });
 });
 test.afterEach(async () => { await store.close(); });
+test('native publisher literal UALs render and copy as lexical identifiers', async ({ page }) => {
+  const ual = `did:dkg:evm:31337/${owner}/7`;
+  await store.insert([{ subject: `urn:dkg:assertion:${cg}:${owner}:00`, predicate: 'http://dkg.io/ontology/reservedUal',
+    object: JSON.stringify(ual), graph: `did:dkg:context-graph:${cg}/_meta` }]);
+  await page.goto('/?view=assertions');
+  const element = page.locator('.v10-item-ual').first();
+  await expect(element).toHaveText(ual); await expect(element).toHaveAttribute('title', ual);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await element.evaluate(node => { const range = document.createRange(); range.selectNodeContents(node);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range); });
+  await page.keyboard.press('ControlOrMeta+C');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(ual);
+});
+test('incrementally ingested data images keep their WebGL sprite when the view changes', async ({ page }) => {
+  await page.route('**/photo*', route => route.fulfill({ contentType: 'image/png',
+    body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64') }));
+  await page.goto('/?view=scene-data');
+  await page.getByRole('button', { name: 'Add data image' }).click();
+  const state = () => page.evaluate(() => {
+    const viz = (window as any).regressionViz;
+    return { image: viz?.model.nodes.get('urn:a')?.imageUrl,
+      attached: viz?._renderer?._iconSprites?.get('urn:a')?.sprite?.parent != null };
+  });
+  const expected = { image: 'http://127.0.0.1:5186/photo one.png', attached: true };
+  await expect.poll(state).toEqual(expected);
+  await page.getByRole('button', { name: 'Switch default view' }).click();
+  await expect.poll(state).toEqual(expected);
+});
 test('Memory Stack flags the five-graph preview and loads the sixth graph', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Only loaded memory is shown.', { exact: false })).toBeVisible();

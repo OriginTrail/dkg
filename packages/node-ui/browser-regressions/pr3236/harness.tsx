@@ -4,20 +4,27 @@ import { MemoryStackView } from '../../src/ui/views/MemoryStackView.js';
 import { AgentProfilePage } from '../../src/ui/components/AgentProfilePage.js';
 import { useProjectsStore } from '../../src/ui/stores/projects.js';
 import { RdfGraphViz } from '../../../graph-viz/src/core/rdf-graph-viz.js';
+import { AssertionsList } from '../../src/ui/views/project/components/assertions.js';
 const cg = '0x1111111111111111111111111111111111111111/browser-preview';
 useProjectsStore.setState({ contextGraphs: [{ id: cg, name: 'Browser preview' } as any] });
-function Scene() {
+function Scene({ dataImages = false }: { dataImages?: boolean }) {
   const container = useRef<HTMLDivElement>(null);
   const viz = useRef<RdfGraphViz | null>(null);
   useEffect(() => {
     const graph = new RdfGraphViz(container.current!, { renderer: '3d' }); viz.current = graph;
     graph.loadTriples([{ subject: 'urn:a', predicate: 'urn:p', object: 'urn:b' }]);
-    graph.applyView({ name: 'icon', focal: { uri: 'urn:a', image: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=' } });
+    graph.applyView(dataImages ? { name: 'Initial' } : { name: 'icon', focal: { uri: 'urn:a', image: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=' } });
     (window as any).regressionViz = graph;
     return () => { graph.destroy(); delete (window as any).regressionViz; };
   }, []);
-  return <><button onClick={() => viz.current?.refresh()}>Redraw scene</button><div ref={container} style={{ width: 700, height: 500 }} /></>;
+  return <><button onClick={() => viz.current?.refresh()}>Redraw scene</button>
+    {dataImages && <><button onClick={() => viz.current?.addTriples([
+      { subject: 'urn:a', predicate: 'https://schema.org/image', object: `${location.origin}/photo one.png` },
+    ])}>Add data image</button><button onClick={() => viz.current?.applyView({ name: 'Next' })}>Switch default view</button></>}
+    <div ref={container} style={{ width: 700, height: 500 }} /></>;
 }
 const view = new URLSearchParams(location.search).get('view');
-createRoot(document.getElementById('root')!).render(view === 'scene' ? <Scene /> : view === 'agent'
+createRoot(document.getElementById('root')!).render(view === 'assertions'
+  ? <AssertionsList contextGraphId={cg} layer="wm" onComplete={() => {}} /> : view === 'scene-data'
+  ? <Scene dataImages /> : view === 'scene' ? <Scene /> : view === 'agent'
   ? <AgentProfilePage contextGraphId={cg} agentUri="urn:dkg:agent:late-author" /> : <MemoryStackView />);

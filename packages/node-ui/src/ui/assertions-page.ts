@@ -1,6 +1,7 @@
 import { sparqlIri } from '@origintrail-official/dkg-core/sparql-safe';
 import { executeQuery, type AssertionInfo } from './api.js';
 import { UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
+import { decodeRdfStringLiteral } from '../rdf-literal.js';
 
 export interface AssertionsPage {
   items: Array<AssertionInfo & { reservedUal?: string; dataGraphUri?: string }>;
@@ -66,7 +67,7 @@ export async function listAssertionsPage(
     const graphUri = value(row.g);
     const parsed = identity(graphUri, contextGraphId);
     if (!parsed || (parsed.subGraph === 'meta' && !(options.includeQueryCatalog && parsed.name.startsWith('query-catalog-')))) return [];
-    return [{ ...parsed, graphUri, reservedUal: value(row.ual) || undefined, dataGraphUri: value(row.dg) || undefined }];
+    return [{ ...parsed, graphUri, reservedUal: decodeRdfStringLiteral(value(row.ual)) || undefined, dataGraphUri: value(row.dg) || undefined }];
   });
   if (items.length && layer === 'wm' && options.includeCounts !== false) {
     const byGraph = await fetchAssertionPageCounts(contextGraphId, items).catch(() => ({} as Record<string, number>));
