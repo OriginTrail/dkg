@@ -1,7 +1,7 @@
 import type { DurableRecoveryAuthority } from './durable-recovery-authority.js';
 // SPDX-License-Identifier: Apache-2.0
 import { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from "@origintrail-official/dkg-publisher";
-import type { PublicGraphSnapshot } from "@origintrail-official/dkg-chain";
+import type { AcceptedPublicGraphSnapshot } from "@origintrail-official/dkg-chain";
 import {
   parseDeterministicKnowledgeAssetUal,
   contextGraphMetaUri,
@@ -18,8 +18,8 @@ import { packKnowledgeAssetIdFromIdentity } from "./ka-identity.js";
 import type { PublicSnapshotMode } from './public-snapshot-mode.js';
 export type { PublicSnapshotMode } from './public-snapshot-mode.js';
 export type PublicSnapshotObservation =
-  | { readonly mode: "core-cache"; readonly snapshot: PublicGraphSnapshot; readonly sourceCore: string }
-  | { readonly mode: "rpc-only"; readonly snapshot: PublicGraphSnapshot; readonly sourceCore: null };
+  | { readonly mode: "core-cache"; readonly snapshot: AcceptedPublicGraphSnapshot; readonly sourceCore: string }
+  | { readonly mode: "rpc-only"; readonly snapshot: AcceptedPublicGraphSnapshot; readonly sourceCore: null };
 export const SNAPSHOT_TRUST_GRAPH = "urn:dkg:local:public-snapshot-trust";
 const DKG = "http://dkg.io/ontology/";
 /** Query guard is durable and conservative across partial jobs, upgrades and process restarts. */
@@ -80,16 +80,14 @@ export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
     }
   }
   readonly coalescing = 'owner-only' as const;
-  private readonly assets: ReadonlyMap<string, PublicGraphSnapshot["assets"][number]>;
+  private readonly assets: ReadonlyMap<string, AcceptedPublicGraphSnapshot["assets"][number]>;
   readonly observation: PublicSnapshotObservation;
   constructor(
     observation: PublicSnapshotObservation,
     readonly isCurrent: () => boolean,
   ) {
-    const snapshot = Object.freeze({ ...observation.snapshot,
-      assets: Object.freeze(observation.snapshot.assets.map(asset => Object.freeze({ ...asset }))),
-    });
-    this.observation = Object.freeze({ ...observation, snapshot });
+    const { snapshot } = observation;
+    this.observation = Object.freeze({ ...observation });
     this.assets = new Map(snapshot.assets.map((a) => [a.id, a]));
   }
   get snapshot() { return this.observation.snapshot; }

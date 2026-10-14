@@ -1,3 +1,4 @@
+import { normalizePublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { MULTICALL3_RUNTIME_CODE } from "../../chain/test/fixtures/multicall3-runtime-code.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Contract, Wallet, ethers } from "ethers";
@@ -389,7 +390,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       await sink.connectTo(supplier.multiaddrs.find(a=>a.includes("/tcp/")&&!a.includes("/p2p-circuit"))!);
       const beforeRows = await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o");
       const writes = vi.spyOn(mismatchStore,"replaceGraphAndSubject");
-      const evidence = new PublicSnapshotEvidence({snapshot: independent, mode:"rpc-only", sourceCore:null},()=>true);
+      const evidence = new PublicSnapshotEvidence({snapshot: normalizePublicGraphSnapshot(independent, { ...independent, now: independent.observedAt }), mode:"rpc-only", sourceCore:null},()=>true);
       const authenticate = vi.spyOn(evidence, 'authenticate');
       if (scenario === "legacy-envelope") {
         // Model the malicious legacy peer's accepted raw pages. Keep the real
