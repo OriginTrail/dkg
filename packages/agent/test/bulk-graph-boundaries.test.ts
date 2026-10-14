@@ -39,7 +39,7 @@ describe('100 MB encoded envelope and bounded credits', () => {
     } satisfies PublicAssetServingOptions;
     await expect(servePublicBulkChunk(request, session, options)).rejects.toThrow('asset access revoked');
     expect(sent.filter(frame => frame.kind === K.META)).toHaveLength(32);
-    expect(sent.some(frame => frame.index === 32 && [K.META, K.DATA].includes(frame.kind))).toBe(false);
+    expect(sent.some(frame => frame.index === 32 && (frame.kind === K.META || frame.kind === K.DATA))).toBe(false);
     expect(released).toBe(33);
   });
   it('ends before crossing 100,000,000 encoded bytes, without splitting or inventing a committed asset', async () => {
