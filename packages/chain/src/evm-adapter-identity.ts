@@ -12,12 +12,22 @@
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers, type Contract } from 'ethers';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import { isExternalEvmSigner } from './evm-signer.js';
 import type {
   IdentityProof,
   IdentityWalletContracts,
   OperationalWalletRegistrationResult,
   TxResult,
 } from './chain-adapter.js';
+
+/** Explains a missing admin key on a node whose operational signing is external. */
+const EXTERNAL_SIGNER_ADMIN_HINT =
+  ' Operational signing is delegated to an external signer and the node holds no admin key; ' +
+  'perform admin-key operations with the admin key outside this node.';
+
+function externalSignerAdminHint(signer: unknown): string {
+  return isExternalEvmSigner(signer) ? EXTERNAL_SIGNER_ADMIN_HINT : '';
+}
 
 export class IdentityMethods extends EVMChainAdapterBase {
   /** Independent all-or-none browser capability for node-identity key rotation. */
@@ -100,7 +110,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     if (!this.adminSigner) {
       throw new Error(
         `Cannot register operational wallets for identity ${identityId}: ` +
-        'adminPrivateKey is not configured.',
+        'adminPrivateKey is not configured.' + externalSignerAdminHint(this.signer),
       );
     }
     if (!(await this.hasAdminPurpose(identityStorage, identityId, this.adminSigner.address))) {
@@ -149,7 +159,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     }
     if (!this.adminSigner) {
       throw new Error(
-        `Cannot add operational wallet to identity ${identityId}: adminPrivateKey is not configured.`,
+        `Cannot add operational wallet to identity ${identityId}: adminPrivateKey is not configured.` + externalSignerAdminHint(this.signer),
       );
     }
     const identityStorage = await this.getIdentityStorage();
@@ -205,7 +215,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     }
     if (!this.adminSigner) {
       throw new Error(
-        `Cannot remove operational wallet from identity ${identityId}: adminPrivateKey is not configured.`,
+        `Cannot remove operational wallet from identity ${identityId}: adminPrivateKey is not configured.` + externalSignerAdminHint(this.signer),
       );
     }
     const identityStorage = await this.getIdentityStorage();
@@ -327,7 +337,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       const nodeName = options?.nodeName ?? `node-${Date.now()}`;
       if (!this.adminSigner) {
         throw new Error(
-          'Cannot create profile: adminPrivateKey is required so the profile admin key is not lost.',
+          'Cannot create profile: adminPrivateKey is required so the profile admin key is not lost.' + externalSignerAdminHint(this.signer),
         );
       }
       const nodeId = ethers.hexlify(ethers.randomBytes(32));
@@ -417,7 +427,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     await this.init();
     if (!this.adminSigner) {
       throw new Error(
-        'Cannot register identity: adminPrivateKey is required so the profile admin key is not lost.',
+        'Cannot register identity: adminPrivateKey is required so the profile admin key is not lost.' + externalSignerAdminHint(this.signer),
       );
     }
     const nodeName = `node-${ethers.hexlify(ethers.randomBytes(4)).slice(2)}`;

@@ -617,6 +617,54 @@ describe('generic imported artifact peer handler', () => {
     expect(recovered).toBe(ownerAgentAddress);
   });
 
+  it('signs private artifact requests through the external signer for an owner whose key the node does not hold', async () => {
+    const agent = fakeAgent({
+      onChainPolicy: { accessPolicy: 1, publishPolicy: 0 },
+    });
+    agent.localAgents = new Map([[ownerAgentAddress, {}]]);
+    const signerFor = vi.fn(async (address: string) => (address === ownerAgentAddress ? ownerWallet : undefined));
+    Object.assign(agent.config, {
+      authorSigners: {
+        addresses: [ownerAgentAddress],
+        signerFor,
+        firstSignerOf: async (addresses: readonly string[]) => (
+          addresses.includes(ownerAgentAddress) ? { address: ownerAgentAddress, signer: ownerWallet } : undefined
+        ),
+      },
+    });
+
+    await ImportedArtifactMethods.prototype.readAssertionArtifact.call(agent, {
+      contextGraphId,
+      assertionUri,
+      kind: 'source',
+      hash,
+      sourcePeerId: 'peer-local',
+    });
+
+    const sent = JSON.parse(new TextDecoder().decode(agent.sendToPeer.mock.calls[0][2]));
+    const auth = JSON.parse(Buffer.from(sent.authB64, 'base64').toString('utf8')) as SyncRequestEnvelope;
+    const digest = computeSyncDigest(
+      auth.contextGraphId,
+      auth.offset,
+      auth.limit,
+      auth.includeSharedMemory,
+      auth.targetPeerId!,
+      auth.requesterPeerId!,
+      auth.requestId!,
+      auth.issuedAtMs!,
+      auth.requesterAgentAddress,
+      auth.authPurpose,
+      auth.authSelector,
+    );
+    expect(signerFor).toHaveBeenCalledTimes(1);
+    expect(auth.requesterIdentityId).toBe('0');
+    expect(auth.requesterAgentAddress).toBe(ownerAgentAddress);
+    expect(ethers.recoverAddress(ethers.hashMessage(digest), {
+      r: auth.requesterSignatureR!,
+      yParityAndS: auth.requesterSignatureVS!,
+    })).toBe(ownerAgentAddress);
+  });
+
   it('rejects remote pagination that does not advance nextOffset', async () => {
     const bytes = Buffer.from('abcdef');
     const artifactHash = keccakHash(bytes);
