@@ -25,7 +25,9 @@ export function buildBulkAssetGroupPlan(assets: readonly AtomicAssetReplacement[
         values.add(`${s} ${p} ${canonicalizeObjectTermForHash(o)}`);
         const line = `${quadToBlazegraphNQuad({ ...quad, graph: stage })}\n`;
         bytes += Buffer.byteLength(line);
-        if (bytes > ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES) throw new RangeError('Atomic asset group byte allowance exceeded');
+        // Native escaping can exceed the bounded SPARQL representation. Select
+        // that strategy before any upload; its planner still enforces its own cap.
+        if (bytes > ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES) return null;
         lines.push(line);
       }
       // Backend value-space aliasing is ambiguous: choose SPARQL before uploading anything.
