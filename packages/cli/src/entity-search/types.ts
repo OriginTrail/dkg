@@ -5,6 +5,16 @@ export interface EntityIndexSpec {
   textPredicates: string[];
   types: string[];
 }
+export interface EntityIndexRequest extends EntityIndexSpec { restart?: boolean; timeoutMs?: number }
+export interface EntityReadinessRequest { contextGraphId: string; indexId: string; warmup?: boolean; timeoutMs?: number }
+export interface EntitySearchRequest { contextGraphId: string; indexId: string; query: string; limit?: number; timeoutMs?: number }
+export type NormalizedIndexRequest = EntityIndexSpec & { restart: boolean; timeoutMs: number };
+export type NormalizedReadinessRequest = Required<EntityReadinessRequest>;
+export type NormalizedSearchRequest = Required<EntitySearchRequest>;
+export type EntityOperation =
+  | { kind: 'index'; request: NormalizedIndexRequest }
+  | { kind: 'readiness'; request: NormalizedReadinessRequest }
+  | { kind: 'search'; request: NormalizedSearchRequest };
 export interface EntityDocument {
   entityUri: string;
   sourceGraph: string;

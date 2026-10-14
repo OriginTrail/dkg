@@ -8,10 +8,12 @@ import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph
 import { OxigraphStore, SparqlHttpStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import { EntityGraphReader, indexKey, parseSpec } from '../src/entity-search/documents.js';
+import { parseIndexRequest, parseSearchRequest, parseReadinessRequest } from '../src/entity-search/requests.js';
 import { EntityIndexStore } from '../src/entity-search/store.js';
 import { EntitySearchService } from '../src/entity-search/service.js';
 import { LocalEntityEmbedder } from '../src/entity-search/embedding.js';
 import { handleEntityRoutes } from '../src/daemon/routes/entities.js';
+import { configureApiQueryPriority } from '../src/daemon/api-query-priority.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
@@ -44,8 +46,8 @@ async function fixture(count = 3, capacity = 100_000, http = false) {
     embed: vi.fn(async (text: string) => text.includes('ocean') ? [1, 0] : [0, 1]) };
   const store = new EntityIndexStore(dir, capacity); cleanup.push(() => store.close());
   const service = new EntitySearchService(store, embedder), reader = new EntityGraphReader(agent as never, 'reader');
-  const index = (restart = false) => service.index(spec, reader, restart, AbortSignal.timeout(5000), performance.now() + 5000);
-  const search = (query = 'ocean') => service.search(indexKey(parseSpec(spec), embedder.fingerprint), spec.contextGraphId, query, 2,
+  const index = (restart = false) => service.index(parseIndexRequest({ ...spec, restart }), reader, AbortSignal.timeout(5000), performance.now() + 5000);
+  const search = (query = 'ocean') => service.search(parseSearchRequest({ indexId: indexKey(parseSpec(spec), embedder.fingerprint), contextGraphId: spec.contextGraphId, query, limit: 2 }),
     reader, AbortSignal.timeout(5000), performance.now() + 5000);
   return { dir, graph, endpoint, agent, embedder, store, service, reader, index, search, deny: () => { permitted = false; }, restrictTo: (caller: string) => { allowedCaller = caller; } };
 }
@@ -97,11 +99,11 @@ describe('entity discovery using current scoped graph content', () => {
     const f = await fixture(); await f.index();
     f.embedder.fingerprint = 'different';
     const id = indexKey(parseSpec(spec), 'test-model-v1');
-    await expect(f.service.search(id, 'catalog', 'ocean', 2, f.reader, AbortSignal.timeout(1000), performance.now() + 1000))
+    await expect(f.service.search(parseSearchRequest({ indexId: id, contextGraphId: 'catalog', query: 'ocean', limit: 2 }), f.reader, AbortSignal.timeout(1000), performance.now() + 1000))
       .rejects.toMatchObject({ code: 'ENTITY_EMBEDDING_MODEL_CHANGED' });
     f.embedder.fingerprint = 'test-model-v1'; f.embedder.embed.mockResolvedValue([NaN, 1]);
     await expect(f.search()).rejects.toMatchObject({ code: 'ENTITY_EMBEDDING_INVALID' });
-    await expect(f.service.search(id, 'catalog', 'ocean', 2, f.reader, new AbortController().signal, performance.now() - 1))
+    await expect(f.service.search(parseSearchRequest({ indexId: id, contextGraphId: 'catalog', query: 'ocean', limit: 2 }), f.reader, new AbortController().signal, performance.now() - 1))
       .rejects.toMatchObject({ code: 'QUERY_DEADLINE_EXCEEDED' });
     expect(() => parseSpec({ ...spec, textPredicates: ['urn:p> } SERVICE <http://invalid> {'] })).toThrow('ENTITY_INVALID_REQUEST');
     expect(() => parseSpec({ ...spec, textPredicates: ['urn:p' + String.fromCharCode(1)] })).toThrow('ENTITY_INVALID_REQUEST');
@@ -131,6 +133,37 @@ it('requires operator authority to index and exposes bounded typed search outcom
   const read = request(f, body); await handleEntityRoutes(read.ctx); expect(JSON.parse(read.res.body).entities[0].entityUri).toBe('urn:entity:0');
   const invalid = request(f, { ...body, limit: 99 }); await handleEntityRoutes(invalid.ctx); expect(invalid.res.statusCode).toBe(400);
   f.deny(); const revoked = request(f, body); await handleEntityRoutes(revoked.ctx); expect(revoked.res.statusCode).toBe(403);
+});
+it.each(['background', 'normal'])('honors configured %s priority for entity reads and keeps indexing background', async priority => {
+  const f = await fixture();
+  const logger = { info: vi.fn(), warn: vi.fn() };
+  configureApiQueryPriority(priority, logger);
+  cleanup.push(() => { configureApiQueryPriority(undefined, logger); });
+  const indexed = await f.index();
+  for (const operation of ['index', 'search', 'readiness']) {
+    f.agent.query.mockClear();
+    const call = request(f, { ...spec, indexId: indexed.indexId, query: 'ocean' }, 'nodeOperator', `/api/entities/${operation}`);
+    await handleEntityRoutes(call.ctx);
+    expect(call.res.statusCode).toBe(200);
+    expect(f.agent.query).toHaveBeenCalled();
+    expect(f.agent.query.mock.calls.every(([, options]) => options.priority === (operation === 'index' ? 'background' : priority))).toBe(true);
+  }
+});
+it('changes persisted index identity for every embedding-semantic configuration change', () => {
+  const config = { provider: 'ollama' as const, model: 'test', digest: 'a'.repeat(64), dimensions: 2,
+    documentPrefix: 'document: ', queryPrefix: 'query: ' };
+  const identity = (change = {}) => {
+    const provider = new LocalEntityEmbedder({ ...config, ...change });
+    return { fingerprint: provider.fingerprint, indexId: indexKey(parseSpec(spec), provider.fingerprint) };
+  };
+  const original = identity();
+  expect(identity()).toEqual(original);
+  for (const change of [{ model: 'other' }, { digest: 'b'.repeat(64) }, { dimensions: 3 },
+    { documentPrefix: 'passage: ' }, { queryPrefix: 'question: ' }]) {
+    const changed = identity(change);
+    expect(changed.fingerprint).not.toBe(original.fingerprint);
+    expect(changed.indexId).not.toBe(original.indexId);
+  }
 });
 it('local inference pins the model digest and dimensions and refuses remote inference URLs', async () => {
   const config = { provider: 'ollama' as const, model: 'test', digest: 'a'.repeat(64), dimensions: 2 };
@@ -168,11 +201,11 @@ it('bounds preparation, rejects expired work and releases admission on failure',
   const f = await fixture(); const indexed = await f.index();
   let release!: (v: number[]) => void;
   f.embedder.embed.mockReturnValueOnce(new Promise<number[]>(resolve => { release = resolve; }));
-  const preparing = f.service.readiness(indexed.indexId, 'catalog', true, f.reader, AbortSignal.timeout(5000), performance.now() + 5000);
+  const preparing = f.service.readiness(parseReadinessRequest({ indexId: indexed.indexId, contextGraphId: 'catalog', warmup: true }), f.reader, AbortSignal.timeout(5000), performance.now() + 5000);
   await expect(f.search()).rejects.toMatchObject({ code: 'ENTITY_SEARCH_BUSY' });
   await expect(f.index()).rejects.toMatchObject({ code: 'ENTITY_INDEX_BUSY' });
   release([1, 0]); expect((await preparing).ready).toBe(true);
-  await expect(f.service.readiness(indexed.indexId, 'catalog', false, f.reader, new AbortController().signal, performance.now() - 1))
+  await expect(f.service.readiness(parseReadinessRequest({ indexId: indexed.indexId, contextGraphId: 'catalog', warmup: false }), f.reader, new AbortController().signal, performance.now() - 1))
     .rejects.toMatchObject({ code: 'QUERY_DEADLINE_EXCEEDED' });
   expect((await f.search()).entities).toHaveLength(2);
   const provider = new LocalEntityEmbedder({ provider: 'ollama', model: 'test', digest: 'a'.repeat(64), dimensions: 2 });
@@ -188,7 +221,7 @@ it.each(['embedding', 'residency'] as const)('releases admitted warm-up after %s
   const failure = new Error('injected provider failure');
   if (stage === 'embedding') f.embedder.embed.mockRejectedValueOnce(failure);
   else f.embedder.ready.mockRejectedValueOnce(failure);
-  const warmup = () => f.service.readiness(indexed.indexId, 'catalog', true, f.reader,
+  const warmup = () => f.service.readiness(parseReadinessRequest({ indexId: indexed.indexId, contextGraphId: 'catalog', warmup: true }), f.reader,
     AbortSignal.timeout(5000), performance.now() + 5000);
   await expect(warmup()).rejects.toBe(failure);
   expect((await f.search()).entities).toHaveLength(2);
@@ -205,13 +238,13 @@ it('persists a partial scan across service recreation and keeps SWM and VM index
   const f = await fixture(9); await f.index();
   const resumedStore = new EntityIndexStore(f.dir); cleanup.push(() => resumedStore.close());
   const resumed = new EntitySearchService(resumedStore, f.embedder);
-  expect(await resumed.index(spec, f.reader, false, AbortSignal.timeout(5000), performance.now() + 5000))
+  expect(await resumed.index(parseIndexRequest(spec), f.reader, AbortSignal.timeout(5000), performance.now() + 5000))
     .toMatchObject({ indexedEntities: 9, scanComplete: true });
   await f.graph.insert([
     { graph: 'did:dkg:context-graph:catalog/_shared_memory', subject: 'urn:shared', predicate: 'urn:description', object: '"ocean"' },
     { graph: 'did:dkg:context-graph:catalog/_shared_memory', subject: 'urn:shared', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:Topic' },
   ]);
-  const swm = await resumed.index({ ...spec, view: 'shared-working-memory' }, f.reader, false, AbortSignal.timeout(5000), performance.now() + 5000);
+  const swm = await resumed.index(parseIndexRequest({ ...spec, view: 'shared-working-memory' }), f.reader, AbortSignal.timeout(5000), performance.now() + 5000);
   expect(swm).toMatchObject({ indexedEntities: 1, view: 'shared-working-memory' });
   expect(swm.indexId).not.toBe(indexKey(parseSpec(spec), f.embedder.fingerprint));
   expect((await f.search()).entities.every(e => e.entityUri !== 'urn:shared' && e.entityUri !== 'urn:secret')).toBe(true);
@@ -375,6 +408,7 @@ it('migrates legacy counters while preserving completed and interrupted scan dat
   const id = indexKey(parseSpec(spec), f.embedder.fingerprint);
   const db = new Database(join(f.dir, 'entity-index.db'));
   try {
+    db.pragma('user_version = 0');
     for (const table of ['entity_documents', 'entity_scan_documents']) {
       db.exec(`ALTER TABLE ${table} ADD COLUMN generation INTEGER NOT NULL DEFAULT 7`);
     }
@@ -385,6 +419,6 @@ it('migrates legacy counters while preserving completed and interrupted scan dat
   expect(migrated.state(id)).not.toHaveProperty('generation');
   expect(migrated.count(id)).toBe(10);
   const service = new EntitySearchService(migrated, f.embedder);
-  expect(await service.index(spec, f.reader, false, AbortSignal.timeout(5000), performance.now() + 5000))
+  expect(await service.index(parseIndexRequest(spec), f.reader, AbortSignal.timeout(5000), performance.now() + 5000))
     .toMatchObject({ scanComplete: true, indexedEntities: 10 });
 });

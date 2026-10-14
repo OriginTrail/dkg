@@ -1,6 +1,7 @@
-import { EntityGraphReader, documentKey, indexKey, parseSpec, PAGE_SIZE } from './documents.js';
+import { EntityGraphReader, documentKey, indexKey, PAGE_SIZE } from './documents.js';
 import { EntityIndexStore, type IndexState } from './store.js';
 import { EntitySearchError, checkDeadline, unitVector, type EntityEmbedder, type EntityIndexStatus, type EntityReadinessResponse, type EntitySearchResponse, type EntityDocument } from './types.js';
+import type { NormalizedIndexRequest, NormalizedReadinessRequest, NormalizedSearchRequest } from './types.js';
 
 /** Lifecycle-owned service. Index pages are explicit operator work; reads never start a rebuild. */
 export class EntitySearchService {
@@ -8,8 +9,8 @@ export class EntitySearchService {
   private searches = 0;
   private preparing = false;
   constructor(readonly store: EntityIndexStore, readonly embedder: EntityEmbedder) {}
-  async index(rawSpec: unknown, reader: EntityGraphReader, restart: boolean, signal: AbortSignal, deadline: number): Promise<EntityIndexStatus> {
-    const spec = parseSpec(rawSpec), id = indexKey(spec, this.embedder.fingerprint);
+  async index(request: NormalizedIndexRequest, reader: EntityGraphReader, signal: AbortSignal, deadline: number): Promise<EntityIndexStatus> {
+    const { restart, timeoutMs: _timeoutMs, ...spec } = request, id = indexKey(spec, this.embedder.fingerprint);
     if (this.preparing || this.busy.size) throw new EntitySearchError('ENTITY_INDEX_BUSY', 429);
     this.busy.add(id);
     try {
@@ -47,9 +48,9 @@ export class EntitySearchService {
       completedAt: state.completedAt, coverage: 'local-indexed-subset' as const, graphComplete: null };
   }
   /** A fresh residency check, with explicit bounded warm-up outside a query's budget. */
-  async readiness(id: string, contextGraphId: string, warmup: boolean, reader: EntityGraphReader,
+  async readiness(request: NormalizedReadinessRequest, reader: EntityGraphReader,
     signal: AbortSignal, deadline: number): Promise<EntityReadinessResponse> {
-    if (!/^[a-f0-9]{64}$/.test(id)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+    const { indexId: id, contextGraphId, warmup } = request;
     if (this.preparing || (warmup && (this.searches > 0 || this.busy.size > 0))) throw new EntitySearchError('ENTITY_SEARCH_BUSY', 429);
     if (warmup) this.preparing = true;
     try {
@@ -63,10 +64,9 @@ export class EntitySearchService {
       return { ...this.status(state), ready, observedAt: new Date().toISOString() };
     } finally { if (warmup) this.preparing = false; }
   }
-  async search(id: string, contextGraphId: string, query: string, limit: number, reader: EntityGraphReader,
+  async search(request: NormalizedSearchRequest, reader: EntityGraphReader,
     signal: AbortSignal, deadline: number): Promise<EntitySearchResponse> {
-    if (!/^[a-f0-9]{64}$/.test(id) || typeof query !== 'string' || !query.trim() || query.length > 6000
-      || !Number.isInteger(limit) || limit < 1 || limit > 20) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+    const { indexId: id, contextGraphId, query, limit } = request;
     if (this.preparing || this.searches >= 2) throw new EntitySearchError('ENTITY_SEARCH_BUSY', 429);
     this.searches++;
     try {
