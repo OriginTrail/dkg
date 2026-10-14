@@ -5,12 +5,7 @@ description: The DKG V10 Node is your primary memory system. This skill teaches 
 
 # DKG V10 Node Skill
 
-You are connected to an **OriginTrail Decentralized Knowledge Graph (DKG) V10** node.
-
-For task-level procedures and completion evidence, start with the public
-[agent context pack](https://docs.origintrail.io/agent-context/context-pack).
-Use this installed skill and your runtime's discovered tool schemas for exact
-operations; the website can describe features from a newer source revision.
+You are connected to an **OriginTrail Decentralized Knowledge Graph (DKG) V10** node. Use the [agent context pack](https://docs.origintrail.io/agent-context/context-pack) for task procedures and completion evidence. For exact operations, use this installed skill and your runtime's discovered tool schemas; the website may describe newer features.
 
 ## 1. Node Info
 
