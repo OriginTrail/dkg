@@ -18,8 +18,8 @@
     "availability": "released baseline",
     "baseline": "10.0.23",
     "owner": "DKG maintainers",
-    "reviewedOn": "2026-10-13",
-    "validation": "Published-package WM write/read and local SWM share passed",
+    "reviewedOn": "2026-10-14",
+    "validation": "Released-package WM write/read, local SWM share, and committed-share replay passed; controlled error-response tests passed",
     "sources": [
       "examples/docs/http-app.mjs",
       "packages/cli/src/api-client.ts"
@@ -117,14 +117,15 @@
   },
   {
     "name": "External signer",
-    "page": "docs/references/availability.md",
+    "page": "docs/use-dkg/external-signer.md",
     "availability": "source only",
     "baseline": null,
     "owner": "DKG maintainers",
-    "reviewedOn": "2026-10-13",
-    "validation": "On main after 10.0.23 (PR #3177); absent from this canary baseline",
+    "reviewedOn": "2026-10-14",
+    "validation": "Merged after the validated 10.0.23 release ([PR #3177](https://github.com/OriginTrail/dkg/pull/3177)); runtime verification and a released minimum remain unclaimed",
     "sources": [
-      "docs/references/api.md"
+      "docs/use-dkg/external-signer.md",
+      "packages/chain/src/remote-signer.ts"
     ]
   },
   {

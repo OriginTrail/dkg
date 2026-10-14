@@ -57,6 +57,8 @@ node http-app.mjs read shared-working-memory
 
 The client checks HTTP errors and partial `207` results, uses a bounded request timeout, and never retries a mutation automatically. It is a minimal example, not a background ingestion service.
 
+`share` calls the node's seal-before-share route directly. If a response is lost or bookkeeping fails after the share commits, inspect the existing KA, then rerun `share` with the same Context Graph ID and KA name. The route can resume the existing share even after WM is empty. Do not rerun `write` or finalize an empty draft as a prerequisite for that recovery.
+
 ## The request contract
 
 All JSON writes send `Content-Type: application/json` and a bearer token.
