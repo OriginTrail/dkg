@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { validateContextGraphId } from '@origintrail-official/dkg-core';
+import { isPublicGraphSnapshotScope } from '@origintrail-official/dkg-chain';
 
 export const PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES = 1024;
 export interface PublicGraphSnapshotRequest {
@@ -14,8 +14,7 @@ function validateRequest(value: unknown): PublicGraphSnapshotRequest {
   const request = value as Record<string, unknown>;
   if (Object.keys(request).sort().join(',') !== 'contextGraphId,onChainId,refresh,version'
     || request.version !== 1 || typeof request.refresh !== 'boolean'
-    || typeof request.contextGraphId !== 'string' || !validateContextGraphId(request.contextGraphId).valid
-    || typeof request.onChainId !== 'string' || !/^[1-9][0-9]{0,77}$/.test(request.onChainId)) {
+    || !isPublicGraphSnapshotScope(request)) {
     throw new Error('Invalid snapshot request');
   }
   return { version: 1, contextGraphId: request.contextGraphId, onChainId: request.onChainId, refresh: request.refresh };

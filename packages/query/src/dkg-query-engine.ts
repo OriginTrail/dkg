@@ -393,7 +393,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
     const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs));
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
-      routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads));
+      routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads),
+      options?.requireCompleteGraphScope ? 'preserve-scope' : 'compatibility');
     const route = plan.execution;
     if (route.kind === 'combined') {
       const dataScope = await resolve(route.data);
