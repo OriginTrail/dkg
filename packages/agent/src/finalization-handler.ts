@@ -1,4 +1,3 @@
-import { readCurrentAssertionVersion } from "./graph-scoped-assertion-version.js";
 import {
   decodeFinalizationMessage,
   contextGraphMetaUri,
@@ -30,6 +29,7 @@ import {
   type PublicFinalizedMaterializationVersionSnapshot,
 } from '@origintrail-official/dkg-chain';
 import {
+  readCurrentAssertionVersion,
   generateGraphKnowledgeAssetMetadata,
   compareMaterializedVersion, readMaterializedVersion,
   writeMaterializedVersion, materializedVersionQuad,

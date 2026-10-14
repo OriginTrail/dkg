@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri } from '@origintrail-official/dkg-core';
-import { mergeSameVersionGraphKnowledgeAssetMetadataV1, overlayLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
+import { readCurrentAssertionVersion, mergeSameVersionGraphKnowledgeAssetMetadataV1, overlayLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
 import type { AtomicAssetReplacement, Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { readCurrentAssertionVersion } from '../../graph-scoped-assertion-version.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
 /** Caller owns the per-asset lock and the stale/publication outcome policy. */
