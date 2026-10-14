@@ -1,6 +1,5 @@
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import { StoreResponseTooLargeError } from './http-response-limit.js';
 
 /** A caller's logical result budget also bounds disk-backed literal allocation. */
@@ -18,7 +17,7 @@ export class LiteralHydrationBudget {
   }
 }
 
-export async function readLiteralBlobBounded(path: string, hash: string, maxBytes: number, signal?: AbortSignal): Promise<string> {
+export async function readLiteralBlobBounded(path: string, maxBytes: number, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted();
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -37,7 +36,6 @@ export async function readLiteralBlobBounded(path: string, hash: string, maxByte
     signal?.throwIfAborted();
     if (bytes > stat.size) throw new StoreResponseTooLargeError(maxBytes, bytes);
     const content = buffer.subarray(0, bytes).toString('utf8');
-    if (createHash('sha256').update(content).digest('hex') !== hash) throw new Error('External literal blob digest mismatch');
     return content;
   } finally { await file.close(); }
 }
