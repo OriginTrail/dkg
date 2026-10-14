@@ -10,6 +10,7 @@ export type QueryReadPlan = { kind: 'unscoped' } | {
 } | {
   kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
   execution: ScopedRoute['execution']; draftAccess: DraftAccessPolicy;
+  fallbackPolicy: 'compatibility' | 'preserve-scope'; excludedGraphPrefixes: readonly string[];
   discovery: {
     catalog: { kind: 'none' | 'shared' }
       | { kind: 'admission-owned'; owner: QueryReadAdmissionCapability };
@@ -40,6 +41,8 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     .map(({ root, family }) => ({ root, prefix: `${root}/${family === 'data' ? '_verifiable_memory/' : ''}` })) : [];
   return { kind: 'scoped', contextGraphId: options.contextGraphId, graphs, execution,
     draftAccess: resolveDraftAccessPolicy(options),
+    fallbackPolicy: options.requireCompleteGraphScope ? 'preserve-scope' : 'compatibility',
+    excludedGraphPrefixes: [...(options.excludeGraphPrefixes ?? [])],
     discovery: { contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,
       // Other routes can depend on a decorator refresh queued behind an owned slot.
       catalog: !expandGraphVariables ? { kind: 'none' }

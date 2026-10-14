@@ -355,7 +355,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
         plan.options.contextGraphId, plan.options, reads, reads.catalog);
-      case 'unscoped': return this.execWithExclusions(initialGraphScope, reads, options);
+      case 'unscoped': return this.execWithExclusions(initialGraphScope, reads, options?.excludeGraphPrefixes);
     }
   }
 
@@ -366,7 +366,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
       const variableContentGraphs = discovery ? selectContentPartitions(
         discovery.partitions, plan.draftAccess, plan.graphs.subGraphName) : [];
-      return this.executeScoped(scope, options, plan, lane, variableContentGraphs);
+      return this.executeScoped(scope, plan, lane, variableContentGraphs);
     };
     switch (plan.discovery.catalog.kind) {
       case 'none': return execute(null);
@@ -376,7 +376,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
   }
 
-  private async executeScoped(initialGraphScope: PreparedGraphScope, options: QueryOptions | undefined,
+  private async executeScoped(initialGraphScope: PreparedGraphScope,
     plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[]): Promise<QueryResult> {
     const { staticContentGraphs, subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
     const partitions = new Map<string, string[]>();
@@ -395,7 +395,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs));
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
       routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads),
-      options?.requireCompleteGraphScope ? 'preserve-scope' : 'compatibility');
+      plan.fallbackPolicy);
     const route = plan.execution;
     if (route.kind === 'combined') {
       const dataScope = await resolve(route.data);
@@ -404,20 +404,20 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const smResult = await this.execCallerQuery(sharedScope, reads);
       return mergeSharedMemoryAndDataResults(dataResult, smResult);
     }
-    return this.execWithExclusions(await resolve(route.target), reads, options);
+    return this.execWithExclusions(await resolve(route.target), reads, plan.excludedGraphPrefixes);
   }
 
-  private async execWithExclusions(scope: PreparedGraphScope, reads: StoreReadLane, options?: QueryOptions): Promise<QueryResult> {
+  private async execWithExclusions(scope: PreparedGraphScope, reads: StoreReadLane, excludedGraphPrefixes: readonly string[] = []): Promise<QueryResult> {
     const result = await this.execAndNormalize(scope, reads);
-    return options?.excludeGraphPrefixes?.length && result.bindings.length > 0
-      ? this.filterExcludedGraphs(result, options.excludeGraphPrefixes) : result;
+    return excludedGraphPrefixes.length && result.bindings.length > 0
+      ? this.filterExcludedGraphs(result, excludedGraphPrefixes) : result;
   }
 
   /**
    * Remove bindings that contain values matching excluded graph URI prefixes.
    * This prevents private CG data from leaking into unscoped queries.
    */
-  private filterExcludedGraphs(result: QueryResult, prefixes: string[]): QueryResult {
+  private filterExcludedGraphs(result: QueryResult, prefixes: readonly string[]): QueryResult {
     const filtered = result.bindings.filter((binding) => {
       for (const value of Object.values(binding)) {
         if (typeof value !== 'string') continue;
