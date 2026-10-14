@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../../src/agent-work-lifetime.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerCapabilityRegistry } from '../../src/p2p/peer-capability.js';
@@ -61,7 +62,7 @@ export interface VmRecoveryHostInternals {
   };
   preferredSyncPeers: Map<string, string>;
   peerCapabilityRegistry: PeerCapabilityRegistry;
-  vmReconcileLifecycleGeneration: number;
+  workLifetime: AgentWorkLifetime;
   contextGraphBindingState: { bump(contextGraphId: string): number };
   selectedVmReconcileCursors: Map<string, { bindingGeneration: number }>;
   vmReconcilePublicCoreTransportPreferencePolicy: VmRecoveryCoreTransportPreferencePolicy;

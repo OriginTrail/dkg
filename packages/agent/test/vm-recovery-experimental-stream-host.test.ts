@@ -530,8 +530,8 @@ describe('a stream Core whose attempt ended without a verdict on its data', () =
       expect(peersOf(await h.runPending())).toEqual([core, older, olderB]);
 
       if (boundary === 'recovery is closed') {
-        h.internals.closeVmReconcileRotationState();
-        h.internals.openVmReconcileRotationState();
+        h.internals.workLifetime.close(); h.internals.closeVmReconcileRotationState();
+        h.internals.workLifetime.open(); h.internals.openVmReconcileRotationState();
       } else {
         h.internals.clearVmReconcileRotationStateForContextGraph(cg);
       }
