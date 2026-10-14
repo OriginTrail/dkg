@@ -1,9 +1,10 @@
+import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
   PublicGraphSnapshotCache,
   PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
 } from "@origintrail-official/dkg-chain";
-import { buildKnowledgeAssetUalFromOnChainIdV1, validateContextGraphId } from "@origintrail-official/dkg-core";
+import { buildKnowledgeAssetUalFromOnChainIdV1 } from "@origintrail-official/dkg-core";
 import { runGraphScopedPhysicalOperation } from "./sync/requester/graph-scoped-operation-fence.js";
 import type { DKGAgent } from "./dkg-agent.js";
 import {
@@ -33,19 +34,8 @@ export class PublicSnapshotMethods {
       PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
       async (data) => {
         try {
-          if (data.byteLength > 1024) throw new Error("Request too large");
-          const request = JSON.parse(
-            new TextDecoder("utf-8", { fatal: true }).decode(data),
-          );
+          const request = decodePublicGraphSnapshotRequest(data);
           if (
-            Object.keys(request).sort().join(",") !==
-              "contextGraphId,onChainId,refresh,version" ||
-            request.version !== 1 ||
-            typeof request.refresh !== "boolean" ||
-            typeof request.contextGraphId !== "string" ||
-            !validateContextGraphId(request.contextGraphId).valid ||
-            typeof request.onChainId !== "string" ||
-            !/^[1-9][0-9]{0,77}$/.test(request.onChainId) ||
             !(this.subscribedContextGraphs.get(request.contextGraphId)?.subscribed
               || this.subscribedContextGraphs.get(request.contextGraphId)?.coreHosted)
           )
@@ -70,7 +60,7 @@ export class PublicSnapshotMethods {
           return encoder.encode('{"unavailable":true}');
         }
       },
-      { maxReadBytes: 1024 },
+      { maxReadBytes: PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES },
     );
   }
   /** Explicit foreground job. The existing background reconciler's trust policy is unchanged. */

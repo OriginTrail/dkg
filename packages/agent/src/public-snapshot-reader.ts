@@ -4,7 +4,7 @@ import type { DKGAgent } from './dkg-agent.js';
 import type { PublicSnapshotMode, PublicSnapshotObservation } from './public-snapshot-evidence.js';
 
 export const PUBLIC_GRAPH_SNAPSHOT_PROTOCOL = '/dkg/10.0.0/public-graph-snapshot/1';
-const encoder = new TextEncoder();
+import { encodePublicGraphSnapshotRequest } from './public-snapshot-wire.js';
 export function createPublicSnapshotReader(options: {
   mode: PublicSnapshotMode;
   chain: DKGAgent['chain']; router: DKGAgent['router'];
@@ -26,7 +26,7 @@ export function createPublicSnapshotReader(options: {
       assertCurrent();
       try {
         const bytes=await router.send(peer,PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
-          encoder.encode(JSON.stringify({version:1,contextGraphId:expected.contextGraphId,onChainId:expected.onChainId,refresh})),
+          encodePublicGraphSnapshotRequest({version:1,contextGraphId:expected.contextGraphId,onChainId:expected.onChainId,refresh}),
           {timeoutMs:115_000,signal,maxReadBytes:PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES});
         const snapshot=decodePublicGraphSnapshot(bytes,expected);
         assertCurrent();
