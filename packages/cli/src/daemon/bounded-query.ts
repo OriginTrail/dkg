@@ -1,3 +1,4 @@
+import { isPublicSnapshotMode, type PublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
 import { prepareSparql, prepareSparqlQuery } from '@origintrail-official/dkg-rdf-utils/sparql';
 
 export const BOUNDED_QUERY_VERSION = 1;
@@ -10,7 +11,7 @@ interface BoundedQueryBase {
   readonly sparql: string;
   readonly maxRows: number;
   readonly timeoutMs: number;
-  readonly chainEvidenceMode?: 'core-cache' | 'rpc-only';
+  readonly chainEvidenceMode?: PublicSnapshotMode;
   readonly view?: 'verifiable-memory' | 'shared-working-memory';
   readonly includeContextGraphPartitions: boolean;
 }
@@ -31,7 +32,7 @@ export function boundedQueryPolicy(input: Record<string, unknown>): BoundedQuery
       || (mode !== 'complete' && mode !== 'page') || typeof offset !== 'number'
       || !Number.isSafeInteger(offset) || offset < 0 || offset > BOUNDED_QUERY_MAX_OFFSET
       || (mode === 'complete' && offset !== 0)
-      || (chainEvidenceMode !== undefined && chainEvidenceMode !== 'core-cache' && chainEvidenceMode !== 'rpc-only')
+      || (chainEvidenceMode !== undefined && !isPublicSnapshotMode(chainEvidenceMode))
       || (view !== undefined && view !== 'verifiable-memory' && view !== 'shared-working-memory')) {
     throw new Error('Unsupported version, view, mode, offset or deadline');
   }

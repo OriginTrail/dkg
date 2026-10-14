@@ -15,7 +15,8 @@ import type {
 
 import { packKnowledgeAssetIdFromIdentity } from "./ka-identity.js";
 
-export type PublicSnapshotMode = "core-cache" | "rpc-only";
+import type { PublicSnapshotMode } from './public-snapshot-mode.js';
+export type { PublicSnapshotMode } from './public-snapshot-mode.js';
 export type PublicSnapshotObservation =
   | { mode: "core-cache"; snapshot: PublicGraphSnapshot; sourceCore: string }
   | { mode: "rpc-only"; snapshot: PublicGraphSnapshot; sourceCore: null };
