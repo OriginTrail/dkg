@@ -44,6 +44,16 @@ describe('a count the node refuses to read', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
+  it('preserves caller cancellation rather than presenting it as an empty legacy read', async () => {
+    const controller = new AbortController(), reason = new Error('caller cancelled during admission');
+    const { agent, query } = node({ resolveSharedMemoryReadAdmission: async () => {
+      controller.abort(reason); return { outcome: 'unavailable', error: reason };
+    } });
+    await expect(agent.query(COUNT, { contextGraphId: 'cg-1', view: 'shared-working-memory',
+      callerAgentAddress: OTHER, signal: controller.signal })).rejects.toBe(reason);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('reads as a count of nothing for another agent\'s working memory', async () => {
     const { agent, query } = node();
     expect(await agent.query(COUNT, { contextGraphId: 'cg-1', view: 'working-memory', callerAgentAddress: OTHER, agentAddress: OWNER }))
