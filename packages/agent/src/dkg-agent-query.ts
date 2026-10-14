@@ -1,6 +1,7 @@
 import type { AgentQueryOptions } from './agent-query-options.js';
 import { withPublicSnapshotQueryTrust } from './public-snapshot-evidence.js';
 // SPDX-License-Identifier: Apache-2.0
+import { readQueryAuthorityDependency } from './query-authority-dependency.js';
 
 /**
  * Query / read-path subsystem extracted from dkg-agent.ts as a mixin holder:
@@ -1023,8 +1024,8 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback: opts.allowSubscriptionFallback !== false,
       isSystemContextGraph: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
       getPeerId: () => this.peerId,
-      getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
-      getRegisteredAuthority: () => withRpcUsageSite(
+      getAllowedPeers: () => readQueryAuthorityDependency(opts.signal, () => this.getContextGraphAllowedPeers(contextGraphId, { signal: opts.signal })),
+      getRegisteredAuthority: () => readQueryAuthorityDependency(opts.signal, () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.readRegistered,
         () => this.resolveRegisteredContextGraphAuthority(
           contextGraphId,
@@ -1049,7 +1050,7 @@ export class QueryMethods extends DKGAgentBase {
             freshness: opts.freshness ?? 'bounded',
           },
         ),
-      ),
+      )),
       isAgentAllowed: (agentAddress, roster) => this.isAgentAddressAllowed(agentAddress, roster),
       hasLocalAgentInRoster: (roster) => this.hasLocalAgentInGate(roster),
       resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),
@@ -1064,12 +1065,12 @@ export class QueryMethods extends DKGAgentBase {
       ),
       isPendingMetadata:
         this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true,
-      isPrivateLocalGraph: () => this.isPrivateContextGraph(contextGraphId),
-      getLocalAgentGate: () => withRpcUsageSite(
+      isPrivateLocalGraph: () => readQueryAuthorityDependency(opts.signal, () => this.isPrivateContextGraph(contextGraphId, { signal: opts.signal })),
+      getLocalAgentGate: () => readQueryAuthorityDependency(opts.signal, () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.readLocalGate,
-        () => this.getContextGraphAgentGateAddresses(contextGraphId),
-      ),
-      getLegacyParticipants: () => this.getPrivateContextGraphParticipants(contextGraphId),
+        () => this.getContextGraphAgentGateAddresses(contextGraphId, { signal: opts.signal }),
+      )),
+      getLegacyParticipants: () => readQueryAuthorityDependency(opts.signal, () => this.getPrivateContextGraphParticipants(contextGraphId, { signal: opts.signal })),
       // A crash-safe join approval may restore a restricted pending-metadata
       // row before ordinary read authority is proven. Its durable subscription
       // intent must not become the legacy subscription authorization fallback.
@@ -1079,7 +1080,7 @@ export class QueryMethods extends DKGAgentBase {
           this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
           || (this.config.syncContextGraphs ?? []).includes(contextGraphId)
         ),
-      getLocalIdentityId: () => this.chain.getIdentityId(),
+      getLocalIdentityId: () => readQueryAuthorityDependency(opts.signal, () => this.chain.getIdentityId()),
     };
   }
 
