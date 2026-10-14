@@ -518,7 +518,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
       routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
         initialGraphScope,
-        variableAllowedGraphs,
+        options?.excludeWorkingMemoryPartitions
+          ? variableAllowedGraphs.filter(graph => !/(?:^|\/)(?:_working_memory|assertion)(?:\/|$)/.test(graph))
+          : variableAllowedGraphs,
       ));
     }
 

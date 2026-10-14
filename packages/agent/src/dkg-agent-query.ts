@@ -437,6 +437,7 @@ export class QueryMethods extends DKGAgentBase {
        * registered public content partitions in a scoped `GRAPH ?g` scan.
        */
       includeContextGraphPartitions?: boolean;
+      excludeWorkingMemoryPartitions?: boolean;
       /**
        * Opt-in: allow the scoped query to reference the context graph's own
        * `_private` partition (excluded from the scope guard's allow-set by
@@ -700,6 +701,7 @@ export class QueryMethods extends DKGAgentBase {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
+      excludeWorkingMemoryPartitions: opts.excludeWorkingMemoryPartitions,
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,
