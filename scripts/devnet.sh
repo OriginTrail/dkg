@@ -2205,6 +2205,8 @@ cmd_clean() {
 # itself so it can assert on every step.
 #
 # Usage: devnet.sh addnode <num> [core|edge]
+#   DEVNET_ADDNODE_CONFIG_OVERRIDES='{"key": value, ...}'  config.json members
+#                                   to set before the node's first start
 cmd_addnode() {
   local node_num="${2:-}"
   local role="${3:-core}"
@@ -2233,6 +2235,25 @@ cmd_addnode() {
 
   log "Adding node $node_num (role=$role)..."
   DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
+
+  # A test that needs the new node to differ from the first second it runs
+  # (the addresses it announces, for one: what a peer has once learnt about a
+  # node it keeps) passes a JSON object here. Its members replace the members
+  # of the same name in the node's config.json before the daemon starts.
+  if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
+    if ! CONFIG_PATH="$DEVNET_DIR/node${node_num}/config.json" node -e '
+      const fs = require("fs");
+      const overrides = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES);
+      if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) throw new Error("not a JSON object");
+      const config = JSON.parse(fs.readFileSync(process.env.CONFIG_PATH, "utf8"));
+      fs.writeFileSync(process.env.CONFIG_PATH, JSON.stringify({ ...config, ...overrides }, null, 2));
+    '; then
+      echo "[devnet] DEVNET_ADDNODE_CONFIG_OVERRIDES must be a JSON object; node${node_num} was not started"
+      rm -rf "$DEVNET_DIR/node${node_num}"
+      exit 1
+    fi
+    log "Node $node_num config: applied DEVNET_ADDNODE_CONFIG_OVERRIDES"
+  fi
 
   # Reuse the cluster's shared auth token so the test can talk to the new
   # node with the same bearer used everywhere else.
