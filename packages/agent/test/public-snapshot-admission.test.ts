@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { PublicGraphSnapshotCache, sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
-import { PublicSnapshotAdmission } from '../src/public-snapshot-admission.js';
+import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
+import { PublicSnapshotServingRuntime } from '../src/public-snapshot-serving-runtime.js';
+const lifetime = () => ({ signal: new AbortController().signal, physicalRuns: new Set<Promise<unknown>>() });
 
 function snapshot(id: string, now: number) {
   return sealPublicGraphSnapshot({ version: 1, chainId: 'evm:31337', deploymentId: 'test',
@@ -13,9 +14,8 @@ function snapshot(id: string, now: number) {
 describe('public snapshot physical build budgets', () => {
   it('allows a cold and fresh observation, then refuses repeated forced RPC work until the window ends', async () => {
     let now = 1000, builds = 0;
-    const admission = new PublicSnapshotAdmission(() => now);
-    const cache = new PublicGraphSnapshotCache(async id => { builds++; return snapshot(id, now); }, () => now);
-    const get = (refresh: boolean) => cache.get('g', '1', refresh, () => admission.acquire('peer-a'));
+    const cache = new PublicSnapshotServingRuntime(async id => { builds++; return snapshot(id, now); }, lifetime(), () => now);
+    const get = (refresh: boolean) => cache.get('peer-a', 'g', '1', refresh);
     const cold = await get(false);
     expect(await get(false)).toBe(cold);
     const fresh = await get(true);
@@ -28,15 +28,14 @@ describe('public snapshot physical build budgets', () => {
   });
 
   it('reserves capacity for a different peer until physical work settles, including failure', async () => {
-    const admission = new PublicSnapshotAdmission();
     let reject!: (error: Error) => void;
-    const cache = new PublicGraphSnapshotCache(async id => id === 'held'
-      ? new Promise((_resolve, fail) => { reject = fail; }) : snapshot(id, Date.now()));
-    const first = cache.get('held', '1', true, () => admission.acquire('peer-a'));
+    const cache = new PublicSnapshotServingRuntime(async id => id === 'held'
+      ? new Promise((_resolve, fail) => { reject = fail; }) : snapshot(id, Date.now()), lifetime());
+    const first = cache.get('peer-a', 'held', '1', true);
     const failed = expect(first).rejects.toThrow('RPC failed');
-    await expect(cache.get('other', '1', true, () => admission.acquire('peer-a'))).rejects.toThrow('peer busy');
-    await expect(cache.get('other', '1', true, () => admission.acquire('peer-b'))).resolves.toMatchObject({contextGraphId:'other'});
+    await expect(cache.get('peer-a', 'other', '1', true)).rejects.toThrow('peer busy');
+    await expect(cache.get('peer-b', 'other', '1', true)).resolves.toMatchObject({contextGraphId:'other'});
     reject(new Error('RPC failed')); await failed;
-    await expect(cache.get('next', '1', true, () => admission.acquire('peer-a'))).resolves.toMatchObject({contextGraphId:'next'});
+    await expect(cache.get('peer-a', 'next', '1', true)).resolves.toMatchObject({contextGraphId:'next'});
   });
 });

@@ -2,11 +2,10 @@ import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
 import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
-import { PublicSnapshotAdmission } from './public-snapshot-admission.js';
+import { PublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
 import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
-  PublicGraphSnapshotCache,
   PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
 } from "@origintrail-official/dkg-chain";
 import { startRequestAbortLifecycle, buildKnowledgeAssetUalFromOnChainIdV1 } from "@origintrail-official/dkg-core";
@@ -27,16 +26,10 @@ export class PublicSnapshotMethods {
   startPublicGraphSnapshots(this: DKGAgent): void {
     if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
       return;
-    const cache = new PublicGraphSnapshotCache(async (id, onChainId, signal) => {
-      const lifecycle = startRequestAbortLifecycle(110_000, [signal, this.vmReconcileLifecycleController.signal]);
-      try {
-        const operation = this.chain.readPublicGraphSnapshot!(id, onChainId, { signal: lifecycle.signal });
-        this.vmReconcilePhysicalRuns.add(operation);
-        try { return await operation; }
-        finally { this.vmReconcilePhysicalRuns.delete(operation); }
-      } finally { lifecycle.release(); }
-    });
-    const admission = new PublicSnapshotAdmission();
+    const runtime = new PublicSnapshotServingRuntime(
+      (id, onChainId, signal) => this.chain.readPublicGraphSnapshot!(id, onChainId, { signal }),
+      { signal: this.vmReconcileLifecycleController.signal, physicalRuns: this.vmReconcilePhysicalRuns },
+    );
     this.router.register(
       PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
       async (data, peer) => {
@@ -49,11 +42,11 @@ export class PublicSnapshotMethods {
             throw new Error("Unavailable");
           const generation = this.contextGraphBindingState.capture(request.contextGraphId);
           const lifetime = this.vmReconcileLifecycleGeneration;
-          const snapshot = await cache.get(
+          const snapshot = await runtime.get(
+            peer.toString(),
             request.contextGraphId,
             request.onChainId,
             request.refresh,
-            () => admission.acquire(peer.toString()),
           );
           if (lifetime !== this.vmReconcileLifecycleGeneration
             || !this.contextGraphBindingState.isGenerationCurrent(request.contextGraphId, generation)
