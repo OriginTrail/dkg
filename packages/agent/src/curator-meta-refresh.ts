@@ -45,6 +45,10 @@ import { stripLiteral } from './dkg-agent-utils.js';
 import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
 import { ensureCuratorConnected } from './curator-peer-connection.js';
+import {
+  noteCuratorMetaRefreshStarted,
+  noteCuratorRegistrationRefusal,
+} from './curator-registration-refusal.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -503,6 +507,16 @@ async function fetchAuthoritativeMetaSnapshot(
   if (!admitted) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
+    if (options.requirePublicDefinition === true && controlMetaQuads.length === 0) {
+      // The public bootstrap asks connected peers in turn, and every peer that
+      // does not hold the graph answers with a complete, empty page. That is a
+      // miss, not a snapshot that was refused.
+      agent.log.info(
+        ctx,
+        `Peer ${curatorPeerId.slice(-8)} holds no definition of "${contextGraphId}"`,
+      );
+      return undefined;
+    }
     agent.log.warn(
       ctx,
       `Rejected curator metadata snapshot for "${contextGraphId}": missing an unambiguous public definition or the complete private definition and approved-member delegation proof`,
@@ -760,6 +774,8 @@ async function executeCuratorMetaRefresh(
   options: CuratorMetaRefreshOptions,
   ctx: OperationContext,
 ): Promise<boolean> {
+  // Numbered as it starts, so a watch tells its refusal from an earlier refresh's.
+  const refresh = noteCuratorMetaRefreshStarted(agent, contextGraphId, curatorPeerId);
   const connectionResult = ensureCuratorConnected(
     agent,
     curatorPeerId,
@@ -785,12 +801,17 @@ async function executeCuratorMetaRefresh(
     );
     if (!snapshot) return false;
     if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
+      // Counted, so a caller that retries failed refreshes does not fetch it again.
+      noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId, refresh);
       agent.syncCheckpoints.delete(snapshot.checkpointKey);
       agent.log.warn(ctx, `Rejected curator metadata for "${contextGraphId}": `
         + `its registration conflicts with owned slot ${agent.subscribedContextGraphs?.get(contextGraphId)?.onChainId}`);
       return false;
     }
     if (!(await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot, ctx))) {
+      if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
+        noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId, refresh);
+      }
       agent.syncCheckpoints.delete(snapshot.checkpointKey);
       agent.log.warn(
         ctx,

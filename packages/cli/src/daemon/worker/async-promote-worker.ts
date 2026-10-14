@@ -180,35 +180,37 @@ class PromoteWorkerShutdownError extends Error {
   }
 }
 
-type FailureBookkeepingStage = 'record_failure' | 'read_failure_outcome';
-
 /** Queue uncertainty is not an operation verdict or permission to replay it. */
-class PromoteFailureBookkeepingUncertainError extends Error {
-  readonly errorName: string = 'unknown';
-  readonly errorCode: string = 'unknown';
-
-  constructor(readonly stage: FailureBookkeepingStage, error?: unknown) {
-    super(`Promote failure bookkeeping is uncertain (${stage})`);
-    this.name = 'PromoteFailureBookkeepingUncertainError';
-    // Capture closed identities only; never retain an arbitrary cause/message.
-    try {
-      if (error instanceof StoreSchedulerBusyError) {
-        this.errorName = 'StoreSchedulerBusyError';
-        this.errorCode = 'STORE_SCHEDULER_BUSY';
-      } else if (isStoreOperationTimeoutError(error)) {
-        this.errorName = 'TimeoutError';
-        this.errorCode = 'STORE_OPERATION_TIMEOUT';
-      } else if (error instanceof PromoteJobLeaseError) {
-        this.errorName = 'PromoteJobLeaseError';
-      } else {
-        this.errorName = safePromoteErrorIdentity(error, 'name') ?? 'unknown';
-        this.errorCode = safePromoteErrorIdentity(error, 'code') ?? 'unknown';
-      }
-    } catch {
-      // Even hostile diagnostic getters cannot turn uncertainty into fatality.
+function failureBookkeepingUncertainty(error: unknown): { errorName: string; errorCode: string } {
+  let errorName = 'unknown';
+  let errorCode = 'unknown';
+  // Capture closed identities only; never retain an arbitrary cause/message.
+  try {
+    if (error instanceof StoreSchedulerBusyError) {
+      errorName = 'StoreSchedulerBusyError';
+      errorCode = 'STORE_SCHEDULER_BUSY';
+    } else if (isStoreOperationTimeoutError(error)) {
+      errorName = 'TimeoutError';
+      errorCode = 'STORE_OPERATION_TIMEOUT';
+    } else if (error instanceof PromoteJobLeaseError) {
+      errorName = 'PromoteJobLeaseError';
+    } else {
+      errorName = safePromoteErrorIdentity(error, 'name') ?? 'unknown';
+      errorCode = safePromoteErrorIdentity(error, 'code') ?? 'unknown';
     }
+  } catch {
+    // Even hostile diagnostic getters cannot turn uncertainty into fatality.
   }
+  return { errorName, errorCode };
 }
+
+type PromoteJobRunResult = {
+  outcome: 'succeeded' | 'failed_retrying' | 'failed_terminal' | 'partial_promote_ambiguity';
+  error?: ClassifiedPromoteError;
+} | {
+  outcome: 'failure_bookkeeping_uncertain';
+  diagnostic: { errorName: string; errorCode: string };
+};
 
 export interface PromoteWorkerCounters {
   succeeded: number;
@@ -270,14 +272,7 @@ export async function runPromoteJob(
     log: PromoteWorkerLogger;
     emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   },
-): Promise<{
-  outcome:
-    | 'succeeded'
-    | 'failed_retrying'
-    | 'failed_terminal'
-    | 'partial_promote_ambiguity';
-  error?: ClassifiedPromoteError;
-}> {
+): Promise<PromoteJobRunResult> {
   const {
     job,
     queue,
@@ -409,36 +404,19 @@ export async function runPromoteJob(
       };
       try {
         const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
-        await persistWithRecovery(
+        const transition = await persistWithRecovery(
           'record failure',
           bookkeepingDeadlineAt,
           () => queue.fail(job.jobId, claimToken, attemptError),
         );
+        throwIfShutdownInterrupted();
+        return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', error: classified };
       } catch (failErr: unknown) {
         if (failErr instanceof PromoteWorkerShutdownError) throw failErr;
         // The write may have committed without an acknowledgement. A lost lease
         // also forbids attributing another worker's outcome to this attempt.
-        throw new PromoteFailureBookkeepingUncertainError('record_failure', failErr);
+        return { outcome: 'failure_bookkeeping_uncertain', diagnostic: failureBookkeepingUncertainty(failErr) };
       }
-      // Determine final outcome by re-reading state — the queue decides retrying vs terminal.
-      throwIfShutdownInterrupted();
-      let updated: PromoteJob | null;
-      try {
-        updated = await queue.getStatus(job.jobId);
-      } catch (readErr: unknown) {
-        throwIfShutdownInterrupted();
-        if (readErr instanceof PromoteWorkerShutdownError) throw readErr;
-        throw new PromoteFailureBookkeepingUncertainError('read_failure_outcome', readErr);
-      }
-      if (
-        !updated
-        || updated.attempt.count !== job.attempt.count
-        || (updated.state !== 'failed_retrying' && updated.state !== 'failed')
-      ) {
-        throw new PromoteFailureBookkeepingUncertainError('read_failure_outcome');
-      }
-      const outcome = updated.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal';
-      return { outcome, error: classified };
     }
 
     // Plan §7 recommendation (b): single OUTER commit-marker after
@@ -706,6 +684,16 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           case 'failed_terminal':
             counters.failedTerminal += 1;
             break;
+          case 'failure_bookkeeping_uncertain':
+            log(`[async-promote-worker] ${JSON.stringify({
+              event: 'async_promote_failure_bookkeeping_uncertain', schemaVersion: 1,
+              jobId: claimed.jobId, attempt: claimed.attempt.count,
+              maxAttempts: claimed.attempt.maxRetries, stage: 'record_failure',
+              ...outcome.diagnostic,
+            })}`);
+            // The runner stopped heartbeats. Trust a committed outcome, or let
+            // existing lease reconciliation hold an ambiguous started promote.
+            break;
           case 'partial_promote_ambiguity':
             counters.partialPromoteAmbiguity += 1;
             break;
@@ -716,21 +704,6 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           log(
             `Worker ${slot.workerId} stopped bookkeeping for ${claimed.jobId} after shutdown timeout`,
           );
-          return;
-        }
-        if (err instanceof PromoteFailureBookkeepingUncertainError) {
-          log(`[async-promote-worker] ${JSON.stringify({
-            event: 'async_promote_failure_bookkeeping_uncertain',
-            schemaVersion: 1,
-            jobId: claimed.jobId,
-            attempt: claimed.attempt.count,
-            maxAttempts: claimed.attempt.maxRetries,
-            stage: err.stage,
-            errorName: err.errorName,
-            errorCode: err.errorCode,
-          })}`);
-          // The runner stopped heartbeats. Trust a committed outcome, or let
-          // existing lease reconciliation hold an ambiguous started promote.
           return;
         }
         log(`Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${message}`);

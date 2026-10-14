@@ -32,6 +32,12 @@ export interface RequestAbortLifecycle {
   release(): void;
 }
 
+/** Transport deadlines may surface directly or as the cause of a read abort. */
+export function isTransportTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'TimeoutError'
+    || (error.name === 'AbortError' && error.cause instanceof Error && error.cause.name === 'TimeoutError'));
+}
+
 /**
  * Starts the deadline now. `linked` signals are followed in order, so when
  * several are already aborted the first one's reason wins.

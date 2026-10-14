@@ -1,3 +1,5 @@
+import { type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
+export { createRfc64SwmAuthorInventoryOperationsViewV1, type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 import { randomBytes } from 'node:crypto';
 
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
@@ -49,6 +51,7 @@ import {
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SubGraphNameV1,
   type SwmAuthorInventorySnapshotV1,
+  type SwmAuthorInventoryRowV1,
   type VerifiedAuthorCatalogDirectoryPathV1,
   type VerifiedCgSharedProjectionV1,
   type VerifiedTransferredCatalogBundleV1,
@@ -329,24 +332,6 @@ export class InventoryV1CandidateError extends Error {
   }
 }
 
-export interface Rfc64SwmAuthorInventoryOperationsV1 {
-  readSwmAuthorInventoryHeadDigestV1(
-    inventoryScopeDigest: Digest32V1,
-    authorAddress: EvmAddressV1,
-  ): Digest32V1 | null;
-  readSwmAuthorInventorySnapshotV1(
-    inventoryScopeDigest: Digest32V1,
-    authorAddress: EvmAddressV1,
-  ): SwmAuthorInventorySnapshotV1 | null;
-  compareAndSwapSwmAuthorInventoryV1(
-    input: CompareAndSwapSwmAuthorInventoryInputV1,
-  ): SwmAuthorInventoryCasResultV1;
-  compareAndSwapMergeSwmAuthorInventoryV1(
-    input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
-  ): SwmAuthorInventoryCasResultV1;
-  deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void;
-}
-
 export interface Rfc64InventoryV1CandidateApi
   extends Rfc64SwmAuthorInventoryOperationsV1,
     Rfc64FinalizedPrivatePlacementRepairOperationsV1,
@@ -493,48 +478,6 @@ export function createRfc64InventoryOperationsViewV1(
     compareAndSwapAppliedCatalogHeadV1: fence(
       inventory.compareAndSwapAppliedCatalogHeadV1.bind(inventory),
     ),
-  });
-}
-
-/** Build the feature-owned non-owning SWM author-inventory capability. */
-export function createRfc64SwmAuthorInventoryOperationsViewV1(
-  inventory: Rfc64SwmAuthorInventoryOperationsV1,
-  requireOwnerOpen: () => void,
-): Rfc64SwmAuthorInventoryOperationsV1 {
-  return Object.freeze({
-    readSwmAuthorInventoryHeadDigestV1: (
-      inventoryScopeDigest: Digest32V1,
-      authorAddress: EvmAddressV1,
-    ): Digest32V1 | null => {
-      requireOwnerOpen();
-      return inventory.readSwmAuthorInventoryHeadDigestV1(inventoryScopeDigest, authorAddress);
-    },
-    readSwmAuthorInventorySnapshotV1: (
-      inventoryScopeDigest: Digest32V1,
-      authorAddress: EvmAddressV1,
-    ): SwmAuthorInventorySnapshotV1 | null => {
-      requireOwnerOpen();
-      return inventory.readSwmAuthorInventorySnapshotV1(
-        inventoryScopeDigest,
-        authorAddress,
-      );
-    },
-    compareAndSwapSwmAuthorInventoryV1: (
-      input: CompareAndSwapSwmAuthorInventoryInputV1,
-    ): SwmAuthorInventoryCasResultV1 => {
-      requireOwnerOpen();
-      return inventory.compareAndSwapSwmAuthorInventoryV1(input);
-    },
-    compareAndSwapMergeSwmAuthorInventoryV1: (
-      input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
-    ): SwmAuthorInventoryCasResultV1 => {
-      requireOwnerOpen();
-      return inventory.compareAndSwapMergeSwmAuthorInventoryV1(input);
-    },
-    deleteSwmAuthorInventoryV1: (input: DeleteSwmAuthorInventoryInputV1): void => {
-      requireOwnerOpen();
-      inventory.deleteSwmAuthorInventoryV1(input);
-    },
   });
 }
 
@@ -920,6 +863,19 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       inventoryScopeDigest, authorAddress, swmAuthorInventoryErrorV1,
     );
     return this.readTransaction(() => persistence.readHeadDigest(key));
+  }
+
+  readSwmAuthorInventoryRowV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+    kaUal: SwmAuthorInventoryRowV1['kaUal'],
+  ): Readonly<SwmAuthorInventoryRowV1> | null {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const key = encodeSwmAuthorInventoryKeyV1(
+      inventoryScopeDigest, authorAddress, swmAuthorInventoryErrorV1,
+    );
+    return this.readTransaction(() => persistence.readRow(key, kaUal));
   }
 
   readSwmAuthorInventorySnapshotV1(

@@ -138,7 +138,7 @@ describe('RPC request admission and cancellation', () => {
     // backup would only wait behind the same governor.
     await expect(adapter.getBlockNumber()).rejects.toMatchObject({
       code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
-      message: expect.stringContaining('for local RPC admission and was not sent'),
+      message: expect.stringContaining('waiting for local RPC admission with no endpoint request in flight'),
     });
     expect(governor.snapshot()).toMatchObject({
       foregroundQueued: 0,
