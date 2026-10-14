@@ -10,7 +10,7 @@
 import { OKF_STATUS_VALUES } from './constants.js';
 import { VERIFIED, definedKeys } from './families/specs.js';
 import { parseList, type ParsedEntry } from './families/parse.js';
-import { dateTimeLexical, hasExplicitOffset, isXsdDate, isXsdDateTime } from './timestamps.js';
+import { dateTimeLexical, instantOf } from './timestamps.js';
 import { safeString } from './utils.js';
 import type { OkfStatus, TrustTier, VerificationEvent } from './types.js';
 
@@ -93,13 +93,9 @@ export function isKnownStatus(value: string): value is OkfStatus {
  */
 export function isStale(staleAfter: unknown, now: Date = new Date()): boolean {
   const lexical = dateTimeLexical(staleAfter);
-  if (lexical === null) return false;
-  // Only a valid XSD value can be stale: `Date.parse` would silently roll an
-  // impossible `2026-02-30` over to March and report it stale.
-  if (!isXsdDateTime(lexical) && !isXsdDate(lexical)) return false;
-  // `Date.parse` reads an offset-less date-time as *local* time; read it as UTC
-  // so staleness does not depend on the machine's time zone.
-  const t = Date.parse(isXsdDateTime(lexical) && !hasExplicitOffset(lexical) ? `${lexical}Z` : lexical);
-  if (Number.isNaN(t)) return false;
-  return now.getTime() >= t;
+  // Only a valid XSD value can be stale (`Date.parse` would silently roll an
+  // impossible `2026-02-30` over to March), read the same in every time zone,
+  // a date with an offset included.
+  const t = lexical === null ? null : instantOf(lexical);
+  return t !== null && now.getTime() >= t;
 }

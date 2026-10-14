@@ -94,3 +94,24 @@ export function isXsdDate(lexical: string): boolean {
 export function hasExplicitOffset(lexical: string): boolean {
   return EXPLICIT_OFFSET_RE.test(lexical);
 }
+
+/**
+ * The instant (milliseconds since the epoch) a valid xsd:dateTime or xsd:date
+ * lexical names, or `null` for any other text. A value without an explicit
+ * offset is read as UTC, so nothing depends on the machine's time zone, and a
+ * date names its midnight, in its own zone when it carries one
+ * (`2026-06-15+02:00` is 2026-06-14T22:00:00Z), which `Date.parse` alone
+ * cannot read.
+ */
+export function instantOf(lexical: string): number | null {
+  let iso: string | null = null;
+  if (isXsdDateTime(lexical)) {
+    iso = hasExplicitOffset(lexical) ? lexical : `${lexical}Z`;
+  } else {
+    const m = isXsdDate(lexical) ? XSD_DATE_RE.exec(lexical) : null;
+    if (m) iso = `${m[1]}-${m[2]}-${m[3]}T00:00:00${m[4] ?? 'Z'}`;
+  }
+  if (iso === null) return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+}

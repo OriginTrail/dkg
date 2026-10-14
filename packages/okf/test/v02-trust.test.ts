@@ -249,7 +249,7 @@ describe('staleness does not depend on the machine time zone', () => {
   }
 
   for (const [tz, offsetMinutes] of [['America/New_York', 300], ['Asia/Tokyo', -540]] as const) {
-    it(`reads an offset-less stale_after as UTC in ${tz}`, () => {
+    it(`reads stale_after the same in ${tz}: offset-less as UTC, a zoned date at its own midnight`, () => {
       inZone(tz, () => {
         // The switch took effect: local midnight is hours away from UTC midnight.
         expect(new Date(2026, 11, 31).getTimezoneOffset()).toBe(offsetMinutes);
@@ -257,6 +257,15 @@ describe('staleness does not depend on the machine time zone', () => {
         expect(isStale('2026-12-31T00:00:00', new Date('2026-12-31T00:00:00Z'))).toBe(true);
         expect(isStale('2026-06-15', new Date('2026-06-15T00:00:00Z'))).toBe(true);
         expect(isStale('2026-06-15', new Date('2026-06-14T23:59:59Z'))).toBe(false);
+        // A date with a zone names its own midnight: `2026-06-15+02:00` is 2026-06-14T22:00:00Z.
+        expect(isStale('2026-06-15+02:00', new Date('2026-06-14T21:59:59Z'))).toBe(false);
+        expect(isStale('2026-06-15+02:00', new Date('2026-06-14T22:00:00Z'))).toBe(true);
+        expect(isStale('2026-06-15-05:00', new Date('2026-06-15T04:59:59Z'))).toBe(false);
+        expect(isStale('2026-06-15-05:00', new Date('2026-06-15T05:00:00Z'))).toBe(true);
+        expect(isStale('2026-06-15Z', new Date('2026-06-14T23:59:59Z'))).toBe(false);
+        expect(isStale('2026-06-15Z', new Date('2026-06-15T00:00:00Z'))).toBe(true);
+        // and an impossible date is still never stale
+        expect(isStale('2026-02-30+02:00', new Date('2099-01-01T00:00:00Z'))).toBe(false);
       });
     });
   }
