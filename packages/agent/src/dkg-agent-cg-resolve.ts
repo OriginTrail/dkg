@@ -212,6 +212,7 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
+import { claimedAgentSyncRequestSigner } from './sync/auth/request-signing.js';
 import { normalizeExactSyncResponseEncoding } from './sync/wire-compression.js';
 import {
   normalizeExactAssetUals,
@@ -1544,7 +1545,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       getIdentityId: () => this.chain.getIdentityId(),
       signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
       claimedAgentAddress: claimedAgentAddress,
-      claimedAgentPrivateKey: claimedAgent?.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(this.config?.authorSigners, claimedAgentAddress, claimedAgent),
     });
   }
 

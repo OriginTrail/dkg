@@ -214,8 +214,9 @@ mcpCmd
         // warning (mcpSetupAction wraps the call in try/catch) instead of
         // aborting setup.
         loadOpWallets: async (dir: string) => {
-          const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
-          return loadOpWallets(dir);
+          // No wallets.json when the node signs through an external signer.
+          const { loadLocalOpWalletsUnlessExternal } = await import('../local-op-wallets.js');
+          return loadLocalOpWalletsUnlessExternal(dir);
         },
         // Shared faucet orchestrator — the SAME one openclaw/hermes use.
         // Replaces the old bespoke `/api/status` reachability probe +
