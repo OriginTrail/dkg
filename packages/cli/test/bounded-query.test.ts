@@ -319,7 +319,7 @@ it('excludes another agent drafts from bounded partition scans without narrowing
   const store = new OxigraphStore(), engine = new DKGQueryEngine(store);
   const root = 'did:dkg:context-graph:test', draft = `${root}/_working_memory/agent-b/1`;
   const graphs = [draft, `${draft}/details`, `${root}/_shared_memory/a`, `${root}/_verifiable_memory/a`];
-  const agent = { queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+  const agent = { store, queryEngine: engine, log: { info() {} }, peerId: 'fixture',
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' }),
     subscribedContextGraphs: new Map() };
   const query = QueryMethods.prototype.query.bind(agent as never);
