@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -174,9 +175,8 @@ describe('operator asset fetch — from the chain adapter to the conflict', () =
       vmReconcileRuntimeReady: true,
       graphScopedStoreClosed: false,
       vmReconcileRotationClosed: false,
-      vmReconcileLifecycleGeneration: 1,
-      vmReconcileLifecycleController: new AbortController(),
-      vmReconcilePhysicalRuns: new Set<Promise<unknown>>(),
+      workLifetime: new AgentWorkLifetime(),
+
       subscribedContextGraphs: new Map([[CONTEXT_GRAPH, { subscribed: true, onChainId: ON_CHAIN_ID }]]),
       chain: {
         chainId: CHAIN_ID,

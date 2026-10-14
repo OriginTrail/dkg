@@ -51,10 +51,14 @@ export async function assertPublicSnapshotQueryTrust(
   }
   if (accepted !== undefined && accepted !== "rpc-only")
     throw new Error("Unknown chain evidence mode");
-  // A parent/subGraphName query can resolve a descendant graph's VM partitions.
-  // Conservatively guard the whole canonical scope, including descendants.
+  // Storage partitions overlap in both directions: a parent can select a child's
+  // partitions, and a descendant alias can select content imported by its parent.
+  // Keep slash boundaries so similarly named, unrelated scopes remain readable.
+  const prefix = contextGraphId
+    ? sparqlString(contextGraphMetaUri(contextGraphId).replace(/_meta$/, "")) : "";
   const scope = contextGraphId
-    ? `FILTER(STRSTARTS(STR(?graph), ${sparqlString(contextGraphMetaUri(contextGraphId).replace(/_meta$/, ""))}))`
+    ? `FILTER(STRSTARTS(STR(?graph), ${prefix}) ||
+        (STRENDS(STR(?graph), "/_meta") && STRSTARTS(${prefix}, SUBSTR(STR(?graph), 1, STRLEN(STR(?graph)) - 5))))`
     : "";
   const result = await store.query(
     `SELECT ?mode WHERE { GRAPH <${SNAPSHOT_TRUST_GRAPH}> { ?graph <${DKG}chainEvidenceMode> ?mode } ${scope} } LIMIT 1`,
