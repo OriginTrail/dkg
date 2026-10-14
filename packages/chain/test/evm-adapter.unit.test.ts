@@ -28,6 +28,7 @@ import {
   type ApprovalPolicy,
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
+import { explainOutOfGasRevert } from '../src/evm-adapter-rpc.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import {
   DEFAULT_FINALITY_CONFIRMATIONS,
@@ -848,7 +849,63 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
     expect(sendSpy.calls[0][1]).toBe('createChallenge');
     expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
-    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom preserved
+    // gas headroom: +50%, and never less than 2.5M
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000, gasLimitMinBuffer: 2_500_000n });
+  });
+
+  it('createChallenge signs a gas limit that fits a draw costlier than the one its estimate saw', async () => {
+    // The contract settles every graph its weighted draw lands on without
+    // finding a live asset, then draws again. Which graphs a creation lands on
+    // follows from the block it runs in, so the estimate and the mined
+    // transaction take independent draws, and a settle is a fixed amount of
+    // extra work. Numbers from one test network: a creation without a settle
+    // and one with the cheapest settle (local fork of its state), and the
+    // costliest of 5,336 creations estimated there in 24 days.
+    const estimatedWithoutSettle = 319_732n;
+    const neededWithCheapestSettle = 499_275n;
+    const costliestEstimateSeen = 2_580_738n;
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const rsInterface = new Interface([
+      'event ChallengeGenerated(uint72 indexed identityId,uint256 indexed contextGraphId,uint256 knowledgeAssetId,uint256 chunkId,uint256 epoch,uint256 activeProofPeriodStartBlock)',
+    ]);
+    const encoded = rsInterface.encodeEventLog(rsInterface.getEvent('ChallengeGenerated')!, [7n, 3n, 11n, 2n, 3n, 4n]);
+    const receipt = {
+      hash: '0x' + '44'.repeat(32), blockNumber: 8, index: 0, status: 1,
+      logs: [{ topics: encoded.topics, data: encoded.data }],
+    };
+    const challengeRaw = {
+      knowledgeAssetId: 11n, knowledgeAssetStorageContract: ethers.ZeroAddress, chunkId: 2n, epoch: 3n,
+      activeProofPeriodStartBlock: 4n, proofingPeriodDurationInBlocks: 5n, solved: false, isCurated: false,
+      challengeLeafCount: 1n, challengeRoot: ethers.ZeroHash,
+    };
+    // No gasLimit from populate: the buffered estimate decides it.
+    const populateTransaction = recorder(async () => (
+      { to: '0x0000000000000000000000000000000000000001', data: '0x1234' } as any
+    ));
+    const estimateGas = recorder(async () => estimatedWithoutSettle);
+    const rs = {
+      interface: rsInterface,
+      connect: recorder(() => ({ createChallenge: { populateTransaction, estimateGas } })),
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs, rss: {} });
+    a.readContract = recorder(async () => challengeRaw);
+    a.nextRandomSamplingSigner = async () => signer;
+    a.providers = [provider];
+    const { prepare: prepareSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    a.sendSignedTransactionAndWait = recorder(async () => receipt);
+
+    await expect(a.createChallenge()).resolves.toMatchObject({ hash: receipt.hash, success: true });
+
+    expect(estimateGas.calls).toHaveLength(1);
+    const signedGasLimit = prepareSpy.calls[0][1].gasLimit;
+    // 319,732 + 2,500,000: +50% of the estimate would add 159,866
+    expect(signedGasLimit).toBe(2_819_732n);
+    expect(signedGasLimit >= costliestEstimateSeen).toBe(true);
+    // +50% alone, the previous limit, was below even the cheapest settle.
+    expect((estimatedWithoutSettle * 3n) / 2n < neededWithCheapestSettle).toBe(true);
   });
 
   it('submitProof signs with the wallet selected by nextRandomSamplingSigner', async () => {
@@ -866,6 +923,48 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
     expect(sendSpy.calls[0][1]).toBe('submitProof');
     expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom
+  });
+
+  it('submitProof signs a gas limit above the estimate, so a proof that costs more one block later still fits', async () => {
+    // The contract settles the node's stake to `block.timestamp` and skips the
+    // settle when the node is already settled at that timestamp, which is the
+    // case on the block that holds the node's own createChallenge. An estimate
+    // taken on that block comes out below what the proof needs one block
+    // later. Numbers from one observed case: estimate 294,443, needed 306,807;
+    // sent with the raw estimate, the proof ran out of gas.
+    const estimatedOnChallengeBlock = 294_443n;
+    const neededOneBlockLater = 306_807n;
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0x' + '33'.repeat(32), blockNumber: 6, index: 0, status: 1, logs: [] };
+    // No gasLimit from populate: without headroom ethers would fill in the raw
+    // estimate while signing.
+    const populateTransaction = recorder(async () => (
+      { to: '0x0000000000000000000000000000000000000001', data: '0x1234' } as any
+    ));
+    const estimateGas = recorder(async () => estimatedOnChallengeBlock);
+    const rs = {
+      connect: recorder(() => ({ submitProof: { populateTransaction, estimateGas } })),
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs });
+    a.nextRandomSamplingSigner = async () => signer;
+    a.providers = [provider];
+    const { prepare: prepareSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    a.sendSignedTransactionAndWait = recorder(async () => receipt);
+
+    await expect(a.submitProof(new Uint8Array([1, 2, 3]), [])).resolves.toMatchObject({
+      hash: receipt.hash,
+      success: true,
+    });
+
+    expect(estimateGas.calls).toHaveLength(1);
+    const signedGasLimit = prepareSpy.calls[0][1].gasLimit;
+    // 294_443 * (10_000 + 5_000) / 10_000, rounded down
+    expect(signedGasLimit).toBe(441_664n);
+    expect(signedGasLimit >= neededOneBlockLater).toBe(true);
   });
 
   // ── self-heal for STALE eligibility: an out-of-band removed wallet that
@@ -2014,6 +2113,109 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       receipt,
     });
     expect(backup.getTransactionReceipt.calls).toEqual([]);
+  });
+
+  describe('a mined write that reverted: out-of-gas hint', () => {
+    const GAS_LIMIT = 294_443n;
+    const blockHash = '0x' + '48'.repeat(32);
+
+    async function signWithGasLimit(gasLimit: bigint) {
+      const signedTx = await new ethers.Wallet(DEPLOYER_PK).signTransaction({
+        to: '0x0000000000000000000000000000000000000001',
+        data: '0x1234',
+        gasLimit,
+        nonce: 0,
+        chainId: 31337n,
+        type: 2,
+        maxFeePerGas: 1n,
+        maxPriorityFeePerGas: 1n,
+      });
+      return { signedTx, txHash: ethers.Transaction.from(signedTx).hash! };
+    }
+
+    async function sendAndRevert(signedTx: string, txHash: string, gasUsed: bigint): Promise<any> {
+      const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+      const receipt = { hash: txHash, blockNumber: 48, blockHash, status: 0, gasUsed, logs: [] };
+      (a as any).providers = [{
+        broadcastTransaction: recorder(async () => ({ hash: txHash })),
+        getTransactionReceipt: recorder(async () => receipt),
+        getBlockNumber: recorder(async () => 48),
+        getBlock: recorder(async () => ({ number: 48, hash: blockHash })),
+      }];
+      const error = await (a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write')
+        .then(() => undefined, (err: unknown) => err);
+      expect(error).toMatchObject({ code: 'CALL_EXCEPTION', receipt });
+      return error;
+    }
+
+    it('says so when the transaction used nearly its whole gas limit', async () => {
+      const { signedTx, txHash } = await signWithGasLimit(GAS_LIMIT);
+
+      // The observed case: 416 gas short of the limit, no logs, no revert data.
+      const error = await sendAndRevert(signedTx, txHash, 294_027n);
+
+      expect(error.message).toBe(
+        `unit write tx ${txHash} was mined but reverted (status=0); ` +
+        'it used 294027 of its 294443 gas limit, so it probably ran out of gas',
+      );
+    });
+
+    it('applies when at most 1/32 of the limit is left, and not below', async () => {
+      // A call hands its callee at most 63/64 of its gas. When a callee two
+      // calls deep runs out, both callers above it keep 1/64: at most 1/32 of
+      // the limit is left when the transaction reverts.
+      const { signedTx, txHash } = await signWithGasLimit(1_280_000n);
+      const plain = `unit write tx ${txHash} was mined but reverted (status=0)`;
+
+      expect((await sendAndRevert(signedTx, txHash, 1_240_000n)).message).toBe(
+        `${plain}; it used 1240000 of its 1280000 gas limit, so it probably ran out of gas`,
+      );
+      // An ordinary revert leaves more gas unused: the message stays as it was.
+      expect((await sendAndRevert(signedTx, txHash, 1_239_999n)).message).toBe(plain);
+    });
+
+    it.each([
+      // Challenge creations that ran out of gas on a test network: status 0, no logs.
+      [476_714, 482_200], // 98.86%
+      [460_505, 466_182], // 98.78%
+      [484_904, 492_139], // 98.53%
+      [497_260, 503_787], // 98.70%
+      // The lowest share among 557 such failures in 24 days: below 63/64 (98.44%).
+      [765_413, 781_749], // 97.91%
+      // Reproduced on a local fork: the loop two calls below the transaction ran out.
+      [494_198, 501_151], // 98.61%
+    ])('recognises a callee that ran out of gas: %i used of %i', async (gasUsed, gasLimit) => {
+      const { signedTx, txHash } = await signWithGasLimit(BigInt(gasLimit));
+
+      const error = await sendAndRevert(signedTx, txHash, BigInt(gasUsed));
+
+      expect(error.message).toBe(
+        `unit write tx ${txHash} was mined but reverted (status=0); ` +
+        `it used ${gasUsed} of its ${gasLimit} gas limit, so it probably ran out of gas`,
+      );
+    });
+
+    it('leaves the message alone when the signed bytes cannot be decoded', async () => {
+      const txHash = '0x' + '34'.repeat(32);
+
+      const error = await sendAndRevert('0xdeadbeef', txHash, GAS_LIMIT);
+
+      expect(error.message).toBe(`unit write tx ${txHash} was mined but reverted (status=0)`);
+    });
+
+    it('rethrows any other rejection untouched', async () => {
+      const { signedTx } = await signWithGasLimit(GAS_LIMIT);
+      const handler = explainOutOfGasRevert(signedTx);
+      const timeout = Object.assign(new Error('no receipt yet'), { code: 'RPC_TIMEOUT' });
+      const notAnError = { receipt: { status: 0, gasUsed: GAS_LIMIT } };
+
+      expect(() => handler(timeout)).toThrow(timeout);
+      expect(timeout.message).toBe('no receipt yet');
+      let thrown: unknown;
+      try { handler(notAnError); } catch (err) { thrown = err; }
+      expect(thrown).toBe(notAnError);
+      expect(notAnError).toEqual({ receipt: { status: 0, gasUsed: GAS_LIMIT } });
+    });
   });
 
   it('signMessage returns 32-byte r and vs (no contract init)', async () => {
@@ -4870,6 +5072,69 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(coverReadStrict[0]).toBe(true);
   });
 
+  it.each([
+    { name: 'native floor equality', native: 5n, trac: 0n, pca: true, eligible: false },
+    { name: 'direct funding', native: 10n, trac: 100n, pca: true, eligible: false },
+    { name: 'short own TRAC', native: 10n, trac: 10n, pca: true, eligible: true },
+    { name: 'TRAC floor equality', native: 10n, trac: 5n, pca: true, eligible: true },
+    { name: 'PCA disabled', native: 10n, trac: 0n, pca: false, eligible: false },
+  ])('refreshes assessed PCA eligibility: $name', async ({ native, trac, pca, eligible }) => {
+    const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), 10n);
+    tracByAddr.set(lc(walletA.address), 0n);
+    const selection = await (a as any)._assessFundedCandidates([walletA], () => ({
+      kind: 'native+trac', nativeFloorWei: 5n, tracFloorWei: 5n, requiredTracWei: 100n,
+      pca: pca ? { kind: 'publish', epochs: 12 } : { kind: 'none' },
+    }), { preferIdle: false });
+    expect(selection.kind).toBe('unfunded');
+    const assessment = selection.assessments[0];
+    expect(assessment.candidate).toBe(walletA);
+    const reads = (a as any).provider.getBalance.calls.length;
+    nativeByAddr.set(lc(walletA.address), native);
+    tracByAddr.set(lc(walletA.address), trac);
+    await expect(assessment.refreshPcaEligibility()).resolves.toBe(eligible);
+    expect((a as any).provider.getBalance.calls.length).toBe(reads + 1);
+  });
+
+  it('refreshes a later wallet after an earlier PCA repricing waits', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE);
+    nativeByAddr.set(lc(walletB.address), 0n);
+    tracByAddr.set(lc(walletA.address), 0n);
+    tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (address: string) => lc(address) === lc(walletA.address) ? 41n : 42n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 24);
+    (a as any).convictionAccountCanCover = recorder(async (account: bigint) => account === 42n);
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const firstReprice = new Promise<void>((resolve) => { entered = resolve; });
+    const plansByAddress = new Map<string, number>();
+    const order: string[] = [];
+    (a as any)._publisherCandidatePlan = async (signer: ethers.Wallet) => {
+      const visits = plansByAddress.get(signer.address) ?? 0;
+      plansByAddress.set(signer.address, visits + 1);
+      const base = { signer, address: signer.address, publisherAddress: signer.address };
+      if (visits === 0) return { ...base, publishEpochs: 12, tokenAmount: 120n,
+        pcaPricing: { kind: 'unavailable', error: new Error('transient lock probe') } };
+      order.push(signer.address);
+      if (signer.address === walletA.address) { entered(); await hold; }
+      return { ...base, publishEpochs: 24, tokenAmount: 240n, pcaPricing: { kind: 'available' } };
+    };
+    const pending = a.resolvePublisherPublishPlan({
+      contextGraphId: CG, billableByteSize: 100n, effectiveByteSize: 100n, defaultPublishEpochs: 12,
+    });
+    try {
+      await firstReprice;
+      expect(order).toEqual([walletA.address]);
+      nativeByAddr.set(lc(walletB.address), ONE);
+      release();
+      await expect(pending).resolves.toEqual({ publisherAddress: walletB.address, publishEpochs: 24, tokenAmount: 240n });
+      expect(order).toEqual([walletA.address, walletB.address]);
+    } finally { release(); }
+  });
+
   it('reports confirmed non-coverage after failed PCA planning as insufficient funds', async () => {
     const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE);
@@ -5330,6 +5595,27 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       requiredTracWei: 0n,
       pca: { kind: 'provisional-publish' as const },
     };
+
+    it.each([
+      { name: 'native balance takes precedence over TRAC', native: [2n, 1n], trac: [0n, 100n], expected: 0 },
+      { name: 'TRAC breaks equal native balances', native: [0n, 0n], trac: [1n, 2n], expected: 1 },
+      { name: 'equal balances retain candidate order', native: [0n, 0n], trac: [1n, 1n], expected: 0 },
+      { name: 'native floor equality remains unfunded', native: [100n, 99n], trac: [0n, 100n], expected: 0 },
+    ])('unfunded fallback: $name', async ({ native, trac, expected }) => {
+      const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      const wallets = [walletA, walletB];
+      for (const [index, wallet] of wallets.entries()) {
+        nativeByAddr.set(lc(wallet.address), native[index]);
+        tracByAddr.set(lc(wallet.address), trac[index]);
+      }
+      const chosen = await (a as any).selectSigner({
+        txClass: 'rotatable-free',
+        funding: { ...nativeAndTrac, nativeFloorWei: 100n, pca: { kind: 'none' } },
+        preferIdle: true,
+      });
+      expect(chosen).toBe(wallets[expected]);
+    });
 
     it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {
       const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());

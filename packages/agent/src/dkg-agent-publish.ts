@@ -10,6 +10,8 @@
  */
 
 
+import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
+import { createContextGraphAuthorityError } from './internal/context-graph-authority/context-graph-authority.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
@@ -32,9 +34,7 @@ import {
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
-  encodeGossipEnvelope,
   computeGossipSigningPayload,
-  GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   decodeGossipEnvelope, type GossipEnvelopeMsg,
@@ -94,14 +94,6 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
-  encryptV10PublishPayload,
-  encryptChunked,
-  buildCiphertextChunksRoot,
-  computeGossipSigningPayloadV2,
-  GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-  ciphertextChunkStoreGraph,
-  ciphertextChunkStoreSubject,
-  CIPHERTEXT_CHUNK_PREDICATE,
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
@@ -196,7 +188,7 @@ import  {
   type PrepareWorkspaceGossip,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
-import { pickPublishLifecycleHooks, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
+import { pickPublishLifecycleHooks, type LiftJobTailStep, type LiftJobTailStepObserver, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
@@ -262,6 +254,7 @@ import {
   classifySwmFanoutPeerOutcome,
   type SelectSwmFanoutPeersResult,
 } from './swm/swm-fanout-peer-selection.js';
+import type { WorkspaceShareScope } from './swm/shared-memory-followers.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
@@ -463,7 +456,6 @@ import {
   createPublicSnapshotStore,
   applyDefaultLargeLiteralStorage,
   isLocalOxigraphConfig,
-  sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
 import { reconcileAndAllocateKaNumber, readMaxKaNumberWithRetry, isTransientChainError } from './allocator.js';
 import {
@@ -718,6 +710,9 @@ export type ResolveCuratedChainKeyContextOptions = {
   aeadBindingContextGraphId?: string;
 };
 
+/** How many sender-key setups one resolution may run before it gives the publish attempt back. */
+const CURATED_KEY_CONTEXT_SETUP_ROUNDS = 3;
+
 function normalizeOptionalContextGraphId(value: string | null | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
@@ -902,6 +897,7 @@ export class PublishMethods extends DKGAgentBase {
     ctx: OperationContext,
     resolvedSigner?: WorkspaceGossipSigner | null,
     shareOperationId?: string,
+    shareScope?: WorkspaceShareScope,
   ): Promise<void>;
 
   /**
@@ -915,6 +911,7 @@ export class PublishMethods extends DKGAgentBase {
     ctx: OperationContext,
     resolvedSigner?: WorkspaceGossipSigner | null,
     shareOperationId?: string,
+    shareScope?: WorkspaceShareScope,
   ): Promise<void>;
 
   async publishWorkspaceGossip(this: DKGAgent,
@@ -938,6 +935,12 @@ export class PublishMethods extends DKGAgentBase {
      * from quorum tracking too.
      */
     shareOperationId?: string,
+    /**
+     * Where the share goes: the graph's root (`subGraphName: null`) or a
+     * named sub-graph. Decides only whether the graph's followers are sent
+     * to; a caller that leaves it out sends to them.
+     */
+    shareScope?: WorkspaceShareScope,
   ): Promise<void> {
     const payload = normalizeWorkspaceGossipPublishInput(payloadOrMessage);
     const message = payload.message;
@@ -1078,6 +1081,27 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    // Followers of a public graph: peers that asked this node for the graph's
+    // shared memory and are not topic subscribers, which is what a peer
+    // reached only through a relay is (GossipSub does not run there). A direct
+    // send is their only path, so they are sent to outside the selection
+    // above (its probe limit and its memory of refusals assume that gossip
+    // delivers as well) and outside the cap that turns a large public graph
+    // gossip-only. One share is not sent to them: a share into a root that
+    // the catalog owns. The receiver refuses it and takes the content from
+    // the author's catalog, so sending it would only spend the relay's bytes.
+    const directFollowers = shareScope?.subGraphName === null
+      && !this.rfc64LegacySwmApplyAllowedForScope(contextGraphId, null)
+      ? []
+      : (plan.directFollowers ?? []);
+    const followerPeers = new Set(directFollowers);
+    const sendMembers = directFollowers.length === 0
+      ? substrateMembers
+      : [...new Set([...substrateMembers, ...directFollowers])];
+    const ackMembers = directFollowers.length === 0
+      ? plan.substrateMembers
+      : [...new Set([...plan.substrateMembers, ...directFollowers])];
+
     // rc.9 PR-D codex follow-up #D5 (rebased onto PR-G's G2
     // detach): register the SwmAckQuorum tracker BEFORE
     // substrate + gossip fire so a fast receiver's
@@ -1156,14 +1180,15 @@ export class PublishMethods extends DKGAgentBase {
     // retryable sentinel had no second delivery attempt because no gossip ACK
     // could ever arrive.
     const ackQuorumActive = !!shareOperationId
-      && plan.substrateMembers.length > 0;
+      && ackMembers.length > 0;
     let trackedQuorum: SwmAckQuorum | null = null;
     if (ackQuorumActive && shareOperationId) {
       trackedQuorum = this.getOrCreateSwmAckQuorum();
       trackedQuorum.track({
         shareOperationId,
         cgId: contextGraphId,
-        expectedMembers: plan.substrateMembers,
+        expectedMembers: ackMembers,
+        ...(directFollowers.length > 0 ? { directMembers: directFollowers } : {}),
         preAckedFromSubstrate: [],
         payload: wireMessage,
         enumerationSource: plan.enumerationSource,
@@ -1180,7 +1205,7 @@ export class PublishMethods extends DKGAgentBase {
     //   2. (PR-D #D5) Feed substrate-`delivered` peers into
     //      the quorum via onAck so they count toward the same
     //      quorum target as gossip-side acks.
-    if (plan.useSubstrate && substrateMembers.length > 0) {
+    if ((plan.useSubstrate || directFollowers.length > 0) && sendMembers.length > 0) {
       const baseBookkeeper = this.substrateFanoutBookkeeper();
       // PR-J: capture per-peer outcomes for the optional detail
       // line emitted when anything queues/fails/is rejected. Lets
@@ -1193,7 +1218,7 @@ export class PublishMethods extends DKGAgentBase {
             contextGraphId,
             protocolId: PROTOCOL_SWM_UPDATE,
             payload: wireMessage,
-            members: substrateMembers,
+            members: sendMembers,
             sendTimeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
             substrate: this.messenger,
             bookkeeper: {
@@ -1222,6 +1247,7 @@ export class PublishMethods extends DKGAgentBase {
                 // (swmSubstrateTopUp) keeps feeding its own outcomes.
                 if (
                   plan.enumerationSource === 'topic-subscribers'
+                  && !followerPeers.has(record.peerId)
                   && classifySwmFanoutPeerOutcome(record) !== 'nonTerminal'
                 ) {
                   this.recordSwmFanoutPeerRecord(contextGraphId, record);
@@ -1246,13 +1272,14 @@ export class PublishMethods extends DKGAgentBase {
             ctx,
             `SWM substrate fan-out cgId=${contextGraphId} source=${plan.enumerationSource} `
             + `enumerated=${plan.enumeratedCount} `
-            + `selected=${substrateMembers.length} `
+            + `selected=${sendMembers.length} `
             + `attempted=${substrateResult.attempted} `
             + `delivered=${substrateResult.delivered} rejected=${substrateResult.rejected} `
             + `retryable=${substrateResult.retryable} `
             + `queued=${substrateResult.queued} `
             + `inFlight=${substrateResult.inFlight} failed=${substrateResult.failed} `
-            + `also_gossiped=${plan.useGossip}`,
+            + `also_gossiped=${plan.useGossip}`
+            + (directFollowers.length > 0 ? ` followers=${directFollowers.length}` : ''),
           );
           // PR-J per-peer detail. Logged at WARN so it surfaces in
           // operator dashboards that filter by level (the aggregate
@@ -1669,6 +1696,7 @@ export class PublishMethods extends DKGAgentBase {
         ctx,
         gossipSigner,
         promoted.shareOperationId,
+        { subGraphName: opts?.subGraphName ?? null },
       );
     }
     try {
@@ -1899,23 +1927,8 @@ export class PublishMethods extends DKGAgentBase {
     // separate from the AEAD binding id. Agent-derived same-CG ids bind
     // AEAD to the canonical on-chain id without being treated as explicit
     // remaps; caller-supplied mismatches stay explicit policy targets.
-    const encryptInlinePayload = await this._resolveEncryptInlinePayload(
-      contextGraphId,
-      opts?.subGraphName,
-      undefined,
-      explicitPublishPolicyTarget,
-      publishBindingOptions,
-    );
-    // OT-RFC-38 LU-11 — also resolve the chunked emitter for curated
-    // CGs. When set, the publisher prefers this path: chunks fan out
-    // via SWM gossip and the V2 ACK carries only the commitment.
-    // Public CGs resolve to `undefined` inside the chain-confirmed resolver.
-    const encryptInlineChunked = await this._resolveEncryptInlineChunked(
-      contextGraphId,
-      opts?.subGraphName,
-      undefined,
-      explicitPublishPolicyTarget,
-      publishBindingOptions,
+    const { encryptInlinePayload, encryptInlineChunked } = await this._resolveInlineEncryption(
+      contextGraphId, opts?.subGraphName, undefined, explicitPublishPolicyTarget, publishBindingOptions,
     );
     // Use the same chain-aware curated decision that selected encryption.
     // Local `_meta` can legitimately lag chain registration; consulting it a
@@ -2294,37 +2307,11 @@ export class PublishMethods extends DKGAgentBase {
       // target on-chain cgId is now binding-only so the AEAD key derives from
       // the canonical id consumers verify against without reclassifying the
       // same-CG update as an explicit remap.
-      const updateEncryptInlinePayload = await this._resolveEncryptInlinePayload(
-        contextGraphId,
-        opts?.subGraphName,
-        undefined,
-        undefined,
-        updateOnChainId
-          ? { aeadBindingContextGraphId: updateOnChainId }
-          : undefined,
+      const { encryptInlinePayload: updateEncryptInlinePayload, encryptInlineChunked: updateEncryptInlineChunked } = await this._resolveInlineEncryption(
+        contextGraphId, opts?.subGraphName, undefined, undefined,
+        updateOnChainId ? { aeadBindingContextGraphId: updateOnChainId } : undefined,
       );
       const isCuratedUpdate = typeof updateEncryptInlinePayload === 'function';
-
-      // ALSO resolve the chunked SWM emitter — the MEMBER-DISTRIBUTION path. A
-      // curated update must actively fan the updated private payload out to CG
-      // members (OT-RFC-49: cores hold zero ciphertext, members hold it), exactly
-      // as curated publish does — otherwise members silently fall behind a
-      // committed update. The producer prefers this side-effecting chunked emitter
-      // over the pure single-blob hook. Like publish, it THROWS for a curated CG
-      // with no workspace-gossip signer (cores reject unsigned chunked envelopes):
-      // fail-closed — you cannot update a curated CG you cannot distribute to
-      // members. Public CGs → `undefined` (no-op), unchanged.
-      const updateEncryptInlineChunked = isCuratedUpdate
-        ? await this._resolveEncryptInlineChunked(
-            contextGraphId,
-            opts?.subGraphName,
-            undefined,
-            undefined,
-            updateOnChainId
-              ? { aeadBindingContextGraphId: updateOnChainId }
-              : undefined,
-          )
-        : undefined;
 
       // Curated V2 updates re-commit the deterministic catalog floor only as a
       // detached trusted capability. The exact staged KA graph stays untouched.
@@ -2472,6 +2459,7 @@ export class PublishMethods extends DKGAgentBase {
         ctx,
         gossipSigner,
         shareOperationId,
+        { subGraphName: opts?.subGraphName ?? null },
       );
     }
     return { shareOperationId };
@@ -2633,6 +2621,7 @@ export class PublishMethods extends DKGAgentBase {
         ctx,
         gossipSigner,
         shareOperationId,
+        { subGraphName: opts?.subGraphName ?? null },
       );
     }
     return { shareOperationId };
@@ -3882,19 +3871,7 @@ export class PublishMethods extends DKGAgentBase {
    * NO_DATA_IN_SWM (same observable as today, the §1.1 bug). The
    * agent surfaces a warn so operators see the configuration miss.
    */
-  /**
-   * Shared resolution between LU-5 (`_resolveEncryptInlinePayload`) and
-   * LU-11 (`_resolveEncryptInlineChunked`). Probes the access policy,
-   * bootstraps / rotates the swm-sender-key epoch, and returns the
-   * effective `chainKey` + AEAD CG-id binding. Returns `undefined` for
-   * public CGs so the caller stays on the plaintext-inline path.
-   *
-   * The original LU-5 method body lived inline here pre-LU-11; pulling
-   * it into a helper avoided drifting two near-identical curated-
-   * probe / epoch-rotation blocks once chunked emission joined the
-   * picture. All semantics (probe order, rotation triggers, fail-
-   * closed branches, error texts) are preserved.
-   */
+  /** Resolve policy, recipient authority and sender-key epoch once per publish attempt. */
   async _resolveCuratedChainKeyContext(this: DKGAgent,
     contextGraphId: string,
     subGraphName: string | undefined,
@@ -3902,6 +3879,7 @@ export class PublishMethods extends DKGAgentBase {
     explicitPolicyTargetContextGraphId: string | undefined,
     logPrefix: string,
     options?: ResolveCuratedChainKeyContextOptions,
+    setupRound = 1,
   ): Promise<{ chainKey: Uint8Array; aeadCgId: string; senderAddress: string } | undefined> {
     const ctx = createOperationContext('publish');
     const targetCgId = explicitPolicyTargetContextGraphId ?? contextGraphId;
@@ -4087,10 +4065,54 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
 
+    // Distribution and the pending drain wait on peers. A member removed or a route
+    // replaced meanwhile must not be served by this epoch, so the authority is read
+    // once more. On a difference the resolution starts over, as a new attempt would,
+    // and sets up an epoch for the authority as it is now. An authority that keeps
+    // moving gives the attempt back as the typed authority failure.
+    const current = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.curatedKeyContext,
+      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
+    );
+    if (!current.requiresEncryption
+      || computeSwmSenderKeyMembershipHash({ contextGraphId, subGraphName,
+        members: current.recipients.map((recipient) => ({ agentAddress: recipient.agentAddress, recipientKeyId: recipient.recipientKeyId })),
+      }) !== membershipHash
+      || computeSwmSenderKeyRecipientRouteHash({ contextGraphId, subGraphName, recipients: current.recipients }) !== recipientRouteHash) {
+      if (setupRound < CURATED_KEY_CONTEXT_SETUP_ROUNDS) {
+        this.log.info(
+          ctx,
+          `${logPrefix}: curated CG ${contextGraphId}: recipient authority changed during sender-key setup; ` +
+          `resolving again (round ${setupRound + 1} of ${CURATED_KEY_CONTEXT_SETUP_ROUNDS})`,
+        );
+        return this._resolveCuratedChainKeyContext(
+          contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, logPrefix, options, setupRound + 1,
+        );
+      }
+      throw createContextGraphAuthorityError(
+        `${logPrefix}: curated CG ${contextGraphId}: recipient authority changed during sender-key setup; refusing to encrypt with a stale epoch`,
+        { reason: 'chain-participant-authority-unavailable', detail: 'retry the publish against the current private authority' },
+      );
+    }
+
     return {
       chainKey: state.chainKey,
       aeadCgId: options?.aeadBindingContextGraphId ?? explicitPolicyTargetContextGraphId ?? contextGraphId,
       senderAddress,
+    };
+  }
+
+  /** Both encryption hooks of a publish attempt, from one authority resolution and one sender-key epoch. */
+  async _resolveInlineEncryption(this: DKGAgent,
+    contextGraphId: string, subGraphName?: string, authorAgentAddress?: string,
+    explicitPolicyTargetContextGraphId?: string, options?: ResolveCuratedChainKeyContextOptions,
+  ) {
+    const resolved = await this._resolveCuratedChainKeyContext(
+      contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, 'LU-5', options,
+    );
+    return {
+      encryptInlinePayload: buildInlinePayload(resolved),
+      encryptInlineChunked: await buildInlineChunked(this, contextGraphId, resolved, this.log),
     };
   }
 
@@ -4104,15 +4126,7 @@ export class PublishMethods extends DKGAgentBase {
     const resolved = await this._resolveCuratedChainKeyContext(
       contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, 'LU-5', options,
     );
-    if (!resolved) return undefined;
-    const { chainKey, aeadCgId } = resolved;
-    return async (plaintextNquads: Uint8Array): Promise<Uint8Array> => {
-      return encryptV10PublishPayload({
-        chainKey,
-        contextGraphId: aeadCgId,
-        plaintext: plaintextNquads,
-      });
-    };
+    return buildInlinePayload(resolved);
   }
 
   /**
@@ -4166,119 +4180,7 @@ export class PublishMethods extends DKGAgentBase {
     const resolved = await this._resolveCuratedChainKeyContext(
       contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, 'LU-11', options,
     );
-    if (!resolved) return undefined;
-    const { chainKey, aeadCgId } = resolved;
-    const wireCgId = this.gossipWireIdFor(contextGraphId);
-    const topic = contextGraphWorkspaceTopic(wireCgId);
-    const signer = await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
-    if (!signer) {
-      throw new Error(
-        `LU-11: curated CG ${contextGraphId}: cannot resolve a workspace-gossip signing agent — ` +
-        `cores reject unsigned chunked envelopes. Add a local custodial signing key for an ` +
-        `allowed agent before publishing.`,
-      );
-    }
-    const signerAgentAddress = signer.agentAddress;
-    const log = this.log;
-    const ctx = createOperationContext('publish');
-    const gossip = this.gossip;
-
-    return async (input: { plaintextNquads: Uint8Array; batchId: Uint8Array; publishOperationId: string }): Promise<{
-      ciphertextChunksRoot: Uint8Array;
-      ciphertextChunkCount: number;
-      totalCiphertextBytes: number;
-      ciphertextChunks: Uint8Array[];
-    }> => {
-      if (input.batchId.length !== 32) {
-        throw new Error(
-          `LU-11: chunked emit requires a 32-byte batchId (V10 KC merkleRoot); got ${input.batchId.length}`,
-        );
-      }
-      if (input.publishOperationId.length === 0) {
-        throw new Error('LU-11: chunked emit requires a non-empty publishOperationId');
-      }
-      const plaintextChunks = sliceIntoCiphertextChunks(input.plaintextNquads);
-      const { ciphertextChunks } = encryptChunked({
-        chainKey,
-        contextGraphId: aeadCgId,
-        plaintextChunks,
-        publishOperationId: input.publishOperationId,
-      });
-      const { root, leafCount } = buildCiphertextChunksRoot(ciphertextChunks);
-      const batchIdHex = ethers.hexlify(input.batchId);
-      let totalCiphertextBytes = 0;
-      for (let i = 0; i < ciphertextChunks.length; i++) {
-        const ct = ciphertextChunks[i];
-        totalCiphertextBytes += ct.length;
-        const payload = new Uint8Array(input.batchId.length + ct.length);
-        payload.set(input.batchId, 0);
-        payload.set(ct, input.batchId.length);
-        const persistCanonical = this.canonicalChunkStoreCgIdOrNull(contextGraphId);
-        const chunksGraph = ciphertextChunkStoreGraph(persistCanonical ?? contextGraphId);
-        const subject = ciphertextChunkStoreSubject(input.batchId, i);
-        const literal = `"${Buffer.from(ct).toString('base64')}"`;
-        try {
-          await this.store.insert([{
-            subject,
-            predicate: CIPHERTEXT_CHUNK_PREDICATE,
-            object: literal,
-            graph: chunksGraph,
-          }]);
-        } catch (err) {
-          log.warn(
-            ctx,
-            `LU-11: failed to persist local ciphertext chunk cgId=${contextGraphId} ` +
-            `batchId=${batchIdHex.slice(0, 18)}... op=${input.publishOperationId} chunkIndex=${i}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          throw err;
-        }
-        const timestamp = new Date().toISOString();
-        const signingPayload = computeGossipSigningPayloadV2(
-          GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-          contextGraphId,
-          timestamp,
-          payload,
-          i,
-        );
-        const signature = await signer.signMessage(signingPayload);
-        const envelope = encodeGossipEnvelope({
-          version: GOSSIP_ENVELOPE_VERSION,
-          type: GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-          contextGraphId,
-          agentAddress: signerAgentAddress,
-          timestamp,
-          signature: ethers.getBytes(signature),
-          payload,
-          swmMessageIndex: i,
-        });
-        try {
-          await gossip.publish(topic, envelope);
-        } catch (err) {
-          log.warn(
-            ctx,
-            `LU-11: chunked gossip publish failed for cgId=${contextGraphId} ` +
-            `batchId=${batchIdHex.slice(0, 18)}... op=${input.publishOperationId} chunkIndex=${i}: ${
-              err instanceof Error ? err.message : String(err)
-            } — cores without this chunk will DECLINE the V2 ACK; ` +
-            `late-join sync can backfill once the catchup verb lands.`,
-          );
-        }
-      }
-      log.info(
-        ctx,
-        `LU-11: emitted ${ciphertextChunks.length} ciphertext chunks ` +
-        `(${totalCiphertextBytes} bytes total) for curated CG ${contextGraphId} ` +
-        `batchId=${batchIdHex.slice(0, 18)}... op=${input.publishOperationId} on topic ${topic}`,
-      );
-      return {
-        ciphertextChunksRoot: root,
-        ciphertextChunkCount: leafCount,
-        totalCiphertextBytes,
-        ciphertextChunks,
-      };
-    };
+    return buildInlineChunked(this, contextGraphId, resolved, this.log);
   }
 
   async _loadSelectedSWMQuads(this: DKGAgent,
@@ -5029,17 +4931,16 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     input: AsyncKnowledgeAssetVmPublishRecoveryInput,
   ): Promise<void> {
-    const ctx = createOperationContext('publishFromSWM');
+    // The queue job is the operation this recovery serves: every line it logs carries [from:<jobId>].
+    const ctx = createOperationContext('publishFromSWM', input.job.jobId);
     try {
       await this._finalizeRecoveredQueuedKnowledgeAssetVmPublish(input, ctx);
     } catch (error) {
-      this.log.warn(
-        ctx,
-        `Named KA recovery for "${input.request.name}" remains pending: ` +
-          (error instanceof Error ? error.message : String(error)),
-      );
+      // One line when the reason appears or changes, then summaries: see the module.
+      this.namedKaRecoveryPendingLog.deferred(input.request, error, (line) => this.log.warn(ctx, line));
       throw error;
     }
+    this.namedKaRecoveryPendingLog.finalized(input.request);
   }
 
   async _finalizeRecoveredQueuedKnowledgeAssetVmPublish(
@@ -5063,6 +4964,7 @@ export class PublishMethods extends DKGAgentBase {
       // normalizer performs. They all precede any mutation, so bounding them is safe and is what
       // keeps a stalled endpoint from holding the global claim lock past the budget.
       signal,
+      onVersionView: () => this.namedKaRecoveryPendingLog.versionViewRead(),
     });
 
     const onChainCgId = normalizeOptionalContextGraphId(
@@ -5310,6 +5212,8 @@ export class PublishMethods extends DKGAgentBase {
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
       publisherOverride?: DKGPublisher;
+      /** GH#3081 — observation only: where the queue hears of each step that ends after the confirmation. */
+      onPostConfirmationStep?: LiftJobTailStepObserver;
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
@@ -5327,6 +5231,13 @@ export class PublishMethods extends DKGAgentBase {
     const executionHooks: PublishLifecycleHooks = {
       ...pickPublishLifecycleHooks(publishOptions),
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
+    };
+    // GH#3081 — observation only: tell the queue which step after the confirmation just ended,
+    // so its timing line can say where this executor's tail went. Nothing here waits or reads.
+    const endedTailStep = (step: LiftJobTailStep): void => {
+      try {
+        opts?.onPostConfirmationStep?.(step);
+      } catch { /* observation only */ }
     };
     const capturedPricingPolicy = request.pricingPolicy ?? 'network-visible';
     const executionPricingPolicy = publishOptions.pricingPolicy ?? capturedPricingPolicy;
@@ -5504,6 +5415,8 @@ export class PublishMethods extends DKGAgentBase {
             (err instanceof Error ? err.message : String(err)),
         );
         return;
+      } finally {
+        endedTailStep('publishedGraphClear');
       }
       await this.retireLegacySwmAfterConfirmedLocalPublish(
         request.contextGraphId,
@@ -5512,6 +5425,7 @@ export class PublishMethods extends DKGAgentBase {
         request.subGraphName,
         ctx,
       );
+      endedTailStep('legacySwmRetire');
     };
     const clearRemainingSharedMemory = async (): Promise<void> => {
       try {
@@ -5523,6 +5437,7 @@ export class PublishMethods extends DKGAgentBase {
             (err instanceof Error ? err.message : String(err)),
         );
       }
+      endedTailStep('remainingSwmClear');
     };
     const onChainCapable =
       typeof this.chain.getEvmChainId === 'function' &&
@@ -5564,6 +5479,7 @@ export class PublishMethods extends DKGAgentBase {
           ...queuedKnowledgeAssetAccessEnvelope(request),
         },
       );
+      endedTailStep('publish');
 
       if (result.status === 'confirmed') {
         await clearPublishedGraph('update');
@@ -5629,19 +5545,8 @@ export class PublishMethods extends DKGAgentBase {
       const publishBindingOptions = queuedOnChainContextGraphId
         ? { aeadBindingContextGraphId: queuedOnChainContextGraphId }
         : undefined;
-      const resolvedEncryptInlinePayload = await this._resolveEncryptInlinePayload(
-        request.contextGraphId,
-        request.subGraphName,
-        undefined,
-        undefined,
-        publishBindingOptions,
-      );
-      const resolvedEncryptInlineChunked = await this._resolveEncryptInlineChunked(
-        request.contextGraphId,
-        request.subGraphName,
-        undefined,
-        undefined,
-        publishBindingOptions,
+      const { encryptInlinePayload: resolvedEncryptInlinePayload, encryptInlineChunked: resolvedEncryptInlineChunked } = await this._resolveInlineEncryption(
+        request.contextGraphId, request.subGraphName, undefined, undefined, publishBindingOptions,
       );
       // #1670 — finalized V2 private assertions seal only the exact submitted
       // RDF. Queued execution must still supply the deterministic catalog
@@ -5713,6 +5618,7 @@ export class PublishMethods extends DKGAgentBase {
             }
           : {}),
       });
+      endedTailStep('publish');
 
       if (result.status === 'confirmed' && result.onChainResult) {
         try {
@@ -5729,6 +5635,7 @@ export class PublishMethods extends DKGAgentBase {
               (err instanceof Error ? err.message : String(err)),
           );
         }
+        endedTailStep('receiptWrite');
       }
 
       if (result.status === 'confirmed') {
@@ -5754,12 +5661,14 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
+    if (result.status === 'confirmed') endedTailStep('lifecycleStamp');
 
     if (result.status === 'confirmed' && result.onChainResult) {
       const rootEntities: string[] = [];
       const broadcastCgId = queuedOnChainContextGraphId ?? (onChainCapable
         ? normalizeOptionalContextGraphId(await this.getContextGraphOnChainId(request.contextGraphId))
         : undefined);
+      if (queuedOnChainContextGraphId === undefined && onChainCapable) endedTailStep('graphIdRead');
       const keepRootCopyOnLabel = true;
       const msg: FinalizationMessageMsg = {
         ual: result.ual,
@@ -5793,6 +5702,7 @@ export class PublishMethods extends DKGAgentBase {
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
+      endedTailStep('finalizationGossip');
     }
 
     if (result.status === 'confirmed') {
@@ -5805,6 +5715,7 @@ export class PublishMethods extends DKGAgentBase {
             (err instanceof Error ? err.message : String(err)),
         );
       }
+      endedTailStep('shareMarkerClear');
     }
 
     await this.afterConfirmedGraphScopedVmPublishV1({
@@ -5818,6 +5729,7 @@ export class PublishMethods extends DKGAgentBase {
       ctx,
       publicationLabel: 'queued publish',
     });
+    endedTailStep('catalogObserver');
 
     return { ...result, assertionUri, seal };
   }
@@ -6830,33 +6742,13 @@ export class PublishMethods extends DKGAgentBase {
     // (`onChainId`) so consumers using the canonical chain id can
     // decrypt — without this, remap publishes (source SWM cg != target
     // chain cg) produced undecryptable payloads.
-    const encryptInlinePayload = await this._resolveEncryptInlinePayload(
-      contextGraphId,
-      options?.subGraphName,
-      options?.authorAgentAddress,
-      ctxGraphIdStr,
-      onChainId
-        ? { aeadBindingContextGraphId: onChainId }
-        : undefined,
+    const { encryptInlinePayload, encryptInlineChunked } = await this._resolveInlineEncryption(
+      contextGraphId, options?.subGraphName, options?.authorAgentAddress, ctxGraphIdStr,
+      onChainId ? { aeadBindingContextGraphId: onChainId } : undefined,
     );
     if (encryptInlinePayload) {
       this.log.info(ctx, `LU-5: curated CG ${contextGraphId} — wrapping inline ACK payload with chain-key AEAD`);
     }
-    // OT-RFC-38 LU-11 — also resolve the chunked emitter. Publisher
-    // prefers the chunked path when both are set; single-blob remains
-    // the unconditional fallback for any code path that resolves the
-    // chunked callback to `undefined` (currently impossible since
-    // both helpers share the curated probe, but kept defensively to
-    // future-proof CG types whose chunked path might lag rollout).
-    const encryptInlineChunked = await this._resolveEncryptInlineChunked(
-      contextGraphId,
-      options?.subGraphName,
-      options?.authorAgentAddress,
-      ctxGraphIdStr,
-      onChainId
-        ? { aeadBindingContextGraphId: onChainId }
-        : undefined,
-    );
     if (encryptInlineChunked) {
       this.log.info(ctx, `LU-11: curated CG ${contextGraphId} — chunked path active (per-chunk SWM gossip + V2 ACK)`);
     }

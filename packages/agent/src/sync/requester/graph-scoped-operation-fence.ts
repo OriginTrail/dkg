@@ -1,9 +1,18 @@
 export interface GraphScopedPhysicalOperationControl<Subscription> {
+  /** The row this operation runs under: the captured one, or the one it adopted. */
   readonly subscription: Subscription;
   /** True only while the subscription identity and binding generation match. */
   isBindingCurrent(): boolean;
   /** Re-capture after this operation installs an authenticated binding. */
   recaptureBindingGeneration(): void;
+  /**
+   * Continue under a row that was stored again while this operation ran, when
+   * the host finds the operation's premises unchanged in it and the binding
+   * generation did not move. Any other change is left for `assertCurrent` to
+   * refuse. Call it only where nothing the operation has read from the row or
+   * written yet depends on what a stored-again row may change.
+   */
+  adoptEquivalentSubscription(): void;
   /** Enforce cancellation, lifecycle, shutdown, and binding ownership. */
   assertCurrent(): void;
 }
@@ -15,6 +24,8 @@ export interface GraphScopedPhysicalOperationFenceOptions<T, Subscription> {
   captureSubscription(): Subscription;
   captureBindingGeneration(): number;
   isBindingGenerationCurrent(generation: number): boolean;
+  /** Absent: no stored-again row is ever equivalent. */
+  isEquivalentSubscription?(captured: Subscription, current: Subscription): boolean;
   assertLifecycleCurrent(): void;
   closedError(): Error;
   bindingChangedError(): Error;
@@ -29,6 +40,7 @@ export interface GraphScopedPhysicalOperationFenceHost<Subscription> {
   captureSubscription(contextGraphId: string): Subscription;
   captureBindingGeneration(contextGraphId: string): number;
   isBindingGenerationCurrent(contextGraphId: string, generation: number): boolean;
+  isEquivalentSubscription?(captured: Subscription, current: Subscription): boolean;
   assertLifecycleCurrent(): void;
   asAbortError(reason: unknown): Error;
   track(run: Promise<unknown>): void;
@@ -53,7 +65,7 @@ export function runGraphScopedPhysicalOperation<T, Subscription>(
 ): Promise<T> {
   if (options.isClosed()) return Promise.reject(options.closedError());
 
-  const subscription = options.captureSubscription();
+  let subscription = options.captureSubscription();
   let bindingGeneration = options.captureBindingGeneration();
   const isBindingCurrent = () => (
     options.captureSubscription() === subscription
@@ -68,10 +80,20 @@ export function runGraphScopedPhysicalOperation<T, Subscription>(
     if (!isBindingCurrent()) throw options.bindingChangedError();
   };
   const physicalRun = Promise.resolve().then(() => options.operation({
-    subscription,
+    get subscription() {
+      return subscription;
+    },
     isBindingCurrent,
     recaptureBindingGeneration: () => {
       bindingGeneration = options.captureBindingGeneration();
+    },
+    adoptEquivalentSubscription: () => {
+      const current = options.captureSubscription();
+      if (
+        current !== subscription
+        && options.isBindingGenerationCurrent(bindingGeneration)
+        && options.isEquivalentSubscription?.(subscription, current) === true
+      ) subscription = current;
     },
     assertCurrent,
   }));
@@ -91,6 +113,7 @@ export function createGraphScopedPhysicalOperationFence<Subscription>(
       captureBindingGeneration: () => host.captureBindingGeneration(options.contextGraphId),
       isBindingGenerationCurrent: (generation) =>
         host.isBindingGenerationCurrent(options.contextGraphId, generation),
+      isEquivalentSubscription: host.isEquivalentSubscription,
       assertLifecycleCurrent: host.assertLifecycleCurrent,
       asAbortError: host.asAbortError,
       track: host.track,

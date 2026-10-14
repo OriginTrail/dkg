@@ -68,6 +68,7 @@ import {
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
+import type { RollingSubscriptionChecks } from '../src/context-graph-subscription-rolling-checks.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const DKG = 'http://dkg.io/ontology/';
@@ -155,6 +156,8 @@ interface Internals {
   storageAckDormantSince: Map<string, number>;
   vmPromotionBackfillBackoff: Map<string, unknown>;
   contextGraphSubscriptionDormancyById: Map<string, string>;
+  contextGraphSubscriptionRollingChecks: RollingSubscriptionChecks;
+  contextGraphSubscriptionRehydrationPromotionRuntime?: { request(): boolean; close(): Promise<void> };
   writeLocks: Map<string, Promise<void>>;
   readStorageAckKnowledgeAssetRootCount(kaUal: string, signal?: AbortSignal): Promise<bigint>;
   reconcileChainOrdinal(
@@ -1878,6 +1881,31 @@ describe('core VM-promotion guarantees', () => {
 
       expect(verdict).toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
       expect(verdict.message).toContain('rehydrationDisabled');
+    });
+
+    it('asks rolling activation for a row the activation cap left dormant, ahead of its backlog', async () => {
+      const internals = await boot();
+      internals.contextGraphSubscriptionDormancyById.set('a-earlier-row', 'activationCap');
+      internals.contextGraphSubscriptionDormancyById.set('dormant-cg', 'activationCap');
+      const request = vi.fn(() => true);
+      internals.contextGraphSubscriptionRehydrationPromotionRuntime = { request, close: async () => undefined };
+
+      const verdict = await internals.ensureStorageAckVmPromotion({
+        contextGraphId: '46', swmGraphId: 'dormant-cg', operation: 'publish',
+      });
+
+      expect(verdict).toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+      expect(verdict.message).toContain('activationCap');
+      expect(request).toHaveBeenCalledOnce();
+      // Rolling activation checks it next, not the row that sorts first.
+      const pass = internals.contextGraphSubscriptionRollingChecks.beginPass({
+        pendingIds: new Set(['a-earlier-row', 'dormant-cg']),
+        dormancyById: internals.contextGraphSubscriptionDormancyById as never,
+        subscriptions: internals.subscribedContextGraphs,
+        warn: () => undefined,
+        debug: () => undefined,
+      });
+      await expect(pass.next(new AbortController().signal)).resolves.toBe('dormant-cg');
     });
 
     it('declines transiently for a while, then finally, when dormancy does not clear', async () => {

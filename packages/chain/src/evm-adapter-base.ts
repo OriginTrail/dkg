@@ -42,7 +42,7 @@ import type {
   BrowserWalletRpcMethod,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
+import { SignerTxSerializer } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, enrichEvmError, isCausedByRemoteSigner, isHubStaleError, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
@@ -50,11 +50,11 @@ import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
   classifyRpcRetryDisposition,
-  rethrowInterruptedInitialization,
   isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   resolveRpcUrls,
   assertSuccessfulReceipt,
+  explainOutOfGasRevert,
   sleep,
 } from './evm-adapter-rpc.js';
 import {
@@ -66,10 +66,7 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
-import {
-  RpcEndpointsExhaustedError,
-} from './chain-rpc-transport-error.js';
+import { hostOnlyRpcText } from './rpc-failover-log.js';
 import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
@@ -78,6 +75,7 @@ import  {
   type ReadOpts,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
+import type { GasLimitBufferOptions } from './gas-limit-buffer.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { markTransactionNotSubmitted } from './transaction-submission.js';
 import {
@@ -93,8 +91,11 @@ import {
   AbortableKeyedSingleFlight,
   ReadThroughTtlCache,
 } from './keyed-ttl-single-flight-cache.js';
+import { SharedAdapterInitialization, initializationBinder } from './evm-adapter-shared-init.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
+import { preferredFundableCandidate } from './signer-selection.js';
+import type { PublisherCandidateFundingAssessment, PublisherUnfundedCandidateFundingAssessment, PublisherFundingSelection } from './evm-publisher-funding.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import type {
@@ -119,7 +120,7 @@ import { ContextGraphRegistryRepairCoordinator } from
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import { BackgroundContractReadBatching } from './evm-background-read-batching.js';
-import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import { HubBindingNotFoundError, HubContractNotFoundError, HubAssetStorageNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type {
   RandomSamplingBlockContext,
@@ -151,7 +152,7 @@ type ContractWriteSender = (
   args: readonly unknown[],
   signer: EvmSigner,
   label: string,
-  opts?: { gasLimitBufferBps?: number },
+  opts?: GasLimitBufferOptions,
 ) => Promise<ethers.TransactionReceipt>;
 
 type SerializedSignerWriteContext = {
@@ -613,6 +614,16 @@ export type SelectSignerSpec =
       preferIdle?: boolean;
     };
 
+/** Initialization tolerates only genuine Hub absence, while cancellation wins a raced miss. */
+async function resolveOptionalHubBinding(resolve: () => Promise<void>): Promise<void> {
+  try {
+    await resolve();
+  } catch (error) {
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    if (!(error instanceof HubBindingNotFoundError)) throw error;
+  }
+}
+
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
@@ -780,6 +791,14 @@ export class EVMChainAdapterBase {
   protected contracts: ContractCache;
 
   protected initialized = false;
+
+  /** The one initialization that callers of an uninitialized adapter share. */
+  private readonly sharedInit = new SharedAdapterInitialization({
+    rpcUrls: () => this.rpcUrls,
+    isInitialized: () => this.initialized,
+    markInitialized: () => { this.initialized = true; },
+    initContracts: (startsRequestClass) => this.initContracts(startsRequestClass),
+  });
 
   /** Monotonic fence for physical Hub binding generations, including ABA. */
   protected hubBindingGeneration = 0;
@@ -1453,14 +1472,7 @@ export class EVMChainAdapterBase {
       // Resolved here at the config boundary, live per read, like the stickiness switch.
       isEnabled: () => process.env.DKG_DISABLE_RPC_READ_BATCHING !== '1',
     });
-    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
-      config.chainEventLogStore,
-      (error) => {
-        console.warn(
-          `[chain] one-log chain index disabled: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      },
-    );
+    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(config.chainEventLogStore);
     this.receiptFinality = new EvmReceiptFinalityReader(
       this.finalityConfirmations,
       (label, read, options) => this.readProviderRetryingNull(label, read, options),
@@ -2014,7 +2026,7 @@ export class EVMChainAdapterBase {
     // poll + deadline), so lock-hold (held across the retries for the V10 path)
     // stays bounded.
     await this.broadcastSignedTransactionWithRetries(signedTx, txHash, label);
-    return this.waitForReceiptWithFailover(txHash, label);
+    return this.waitForReceiptWithFailover(txHash, label).catch(explainOutOfGasRevert(signedTx));
   }
 
   /** Broadcast one immutable signed transaction with bounded endpoint-set retries. */
@@ -2135,7 +2147,7 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     signer: EvmSigner,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<PreparedTransaction> {
     return this.rpcFailover.prepareTransaction(contract, method, args, signer, label, opts);
   }
@@ -2152,7 +2164,7 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     signer: EvmSigner,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(
       signer,
@@ -2208,17 +2220,16 @@ export class EVMChainAdapterBase {
     signer: EvmSigner,
     label: string,
     // Optional gas headroom for methods whose on-chain gas cost depends on
-    // per-block randomness. ethers fills `gasLimit` from a single
+    // the block they are mined in. ethers fills `gasLimit` from a single
     // `eth_estimateGas` with NO margin, but that estimate runs against the
     // CURRENT block while the tx is mined in a LATER block with different
-    // `prevrandao`/`blockhash`/`timestamp`. If the mined block's entropy
-    // drives a more expensive code path than the estimate's, the tx runs
-    // out of gas and reverts with empty (`0x`) data. `RandomSampling.createChallenge`
-    // is exactly this case (weighted CG draw + historical blockhash access):
-    // observed estimate-vs-execution spread is small here but unbounded in
-    // production with many CGs/KCs. When set, we estimate once and inflate
-    // the limit by `gasLimitBufferBps` basis points so the drift can't OOG.
-    opts?: { gasLimitBufferBps?: number },
+    // `prevrandao`/`blockhash`/`timestamp`. If the mined block drives a more
+    // expensive code path than the estimate's, the tx runs out of gas and
+    // reverts with empty (`0x`) data. `RandomSampling.createChallenge`
+    // (weighted CG draw that settles every graph it misses) and `submitProof`
+    // (stake settle at `block.timestamp`) are such cases. When set, we estimate
+    // once and add the headroom `bufferedGasLimit` computes from these options.
+    opts?: GasLimitBufferOptions,
   ): Promise<ethers.TransactionReceipt> {
     // Parent span for the whole send. Broadcast + receipt-wait open their own
     // nested spans/metrics (chain.tx_submit / chain.tx_wait) inside
@@ -2574,15 +2585,11 @@ export class EVMChainAdapterBase {
    * verdict.
    */
   private async _scanCandidateFunding<T extends { address: string }>(
-    candidates: T[],
+    candidates: readonly T[],
     fundingFor: (candidate: T) => FundingMode,
     forceRefresh = false,
     strictPcaRead = false,
-  ): Promise<{
-    fundings: Array<{ native: bigint | null; trac: bigint | null }>;
-    fundableIdx: number[];
-    inconclusiveReads: unknown[];
-  }> {
+  ): Promise<PublisherCandidateFundingAssessment<T>[]> {
     const fundingModes = candidates.map(fundingFor);
     const fundings = await Promise.all(
       candidates.map((candidate, index) => {
@@ -2601,50 +2608,21 @@ export class EVMChainAdapterBase {
         strictPcaRead,
       )),
     );
-    const fundableIdx: number[] = [];
-    const inconclusiveReads: unknown[] = [];
-    for (let index = 0; index < fundable.length; index += 1) {
-      const result = fundable[index];
-      if (result.status === 'fulfilled' && result.value) fundableIdx.push(index);
+    return fundable.map((result, index) => {
+      const candidate = candidates[index];
+      const funding = fundings[index];
       if (result.status === 'rejected') {
         if (!strictPcaRead) throw result.reason;
-        inconclusiveReads.push(result.reason);
+        return { kind: 'unavailable', candidate, funding, error: result.reason };
       }
-    }
-    return { fundings, fundableIdx, inconclusiveReads };
-  }
-
-  private _preferredFundableCandidate<T extends { address: string }>(
-    candidates: T[],
-    fundableIdx: number[],
-    preferIdle: boolean,
-  ): T {
-    if (preferIdle && !this.idleAwareSelectionDisabled) {
-      // GH#953 — soft-prefer a wallet with no in-flight or queued write.
-      // GH#1574 — a lane whose holder is wedged is NOT idle, but it is not
-      // healthy either: routing new work behind it inherits the wedge
-      // invisibly, which is the failure that issue reports. Rank the
-      // serializer's OWN health verdict rather than reading raw timings and
-      // re-deriving the threshold here — two copies of that policy would
-      // drift, and diagnostics could call a lane stalled while selection
-      // still called it healthy.
-      const laneRank: Record<SignerTxLaneState, number> = {
-        idle: 0,
-        busy: 1,
-        stalled: 2,
+      const mode = fundingModes[index];
+      return {
+        kind: result.value ? 'funded' : 'unfunded', candidate, funding,
+        refreshPcaEligibility: async () => this._walletFundingPath(
+          await this.getWalletFunding(candidate.address, { forceRefresh: true, metrics: mode.kind }), mode,
+        ) === 'pca',
       };
-      const rank = (address: string): number =>
-        laneRank[this.signerTxSerializer.state(address)];
-      let best: number | undefined;
-      let bestRank = Number.POSITIVE_INFINITY;
-      for (const index of fundableIdx) {
-        const r = rank(candidates[index].address);
-        if (r < bestRank) { bestRank = r; best = index; }
-        if (bestRank === 0) break;
-      }
-      if (best !== undefined) return candidates[best];
-    }
-    return candidates[fundableIdx[0]];
+    });
   }
 
   protected async selectFundedSigner(
@@ -2654,63 +2632,77 @@ export class EVMChainAdapterBase {
   ): Promise<EvmSigner> {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
-    const { fundings, fundableIdx } = await this._scanCandidateFunding(
-      candidates,
-      () => funding,
-    );
-    if (fundableIdx.length > 0) {
-      // Idle preference is a SOFT, fail-open bias: among funded candidates,
-      // prefer one whose per-wallet send lock is currently free so a
-      // deadline-bound write doesn't queue behind a slow in-flight send. Falls
-      // straight through to the first funded candidate when none is idle or the
-      // preference is off — so it can never EXCLUDE a wallet, only reorder.
-      return this._preferredFundableCandidate(candidates, fundableIdx, policy.preferIdle);
-    }
-    let bestIdx = 0;
-    for (let i = 1; i < candidates.length; i += 1) {
-      const a = fundings[i];
-      const b = fundings[bestIdx];
+    const assessments = await this._scanCandidateFunding(candidates, () => funding);
+    // Idle preference is a SOFT, fail-open bias: among funded candidates,
+    // prefer one whose per-wallet send lock is currently free so a
+    // deadline-bound write doesn't queue behind a slow in-flight send. Falls
+    // straight through to the first funded candidate when none is idle or the
+    // preference is off — so it can never EXCLUDE a wallet, only reorder.
+    const selected = preferredFundableCandidate(assessments.filter((assessment) => assessment.kind === 'funded'), {
+      ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
+      laneState: (address) => this.signerTxSerializer.state(address),
+    });
+    if (selected !== undefined) return selected;
+    let best = assessments[0];
+    for (const assessment of assessments.slice(1)) {
+      const a = assessment.funding;
+      const b = best.funding;
       const an = a.native ?? -1n;
       const bn = b.native ?? -1n;
-      if (an > bn || (an === bn && (a.trac ?? -1n) > (b.trac ?? -1n))) bestIdx = i;
+      if (an > bn || (an === bn && (a.trac ?? -1n) > (b.trac ?? -1n))) best = assessment;
     }
-    return candidates[bestIdx];
+    return best?.candidate;
   }
 
   /**
    * Canonical fail-closed funded-candidate selector for publish plans: cached
    * scan, fresh terminal recheck, idle preference, diagnostics, and typed failure.
    */
-  protected async _selectFundedCandidateOrThrow<T extends { address: string }>(
-    candidates: T[],
+  protected async _assessFundedCandidates<T extends { address: string }>(
+    candidates: readonly T[],
     fundingFor: (candidate: T) => NativeAndTracFundingMode,
     policy: { preferIdle: boolean },
-  ): Promise<T> {
+  ): Promise<PublisherFundingSelection<T>> {
+    const choose = (assessments: PublisherCandidateFundingAssessment<T>[]): T | undefined =>
+      preferredFundableCandidate(assessments.filter((assessment) => assessment.kind === 'funded'), {
+        ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
+        laneState: (address) => this.signerTxSerializer.state(address),
+      });
     const initial = await this._scanCandidateFunding(candidates, fundingFor);
-    if (initial.fundableIdx.length > 0) {
-      return this._preferredFundableCandidate(candidates, initial.fundableIdx, policy.preferIdle);
-    }
+    const selected = choose(initial);
+    if (selected !== undefined) return { kind: 'funded', candidate: selected };
 
     // Cached balances are appropriate for soft routing, but a terminal
     // whole-pool claim must be based on a fresh snapshot. Operators commonly
     // fund a wallet and retry immediately, inside the advisory cache TTL.
     const refreshed = await this._scanCandidateFunding(candidates, fundingFor, true, true);
-    if (refreshed.fundableIdx.length > 0) {
-      return this._preferredFundableCandidate(candidates, refreshed.fundableIdx, policy.preferIdle);
+    const rechecked = choose(refreshed);
+    if (rechecked !== undefined) return { kind: 'funded', candidate: rechecked };
+    const unknown = refreshed.find((assessment) => assessment.kind === 'unavailable');
+    if (unknown?.kind === 'unavailable') {
+      return { kind: 'unavailable', assessments: refreshed, error: new PcaFundingUnknownError(errorCode(unknown.error)) };
     }
-
-    const unknown = refreshed.inconclusiveReads;
-    if (unknown.length > 0) throw new PcaFundingUnknownError(errorCode(unknown[0]));
-
-    const diagnostics = candidates.map((candidate, index) => ({
-      address: candidate.address,
-      nativeWei: refreshed.fundings[index].native,
-      tracWei: refreshed.fundings[index].trac,
+    const unfunded = refreshed.filter((assessment): assessment is PublisherUnfundedCandidateFundingAssessment<T> => assessment.kind === 'unfunded');
+    const diagnostics = unfunded.map(({ candidate, funding }) => ({
+      address: candidate.address, nativeWei: funding.native, tracWei: funding.trac,
     }));
-    throw new InsufficientPublisherFundsError(
-      formatNoFundedPublisherWalletMessage(diagnostics),
-      diagnostics,
-    );
+    return { kind: 'unfunded', assessments: unfunded, error: new InsufficientPublisherFundsError(
+      formatNoFundedPublisherWalletMessage(diagnostics), diagnostics,
+    ) };
+  }
+
+  /** Canonical native/direct/PCA interpretation shared by funding and reconciliation. */
+  private _walletFundingPath(
+    f: { native: bigint | null; trac: bigint | null },
+    funding: FundingMode,
+  ): 'unfunded' | 'direct' | 'pca' {
+    const nativeOk = f.native === null || f.native > funding.nativeFloorWei;
+    if (!nativeOk) return 'unfunded'; // even a PCA agent needs gas
+    if (funding.kind === 'native-only') return 'direct';
+    const ownTracOk = f.trac === null
+      || (f.trac > funding.tracFloorWei && f.trac >= funding.requiredTracWei);
+    if (ownTracOk) return 'direct';
+    return funding.pca.kind === 'none' ? 'unfunded' : 'pca';
   }
 
   /**
@@ -2731,13 +2723,8 @@ export class EVMChainAdapterBase {
     funding: FundingMode,
     strictPcaRead = false,
   ): Promise<boolean> {
-    const nativeOk = f.native === null || f.native > funding.nativeFloorWei;
-    if (!nativeOk) return false; // even a PCA agent needs gas
-    if (funding.kind === 'native-only') return true;
-    const ownTracOk = f.trac === null
-      || (f.trac > funding.tracFloorWei && f.trac >= funding.requiredTracWei);
-    if (ownTracOk) return true;
-    if (funding.pca.kind === 'none') return false;
+    const path = this._walletFundingPath(f, funding);
+    if (path !== 'pca' || funding.kind === 'native-only') return path === 'direct';
     return this.isConvictionFundedAgent(
       address,
       funding.requiredTracWei,
@@ -3067,10 +3054,13 @@ export class EVMChainAdapterBase {
       return this.readHubContractAddress(name);
     }
     const key = `${this.hubAddress}:${this.chainId}:${name}`;
+    // The read runs under its caller's cancellation. Once that is aborted, as
+    // an initialization's is when the run is ended, nobody joins the read.
     return this.resolvedContractAddressCache.getOrLoad(
       key,
       key,
       () => this.readHubContractAddress(name),
+      activeRpcRequestAbortSignal(),
     );
   }
 
@@ -3106,12 +3096,12 @@ export class EVMChainAdapterBase {
       );
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
-        throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+        throw new HubAssetStorageNotFoundError(name, this.hubAddress, { cause: err });
       }
       throw err;
     }
     if (address === ethers.ZeroAddress) {
-      throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`);
+      throw new HubAssetStorageNotFoundError(name, this.hubAddress);
     }
     return new Contract(address, loadAbi(abiName ?? name), this.signer);
   }
@@ -3120,9 +3110,9 @@ export class EVMChainAdapterBase {
    * The current Hub implementation reverts with `ContractDoesNotExist(name)`
    * (custom error from `UnorderedNamedContractDynamicSet.get`) when a name
    * is missing, instead of returning `address(0)`. We normalise both
-   * shapes onto the legacy `Contract "X" not found in Hub at <addr>` marker
-   * so downstream code (`getRandomSampling()`'s catch block) only needs
-   * to recognise one wording.
+   * shapes onto typed Hub absence. Contract capability callers retain the
+   * historical contract-miss class; asset-storage misses share its absence
+   * base so optional initialization has one positive policy.
    */
   protected isContractMissingRevert(err: unknown): boolean {
     if (!(err instanceof Error)) return false;
@@ -3131,139 +3121,112 @@ export class EVMChainAdapterBase {
       || err.message.includes('AddressDoesNotExist');
   }
 
-  protected async init(): Promise<void> {
-    if (this.initialized) return;
-    try {
-      await this.initContracts();
-    } catch (err) {
-      // `init()` sits on the critical path of every chain write
-      // (`createOnChainContextGraph`, publish, verify, …). If the Hub lookups
-      // fail because the configured RPC endpoint(s) are exhausted (perpetual
-      // 429 / unreachable), surface the same `RPC_ENDPOINTS_EXHAUSTED` contract
-      // the tx-send path uses, so callers (e.g. `/api/context-graph/register`
-      // → `classifyRegisterContextGraphError`) map it to a bounded 503 instead
-      // of a generic 500 — and never hang waiting on it (#894 follow-up). A
-      // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
-      // its original shape.
-      if (classifyRpcRetryDisposition(err) === 'failover') {
-        throw new RpcEndpointsExhaustedError(
-          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${hostOnlyRpcText(errorMessage(err))}`,
-          { cause: err, rpcUrls: this.rpcUrls },
-        );
-      }
-      throw err;
-    }
+  protected init(): Promise<void> {
+    return this.sharedInit.ensure();
   }
 
-  protected async initContracts(): Promise<void> {
-    this.contracts.identity = await this.resolveContract('Identity');
-    this.contracts.profile = await this.resolveContract('Profile');
-    this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
+  /** Make the next caller initialize again, and end an initialization that is out. */
+  private rearmInit(): void {
+    this.initialized = false;
+    this.sharedInit.rearm();
+  }
+
+  protected async initContracts(startsRequestClass: RpcRequestClass = activeRpcRequestContext().requestClass): Promise<void> {
+    // Every binding this routine writes goes through `bind`, so an ended
+    // initialization binds nothing more (the random-sampling pair, further
+    // down, has a guard of its own).
+    const bind = initializationBinder(this.contracts);
+    bind('identity', await this.resolveContract('Identity'));
+    bind('profile', await this.resolveContract('Profile'));
+    bind('parametersStorage', await this.resolveContract('ParametersStorage'));
 
     // V8 `Staking` is archived (PRD §4.1 — `Staking.sol` moved under
     // contracts/archive/, deploy script 023 archived). Tolerate its absence
     // so the V10 surface still initialises; the contract slot is retained
     // only to keep stale Hub bindings on older deploys resolving cleanly.
-    try {
-      this.contracts.staking = await this.resolveContract('Staking');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // V8 Staking not deployed on this Hub — V10 surface continues.
-    }
+    // V8 Staking not deployed on this Hub — V10 surface continues.
+    await resolveOptionalHubBinding(async () => {
+      bind('staking', await this.resolveContract('Staking'));
+    });
 
     // RFC 04 — ProfileStorage holds the relay registry views + events.
     // Tolerated as optional so adapters bound to a Hub that pre-dates the
     // Profile 1.2.0 / ProfileStorage 1.1.0 deploy still init cleanly; the
     // relay-registry methods will throw with a clear message at call time.
-    try {
-      this.contracts.profileStorage = await this.resolveContract('ProfileStorage');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Older deployments without the relay registry surface.
-    }
+    // Older deployments without the relay registry surface.
+    await resolveOptionalHubBinding(async () => {
+      bind('profileStorage', await this.resolveContract('ProfileStorage'));
+    });
 
     // V10.1 KA storage. Legacy V8 KnowledgeCollection + V10.0 DKGKnowledgeAssets
     // are deleted in the rc.12 KC->KA rename — no fallback resolution.
-    this.contracts.knowledgeAssetStorage = await this.resolveAssetStorage('DKGKnowledgeAssets');
+    bind('knowledgeAssetStorage', await this.resolveAssetStorage('DKGKnowledgeAssets'));
 
     // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
     // (PRD §4.1, deploy scripts 040+041 moved under deploy/archive). Keep
-    // the try/catch so adapters bound to legacy deploys still resolve them.
+    // optional resolution so adapters bound to legacy deploys still resolve them.
     // AskStorage is V10-active (deploy script 017 still in the active set);
     // split it out so a missing V9 binding doesn't strand AskStorage. The
     // V10 publish-token-amount path depends on AskStorage being resolved.
-    try {
-      this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets');
-      this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // V9 contracts not deployed — V9 publish/update surface unavailable.
-    }
-    try {
-      this.contracts.askStorage = await this.resolveContract('AskStorage');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
-    }
+    // V9 contracts not deployed — V9 publish/update surface unavailable.
+    await resolveOptionalHubBinding(async () => {
+      bind('knowledgeAssets', await this.resolveContract('KnowledgeAssets'));
+      bind('knowledgeAssetsStorage', await this.resolveAssetStorage('KnowledgeAssetsStorage'));
+    });
 
-    try {
-      this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
-    }
+    // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
+    await resolveOptionalHubBinding(async () => {
+      bind('askStorage', await this.resolveContract('AskStorage'));
+    });
 
-    try {
-      this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
-      this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // ContextGraphs not deployed — context graph operations unavailable
-    }
+    // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
+    await resolveOptionalHubBinding(async () => {
+      bind('contextGraphNameRegistry', await this.resolveContract('ContextGraphNameRegistry'));
+    });
 
-    try {
-      this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Lifecycle not deployed — createKnowledgeAssets unavailable.
-      // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
-    }
+    // ContextGraphs not deployed — context graph operations unavailable
+    await resolveOptionalHubBinding(async () => {
+      bind('contextGraphs', await this.resolveContract('ContextGraphs'));
+      bind('contextGraphStorage', await this.resolveAssetStorage('ContextGraphStorage'));
+    });
 
-    try {
-      this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
-    }
+    // Lifecycle not deployed — createKnowledgeAssets unavailable.
+    // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
+    await resolveOptionalHubBinding(async () => {
+      bind('knowledgeAssetsLifecycle', await this.resolveContract('KnowledgeAssetsLifecycle'));
+    });
 
-    try {
-      this.contracts.chronos = await this.resolveContract('Chronos');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Chronos not deployed — update-path growth-cost sizing falls back to
-      // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
-      // Greenfield V10 deployments always have Chronos; this catch is for older
-      // adapters bound to deploys that pre-date the Chronos registration.
-    }
+    // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
+    await resolveOptionalHubBinding(async () => {
+      bind('dkgPublishingConvictionNFT', await this.resolveContract('DKGPublishingConvictionNFT'));
+    });
 
-    try {
+    // Chronos not deployed — update-path growth-cost sizing falls back to
+    // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
+    // Greenfield V10 deployments always have Chronos; optional resolution is for older
+    // adapters bound to deploys that pre-date the Chronos registration.
+    await resolveOptionalHubBinding(async () => {
+      bind('chronos', await this.resolveContract('Chronos'));
+    });
+
+    // RandomSampling not deployed — proof submission unavailable
+    await resolveOptionalHubBinding(async () => {
       await this.resolveAndAssignRandomSamplingPair();
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // RandomSampling not deployed — proof submission unavailable
-    }
+    });
 
     // THE tick. Started here because the Hub bindings resolved above ARE its
     // address array, and started WITHOUT an await so a cold backfill can never
     // delay a chain write. Only the adapter the composition root gave a store
     // does anything at all here.
+    // An initialization that was ended meanwhile starts nothing.
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     // Both starts spawn detached work. Its context must belong to the adapter,
     // not to whichever transient caller happened to initialize it first: the
-    // work keeps that caller's request class, as it always has, and nothing
-    // else of it. An authority read that finds the adapter uninitialized must
-    // not lend its admission priority to scans that run for the process's
-    // lifetime.
-    await withDetachedRpcRequestContext(activeRpcRequestContext().requestClass, async () => {
+    // work keeps the request class of the caller that started the run, as it
+    // always has, and nothing else of it. An authority read that finds the
+    // adapter uninitialized must not lend its admission priority to scans that
+    // run for the process's lifetime.
+    await withDetachedRpcRequestContext(startsRequestClass, async () => {
       this.startChainIndexRuntime();
       await this.startHubRotationListener();
     });
@@ -3275,7 +3238,7 @@ export class EVMChainAdapterBase {
       'Token',
     );
     if (tokenAddress !== ethers.ZeroAddress) {
-      this.contracts.token = new Contract(
+      bind('token', new Contract(
         tokenAddress,
         [
           'function approve(address,uint256) returns (bool)',
@@ -3283,10 +3246,9 @@ export class EVMChainAdapterBase {
           'function allowance(address,address) view returns (uint256)',
         ],
         this.signer,
-      );
+      ));
     }
 
-    this.initialized = true;
   }
 
   protected requireV9(): void {
@@ -4686,8 +4648,12 @@ export class EVMChainAdapterBase {
    */
   protected async resolveAndAssignRandomSamplingPair(): Promise<{ rs: Contract; rss: Contract }> {
     const generationBefore = this.randomSamplingPairCache.currentGeneration();
-    const pair = await this.randomSamplingPairCache.get();
-    if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
+    // Under the caller's cancellation, as the address reads: nobody joins a
+    // resolve whose caller was cancelled, and a caller cancelled meanwhile (an
+    // initialization that was ended) assigns nothing from its late result.
+    const owner = activeRpcRequestAbortSignal();
+    const pair = await this.randomSamplingPairCache.get(owner);
+    if (this.randomSamplingPairCache.currentGeneration() === generationBefore && owner?.aborted !== true) {
       this.contracts.randomSampling = pair.rs;
       this.contracts.randomSamplingStorage = pair.rss;
     }
@@ -4861,7 +4827,10 @@ export class EVMChainAdapterBase {
    * refuses and each one does exactly what it did before the log existed.
    *
    * A failure here is a degraded index, not a degraded node: it is reported
-   * and the adapter keeps every pre-log path.
+   * and the adapter keeps every pre-log path. A start that could not complete
+   * for now (a read not admitted to the local RPC queue in time, an endpoint
+   * that timed out, throttled or was unreachable) is not a failure: the owner
+   * retries it, with this same snapshot, until the log attaches.
    *
    * Re-entrant after a Hub rotation, and only after one:
    * `rebuildChainIndexRuntimeOnRotation` clears the single-flight so the next
@@ -5076,7 +5045,7 @@ export class EVMChainAdapterBase {
     // every binding. Do not clear boot-bound handles here: the callback can
     // fire between a public method's `await init()` and its first
     // `this.contracts.X` read.
-    this.initialized = false;
+    this.rearmInit();
   }
 
   /**
@@ -5111,7 +5080,7 @@ export class EVMChainAdapterBase {
     // the entire resolved-address memo along with every bound handle.
     this.resolvedContractAddressCache.invalidateAll();
     this.invalidateRandomSamplingPair();
-    this.initialized = false;
+    this.rearmInit();
   }
 
   protected requireContextGraphStorage(): Contract {
@@ -5144,6 +5113,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    this.sharedInit.destroy();
     this.hubBindingGeneration += 1;
     this.knowledgeAssetStorageBindingGeneration += 1;
     this.hubRotationPoller.stop();

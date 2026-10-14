@@ -183,7 +183,8 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
       row: 8,
       form: 'COUNT',
       sparql: `SELECT (COUNT(*) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${privatePrefix}")) }`,
-      empty: { bindings: [] },
+      // What the count returns over no data: one row, never an answer without rows.
+      empty: { bindings: [{ count: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
     },
     {
       row: 9,
