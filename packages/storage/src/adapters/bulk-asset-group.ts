@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from 'node:crypto';
-import { canonicalizeObjectTermForHash, formatSparqlTerm } from '@origintrail-official/dkg-core';
+import { formatSparqlTerm } from '@origintrail-official/dkg-core';
 import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../atomic-graph-replace.js';
 import { type AtomicAssetReplacement, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, validateAtomicAssetGroup, preflightAtomicAssetGroupLiterals } from '../atomic-asset-group.js';
 import { quadToBlazegraphNQuad } from './blazegraph-nquads.js';
+import { blazegraphStagingObjectBucket } from './blazegraph-staging-compatibility.js';
 
 /** Native upload into hidden graphs followed by ONE guarded group publication and receipt. */
 export function buildBulkAssetGroupPlan(assets: readonly AtomicAssetReplacement[]) {
@@ -22,7 +23,7 @@ export function buildBulkAssetGroupPlan(assets: readonly AtomicAssetReplacement[
         const p = formatSparqlTerm(quad.predicate, { position: 'predicate' });
         const o = formatSparqlTerm(quad.object, { position: 'object' });
         triples.add(`${s} ${p} ${o}`);
-        values.add(`${s} ${p} ${canonicalizeObjectTermForHash(o)}`);
+        values.add(`${s} ${p} ${blazegraphStagingObjectBucket(o)}`);
         const line = `${quadToBlazegraphNQuad({ ...quad, graph: stage })}\n`;
         bytes += Buffer.byteLength(line);
         // Native escaping can exceed the bounded SPARQL representation. Select
