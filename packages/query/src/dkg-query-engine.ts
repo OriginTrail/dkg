@@ -1,4 +1,5 @@
-import { contentPartitionLayer, selectContentPartitions } from './content-partition-policy.js';
+import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
+import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readViewGraphAuthority, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
@@ -40,7 +41,6 @@ import {
   contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   ASSERTION_NAMED_GRAPH_PREFIX,
-  isAssertionScopedChildGraph,
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
@@ -365,7 +365,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       reads: discovery ? { query: reads.query,
         listGraphsByPrefix: async prefix => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads,
       variableContentGraphs: discovery ? selectContentPartitions(
-        scopedContentGraphs(discovery, plan.contextGraphId, plan.graphs.subGraphName), plan.contextGraphId, plan.partitionSelection) : [],
+        discovery.partitions, plan.partitionSelection, plan.graphs.subGraphName) : [],
     });
     // One strategy owns catalog loading and the caller's admission lifetime.
     switch (plan.discovery.catalog) {
@@ -906,15 +906,22 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     reads: StoreReadLane,
   ): Promise<ScopedContentGraphDiscoverySnapshot> {
     const visible = this.store.graphEnumerationVisibility;
-    const [catalog, filteredInventory] = await Promise.all([
-      readScopedContentGraphCatalog(contextGraphId, reads.query, Boolean(visible)),
-      visible ? undefined : reads.listGraphsByPrefix(contextGraphDataUri(contextGraphId)),
-    ]);
+    // A filtered wrapper enumerates first, so authority fences observe child
+    // registrations that occurred during enumeration. Complete visibility uses
+    // one catalog query for inventory and authority under the same admission.
+    const filteredInventory = visible ? undefined
+      : await reads.listGraphsByPrefix(contextGraphDataUri(contextGraphId));
+    const catalog = await readScopedContentGraphCatalog(contextGraphId, reads.query, Boolean(visible));
     const inventory = visible
       ? [...catalog.graphs].filter(graph => visible.call(this.store, graph))
       : filteredInventory!;
-    return { inventory, subGraphs: [...catalog.subGraphs],
-      assertionGraphs: [...catalog.assertionGraphs], childContextGraphs: [...catalog.childContextGraphs] };
+    const partitions: ContentPartition[] = [];
+    for (const graph of inventory) {
+      const partition = classifyScopedContentGraph(graph, contextGraphId,
+        catalog.subGraphs, catalog.assertionGraphs, catalog.childContextGraphs);
+      if (partition) partitions.push(partition);
+    }
+    return { inventory, partitions };
   }
 
   /**
@@ -1123,102 +1130,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return { bindings: allBindings };
   }
 
-}
-
-function scopedContentGraphs(snapshot: ScopedContentGraphDiscoverySnapshot, contextGraphId: string, subGraphName?: string): string[] {
-  const subGraphs = new Set(subGraphName ? [subGraphName] : snapshot.subGraphs);
-  const assertions = new Set(snapshot.assertionGraphs), children = new Set(snapshot.childContextGraphs);
-  return snapshot.inventory.filter(graph => isScopedContentGraph(graph, contextGraphId, subGraphs, assertions, children, subGraphName));
-}
-
-function isScopedContentGraph(
-  graph: string,
-  contextGraphId: string,
-  registeredSubGraphs: Set<string>,
-  registeredAssertionGraphs: Set<string>,
-  knownChildContextGraphs: Set<string>,
-  subGraphName?: string,
-): boolean {
-  const root = contextGraphDataUri(contextGraphId);
-  if (graph === root) return !subGraphName;
-  if (!graph.startsWith(`${root}/`)) return false;
-  if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return false;
-
-  const tail = graph.slice(root.length + 1);
-  if (
-    !tail ||
-    isMetadataGraphTail(tail) ||
-    isPrivateGraphTail(tail) ||
-    isRulesGraphTail(tail) ||
-    isStagingGraphTail(tail)
-  ) {
-    return false;
-  }
-
-  if (!subGraphName) {
-    if (tail.startsWith('_shared_memory/')) return true;
-    if (tail.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(tail);
-    if (contentPartitionLayer(tail) === 'draft') return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
-  }
-
-  const slash = tail.indexOf('/');
-  const firstSegment = slash >= 0 ? tail.slice(0, slash) : tail;
-  const remaining = slash >= 0 ? tail.slice(slash + 1) : '';
-  if (subGraphName && firstSegment !== subGraphName) return false;
-  if (!registeredSubGraphs.has(firstSegment) || !validateSubGraphName(firstSegment).valid) {
-    return false;
-  }
-
-  if (!remaining) return true;
-  if (remaining.startsWith('_shared_memory/')) return true;
-  if (remaining.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(remaining);
-  if (contentPartitionLayer(remaining) === 'draft') return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
-  return false;
-}
-
-function isRegisteredAssertionGraphOrScopedChild(
-  graph: string,
-  registeredAssertionGraphs: Set<string>,
-): boolean {
-  if (registeredAssertionGraphs.has(graph)) return true;
-  for (const registeredGraph of registeredAssertionGraphs) {
-    if (isAssertionScopedChildGraph(graph, registeredGraph)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isMetadataGraphTail(tail: string): boolean {
-  return (
-    tail === '_meta' ||
-    tail === '_shared_memory_meta' ||
-    tail.endsWith('/_meta') ||
-    tail.endsWith('/_shared_memory_meta') ||
-    tail.includes('/_meta/') ||
-    tail.includes('/_shared_memory_meta/')
-  );
-}
-
-function isPrivateGraphTail(tail: string): boolean {
-  return tail === '_private' || tail.startsWith('_private/') || tail.endsWith('/_private') || tail.includes('/_private/');
-}
-
-function isRulesGraphTail(tail: string): boolean {
-  return tail === '_rules' || tail.startsWith('_rules/') || tail.endsWith('/_rules') || tail.includes('/_rules/');
-}
-
-function isKnownChildContextGraphPartition(graph: string, knownChildContextGraphs: Set<string>): boolean {
-  for (const childContextGraph of knownChildContextGraphs) {
-    if (graph === childContextGraph || graph.startsWith(`${childContextGraph}/`)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isStagingGraphTail(tail: string): boolean {
-  return tail.startsWith('_verifiable_memory/staging/') || tail.includes('/_verifiable_memory/staging/');
 }
 
 function parseCanonicalIntegerBinding(value: string | undefined): bigint | undefined {

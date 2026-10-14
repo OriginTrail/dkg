@@ -802,7 +802,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    */
   async rfc64PrivateRootSwmOnLegacyLaneV1(
     this: DKGAgent,
-    contextGraphId: string, options: { signal?: AbortSignal } = {},
+    contextGraphId: string, options: { signal?: AbortSignal; strict?: boolean } = {},
   ): Promise<boolean> {
     const authorityContextGraphId = this.rfc64PrivateRootLegacyLaneAuthorityIdV1(contextGraphId);
     if (authorityContextGraphId === null) return false;
@@ -820,7 +820,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (!isLocalPrivateMember(await this.getOwnCgMetaFacts(authorityContextGraphId, options), localAgents)) {
         return false;
       }
-    } catch {
+    } catch (error) {
+      if (options.strict) throw error;
       return false;
     }
     // RFC-64 authority can change while the metadata is read: decide on the

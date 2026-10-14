@@ -32,26 +32,27 @@ function testMemo(...args: ConstructorParameters<typeof ScopedContentGraphDiscov
     get(request: typeof REQUEST & { signal?: AbortSignal; load: () => Promise<readonly string[]> }) {
       return memo.get({ ...request, load: async () => {
         const graphs = await request.load();
-        return { inventory: graphs, subGraphs: [], assertionGraphs: [], childContextGraphs: [] };
+        return { inventory: graphs, partitions: [] };
       } }).then(snapshot => snapshot.inventory);
     },
   };
 }
 
 describe('ScopedContentGraphDiscoveryMemo', () => {
-  it('preserves distinct inventory and authority as an immutable snapshot', async () => {
+  it('preserves distinct inventory and classified partitions as an immutable snapshot', async () => {
     const memo = new ScopedContentGraphDiscoveryMemo(
       revisionSource('all-writers', () => ({ generation: 1, stable: true })),
     );
     const inventory = ['urn:route-only', 'urn:content'];
-    const assertionGraphs = ['urn:content'];
-    const first = await memo.get({ ...REQUEST, load: async () => ({ inventory, assertionGraphs, subGraphs: [], childContextGraphs: [] }) });
-    inventory.push('urn:later'); assertionGraphs.push('urn:later');
+    const partitions: Array<{ graph: string; kind: 'content' }> = [{ graph: 'urn:content', kind: 'content' }];
+    const first = await memo.get({ ...REQUEST, load: async () => ({ inventory, partitions }) });
+    inventory.push('urn:later'); partitions[0]!.graph = 'urn:later';
     expect(first.inventory).toEqual(['urn:route-only', 'urn:content']);
-    expect(first.assertionGraphs).toEqual(['urn:content']);
+    expect(first.partitions).toEqual([{ graph: 'urn:content', kind: 'content' }]);
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(first.inventory)).toBe(true);
-    expect(Object.isFrozen(first.assertionGraphs)).toBe(true);
+    expect(Object.isFrozen(first.partitions)).toBe(true);
+    expect(Object.isFrozen(first.partitions[0])).toBe(true);
     const second = await memo.get({ ...REQUEST, load: async () => { throw new Error('unexpected reload'); } });
     expect(second).toBe(first);
   });

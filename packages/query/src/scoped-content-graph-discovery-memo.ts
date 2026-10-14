@@ -1,3 +1,4 @@
+import type { ContentPartition } from './content-partition-policy.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import type { GraphWriteRevisionSource } from '@origintrail-official/dkg-storage';
 import { callerAbortReason, raceAgainstCallerAbort } from './caller-abort.js';
@@ -10,9 +11,7 @@ export interface ScopedContentGraphDiscoveryMemoOptions {
 
 export interface ScopedContentGraphDiscoverySnapshot {
   readonly inventory: readonly string[];
-  readonly subGraphs: readonly string[];
-  readonly assertionGraphs: readonly string[];
-  readonly childContextGraphs: readonly string[];
+  readonly partitions: readonly ContentPartition[];
 }
 
 export interface ScopedContentGraphDiscoveryRequest {
@@ -66,9 +65,7 @@ export class ScopedContentGraphDiscoveryMemo {
       if (after.stable && after.generation === before.generation) {
         const immutable = Object.freeze({
           inventory: Object.freeze([...value.inventory]),
-          subGraphs: Object.freeze([...value.subGraphs]),
-          assertionGraphs: Object.freeze([...value.assertionGraphs]),
-          childContextGraphs: Object.freeze([...value.childContextGraphs]),
+          partitions: Object.freeze(value.partitions.map(partition => Object.freeze({ ...partition }))),
         });
         this.completed.set(completedKey, immutable);
         return immutable;

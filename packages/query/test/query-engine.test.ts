@@ -2366,13 +2366,13 @@ describe('DKGQueryEngine', () => {
     const afterWrite = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads);
     expect(discoveryCalls).toBe(2);
 
-    secondDiscovery.resolve({ inventory: ['urn:graph:fresh'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
-    await expect(afterWrite).resolves.toEqual({ inventory: ['urn:graph:fresh'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
-    firstDiscovery.resolve({ inventory: ['urn:graph:stale'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
-    await expect(beforeWrite).resolves.toEqual({ inventory: ['urn:graph:stale'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
+    secondDiscovery.resolve({ inventory: ['urn:graph:fresh'], partitions: [] });
+    await expect(afterWrite).resolves.toEqual({ inventory: ['urn:graph:fresh'], partitions: [] });
+    firstDiscovery.resolve({ inventory: ['urn:graph:stale'], partitions: [] });
+    await expect(beforeWrite).resolves.toEqual({ inventory: ['urn:graph:stale'], partitions: [] });
 
     await expect(target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads))
-      .resolves.toEqual({ inventory: ['urn:graph:fresh'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
+      .resolves.toEqual({ inventory: ['urn:graph:fresh'], partitions: [] });
     expect(discoveryCalls).toBe(2);
   });
 
@@ -2402,8 +2402,8 @@ describe('DKGQueryEngine', () => {
       shared: { cacheKey: '["normal","dashboard.vm"]' },
     });
     expect(discoveryCalls).toBe(2);
-    laneA.resolve({ inventory: ['urn:graph:a'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
-    laneB.resolve({ inventory: ['urn:graph:b'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
+    laneA.resolve({ inventory: ['urn:graph:a'], partitions: [] });
+    laneB.resolve({ inventory: ['urn:graph:b'], partitions: [] });
     await Promise.all([first, second]);
   });
 

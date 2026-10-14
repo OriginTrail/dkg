@@ -11187,7 +11187,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async canUseSharedMemoryForContextGraph(this: DKGAgent,
     contextGraphId: string,
     opts: {
-      callerAgentAddress?: string; signal?: AbortSignal;
+      callerAgentAddress?: string; signal?: AbortSignal; strict?: boolean;
       readAuthority?: ContextGraphReadAuthorityDecision;
     } = {},
   ): Promise<boolean> {
