@@ -44,6 +44,47 @@ beforeEach(() => {
 afterEach(async () => { vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 
 describe('assertion pages against the native scoped query engine', () => {
+  it.each(['$&', '$$', '$`', "$'", '$1'])('preserves %s in literal keyset cursors', async token => {
+    const graph = content('replacement-cursor');
+    await store.insert([
+      { subject: iri('replacement-cursor'), predicate: dkg + 'assertionGraph', object: graph, graph: meta },
+      ...[token, 'a', 'z'].map(value => ({ subject: 'urn:cursor', predicate: 'urn:value', object: JSON.stringify(value), graph })),
+    ]);
+    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
+    const seen: string[] = []; let cursor;
+    for (let page = 0; page < 5; page++) {
+      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 1, cursor });
+      expect(result.ok).toBe(true); seen.push(...result.triples.map(triple => triple.object));
+      if (!result.truncated) break;
+      cursor = result.cursor;
+    }
+    expect(seen).toEqual([JSON.stringify(token), '"a"', '"z"']);
+    expect(failures).toEqual([]);
+  });
+  it.each(['$&', '$$', "$'", '$1'])('preserves %s in clicked resource IRIs', async token => {
+    await assertion('detail-token'); const target = `urn:resource:${token}`;
+    await store.insert([
+      { subject: target, predicate: 'http://schema.org/name', object: '"Special resource"', graph: content('detail-token') },
+      { subject: 'urn:incoming', predicate: 'urn:links', object: target, graph: content('detail-token') },
+    ]);
+    const detail = await fetchMemoryEntity(cg, target, 'wm');
+    expect(detail.partial).toBe(false);
+    expect(detail.triples.map(triple => triple.subject).sort()).toEqual(['urn:incoming', target].sort());
+    expect(failures).toEqual([]);
+  });
+  it('preserves replacement tokens in graph VALUES and graph-boundary continuation', async () => {
+    for (const name of ['00', '01', '02', '03', '04$&', '04a', '04z']) await assertion(name);
+    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
+    const seen: string[] = []; let cursor;
+    for (let page = 0; page < 3; page++) {
+      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 100, cursor });
+      expect(result.ok).toBe(true); seen.push(...result.triples.map(triple => triple.subject));
+      if (!result.truncated) break;
+      cursor = result.cursor;
+    }
+    expect(new Set(seen).size).toBe(7); expect(seen).toHaveLength(7);
+    expect(failures).toEqual([]);
+  });
   it('keeps under-budget blank-node subjects and objects complete, including detail reads', async () => {
     await assertion('blank-edges');
     const graph = content('blank-edges');

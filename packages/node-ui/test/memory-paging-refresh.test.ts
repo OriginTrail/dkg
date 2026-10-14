@@ -55,6 +55,21 @@ beforeEach(() => {
 });
 afterEach(async () => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 describe('memory continuation and refresh with the scoped native store', () => {
+  it('reports preview counts when a later SWM page reclassifies a loaded WM entity', async () => {
+    await seed(cg, 1); const target = `urn:${cg}:00`;
+    await store.insert(Array.from({ length: 6 }, (_, i) => ({
+      subject: i === 5 ? target : `urn:shared:${i}`, predicate: 'http://schema.org/name', object: '"Shared entity"',
+      graph: `did:dkg:context-graph:${cg}/_shared_memory/${owner}/${String(i).padStart(2, '0')}`,
+    })));
+    await act(async () => root.render(React.createElement(Probe)));
+    expect(memory.counts.wm).toBe(1); expect(memory.partial).toBe(true);
+    const previewClaim = container.textContent;
+    await act(async () => memory.loadMore?.());
+    expect(memory.counts.wm).toBe(0); expect(memory.counts.swm).toBe(6);
+    expect(memory.hasMore).toBe(false); expect(memory.partial).toBe(false);
+    expect(previewClaim).toContain('Per-layer counts may change');
+    expect(previewClaim).not.toContain('lower bounds');
+  });
   it.each([1, 6])('can retry a failed layer alongside clipped blanks across %i partitions', async partitions => {
     await seed(cg, partitions); const base = `did:dkg:context-graph:${cg}`;
     await store.insert([

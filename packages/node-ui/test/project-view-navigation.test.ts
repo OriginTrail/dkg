@@ -166,6 +166,7 @@ const apiWrapperMock = vi.hoisted(() => ({
   // so the Subgraphs stat resolves in mock mode. Default to empty.
   fetchSubGraphs: vi.fn(async (id: string) => ({ contextGraphId: id, subGraphs: [] })),
 }));
+const fetchMemoryEntityMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: apiWrapperMock,
@@ -182,7 +183,7 @@ vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({
 
 vi.mock('../src/ui/hooks/useMemoryEntities.js', () => ({
   useMemoryEntities: () => memory,
-  fetchMemoryEntity: vi.fn(async () => ({ triples: [], partial: false })),
+  fetchMemoryEntity: fetchMemoryEntityMock,
   buildMemoryEntities: buildTestMemoryEntities,
   // ProjectView imports `canonicalEntityUri` for `dedupeTriplesBySpo`.
   // Idempotent strip of `<...>` wrappers mirrors the real impl.
@@ -457,6 +458,7 @@ describe('ProjectView entity detail navigation', () => {
 
   beforeEach(async () => {
     resetMemory();
+    fetchMemoryEntityMock.mockReset().mockResolvedValue({ triples: [], partial: false });
     apiWrapperMock.fetchContextGraphs.mockResolvedValue({
       contextGraphs: [{ id: 'cg-test', name: 'Context Graph Test' }],
     });
@@ -494,6 +496,49 @@ describe('ProjectView entity detail navigation', () => {
     });
     document.body.innerHTML = '';
     vi.clearAllMocks();
+  });
+
+  it('opens a resource outside the preview from nonempty asynchronous details', async () => {
+    const uri = 'urn:remote:record'; let resolve!: (value: unknown) => void;
+    fetchMemoryEntityMock.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+    expect(memory.entities.has(uri)).toBe(false);
+    await act(async () => window.dispatchEvent(new CustomEvent('v10:open-entity', {
+      detail: { contextGraphId: 'cg-test', entityUri: uri },
+    })));
+    expect(document.body.textContent).toContain('Loading resource details');
+    expect(document.querySelector('[data-testid="entity-detail"]')).toBeNull();
+    await act(async () => resolve({ partial: false, triples: [
+      { subject: uri, predicate: NAME, object: '"Remote record"', layer: 'working', subGraph: 'remote' },
+      { subject: uri, predicate: 'urn:hasPart', object: 'urn:remote:part', layer: 'working', subGraph: 'remote' },
+      { subject: 'urn:remote:origin', predicate: 'urn:references', object: uri, layer: 'working', subGraph: 'remote' },
+    ] }));
+    expect(query('entity-detail').dataset.entity).toBe(uri);
+    expect(query('entity-detail').textContent).toContain('Remote record');
+    expect(query('entity-detail').dataset.connections).toBe('1');
+    expect(query('entity-detail').dataset.subgraphs).toBe('remote');
+    expect(document.body.textContent).not.toContain('Loading resource details');
+  });
+
+  it('keeps fetched details for the current selection when an older request finishes late', async () => {
+    const pending = new Map<string, (value: unknown) => void>();
+    fetchMemoryEntityMock.mockImplementation((_cg: string, uri: string) => new Promise(resolve => pending.set(uri, resolve)));
+    const open = async (uri: string) => act(async () => window.dispatchEvent(new CustomEvent('v10:open-entity', {
+      detail: { contextGraphId: 'cg-test', entityUri: uri },
+    })));
+    await open('urn:remote:old'); await open('urn:remote:current');
+    await act(async () => pending.get('urn:remote:current')!({ partial: false, triples: [
+      { subject: 'urn:remote:current', predicate: NAME, object: '"Current fetched resource"', layer: 'shared' },
+      { subject: 'urn:remote:current', predicate: 'urn:links', object: 'urn:remote:target', layer: 'shared' },
+    ] }));
+    expect(query('entity-detail').dataset.entity).toBe('urn:remote:current');
+    expect(query('entity-detail').dataset.trust).toBe('shared');
+    expect(query('entity-detail').dataset.connections).toBe('1');
+    await act(async () => pending.get('urn:remote:old')!({ partial: false, triples: [
+      { subject: 'urn:remote:old', predicate: NAME, object: '"Obsolete fetched resource"', layer: 'working' },
+    ] }));
+    expect(query('entity-detail').dataset.entity).toBe('urn:remote:current');
+    expect(query('entity-detail').textContent).toContain('Current fetched resource');
+    expect(document.body.textContent).not.toContain('Obsolete fetched resource');
   });
 
   it('restores layer, subtab, and scroll when entity detail closes', async () => {

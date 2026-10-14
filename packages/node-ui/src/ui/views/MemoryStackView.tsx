@@ -211,13 +211,13 @@ function LayerCell({
       style={{ '--cell-color': color } as React.CSSProperties}
     >
       <div className="v10-memstack-cell-stats">
-        <span className="v10-memstack-cell-n">{partial ? '≥ ' : ''}{entityCount}</span>
+        <span className="v10-memstack-cell-n">{entityCount}</span>
         <span className="v10-memstack-cell-n-lbl">
-          entit{entityCount === 1 ? 'y' : 'ies'}
+          {partial ? 'loaded ' : ''}entit{entityCount === 1 ? 'y' : 'ies'}
         </span>
         <span className="v10-memstack-cell-sep">·</span>
-        <span className="v10-memstack-cell-t">{partial ? '≥ ' : ''}{tripleCount.toLocaleString()}</span>
-        <span className="v10-memstack-cell-t-lbl">triples</span>
+        <span className="v10-memstack-cell-t">{tripleCount.toLocaleString()}</span>
+        <span className="v10-memstack-cell-t-lbl">{partial ? 'loaded triples' : 'triples'}</span>
       </div>
       {recent.length > 0 ? (
         <ul className="v10-memstack-cell-recent">

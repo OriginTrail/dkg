@@ -253,8 +253,8 @@ export async function readMemoryGraphPage(
       const predicateFilter = ordered.match(/&&\s*(\?p\s*!=\s*<[^>]+>)/)?.[1];
       const inventory = ordered.replace(/SELECT\s+\?s\s+\?p\s+\?o\s+\?g/i, 'SELECT DISTINCT ?g')
         .replace(/&&\s*\?p\s*!=\s*<[^>]+>/g, '')
-        .replace(/\?s\s+\?p\s+\?o\b/g, `FILTER EXISTS { ?s ?p ?o ${predicateFilter ? `FILTER(${predicateFilter})` : ''} }`)
-        .replace(/}\s*$/, `${cursor ? `FILTER(STR(?g) ${cursor[7] ? '>' : '>='} ${JSON.stringify(cursor[0])})` : ''} }`);
+        .replace(/\?s\s+\?p\s+\?o\b/g, () => `FILTER EXISTS { ?s ?p ?o ${predicateFilter ? `FILTER(${predicateFilter})` : ''} }`)
+        .replace(/}\s*$/, () => `${cursor ? `FILTER(STR(?g) ${cursor[7] ? '>' : '>='} ${JSON.stringify(cursor[0])})` : ''} }`);
       const catalog = await postQueryDeduped({ sparql: `${inventory} ORDER BY STR(?g) LIMIT 6`, contextGraphId, ...requestOpts }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
       checkCurrent();
       const names = [...new Set((catalog.result?.bindings ?? []).map(row => canonicalEntityUri(bv(row.g) ?? '')).filter(Boolean))];
@@ -265,7 +265,7 @@ export async function readMemoryGraphPage(
     }
     // Compare the complete RDF term identity. STR(?o) alone would skip values
     // sharing lexical text but differing in language, datatype or node kind.
-    const seek = ordered.replace(/WHERE\s*{/i, `WHERE { ${graphValues}`).replace(/}\s*$/, `
+    const seek = ordered.replace(/WHERE\s*{/i, () => `WHERE { ${graphValues}`).replace(/}\s*$/, () => `
       FILTER(!isBlank(?s) && !isBlank(?o))
       BIND(STR(?g) AS ?__g)
       BIND(CONCAT(IF(isBlank(?s), "B:", "I:"), STR(?s)) AS ?__s)
@@ -291,8 +291,8 @@ export async function readMemoryGraphPage(
     const blankGraphs = enteredGraphs.filter(graph => !cursor || cursor[7] || graph !== cursor[0]);
     const blankBudget = layerLimit - bindings.length;
     const blankData = blankGraphs.length || (direct && !cursor) ? await postQueryDeduped({
-      sparql: ordered.replace(/WHERE\s*{/i, `WHERE { ${blankGraphs.length ? `VALUES ?g { ${blankGraphs.map(sparqlIri).join(' ')} }` : ''}`)
-        .replace(/}\s*$/, `FILTER(isBlank(?s) || isBlank(?o)) } LIMIT ${blankBudget + 1}`),
+      sparql: ordered.replace(/WHERE\s*{/i, () => `WHERE { ${blankGraphs.length ? `VALUES ?g { ${blankGraphs.map(sparqlIri).join(' ')} }` : ''}`)
+        .replace(/}\s*$/, () => `FILTER(isBlank(?s) || isBlank(?o)) } LIMIT ${blankBudget + 1}`),
       contextGraphId, ...requestOpts,
     }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 }) : undefined;
     checkCurrent();
@@ -345,7 +345,7 @@ export async function fetchMemoryEntity(
       // Compare the returned terms in the client; _:label in a WHERE pattern
       // would be an existential variable and STR(blank) is undefined.
       const data = await postQueryDeduped({
-        sparql: definition.sparql.replace(/}\s+LIMIT\s+\d+\s*$/i, `FILTER(${match}) } LIMIT 1001`),
+        sparql: definition.sparql.replace(/}\s+LIMIT\s+\d+\s*$/i, () => `FILTER(${match}) } LIMIT 1001`),
         contextGraphId, includeContextGraphPartitions: true,
       }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
       const rows = data.result?.bindings ?? [];
@@ -357,7 +357,7 @@ export async function fetchMemoryEntity(
     }
     // Bind the resource in the triple pattern so the store can use its subject
     // and object indexes, rather than filtering every row in the partitions.
-    const query = definition.sparql.replace(/(WHERE[\s\S]*?)\?s\s+\?p\s+\?o\b/, `$1{
+    const query = definition.sparql.replace(/(WHERE[\s\S]*?)\?s\s+\?p\s+\?o\b/, (_match, prefix: string) => `${prefix}{
       { ${sparqlIri(target)} ?p ?o BIND(${sparqlIri(target)} AS ?s) }
       UNION { ?s ?p ${sparqlIri(target)} BIND(${sparqlIri(target)} AS ?o) FILTER(?s != ${sparqlIri(target)}) }
     }`);

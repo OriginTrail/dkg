@@ -74,7 +74,7 @@ export interface MemoryData {
   counts: { wm: number; swm: number; vm: number; total: number };
   loading: boolean;
   error: string | null;
-  /** True when counts are lower bounds because a layer failed or clipped at its query limit. */
+  /** True when reads are incomplete; later layers may change preview membership and counts. */
   partial: boolean;
   /** Per-layer query status so UI can distinguish a VM miss from WM/SWM failures. */
   layerStatus: Record<MemoryLayerKey, MemoryLayerStatus>;
@@ -194,8 +194,8 @@ function deriveEntityLabel(entity: MemoryEntity): string {
 // We treat it as VM, not WM. Pre-publish writes only exist in
 // `assertion/<addr>/<name>` graphs.
 //
-// Bounded pages replace a silent result cutoff. Counts remain lower bounds
-// until the user has loaded every page and all requested layers succeeded.
+// Bounded pages replace a silent result cutoff. Later pages can promote an
+// entity to another layer, so per-layer counts describe the loaded preview.
 export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
   const entities = new Map<string, MemoryEntity>();
   const connectionKeys = new Map<string, Set<string>>();

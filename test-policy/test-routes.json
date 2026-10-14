@@ -1,9 +1,9 @@
 [
   {
     "pattern": "packages/node-ui/browser-regressions/pr3236/*.spec.ts",
-    "lane": "browser-local",
-    "reason": "Standalone PR3236 Chromium regressions use the real scoped store and WebGL without devnet bootstrap",
-    "cadence": "manual",
+    "lane": "browser",
+    "reason": "Standalone scoped-store and WebGL regressions run in the first required browser CI shard",
+    "cadence": "required",
     "command": "pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts",
     "layer": "browser regression fixtures",
     "prerequisites": [

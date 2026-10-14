@@ -31,7 +31,8 @@ test.afterEach(async () => { await store.close(); });
 test('Memory Stack flags the five-graph preview and loads the sixth graph', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Only loaded memory is shown.', { exact: false })).toBeVisible();
-  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('≥ 5');
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5');
+  await expect(page.locator('.v10-memstack-cell-n-lbl').first()).toHaveText('loaded entities');
   await page.getByRole('button', { name: 'Load more graph data' }).click();
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('6');
 });
@@ -56,6 +57,23 @@ test('real WebGL icons retain their Three.js scene parent after redraws', async 
     expect(await hasIcon()).toBe(true);
   }
 });
+test('Memory Stack describes loaded counts when later SWM pages reduce WM membership', async ({ page }) => {
+  const base = `did:dkg:context-graph:${cg}`;
+  await store.insert(Array.from({ length: 6 }, (_, i) => {
+    const graph = `${base}/_shared_memory/${owner}/${String(i).padStart(2, '0')}`;
+    return i === 5
+      ? ['urn:entity:00', 'urn:entity:01'].map(subject => ({ subject, predicate: 'http://schema.org/name', object: '"Promoted entity"', graph }))
+      : [{ subject: `urn:shared:${i}`, predicate: 'http://schema.org/name', object: '"Shared entity"', graph }];
+  }).flat());
+  await page.goto('/');
+  await expect(page.locator('.v10-memstack-cell-n').first()).toContainText('5');
+  const initialCount = await page.locator('.v10-memstack-cell-n').first().innerText();
+  const initialLabel = await page.locator('.v10-memstack-cell-n-lbl').first().innerText();
+  await page.getByRole('button', { name: 'Load more graph data' }).click();
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('4');
+  expect(initialCount).toBe('5'); expect(initialLabel).toBe('loaded entities');
+  await expect(page.getByText('lower bounds', { exact: false })).toHaveCount(0);
+});
 test('Memory Stack keeps a budget warning after graph continuation ends', async ({ page }) => {
   const graph = `did:dkg:context-graph:${cg}/_working_memory/${owner}/00`;
   await store.insert(Array.from({ length: 5001 }, (_, i) => ({
@@ -63,9 +81,9 @@ test('Memory Stack keeps a budget warning after graph continuation ends', async 
   })));
   await page.goto('/');
   await expect(page.getByText('Memory preview limit reached.', { exact: false })).toBeVisible();
-  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('≥ 5000');
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5000');
   await page.getByRole('button', { name: 'Load more graph data' }).click();
   await expect(page.getByRole('button', { name: 'Load more graph data' })).toHaveCount(0);
   await expect(page.getByText('Memory preview limit reached.', { exact: false })).toBeVisible();
-  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('≥ 5001');
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5001');
 });

@@ -146,7 +146,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           className={`v10-agent-profile-stat${typeFilter === null ? ' active' : ''}`}
           onClick={() => setTypeFilter(null)}
         >
-          <span className="v10-agent-profile-stat-val">{partial ? '≥ ' : ''}{total}</span>
+          <span className="v10-agent-profile-stat-val">{total}</span>
           <span className="v10-agent-profile-stat-lbl">{partial ? 'Loaded activity' : 'All activity'}</span>
         </button>
         {PRIMARY_TYPES.map(t => {
@@ -162,7 +162,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
               style={{ '--stat-color': color } as React.CSSProperties}
               onClick={() => setTypeFilter(t.iri)}
             >
-              <span className="v10-agent-profile-stat-val">{partial ? '≥ ' : ''}{arr.length}</span>
+              <span className="v10-agent-profile-stat-val">{arr.length}</span>
               <span className="v10-agent-profile-stat-lbl">
                 {binding?.label ? binding.label : t.label}
               </span>
