@@ -19,7 +19,7 @@ it.each(['verifiable-memory', 'shared-working-memory', 'working-memory'] as cons
             { graph: `${child}/${layer}/agent-a/1`, subject: 'urn:child-secret', predicate: 'urn:p', object: '"secret"' },
           ]);
         }
-        return target.listGraphsByPrefix(prefix);
+        return (await target.listGraphs()).filter(graph => graph.startsWith(prefix));
       };
       const value = Reflect.get(target, key, target);
       return typeof value === 'function' ? value.bind(target) : value;
