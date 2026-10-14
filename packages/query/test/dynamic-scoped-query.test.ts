@@ -41,10 +41,11 @@ describe('fresh dynamic scoped query admission', () => {
       expect(admission).toHaveBeenCalledTimes(visible ? 2 : 0);
       expect(reads.length).toBeGreaterThanOrEqual(4);
       expect(reads.every(value => value === visible)).toBe(true);
-      // Explicit/view/private routes may await shared decorator refreshes.
-      admission.mockClear();
+      // Private discovery uses the same owned inventory and metadata reads.
+      admission.mockClear(); reads.length = 0;
       await engine.query(QUERY, { ...OPTIONS, includePrivate: true });
-      expect(admission).not.toHaveBeenCalled();
+      expect(admission).toHaveBeenCalledTimes(visible ? 1 : 0);
+      expect(reads.every(value => value === visible)).toBe(true);
     } finally { await adapter.close(); }
   });
   it('shares a context inventory across sibling scopes without sharing their authorization', async () => {

@@ -44,9 +44,10 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     fallbackPolicy: options.requireCompleteGraphScope ? 'preserve-scope' : 'compatibility',
     excludedGraphPrefixes: [...(options.excludeGraphPrefixes ?? [])],
     discovery: { contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,
-      // Other routes can depend on a decorator refresh queued behind an owned slot.
+      // Complete dynamic routes use the catalog inventory for prefix reads;
+      // private discovery adds metadata queries within the same owned admission.
       catalog: !expandGraphVariables ? { kind: 'none' }
-        : completeAdmissionOwner && !options.includePrivate
+        : completeAdmissionOwner
           ? { kind: 'admission-owned', owner: completeAdmissionOwner } : { kind: 'shared' },
     },
   };
