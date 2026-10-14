@@ -154,7 +154,9 @@ export interface PathFieldTerm {
  * Resolve a path-valued field (`resource`, `sources[].resource`, `computation`,
  * `executor.resource`, `attester.resource` — SPEC §6.2):
  *
- *   - an absolute URL (scheme-prefixed) → IRI object;
+ *   - an absolute URL (scheme-prefixed) → IRI object, as written; when it is
+ *     a bundle concept's own IRI (`urn:okf:p`), it also names that concept, so
+ *     its lineage counts it as the `/p.md` spelling would;
  *   - a bundle path that names a concept → the concept's IRI (a typed graph
  *     edge). File-relative resolution (§6.2) is tried first, then the
  *     bundle-root-relative reading the reference bundles actually use
@@ -164,7 +166,10 @@ export interface PathFieldTerm {
  */
 export function pathFieldTerm(value: unknown, ctx?: PathContext): PathFieldTerm {
   const s = safeString(value).trim();
-  if (isSafeIri(s)) return { term: s };
+  if (isSafeIri(s)) {
+    const id = ctx && s.startsWith(ctx.iriBase) ? s.slice(ctx.iriBase.length) : null;
+    return ctx && id !== null && ctx.conceptExists(id) ? { term: s, conceptId: id } : { term: s };
+  }
   if (!ctx) return { term: literalTerm(s) };
   const direct = resolveLinkTarget(s, ctx.conceptId);
   if (direct && ctx.conceptExists(direct)) {

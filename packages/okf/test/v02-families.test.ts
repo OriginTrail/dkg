@@ -52,7 +52,7 @@ import {
 import * as okfPublic from '../src/index.js';
 import { decodeFamilies, prepareFamily, resolveReferences, FAMILY_SPECS, FAMILY_BY_KEY, VERIFIED } from '../src/families/index.js';
 import type { Quad } from '../src/index.js';
-import { DT, objs, node, bundle, conceptOf, exportedFrontmatter } from './helpers/okf-v02-fixtures.js';
+import { DT, IDX_V02, objs, node, bundle, conceptOf, exportedFrontmatter } from './helpers/okf-v02-fixtures.js';
 
 describe('§5.2 generated / legacy timestamp', () => {
   it('maps generated.by → okf:generatedBy and generated.at → schema:dateModified (canonical lexical)', () => {
@@ -300,6 +300,47 @@ describe('§5.1 sources and provenance', () => {
     expect(fn.map((w) => w.message)).toEqual(['footnote [^missing] does not match any sources[].id (§5.1 per-claim attribution)']);
     const noSources = conceptOf(bundle('type: Metric', body)).r;
     expect(noSources.warnings.some((w) => w.code === 'unknown-footnote')).toBe(false);
+  });
+});
+
+describe('§6.2 a source path names one concept, and keeps naming it through a round trip', () => {
+  const metric = { path: 'metrics/revenue.md', content: '---\ntype: Metric\nsources: [{ id: s, resource: policies/p.md }]\n---\n\nbody\n' };
+  const LOCAL = { path: 'metrics/policies/p.md', content: '---\ntype: Policy\ntitle: Local\n---\n\nbody\n' };
+  const ROOT = { path: 'policies/p.md', content: '---\ntype: Policy\ntitle: Root\n---\n\nbody\n' };
+  const lineage = (r: ReturnType<typeof importBundle>) => {
+    const c = r.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    return {
+      resource: objs(c.quads, OKF_RESOURCE, node(GENID_TAGS.source, 0)),
+      derivedFrom: objs(c.quads, PROV_WAS_DERIVED_FROM),
+      concepts: c.trust.derivedFromConcepts,
+    };
+  };
+  const named = (id: string) => ({ resource: [`urn:okf:${id}`], derivedFrom: [`urn:okf:${id}`], concepts: [id] });
+
+  it('picks the file-relative concept when both readings exist (§6.2)', () => {
+    const first = importBundle([IDX_V02(), metric, LOCAL, ROOT]);
+    expect(lineage(first)).toEqual(named('metrics/policies/p'));
+    expect(lineage(importBundle(exportBundle(first)))).toEqual(named('metrics/policies/p'));
+  });
+
+  it('falls back to the bundle-root concept when there is no file-relative one', () => {
+    const first = importBundle([IDX_V02(), metric, ROOT]);
+    expect(lineage(first)).toEqual(named('policies/p'));
+    expect(lineage(importBundle(exportBundle(first)))).toEqual(named('policies/p'));
+  });
+
+  it("counts a concept's own absolute IRI as that concept, and keeps every other IRI external", () => {
+    const files = [
+      IDX_V02(),
+      { path: 'a.md', content: '---\ntype: Metric\nsources:\n  - { id: p, resource: urn:okf:p }\n  - { id: m, resource: urn:okf:missing }\n  - { id: x, resource: https://x.example/doc }\n---\n\nbody\n' },
+      { path: 'p.md', content: '---\ntype: Policy\n---\n\nbody\n' },
+    ];
+    const first = importBundle(files);
+    for (const r of [first, importBundle(exportBundle(first))]) {
+      const a = r.concepts.find((c) => c.conceptId === 'a')!;
+      expect(a.trust.derivedFromConcepts).toEqual(['p']);
+      expect(objs(a.quads, PROV_WAS_DERIVED_FROM, a.iri).sort()).toEqual(['https://x.example/doc', 'urn:okf:missing', 'urn:okf:p']);
+    }
   });
 });
 

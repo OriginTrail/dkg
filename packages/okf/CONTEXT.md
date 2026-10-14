@@ -221,8 +221,11 @@ it; the CLI summary reports it against the current time.
 - **Root-relative vs. file-relative paths (upstream issue #29).** SPEC §6.2 says a
   path without a leading `/` is file-relative, but Google's own `acme_retail`
   bundle writes `policies/x.md` from `metrics/y.md` meaning bundle-root-relative.
-  We resolve file-relative first, then root-relative, so both conventions work;
-  export always writes the unambiguous absolute `/path.md` form.
+  We resolve file-relative first, then root-relative, so both conventions work
+  (when both readings name a concept, the file-relative one wins); export
+  always writes the unambiguous absolute `/path.md` form. An absolute IRI that
+  is a bundle concept's own IRI (`urn:okf:p`) is kept as written but names
+  that concept too, so lineage summaries count it as they count `/p.md`.
 - **Timestamps.** YAML parsers (js-yaml here, PyYAML in the reference agent) turn
   an unquoted `2026-06-30T14:00:00Z` into a native datetime; a quoted one stays a
   string. js-yaml's own conversion would roll an impossible `2026-02-30` over to
