@@ -3,7 +3,7 @@ import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
-import { selectContentPartitions, type ContentPartition, type ContentPartitionSelection } from './content-partition-policy.js';
+import { selectContentPartitions, resolveDraftAccessPolicy, type ContentPartition, type DraftAccessPolicy } from './content-partition-policy.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource,
@@ -452,8 +452,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         ? await this.resolveScopedGraphVariableAllowList(
             effectiveContextGraphId,
             explicitAllowedGraphs,
-            { subGraphName, isSwmOnlyRoute, selection: options?.excludeWorkingMemoryPartitions ? 'published-content' : 'all-content',
-              authorizedWorkingMemoryOwners: options?.authorizedWorkingMemoryOwners },
+            { subGraphName, isSwmOnlyRoute, draftAccess: resolveDraftAccessPolicy(options) },
             reads,
           )
         : explicitAllowedGraphs;
@@ -974,7 +973,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async resolveScopedGraphVariableAllowList(
     contextGraphId: string,
     staticAllowedGraphs: string[],
-    opts: { subGraphName?: string; isSwmOnlyRoute: boolean; selection: ContentPartitionSelection; authorizedWorkingMemoryOwners?: readonly string[] },
+    opts: { subGraphName?: string; isSwmOnlyRoute: boolean; draftAccess: DraftAccessPolicy },
     reads: QueryStoreReadContext,
   ): Promise<string[]> {
     if (opts.isSwmOnlyRoute) {
@@ -987,7 +986,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       reads,
       opts.subGraphName,
     );
-    for (const graph of selectContentPartitions(scopedContentGraphs, opts.selection, undefined, opts.authorizedWorkingMemoryOwners)) {
+    for (const graph of selectContentPartitions(scopedContentGraphs, opts.draftAccess)) {
       allowed.add(graph);
     }
 

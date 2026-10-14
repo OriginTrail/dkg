@@ -7196,7 +7196,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     // Finalized RFC-64 authority is sufficient at the transport boundary, so
     // catalog-owned SWM no longer waits for a legacy metadata bootstrap read.
-    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true);
+    await vi.waitFor(() => expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true));
 
     // Catalog mode owns the root lane, but named subgraphs still require the
     // authorized member transport. queueSharedMemoryGossipSubscription remains
