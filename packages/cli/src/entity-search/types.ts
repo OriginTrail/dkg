@@ -7,6 +7,7 @@ export interface EntityIndexSpec {
   types: string[];
 }
 interface EntityReadPolicy { chainEvidenceMode?: PublicSnapshotMode }
+export type EntityReadSpec = EntityIndexSpec & EntityReadPolicy;
 export interface EntityIndexRequest extends EntityIndexSpec, EntityReadPolicy { restart?: boolean; timeoutMs?: number }
 export interface EntityReadinessRequest extends EntityReadPolicy { contextGraphId: string; indexId: string; warmup?: boolean; timeoutMs?: number }
 export interface EntitySearchRequest extends EntityReadPolicy { contextGraphId: string; indexId: string; query: string; limit?: number; timeoutMs?: number }
