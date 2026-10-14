@@ -46,6 +46,8 @@ export const SCHEMA_MENTIONS = 'http://schema.org/mentions';
  * the source's own `last_modified` (§5.1).
  */
 export const SCHEMA_DATE_MODIFIED = 'http://schema.org/dateModified';
+/** `parameters[].default` (§10.2): the default a parameter takes, one value kept whole. */
+export const SCHEMA_DEFAULT_VALUE = 'http://schema.org/defaultValue';
 /** OKF `resource` = canonical URI of the underlying asset (SPEC §4.1). */
 export const SCHEMA_URL = 'http://schema.org/url';
 /** Legacy v0.1 `# Citations` links (v0.1 SPEC §8) — semantically distinct from concept edges. */

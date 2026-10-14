@@ -83,7 +83,7 @@ verified one, and is never rejected — SPEC §11).
 | `sources[]` (§5.1) | `okf:source → okf:Source` node: `schema:identifier` (`id`), `schema:name` (`title`), `okf:resource`, `okf:author`, `okf:usageCount`, `schema:dateModified` (`last_modified`), `okf:usageWindowFrom/To` | plus `prov:wasDerivedFrom <resource>` on the concept whenever the resource has an IRI |
 | `usage_window` (§5.1) | `okf:usageWindowFrom`, `okf:usageWindowTo` | concept-level sibling; per-entry overrides sit on the source node; extra keys (e.g. `population`) → `okf:usage_window.<key>` on the same subject |
 | `runtime`, `computation` (§10.2) | `okf:runtime`, `okf:computation` | |
-| `parameters[]` (§10.2) | `okf:parameter → okf:Parameter` node: `schema:name`, `okf:parameterType`, `okf:required` | ordered by node IRI |
+| `parameters[]` (§10.2) | `okf:parameter → okf:Parameter` node: `schema:name`, `okf:parameterType`, `okf:required`, `schema:defaultValue` (`default`) | ordered by node IRI; a `default` is one value kept whole, a list or mapping as one `rdf:JSON` literal, so `[US]` stays a list and `[2, 1, 2]` keeps its order and repeats |
 | `executor`, `attester` (§10.2) | `okf:executorResource`, `okf:executorReceipt` (one per field), `okf:attesterResource` | extra keys → `okf:executor.<key>` / `okf:attester.<key>` |
 | body links (§6.1) | `schema:mentions` (untyped; opt-in `--relate` typing) | unchanged |
 | legacy `# Citations` (§13.1) | `schema:citation` | still parsed for v0.1 documents |

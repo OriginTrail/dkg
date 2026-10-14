@@ -275,7 +275,12 @@ it; the CLI summary reports it against the current time.
   the store happened to use. A single-valued field that somehow holds two
   values exports the same one either way. `parameters`, `verified` and
   `sources` keep their order because the node IRI numbers the entries, and a
-  value kept verbatim as one `rdf:JSON` literal keeps its internal order.
+  value kept verbatim as one `rdf:JSON` literal keeps its internal order. A
+  parameter `default` is no set: it is the one value a computation receives,
+  so it is a field of its own (`schema:defaultValue`, kind `value`) kept
+  whole, a list or mapping as one `rdf:JSON` literal; `[US]` stays a list and
+  `[2, 1, 2]` keeps its order and repeats. A family extension's list
+  (`executor.retries: [1, 2]`) is still one triple per item.
 - **Both `timestamp` and `generated` present.** Unusual (a migration leftover).
   One codec, `src/families/generated.ts`, owns this rule in both directions:
   the mapper's quads for each, the summary's last-modified time, whether

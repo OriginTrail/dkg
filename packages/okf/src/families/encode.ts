@@ -88,10 +88,11 @@ function nodeIri(iri: string, tag: string, conceptId: string, index: number): st
 /**
  * A field value's object terms, per its kind (see `FieldKind`), or `null` for
  * a path, whose term depends on the bundle. Every kind but `text-list` holds
- * one value; given a mapping or list instead, the field keeps it verbatim as
- * one `rdf:JSON` literal (reported by the diagnostics) rather than coercing
- * it — coercion would lose it, or throw on a mapping that has its own
- * `toString` key.
+ * one value; given a mapping or list instead, the field keeps it as one
+ * `rdf:JSON` literal rather than coercing it — coercion would lose it, or
+ * throw on a mapping that has its own `toString` key. For a `value` field a
+ * list or mapping is a value like any other; for the rest it is the wrong
+ * shape, kept verbatim and reported by the diagnostics.
  */
 function fieldTerms(field: FieldSpec, value: unknown): string[] | null {
   if (field.kind !== 'text-list' && !isScalar(value)) return [jsonTerm(value)];
@@ -113,6 +114,8 @@ function fieldTerms(field: FieldSpec, value: unknown): string[] | null {
       return typeof value === 'boolean' ? [typedLiteralTerm(String(value), XSD_BOOLEAN)] : valueToTerms(value).slice(0, 1);
     case 'path':
       return null;
+    case 'value':
+      return valueToTerms(value);
     case 'text-list':
       return toArray(value).map((item) => (isScalar(item) ? literalTerm(safeString(item)) : jsonTerm(item)));
   }

@@ -65,6 +65,8 @@ function checkField(spec: FamilySpec, field: FieldSpec, value: unknown, label: s
     });
     return;
   }
+  // A `value` field holds a value of any shape, a list or mapping included.
+  if (field.kind === 'value') return;
   if (!isScalar(value)) {
     const outcome = field.skipEntryWhenBlank ? 'the entry is skipped' : 'kept verbatim';
     out.push({ code: 'malformed-family', message: `${name} should be a single value, not a mapping or list (${spec.section}); ${outcome}` });

@@ -24,6 +24,7 @@
 
 import {
   SCHEMA_DATE_MODIFIED,
+  SCHEMA_DEFAULT_VALUE,
   SCHEMA_IDENTIFIER,
   SCHEMA_NAME,
   OKF_GENERATED_BY,
@@ -71,6 +72,12 @@ export type FieldKind =
   | 'boolean'
   /** A §6.2 path-valued field: a bundle concept's IRI, an absolute IRI, or a literal. */
   | 'path'
+  /**
+   * One value of any type, kept whole: a scalar as its typed term, a list or
+   * mapping as one `rdf:JSON` literal, so its shape, order and repeats
+   * survive (a parameter `default` of `[US]` or `[2, 1, 2]`).
+   */
+  | 'value'
   /** One plain literal per element; set semantics, so it decodes sorted. */
   | 'text-list';
 
@@ -241,6 +248,7 @@ export const PARAMETERS: ListFamilySpec = {
     { key: 'name', predicate: SCHEMA_NAME, kind: 'text', requiredNote: 'is missing (§10.2)' },
     { key: 'type', predicate: OKF_PARAMETER_TYPE, kind: 'text' },
     { key: 'required', predicate: OKF_REQUIRED, kind: 'boolean' },
+    { key: 'default', predicate: SCHEMA_DEFAULT_VALUE, kind: 'value' },
   ],
 };
 

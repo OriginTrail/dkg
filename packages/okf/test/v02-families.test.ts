@@ -41,6 +41,7 @@ import {
   PROV_WAS_DERIVED_FROM,
   RDF_TYPE,
   SCHEMA_DATE_MODIFIED,
+  SCHEMA_DEFAULT_VALUE,
   SCHEMA_IDENTIFIER,
   SCHEMA_NAME,
   RDF_JSON,
@@ -372,7 +373,7 @@ describe('§10 attested computations', () => {
     expect(objs(c.quads, SCHEMA_NAME, p0)).toEqual(['"year"']);
     expect(objs(c.quads, OKF_PARAMETER_TYPE, p0)).toEqual(['"integer"']);
     expect(objs(c.quads, OKF_REQUIRED, p0)).toEqual([`"true"^^<${XSD_BOOLEAN}>`]);
-    expect(objs(c.quads, okfExtensionPredicate('parameters', 'default'), p1)).toEqual(['"all"']);
+    expect(objs(c.quads, SCHEMA_DEFAULT_VALUE, p1)).toEqual(['"all"']);
     expect(objs(c.quads, OKF_COMPUTATION)).toEqual(['"references/computations/lib/revenue.sql"']);
     // a bundle concept named by executor.resource becomes a typed edge
     expect(objs(c.quads, OKF_EXECUTOR_RESOURCE)).toEqual(['urn:okf:policies/revenue-recognition']);
@@ -488,6 +489,51 @@ describe('family extensions (SPEC §4.1) are preserved invertibly', () => {
   });
 });
 
+describe('a parameter default is one value, kept whole', () => {
+  // A default is the value an Attested Computation receives: a list default
+  // keeps its shape, order and repeats, unlike a set-valued field such as
+  // `executor.receipt` (the fields a run must return), which comes back once
+  // per value, in a canonical order.
+  const withDefault = (value: string) => bundle(`type: Attested Computation\nruntime: bigquery\nparameters:\n  - { name: p, type: array, required: false, default: ${value} }`);
+  for (const [yaml, value] of [
+    ['[US]', ['US']],
+    ['[2, 1, 2]', [2, 1, 2]],
+    ['[[1, 2], [3]]', [[1, 2], [3]]],
+    ['{ a: 1, b: [x, y] }', { a: 1, b: ['x', 'y'] }],
+  ] as const) {
+    it(`keeps default: ${yaml} through import, export and re-import`, () => {
+      const files = withDefault(yaml);
+      const first = importBundle(files);
+      const c = first.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+      expect(objs(c.quads, SCHEMA_DEFAULT_VALUE, node(GENID_TAGS.parameter, 0))).toEqual([`"${JSON.stringify(value).replaceAll('"', '\\"')}"^^<${RDF_JSON}>`]);
+      expect(first.warnings).toEqual([]);
+      const exported = exportBundle(first);
+      const fm = parseDocument('metrics/revenue.md', exported.find((f) => f.path === 'metrics/revenue.md')!.content).frontmatter;
+      expect((fm.parameters as Array<Record<string, unknown>>)[0].default).toEqual(value);
+      const second = importBundle(exported);
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      expect(exportBundle(second)).toEqual(exported);
+    });
+  }
+
+  it('keeps a scalar default typed, and the receipt a set', () => {
+    const files = bundle([
+      'type: Attested Computation',
+      'runtime: bigquery',
+      'parameters:',
+      '  - { name: year, type: integer, default: 2026 }',
+      '  - { name: on, type: boolean, default: true }',
+      'executor: { resource: https://x.example/run, receipt: [result, job_id, result] }',
+    ].join('\n'));
+    const c = importBundle(files).concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(objs(c.quads, SCHEMA_DEFAULT_VALUE, node(GENID_TAGS.parameter, 0))).toEqual([`"2026"^^<${XSD_INTEGER}>`]);
+    expect(objs(c.quads, SCHEMA_DEFAULT_VALUE, node(GENID_TAGS.parameter, 1))).toEqual([`"true"^^<${XSD_BOOLEAN}>`]);
+    const fm = exportedFrontmatter(files);
+    expect((fm.parameters as Array<Record<string, unknown>>).map((p) => p.default)).toEqual([2026, true]);
+    expect((fm.executor as Record<string, unknown>).receipt).toEqual(['job_id', 'result']);
+  });
+});
+
 describe('an empty list in a family extension is a value, not an absence', () => {
   it('keeps a parameter default of [] and an executor extension of [] through a round trip', () => {
     const files = bundle(
@@ -495,7 +541,7 @@ describe('an empty list in a family extension is a value, not an absence', () =>
     );
     const { c } = conceptOf(files);
     const empty = `"[]"^^<${RDF_JSON}>`;
-    expect(objs(c.quads, okfExtensionPredicate('parameters', 'default'), node(GENID_TAGS.parameter, 0))).toEqual([empty]);
+    expect(objs(c.quads, SCHEMA_DEFAULT_VALUE, node(GENID_TAGS.parameter, 0))).toEqual([empty]);
     expect(objs(c.quads, okfExtensionPredicate('executor', 'retries'))).toEqual([empty]);
     const fm = exportedFrontmatter(files);
     expect((fm.parameters as Array<Record<string, unknown>>)[0]).toEqual({ name: 'regions', type: 'array', required: false, default: [] });
