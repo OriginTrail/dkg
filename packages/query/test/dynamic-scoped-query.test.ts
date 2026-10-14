@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, ChangelogStore, GraphSetIndexStore, StoreResponseTooLargeError, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
+import { QUERY_CATALOG_MAX_RESPONSE_BYTES } from '../src/query-store-read-context.js';
 import { readScopedContentGraphCatalog } from '../src/scoped-content-graph-catalog.js';
 
 const ID = 'dynamic-admission';
@@ -198,7 +199,7 @@ it.each([true, false])('keeps catalog bytes separate from caller result limits (
     expect(calls[0]!.bytes).toBeGreaterThan(1024);
     expect(calls[0]!.options).toMatchObject({ priority: options.priority, source: options.source });
     expect(calls[0]!.options?.signal).toBe(owned ? controller.signal : undefined);
-    expect(calls[0]!.options?.maxResponseBytes).toBeUndefined();
+    expect(calls[0]!.options?.maxResponseBytes).toBe(QUERY_CATALOG_MAX_RESPONSE_BYTES);
     expect(calls.at(-1)!.options?.maxResponseBytes).toBe(1024);
     await expect(engine.query(QUERY, options)).rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
   } finally { await adapter.close(); }

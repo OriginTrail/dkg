@@ -2,13 +2,17 @@ import type { TripleStore, QueryResult as StoreQueryResult, QueryOptions as Stor
 import type { QueryOptions } from './query-engine.js';
 import { storeOptions } from './query-store-options.js';
 
+// Separate from the caller result: stop HTTP buffering before decoding a large
+// authority response. Oversized catalogs fail closed; they are never truncated.
+export const QUERY_CATALOG_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+
 function sharedDiscoveryStoreOptions(
   options: StoreQueryOptions | undefined,
-): StoreQueryOptions | undefined {
-  if (!options?.priority && !options?.source) return undefined;
+): StoreQueryOptions {
   return {
-    priority: options.priority,
-    source: options.source,
+    priority: options?.priority,
+    source: options?.source,
+    maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES,
   };
 }
 
@@ -41,8 +45,8 @@ export function createQueryStoreReadContext(
   const lane = createStoreReadLane(store, options);
   const sharedOptions = sharedDiscoveryStoreOptions(options);
   // Fresh catalog authority shares the owner and cancellation, but has the
-  // store's catalog budget rather than the caller-derived result ceiling.
-  const { maxResponseBytes: _callerLimit, ...catalogOptions } = options ?? {};
+  // independent catalog budget rather than the caller-derived result ceiling.
+  const catalogOptions = { ...options, maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES };
   return {
     ...lane,
     signal: options?.signal,

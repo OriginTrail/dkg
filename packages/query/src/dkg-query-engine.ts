@@ -1,6 +1,6 @@
 import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
-import { readScopedContentGraphCatalog } from './scoped-content-graph-catalog.js';
+import { readScopedContentGraphCatalog, readViewGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
 import { storeOptions } from './query-store-options.js';
@@ -493,7 +493,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     catalogReads: StoreReadLane,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
-    const catalog = await readScopedContentGraphCatalog(contextGraphId, catalogReads.query, false);
+    const catalog = await readViewGraphAuthority(contextGraphId, catalogReads.query);
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
     // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
     // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass
