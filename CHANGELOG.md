@@ -2,7 +2,7 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10.0.24] - 2026-10-13
+## [10.0.24] - 2026-10-14
 
 A patch for queued publications into private Context Graphs. A queued
 publication into a private graph stayed non-terminal for minutes after its
