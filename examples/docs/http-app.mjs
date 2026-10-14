@@ -55,6 +55,9 @@ if (operation === 'write') {
   // The share route seals an editable draft and resumes an existing share when
   // WM is empty. A separate finalize would block that recovery with ASSERTION_EMPTY.
   const result = await request(`${path}/swm/share`, { contextGraphId, entities: 'all' });
+  if (result.swmShared !== true) {
+    throw new Error('Share did not complete; inspect the existing KA before retrying.');
+  }
   console.log(JSON.stringify({ layer: 'shared-working-memory', result }, null, 2));
 } else {
   const sparql = await readFile(new URL('./atlas-query.rq', import.meta.url), 'utf8');
