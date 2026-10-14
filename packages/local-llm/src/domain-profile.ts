@@ -8,6 +8,14 @@ export interface DkgLocalLlmDomainProfile {
   systemContext?: string;
 }
 
+export function assertRequiredDomainTools(
+  profile: DkgLocalLlmDomainProfile | undefined,
+  tools: ReadonlyArray<{ name: string }>,
+): void {
+  const missing = profile?.requiredTools?.filter(name => !tools.some(tool => tool.name === name)) ?? [];
+  if (missing.length) throw new Error('LOCAL_LLM_REQUIRED_TOOLS_UNAVAILABLE: ' + missing.join(', '));
+}
+
 const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 function stringField(record: Record<string, unknown>, key: string, required = false): string | undefined {

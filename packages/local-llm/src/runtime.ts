@@ -13,8 +13,8 @@ import {
   type ToolProfile,
 } from './tool-router.js';
 import { NOOP_TRACE, type InteractionTrace } from './text-trace.js';
-import type { DkgLocalLlmDomainProfile } from './domain-profile.js';
-
+import { assertRequiredDomainTools, type DkgLocalLlmDomainProfile } from './domain-profile.js';
+import { ContextRecovery } from './context-recovery.js';
 import {
   rewriteCompactPredicatesForDkg,
   referencesUnresolvedContextGraphAlias,
@@ -25,13 +25,10 @@ import {
 import {
   DEFAULT_MAX_MODEL_RESPONSE_BYTES,
   readModelResponseTextBounded,
+  normalizeFinalAnswer,
+  throwModelResponseError,
 } from './model-response.js';
-
-class LocalModelContextLimitError extends Error {
-  constructor(readonly contextTokens?: number) {
-    super('LOCAL_LLM_CONTEXT_LIMIT');
-  }
-}
+export { normalizeFinalAnswer } from './model-response.js';
 
 export interface McpClientLike {
   listTools(options?: { signal?: AbortSignal }): Promise<{ tools: McpToolDefinition[] }>;
@@ -317,30 +314,6 @@ function assistantToolMessage(toolCall: ToolCall): ChatMessage {
   };
 }
 
-export function normalizeFinalAnswer(value: string): string {
-  const withoutControls = [...value]
-    .filter((character) => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return !(
-        codePoint <= 0x08
-        || codePoint === 0x0b
-        || codePoint === 0x0c
-        || (codePoint >= 0x0e && codePoint <= 0x1f)
-        || codePoint === 0x7f
-        || (codePoint >= 0x200b && codePoint <= 0x200d)
-        || codePoint === 0x2060
-        || codePoint === 0xfeff
-      );
-    })
-    .join('');
-  return withoutControls
-    .replace(/<\|[^|>]{1,80}\|>/g, '')
-    .split('\n')
-    .filter((line) => !/^\s*[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F\s]{2,}\s*$/u.test(line))
-    .join('\n')
-    .trim();
-}
-
 export class DkgLocalLlmRuntime {
   private readonly mcp: McpClientLike;
   private readonly fetcher: typeof fetch;
@@ -419,8 +392,7 @@ export class DkgLocalLlmRuntime {
     if (!this.tools.length) {
       throw new Error('MCP tools/list returned no tools compatible with the strict Context Graph scope.');
     }
-    const missingTools = this.domainProfile?.requiredTools?.filter(name => !this.tools.some(tool => tool.name === name)) ?? [];
-    if (missingTools.length) throw new Error('LOCAL_LLM_REQUIRED_TOOLS_UNAVAILABLE: ' + missingTools.join(', '));
+    assertRequiredDomainTools(this.domainProfile, this.tools);
     this.toolRouter = createToolRouter(this.tools);
   }
 
@@ -590,16 +562,7 @@ export class DkgLocalLlmRuntime {
     signal?.throwIfAborted();
     if (!response.ok) {
       await this.trace.write(`LLM HTTP ERROR ${round}`, { status: response.status, body: raw });
-      // This explicit rejection occurred before inference. Do not retry
-      // timeouts, transport failures or other ambiguous model outcomes.
-      if (response.status === 400) {
-        let failure: { error?: { type?: string; n_ctx?: number } } | undefined;
-        try { failure = JSON.parse(raw); } catch { /* Preserve the ordinary HTTP failure below. */ }
-        if (failure?.error?.type === 'exceed_context_size_error') {
-          throw new LocalModelContextLimitError(failure.error.n_ctx);
-        }
-      }
-      throw new Error(`Local LLM endpoint returned ${response.status}: ${raw}`);
+      throwModelResponseError(response.status, raw);
     }
 
     let parsed: OpenAiCompatibleResponse;
@@ -687,8 +650,7 @@ export class DkgLocalLlmRuntime {
     let requireTool = route.profile !== 'chat';
     let finalOnly = false;
     let truncationRetryUsed = false;
-    let historyRemoved = !priorSession;
-    let contextFinalOnlyUsed = false;
+    const contextRecovery = new ContextRecovery(Boolean(priorSession), this.trace);
 
     const scheduleRepair = async (
       reason: string,
@@ -733,28 +695,14 @@ export class DkgLocalLlmRuntime {
           signal,
         );
       } catch (error) {
-        if (!(error instanceof LocalModelContextLimitError)) throw error;
-        if (!historyRemoved) {
-          // Keep the selected graph, current question and every current-turn
-          // tool result. Only unrelated past-turn history leaves this request.
-          messages[0] = { role: 'system', content: currentSystemContext
-            + '\n\nEarlier conversation history was omitted to fit this request. '
-            + 'Do not guess entities referred to only in earlier turns; ask for the missing identifier if needed.' };
-          historyRemoved = true;
-          await this.trace.write('CONTEXT RECOVERY', { action: 'omit-prior-history', contextTokens: error.contextTokens });
-        } else if (sessionEvidence.length && routedTools.length && !contextFinalOnlyUsed) {
-          // Tool schemas consume context too. A bounded final answer can use
-          // the existing evidence without another tool dispatch or invented rows.
+        const finishFromEvidence = await contextRecovery.recover(
+          error, messages, currentSystemContext, sessionEvidence.length > 0, routedTools.length > 0,
+        );
+        if (finishFromEvidence) {
           finalOnly = true;
           requireTool = false;
           pinnedToolName = undefined;
-          contextFinalOnlyUsed = true;
-          messages.push({ role: 'user', content:
-            'The model context limit was reached. Answer concisely from the current tool results only. '
-            + 'If the requested list or count is not fully supported, explicitly report a partial answer and what is missing. '
-            + 'Do not infer absent facts or repeat tool calls.' });
-          await this.trace.write('CONTEXT RECOVERY', { action: 'finish-from-current-evidence', contextTokens: error.contextTokens });
-        } else throw error;
+        }
         // At most two explicit pre-inference rejections can reach here. They
         // do not spend an orchestration round or repeat any completed MCP call.
         round--;
