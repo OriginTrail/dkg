@@ -16,7 +16,6 @@ export interface DecodedAssetPayload {
 export type AssetVerificationStage = 'decode' | 'parse' | 'verify' | 'authenticate-and-store';
 export interface AssetVerificationOptions {
   readonly contextGraphId: string;
-  readonly assetUals: readonly string[];
   readonly ctx: Parameters<DurableSyncContext['processDurableBatchInWorker']>[2];
   readonly parseAndFilter: (text: string, graph: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
   readonly processDurableBatchInWorker: DurableSyncContext['processDurableBatchInWorker'];

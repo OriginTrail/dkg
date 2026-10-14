@@ -58,7 +58,7 @@ export async function recoverPublicSnapshotBulk(agent: PublicSnapshotBulkHost, o
       bulkGraphTransportOptions(Math.max(1, options.deadline - Date.now()), signal),
       {
         stagingRoot: join(options.dataDir!, 'bulk-snapshot-staging'),
-        verification: { contextGraphId, assetUals: request.assetUals, ctx,
+        verification: { contextGraphId, ctx,
           parseAndFilter: (text, graph, cg) => agent.getOrCreateSyncVerifyWorker().parseAndFilter(text, graph, cg),
           processDurableBatchInWorker: agent.processDurableBatchInWorker.bind(agent),
         },

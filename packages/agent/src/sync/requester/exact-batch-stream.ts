@@ -15,6 +15,7 @@ export type ExactBatchAgentSession = Pick<ExactBatchTransportSession, 'signal' |
 export type ExactBatchStage = AssetVerificationStage;
 export type ExactBatchAssetVerifierOptions = AssetVerificationOptions;
 export interface ExactBatchVerifiedReceiverOptions extends ExactBatchAssetVerifierOptions {
+  readonly assetUals: readonly string[];
   /** The normal host callback, including chain/binding fences, atomic write and retirement. */
   readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
   readonly authenticationDeadline: () => number;
