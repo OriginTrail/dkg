@@ -147,6 +147,8 @@ export function partitionVerifiedGraphScopedAssets(
     const metadataQuads = (metadataBySubject.get(ual) ?? []).filter(
       (quad) => GRAPH_SCOPED_SYNC_METADATA_PREDICATES.has(quad.predicate),
     );
+    const rootCount = metadataQuads.filter(quad => quad.predicate === `${DKG_NS}merkleRoot`).length;
+    if (rootCount !== 1) throw new Error(`Verified graph-scoped KA ${ual} has ${rootCount} Merkle roots`);
     const descriptor = parseGraphScopedDescriptor(ual, metadataQuads);
     if (descriptor.contextGraphId !== contextGraphId || descriptor.assertionGraph !== assertionGraph) {
       throw new Error(`Verified graph-scoped KA ${ual} is not bound to requested context graph ${contextGraphId}`);
@@ -169,6 +171,7 @@ export function partitionVerifiedGraphScopedAssets(
       graph: metaGraph,
     });
     assets.push({
+      merkleRootHex: descriptor.claimedRootHex,
       contextGraphId,
       subGraphName: descriptor.subGraphName,
       ual,

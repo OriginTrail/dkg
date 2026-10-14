@@ -1,5 +1,4 @@
 import { readCurrentAssertionVersion } from "../../graph-scoped-assertion-version.js";
-import { normalizeGraphScopedHex32 } from "../graph-scoped-root.js";
 import {
   assertSafeIri,
   parseDeterministicKnowledgeAssetUal,
@@ -46,10 +45,11 @@ const ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1 = (capability: string): string => (
   + 'if it provides that guarantee.'
 );
 
-const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
 const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
 
 export interface VerifiedGraphScopedAsset {
+  /** Lower-case 32-byte root validated once with the descriptor. */
+  readonly merkleRootHex: string;
   /** Named VM scope validated at the durable verification boundary. */
   subGraphName?: string;
   contextGraphId: string;
@@ -190,12 +190,6 @@ export async function authenticateVerifiedGraphScopedAsset(
     );
   }
   const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
-  const roots = asset.metadataQuads
-    .filter((quad) => quad.predicate === MERKLE_ROOT)
-    .map((quad) => parseBytes32Literal(quad.object, 'merkleRoot'));
-  if (roots.length !== 1) {
-    throw new Error(`Graph-scoped durable sync ${asset.ual} has ${roots.length} Merkle roots`);
-  }
   // What the asset claims as provenance is fixed by its own metadata, so the
   // receipt of a first publish is requested with the views instead of after
   // them. Only the request moves: this is awaited after the checks on the
@@ -209,7 +203,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     chain.getMerkleRootCount(kaId, { signal: options.signal }),
     chain.getKAContextGraphId(kaId, { signal: options.signal }),
   ]);
-  if (latestRoot.length !== 32 || !bytesEqual(latestRoot, roots[0]!)) {
+  if (latestRoot.length !== 32 || Buffer.from(latestRoot).toString('hex') !== asset.merkleRootHex) {
     throw Object.assign(
       new Error(`Graph-scoped durable sync ${asset.ual} does not match the latest on-chain Merkle root`),
       { code: 'VM_CHAIN_ROOT_MISMATCH' },
@@ -278,7 +272,7 @@ export async function authenticateVerifiedGraphScopedAsset(
       !resolved
       || resolvedKaId !== kaId
       || resolved.merkleRoot === undefined
-      || !bytesEqual(resolved.merkleRoot, roots[0]!)
+      || Buffer.from(resolved.merkleRoot).toString('hex') !== asset.merkleRootHex
       || resolved.txHash.toLowerCase() !== transactionHash.toLowerCase()
     ) {
       throw Object.assign(
@@ -308,7 +302,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     if (
       !verified.verified
       || verified.onChainMerkleRoot === undefined
-      || !bytesEqual(verified.onChainMerkleRoot, roots[0]!)
+      || Buffer.from(verified.onChainMerkleRoot).toString('hex') !== asset.merkleRootHex
       || (verified.merkleRootCount !== undefined
         && verified.merkleRootCount !== asset.assertionVersion)
       || verified.blockNumber === undefined
@@ -499,11 +493,6 @@ async function readCurrentGraphKnowledgeAssetMetadata(
 }
 
 
-function parseBytes32Literal(raw: string, field: string): Uint8Array {
-  const hex = normalizeGraphScopedHex32(raw, field);
-  return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
-}
-
 type PublishReceipt = Awaited<ReturnType<NonNullable<ChainAdapter['resolvePublishByTxHash']>>>;
 
 /** A verified asset's provenance claim and, for a first publish, the receipt it names. */
@@ -597,8 +586,4 @@ function parseRdfLiteral(raw: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }

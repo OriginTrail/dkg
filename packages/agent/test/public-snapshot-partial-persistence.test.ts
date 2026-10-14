@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +15,8 @@ const meta=`did:dkg:context-graph:${graph}/_meta`, root=`0x${'b'.repeat(64)}`;
 function asset(n:number): VerifiedGraphScopedAsset {
   const ual=`did:dkg:evm:31337/${address}/${n}`;
   const assertionGraph=`did:dkg:context-graph:${graph}/_verifiable_memory/${address}/${n}`;
-  return {contextGraphId:graph,ual,assertionVersion:1n,assertionGraph,metaGraph:meta,
+  return {
+      merkleRootHex: fixtureRoot([{ predicate: 'http://dkg.io/ontology/merkleRoot', object: JSON.stringify(root), graph: '', subject: '' }]),contextGraphId:graph,ual,assertionVersion:1n,assertionGraph,metaGraph:meta,
     dataQuads:[{subject:`urn:entity:${n}`,predicate:'urn:value',object:'"safe"',graph:assertionGraph}],
     metadataQuads:[['merkleRoot',JSON.stringify(root)],['assertionVersion','"1"']].map(([key,object])=>({subject:ual,predicate:`http://dkg.io/ontology/${key}`,object:object!,graph:meta}))};
 }

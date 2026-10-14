@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -139,6 +140,20 @@ function graphScopedAsset(
 ): VerifiedGraphScopedAsset {
   const rootHex = Array.from(root, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return {
+      merkleRootHex: fixtureRoot([
+      {
+        subject: ual,
+        predicate: `${DKG}merkleRoot`,
+        object: `"${rootHex}"`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}transactionHash`,
+        object: `"0x${assertionVersion.toString(16).padStart(64, '0')}"`,
+        graph: metaGraph,
+      },
+    ]),
     contextGraphId,
     ual,
     assertionVersion,
@@ -1224,6 +1239,20 @@ describe('durable sync lifecycle chain binding', () => {
     expect(storeGraphScopedAsset).toBeTypeOf('function');
 
     const asset: VerifiedGraphScopedAsset = {
+      merkleRootHex: fixtureRoot([
+        {
+          subject: ual,
+          predicate: `${DKG}merkleRoot`,
+          object: `"${rootHex}"`,
+          graph: metaGraph,
+        },
+        {
+          subject: ual,
+          predicate: `${DKG}transactionHash`,
+          object: `"0x${'02'.padStart(64, '0')}"`,
+          graph: metaGraph,
+        },
+      ]),
       contextGraphId,
       ual,
       assertionVersion: 2n,
@@ -1859,6 +1888,20 @@ describe('durable sync lifecycle chain binding', () => {
     const asset = (kaNumber: number): VerifiedGraphScopedAsset => {
       const assetUal = `did:dkg:otp:2043/0x1111111111111111111111111111111111111111/${kaNumber}`;
       return {
+      merkleRootHex: fixtureRoot([
+          {
+            subject: assetUal,
+            predicate: `${DKG}merkleRoot`,
+            object: `"${rootHex}"`,
+            graph: metaGraph,
+          },
+          {
+            subject: assetUal,
+            predicate: `${DKG}transactionHash`,
+            object: `"0x${'02'.padStart(64, '0')}"`,
+            graph: metaGraph,
+          },
+        ]),
         contextGraphId,
         ual: assetUal,
         assertionVersion: 2n,
@@ -2134,6 +2177,10 @@ describe('durable sync lifecycle chain binding', () => {
     // What a repeated subscribe or a catch-up readiness result stores: the
     // same admission and binding, other readiness bookkeeping.
     const storedAgain = { ...captured, sharedMemorySynced: false, lastReconciledOrdinal: 3 };
+    mockedMaterialize.mockImplementationOnce(async request => {
+      expect(request.isCurrent?.()).toBe(true);
+      return 'applied';
+    });
     const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(
       captured,
       (agent) => storeAgain(agent, storedAgain),
@@ -2144,11 +2191,8 @@ describe('durable sync lifecycle chain binding', () => {
     expect(agentLike.bindSubscriptionOnChainId).not.toHaveBeenCalled();
     expect(agentLike.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
     expect(agentLike.subscribedContextGraphs.get(contextGraphId)).toBe(storedAgain);
-    // The store keeps fencing on the row it continued under.
-    const materialization = mockedMaterialize.mock.calls[0]![0];
-    expect(materialization.isCurrent?.()).toBe(true);
-    storeAgain(agentLike, { ...storedAgain });
-    expect(materialization.isCurrent?.()).toBe(false);
+    // The completed operation must no longer authorize escaped storage work.
+    expect(mockedMaterialize.mock.calls[0]![0].isCurrent?.()).toBe(false);
   });
 
   it('binds the row that was stored again, not the one the store started under', async () => {
