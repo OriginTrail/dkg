@@ -7,7 +7,7 @@ import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
 import { storeOptions } from './query-store-options.js';
 import {
-  asGraphWriteRevisionSource,
+  asGraphWriteRevisionSource, asQueryReadAdmissionCapability, type QueryReadAdmissionCapability,
   isSparqlHttpResponseError,
 } from '@origintrail-official/dkg-storage';
 import type {
@@ -347,11 +347,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const validation = validateSubGraphName(options.subGraphName);
       if (!validation.valid) throw new Error(`Invalid sub-graph name for query: ${validation.reason}`);
     }
+    const admission = asQueryReadAdmissionCapability(this.store);
     const plan = resolveQueryReadPlan(initialGraphScope, options,
-      Boolean(this.store.withQueryReadAdmission && this.store.graphEnumerationVisibility));
+      Boolean(admission && this.store.graphEnumerationVisibility));
     const reads = createQueryStoreReadContext(this.store, options);
     switch (plan.kind) {
-      case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
+      case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads, admission);
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
         plan.options.contextGraphId, plan.options, reads, reads.catalog);
       case 'unscoped': return this.execWithExclusions(initialGraphScope, reads, options);
@@ -359,7 +360,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   private queryScoped(scope: PreparedGraphScope, options: QueryOptions | undefined,
-    plan: ScopedQueryReadPlan, reads: QueryStoreReadContext): Promise<QueryResult> {
+    plan: ScopedQueryReadPlan, reads: QueryStoreReadContext, admission: QueryReadAdmissionCapability | null): Promise<QueryResult> {
     const execute = (discovery: ScopedContentGraphDiscoverySnapshot | null) => {
       const lane = discovery ? { query: reads.query,
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
@@ -367,11 +368,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         discovery.partitions, plan.draftAccess, plan.graphs.subGraphName) : [];
       return this.executeScoped(scope, options, plan, lane, variableContentGraphs);
     };
-    // One strategy owns catalog loading and the caller's admission lifetime.
     switch (plan.discovery.catalog) {
       case 'none': return execute(null);
       case 'shared': return this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads).then(execute);
-      case 'admission-owned': return this.store.withQueryReadAdmission!(async () =>
+      case 'admission-owned': return admission!.withQueryReadAdmission(async () =>
         execute(await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, reads.catalog)), storeOptions(options));
     }
   }

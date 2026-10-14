@@ -1,3 +1,4 @@
+export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
   BlazegraphNamespaceManager,

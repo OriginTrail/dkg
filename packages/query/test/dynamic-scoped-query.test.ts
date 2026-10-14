@@ -12,7 +12,7 @@ const OPTIONS = { contextGraphId: ID, includeContextGraphPartitions: true };
 const QUERY = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${NAME}> ?name } }`;
 
 describe('fresh dynamic scoped query admission', () => {
-  it.each([true, false])('groups only a complete fresh catalog and refreshes the next request (visibility=%s)', async visible => {
+  it.each([[true, false], [false, false], [true, true], [false, true]])('groups only a complete fresh catalog (visibility=%s, decorated=%s)', async (visible, decorated) => {
     const adapter = new OxigraphStore();
     let owned = false;
     const admission = vi.fn(async (work: () => Promise<unknown>) => {
@@ -20,7 +20,7 @@ describe('fresh dynamic scoped query admission', () => {
       try { return await work(); } finally { owned = false; }
     });
     const reads: boolean[] = [];
-    const store = new Proxy(adapter, { get(target, key) {
+    const wrapped = new Proxy(adapter, { get(target, key) {
       if (key === 'withQueryReadAdmission') return admission;
       if (key === 'graphEnumerationVisibility' && !visible) return undefined;
       const value = Reflect.get(target, key, target);
@@ -30,6 +30,7 @@ describe('fresh dynamic scoped query admission', () => {
       };
       return typeof value === 'function' ? value.bind(target) : value;
     } });
+    const store = decorated ? new ChangelogStore(new GraphSetIndexStore(wrapped)) : wrapped;
     const graph = `${ROOT}/_verifiable_memory/a/1`;
     try {
       await adapter.insert([{ graph, subject: 'urn:item', predicate: NAME, object: '"visible"' }]);

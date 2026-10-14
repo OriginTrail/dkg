@@ -1,3 +1,4 @@
+import { asQueryReadAdmissionCapability } from '../src/query-read-admission-capability.js';
 import { setImmediate } from 'node:timers/promises';
 import { withAdmittedReadCancellation } from '../src/admitted-read-cancellation.js';
 import { QueryReadAdmission } from '../src/query-read-admission.js';
@@ -23,6 +24,10 @@ describe('query read admission', () => {
     const { store: adapter, scheduler } = fixture();
     const store = new ChangelogStore(new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(adapter,
       { blobDir: '/unused-query-fixture', thresholdBytes: 65536 })));
+    const run = vi.spyOn(scheduler, 'run'), outerQuery = vi.spyOn(store, 'query');
+    const admission = asQueryReadAdmissionCapability(store);
+    expect(admission).toBe(adapter);
+    expect('withQueryReadAdmission' in store).toBe(false);
     const order: string[] = [];
     let queued!: Promise<void>;
     vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
@@ -30,10 +35,12 @@ describe('query read admission', () => {
       if (order.length === 1) queued = scheduler.run('background', 'import', async () => { order.push('import'); });
       return response();
     }));
-    await store.withQueryReadAdmission!(async () => {
+    await admission!.withQueryReadAdmission(async () => {
       await store.query('SELECT ?authority WHERE {}', options);
       await store.query('SELECT ?data WHERE {}', options);
     }, options);
+    expect(run).toHaveBeenCalledTimes(2); // One query admission plus the waiting import.
+    expect(outerQuery).toHaveBeenCalledTimes(2);
     await queued;
     expect(order).toEqual(['SELECT ?authority WHERE {}', 'SELECT ?data WHERE {}', 'import']);
     expect(store.graphEnumerationVisibility).toBeTypeOf('function');
