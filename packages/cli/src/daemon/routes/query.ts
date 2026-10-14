@@ -520,6 +520,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const contextGraphId = parsed.contextGraphId === 'all'
       ? undefined
       : parsed.contextGraphId;
+    if (![undefined, 'core-cache', 'rpc-only'].includes(parsed.chainEvidenceMode)) {
+      return jsonResponse(res, 400, { error: 'Invalid chainEvidenceMode; expected core-cache or rpc-only' });
+    }
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory =
       parsed.includeSharedMemory ?? parsed.includeWorkspace;

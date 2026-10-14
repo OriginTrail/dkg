@@ -14,7 +14,6 @@ import type {
 } from "./sync/requester/graph-scoped-materialization.js";
 
 import { packKnowledgeAssetIdFromIdentity } from "./ka-identity.js";
-import { normalizeGraphScopedHex32 } from "./sync/graph-scoped-root.js";
 
 export type PublicSnapshotMode = "core-cache" | "rpc-only";
 export type PublicSnapshotObservation =
@@ -100,13 +99,7 @@ export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
     const identity = parseDeterministicKnowledgeAssetUal(asset.ual);
     const id = packKnowledgeAssetIdFromIdentity(identity).toString();
     const expected = this.assets.get(id);
-    const roots = asset.metadataQuads.filter(
-      (q) => q.predicate === `${DKG}merkleRoot`,
-    );
-    // Content digest verification already ran in the existing exact-sync worker.
-    const root = roots.length === 1
-      ? normalizeGraphScopedHex32(roots[0]!.object, "merkleRoot")
-      : undefined;
+    // Content digest and descriptor root were validated at preparation.
     const blockNumber = Number(s.blockNumber);
     if (!Number.isSafeInteger(blockNumber) || blockNumber < 0)
       throw new Error("Snapshot block exceeds materialization ordering range");
@@ -115,7 +108,7 @@ export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
       identity.chainId !== s.chainId ||
       !expected ||
       asset.assertionVersion.toString() !== expected.version ||
-      `0x${root?.toLowerCase()}` !== expected.root
+      `0x${asset.merkleRootHex}` !== expected.root
     ) {
       throw Object.assign(
         new Error("Payload does not match the pinned public snapshot"),

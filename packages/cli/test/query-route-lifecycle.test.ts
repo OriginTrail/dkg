@@ -340,6 +340,17 @@ describe('/api/query request lifecycle', () => {
     expect(res.writableEnded).toBe(false);
   });
 
+  it.each([undefined, 'core-cache', 'rpc-only', 'auto', null, 1])('validates query evidence mode %s before execution', async chainEvidenceMode => {
+    const res = new ResponseStub();
+    const agent = { query: vi.fn(async (_sparql: string, _options: unknown) => ({ type: 'bindings', bindings: [] })) };
+    const tracker = { start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(), complete: vi.fn(), fail: vi.fn(), cancel: vi.fn() };
+    await handleQueryRoutes(queryRouteContext(new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', chainEvidenceMode }), res, agent, tracker));
+    const valid = chainEvidenceMode === undefined || chainEvidenceMode === 'core-cache' || chainEvidenceMode === 'rpc-only';
+    expect(res.statusCode).toBe(valid ? 200 : 400);
+    expect(agent.query).toHaveBeenCalledTimes(valid ? 1 : 0);
+    if (valid) expect(agent.query.mock.calls[0]?.[1]).toMatchObject({ chainEvidenceMode });
+  });
+
   it('passes the lifecycle admission options through the actual route handoff', async () => {
     const req = new RequestStub();
     const res = new ResponseStub();
