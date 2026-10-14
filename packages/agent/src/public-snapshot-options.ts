@@ -1,4 +1,4 @@
-import { validateContextGraphId } from '@origintrail-official/dkg-core';
+import { isPublicGraphSnapshotScope } from '@origintrail-official/dkg-chain';
 import { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 
 export interface PublicSnapshotSyncOptions {
@@ -17,8 +17,7 @@ export function normalizePublicSnapshotSyncOptions(input: unknown): PublicSnapsh
   const value = input as Record<string, unknown>;
   const mode = value.mode ?? 'core-cache';
   const transport = value.transport ?? (process.env.DKG_PUBLIC_SNAPSHOT_BULK === '1' ? 'bulk' : 'exact');
-  if (typeof value.contextGraphId !== 'string' || !validateContextGraphId(value.contextGraphId).valid
-    || typeof value.onChainId !== 'string' || !/^[1-9][0-9]{0,77}$/.test(value.onChainId)
+  if (!isPublicGraphSnapshotScope(value)
     || !isPublicSnapshotMode(mode)
     || (transport !== 'exact' && transport !== 'bulk')
     || !Array.isArray(value.trustedCorePeerIds)

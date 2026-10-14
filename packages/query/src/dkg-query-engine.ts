@@ -491,6 +491,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
     // ── Legacy routing (V9 compat) ────────────────────────────────────
     let effectiveScope = routedScope;
+    const fallbackPolicy = options?.requireCompleteGraphScope ? 'preserve-scope' : 'compatibility';
 
     if (effectiveContextGraphId) {
       const dataGraph = options?.subGraphName
@@ -498,7 +499,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         : contextGraphDataUri(effectiveContextGraphId);
       const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
       const resolveRoute = (root: string, family: 'data' | 'shared-memory') =>
-        resolveLegacyRouteScope(routedScope, root, family, prefix => this.discoverGraphsByPrefix(prefix, reads));
+        resolveLegacyRouteScope(routedScope, root, family, prefix => this.discoverGraphsByPrefix(prefix, reads), fallbackPolicy);
       if (options?.includeSharedMemory ?? options?.includeWorkspace) {
         const dataScope = await resolveRoute(dataGraph, 'data');
         const sharedMemoryScope = await resolveRoute(sharedMemoryGraph, 'shared-memory');
