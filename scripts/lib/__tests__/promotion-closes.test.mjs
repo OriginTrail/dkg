@@ -200,6 +200,8 @@ function withStubGh({ prExit = 0, issueExit = 0, issueState = 'OPEN', prBody = '
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 't@t');
   git('config', 'user.name', 't');
+  // Commits otherwise start detached Git maintenance, which can outlive the run and race the fixture's removal.
+  git('config', 'maintenance.auto', 'false');
   fs.writeFileSync(path.join(repo, 'f'), '1');
   git('add', '.');
   git('commit', '-qm', 'base');
