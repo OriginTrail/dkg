@@ -1,19 +1,27 @@
 import { describe, it, expect } from 'vitest';
-import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { fileURLToPath } from 'node:url';
+import { formatCanonicalRdfLiteralTerm, parseWritableRdfTerm } from '@origintrail-official/dkg-rdf-utils';
 import {
   exportBundle,
   exportInputFromQuads,
   importBundle,
+  isSafeIri,
   literalTerm,
+  loadBundleDir,
   parseDocument,
   typedLiteralTerm,
+  OKF_RESOURCE,
+  PROV_WAS_DERIVED_FROM,
   RDF_JSON,
   RDF_TYPE,
   SCHEMA_NAME,
+  SCHEMA_NS,
+  SCHEMA_URL,
   XSD_DATE_TIME,
 } from '../src/index.js';
-import type { Quad } from '../src/index.js';
-import { bundle, exportedFrontmatter, semantic } from './helpers/okf-v02-fixtures.js';
+import type { BundleImport, Quad } from '../src/index.js';
+import { isWritableIri } from '../src/utils.js';
+import { IDX_V02, bundle, exportedFrontmatter, objs, semantic } from './helpers/okf-v02-fixtures.js';
 
 // Literal terms use the DKG's canonical form (dkg-rdf-utils), the one the
 // stores return, so an import's quads match what a store holds byte for byte
@@ -72,5 +80,105 @@ describe('export reads literals with the shared RDF parser', () => {
     // A raw line break is not canonical N-Triples.
     const raw = '"line one\nline two"';
     expect(exported([typed, { subject: iri, predicate: 'http://schema.org/note', object: raw }]).note).toBe(raw);
+  });
+});
+
+describe('a value is written as an IRI only when the node accepts it', () => {
+  // The write routes parse every term with `parseWritableRdfTerm`, so an IRI
+  // must be an absolute RFC 3987 IRI. `https://example.org/%zz` (a malformed
+  // percent escape) passes the looser shape check, and as an IRI the node
+  // refuses the concept's whole write.
+  const BAD = 'https://example.org/%zz';
+  const ACCEPTS: Record<'subject' | 'predicate' | 'object', readonly string[]> = {
+    subject: ['iri', 'blank-node'],
+    predicate: ['iri'],
+    object: ['literal', 'iri', 'blank-node'],
+  };
+  const refused = (quads: readonly Quad[]) =>
+    quads.filter((q) => (['subject', 'predicate', 'object'] as const).some((field) => {
+      const term = parseWritableRdfTerm(q[field]);
+      return term === null || !ACCEPTS[field].includes(term.kind);
+    }));
+  const concept = (r: BundleImport, id = 'metrics/revenue') => r.concepts.find((c) => c.conceptId === id)!;
+  const invalidIri = (r: BundleImport) => r.warnings.filter((w) => w.code === 'invalid-iri').map((w) => w.message);
+
+  it('tells a writable IRI from one only shaped like it', () => {
+    expect(isSafeIri(BAD)).toBe(true);
+    expect(isWritableIri(BAD)).toBe(false);
+    for (const iri of ['https://例え.jp/パス', 'urn:isbn:0451450523', 'tag:example.com,2026:x', 'https://example.org/%41ok']) expect(isWritableIri(iri), iri).toBe(true);
+    // RFC 3987 allows a no-break space; it is whitespace to SPARQL interpolation (`isSafeIri`).
+    expect(isWritableIri('https://example.org/a\u00A0b')).toBe(false);
+  });
+
+  it('keeps a malformed source URL as a literal, with a warning and no lineage, and imports the concept after it', () => {
+    const r = importBundle([
+      IDX_V02(),
+      { path: 'a.md', content: `---\ntype: Metric\nsources: [{ resource: '${BAD}' }]\n---\n\nbody\n` },
+      { path: 'z.md', content: '---\ntype: Metric\ntitle: Healthy\n---\n\nbody\n' },
+    ]);
+    expect(refused(r.quads)).toEqual([]);
+    expect(r.concepts.map((c) => c.conceptId)).toEqual(['a', 'z']);
+    const a = concept(r, 'a');
+    expect(a.quads.filter((q) => q.predicate === OKF_RESOURCE).map((q) => q.object)).toEqual([`"${BAD}"`]);
+    expect(a.quads.some((q) => q.predicate === PROV_WAS_DERIVED_FROM)).toBe(false);
+    expect(r.warnings).toContainEqual({ conceptId: 'a', code: 'invalid-iri', message: `sources[0].resource "${BAD}" is not a valid IRI (RFC 3987); kept as a literal` });
+  });
+
+  it('writes such a value as a literal wherever it is, warning where a link was meant', () => {
+    const files = bundle(
+      [
+        'type: Attested Computation',
+        'runtime: python',
+        `resource: '${BAD}'`,
+        `computation: '${BAD}'`,
+        `executor: { resource: '${BAD}', endpoint: '${BAD}' }`,
+        `attester: { resource: '${BAD}' }`,
+        `sources:\n  - { resource: '${BAD}', usage_count: '${BAD}' }`,
+        `parameters:\n  - { name: p, type: string, required: '${BAD}' }`,
+        `usage_window: '${BAD}'`,
+        `homepage: '${BAD}'`,
+        `mirrors: ['https://example.org/ok', '${BAD}']`,
+      ].join('\n'),
+      `body\n\n# Citations\n\n- ${BAD}\n`,
+    );
+    const r = importBundle(files);
+    expect(refused(r.quads)).toEqual([]);
+    expect(concept(r).quads.filter((q) => q.object === BAD)).toEqual([]);
+    expect(invalidIri(r).map((m) => m.split(' "')[0])).toEqual(['`resource`', 'computation', 'executor.resource', 'attester.resource', 'sources[0].resource']);
+    const second = importBundle(exportBundle(r));
+    expect(semantic(second.quads)).toBe(semantic(r.quads));
+    expect(invalidIri(second)).toEqual(invalidIri(r));
+  });
+
+  it('maps a malformed type to its schema: name, with a warning', () => {
+    const r = importBundle(bundle(`type: '${BAD}'`));
+    expect(objs(concept(r).quads, RDF_TYPE)).toEqual([SCHEMA_NS + 'HttpsExampleOrgZz']);
+    expect(invalidIri(r)).toEqual([`\`type\` "${BAD}" is not a valid IRI (RFC 3987); mapped as ${SCHEMA_NS}HttpsExampleOrgZz`]);
+  });
+
+  it('still writes every IRI the node accepts as an IRI', () => {
+    const valid = ['https://例え.jp/パス', 'urn:isbn:0451450523', 'tag:example.com,2026:x', 'https://example.org/%41ok'];
+    const r = importBundle(bundle([
+      'type: Metric',
+      `resource: '${valid[0]}'`,
+      'sources:',
+      ...valid.map((v) => `  - { resource: '${v}' }`),
+      "  - { resource: 'urn:okf:policies/revenue-recognition' }",
+      `homepage: '${valid[1]}'`,
+    ].join('\n')));
+    const c = concept(r);
+    expect(invalidIri(r)).toEqual([]);
+    expect(objs(c.quads, SCHEMA_URL)).toEqual([valid[0]]);
+    expect(objs(c.quads, PROV_WAS_DERIVED_FROM).sort()).toEqual([...valid, 'urn:okf:policies/revenue-recognition'].sort());
+    expect(c.trust.derivedFromConcepts).toEqual(['policies/revenue-recognition']);
+    expect(objs(c.quads, SCHEMA_NS + 'homepage')).toEqual([valid[1]]);
+    expect(refused(r.quads)).toEqual([]);
+  });
+
+  it('writes only terms the node accepts, for every vendored bundle', () => {
+    for (const name of ['crypto_bitcoin', 'acme_retail', 'synthetic_links', 'edge_cases']) {
+      const r = importBundle(loadBundleDir(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))));
+      expect(refused(r.quads), name).toEqual([]);
+    }
   });
 });

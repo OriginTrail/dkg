@@ -18,6 +18,7 @@ import {
   startStub,
   subjectBelongsToOkfConcept,
   type StubHandler,
+  validatingDaemonHandler,
   writtenQuadsFor,
 } from './okf-test-helpers';
 
@@ -101,6 +102,31 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     const manifest = await manifestFor(bundle);
     expect(manifest.mode).toBe('per-concept');
     expect(manifest.stages).toEqual({ a: 'written', b: 'written' });
+  });
+
+  it('imports a concept with a malformed source URL, as a literal, and the concept after it', async () => {
+    // `https://example.org/%zz` has a malformed percent escape: as an IRI the
+    // daemon refuses the concept's write, which stopped the import there.
+    clear();
+    const dir = await mkdtemp(join(tmpdir(), 'okf-bundle-'));
+    await writeFile(join(dir, 'index.md'), '---\nokf_version: "0.2"\n---\n\n# Root\n');
+    await writeFile(join(dir, 'a.md'), "---\ntype: Metric\nsources: [{ resource: 'https://example.org/%zz' }]\n---\n\nbody\n");
+    await writeFile(join(dir, 'z.md'), '---\ntype: Metric\ntitle: Healthy\n---\n\nbody\n');
+    stub.setHandler(validatingDaemonHandler(okfDaemonHandler(createdCGs)));
+    try {
+      const r = await runCli(['okf', 'import', dir, '--context-graph-id', 'cg-iri', '--create-context-graph'], env());
+      expect(r.exitCode, r.stderr).toBe(0);
+      expect(knowledgeAssetCreateBodies(stub.calls).map((b) => b.name).sort()).toEqual(['a', 'z']);
+      const aQuads = writtenQuadsFor(stub.calls, 'a');
+      expect(aQuads.map((q) => q.object)).toContain('"https://example.org/%zz"');
+      expect(aQuads.some((q) => q.predicate === PROV_WAS_DERIVED_FROM)).toBe(false);
+      expect(writtenQuadsFor(stub.calls, 'z').length).toBeGreaterThan(0);
+    } finally {
+      stub.setHandler(okfDaemonHandler(createdCGs));
+    }
+    const dry = parseJsonTail((await runCli(['okf', 'import', dir, '--context-graph-id', 'cg-iri', '--dry-run'], env())).stdout);
+    const warnings = dry.warnings as Array<{ conceptId?: string; code: string; message: string }>;
+    expect(warnings).toContainEqual({ conceptId: 'a', code: 'invalid-iri', message: 'sources[0].resource "https://example.org/%zz" is not a valid IRI (RFC 3987); kept as a literal' });
   });
 
   it('import then import --share ADVANCES WM→SWM (does not skip finalize/share)', async () => {

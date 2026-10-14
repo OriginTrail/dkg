@@ -37,7 +37,7 @@ import {
   DEFAULT_IRI_BASE,
 } from './constants.js';
 import { conceptIdToIri, resolveLinkTarget } from './paths.js';
-import { dedupeQuads, isBlank, isSafeIri, isScalar, literalTerm, safeString, sanitizeForBlank } from './utils.js';
+import { dedupeQuads, isBlank, isMalformedIri, isScalar, isWritableIri, literalTerm, safeString, sanitizeForBlank } from './utils.js';
 import {
   typeToIri,
   isAttestedComputationType,
@@ -181,7 +181,7 @@ function prepareFrontmatter(iri: string, frontmatter: Record<string, unknown>, c
         break;
       case 'resource': {
         const r = safeString(value);
-        out.push({ subject: iri, predicate: SCHEMA_URL, object: isSafeIri(r) ? r : literalTerm(r) });
+        out.push({ subject: iri, predicate: SCHEMA_URL, object: isWritableIri(r) ? r : literalTerm(r) });
         break;
       }
     }
@@ -302,9 +302,27 @@ export function parseBody(body: string): ParsedBody {
 }
 
 /**
+ * A `type` or `resource` shaped like an IRI that the node's write rule refuses
+ * (`https://example.org/%zz`): written as a `schema:` name and a literal, so
+ * the concept is still written, with a warning.
+ */
+function baseFieldDiagnostics(frontmatter: Record<string, unknown>): Omit<OkfWarning, 'conceptId'>[] {
+  const out: Omit<OkfWarning, 'conceptId'>[] = [];
+  const type = safeString(frontmatter.type).trim();
+  if (frontmatter.type != null && isMalformedIri(type)) {
+    out.push({ code: 'invalid-iri', message: `\`type\` "${type}" is not a valid IRI (RFC 3987); mapped as ${typeToIri(type)}` });
+  }
+  const resource = safeString(frontmatter.resource);
+  if (frontmatter.resource != null && isMalformedIri(resource)) {
+    out.push({ code: 'invalid-iri', message: `\`resource\` "${resource}" is not a valid IRI (RFC 3987); kept as a literal` });
+  }
+  return out;
+}
+
+/**
  * What one concept's document decides on its own: its frontmatter as quads
  * with the path-valued fields still references, its parsed body, and its
- * family diagnostics. Nothing here reads the bundle, so a bundle can prepare
+ * base-field and family diagnostics. Nothing here reads the bundle, so a bundle can prepare
  * every concept, settle which ones it holds, and only then resolve.
  */
 export interface PreparedConcept {
@@ -329,7 +347,7 @@ export function prepareConcept(doc: OkfDocument, iri: string, opts: OkfMappingOp
     opts,
     frontmatter: prepareFrontmatter(iri, doc.frontmatter, doc.conceptId),
     body: parseBody(doc.body),
-    diagnostics: familyDiagnostics(doc.frontmatter).map((d) => ({ conceptId: doc.conceptId, ...d })),
+    diagnostics: [...baseFieldDiagnostics(doc.frontmatter), ...familyDiagnostics(doc.frontmatter)].map((d) => ({ conceptId: doc.conceptId, ...d })),
   };
 }
 
@@ -430,7 +448,7 @@ export function resolveConcept(prepared: PreparedConcept, conceptExists: (concep
     quads.push({
       subject: iri,
       predicate: SCHEMA_CITATION,
-      object: isSafeIri(c.url) ? c.url : literalTerm(c.url),
+      object: isWritableIri(c.url) ? c.url : literalTerm(c.url),
     });
   }
 

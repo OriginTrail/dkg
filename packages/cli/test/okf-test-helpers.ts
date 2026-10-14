@@ -12,6 +12,7 @@ import {
   type ServerResponse,
 } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { validateWritableQuads } from '../src/daemon/knowledge-asset-quad-validation.js';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -90,6 +91,21 @@ export function startStub(): Promise<{
       });
     });
   });
+}
+
+/**
+ * `inner`, refusing a knowledge-asset create or write whose quads the
+ * daemon's write routes would refuse: the same `validateWritableQuads`, the
+ * same 400.
+ */
+export function validatingDaemonHandler(inner: StubHandler): StubHandler {
+  return (req, body) => {
+    const path = new URL(`http://x${req.url ?? ''}`).pathname;
+    const writes = req.method === 'POST' && (path === '/api/knowledge-assets' || /\/api\/knowledge-assets\/.+\/wm\/write$/.test(path));
+    const quads = writes ? (JSON.parse(body || '{}') as { quads?: unknown }).quads : undefined;
+    const refused = Array.isArray(quads) ? validateWritableQuads('quads', quads) : null;
+    return refused ? { status: 400, body: refused } : inner(req, body);
+  };
 }
 
 /**

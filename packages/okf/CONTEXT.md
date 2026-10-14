@@ -141,9 +141,19 @@ it; the CLI summary reports it against the current time.
   one extra step: file-relative first (the §6.2 rule), then bundle-root-relative
   (the convention Google's own reference bundles use, e.g.
   `policies/x.md` written from `metrics/y.md`). A concept → its IRI (a typed
-  edge); an absolute URL → an IRI; anything else → a literal (a `references/`
-  artifact, an attester `.py`, a scope descriptor such as
+  edge); an absolute IRI the node accepts → an IRI; anything else → a literal
+  (a `references/` artifact, an attester `.py`, a scope descriptor such as
   `all queries in BigQuery project X`).
+- **An IRI is one the node accepts.** Every value the mapper writes as an IRI
+  (a path-valued field, `resource`, `type`, a citation, a producer value) must
+  pass the DKG write routes' rule, an absolute RFC 3987 IRI
+  (`isAbsoluteRfc3987IriV1` in `dkg-rdf-utils`), as well as `isSafeIri`. A
+  value shaped like an IRI that the rule refuses (`https://example.org/%zz`)
+  is a literal (a `type` its `schema:` name): written as an IRI, it made the
+  node refuse the concept's write and stopped the import there. A link field
+  and `type` warn for it (`invalid-iri`); a literal derives no lineage. A value
+  that is not shaped like an IRI at all (`urn:a b`) was a literal already and
+  does not warn.
 - **Lineage** (§5.1 "lineage is expressed through links"): every
   `sources[].resource` with an IRI additionally yields
   `<concept> prov:wasDerivedFrom <resource>` on the concept itself, so

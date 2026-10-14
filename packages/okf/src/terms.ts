@@ -14,7 +14,7 @@ import {
   XSD_INTEGER,
 } from './constants.js';
 import { conceptIdToIri, resolveLinkTarget } from './paths.js';
-import { isSafeIri, literalTerm, safeString, typedLiteralTerm, pascalCase, camelCase } from './utils.js';
+import { isMalformedIri, isWritableIri, literalTerm, safeString, typedLiteralTerm, pascalCase, camelCase } from './utils.js';
 import { dateTimeLexical, isXsdDate, isXsdDateTime } from './timestamps.js';
 import type { Quad } from './types.js';
 
@@ -46,11 +46,14 @@ export function toArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [value];
 }
 
-/** OKF `type` value → an rdf:type object IRI (raw, no angle brackets). */
+/**
+ * OKF `type` value → an rdf:type object IRI (raw, no angle brackets). A value
+ * that is not a writable IRI, a malformed one included, is a `schema:` name.
+ */
 export function typeToIri(value: unknown): string | null {
   const s = safeString(value).trim();
   if (!s) return null;
-  if (isSafeIri(s)) return s; // already a full IRI (e.g. `tag:…`, `https://…`)
+  if (isWritableIri(s)) return s; // already a full IRI (e.g. `tag:…`, `https://…`)
   const pascal = pascalCase(s);
   return pascal ? SCHEMA_NS + pascal : null;
 }
@@ -111,7 +114,7 @@ export function valueToTerms(value: unknown): string[] {
     return [typedLiteralTerm(String(value), Number.isInteger(value) ? XSD_INTEGER : XSD_DECIMAL)];
   }
   if (typeof value === 'string') {
-    return [isSafeIri(value) ? value : literalTerm(value)];
+    return [isWritableIri(value) ? value : literalTerm(value)];
   }
   return [typedLiteralTerm(jsonOf(value), RDF_JSON)];
 }
@@ -150,15 +153,19 @@ export interface PathFieldTerm {
   conceptId?: string;
   /** Set when the value looked like a bundle `.md` path but no such concept exists. */
   unresolvedConceptPath?: boolean;
+  /** Set when the value is shaped like an IRI but the write rule refuses it: it is kept as a literal. */
+  malformedIri?: boolean;
 }
 
 /**
- * Resolve a path-valued field (`resource`, `sources[].resource`, `computation`,
+ * Resolve a path-valued field (`sources[].resource`, `computation`,
  * `executor.resource`, `attester.resource` — SPEC §6.2):
  *
- *   - an absolute URL (scheme-prefixed) → IRI object, as written; when it is
- *     a bundle concept's own IRI (`urn:okf:p`), it also names that concept, so
- *     its lineage counts it as the `/p.md` spelling would;
+ *   - an absolute IRI (one the write rule accepts, `isWritableIri`) → IRI
+ *     object, as written; when it is a bundle concept's own IRI (`urn:okf:p`),
+ *     it also names that concept, so its lineage counts it as the `/p.md`
+ *     spelling would. One shaped like an IRI but malformed
+ *     (`https://example.org/%zz`) is kept as a literal and flagged;
  *   - a bundle path that names a concept → the concept's IRI (a typed graph
  *     edge). File-relative resolution (§6.2) is tried first, then the
  *     bundle-root-relative reading the reference bundles actually use
@@ -168,10 +175,11 @@ export interface PathFieldTerm {
  */
 export function pathFieldTerm(value: unknown, ctx?: PathContext): PathFieldTerm {
   const s = safeString(value).trim();
-  if (isSafeIri(s)) {
+  if (isWritableIri(s)) {
     const id = ctx && s.startsWith(ctx.iriBase) ? s.slice(ctx.iriBase.length) : null;
     return ctx && id !== null && ctx.conceptExists(id) ? { term: s, conceptId: id } : { term: s };
   }
+  if (isMalformedIri(s)) return { term: literalTerm(s), malformedIri: true };
   if (!ctx) return { term: literalTerm(s) };
   const direct = resolveLinkTarget(s, ctx.conceptId);
   if (direct && ctx.conceptExists(direct)) {

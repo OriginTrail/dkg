@@ -72,7 +72,7 @@ The import summary (and `--dry-run`) reports the trust picture next to the tripl
 }
 ```
 
-`stale` is evaluated against the current time at summary time; it is never part of the deterministic mapping. Malformed families (a `generated` without `by`, an unknown `status`, a timestamp without an explicit offset, an `Attested Computation` without `runtime`), footnotes that join no `sources[].id`, unresolved `.md` paths and unknown `okf_version` values are reported as warnings and never reject the bundle.
+`stale` is evaluated against the current time at summary time; it is never part of the deterministic mapping. Malformed families (a `generated` without `by`, an unknown `status`, a timestamp without an explicit offset, an `Attested Computation` without `runtime`), footnotes that join no `sources[].id`, unresolved `.md` paths, a link or `type` shaped like an IRI that the node would refuse (kept as a literal, so the concept still imports) and unknown `okf_version` values are reported as warnings and never reject the bundle.
 
 Once shared, the signals are plain SPARQL. Only human-reviewed, non-deprecated metrics:
 

@@ -164,6 +164,7 @@ export interface OkfWarning {
   conceptId?: string;
   code:
     | 'broken-link'
+    | 'invalid-iri'
     | 'code-span-link'
     | 'missing-type'
     | 'reserved-skip'

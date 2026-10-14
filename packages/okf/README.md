@@ -90,12 +90,22 @@ verified one, and is never rejected — SPEC §11).
 | producer-defined keys (§4.1) | `schema:<camelKey>` | scalars typed; nested mappings as `rdf:JSON` literals so they round-trip as objects; an empty list as one `[]` |
 | a family value of the wrong shape (§11) | `schema:<camelKey>`, plus `okf:keptVerbatim.<familyKey>` holding the same term | kept verbatim with a warning; the marker says the value is the family's, since a producer key of the same camelCase (`Sources`) shares the `schema:` predicate |
 
-**Path-valued fields** (`resource`, `sources[].resource`, `computation`,
+**Path-valued fields** (`sources[].resource`, `computation`,
 `executor.resource`, `attester.resource` — §6.2) resolve against the bundle: a
 concept becomes a typed edge to its IRI (file-relative first, then the
-bundle-root-relative reading Google's reference bundles use), an absolute URL
+bundle-root-relative reading Google's reference bundles use), an absolute IRI
 stays an IRI, and anything else (a `references/` artifact, an attester `.py`, a
-scope descriptor) is kept as a literal.
+scope descriptor) is kept as a literal. The concept's own `resource` is not
+resolved against the bundle: it is an IRI or a literal.
+
+**An IRI the node accepts.** A value is written as an IRI only when the DKG
+write routes accept it: an absolute RFC 3987 IRI (`isAbsoluteRfc3987IriV1`,
+the rule `parseWritableRdfTerm` applies to every term), that is also safe in
+SPARQL. One shaped like an IRI but malformed (`https://example.org/%zz`, a bad
+percent escape) would make the node refuse the concept's whole write, so it is
+kept as a literal (a `type`, as its `schema:` name), and a field that holds a
+link (`resource`, a path-valued field) or `type` warns for it; a literal derives
+no lineage.
 
 **Family extensions.** A producer-defined key *inside* a family (§4.1 asks
 consumers to preserve unknown keys) — `executor.timeout_s`,
@@ -167,8 +177,9 @@ family (`generated` without `by`, an unknown `status`, a timestamp without an
 explicit offset, an `Attested Computation` without `runtime`, a mapping or list
 where one value belongs — kept verbatim — …), a footnote
 `[^label]` that joins no `sources[].id`, a `.md` path in a path-valued field
-that names no concept, and an `okf_version` this consumer does not know (the
-bundle is still consumed best-effort, §12). A family given a value of the wrong
+that names no concept, a link or `type` shaped like an IRI that the node would
+refuse (`invalid-iri`, kept as a literal), and an `okf_version` this consumer
+does not know (the bundle is still consumed best-effort, §12). A family given a value of the wrong
 shape (`generated: [{ by: … }]`, `usage_window: Q2`) keeps it verbatim under
 `schema:<camelKey>`, whole: one term for a single value, one `rdf:JSON` literal
 for anything else, marked as the family's (`okf:keptVerbatim.<familyKey>`), so

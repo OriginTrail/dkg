@@ -7,10 +7,11 @@
  * with the same parser. `isSafeIri` is replicated verbatim from `dkg-core`'s
  * `sparql-safe.ts`, so the package never imports the node at runtime and stays
  * unit-testable in isolation. A test pins it against the inputs the node
- * validates.
+ * validates. A value is written as an IRI only when the node's own write rule,
+ * also in `dkg-rdf-utils`, accepts it too (`isWritableIri`).
  */
 
-import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { formatCanonicalRdfLiteralTerm, isAbsoluteRfc3987IriV1 } from '@origintrail-official/dkg-rdf-utils';
 import { yamlLexicalOf } from './yaml-lexical.js';
 
 const IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
@@ -19,6 +20,25 @@ const IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
 export function isSafeIri(value: string): boolean {
   if (!value) return false;
   return IRI_SCHEME_RE.test(value);
+}
+
+/**
+ * Whether `value` can be written as an IRI term: safe in SPARQL (`isSafeIri`)
+ * and an absolute RFC 3987 IRI, the rule the DKG write routes check every term
+ * against (`parseWritableRdfTerm`). Anything else is written as a literal: as
+ * an IRI, a malformed value (`https://example.org/%zz`) would make the node
+ * refuse the concept's whole write.
+ */
+export function isWritableIri(value: string): boolean {
+  return isSafeIri(value) && isAbsoluteRfc3987IriV1(value);
+}
+
+/**
+ * Whether `value` is shaped like an IRI (`isSafeIri`) but the write rule
+ * refuses it: a field that holds a link warns for it.
+ */
+export function isMalformedIri(value: string): boolean {
+  return isSafeIri(value) && !isAbsoluteRfc3987IriV1(value);
 }
 
 /** N-Triples/quad-encoding of a plain string literal: `"escaped"`, in the canonical form. */

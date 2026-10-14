@@ -225,7 +225,9 @@ export function prepareFamily(iri: string, conceptId: string, spec: FamilySpec, 
  * each in its place: a value that names a bundle concept becomes an edge to
  * it, a URL an IRI, anything else a literal (§6.2). A `derivesLineage` field
  * adds `prov:wasDerivedFrom` on the concept `iri` for every value with an IRI
- * (§5.1), and a `.md` path that names no concept is a warning, never an error.
+ * (§5.1), and a `.md` path that names no concept is a warning, never an error,
+ * as is a value shaped like an IRI that the write rule refuses (kept as a
+ * literal, so it derives no lineage).
  */
 export function resolveReferences(iri: string, prepared: readonly PreparedQuad[], ctx: PathContext): FamilyResult {
   const result: FamilyResult = { quads: [], derivedFromConcepts: [], warnings: [] };
@@ -239,6 +241,13 @@ export function resolveReferences(iri: string, prepared: readonly PreparedQuad[]
     if (item.derivesLineage) {
       if (path.conceptId) result.derivedFromConcepts.push(path.conceptId);
       if (!path.term.startsWith('"')) result.quads.push({ subject: iri, predicate: PROV_WAS_DERIVED_FROM, object: path.term });
+    }
+    if (path.malformedIri) {
+      result.warnings.push({
+        conceptId: ctx.conceptId,
+        code: 'invalid-iri',
+        message: `${item.label} "${safeString(item.value).trim()}" is not a valid IRI (RFC 3987); kept as a literal`,
+      });
     }
     if (path.unresolvedConceptPath) {
       result.warnings.push({
