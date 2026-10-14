@@ -218,6 +218,65 @@ it('rejects oversized materialized bindings even below the row limit', async () 
   expect(JSON.parse(read.res.body)).not.toHaveProperty('result');
 });
 
+it.each([
+  { event: 'request abort', phase: 'admission' },
+  { event: 'response close', phase: 'admission' },
+  { event: 'request abort', phase: 'execution' },
+  { event: 'response close', phase: 'execution' },
+])('cancels bounded query on $event during $phase', async ({ event, phase }) => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let querySignal!: AbortSignal;
+  const pause = async (signal: AbortSignal) => {
+    querySignal = signal;
+    entered();
+    await pending;
+  };
+  const callerQuery = vi.fn(async (_sparql: string, opts: { signal: AbortSignal }) => {
+    if (phase === 'execution') await pause(opts.signal);
+    return { bindings: [] };
+  });
+  const agent = {
+    queryEngine: { query: callerQuery }, log: { info() {} }, peerId: 'fixture',
+    resolveContextGraphReadAuthority: async (_id: string, opts: { signal: AbortSignal }) => {
+      if (phase === 'admission') await pause(opts.signal);
+      return { outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' };
+    },
+  };
+  const read = context({ query: QueryMethods.prototype.query.bind(agent as never) });
+  const writeHead = vi.spyOn(read.res, 'writeHead');
+  const end = vi.spyOn(read.res, 'end');
+  const operation = handleBoundedQueryRoutes(read.ctx);
+  await started;
+  try {
+    expect(read.req.listenerCount('aborted')).toBe(1);
+    expect(read.res.listenerCount('close')).toBe(1);
+    expect(querySignal.aborted).toBe(false);
+    if (event === 'request abort') {
+      read.req.aborted = true;
+      read.req.emit('aborted');
+    } else {
+      read.res.destroyed = true;
+      read.res.emit('close');
+    }
+    expect(querySignal.aborted).toBe(true);
+    expect(querySignal.reason.code).toBe('API_QUERY_CALLER_DISCONNECTED');
+    await operation;
+    expect(read.req.listenerCount('aborted')).toBe(0);
+    expect(read.res.listenerCount('close')).toBe(0);
+    release();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(callerQuery).toHaveBeenCalledTimes(phase === 'admission' ? 0 : 1);
+    expect(writeHead).not.toHaveBeenCalled();
+    expect(end).not.toHaveBeenCalled();
+  } finally {
+    release();
+    await operation;
+  }
+});
+
 it('bounds stalled shared-memory metadata admission and prevents a late caller query', async () => {
   let release!: (value: { type: 'boolean'; value: boolean }) => void;
   const pending = new Promise<{ type: 'boolean'; value: boolean }>(resolve => { release = resolve; });
