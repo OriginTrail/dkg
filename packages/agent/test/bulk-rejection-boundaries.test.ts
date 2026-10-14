@@ -68,7 +68,7 @@ describe('bulk receiver reservations against excess data', () => {
     } };
     const session = new BulkGraphSession(stream as never, cancellation.signal), commit = vi.fn();
     const result = consumeBulkGraph(session, request, { stagingRoot: root, commit,
-      verification: { contextGraphId: request.contextGraphId, assetUals: uals, ctx: createOperationContext('sync'),
+      verification: { contextGraphId: request.contextGraphId, ctx: createOperationContext('sync'),
         parseAndFilter: async () => { await blocked; return { quads: [], totalQuads: 0 }; },
         processDurableBatchInWorker: vi.fn(),
       }, onMetrics: metrics => { received = metrics.receivedAssets; },
