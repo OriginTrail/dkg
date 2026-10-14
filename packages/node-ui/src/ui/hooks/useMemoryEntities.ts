@@ -445,6 +445,7 @@ export function useMemoryEntities(
   const activeRef = useRef(true);
   const requestRef = useRef<{ key: string; promise: Promise<void>; again: boolean } | null>(null);
   const pagesRef = useRef<Array<{ sparql: string; layer: TrustLevel; result: LayerResult }>>([]);
+  const depthRef = useRef({ contextGraphId, depths: new Map<string, number>() });
   const key = JSON.stringify([contextGraphId, includeQueryCatalog, signalErrors]);
 
   const fetchAll = useCallback((force = false): Promise<void> => {
@@ -461,6 +462,7 @@ export function useMemoryEntities(
     setPageError(null);
     setLayerStatus(LOADING_LAYER_STATUS);
     const entry = { key, promise: Promise.resolve(), again: false };
+    if (depthRef.current.contextGraphId !== contextGraphId) depthRef.current = { contextGraphId, depths: new Map() };
     const definitions: Array<{ sparql: string; layer: TrustLevel }> = [
       { sparql: wmSparql(contextGraphId), layer: 'working' },
       { sparql: swmSparql(contextGraphId), layer: 'shared' },
@@ -471,9 +473,18 @@ export function useMemoryEntities(
       ] : []),
     ];
     entry.promise = (async () => {
-      const results = await Promise.all(definitions.map(definition => readMemoryGraphPage(
-        definition.sparql, contextGraphId, { includeContextGraphPartitions: true, layerLimit: WM_LIMIT },
-      )));
+      const results = await Promise.all(definitions.map(async definition => {
+        const depth = depthRef.current.depths.get(definition.sparql) ?? 1;
+        let result = await readMemoryGraphPage(definition.sparql, contextGraphId,
+          { includeContextGraphPartitions: true, layerLimit: WM_LIMIT });
+        for (let page = 1; page < depth && result.ok && result.truncated; page++) {
+          const next = await readMemoryGraphPage(definition.sparql, contextGraphId,
+            { includeContextGraphPartitions: true, layerLimit: WM_LIMIT, cursor: result.cursor });
+          if (!next.ok) { result = { ...result, ok: false }; break; }
+          result = { ...next, triples: [...result.triples, ...next.triples], rowCount: result.rowCount + next.rowCount };
+        }
+        return result;
+      }));
       if (version !== versionRef.current || !activeRef.current) return;
       pagesRef.current = definitions.map((definition, index) => ({ ...definition, result: results[index] }));
       const triples = pagesRef.current.flatMap(page => page.result.triples.map(triple => ({ ...triple, layer: page.layer })));
@@ -513,6 +524,7 @@ export function useMemoryEntities(
       const added: LayeredTriple[] = [];
       for (const [index, result] of results.entries()) {
         if (!result.ok) { setPageError('Could not load more graph data. Retry to continue from the last loaded page.'); continue; }
+        depthRef.current.depths.set(pages[index].sparql, (depthRef.current.depths.get(pages[index].sparql) ?? 1) + 1);
         pages[index].result = result;
         added.push(...result.triples.map(triple => ({ ...triple, layer: pages[index].layer })));
       }

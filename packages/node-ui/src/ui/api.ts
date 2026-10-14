@@ -458,7 +458,7 @@ export const submitJoinRequest = (
   }>(
     `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
     req,
-  );
+  ).then(result => { invalidateQueryCache(contextGraphId); return result; });
 
 export const listJoinRequests = (contextGraphId: string) =>
   get<{ contextGraphId: string; requests: PendingJoinRequest[] }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
@@ -3164,7 +3164,7 @@ export const subscribeToContextGraph = (
   }>('/api/subscribe', {
     contextGraphId,
     syncMode: options?.syncMode ?? 'on-demand',
-  });
+  }).then(result => { invalidateQueryCache(contextGraphId); return result; });
 
 // --- Notifications (scoped pane wire contract — implementation-plan §3) ---
 //
@@ -3269,7 +3269,7 @@ export interface NotificationsFeedResponse {
 
 /** Fetch the scoped notifications feed (`GET /api/notifications`). */
 export const fetchNotificationsFeed = () =>
-  get<NotificationsFeedResponse>('/api/notifications');
+  getWithTimeout<NotificationsFeedResponse>('/api/notifications', 60_000);
 
 /** Mark notifications read by id. Accepts numeric row ids AND string
  *  `digestKey`s (the daemon resolves a digestKey to its underlying atomic

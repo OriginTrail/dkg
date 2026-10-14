@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReadCache, UI_READ_MAX_AGE_MS } from '../src/ui/lib/read-cache.js';
-import { fetchContextGraphs, invalidateQueryCache, postQueryDeduped } from '../src/ui/api.js';
+import { fetchContextGraphs, invalidateQueryCache, postQueryDeduped, subscribeToContextGraph, submitJoinRequest } from '../src/ui/api.js';
 
 const body = (cg = 'cg-a') => ({ sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 50', contextGraphId: cg });
 const read = { maxAgeMs: UI_READ_MAX_AGE_MS };
@@ -36,6 +36,26 @@ describe('bounded read cache', () => {
 });
 
 describe('scoped UI reads', () => {
+  it('lets console queries run without an implicit deadline while bounded reads opt in', async () => {
+    const fetch = vi.fn(async () => response()); vi.stubGlobal('fetch', fetch);
+    await postQueryDeduped(body());
+    expect(fetch.mock.calls[0][1]?.signal).toBeUndefined();
+    await postQueryDeduped(body(), { timeoutMs: 60_000 });
+    expect(fetch.mock.calls[1][1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+  it.each(['subscribe', 'join'])('invalidates a pre-mutation list after successful %s without SSE', async action => {
+    let joined = false;
+    const fetch = vi.fn(async (url: string) => {
+      if (url.includes('/list')) return new Response(JSON.stringify({ contextGraphs: joined ? [{ id: 'cg-new' }] : [] }));
+      joined = true; return new Response('{"success":true,"approved":true}');
+    });
+    vi.stubGlobal('fetch', fetch);
+    expect((await fetchContextGraphs()).contextGraphs).toHaveLength(0);
+    if (action === 'subscribe') await subscribeToContextGraph('cg-new');
+    else await submitJoinRequest('cg-new', { delegation: {} as any });
+    expect((await fetchContextGraphs()).contextGraphs).toEqual([{ id: 'cg-new' }]);
+    expect(fetch.mock.calls.filter(([url]) => url.includes('/list'))).toHaveLength(2);
+  });
   it('coalesces concurrent reads and reuses them on tab return, with TTL and scoped refresh', async () => {
     vi.useFakeTimers();
     const fetch = vi.fn(async () => response()); vi.stubGlobal('fetch', fetch);

@@ -33,6 +33,7 @@ const PRIMARY_TYPES: Array<{ iri: string; label: string }> = [
 export interface AgentProfileViewProps {
   agentUri: string;
   entityList: MemoryEntity[];
+  partial?: boolean;
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
   onBack: () => void;
@@ -41,6 +42,7 @@ export interface AgentProfileViewProps {
 export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   agentUri,
   entityList,
+  partial = false,
   onSelectEntity,
   onOpenAgent,
   onBack,
@@ -144,8 +146,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           className={`v10-agent-profile-stat${typeFilter === null ? ' active' : ''}`}
           onClick={() => setTypeFilter(null)}
         >
-          <span className="v10-agent-profile-stat-val">{total}</span>
-          <span className="v10-agent-profile-stat-lbl">All activity</span>
+          <span className="v10-agent-profile-stat-val">{partial ? '≥ ' : ''}{total}</span>
+          <span className="v10-agent-profile-stat-lbl">{partial ? 'Loaded activity' : 'All activity'}</span>
         </button>
         {PRIMARY_TYPES.map(t => {
           const arr = authoredByType.get(t.iri) ?? [];
@@ -160,7 +162,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
               style={{ '--stat-color': color } as React.CSSProperties}
               onClick={() => setTypeFilter(t.iri)}
             >
-              <span className="v10-agent-profile-stat-val">{arr.length}</span>
+              <span className="v10-agent-profile-stat-val">{partial ? '≥ ' : ''}{arr.length}</span>
               <span className="v10-agent-profile-stat-lbl">
                 {binding?.label ? binding.label : t.label}
               </span>
@@ -177,12 +179,12 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
         onOpenAgent={onOpenAgent}
         title={
           <>
-            All activity
+            {partial ? 'Loaded activity' : 'All activity'}
             {agent && <span className="v10-agent-profile-feed-sub"> · authored by {agent.name}</span>}
           </>
         }
         emptyHint={
-          total === 0
+          partial ? 'No entries for this agent in the loaded preview. Load more memory to check later assets.' : total === 0
             ? `${agent?.name ?? agentUri} hasn't authored anything in this project yet.`
             : 'No entries match the current filter.'
         }

@@ -79,7 +79,7 @@ export function invalidateQueryCache(contextGraphId?: string): void {
   }
 }
 
-export interface QueryReadOptions { maxAgeMs?: number; }
+export interface QueryReadOptions { maxAgeMs?: number; timeoutMs?: number; }
 
 export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadOptions = {}): Promise<QueryExecutionResponse> {
   const headers = authHeaders();
@@ -92,7 +92,7 @@ export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadO
   const generation = queryGenerations.get(scope) ?? 0;
   const globalGeneration = queryGeneration;
   const requestBody = JSON.stringify(body);
-  const key = JSON.stringify([session, globalGeneration, generation, requestBody]);
+  const key = JSON.stringify([session, globalGeneration, generation, requestBody, read.timeoutMs]);
   const maxAgeMs = read.maxAgeMs ?? 0;
   const operation = classifySparqlOperation(String(body.sparql ?? '')).kind;
   const cacheable = maxAgeMs > 0 && operation === 'read';
@@ -101,11 +101,13 @@ export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadO
   const existing = inflightQuery.get(key);
   if (existing) return existing;
   const promise = (async () => {
-    const res = await fetchWithTimeout(`${BASE}/api/query`, {
+    const init = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: requestBody,
-    }, 60_000);
+    };
+    const res = await (read.timeoutMs ? fetchWithTimeout(`${BASE}/api/query`, init, read.timeoutMs)
+      : fetch(`${BASE}/api/query`, init));
     if (!res.ok) {
       if (res.status === 401 || res.status === 403) invalidateQueryCache();
       const errBody = await res.json().catch(() => ({}));
@@ -145,9 +147,10 @@ export const executeQuery = (
 ) =>
   postQueryDeduped({ sparql, ...options }, read);
 
-export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
+export async function fetchContextGraphs(options: { fresh?: boolean } = {}): Promise<{ contextGraphs: any[] }> {
   const session = JSON.stringify(authHeaders());
   if (session !== querySession) { invalidateQueryCache(); querySession = session; }
+  if (options.fresh) { graphListCache.invalidate(); graphListGeneration++; }
   const key = JSON.stringify([session, graphListGeneration]);
   const cached = graphListCache.get(key, UI_READ_MAX_AGE_MS);
   if (cached) return cached;

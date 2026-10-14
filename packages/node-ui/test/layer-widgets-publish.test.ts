@@ -69,6 +69,26 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = ''; });
 
 describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
+  it('states the full paid action scope before publishing assertions outside the loaded preview', async () => {
+    const assertions = ['a', 'b', 'c'].map(name => ({ name, graphUri: name }));
+    apiMocks.listAssertions.mockResolvedValue(assertions);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 3, total: 3, partial: 0, failures: [] });
+    const { container, unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    expect(container.textContent).toContain('all eligible complete Shared Working Memory Knowledge Assets');
+    expect(container.textContent).toContain('including assets outside the loaded preview');
+    expect(container.textContent).toContain('incurs a cost');
+    await clickPublish(container); await flush();
+    expect(apiMocks.publishAssertionsToVm).toHaveBeenCalledWith('cg', assertions);
+    await unmount();
+  });
+  it('states the whole context graph share scope despite a one-entity preview', async () => {
+    apiMocks.listAssertions.mockResolvedValue(['a', 'b', 'c'].map(name => ({ name, graphUri: name })));
+    const { container, unmount } = await render(React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }));
+    expect(container.textContent).toContain('all eligible complete Working Memory Knowledge Assets');
+    expect(container.textContent).toContain('including assets outside the loaded preview');
+    await act(async () => (container.querySelector('[data-testid="widget-promote-all-btn"]') as HTMLButtonElement).click());
+    await flush(); expect(apiMocks.promoteAssertion).toHaveBeenCalledTimes(3); await unmount();
+  });
   it('renders the badge from the BATCH convictionCostCovered even when the clean sample has none', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
       published: 1, total: 1, partial: 0, failures: [],

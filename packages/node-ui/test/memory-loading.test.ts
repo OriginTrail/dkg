@@ -83,6 +83,24 @@ describe('bounded graph reads', () => {
 });
 
 describe('pending tab reads', () => {
+  it('applies slow polling responses without overlapping interval requests', async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn(() => new Promise<string>(resolve => setTimeout(() => resolve('loaded'), 15_000)));
+    let value: ReturnType<typeof useFetch<string>>;
+    function FetchProbe() {
+      value = useFetch(fetcher, [], 10_000);
+      return React.createElement('div', null, value.data);
+    }
+    try {
+      await act(async () => root.render(React.createElement(FetchProbe)));
+      await act(async () => vi.advanceTimersByTimeAsync(10_000));
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTimeAsync(5_000));
+      expect(value!.data).toBe('loaded'); expect(value!.loading).toBe(false);
+      await act(async () => vi.advanceTimersByTimeAsync(50_000));
+      expect(value!.data).toBe('loaded');
+    } finally { vi.useRealTimers(); }
+  });
   it('does not let an older refresh overwrite a newer result in the same tab', async () => {
     let resolve!: (value: string) => void; let refresh!: () => void;
     const fetcher = vi.fn().mockImplementationOnce(() => new Promise<string>(r => { resolve = r; }))

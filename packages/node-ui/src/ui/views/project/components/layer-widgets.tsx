@@ -224,13 +224,12 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
 
   if (count === 0) return null;
   const color = '#f59e0b';
-  const noun = layerNoun('wm', count).toLowerCase();
 
   return (
     <LayerActionShell
       title="Share complete Knowledge Assets"
       footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
-      context={<>{count} eligible {noun} will be shared through their complete owning Knowledge Assets for collaborative review.</>}
+      context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets outside the loaded preview.</>}
       result={result}
       error={error}
     >
@@ -295,13 +294,12 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
   }, [contextGraphId, run, gate.blocked]);
 
   if (count === 0) return null;
-  const noun = layerNoun('swm', count).toLowerCase();
 
   return (
     <LayerActionShell
       title="Publish"
-      footnote={`Moves ${noun} from this layer to Verifiable Memory.`}
-      context={<>{count} {noun} in this layer can be published to Verifiable Memory on-chain.</>}
+      footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this context graph on-chain."
+      context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets outside the loaded preview. On-chain publishing incurs a cost.</>}
       result={result}
       error={error}
       extras={

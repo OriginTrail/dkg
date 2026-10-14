@@ -248,7 +248,7 @@ export async function readMemoryGraphPage(
         .replace(/&&\s*\?p\s*!=\s*<[^>]+>/g, '')
         .replace(/\?s\s+\?p\s+\?o\b/g, `FILTER EXISTS { ?s ?p ?o ${predicateFilter ? `FILTER(${predicateFilter})` : ''} }`)
         .replace(/}\s*$/, `${cursor ? `FILTER(STR(?g) ${cursor[7] ? '>' : '>='} ${JSON.stringify(cursor[0])})` : ''} }`);
-      const catalog = await postQueryDeduped({ sparql: `${inventory} ORDER BY STR(?g) LIMIT 6`, contextGraphId, ...requestOpts }, { maxAgeMs: UI_READ_MAX_AGE_MS });
+      const catalog = await postQueryDeduped({ sparql: `${inventory} ORDER BY STR(?g) LIMIT 6`, contextGraphId, ...requestOpts }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
       const names = [...new Set((catalog.result?.bindings ?? []).map(row => canonicalEntityUri(bv(row.g) ?? '')).filter(Boolean))];
       graphNames = names.slice(0, 5);
       moreGraphs = names.length > 5;
@@ -258,6 +258,7 @@ export async function readMemoryGraphPage(
     // Compare the complete RDF term identity. STR(?o) alone would skip values
     // sharing lexical text but differing in language, datatype or node kind.
     const seek = ordered.replace(/WHERE\s*{/i, `WHERE { ${graphValues}`).replace(/}\s*$/, `
+      FILTER(!isBlank(?s) && !isBlank(?o))
       BIND(STR(?g) AS ?__g)
       BIND(CONCAT(IF(isBlank(?s), "B:", "I:"), STR(?s)) AS ?__s)
       BIND(STR(?p) AS ?__p)
@@ -268,11 +269,25 @@ export async function readMemoryGraphPage(
       ${cursor ? cursorFilter(cursor) : ''}
     }`);
     const body = { sparql: `${seek} ORDER BY ${CURSOR_VARIABLES.join(' ')} LIMIT ${layerLimit}`, contextGraphId, ...requestOpts };
-    const data = await postQueryDeduped(body, { maxAgeMs: UI_READ_MAX_AGE_MS });
+    const data = await postQueryDeduped(body, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
     const bindings = data?.result?.bindings ?? [];
     const clipped = bindings.length >= layerLimit;
     const truncated = clipped || moreGraphs;
-    const triples = bindings
+    // Blank labels cannot be used in portable SPARQL seek filters. Read the
+    // blank edges of each newly entered graph together, without a row cutoff;
+    // subsequent pages seek only through IRI/literal rows. This also preserves
+    // a blank component's identity within one result document.
+    const lastGraphIndex = clipped ? graphNames.indexOf(cursorForRow(bindings.at(-1)!)[0]) : graphNames.length - 1;
+    const enteredGraphs = graphNames.slice(0, lastGraphIndex + 1);
+    const blankGraphs = enteredGraphs.filter(graph => !cursor || cursor[7] || graph !== cursor[0]);
+    const blankData = blankGraphs.length || (direct && !cursor) ? await postQueryDeduped({
+      sparql: ordered.replace(/WHERE\s*{/i, `WHERE { ${blankGraphs.length ? `VALUES ?g { ${blankGraphs.map(sparqlIri).join(' ')} }` : ''}`)
+        .replace(/}\s*$/, 'FILTER(isBlank(?s) || isBlank(?o)) }'),
+      contextGraphId, ...requestOpts,
+    }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 }) : undefined;
+    const blankBindings = (blankData?.result?.bindings ?? []).filter(row =>
+      rdfBindingValue(row.s)?.startsWith('_:') || rdfBindingValue(row.o)?.startsWith('_:'));
+    const triples = [...bindings, ...blankBindings]
       .map((row: any) => {
         const g = bv(row.g);
         return {
@@ -283,7 +298,7 @@ export async function readMemoryGraphPage(
         };
       })
       .filter((t: Triple) => t.subject && t.predicate && t.object);
-    return { triples, ok: true, truncated, rowCount: bindings.length,
+    return { triples, ok: true, truncated, rowCount: bindings.length + blankBindings.length,
       cursor: !clipped && graphNames.length ? [graphNames.at(-1)!, '', '', '', '', '', '', true]
         : bindings.length ? cursorForRow(bindings.at(-1)!) : undefined };
   } catch {
@@ -300,8 +315,8 @@ export async function fetchMemoryEntity(
 ): Promise<{ triples: LayeredTriple[]; partial: boolean }> {
   const target = canonicalEntityUri(uri);
   const match = target.startsWith('_:')
-    ? `((isBlank(?s) && STR(?s) = ${JSON.stringify(target.slice(2))}) || (isBlank(?o) && STR(?o) = ${JSON.stringify(target.slice(2))}))`
-    : `(?s = ${sparqlIri(target)} || ?o = ${sparqlIri(target)})`;
+    ? 'isBlank(?s) || isBlank(?o)'
+    : undefined;
   const definitions = [
     { key: 'wm', sparql: wmSparql(contextGraphId), layer: 'working' as const },
     { key: 'swm', sparql: swmSparql(contextGraphId), layer: 'shared' as const },
@@ -311,11 +326,37 @@ export async function fetchMemoryEntity(
       { key: 'swm', sparql: queryCatalogLayerSparql(contextGraphId, 'swm'), layer: 'shared' as const },
     ] : []),
   ].filter(definition => !layer || definition.key === layer);
-  const results = await Promise.all(definitions.map(definition => readMemoryGraphPage(
-    definition.sparql.replace(/}\s+LIMIT\s+\d+\s*$/i, `FILTER(${match}) }`),
-    contextGraphId, { includeContextGraphPartitions: true, layerLimit: 1_000, direct: true },
-  )));
-  if (results.some(result => !result.ok)) throw new Error('Could not load all resource details. Retry to refresh this resource.');
+  const results = await Promise.all(definitions.map(async definition => {
+    if (match) {
+      // Result labels are store-local identifiers, not SPARQL constants.
+      // Compare the returned terms in the client; _:label in a WHERE pattern
+      // would be an existential variable and STR(blank) is undefined.
+      const data = await postQueryDeduped({
+        sparql: definition.sparql.replace(/}\s+LIMIT\s+\d+\s*$/i, `FILTER(${match}) }`),
+        contextGraphId, includeContextGraphPartitions: true,
+      }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
+      return { truncated: false, triples: (data.result?.bindings ?? []).flatMap(row => {
+        const subject = rdfBindingValue(row.s) ?? ''; const object = rdfBindingValue(row.o) ?? '';
+        return subject === target || object === target ? [{ subject, predicate: bv(row.p) ?? '', object,
+          subGraph: subGraphOf(bv(row.g) ?? '', contextGraphId) }] : [];
+      }) };
+    }
+    // Bind the resource in the triple pattern so the store can use its subject
+    // and object indexes, rather than filtering every row in the partitions.
+    const query = definition.sparql.replace(/(WHERE[\s\S]*?)\?s\s+\?p\s+\?o\b/, `$1{
+      { ${sparqlIri(target)} ?p ?o BIND(${sparqlIri(target)} AS ?s) }
+      UNION { ?s ?p ${sparqlIri(target)} BIND(${sparqlIri(target)} AS ?o) FILTER(?s != ${sparqlIri(target)}) }
+    }`);
+    // Detail reads also include blank edges. They are already bound to an IRI
+    // and need no keyset cursor or computed sort.
+    const data = await postQueryDeduped({ sparql: query.replace(/LIMIT\s+\d+\s*$/i, 'LIMIT 1001'),
+      contextGraphId, includeContextGraphPartitions: true }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
+    const rows = data.result?.bindings ?? [];
+    return { truncated: rows.length > 1000, triples: rows.slice(0, 1000).map(row => ({
+      subject: rdfBindingValue(row.s) ?? '', predicate: bv(row.p) ?? '', object: rdfBindingValue(row.o) ?? '',
+      subGraph: subGraphOf(bv(row.g) ?? '', contextGraphId),
+    })) };
+  }));
   return {
     triples: results.flatMap((result, index) => result.triples.map(triple => ({ ...triple, layer: definitions[index].layer }))),
     partial: results.some(result => result.truncated),

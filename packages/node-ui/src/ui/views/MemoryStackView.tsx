@@ -20,6 +20,7 @@ import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/
 import { useMemoryCounts } from './project/helpers.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
 import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
+import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
@@ -153,6 +154,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
         {memory.error && (
           <div className="v10-memstack-project-status error">{memory.error}</div>
         )}
+        <MemoryReadStatus memory={memory} />
       </div>
       {LAYERS.map(L => {
         const bucket = byLayer[L.key];
@@ -166,6 +168,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
             entityCount={bucket.entities.length}
             tripleCount={bucket.tripleCount}
             recent={bucket.entities.slice(0, 4)}
+            partial={memory.partial || memory.loading}
             onOpenLayer={() =>
               openTab({
                 id: `${L.tabPrefix}:${cg.id}`,
@@ -188,6 +191,7 @@ function LayerCell({
   entityCount,
   tripleCount,
   recent,
+  partial,
   onOpenLayer,
 }: {
   cgId: string;
@@ -197,6 +201,7 @@ function LayerCell({
   entityCount: number;
   tripleCount: number;
   recent: MemoryEntity[];
+  partial: boolean;
   onOpenLayer: () => void;
 }) {
   const isEmpty = entityCount === 0;
@@ -206,12 +211,12 @@ function LayerCell({
       style={{ '--cell-color': color } as React.CSSProperties}
     >
       <div className="v10-memstack-cell-stats">
-        <span className="v10-memstack-cell-n">{entityCount}</span>
+        <span className="v10-memstack-cell-n">{partial ? '≥ ' : ''}{entityCount}</span>
         <span className="v10-memstack-cell-n-lbl">
           entit{entityCount === 1 ? 'y' : 'ies'}
         </span>
         <span className="v10-memstack-cell-sep">·</span>
-        <span className="v10-memstack-cell-t">{tripleCount.toLocaleString()}</span>
+        <span className="v10-memstack-cell-t">{partial ? '≥ ' : ''}{tripleCount.toLocaleString()}</span>
         <span className="v10-memstack-cell-t-lbl">triples</span>
       </div>
       {recent.length > 0 ? (
@@ -225,7 +230,7 @@ function LayerCell({
           ))}
         </ul>
       ) : (
-        <div className="v10-memstack-cell-empty-hint">Nothing in {tabPrefix.toUpperCase()} yet</div>
+        <div className="v10-memstack-cell-empty-hint">{partial ? 'No entries in the loaded preview' : `Nothing in ${tabPrefix.toUpperCase()} yet`}</div>
       )}
       {!isEmpty && (
         <button

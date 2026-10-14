@@ -44,6 +44,67 @@ beforeEach(() => {
 afterEach(async () => { vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 
 describe('assertion pages against the native scoped query engine', () => {
+  it('keeps blank-node subjects and objects complete across tiny page boundaries and detail reads', async () => {
+    await assertion('blank-edges');
+    const graph = content('blank-edges');
+    await store.insert(Array.from({ length: 7 }, (_, i) => [
+      { subject: `_:subject${i}`, predicate: 'urn:value', object: `"value ${i}"`, graph },
+      { subject: 'urn:parent', predicate: 'urn:child', object: `_:subject${i}`, graph },
+    ]).flat());
+    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
+    const triples: Array<{ subject: string; predicate: string; object: string }> = [];
+    let cursor;
+    for (let page = 0; page < 20; page++) {
+      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
+      expect(result.ok).toBe(true);
+      triples.push(...result.triples);
+      if (!result.truncated) break;
+      cursor = result.cursor;
+    }
+    expect(triples).toHaveLength(15);
+    expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(15);
+    const blank = triples.find(triple => triple.subject.startsWith('_:'))!.subject;
+    const detail = await fetchMemoryEntity(cg, blank, 'wm');
+    expect(detail.partial).toBe(false);
+    expect(detail.triples).toHaveLength(2);
+    expect(detail.triples.every(triple => triple.subject === blank || triple.object === blank)).toBe(true);
+    expect(failures).toEqual([]);
+  });
+  it('filters hidden meta assertions before the page boundary when catalogs are enabled', async () => {
+    for (let i = 0; i < 5; i++) await assertion(`aaa-hidden-${i}`, 'WM', 'meta');
+    await assertion('query-catalog-visible', 'WM', 'meta');
+    await assertion('visible');
+    const first = await listAssertionsPage(cg, 'wm', { pageSize: 1, includeQueryCatalog: true });
+    const second = await listAssertionsPage(cg, 'wm', { pageSize: 1, includeQueryCatalog: true, cursor: first.nextCursor });
+    expect([...first.items, ...second.items].map(item => item.name).sort()).toEqual(['query-catalog-visible', 'visible']);
+    expect(second.nextCursor).toBeUndefined();
+  });
+  it('does not cut off a blank component at the production 5,000-row budget', async () => {
+    await assertion('large-blank');
+    await store.insert(Array.from({ length: 5001 }, (_, i) => ({
+      subject: `_:large${i}`, predicate: 'urn:value', object: `"${i}"`, graph: content('large-blank'),
+    })));
+    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
+    const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true });
+    expect(result.ok).toBe(true); expect(result.truncated).toBe(false);
+    expect(result.triples).toHaveLength(5002);
+  });
+  it('reads each graph blank component once when nonblank pages stop in earlier graphs', async () => {
+    for (let i = 0; i < 7; i++) {
+      const name = `mix-${i}`; await assertion(name);
+      await store.insert([{ subject: `_:blank${i}`, predicate: 'urn:blank', object: `"${i}"`, graph: content(name) }]);
+    }
+    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
+    const triples = []; let cursor;
+    for (let i = 0; i < 10; i++) {
+      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
+      expect(result.ok).toBe(true); triples.push(...result.triples);
+      if (!result.truncated) break;
+      cursor = result.cursor;
+    }
+    expect(triples).toHaveLength(14);
+    expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(14);
+  });
   it('continues across bounded graph-inventory pages even when a triple page is not full', async () => {
     for (let i = 0; i < 12; i++) await assertion(`graph-${String(i).padStart(2, '0')}`);
     const query = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ' + JSON.stringify(root + '/_working_memory/') + ')) }';
@@ -109,7 +170,7 @@ describe('assertion pages against the native scoped query engine', () => {
     expect(detail.triples.some(triple => triple.object.includes('FOREIGN'))).toBe(false);
     expect(detail.triples.some(triple => triple.subject === 'urn:step')).toBe(true);
     expect(requests).toHaveLength(1);
-    expect(requests[0].sparql).toContain('LIMIT 1000');
+    expect(requests[0].sparql).toContain('LIMIT 1001');
   });
   it('pages every canonical KA once and counts only the visible page', async () => {
     for (let i = 0; i < 105; i++) await assertion(String(i).padStart(3, '0'));
@@ -133,10 +194,11 @@ describe('assertion pages against the native scoped query engine', () => {
     await assertion('query-catalog-test', 'WM', 'meta');
     await assertion('profile-hidden', 'WM', 'meta');
     await store.insert([{ subject: physical('legacy'), predicate: dkg + 'memoryLayer', object: '"WM"', graph: meta }]);
+    await store.insert([{ subject: `${root}/meta/assertion/legacy-peer/query-catalog-legacy`, predicate: dkg + 'memoryLayer', object: '"WM"', graph: meta }]);
     const first = await listAssertionsPage(cg, 'wm');
     expect(first.items.map(item => item.name).sort()).toEqual(['input:order:42', 'legacy']);
     const catalogs = await listAssertionsPage(cg, 'wm', { includeQueryCatalog: true });
-    expect(catalogs.items.map(item => item.name).sort()).toEqual(['input:order:42', 'legacy', 'query-catalog-test']);
+    expect(catalogs.items.map(item => item.name).sort()).toEqual(['input:order:42', 'legacy', 'query-catalog-legacy', 'query-catalog-test']);
   });
   it('suppresses published SWM aliases after the canonical pointer moves to shared storage', async () => {
     const published = await assertion('published', 'SWM');

@@ -54,7 +54,9 @@ export async function listAssertionsPage(
         "^assertion/([^/]+)/(.+)$", "$1:$2"), "^([^/]+)/assertion/([^/]+)/(.+)$", "$1:$2:$3"))), ?g) AS ?identity)
     FILTER NOT EXISTS { GRAPH ${meta} { ?identity <${DKG}memoryLayer> ${JSON.stringify(layerName)} } FILTER(?identity != ?g) }
     ${layer === 'swm' ? `FILTER NOT EXISTS { GRAPH ${meta} { ?identity <${DKG}vmCurrentAssertion> ?vm } }` : ''}
-    ${options.includeQueryCatalog ? '' : `FILTER(!CONTAINS(STR(?g), "/meta/assertion/") && !STRSTARTS(STR(?g), ${JSON.stringify(urn + 'meta:')}))`}
+    FILTER((!CONTAINS(STR(?g), "/meta/assertion/") && !STRSTARTS(STR(?g), ${JSON.stringify(urn + 'meta:')}))
+      ${options.includeQueryCatalog ? `|| (CONTAINS(STR(?g), "/meta/assertion/") && REGEX(STRAFTER(STR(?g), "/meta/assertion/"), "^[^/]+/query-catalog-"))
+        || (STRSTARTS(STR(?g), ${JSON.stringify(urn + 'meta:')}) && REGEX(STRAFTER(STR(?g), ${JSON.stringify(urn + 'meta:')}), "^0x[0-9a-fA-F]{40}:query-catalog-"))` : ''})
     ${options.cursor ? `FILTER(STR(?g) > ${JSON.stringify(options.cursor)})` : ''}
   } ORDER BY STR(?g) LIMIT ${size + 1}`;
   const data = await executeQuery(sparql, { contextGraphId }, { maxAgeMs: UI_READ_MAX_AGE_MS });

@@ -33,9 +33,14 @@ export function useFetch<T>(
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
+  const inFlightRef = useRef<number | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = true) => {
+    // A slow poll must still be allowed to publish its result. Interval ticks
+    // coalesce while it runs; explicit refreshes may supersede an old read.
+    if (!force && inFlightRef.current !== null) return;
     const generation = ++generationRef.current;
+    inFlightRef.current = generation;
     try {
       const result = await fetcher();
       if (mountedRef.current && generation === generationRef.current) {
@@ -60,6 +65,7 @@ export function useFetch<T>(
         setError(err.message);
       }
     } finally {
+      if (inFlightRef.current === generation) inFlightRef.current = null;
       if (mountedRef.current && generation === generationRef.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -73,7 +79,7 @@ export function useFetch<T>(
     let timer: ReturnType<typeof setInterval> | null = null;
     const startTimer = () => {
       if (intervalMs <= 0 || timer) return;
-      timer = setInterval(load, intervalMs);
+      timer = setInterval(() => { void load(false); }, intervalMs);
     };
     const stopTimer = () => {
       if (!timer) return;
@@ -89,12 +95,13 @@ export function useFetch<T>(
     const onVisibility = () => {
       if (typeof document === 'undefined') return;
       if (document.hidden) stopTimer();
-      else { load(); startTimer(); }
+      else { void load(false); startTimer(); }
     };
     if (typeof document === 'undefined' || !document.hidden) startTimer();
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
     return () => {
       generationRef.current++;
+      inFlightRef.current = null;
       mountedRef.current = false;
       stopTimer();
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
