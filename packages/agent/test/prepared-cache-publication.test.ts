@@ -1,3 +1,5 @@
+import { createBoundedExactAssetExportCache } from '../src/sync/responder/exact-asset-export-cache.js';
+import { exactAssetExportFixture } from './fixtures/exact-asset-export.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, open, readdir, stat, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -134,4 +136,46 @@ it('closes admission and drains a held fsync before a restarted owner opens the 
   expect(await restarted.get('b')).toEqual(value);
   expect(await restarted.get('late')).toBeNull();
   expect((await readdir(f.directory)).every(name => name.endsWith('.prepared'))).toBe(true);
+});
+
+it('retains failed temporary cleanup ownership and blocks writes until its bytes are reclaimed', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'prepared-orphan-'));
+  cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  const cache = createPreparedContentCache(resolvePreparedContentCacheConfig({ enabled: true, directory, maxBytes: 1024 })!);
+  const large = { body: new Uint8Array(300), plainBytes: 300 };
+  const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  let peak = 0;
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const handle = await real.open(...args);
+    if (args[1] === 'wx') {
+      const write = handle.writeFile.bind(handle);
+      vi.spyOn(handle, 'writeFile').mockImplementation(async (...data) => {
+        await write(...data);
+        const sizes = await Promise.all((await readdir(directory)).map(async name => (await stat(join(directory, name))).size));
+        peak = Math.max(peak, sizes.reduce((sum, size) => sum + size, 0));
+      });
+    }
+    return handle;
+  });
+  vi.mocked(rename).mockRejectedValueOnce(new Error('publication failure'));
+  vi.mocked(unlink).mockRejectedValue(new Error('cleanup failure'));
+  await expect(cache.put('a', large)).resolves.toBeUndefined();
+  expect((await readdir(directory)).filter(name => name.endsWith('.tmp'))).toHaveLength(1);
+  const opened = vi.mocked(open).mock.calls.length;
+  await expect(cache.put('b', large)).resolves.toBeUndefined();
+  expect(vi.mocked(open).mock.calls).toHaveLength(opened);
+  const fixture = exactAssetExportFixture(3);
+  const exporter = createBoundedExactAssetExportCache({ store: fixture.store, budget: fixture.budget, preparedContentCache: cache });
+  const lease = (await exporter.acquireEncoded(fixture))!;
+  try {
+    expect(lease.wholePayloadExports).toBe(1);
+    await expect(lease.assertCurrent()).resolves.toBeUndefined();
+  } finally { lease.release(); }
+  expect(vi.mocked(open).mock.calls).toHaveLength(opened);
+  vi.mocked(unlink).mockImplementation(real.unlink);
+  await cache.put('b', large); await cache.put('c', large);
+  expect(await cache.get('c')).toEqual(large);
+  expect((await readdir(directory)).every(name => name.endsWith('.prepared'))).toBe(true);
+  expect(peak).toBeLessThanOrEqual(1024);
+  await cache.closeAndDrain();
 });

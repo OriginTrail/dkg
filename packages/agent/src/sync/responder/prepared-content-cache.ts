@@ -87,6 +87,7 @@ export function createPreparedContentCache(
   const directory = resolve(options.directory);
   // Iteration order is oldest first; successful reads/writes move to the end.
   const entries = new Map<string, { size: number; expiresAt: number }>();
+  const ownedTemps = new Set<string>();
   let initialized = false, closed = false, total = 0;
   let tail: Promise<unknown> = Promise.resolve();
   // Close admission synchronously, then drain every admitted filesystem task.
@@ -95,11 +96,20 @@ export function createPreparedContentCache(
     if (closed) return Promise.resolve(fallback);
     const next = tail.then(async () => {
       let phase: 'initialize' | 'read' | 'publish' = 'initialize';
-      try { await initialize(); phase = operation; await reclaimExpired(); await evict(); return await work(); }
+      try { await initialize(); phase = operation; await reclaimTemps(); await reclaimExpired(); await evict(); return await work(); }
       catch (error) { try { onError(error, phase); } catch { /* diagnostics cannot deny a valid response */ } return fallback; }
     });
     tail = next.then(() => undefined);
     return next;
+  };
+  const removeTemp = async (path: string) => {
+    await unlink(path).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    ownedTemps.delete(path);
+  };
+  const reclaimTemps = async () => {
+    // A failed unlink still owns physical staging bytes. No further admission
+    // may spend that allowance until cleanup succeeds, including after failed publication.
+    for (const path of ownedTemps) await removeTemp(path);
   };
   const remove = async (name: string) => {
     await unlink(join(directory, name)).catch(error => { if (error.code !== 'ENOENT') throw error; });
@@ -199,6 +209,7 @@ export function createPreparedContentCache(
         if (total + size > maxBytes) return;
         const temp = join(directory, `${name}.${randomUUID()}.tmp`);
         const handle = await open(temp, 'wx', 0o600);
+        ownedTemps.add(temp);
         try {
           const prefix = Buffer.alloc(4); prefix.writeUInt32BE(header.byteLength);
           await handle.writeFile(prefix); await handle.writeFile(header); await handle.writeFile(value.body);
@@ -206,12 +217,13 @@ export function createPreparedContentCache(
           // Rename is the publication point. A failed rename preserves every
           // retained entry. Post-commit cleanup is retried before the next IO.
           await rename(temp, join(directory, name));
+          ownedTemps.delete(temp);
           if (old) total -= old.size;
           entries.delete(name); entries.set(name, { size, expiresAt: createdAt + ttlMs }); total += size;
           await evict();
         } finally {
           await handle.close().catch(() => {});
-          await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; });
+          await removeTemp(temp);
         }
       });
     },
