@@ -323,7 +323,7 @@ describe('durable sync lifecycle chain binding', () => {
       let release!: () => void;
       const started = new Promise<void>(resolve => { entered = resolve; });
       const held = new Promise<void>(resolve => { release = resolve; });
-      const physical = vi.spyOn(LifecycleSyncMethods.prototype, 'runLegacyDurableSyncForContextGraphDetailed')
+      const physical = vi.spyOn(LifecycleSyncMethods.prototype, 'runAdmittedLegacyDurableContextGraph')
         .mockImplementationOnce(async () => {
           entered();
           await held;
@@ -631,7 +631,7 @@ describe('durable sync lifecycle chain binding', () => {
 
   it.each(['complete', 'responder-busy', 'stream-interrupted', undefined] as const)(
     'carries the stream outcome %s from the per-graph run to the exact-sync result', async (outcome) => {
-      const perGraph = vi.spyOn(LifecycleSyncMethods.prototype, 'runLegacyDurableSyncForContextGraphDetailed')
+      const perGraph = vi.spyOn(LifecycleSyncMethods.prototype, 'runAdmittedLegacyDurableContextGraph')
         .mockResolvedValue({
           result: {} as Awaited<ReturnType<typeof runDurableSync>>,
           exactFetchDisposition: outcome === 'complete' ? 'found' : 'incomplete',
@@ -662,7 +662,7 @@ describe('durable sync lifecycle chain binding', () => {
     });
 
   it('reports no stream outcome for a run over several graphs', async () => {
-    vi.spyOn(LifecycleSyncMethods.prototype, 'runLegacyDurableSyncForContextGraphDetailed')
+    vi.spyOn(LifecycleSyncMethods.prototype, 'runAdmittedLegacyDurableContextGraph')
       .mockResolvedValue({
         result: {} as Awaited<ReturnType<typeof runDurableSync>>,
         exactFetchDisposition: 'incomplete',
