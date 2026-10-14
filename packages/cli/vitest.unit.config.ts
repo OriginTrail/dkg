@@ -42,11 +42,17 @@ export default defineConfig({
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
+          // Pure: in-process status route and a chain adapter over scripted endpoints.
+          'test/status-chain-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/query-catalog-profile-route.test.ts',
+          'test/context-graph-route-read-authority.test.ts',
+          'test/knowledge-assets-local-curator-read.test.ts',
+      'test/publisher-jobs-graph-inventory.test.ts',
+          'test/genui-read-authority.test.ts',
       'test/store-unavailable-response.test.ts',
           'test/status-command-store.test.ts',
           // Local-LLM command parsing/session controls are pure and never spawn
@@ -84,6 +90,7 @@ export default defineConfig({
           // Private-CG bootstrap readiness: clean-empty responses are only
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
+          'test/context-graph-authority-attribution.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
           // Subscribing by an on-chain name hash (Base #33): route, catch-up
           // text and the public status summary. Pure handler, no hardhat.
@@ -134,6 +141,10 @@ export default defineConfig({
           'test/catchup-runner.test.ts',
           'test/catchup-runner-worker-impl.test.ts',
           'test/catchup-runner-worker-lifecycle.test.ts',
+          // The bounded wait of a catch-up job for its graph's selected SWM
+          // lane, on its own with fake timers; the job-level cases stay in the
+          // bridge suite above.
+          'test/catchup-selected-lane.test.ts',
           // W1 §6.6/§6.7 — catch-up request/job accounting (I7–I9) and the
           // producer-quiescent shutdown drain. Real WorkerCatchupRunner behind
           // a fake worker thread; no hardhat.
@@ -242,12 +253,19 @@ export default defineConfig({
           'test/protocol-persistence.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
+          'test/memory-vector-tenant-isolation.test.ts',
           'test/snapshot-page-index-store.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
+          'test/oxigraph-server-native.test.ts',
+          'test/oxigraph-server-wal.test.ts',
+          'test/oxigraph-managed-start-options.test.ts',
+          'test/oxigraph-wal-maintenance.test.ts',
+          'test/oxigraph-wal.test.ts',
+          'test/pre-agent-store-boot.test.ts',
           'test/oxigraph-launch-strategy.test.ts',
           'test/oxigraph-parent-watchdog.test.ts',
           'test/oxigraph-orphan-lifecycle.test.ts',
@@ -275,6 +293,8 @@ export default defineConfig({
           'test/knowledge-asset-cli-smoke.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
+          'test/okf-subgraph-roundtrip.test.ts',
+          'test/okf-scoped-verify.test.ts',
           'test/epcis-route-readiness.test.ts',
           // Notifications-pane redesign (A3) — assertion_activity emitter
           // helper. Pure logic + a tmp SQLite DashboardDB, no hardhat.
@@ -310,6 +330,7 @@ export default defineConfig({
           'test/daemon-context-graph-bootstrap.test.ts',
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
+          'test/daemon-managed-boot-wiring.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

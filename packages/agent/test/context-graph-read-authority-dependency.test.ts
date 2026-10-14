@@ -5,6 +5,7 @@ import {
   ContextGraphReadAuthorityUnavailableError,
   contextGraphReadAuthorityDependencyOf,
   resolveContextGraphReadAuthorityDecision,
+  resolveScopedContextGraphQueryReadAuthority,
   type ContextGraphReadAuthorityInput,
 } from '../src/context-graph-read-authority.js';
 
@@ -43,6 +44,57 @@ function input(overrides: Partial<ContextGraphReadAuthorityInput> = {}): Context
     ...overrides,
   };
 }
+
+describe('read-authority grant scope', () => {
+  const caller = '0xabc';
+  it.each([
+    { name: 'registered public', scope: 'public', overrides: { getRegisteredAuthority: async () => ({ kind: 'public' as const, onChainId: 5n }) } },
+    { name: 'registered caller', scope: 'caller', overrides: { callerAgentAddress: caller, isAgentAllowed: () => true, getRegisteredAuthority: async () => ({ kind: 'private' as const, onChainId: 5n, participantAgents: [caller] }) } },
+    { name: 'registered node', scope: 'node', overrides: { hasLocalAgentInRoster: () => true, getRegisteredAuthority: async () => ({ kind: 'private' as const, onChainId: 5n, participantAgents: [caller] }) } },
+    { name: 'RFC64 caller', scope: 'caller', overrides: { callerAgentAddress: caller, isAgentAllowed: () => true, resolveRfc64PrivateRoster: () => [caller] } },
+    { name: 'RFC64 node', scope: 'node', overrides: { defaultAgentAddress: caller, isAgentAllowed: () => true, resolveRfc64PrivateRoster: () => [caller] } },
+    { name: 'RFC64 public', scope: 'public', overrides: { hasAcceptedRfc64PublicPolicy: true } },
+    { name: 'legacy public', scope: 'public', overrides: { isPrivateLocalGraph: async () => false } },
+    { name: 'legacy caller gate', scope: 'caller', overrides: { callerAgentAddress: caller, getLocalAgentGate: async () => [caller], isAgentAllowed: () => true } },
+    { name: 'legacy node gate', scope: 'node', overrides: { getLocalAgentGate: async () => [caller], hasLocalAgentInRoster: () => true } },
+    { name: 'legacy caller participant', scope: 'caller', overrides: { callerAgentAddress: caller, getLegacyParticipants: async () => [caller] } },
+    { name: 'legacy node participant', scope: 'node', overrides: { defaultAgentAddress: caller, getLegacyParticipants: async () => [caller] } },
+    { name: 'legacy node subscription', scope: 'node', overrides: { allowSubscriptionFallback: true, hasLegacySubscription: true } },
+    { name: 'legacy node peer', scope: 'node', overrides: { getAllowedPeers: async () => ['peer-local'] } },
+    { name: 'legacy node identity participant', scope: 'node', overrides: { getLegacyParticipants: async () => ['12'], getLocalIdentityId: async () => 12n } },
+    { name: 'legacy node invitation', scope: 'node', overrides: { getLegacyParticipants: async () => ['another-node'], getAllowedPeers: async () => ['peer-local'] } },
+    { name: 'legacy edge subscription', scope: 'node', overrides: { getLegacyParticipants: async () => ['another-node'], allowSubscriptionFallback: true, hasLegacySubscription: true } },
+  ] satisfies Array<{ name: string; scope: string; overrides: Partial<ContextGraphReadAuthorityInput> }>)(
+    '$name explicitly reports its grant scope', async ({ scope, overrides }) => {
+      expect(await resolveContextGraphReadAuthorityDecision(input(overrides))).toMatchObject({ outcome: 'allowed', grantScope: scope });
+    },
+  );
+  it.each([
+    { name: 'participant', overrides: { defaultAgentAddress: caller, getLegacyParticipants: async () => [caller] } },
+    { name: 'subscription', overrides: { allowSubscriptionFallback: true, hasLegacySubscription: true } },
+    { name: 'peer', overrides: { getAllowedPeers: async () => ['peer-local'] } },
+    { name: 'identity', overrides: { getLegacyParticipants: async () => ['12'], getLocalIdentityId: async () => 12n } },
+    { name: 'invitation', overrides: { getLegacyParticipants: async () => ['another-node'], getAllowedPeers: async () => ['peer-local'] } },
+    { name: 'edge subscription', overrides: { getLegacyParticipants: async () => ['another-node'], allowSubscriptionFallback: true, hasLegacySubscription: true } },
+  ] satisfies Array<{ name: string; overrides: Partial<ContextGraphReadAuthorityInput> }>)(
+    'keeps node-only $name evidence node-scoped with an unrelated bearer caller', async ({ overrides }) => {
+      expect(await resolveContextGraphReadAuthorityDecision(input({ ...overrides, callerAgentAddress: '0xunrelated' })))
+        .toMatchObject({ outcome: 'allowed', grantScope: 'node' });
+    },
+  );
+  it.each([undefined, caller])('keeps local working-memory grants scoped to caller %s', async callerAgentAddress => {
+    const decision = await resolveScopedContextGraphQueryReadAuthority({
+      contextGraphId: 'cg-2834', view: 'working-memory', callerAgentAddress, targetsSharedMemory: false,
+      resolveAuthority: async () => resolveContextGraphReadAuthorityDecision(input()),
+      isLocalFirstUnregistered: async () => true,
+      readCurrentBinding: () => ({}),
+    });
+    expect(decision).toMatchObject({ outcome: 'allowed', reason: 'local-first-working-memory-owner', grantScope: callerAgentAddress ? 'caller' : 'node' });
+  });
+  it('denial conveys no grant', async () => {
+    expect(await resolveContextGraphReadAuthorityDecision(input())).toMatchObject({ outcome: 'denied', grantScope: 'none' });
+  });
+});
 
 describe('read-authority dependency attribution (#2834)', () => {
   it('attributes a registration-status store failure to the store', async () => {

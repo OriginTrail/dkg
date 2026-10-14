@@ -388,6 +388,30 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
   });
 
+  it.each([2, 4])('refuses an unsettled revocation during transport read %s', async (readToHold) => {
+    const stack = createChurnStack();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let pending: Promise<unknown> | undefined;
+    const { host, ready } = churningHost({
+      withStack: stack, seed: profileKeys, churn: readToHold === 4 ? [2, 3] : [],
+      during: (read, context) => { if (read === readToHold) pending = revokeMemberKey(context); },
+    });
+    await ready;
+    const insert = stack.innerStore.insert.bind(stack.innerStore);
+    vi.spyOn(stack.innerStore, 'insert').mockImplementation(async (quads, options) => {
+      if (quads.some((quad) => quad.predicate === DKG_ONTOLOGY.DKG_REVOKED_AT)) await gate;
+      return insert(quads, options);
+    });
+    const encrypt = vi.fn();
+    try {
+      await expect(resolve(host).then(encrypt)).rejects.toMatchObject(REVISION_MOVED);
+      expect(stack.projection.recipientKeyRouteFence.hasPendingWrites).toBe(true);
+      expect(encrypt).not.toHaveBeenCalled();
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+    } finally { release(); await pending; }
+  });
+
   it('never returns the revoked key when it is revoked while the last window is read', async () => {
     const { host, ready, context } = churningHost({
       seed: profileKeys,

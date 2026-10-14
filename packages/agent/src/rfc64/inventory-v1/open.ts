@@ -1,3 +1,4 @@
+import type { Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 import {
   closeSync,
   existsSync,
@@ -91,7 +92,6 @@ import type {
   EvmAddressV1,
   KaIdV1,
   SignedAuthorCatalogHeadEnvelopeV1,
-  SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
 import {
   createProductionInventoryV1LifecycleAdapter,
@@ -530,23 +530,19 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.compareAndSwapAppliedCatalogHeadV1(input);
   }
 
-  readSwmAuthorInventoryHeadDigestV1(
-    inventoryScopeDigest: Digest32V1,
-    authorAddress: EvmAddressV1,
-  ): Digest32V1 | null {
+  readSwmAuthorInventoryHeadDigestV1(...input: Parameters<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']>): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']> {
     this.requireOpen();
-    return this.#candidate.readSwmAuthorInventoryHeadDigestV1(inventoryScopeDigest, authorAddress);
+    return this.#candidate.readSwmAuthorInventoryHeadDigestV1(...input);
   }
 
-  readSwmAuthorInventorySnapshotV1(
-    inventoryScopeDigest: Digest32V1,
-    authorAddress: EvmAddressV1,
-  ): SwmAuthorInventorySnapshotV1 | null {
+  readSwmAuthorInventoryRowV1(...input: Parameters<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryRowV1']>): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryRowV1']> {
     this.requireOpen();
-    return this.#candidate.readSwmAuthorInventorySnapshotV1(
-      inventoryScopeDigest,
-      authorAddress,
-    );
+    return this.#candidate.readSwmAuthorInventoryRowV1(...input);
+  }
+
+  readSwmAuthorInventorySnapshotV1(...input: Parameters<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventorySnapshotV1']>): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventorySnapshotV1']> {
+    this.requireOpen();
+    return this.#candidate.readSwmAuthorInventorySnapshotV1(...input);
   }
 
   deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void {

@@ -5,6 +5,7 @@ import {
   diffRpcRequestTiming,
   recordRpcAdmissionWait,
   recordRpcEndpointLatency,
+  recordFailedRpcAdmissionWait,
   resetRpcRequestTimingForTests,
   snapshotRpcRequestTiming,
 } from '../src/rpc-request-timing.js';
@@ -67,6 +68,22 @@ describe('RPC request timing accumulator', () => {
     expect(delta.background.admissionWait.buckets).toEqual([0, 1, 0, 1, 0, 0]);
     expect(delta.background.endpointLatency).toMatchObject({ count: 1, totalMs: 200 });
     expect(delta.foreground.admissionWait.count).toBe(0);
+  });
+
+  it('preserves failed wait durations and their cancellation owners in non-draining interval diffs', () => {
+    const before = snapshotRpcRequestTiming();
+    recordFailedRpcAdmissionWait('foreground', 4_000, 'deadline');
+    recordFailedRpcAdmissionWait('foreground', 200, 'cancelled');
+    recordFailedRpcAdmissionWait('background', 0, 'rejected');
+    const after = snapshotRpcRequestTiming();
+    const delta = diffRpcRequestTiming(before, after);
+    expect(delta.foreground.admissionDeadlineWait).toMatchObject({ count: 1, totalMs: 4_000 });
+    expect(delta.foreground.admissionCancelledWait).toMatchObject({ count: 1, totalMs: 200 });
+    expect(delta.background.admissionRejectedWait).toMatchObject({ count: 1, totalMs: 0 });
+    expect(delta.foreground.admissionWait.count).toBe(0);
+    expect(delta.foreground.endpointLatency.count).toBe(0);
+    expect(snapshotRpcRequestTiming()).toEqual(after);
+    expect(Object.isFrozen(after.foreground.admissionDeadlineWait.buckets)).toBe(true);
   });
 });
 
