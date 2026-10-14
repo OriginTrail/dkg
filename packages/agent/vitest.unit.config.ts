@@ -19,6 +19,8 @@ export default defineConfig({
     coverage: coverageForPackage("agent"),
     include: [
       "test/public-snapshot-evidence.test.ts",
+      "test/public-snapshot-serving-runtime.test.ts",
+      "test/public-snapshot-admission.test.ts",
       "test/assertion-write-history.test.ts",
       "test/authority-index-snapshot-runtime.test.ts",
       "test/authority-index-snapshot-service.test.ts",
