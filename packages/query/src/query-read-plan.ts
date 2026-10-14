@@ -10,7 +10,7 @@ export type QueryReadPlan = { kind: 'unscoped' } | {
   kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
   execution: ScopedRoute['execution']; partitionSelection: ContentPartitionSelection;
   discovery: {
-    mode: 'admission-owned' | 'shared'; expandGraphVariables: boolean;
+    catalog: 'none' | 'shared' | 'admission-owned';
     contentPrefixes: readonly { root: string; prefix: string }[];
     privatePartitions: boolean;
   };
@@ -38,10 +38,10 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     .map(({ root, family }) => ({ root, prefix: `${root}/${family === 'data' ? '_verifiable_memory/' : ''}` })) : [];
   return { kind: 'scoped', contextGraphId: options.contextGraphId, graphs, execution,
     partitionSelection: options.excludeWorkingMemoryPartitions ? 'published-content' : 'all-content',
-    discovery: { expandGraphVariables, contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,
+    discovery: { contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,
       // Other routes can depend on a decorator refresh queued behind an owned slot.
-      mode: supportsCompleteAdmission && expandGraphVariables && !options.includePrivate
-        ? 'admission-owned' : 'shared',
+      catalog: !expandGraphVariables ? 'none'
+        : supportsCompleteAdmission && !options.includePrivate ? 'admission-owned' : 'shared',
     },
   };
 }

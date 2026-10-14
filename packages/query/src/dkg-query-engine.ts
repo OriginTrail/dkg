@@ -352,30 +352,28 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       Boolean(this.store.withQueryReadAdmission && this.store.graphEnumerationVisibility));
-    const owned = plan.kind === 'scoped' && plan.discovery.mode === 'admission-owned';
-    const execute = async () => {
-      const reads = createQueryStoreReadContext(this.store, options);
-      const context: QueryExecutionContext = plan.kind === 'scoped'
-        ? await this.prepareScopedExecution(plan, reads)
-        : { plan, reads, catalog: reads.catalog, variableContentGraphs: [] };
-      return this.queryPrepared(initialGraphScope, options, context);
-    };
-    return owned ? this.store.withQueryReadAdmission!(execute, storeOptions(options)) : execute();
+    const reads = createQueryStoreReadContext(this.store, options);
+    return plan.kind === 'scoped'
+      ? this.queryScoped(initialGraphScope, options, plan, reads)
+      : this.queryPrepared(initialGraphScope, options, { plan, reads, catalog: reads.catalog, variableContentGraphs: [] });
   }
 
-  private async prepareScopedExecution(plan: ScopedQueryReadPlan, reads: QueryStoreReadContext): Promise<QueryExecutionContext> {
-    const discovery = plan.discovery.expandGraphVariables
-      ? plan.discovery.mode === 'admission-owned'
-        ? await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, reads.catalog)
-        : await this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads)
-      : undefined;
-    return { plan, catalog: reads.catalog,
-      // Routing consumes one discovery callback for owned and memoized inventories.
+  private queryScoped(scope: PreparedGraphScope, options: QueryOptions | undefined,
+    plan: ScopedQueryReadPlan, reads: QueryStoreReadContext): Promise<QueryResult> {
+    const execute = (discovery: ScopedContentGraphDiscoverySnapshot | null) => this.queryPrepared(scope, options, {
+      plan, catalog: reads.catalog,
       reads: discovery ? { query: reads.query,
         listGraphsByPrefix: async prefix => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads,
       variableContentGraphs: discovery ? selectContentPartitions(
         scopedContentGraphs(discovery, plan.contextGraphId, plan.graphs.subGraphName), plan.contextGraphId, plan.partitionSelection) : [],
-    };
+    });
+    // One strategy owns catalog loading and the caller's admission lifetime.
+    switch (plan.discovery.catalog) {
+      case 'none': return execute(null);
+      case 'shared': return this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads).then(execute);
+      case 'admission-owned': return this.store.withQueryReadAdmission!(async () =>
+        execute(await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, reads.catalog)), storeOptions(options));
+    }
   }
 
   private async queryPrepared(initialGraphScope: PreparedGraphScope, options: QueryOptions | undefined,
