@@ -305,9 +305,6 @@ export function resolveViewGraphs(
 }
 
 type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
-type QueryExecutionContext = {
-  plan: QueryReadPlan; reads: StoreReadLane; catalog: StoreReadLane; variableContentGraphs: readonly string[];
-};
 
 /**
  * Local-only query engine that executes SPARQL against this node's own
@@ -352,20 +349,23 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       Boolean(this.store.withQueryReadAdmission && this.store.graphEnumerationVisibility));
     const reads = createQueryStoreReadContext(this.store, options);
-    return plan.kind === 'scoped'
-      ? this.queryScoped(initialGraphScope, options, plan, reads)
-      : this.queryPrepared(initialGraphScope, options, { plan, reads, catalog: reads.catalog, variableContentGraphs: [] });
+    switch (plan.kind) {
+      case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
+      case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
+        plan.options.contextGraphId, plan.options, reads, reads.catalog);
+      case 'unscoped': return this.execWithExclusions(initialGraphScope, reads, options);
+    }
   }
 
   private queryScoped(scope: PreparedGraphScope, options: QueryOptions | undefined,
     plan: ScopedQueryReadPlan, reads: QueryStoreReadContext): Promise<QueryResult> {
-    const execute = (discovery: ScopedContentGraphDiscoverySnapshot | null) => this.queryPrepared(scope, options, {
-      plan, catalog: reads.catalog,
-      reads: discovery ? { query: reads.query,
-        listGraphsByPrefix: async prefix => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads,
-      variableContentGraphs: discovery ? selectContentPartitions(
-        discovery.partitions, plan.partitionSelection, plan.graphs.subGraphName, options?.authorizedWorkingMemoryOwners) : [],
-    });
+    const execute = (discovery: ScopedContentGraphDiscoverySnapshot | null) => {
+      const lane = discovery ? { query: reads.query,
+        listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
+      const variableContentGraphs = discovery ? selectContentPartitions(
+        discovery.partitions, plan.partitionSelection, plan.graphs.subGraphName, options?.authorizedWorkingMemoryOwners) : [];
+      return this.executeScoped(scope, options, plan, lane, variableContentGraphs);
+    };
     // One strategy owns catalog loading and the caller's admission lifetime.
     switch (plan.discovery.catalog) {
       case 'none': return execute(null);
@@ -375,66 +375,40 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
   }
 
-  private async queryPrepared(initialGraphScope: PreparedGraphScope, options: QueryOptions | undefined,
-    context: QueryExecutionContext): Promise<QueryResult> {
-    const { reads, plan } = context;
-    let routedScope = initialGraphScope;
-
-    // ── V10 view-based routing ────────────────────────────────────────
-    if (plan.kind === 'scoped') {
-      const { staticContentGraphs, subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
-      const partitions = new Map<string, string[]>();
-      for (const { root, prefix } of plan.discovery.contentPrefixes) {
-        partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
-      }
-      const allowedGraphs = staticContentGraphs.flatMap(graph => [graph, ...(partitions.get(graph) ?? [])]);
-      const privateAllowList = plan.discovery.privatePartitions
-        ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(
-            plan.contextGraphId, reads, subGraphName,
-          ))]
-        : staticPrivateAllowList;
-      const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
-      const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...context.variableContentGraphs])];
-      // Explicit GRAPH IRIs remain limited to the static route-specific
-      // allow-list. GRAPH variables only gain known same-CG content
-      // partitions for callers that explicitly opt into broad count scans;
-      // legacy scoped routes keep their selected memory-layer contract.
-      assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
-      routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
-        initialGraphScope,
-        variableAllowedGraphs,
-      ));
+  private async executeScoped(initialGraphScope: PreparedGraphScope, options: QueryOptions | undefined,
+    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[]): Promise<QueryResult> {
+    const { staticContentGraphs, subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
+    const partitions = new Map<string, string[]>();
+    for (const { root, prefix } of plan.discovery.contentPrefixes) {
+      partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
     }
-
-    if (plan.kind === 'view') {
-      return this.queryWithView(initialGraphScope, plan.options.view, plan.options.contextGraphId, plan.options, reads, context.catalog);
+    const allowedGraphs = staticContentGraphs.flatMap(graph => [graph, ...(partitions.get(graph) ?? [])]);
+    const privateAllowList = plan.discovery.privatePartitions
+      ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.contextGraphId, reads, subGraphName))]
+      : staticPrivateAllowList;
+    const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
+    const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...variableContentGraphs])];
+    // Explicit IRIs retain static route authority; only opted-in variables gain
+    // classified same-CG content selected for this caller and sub-graph.
+    assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
+    const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs));
+    const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
+      routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads));
+    const route = plan.execution;
+    if (route.kind === 'combined') {
+      const dataScope = await resolve(route.data);
+      const sharedScope = await resolve(route.sharedMemory);
+      const dataResult = await this.execCallerQuery(dataScope, reads);
+      const smResult = await this.execCallerQuery(sharedScope, reads);
+      return mergeSharedMemoryAndDataResults(dataResult, smResult);
     }
+    return this.execWithExclusions(await resolve(route.target), reads, options);
+  }
 
-    // ── Legacy routing (V9 compat) ────────────────────────────────────
-    let effectiveScope = routedScope;
-
-    if (plan.kind === 'scoped') {
-      const route = plan.execution;
-      const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
-        routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads));
-      if (route.kind === 'combined') {
-        const dataScope = await resolve(route.data);
-        const sharedScope = await resolve(route.sharedMemory);
-        const dataResult = await this.execCallerQuery(dataScope, reads);
-        const smResult = await this.execCallerQuery(sharedScope, reads);
-        return mergeSharedMemoryAndDataResults(dataResult, smResult);
-      }
-      effectiveScope = await resolve(route.target);
-    }
-
-    const result = await this.execAndNormalize(effectiveScope, reads);
-
-    // Strip results originating from excluded graphs (e.g. private CGs).
-    if (options?.excludeGraphPrefixes?.length && result.bindings.length > 0) {
-      return this.filterExcludedGraphs(result, options.excludeGraphPrefixes);
-    }
-
-    return result;
+  private async execWithExclusions(scope: PreparedGraphScope, reads: StoreReadLane, options?: QueryOptions): Promise<QueryResult> {
+    const result = await this.execAndNormalize(scope, reads);
+    return options?.excludeGraphPrefixes?.length && result.bindings.length > 0
+      ? this.filterExcludedGraphs(result, options.excludeGraphPrefixes) : result;
   }
 
   /**
@@ -903,13 +877,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const filteredInventory = visible ? undefined
       : await reads.listGraphsByPrefix(contextGraphDataUri(contextGraphId));
     const catalog = await readScopedContentGraphCatalog(contextGraphId, reads.query, Boolean(visible));
-    const inventory = visible
+    const inventory = (visible
       ? [...catalog.graphs].filter(graph => visible.call(this.store, graph))
-      : filteredInventory!;
+      : filteredInventory!).filter(graph =>
+        // Canonical root VM partitions retain the legacy read-both contract.
+        graph.startsWith(`${contextGraphDataUri(contextGraphId)}/_verifiable_memory/`)
+        || !isKnownChildContextGraphPartition(graph, catalog.childContextGraphs));
     const partitions: ContentPartition[] = [];
     for (const graph of inventory) {
       const partition = classifyScopedContentGraph(graph, contextGraphId,
-        catalog.subGraphs, catalog.assertionGraphs, catalog.childContextGraphs);
+        catalog.subGraphs, catalog.assertionGraphs, catalog.childContextGraphs, { includeUnregisteredSubGraphs: true });
       if (partition) partitions.push(partition);
     }
     return { inventory, partitions };
