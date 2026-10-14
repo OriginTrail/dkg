@@ -56,7 +56,7 @@ import {
   type PreparedQuad,
 } from './families/index.js';
 import { timestampQuads } from './families/generated.js';
-import { BASE_KEYS, lastModifiedOf } from './frontmatter-keys.js';
+import { BASE_KEYS, lastModifiedOf, timestampIsProducerKey } from './frontmatter-keys.js';
 import { dateTimeLexical } from './timestamps.js';
 import { parseVerified, trustTierOf, conceptStatus } from './trust.js';
 import type {
@@ -286,7 +286,8 @@ export function parseBody(body: string): ParsedBody {
 /**
  * A `type` or `resource` shaped like an IRI that the node's write rule refuses
  * (`https://example.org/%zz`): written as a `schema:` name and a literal, so
- * the concept is still written, with a warning.
+ * the concept is still written, with a warning. And a legacy `timestamp` given
+ * a list or mapping, which gives no time: kept whole, with a warning (§13.1).
  */
 function baseFieldDiagnostics(frontmatter: Record<string, unknown>): Omit<OkfWarning, 'conceptId'>[] {
   const out: Omit<OkfWarning, 'conceptId'>[] = [];
@@ -297,6 +298,10 @@ function baseFieldDiagnostics(frontmatter: Record<string, unknown>): Omit<OkfWar
   const resource = safeString(frontmatter.resource);
   if (frontmatter.resource != null && isMalformedIri(resource)) {
     out.push({ code: 'invalid-iri', message: `\`resource\` "${resource}" is not a valid IRI (RFC 3987); kept as a literal` });
+  }
+  // Once a `generated.at` supersedes it, `timestamp` is a producer key, which any value suits.
+  if (frontmatter.timestamp != null && !isScalar(frontmatter.timestamp) && !timestampIsProducerKey(frontmatter)) {
+    out.push({ code: 'malformed-family', message: '`timestamp` should be a single value, not a mapping or list (§13.1); kept verbatim' });
   }
   return out;
 }

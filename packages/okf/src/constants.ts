@@ -86,7 +86,7 @@ export const OKF_GENERATED_AT = OKF_NS + 'generatedAt';
  * the value it names: a producer key's value (`dateModified`,
  * `date_modified`), and the legacy `timestamp`, which is written unmarked, as
  * the v0.1 mapper wrote it, and named only where a producer value holds the
- * same term.
+ * same term, or where it is a list or mapping, kept whole (it gives no time).
  */
 export const OKF_PRODUCER_DATE_MODIFIED = OKF_NS + 'producerDateModified';
 export const OKF_LEGACY_TIMESTAMP = OKF_NS + 'legacyTimestamp';

@@ -8,7 +8,8 @@
  * marker holding the same term: `generated.at` its own predicate
  * (`okf:generatedAt`), a producer value `okf:producerDateModified`. The legacy
  * `timestamp` is written unmarked, as the v0.1 mapper wrote it, and is named
- * (`okf:legacyTimestamp`) only where a producer value holds the same term.
+ * (`okf:legacyTimestamp`) only where a producer value holds the same term, or
+ * where it is a list or mapping, kept whole, which gives no time.
  * The `generated` family's fields are the shared definitions in `specs.ts`,
  * and which of the two keys gives the time (the §13.1 precedence) is the
  * shared key policy's (`frontmatter-keys.ts`); this codec writes each key's
@@ -18,8 +19,8 @@
 import { OKF_GENERATED_AT, OKF_LEGACY_TIMESTAMP, OKF_PRODUCER_DATE_MODIFIED, SCHEMA_DATE_MODIFIED } from '../constants.js';
 import { termValue, type ExportContext } from '../decode-terms.js';
 import { timestampIsProducerKey } from '../frontmatter-keys.js';
-import { dateTerm, genericPredicate, genericQuads, valueToTerms } from '../terms.js';
-import { last } from '../utils.js';
+import { dateTerm, genericPredicate, genericQuads, jsonTerm, valueToTerms } from '../terms.js';
+import { isScalar, last } from '../utils.js';
 import type { Quad } from '../types.js';
 import { decodeMapping, keptVerbatim, type Read } from './decode-fields.js';
 import { prepareFamily, type PreparedQuad } from './encode.js';
@@ -63,10 +64,17 @@ function producerDateTerms(frontmatter: Record<string, unknown>): Set<string> {
  * supersedes it, a producer key, preserved as `schema:timestamp`. The legacy
  * time is unmarked, as the v0.1 mapper wrote it, unless a producer value
  * holds the same term: its marker would claim the one triple, so the
- * timestamp is named too.
+ * timestamp is named too. A list or mapping, which gives no time, is kept
+ * whole as one `rdf:JSON` value and always named, since unmarked a reader
+ * would take it for a `generated.at` kept verbatim or a producer value (the
+ * diagnostics warn for it).
  */
 export function timestampQuads(iri: string, frontmatter: Record<string, unknown>, value: unknown): Quad[] {
   if (timestampIsProducerKey(frontmatter)) return genericQuads(iri, 'timestamp', value);
+  if (!isScalar(value)) {
+    const object = jsonTerm(value);
+    return [{ subject: iri, predicate: SCHEMA_DATE_MODIFIED, object }, { subject: iri, predicate: OKF_LEGACY_TIMESTAMP, object }];
+  }
   const term = dateTerm(value);
   if (!term) return [];
   const quads: Quad[] = [{ subject: iri, predicate: SCHEMA_DATE_MODIFIED, object: term }];

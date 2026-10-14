@@ -126,8 +126,11 @@ holding the same term: `generated.at` its own predicate, `okf:generatedAt`
 (beside `okf:generatedBy`), and a producer value `okf:producerDateModified`.
 The legacy `timestamp` is written unmarked, as the v0.1 mapper writes it, so it
 maps to the same triple as before (a v0.1 bundle changes only where a producer
-key lands on `schema:dateModified`, whose values gain their marker); it is
-named (`okf:legacyTimestamp`) only where a producer value holds the same term.
+key lands on `schema:dateModified`, whose values gain their marker, or where
+the timestamp is a list or mapping); it is named (`okf:legacyTimestamp`) only
+where a producer value holds the same term, or where it is a list or mapping,
+which gives no time: that is kept whole, as one `rdf:JSON` value, with a
+warning, and the summary reports no last-modified time for it.
 Export reads the markers, so every value comes back under its own key with its
 own RDF kind. A graph written before them has the markers it lacks inferred
 before decoding (an unmarked time is the legacy `timestamp`, any other

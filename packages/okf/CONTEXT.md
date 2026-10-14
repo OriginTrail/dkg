@@ -308,7 +308,13 @@ it; the CLI summary reports it against the current time.
   `schema:dateModified`, whose values gain their marker (a store the v0.1
   mapper wrote lacks it until re-imported). The timestamp is named
   (`okf:legacyTimestamp`) only where a producer value holds the same term,
-  whose marker would otherwise claim the one triple. Export reads ownership
+  whose marker would otherwise claim the one triple, or where it is a list or
+  mapping. That gives no time, so it is kept whole, as one `rdf:JSON` value
+  with a warning, and the summary reports no last-modified time for it; the
+  v0.1 mapper wrote `String(value)` as an `xsd:dateTime` instead (a one-item
+  list a valid date, a mapping `"[object Object]"`). Once a `generated.at`
+  supersedes it, a structured `timestamp` is a producer key like any other
+  (one triple per list item, no warning). Export reads ownership
   from the markers, so `generated.at` beside a producer `dateModified:
   urn:x` or `true` keeps both keys and both RDF kinds, a lone
   `generated: { at }` comes back inside `generated`, and one value two owners

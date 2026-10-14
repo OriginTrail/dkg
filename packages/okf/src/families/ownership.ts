@@ -6,7 +6,8 @@
  * (`okf:keptVerbatim.<familyKey>`), `generated.at` by `okf:generatedAt`, a
  * producer value on `schema:dateModified` by `okf:producerDateModified`. The
  * legacy `timestamp` is left unmarked there, as the v0.1 mapper wrote it, and
- * named (`okf:legacyTimestamp`) only where a producer value holds its term. A
+ * named (`okf:legacyTimestamp`) only where a producer value holds its term or
+ * where it is a list or mapping, kept whole. A
  * graph written before values were marked (a v0.1 import, or one written
  * before a marker existed) names fewer.
  *

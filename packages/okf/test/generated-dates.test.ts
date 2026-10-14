@@ -191,7 +191,7 @@ describe('each value on schema:dateModified names its owner', () => {
     }
   });
 
-  it('writes the legacy timestamp unmarked, as v0.1 did, and names it only where a producer value holds its term', () => {
+  it('writes the legacy timestamp unmarked, as v0.1 did, and names it where a producer value holds its term', () => {
     const okfOn = (r: ReturnType<typeof importBundle>) => r.quads.filter((q) => q.subject === IRI && q.predicate.startsWith(OKF_NS));
     expect(okfOn(roundTrip("timestamp: '2026-01-01T00:00:00Z'").first)).toEqual([]);
     expect(okfOn(roundTrip("timestamp: '2026-01-01T00:00:00Z'\ndateModified: 2026-02-02T00:00:00Z").first).map((q) => q.predicate)).toEqual([OKF_PRODUCER_DATE_MODIFIED]);
@@ -216,6 +216,9 @@ describe('each value on schema:dateModified names its owner', () => {
     'timestamp: 2026-01-01T00:00:00Z\ndateModified: [2026-01-01T00:00:00Z, urn:x]',
     'generated: [a]\ntimestamp: 2026-01-01T00:00:00Z\ndateModified: 2026-02-02',
     'dateModified: 2026-01-01T00:00:00Z',
+    "timestamp: ['2026-01-01T00:00:00Z']",
+    'timestamp: { a: 1 }\ndateModified: { a: 1 }',
+    'generated: { by: human:a, at: [2026-06-30T00:00:00Z] }\ntimestamp: [2026-06-30T00:00:00Z]',
   ]) {
     it(`gives every value back to its key: ${yaml.replaceAll('\n', ' + ')}`, () => {
       const { files, first, second } = roundTrip(yaml);
@@ -282,3 +285,41 @@ describe('a graph written before values were marked reads back for compatibility
     expect(objs(importBundle(exportOf(graph)).quads, OKF_PRODUCER_DATE_MODIFIED)).toEqual([DT('2026-01-01T00:00:00Z')]);
   });
 });
+
+describe('a legacy timestamp given as a list or mapping is kept whole, with a warning', () => {
+  // A list or mapping gives no time: it is kept as one rdf:JSON value, named
+  // as the timestamp's, and no last-modified time is made of it.
+  const WARNING = '`timestamp` should be a single value, not a mapping or list (§13.1); kept verbatim';
+  const concept = (r: ReturnType<typeof importBundle>) => r.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+  const json = (value: unknown) => `"${JSON.stringify(value).replaceAll('"', '\\"')}"^^<${RDF_JSON}>`;
+  for (const [yaml, value] of [
+    ["['2026-01-01T00:00:00Z']", ['2026-01-01T00:00:00Z']],
+    ['{ when: 2026-01-01T00:00:00Z }', { when: '2026-01-01T00:00:00Z' }],
+    ['[]', []],
+  ] as const) {
+    it(`keeps timestamp: ${yaml}`, () => {
+      const { files, first, second } = roundTrip(`timestamp: ${yaml}`);
+      const c = concept(first);
+      expect(objs(c.quads, SCHEMA_DATE_MODIFIED)).toEqual([json(value)]);
+      expect(objs(c.quads, OKF_LEGACY_TIMESTAMP)).toEqual([json(value)]);
+      expect(c.trust.generatedAt).toBeNull();
+      expect(messages(first)).toContain(WARNING);
+      expect(exportedFrontmatter(files).timestamp).toEqual(value);
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      expect(messages(second)).toEqual(messages(first));
+    });
+  }
+
+  it('leaves a scalar timestamp as it was, and a structured one a producer key once generated.at supersedes it', () => {
+    const scalar = concept(roundTrip("timestamp: '2026-01-01T00:00:00Z'").first);
+    expect(objs(scalar.quads, SCHEMA_DATE_MODIFIED)).toEqual([DT('2026-01-01T00:00:00Z')]);
+    expect(objs(scalar.quads, OKF_LEGACY_TIMESTAMP)).toEqual([]);
+    const { first } = roundTrip('generated: { by: human:a, at: 2026-06-30T00:00:00Z }\ntimestamp: [a, b]');
+    const c = concept(first);
+    expect(objs(c.quads, SCHEMA_NS + 'timestamp').sort()).toEqual(['"a"', '"b"']);
+    expect(objs(c.quads, OKF_LEGACY_TIMESTAMP)).toEqual([]);
+    expect(c.trust.generatedAt).toBe('2026-06-30T00:00:00Z');
+    expect(messages(first)).not.toContain(WARNING);
+  });
+});
+
