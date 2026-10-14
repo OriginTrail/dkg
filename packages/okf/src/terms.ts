@@ -11,6 +11,7 @@ import {
   XSD_DATE,
   XSD_DATE_TIME,
   XSD_DECIMAL,
+  XSD_DOUBLE,
   XSD_INTEGER,
 } from './constants.js';
 import { conceptIdToIri, resolveLinkTarget } from './paths.js';
@@ -91,6 +92,24 @@ export function dateTerm(value: unknown): string | null {
   return literalTerm(lexical);
 }
 
+/**
+ * A YAML number as a typed literal whose lexical form its datatype accepts.
+ * `String()` writes a number positionally (`30`, `0.5`) or, very small or very
+ * large, with an exponent (`1e-7`, `1e+21`). A positional one is an
+ * `xsd:integer` or `xsd:decimal`. Neither lexical space has an exponent, and
+ * the positional form of such a number is outside what a store computes with
+ * (Oxigraph: 64-bit integers, 18-digit decimals), so an exponent one is an
+ * `xsd:double`, written as `String()` writes it, and so is a value no decimal
+ * holds (`.inf` as `INF`, `.nan` as `NaN`).
+ */
+export function numberTerm(value: number): string {
+  if (Number.isNaN(value)) return typedLiteralTerm('NaN', XSD_DOUBLE);
+  if (!Number.isFinite(value)) return typedLiteralTerm(value > 0 ? 'INF' : '-INF', XSD_DOUBLE);
+  const lexical = String(value);
+  if (/e/i.test(lexical)) return typedLiteralTerm(lexical, XSD_DOUBLE);
+  return typedLiteralTerm(lexical, Number.isInteger(value) ? XSD_INTEGER : XSD_DECIMAL);
+}
+
 /** Actor-convention fields (§7) are a string convention, never IRIs — always a plain literal. */
 export function actorTerm(value: unknown): string {
   return literalTerm(safeString(value).trim());
@@ -110,9 +129,7 @@ export function valueToTerms(value: unknown): string[] {
     return t ? [t] : [];
   }
   if (typeof value === 'boolean') return [typedLiteralTerm(String(value), XSD_BOOLEAN)];
-  if (typeof value === 'number') {
-    return [typedLiteralTerm(String(value), Number.isInteger(value) ? XSD_INTEGER : XSD_DECIMAL)];
-  }
+  if (typeof value === 'number') return [numberTerm(value)];
   if (typeof value === 'string') {
     return [isWritableIri(value) ? value : literalTerm(value)];
   }

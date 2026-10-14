@@ -4,7 +4,7 @@
  */
 
 import { parseRdfLiteralTerm, XSD_STRING_DATATYPE, type RdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
-import { RDF_JSON, XSD_BOOLEAN, XSD_DATE, XSD_DATE_TIME, XSD_DECIMAL, XSD_INTEGER } from './constants.js';
+import { RDF_JSON, XSD_BOOLEAN, XSD_DATE, XSD_DATE_TIME, XSD_DECIMAL, XSD_DOUBLE, XSD_INTEGER } from './constants.js';
 import { yamlTimestamp } from './document.js';
 import { dict } from './utils.js';
 
@@ -86,6 +86,13 @@ function typedValue(literal: RdfLiteralTerm, form: TermForm): { value: unknown }
       return Number.isInteger(n) ? { value: n } : null;
     }
     case XSD_DECIMAL: {
+      const n = Number(lexical);
+      return Number.isFinite(n) ? { value: n } : null;
+    }
+    case XSD_DOUBLE: {
+      if (lexical === 'INF' || lexical === '+INF') return { value: Infinity };
+      if (lexical === '-INF') return { value: -Infinity };
+      if (lexical === 'NaN') return { value: NaN };
       const n = Number(lexical);
       return Number.isFinite(n) ? { value: n } : null;
     }

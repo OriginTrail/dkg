@@ -31,10 +31,9 @@ import {
   RDF_TYPE,
   SECTION_GENID_INFIX,
   XSD_BOOLEAN,
-  XSD_INTEGER,
 } from '../constants.js';
 import { keptVerbatimPredicate, okfExtensionPredicate } from '../extensions.js';
-import { genericPredicate, genericQuads, dateTerm, jsonTerm, pathFieldTerm, toArray, valueToTerms, type PathContext } from '../terms.js';
+import { genericPredicate, genericQuads, dateTerm, jsonTerm, numberTerm, pathFieldTerm, toArray, valueToTerms, type PathContext } from '../terms.js';
 import { deriveTrustTier } from '../trust.js';
 import { isBlank, isMapping, isScalar, literalTerm, safeString, sanitizeForBlank, typedLiteralTerm } from '../utils.js';
 import type { OkfWarning, Quad } from '../types.js';
@@ -107,9 +106,7 @@ function fieldTerms(field: FieldSpec, value: unknown): string[] | null {
       return term ? [term] : [];
     }
     case 'integer':
-      return typeof value === 'number' && Number.isInteger(value)
-        ? [typedLiteralTerm(String(value), XSD_INTEGER)]
-        : valueToTerms(value).slice(0, 1);
+      return typeof value === 'number' && Number.isInteger(value) ? [numberTerm(value)] : valueToTerms(value).slice(0, 1);
     case 'boolean':
       return typeof value === 'boolean' ? [typedLiteralTerm(String(value), XSD_BOOLEAN)] : valueToTerms(value).slice(0, 1);
     case 'path':

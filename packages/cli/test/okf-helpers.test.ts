@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { fileURLToPath } from 'node:url';
+import { createTripleStore } from '@origintrail-official/dkg-storage';
 import {
   importBundle,
   loadBundleDir,
@@ -218,6 +219,60 @@ describe('distinctPairCount', () => {
 
   it('skips a row without both terms', () => {
     expect(distinctPairCount([{ s: 'urn:okf:x' }, { o: '"a"' }, {}])).toBe(0);
+  });
+});
+
+describe('the numbers an OKF import writes are ones a store computes with', () => {
+  // `String()` writes 1e-7 and 1e+21 with an exponent, a lexical form neither
+  // xsd:decimal nor xsd:integer has: Oxigraph left such a literal out of every
+  // numeric operation. Each number must now add and compare in the store.
+  it('adds to and compares every numeric literal of parameter defaults, extensions, usage counts and producer keys', async () => {
+    const { quads } = importBundle([
+      { path: 'index.md', content: '---\nokf_version: "0.2"\n---\n\n# Root\n' },
+      {
+        path: 'c.md',
+        content: [
+          '---',
+          'type: Attested Computation',
+          'runtime: bigquery',
+          'parameters:',
+          '  - { name: epsilon, type: float, default: 0.0000001 }',
+          '  - { name: big, type: integer, default: 1e21 }',
+          '  - { name: tiny, type: float, default: -2.5e-8 }',
+          '  - { name: inf, type: float, default: .inf }',
+          '  - { name: half, type: float, default: 0.5 }',
+          '  - { name: year, type: integer, default: 2026 }',
+          'executor: { resource: https://x.example/run, tolerance: 1e-9 }',
+          'sources:',
+          '  - { resource: https://x.example/s, usage_count: 1e21 }',
+          'weight: 3.5e-12',
+          '---',
+          '',
+          'body',
+          '',
+        ].join('\n'),
+      },
+    ]);
+    const numeric = quads.filter((q) => /\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#(integer|decimal|double)>$/.test(q.object));
+    // six parameter defaults, an executor extension, a usage count and a producer key
+    expect(numeric.length).toBe(9);
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    try {
+      const graph = 'urn:test:okf-numbers';
+      await store.insert(quads.map((q) => ({ ...q, graph })));
+      const result = await store.query(
+        `SELECT ?o (?o + 1 AS ?sum) (IF(?o < 1, "below", "not below") AS ?order) WHERE { GRAPH <${graph}> { ?s ?p ?o FILTER(isNumeric(?o)) } }`,
+      );
+      const rows = result.type === 'bindings' ? result.bindings : [];
+      // isNumeric is false for a numeric datatype with a lexical form it does not accept.
+      expect(rows).toHaveLength(numeric.length);
+      for (const row of rows) {
+        expect(row.sum, row.o).toBeDefined();
+        expect(row.order, row.o).toBeDefined();
+      }
+    } finally {
+      await store.close();
+    }
   });
 });
 

@@ -334,6 +334,16 @@ it; the CLI summary reports it against the current time.
   is one triple per item, so an empty one would leave nothing: it is kept as
   one `[]` (`rdf:JSON`) and exported as `[]` (a parameter `default: []` is not
   an absent default), and an empty item of a list (`[a, []]`) stays an item.
+- **A number's datatype accepts its lexical form.** Every number the mapper
+  writes (a producer key, a family extension, a parameter `default`, a usage
+  count) is typed as `String()` writes it: positional (`30`, `0.5`) as
+  `xsd:integer` or `xsd:decimal`, and with an exponent (`1e-7`, `1e+21`) as
+  `xsd:double`, whose lexical space is the only one with an exponent; `.inf`
+  and `.nan` are `xsd:double` `INF` and `NaN`. A store computes with all of
+  them. The positional form of `1e-7` or `1e21` would be valid
+  `xsd:decimal` / `xsd:integer` too, but outside what Oxigraph computes with
+  (64-bit integers, 18-digit decimals), where `"1e-7"^^xsd:decimal` left the
+  value out of every numeric operation.
 - **Nested producer values are `rdf:JSON`.** A mapping-valued producer key (e.g.
   the `not:` extension in `acme_retail`) is carried as
   `"…"^^rdf:JSON` so it exports back as an object; previously it degraded to a

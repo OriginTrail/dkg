@@ -30,6 +30,7 @@ export const XSD_DATE = 'http://www.w3.org/2001/XMLSchema#date';
 export const XSD_BOOLEAN = 'http://www.w3.org/2001/XMLSchema#boolean';
 export const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 export const XSD_DECIMAL = 'http://www.w3.org/2001/XMLSchema#decimal';
+export const XSD_DOUBLE = 'http://www.w3.org/2001/XMLSchema#double';
 
 // --- schema.org (converges with the extractor) ---
 export const SCHEMA_NS = 'http://schema.org/';

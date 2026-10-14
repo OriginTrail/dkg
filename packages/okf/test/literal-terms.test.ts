@@ -18,6 +18,9 @@ import {
   SCHEMA_NS,
   SCHEMA_URL,
   XSD_DATE_TIME,
+  XSD_DECIMAL,
+  XSD_DOUBLE,
+  XSD_INTEGER,
 } from '../src/index.js';
 import type { BundleImport, Quad } from '../src/index.js';
 import { isWritableIri } from '../src/utils.js';
@@ -182,3 +185,54 @@ describe('a value is written as an IRI only when the node accepts it', () => {
     }
   });
 });
+
+describe('a number is written in a lexical form its datatype accepts', () => {
+  // `String()` writes 1e-7 and 1e+21 with an exponent, which xsd:decimal and
+  // xsd:integer do not accept, so a store cannot compute with them.
+  const LEXICAL: Record<string, RegExp> = {
+    [XSD_INTEGER]: /^[+-]?\d+$/,
+    [XSD_DECIMAL]: /^[+-]?(\d+(\.\d*)?|\.\d+)$/,
+    [XSD_DOUBLE]: /^([+-]?(\d+(\.\d*)?|\.\d+)([Ee][+-]?\d+)?|[+-]?INF|NaN)$/,
+  };
+  const NUMBERS = [
+    'type: Attested Computation',
+    'runtime: bigquery',
+    'parameters:',
+    '  - { name: epsilon, type: float, default: 0.0000001 }',
+    '  - { name: big, type: integer, default: 1e21 }',
+    '  - { name: tiny, type: float, default: -2.5e-8 }',
+    '  - { name: inf, type: float, default: .inf }',
+    '  - { name: nan, type: float, default: .nan }',
+    '  - { name: half, type: float, default: 0.5 }',
+    'executor: { resource: https://x.example/run, timeout_s: 30, tolerance: 1e-9 }',
+    'sources:',
+    '  - { resource: https://x.example/s, usage_count: 1e21 }',
+    'weight: 3.5e-12',
+  ].join('\n');
+  const numeric = (quads: readonly Quad[]) =>
+    quads.map((q) => /^"([^"]*)"\^\^<([^>]+)>$/.exec(q.object)).filter((m): m is RegExpExecArray => m !== null && m[2] in LEXICAL);
+
+  it('types a positional number as xsd:integer or xsd:decimal, and an exponent or non-finite one as xsd:double', () => {
+    const terms = numeric(importBundle(bundle(NUMBERS)).quads);
+    expect(terms.length).toBeGreaterThanOrEqual(10);
+    for (const [, lexical, datatype] of terms) expect(lexical, datatype).toMatch(LEXICAL[datatype]);
+    const datatypeOf = (lexical: string) => terms.find((m) => m[1] === lexical)?.[2];
+    expect(datatypeOf('1e-7')).toBe(XSD_DOUBLE);
+    expect(datatypeOf('1e+21')).toBe(XSD_DOUBLE);
+    expect(datatypeOf('INF')).toBe(XSD_DOUBLE);
+    expect(datatypeOf('NaN')).toBe(XSD_DOUBLE);
+    expect(datatypeOf('0.5')).toBe(XSD_DECIMAL);
+    expect(datatypeOf('30')).toBe(XSD_INTEGER);
+  });
+
+  it('keeps every number, the non-finite ones included, through a round trip', () => {
+    const files = bundle(NUMBERS);
+    const first = importBundle(files);
+    expect(semantic(importBundle(exportBundle(first)).quads)).toBe(semantic(first.quads));
+    const fm = exportedFrontmatter(files);
+    expect((fm.parameters as Array<{ default: number }>).map((p) => p.default)).toEqual([1e-7, 1e21, -2.5e-8, Infinity, NaN, 0.5]);
+    expect(fm.weight).toBe(3.5e-12);
+    expect((fm.sources as Array<{ usage_count: number }>)[0].usage_count).toBe(1e21);
+  });
+});
+

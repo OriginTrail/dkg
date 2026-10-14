@@ -87,7 +87,7 @@ verified one, and is never rejected — SPEC §11).
 | `executor`, `attester` (§10.2) | `okf:executorResource`, `okf:executorReceipt` (one per field), `okf:attesterResource` | extra keys → `okf:executor.<key>` / `okf:attester.<key>` |
 | body links (§6.1) | `schema:mentions` (untyped; opt-in `--relate` typing) | unchanged |
 | legacy `# Citations` (§13.1) | `schema:citation` | still parsed for v0.1 documents |
-| producer-defined keys (§4.1) | `schema:<camelKey>` | scalars typed; nested mappings as `rdf:JSON` literals so they round-trip as objects; an empty list as one `[]` |
+| producer-defined keys (§4.1) | `schema:<camelKey>` | scalars typed (a number as `xsd:integer` or `xsd:decimal`, or `xsd:double` when it needs an exponent, `1e-7`, `1e+21`, or is `.inf` / `.nan`, which no decimal holds); nested mappings as `rdf:JSON` literals so they round-trip as objects; an empty list as one `[]` |
 | a family value of the wrong shape (§11) | `schema:<camelKey>`, plus `okf:keptVerbatim.<familyKey>` holding the same term | kept verbatim with a warning; the marker says the value is the family's, since a producer key of the same camelCase (`Sources`) shares the `schema:` predicate |
 
 **Path-valued fields** (`sources[].resource`, `computation`,
