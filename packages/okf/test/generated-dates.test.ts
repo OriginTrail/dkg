@@ -14,7 +14,8 @@ import {
   XSD_BOOLEAN,
 } from '../src/index.js';
 import type { Quad } from '../src/index.js';
-import { generatedAtOf, lastModifiedOf, timestampIsProducerKey, timestampQuads } from '../src/families/generated.js';
+import { timestampQuads } from '../src/families/generated.js';
+import { generatedAtOf, lastModifiedOf, timestampIsProducerKey } from '../src/frontmatter-keys.js';
 import { IRI, bundle, exportedFrontmatter, objs, DT, semantic, shuffled } from './helpers/okf-v02-fixtures.js';
 
 // `generated.at` and the v0.1 `timestamp` share `schema:dateModified` (§13.1):

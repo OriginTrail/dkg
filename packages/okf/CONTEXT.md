@@ -284,9 +284,12 @@ it; the CLI summary reports it against the current time.
   family extension's list
   (`executor.retries: [1, 2]`) is still one triple per item.
 - **Both `timestamp` and `generated` present.** Unusual (a migration leftover).
-  One codec, `src/families/generated.ts`, owns this rule in both directions:
-  the mapper's quads for each, the summary's last-modified time, whether
-  `timestamp` is a producer key, and how export gives each value back.
+  The rule itself, which key gives the time and whether `timestamp` is then a
+  producer key, is the shared key policy (`src/frontmatter-keys.ts`, beside
+  `BASE_KEYS` and `readsAsProducerKey`), read by the importer, the summary's
+  last-modified time and the exporter alike, none of which depends on another
+  for it. One codec, `src/families/generated.ts`, writes each key's values by
+  it and gives each stored value back to its key on export.
   `generated.at` → `okf:generatedAt`, copied to `schema:dateModified`;
   `timestamp` → `schema:timestamp` (the node extractor's own slug for that
   key), preserved and exported verbatim. Export writes both back even when

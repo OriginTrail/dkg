@@ -9,36 +9,21 @@
  * (`okf:generatedAt`), a producer value `okf:producerDateModified`. The legacy
  * `timestamp` is written unmarked, as the v0.1 mapper wrote it, and is named
  * (`okf:legacyTimestamp`) only where a producer value holds the same term.
- * The `generated` family's fields are the shared definitions in `specs.ts`;
- * what is decided here is which key owns which value: the mapper's quads for
- * each, the summary's last-modified time, whether `timestamp` is a producer
- * key (which export relies on), and how export gives each stored value back
- * to its key.
+ * The `generated` family's fields are the shared definitions in `specs.ts`,
+ * and which of the two keys gives the time (the §13.1 precedence) is the
+ * shared key policy's (`frontmatter-keys.ts`); this codec writes each key's
+ * values by that rule and gives each stored value back to its key on export.
  */
 
 import { OKF_GENERATED_AT, OKF_LEGACY_TIMESTAMP, OKF_PRODUCER_DATE_MODIFIED, SCHEMA_DATE_MODIFIED } from '../constants.js';
 import { termValue, type ExportContext } from '../decode-terms.js';
+import { timestampIsProducerKey } from '../frontmatter-keys.js';
 import { dateTerm, genericPredicate, genericQuads, valueToTerms } from '../terms.js';
-import { dateTimeLexical } from '../timestamps.js';
-import { isBlank, isMapping, last } from '../utils.js';
+import { last } from '../utils.js';
 import type { Quad } from '../types.js';
 import { decodeMapping, keptVerbatim, type Read } from './decode-fields.js';
 import { prepareFamily, type PreparedQuad } from './encode.js';
 import { GENERATED } from './specs.js';
-
-/**
- * `generated.at` when it gives a last-modified time, which then supersedes the
- * v0.1 `timestamp` (§13.1); a blank one is missing (§11) and does not.
- */
-export function generatedAtOf(frontmatter: Record<string, unknown>): string | null {
-  const at = isMapping(frontmatter.generated) ? frontmatter.generated.at : undefined;
-  return isBlank(at) ? null : dateTimeLexical(at);
-}
-
-/** Whether the importer reads `timestamp` as a producer key: when a `generated.at` supersedes it. */
-export function timestampIsProducerKey(frontmatter: Record<string, unknown>): boolean {
-  return generatedAtOf(frontmatter) !== null;
-}
 
 /**
  * The quads of `generated` on the concept: the family's own (`at` on
@@ -87,11 +72,6 @@ export function timestampQuads(iri: string, frontmatter: Record<string, unknown>
   const quads: Quad[] = [{ subject: iri, predicate: SCHEMA_DATE_MODIFIED, object: term }];
   if (producerDateTerms(frontmatter).has(term)) quads.push({ subject: iri, predicate: OKF_LEGACY_TIMESTAMP, object: term });
   return quads;
-}
-
-/** The last-modified time a concept reports: `generated.at`, else the legacy `timestamp`. */
-export function lastModifiedOf(frontmatter: Record<string, unknown>): string | null {
-  return generatedAtOf(frontmatter) ?? dateTimeLexical(frontmatter.timestamp);
 }
 
 /**

@@ -46,7 +46,6 @@ import {
   type PathContext,
 } from './terms.js';
 import {
-  FAMILY_BY_KEY,
   SOURCES,
   familyDiagnostics,
   parseList,
@@ -56,7 +55,8 @@ import {
   declaresSources,
   type PreparedQuad,
 } from './families/index.js';
-import { lastModifiedOf, timestampIsProducerKey, timestampQuads } from './families/generated.js';
+import { timestampQuads } from './families/generated.js';
+import { BASE_KEYS, lastModifiedOf } from './frontmatter-keys.js';
 import { dateTimeLexical } from './timestamps.js';
 import { parseVerified, trustTierOf, conceptStatus } from './trust.js';
 import type {
@@ -123,24 +123,6 @@ export function mapFrontmatter(
     conceptExists: ctx.conceptExists ?? (() => false),
   };
   return resolveFrontmatter(iri, prepareFrontmatter(iri, frontmatter, pathCtx.conceptId), pathCtx);
-}
-
-/**
- * The frontmatter keys the importer maps itself (SPEC §4.1, §13.1). The v0.2
- * families come next (`families/`), and every other key is a producer key.
- */
-const BASE_KEYS: ReadonlySet<string> = new Set(['type', 'title', 'description', 'tags', 'timestamp', 'resource']);
-
-/**
- * Whether the importer reads `key` in `frontmatter` as a producer key, kept
- * as `schema:<camelKey>` (SPEC §4.1/§11): a key that is neither a base field
- * nor a v0.2 family, and the legacy `timestamp` when a `generated.at`
- * supersedes it (§13.1). Export writes a producer value back only under such
- * a key.
- */
-export function readsAsProducerKey(key: string, frontmatter: Record<string, unknown>): boolean {
-  if (key === 'timestamp') return timestampIsProducerKey(frontmatter);
-  return !BASE_KEYS.has(key) && !FAMILY_BY_KEY.has(key);
 }
 
 /**

@@ -45,7 +45,7 @@ import {
 } from './constants.js';
 import { conceptIdFromIri, literalValue, orderKeys, termValue, ValueBuckets, type ExportContext } from './decode-terms.js';
 import { decodeFamilies } from './families/decode.js';
-import { readsAsProducerKey } from './mapping.js';
+import { readsAsProducerKey } from './frontmatter-keys.js';
 import { dict, distinctTriples, pascalCase } from './utils.js';
 import type { BundleFile, ExportInput, OkfMappingOptions, Quad } from './types.js';
 

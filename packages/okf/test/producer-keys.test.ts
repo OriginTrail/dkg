@@ -21,7 +21,7 @@ import {
   SCHEMA_NS,
   V02_FAMILY_KEYS,
 } from '../src/index.js';
-import { readsAsProducerKey } from '../src/mapping.js';
+import { readsAsProducerKey } from '../src/frontmatter-keys.js';
 import { genericQuads } from '../src/terms.js';
 import { IRI, bundle, exportedFrontmatter, objs, semantic, shuffled } from './helpers/okf-v02-fixtures.js';
 import type { Quad } from '../src/index.js';
