@@ -1,4 +1,4 @@
-import { resolveWithinAbort } from '@origintrail-official/dkg-core';
+import { resolveWithinAbort, isQueryAccessDeniedError, QUERY_ACCESS_DENIED_CODE, QUERY_ACCESS_DENIED_MESSAGE } from '@origintrail-official/dkg-core';
 import { randomUUID } from 'node:crypto';
 import { authenticatedAgentAddress } from '../../auth.js';
 import {
@@ -46,6 +46,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
     const options = {
       contextGraphId: parsed.contextGraphId, callerAgentAddress, view: query.view,
       includeContextGraphPartitions: query.includeContextGraphPartitions,
+      excludeWorkingMemoryPartitions: true,
       signal, priority: lifecycle.priority, source: lifecycle.source,
       accessDenied: 'error' as const, redactQuery: true, maxResponseBytes: BOUNDED_QUERY_MAX_BYTES,
     };
@@ -72,8 +73,8 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
       jsonResponse(res, 422, { code: 'QUERY_RESULT_TOO_LARGE', error: 'Store response exceeds the byte bound' });
       return;
     }
-    if ((error as { code?: string })?.code === 'QUERY_ACCESS_DENIED') {
-      jsonResponse(res, 403, { code: 'QUERY_ACCESS_DENIED', error: 'Context Graph read denied' });
+    if (isQueryAccessDeniedError(error)) {
+      jsonResponse(res, 403, { code: QUERY_ACCESS_DENIED_CODE, error: QUERY_ACCESS_DENIED_MESSAGE });
       return;
     }
     if (respondIfStoreUnavailable(res, error) !== null) return;
