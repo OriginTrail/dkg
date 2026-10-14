@@ -11250,7 +11250,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   async hasConfirmedSharedMemoryMetaState(this: DKGAgent, contextGraphId: string, options: { signal?: AbortSignal } = {}): Promise<boolean> {
-    return this.hasConfirmedMetaState(contextGraphId, options);
+    return this.hasConfirmedMetaState(contextGraphId, { ...options, unavailable: 'error' });
   }
 
   async canUseSharedMemoryForContextGraph(this: DKGAgent, contextGraphId: string,

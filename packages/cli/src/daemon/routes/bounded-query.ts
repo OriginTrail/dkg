@@ -46,7 +46,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
     const options = {
       contextGraphId: parsed.contextGraphId, callerAgentAddress, view: query.view,
       includeContextGraphPartitions: query.includeContextGraphPartitions,
-      excludeWorkingMemoryPartitions: true,
+      excludeWorkingMemoryPartitions: true, requireCompleteGraphScope: true,
       signal, priority: lifecycle.priority, source: lifecycle.source,
       accessDenied: 'error' as const, redactQuery: true, maxResponseBytes: BOUNDED_QUERY_MAX_BYTES,
     };
