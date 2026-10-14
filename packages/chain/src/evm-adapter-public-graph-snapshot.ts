@@ -6,6 +6,7 @@ import {
   MULTICALL3_RUNTIME_CODE_HASH,
   createMulticall3, staticAggregate3, decodeContractResult,
 } from "./evm-multicall-wire.js";
+import { numericChainIdOf } from "./configured-chain-id.js";
 import { EVMChainAdapterBase } from "./evm-adapter-base.js";
 import { resolveEvmFinalityAnchorBlockV1 } from "./evm-finality-anchor.js";
 import { decodeKnowledgeAssetMerkleRootCount } from "./evm-knowledge-asset-update-context.js";
@@ -36,8 +37,9 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
     const signal = options.signal ?? AbortSignal.timeout(110_000);
     signal.throwIfAborted();
     await this.init();
+    const expected = numericChainIdOf(this.chainId);
+    if (expected === undefined) throw new Error("Invalid snapshot configured chain ID");
     const readOne = async (provider: JsonRpcProvider, signal: AbortSignal) => {
-      const expected = BigInt(this.chainId.split(":").pop()!);
       if (BigInt(await provider.send("eth_chainId", [])) !== expected)
         throw new Error("Snapshot RPC chain mismatch");
       const observedAt = Date.now();

@@ -128,3 +128,17 @@ it.each([false, true])('rejects wrong-chain RPC before statements (healthy fallb
   expect(wrong.provider.send).toHaveBeenCalledWith('eth_chainId', []);
   expect(wrong.blockReads).toEqual([]); expect(wrong.reads).toEqual([]);
 });
+
+
+it.each(['evm:0', 'evm:-1', 'evm:0x7a69', 'evm:', 'evm:unknown'])(
+  'rejects a noncanonical configured chain before RPC reads: %s', async chainId => {
+    const {a, provider, blockReads, reads} = fixture(false, false, 1);
+    a.chainId = chainId;
+    provider.send = vi.fn(provider.send);
+    await expect(a.readPublicGraphSnapshot('coherent-snapshot', '1'))
+      .rejects.toThrow('Invalid snapshot configured chain ID');
+    expect(provider.send).not.toHaveBeenCalled();
+    expect(blockReads).toEqual([]);
+    expect(reads).toEqual([]);
+  },
+);
