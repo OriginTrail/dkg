@@ -3,7 +3,7 @@ import { DKGQueryEngine } from "../../query/src/dkg-query-engine.js";
 import { describe, it, expect } from "vitest";
 import { ethers } from "ethers";
 import { OxigraphStore } from "@origintrail-official/dkg-storage";
-import { sealPublicGraphSnapshot } from "@origintrail-official/dkg-chain";
+import { normalizePublicGraphSnapshot, sealPublicGraphSnapshot } from "@origintrail-official/dkg-chain";
 import {
   PublicSnapshotEvidence,
   withPublicSnapshotQueryTrust,
@@ -17,7 +17,7 @@ import {
 const graph = "snapshot-evidence",
   address = `0x${"1".repeat(40)}`,
   id = ((BigInt(address) << 96n) | 1n).toString();
-const snapshot = sealPublicGraphSnapshot({
+const rawSnapshot = sealPublicGraphSnapshot({
   version: 1,
   chainId: "evm:31337",
   deploymentId: "test",
@@ -34,6 +34,7 @@ const snapshot = sealPublicGraphSnapshot({
   accessPolicy: 0,
   assets: [{ id, root: `0x${"b".repeat(64)}`, version: "2" }],
 });
+const snapshot = normalizePublicGraphSnapshot(rawSnapshot, { ...rawSnapshot, now: 1000 });
 const meta = `did:dkg:context-graph:${graph}/_meta`,
   ual = `did:dkg:evm:31337/${address}/1`;
 const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${address}/1`;
@@ -67,11 +68,13 @@ const asset = (): VerifiedGraphScopedAsset => ({
 describe("job-scoped public snapshot evidence", () => {
   it('owns immutable scope, asset roots and provenance independently of the input wrapper', () => {
     const original = { ...snapshot, assets: snapshot.assets.map(asset => ({ ...asset })) };
-    const input = { snapshot: original, mode: 'core-cache' as const, sourceCore: 'original-core' };
+    const accepted = normalizePublicGraphSnapshot(original, { ...original, now: 1000 });
+    const input = { snapshot: accepted, mode: 'core-cache' as const, sourceCore: 'original-core' };
     const evidence = new PublicSnapshotEvidence(input, () => true);
-    input.snapshot = { ...original, contextGraphId: 'other' };
+    input.snapshot = normalizePublicGraphSnapshot(rawSnapshot, { ...rawSnapshot, now: 1000 });
     input.sourceCore = 'other-core';
     original.assets[0]!.root = `0x${'c'.repeat(64)}`;
+    expect(evidence.snapshot).toBe(accepted);
     expect(evidence.snapshot.contextGraphId).toBe(graph);
     expect(evidence.sourceCore).toBe('original-core');
     expect(evidence.authenticate(asset()).onChainContextGraphId).toBe('1');
@@ -203,7 +206,7 @@ it("guards parent queries that resolve imported child VM partitions", async () =
     a.metadataQuads = a.metadataQuads.map(q => ({...q,graph:a.metaGraph}));
     const childSnapshot = sealPublicGraphSnapshot({...snapshot,contextGraphId:child,nameHash:ethers.id(child)});
     await markCoreTrustedGraph(store,child);
-    const imported = new PublicSnapshotEvidence({snapshot:childSnapshot,mode:"core-cache",sourceCore:"core"},()=>true).authenticate(a);
+    const imported = new PublicSnapshotEvidence({snapshot:normalizePublicGraphSnapshot(childSnapshot, { ...childSnapshot, now: 1000 }),mode:"core-cache",sourceCore:"core"},()=>true).authenticate(a);
     expect(await materializeVerifiedGraphScopedAsset({store,asset:imported.asset})).toBe("applied");
     const engine = new DKGQueryEngine(store);
     const read = (mode?: "core-cache" | "rpc-only") => withPublicSnapshotQueryTrust(store,graph,mode,()=>engine.query(

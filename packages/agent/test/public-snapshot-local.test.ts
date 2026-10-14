@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { ethers } from 'ethers';
 import { BULK_GRAPH_KIND, BULK_GRAPH_PROTOCOL } from '@origintrail-official/dkg-core';
 import { performance } from 'node:perf_hooks';
-import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { normalizePublicGraphSnapshot, EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { PublicSnapshotEvidence, assertPublicSnapshotQueryTrust } from '../src/public-snapshot-evidence.js';
 import { makeAdapterConfig, HARDHAT_KEYS, takeSnapshot, revertSnapshot } from '../../chain/test/evm-test-context.js';
@@ -324,7 +324,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     const independent = await f.adapter.readPublicGraphSnapshot(graph, f.onChainId);
     const { supplier, sink, mismatchStore, ual, beforeRows, rows, changed, metadata } = await mismatchedSnapshotMember(f, scenario === 'legacy-envelope' ? 2 : transport === 'legacy' ? 12 : 1, scenario);
     const writes = vi.spyOn(mismatchStore, 'replaceGraphAndSubject');
-    const evidence = new PublicSnapshotEvidence({ snapshot: independent, mode: 'rpc-only', sourceCore: null }, () => true);
+    const evidence = new PublicSnapshotEvidence({ snapshot: normalizePublicGraphSnapshot(independent, { ...independent, now: independent.observedAt }), mode: 'rpc-only', sourceCore: null }, () => true);
     const authenticate = vi.spyOn(evidence, 'authenticate');
     if (scenario === 'legacy-envelope') {
       // A controlled malicious peer reply, with real worker, RPC evidence and store.
