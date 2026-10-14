@@ -541,16 +541,15 @@ export class QueryMethods extends DKGAgentBase {
       }
     }
 
-    if (
-      opts.contextGraphId
-      && targetsSharedMemory
-      && !(await this.canUseSharedMemoryForContextGraph(opts.contextGraphId, {
-        callerAgentAddress: callerAgentAddressStr,
-        readAuthority: scopedReadAuthority, signal: opts.signal, strict: opts.accessDenied === 'error',
-      }))
-    ) {
-      this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
-      return deniedResult(sparql, opts.accessDenied);
+    if (opts.contextGraphId && targetsSharedMemory) {
+      const admission = await this.resolveSharedMemoryReadAdmission(opts.contextGraphId, {
+        callerAgentAddress: callerAgentAddressStr, readAuthority: scopedReadAuthority, signal: opts.signal,
+      });
+      if (admission.outcome === 'unavailable' && opts.accessDenied === 'error') throw admission.error;
+      if (admission.outcome !== 'allowed') {
+        this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
+        return deniedResult(sparql, opts.accessDenied);
+      }
     }
 
     // A-1 canonicalization (Codex PR #242 iter-9 re-review): the
