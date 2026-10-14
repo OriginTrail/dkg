@@ -21,6 +21,7 @@ export interface AgentQueryOptions {
    * registered public content partitions in a scoped `GRAPH ?g` scan.
    */
   includeContextGraphPartitions?: boolean;
+  excludeWorkingMemoryPartitions?: boolean;
   /**
    * Opt-in: allow the scoped query to reference the context graph's own
    * `_private` partition (excluded from the scope guard's allow-set by

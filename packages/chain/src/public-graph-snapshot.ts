@@ -46,7 +46,28 @@ const keys = (value: object, expected: string[]) =>
 export function sealPublicGraphSnapshot(
   input: Omit<PublicGraphSnapshot, "inventoryDigest" | "snapshotDigest">,
 ): PublicGraphSnapshot {
-  const snapshot = { ...input, inventoryDigest: hash(input.assets) };
+  const canonical = {
+    version: input.version,
+    chainId: input.chainId,
+    deploymentId: input.deploymentId,
+    contextGraphId: input.contextGraphId,
+    onChainId: input.onChainId,
+    nameHash: input.nameHash,
+    contextGraphStorage: input.contextGraphStorage,
+    assetStorage: input.assetStorage,
+    blockNumber: input.blockNumber,
+    blockHash: input.blockHash,
+    finalityConfirmations: input.finalityConfirmations,
+    observedAt: input.observedAt,
+    expiresAt: input.expiresAt,
+    accessPolicy: input.accessPolicy,
+    assets: input.assets.map((a) => ({
+      id: a.id,
+      root: a.root,
+      version: a.version,
+    })),
+  };
+  const snapshot = { ...canonical, inventoryDigest: hash(canonical.assets) };
   return { ...snapshot, snapshotDigest: hash(snapshot) };
 }
 export interface PublicGraphSnapshotScope {
@@ -141,27 +162,7 @@ export function normalizePublicGraphSnapshot(
     seen.add(a.id);
   }
   // Reconstruct in canonical field order: wire object ordering is immaterial.
-  const canonical = sealPublicGraphSnapshot({
-    version: 1,
-    chainId: s.chainId,
-    deploymentId: s.deploymentId,
-    contextGraphId: s.contextGraphId,
-    onChainId: s.onChainId,
-    nameHash: s.nameHash,
-    contextGraphStorage: s.contextGraphStorage,
-    assetStorage: s.assetStorage,
-    blockNumber: s.blockNumber,
-    blockHash: s.blockHash,
-    finalityConfirmations: s.finalityConfirmations,
-    observedAt: s.observedAt,
-    expiresAt: s.expiresAt,
-    accessPolicy: 0,
-    assets: s.assets.map((a) => ({
-      id: a.id,
-      root: a.root,
-      version: a.version,
-    })),
-  });
+  const canonical = sealPublicGraphSnapshot(s);
   if (
     canonical.inventoryDigest !== s.inventoryDigest ||
     canonical.snapshotDigest !== s.snapshotDigest

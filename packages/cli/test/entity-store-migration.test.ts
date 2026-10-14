@@ -15,7 +15,7 @@ function directory() {
 function open(dir: string) { const store = new EntityIndexStore(dir); cleanup.push(() => store.close()); return store; }
 const spec = { contextGraphId: 'catalog', view: 'verifiable-memory' as const, textPredicates: ['urn:text'], types: [] };
 const document = { entityUri: 'urn:item', sourceGraph: 'urn:graph', text: 'ocean', contentHash: 'hash' };
-const state: IndexState = { id: 'a'.repeat(64), spec, fingerprint: 'model', cursor: documentKey(document), scanComplete: false, completedAt: null };
+const state: IndexState = { id: 'a'.repeat(64), spec, fingerprint: 'model', cursor: { entityUri: document.entityUri, sourceGraph: document.sourceGraph }, scanComplete: false, completedAt: null };
 it('versions fresh creation and preserves a current interrupted scan on reopening', () => {
   const dir = directory(), store = open(dir);
   store.begin(state); store.upsert(state, document, [1, 0]);
@@ -23,11 +23,15 @@ it('versions fresh creation and preserves a current interrupted scan on reopenin
   expect(reopened.state(state.id)).toEqual(state);
   expect(reopened.cached(state.id, documentKey(document))).toEqual({ document, vector: [1, 0] });
   const db = new Database(join(dir, 'entity-index.db'));
-  try { expect(db.pragma('user_version', { simple: true })).toBe(1); } finally { db.close(); }
+  try {
+    expect(db.pragma('user_version', { simple: true })).toBe(1);
+    const raw = db.prepare('SELECT state FROM entity_indexes WHERE id = ?').get(state.id) as { state: string };
+    expect(JSON.parse(raw.state).cursor).toBe(documentKey(document));
+  } finally { db.close(); }
 });
 it.each([true, false])('upgrades the completed-only legacy format once, scanComplete=%s', scanComplete => {
   const dir = directory(), db = new Database(join(dir, 'entity-index.db'));
-  const original = { ...state, scanComplete, completedAt: scanComplete ? '2026-10-01T00:00:00Z' : null, generation: 7 };
+  const original = { ...state, cursor: documentKey(document), scanComplete, completedAt: scanComplete ? '2026-10-01T00:00:00Z' : null, generation: 7 };
   try {
     db.exec(`CREATE TABLE entity_indexes (id TEXT PRIMARY KEY, state TEXT NOT NULL);
       CREATE TABLE entity_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
@@ -41,6 +45,7 @@ it.each([true, false])('upgrades the completed-only legacy format once, scanComp
   expect(upgraded.state(state.id)).toEqual(expected);
   expect(upgraded.cached(state.id, documentKey(document))).toEqual({ document, vector: [1, 0] });
   // A saved version-1 checkpoint is no longer reset by the legacy upgrade.
-  upgraded.save({ ...expected, cursor: 'new-checkpoint' });
-  expect(open(dir).state(state.id)?.cursor).toBe('new-checkpoint');
+  const cursor = { sourceGraph: 'urn:next-graph', entityUri: 'urn:next-entity' };
+  upgraded.save({ ...expected, cursor });
+  expect(open(dir).state(state.id)?.cursor).toEqual(cursor);
 });

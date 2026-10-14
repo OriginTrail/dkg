@@ -310,3 +310,19 @@ describe('restateLabelGraphForUpdate — TOCTOU lock holds under concurrent writ
       .toEqual({ blockNumber: 300, txIndex: 7 });
   });
 });
+
+describe('group materialization locks', () => {
+  it('deduplicates reversed inputs and shares exclusion with singleton writers', async () => {
+    const { withMaterializationLocks } = await import('../src/materialization-lock-group.js');
+    const a = { metaGraph: 'urn:group-lock', ual: 'a' }, b = { ...a, ual: 'b' };
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const order: string[] = [];
+    const first = withMaterializationLocks([b, a, b], async () => { order.push('group'); await gate; order.push('released'); });
+    const singleton = withMaterializationLock(a.metaGraph, a.ual, async () => { order.push('single'); });
+    const reverse = withMaterializationLocks([a, b], async () => { order.push('reverse'); });
+    expect(order).toEqual(['group']);
+    release(); await Promise.all([first, singleton, reverse]);
+    expect(order).toEqual(['group', 'released', 'single', 'reverse']);
+  });
+});

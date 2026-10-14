@@ -22,7 +22,7 @@ export class EntitySearchService {
           cursor: null, scanComplete: false, completedAt: null };
         this.store.begin(state);
       }
-      if (state.scanComplete) return this.status(state);
+      if (state.scanComplete) return this.checkedStatus(state, signal, deadline);
       const page = await reader.page(spec, state.cursor, signal, deadline);
       for (const entity of page) {
         const doc = await reader.document(spec, entity, signal, deadline);
@@ -34,18 +34,23 @@ export class EntitySearchService {
         this.store.upsert(state, doc, normalized);
       }
       checkDeadline(signal, deadline);
-      if (page.length) state.cursor = documentKey(page[page.length - 1]);
+      if (page.length) state.cursor = page[page.length - 1];
       if (page.length < PAGE_SIZE) {
         state.scanComplete = true; state.completedAt = new Date().toISOString();
         this.store.finish(state);
       } else this.store.save(state);
-      return this.status(state);
+      return this.checkedStatus(state, signal, deadline);
     } finally { this.busy.delete(id); }
   }
   private status(state: IndexState): EntityIndexStatus {
     return { indexId: state.id, contextGraphId: state.spec.contextGraphId, view: state.spec.view,
       modelFingerprint: state.fingerprint, indexedEntities: this.store.count(state.id), scanComplete: state.scanComplete,
       completedAt: state.completedAt, coverage: 'local-indexed-subset' as const, graphComplete: null };
+  }
+  private checkedStatus(state: IndexState, signal: AbortSignal, deadline: number): EntityIndexStatus {
+    const status = this.status(state);
+    checkDeadline(signal, deadline);
+    return status;
   }
   /** A fresh residency check, with explicit bounded warm-up outside a query's budget. */
   async readiness(request: NormalizedReadinessRequest, reader: EntityGraphReader,
@@ -61,7 +66,7 @@ export class EntitySearchService {
       if (warmup) await this.embedder.embed('readiness probe', 'query', signal);
       const ready = await this.embedder.ready(signal);
       checkDeadline(signal, deadline);
-      return { ...this.status(state), ready, observedAt: new Date().toISOString() };
+      return { ...this.checkedStatus(state, signal, deadline), ready, observedAt: new Date().toISOString() };
     } finally { if (warmup) this.preparing = false; }
   }
   async search(request: NormalizedSearchRequest, reader: EntityGraphReader,
@@ -90,7 +95,7 @@ export class EntitySearchService {
         if (entities.length === limit) break;
       }
       checkDeadline(signal, deadline);
-      return { ...this.status(state), entities, staleCandidates, observedAt: new Date().toISOString(),
+      return { ...this.checkedStatus(state, signal, deadline), entities, staleCandidates, observedAt: new Date().toISOString(),
         // Content is re-read under current authorization. New entities require a rescan.
         freshness: 'candidates-revalidated', exhaustive: false };
     } finally { this.searches--; }
