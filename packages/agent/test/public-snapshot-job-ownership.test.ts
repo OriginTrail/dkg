@@ -56,11 +56,13 @@ describe('public snapshot job ownership', () => {
       expect(transition.mock.calls.filter(([id]) => id === graph)).toHaveLength(1);
       if (intent !== 'inactive-core-hosted') expect(subscribe).not.toHaveBeenCalled();
       expect((agent as any).subscribedContextGraphs.get(graph)).toMatchObject({onChainId:'1',onChainHash:ethers.id(graph)});
+      if (intent.endsWith('core-hosted')) expect((agent as any).subscribedContextGraphs.get(graph))
+        .toMatchObject({subscribed:true,syncMode:'on-demand',coreHosted:true});
       // An enqueued barrier drains the real persistence lane, including its freshness guard.
       await (agent as any).enqueueContextGraphSubscriptionPersistWrite(graph, async () => {});
       if(intent === 'on-demand') expect(saved.has(graph)).toBe(false);
       else expect(saved.get(graph)).toMatchObject({id:graph,onChainId:'1',onChainHash:ethers.id(graph),
-        ...(intent.endsWith('core-hosted') ? {coreHosted:true} : {subscribed:true})});
+        ...(intent.endsWith('core-hosted') ? {coreHosted:true,subscribed:false} : {subscribed:true})});
     } finally { await agent.stop(); }
     const restarted = await create();
     try {
