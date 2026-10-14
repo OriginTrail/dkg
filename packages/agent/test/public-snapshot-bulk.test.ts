@@ -4,6 +4,7 @@ import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { BULK_GRAPH_KIND as K, BULK_GRAPH_PROTOCOL, BULK_GRAPH_CHUNK_BYTES, contextGraphMetaUri, knowledgeAssetLayerGraphUri,
   MemoryLayer, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import { recoverPublicSnapshotBulk, type PublicSnapshotBulkHost } from '../src/public-snapshot-bulk.js';
+import { ensurePeerConnected } from '../src/p2p/peer-connect.js';
 import { PublicSnapshotEvidence } from '../src/public-snapshot-evidence.js';
 import { fixture, cg } from './helpers/bulk-graph-fixture.js';
 
@@ -24,7 +25,7 @@ vi.mock('@origintrail-official/dkg-core', async importOriginal => ({
 }));
 
 describe('public bulk snapshot recovery', () => {
-  it.each(['connect', 'protocols', 'delayed-identify', 'reconciliation'] as const)('uses a healthy supplier after %s and recovers across chunks', async failure => {
+  it.each(['connect', 'probe', 'cached-advertisement', 'delayed-identify', 'reconciliation'] as const)('uses a healthy supplier after %s and recovers across chunks', async failure => {
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
     const started = new Set<string>(), completed = new Set<string>(), controls: number[] = [];
@@ -40,10 +41,23 @@ describe('public bulk snapshot recovery', () => {
       observedAt: Date.now(), expiresAt: Date.now() + 120_000, accessPolicy: 0,
       assets: [...f.byId].map(([id, root]) => ({ id: String(id), root: `0x${Buffer.from(root).toString('hex')}`, version: '1' })),
     });
-    const ensure = vi.fn(async (peer: string) => { if (peer === 'offline' && failure === 'connect') throw new Error('admission unavailable'); });
-    const protocols = vi.fn(async (peer: string) => { if (peer === 'offline') throw new Error('probe unavailable'); return failure === 'delayed-identify' ? [] : [BULK_GRAPH_PROTOCOL]; });
-    const probe = vi.spyOn(f.router, 'probeProtocol');
-    const agent: PublicSnapshotBulkHost = { store: f.target, router: f.router, ensurePeerConnected: ensure, getPeerProtocols: protocols,
+    const connect = vi.fn(async (peer: string) => { if (peer === 'offline') throw new Error('offline dial failed'); });
+    const ensure = vi.fn(async (peer: string, options: { signal?: AbortSignal }) => {
+      if (peer === 'offline' && failure === 'connect') throw new Error('admission unavailable');
+      // Use the production best-effort helper: an offline dial resolves without a connection.
+      await ensurePeerConnected({ connect }, peer, options);
+    });
+    const protocols = vi.fn(async () => failure === 'delayed-identify' ? [] : [BULK_GRAPH_PROTOCOL]);
+    const liveProbe = f.router.probeProtocol.bind(f.router);
+    const probe = vi.spyOn(f.router, 'probeProtocol').mockImplementation(async (peer, ...args) => {
+      if (peer === 'offline') {
+        if (failure === 'probe') throw new Error('probe unavailable');
+        return 'unavailable';
+      }
+      return liveProbe(peer, ...args);
+    });
+    const agent: PublicSnapshotBulkHost & { getPeerProtocols: typeof protocols } = {
+      store: f.target, router: f.router, ensurePeerConnected: ensure, getPeerProtocols: protocols,
       getOrCreateSyncVerifyWorker: () => f.worker,
       processDurableBatchInWorker: (data, meta, _ctx, accept = false, mode) => f.worker.processDurableBatch(data, meta, accept, mode),
       reconcileAfterGraphScopedMaterialization: async (asset: { ual: string }) => {
@@ -80,8 +94,11 @@ describe('public bulk snapshot recovery', () => {
     const result = await pending;
     if (failure === 'reconciliation') expect(completed).toEqual(new Set(f.uals));
     expect(ensure.mock.calls.map(call => call[0])).toEqual(['offline', f.supplierPeer]);
-    if (failure === 'delayed-identify') expect(probe).toHaveBeenCalledExactlyOnceWith(f.supplierPeer, BULK_GRAPH_PROTOCOL, 3_000, signal);
-    else expect(probe).not.toHaveBeenCalled();
+    expect(probe.mock.calls.map(call => call[0])).toEqual(failure === 'connect'
+      ? [f.supplierPeer] : ['offline', f.supplierPeer]);
+    expect(probe).toHaveBeenCalledWith(f.supplierPeer, BULK_GRAPH_PROTOCOL, 3_000, signal);
+    expect(protocols).not.toHaveBeenCalled();
+    if (failure === 'cached-advertisement') expect(connect).toHaveBeenCalledWith('offline', { signal });
     expect(result.committed).toEqual(new Set(f.uals));
     expect(result.bulkChunks!.length).toBeGreaterThanOrEqual(2);
     expect(requests[0]).toEqual(f.uals);
@@ -101,7 +118,7 @@ describe('public bulk snapshot recovery', () => {
   it('negotiates missing advertisements and rejects genuinely unsupported cores without sending a snapshot', async () => {
     const probe = vi.fn(async (_peer: string, _protocol: string, _timeout: number, _signal?: AbortSignal) => 'unsupported' as const);
     const exchange = vi.fn();
-    const agent: PublicSnapshotBulkHost = { ...unusedRecoveryCapabilities, ensurePeerConnected: vi.fn(), getPeerProtocols: async () => [],
+    const agent: PublicSnapshotBulkHost = { ...unusedRecoveryCapabilities, ensurePeerConnected: vi.fn(),
       router: { probeProtocol: probe, withDuplexStream: exchange } };
     const signal = new AbortController().signal;
     await expect(recoverPublicSnapshotBulk(agent, { contextGraphId: cg, peers: ['unsupported'], uals: [],
@@ -122,7 +139,7 @@ describe('public bulk snapshot recovery', () => {
     const fail = async () => { if (mode === 'cancel') controller.abort(reason); else current = false; throw new Error('peer failed'); };
     const ensure = vi.fn(async () => { if (stage === 'connect') await fail(); });
     const probe = vi.fn(fail);
-    const agent: PublicSnapshotBulkHost = { ...unusedRecoveryCapabilities, ensurePeerConnected: ensure, getPeerProtocols: async () => [], router: { probeProtocol: probe, withDuplexStream: () => { throw new Error('Unexpected stream'); } } };
+    const agent: PublicSnapshotBulkHost = { ...unusedRecoveryCapabilities, ensurePeerConnected: ensure, router: { probeProtocol: probe, withDuplexStream: () => { throw new Error('Unexpected stream'); } } };
     await expect(recoverPublicSnapshotBulk(agent, { contextGraphId: cg, peers: ['first', 'second'], uals: [],
       evidence: {} as PublicSnapshotEvidence, signal: controller.signal,
       assertCurrent: () => { if (!current) throw reason; }, deadline: Date.now() + 1000, dataDir: '/unused',
