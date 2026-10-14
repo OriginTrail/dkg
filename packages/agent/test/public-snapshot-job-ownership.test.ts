@@ -174,7 +174,8 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
     vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const f = createExactBatchHostFixture(transportCleanups), a = f.host;
     a.started = true;
-    a.subscribedContextGraphs.set(CG, { subscribed: true, onChainId: '14' });
+    a.subscribedContextGraphs.set(CG, { subscribed: true, onChainId: '14', onChainHash: ethers.id(CG) });
+    a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;
     const pinned = sealPublicGraphSnapshot({ version: 1, chainId: a.chain.chainId,
       deploymentId: a.chain.deploymentId, contextGraphId: CG, onChainId: '14', nameHash: ethers.id(CG),
       contextGraphStorage: `0x${'1'.repeat(40)}`, assetStorage: `0x${'2'.repeat(40)}`,
