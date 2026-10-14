@@ -1,4 +1,3 @@
-import { readCurrentAssertionVersion } from "../../graph-scoped-assertion-version.js";
 import {
   assertSafeIri,
   parseDeterministicKnowledgeAssetUal,
@@ -11,6 +10,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
+  readCurrentAssertionVersion,
   mergeSameVersionGraphKnowledgeAssetMetadataV1,
   overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
   overlayLocallyTrustedKnowledgeAssetControls,
