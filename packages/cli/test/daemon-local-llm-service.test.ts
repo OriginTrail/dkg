@@ -7,7 +7,9 @@ import {
   DaemonLocalLlmError,
   resolveDaemonLocalLlmSettings,
 } from '../src/daemon/local-llm-service.js';
+import { createLocalLlmProgramAdapter } from '../src/semantic-runtime-local-llm-adapter.js';
 import { listLocalAgentIntegrations } from '../src/daemon/local-agents.js';
+import { DkgLocalLlmRuntime } from '@origintrail-official/dkg-local-llm';
 
 function onlineFetch(): typeof fetch {
   return vi.fn(async () => Response.json({
@@ -38,6 +40,128 @@ function fakeSession(options: {
 }
 
 describe('daemon local LLM service', () => {
+  it.each([false, true].flatMap(afterClear => ['adapter', 'profile', 'model', 'endpoint'].map(change => ({ afterClear, change }))))('rejects changed $change configuration before session creation (after clear=$afterClear)', async ({ afterClear, change }) => {
+    const folder = mkdtempSync(join(tmpdir(), 'program-adapter-'));
+    const owner = '0x' + '1'.repeat(40), graph = owner + '/jpb-data';
+    const adapterFile = join(folder, 'adapter.mjs'), profileFile = join(folder, 'profile.json');
+    writeFileSync(adapterFile, 'export function registerTools() {}');
+    writeFileSync(profileFile, JSON.stringify({ name: 'JPB', routingKeywords: ['order'], readTools: ['jpb_read'] }), { mode: 0o600 });
+    const run = vi.fn(async () => ({ answer: 'approved', profile: 'catalog', toolCalls: [] }));
+    const createSession = vi.fn(async (_options: unknown) => fakeSession({ run }));
+    const env = { DKG_PROJECT: graph, DKG_LLM_PROGRAM_AGENT: owner, DKG_LLM_DOMAIN_PROFILE: profileFile, DKG_LLM_ADAPTERS: adapterFile,
+      DKG_LLM_MODEL: 'local-model', DKG_LLM_URL: 'http://127.0.0.1:8080/v1/chat/completions' };
+    const service = createDaemonLocalLlmService({ dkgHome: folder, env, fetch: onlineFetch(), createSession });
+    try {
+      const grant = (await service.health()).programCapability!;
+      const adapter = createLocalLlmProgramAdapter(graph, owner, grant, async () => {}, service.programProvider);
+      if (afterClear) {
+        await adapter.dispatch({} as any, { prompt: 'First approved turn' });
+        expect(createSession.mock.calls[0][0]).toMatchObject({ adapterHashes: [{ path: adapterFile, sha256: expect.any(String) }] });
+        await service.clear();
+      }
+      if (change === 'adapter') writeFileSync(adapterFile, 'export function registerTools() { throw new Error("changed") }');
+      if (change === 'profile') writeFileSync(profileFile, JSON.stringify({ name: 'JPB changed', routingKeywords: ['order'], readTools: ['jpb_read'] }));
+      if (change === 'model') env.DKG_LLM_MODEL = 'changed-model';
+      if (change === 'endpoint') env.DKG_LLM_URL = 'http://127.0.0.1:9090/v1/chat/completions';
+      expect((await service.health()).ready).toBe(false);
+      await expect(adapter.dispatch({} as any, { prompt: 'Must not infer' })).rejects.toThrow('BEFORE_DISPATCH');
+      expect(createSession).toHaveBeenCalledTimes(afterClear ? 1 : 0);
+      expect(run).toHaveBeenCalledTimes(afterClear ? 1 : 0);
+    } finally { await service.close(); rmSync(folder, { recursive: true, force: true }); }
+  });
+
+  it('isolates independently owned daemon providers and closing one disables only that owner', async () => {
+    const owner = '0x' + '1'.repeat(40), graph = owner + '/jpb-data';
+    const firstRun = vi.fn(async () => ({ answer: 'first' })), secondRun = vi.fn(async () => ({ answer: 'second' }));
+    const env = { DKG_PROJECT: graph, DKG_LLM_PROGRAM_AGENT: owner };
+    const first = createDaemonLocalLlmService({ dkgHome: '/tmp/dkg', env, fetch: onlineFetch(), createSession: async () => fakeSession({ run: firstRun }) });
+    const second = createDaemonLocalLlmService({ dkgHome: '/tmp/dkg', env, fetch: onlineFetch(), createSession: async () => fakeSession({ run: secondRun }) });
+    try {
+      const adapter = createLocalLlmProgramAdapter(graph, owner, first.programProvider!.capability, async () => {}, first.programProvider);
+      await adapter.dispatch({} as any, { prompt: 'Read first' });
+      expect(firstRun).toHaveBeenCalledOnce();
+      expect(secondRun).not.toHaveBeenCalled();
+      await first.close();
+      expect(adapter.enabled()).toBe(false);
+      expect(second.programProvider!.isEnabled()).toBe(true);
+      await second.programProvider!.run('Read second');
+      expect(secondRun).toHaveBeenCalledOnce();
+    } finally { await first.close(); await second.close(); }
+  });
+
+  it('aborts and drains standalone Program inference on shutdown without retaining conversation history', async () => {
+    const owner = '0x' + '1'.repeat(40), graph = owner + '/jpb-data';
+    let modelSignal: AbortSignal | undefined;
+    const runtime = await DkgLocalLlmRuntime.create({
+      mcp: { listTools: async () => ({ tools: [{ name: 'dkg_status', description: 'Read node status',
+        inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } }] }), callTool: vi.fn() },
+      llamaUrl: 'http://local/v1/chat/completions', model: 'test-model',
+      fetch: (async (_url: unknown, init: any) => {
+        modelSignal = init.signal;
+        await new Promise((_resolve, reject) => modelSignal!.addEventListener('abort', () => reject(modelSignal!.reason), { once: true }));
+        throw new Error('Unreachable after aborted model request');
+      }) as typeof fetch,
+    });
+    const close = vi.fn(async () => expect(modelSignal?.aborted).toBe(true));
+    const service = createDaemonLocalLlmService({ dkgHome: '/tmp/dkg', env: { DKG_PROJECT: graph, DKG_LLM_PROGRAM_AGENT: owner },
+      fetch: onlineFetch(), createSession: async () => ({ runtime, trace: {} as any, close }) });
+    const adapter = createLocalLlmProgramAdapter(graph, owner, service.programProvider!.capability, async () => {}, service.programProvider);
+    const pending = adapter.dispatch({} as any, { prompt: 'cancelled Program question' });
+    const outcome = pending.catch(error => error);
+    await vi.waitFor(() => expect(modelSignal).toBeDefined());
+    await expect(service.clear()).rejects.toMatchObject({ code: 'LOCAL_LLM_BUSY' });
+    await service.close();
+    expect(await outcome).toMatchObject({ message: 'The local LLM service is shutting down.' });
+    expect(close).toHaveBeenCalledOnce();
+    expect(adapter.enabled()).toBe(false);
+    expect((await service.health()).busy).toBe(false);
+    expect(runtime.getSessionHistory()).toEqual([]);
+  });
+
+  it('reports an unavailable Program executor without falling back to direct inference', async () => {
+    const owner = '0x' + '1'.repeat(40);
+    const createSession = vi.fn();
+    const service = createDaemonLocalLlmService({ dkgHome: '/tmp/dkg', env: {
+      DKG_PROJECT: owner + '/jpb-data', DKG_LLM_PROGRAM_AGENT: owner,
+      DKG_LLM_PROGRAM_EXECUTOR: '/reviewed/program.mjs',
+    }, fetch: onlineFetch(), createSession,
+    createProgramExecutor: async () => { throw new Error('JPB_CHAT_APPROVAL_CHANGED'); } });
+    try {
+      expect(await service.health()).toMatchObject({ ready: false, executionMode: 'program', error: 'JPB_CHAT_APPROVAL_CHANGED' });
+      await expect(service.chat({ message: 'Read 62994' })).rejects.toMatchObject({ status: 502, message: 'JPB_CHAT_APPROVAL_CHANGED' });
+      expect(createSession).not.toHaveBeenCalled();
+    } finally { await service.close(); }
+  });
+
+  it('routes Program-mode chat through the approved effect and captures evidence without recursion', async () => {
+    const owner = '0x' + '1'.repeat(40), graph = owner + '/jpb-data';
+    const run = vi.fn(async () => ({ answer: '280', profile: 'catalog', toolCalls: [],
+      evidence: [{ name: 'order', arguments: { orderNo: '62994' }, result: 'SQL snapshot' }] }));
+    const invoke = vi.fn();
+    const service = createDaemonLocalLlmService({ dkgHome: '/tmp/dkg', env: {
+      DKG_PROJECT: graph, DKG_LLM_PROGRAM_AGENT: owner, DKG_LLM_PROGRAM_EXECUTOR: '/reviewed/program.mjs',
+    }, fetch: onlineFetch(), createSession: async () => fakeSession({ run }),
+    createProgramExecutor: async ({ capability }) => ({ chat: async input => {
+      invoke(input);
+      const adapter = createLocalLlmProgramAdapter(graph, owner, capability, async () => {}, service.programProvider);
+      const effect = await adapter.dispatch({} as any, { prompt: input.message });
+      const result = JSON.parse(JSON.parse(effect.output!).output);
+      return { text: result.answer, contextGraphId: graph, profile: result.profile, toolCalls: result.toolCalls,
+        execution: { invocationId: 'test', executionIri: 'urn:execution:test', persisted: true,
+          executionLayer: 'wm', programIri: 'urn:program:chat', contextGraphId: graph, assetName: 'semantic-execution-test' } };
+    } }) });
+    try {
+      expect(await service.health()).toMatchObject({ executionMode: 'program' });
+      expect(await service.chat({ message: 'NAF 62994', contextGraphId: graph }))
+        .toMatchObject({ text: '280', execution: { persisted: true } });
+      expect(invoke).toHaveBeenCalledOnce();
+      expect(run).toHaveBeenCalledWith('NAF 62994', expect.objectContaining({ captureEvidence: true }));
+      await expect(service.chat({ message: 'Read elsewhere', contextGraphId: 'other' }))
+        .rejects.toMatchObject({ code: 'LOCAL_LLM_PROJECT_MISMATCH' });
+      expect(run).toHaveBeenCalledOnce();
+    } finally { await service.close(); }
+  });
+
   it('loads a reviewed read-only domain profile and keeps its adapter tools project-bound', async () => {
     const folder = mkdtempSync(join(tmpdir(), 'dkg-llm-profile-'));
     try {
