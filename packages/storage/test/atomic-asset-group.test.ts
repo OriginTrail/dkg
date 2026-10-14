@@ -109,10 +109,14 @@ describe('atomic asset group', () => {
     expect(() => buildAtomicAssetGroupUpdate([])).toThrow();
     expect(() => buildAtomicAssetGroupUpdate(Array.from({length:9},(_,i)=>asset(i,'x')))).toThrow();
   });
-  it.each([0, 1, 2, 3])('preserves every destination when staging member %s alone is missing', async missing => {
+  it.each([0, 1, 2, 3].flatMap(index => ['absent', 'partial'].map(mode => ({ index, mode }))))(
+    'preserves every destination when staging member $index is $mode', async ({ index, mode }) => {
     const store = new OxigraphStore();
     try {
-      const members = [asset(1, 'new'), asset(2, 'new')];
+      const members = [asset(1, 'new'), asset(2, 'new')].map(a => ({ ...a,
+        graphQuads: [...a.graphQuads, { ...a.graphQuads[0]!, predicate: 'urn:second' }],
+        metadataQuads: [...a.metadataQuads, { ...a.metadataQuads[0]!, predicate: 'urn:second' }],
+      }));
       await store.insert([...[asset(1, 'old'), asset(2, 'old')].flatMap(a => [...a.graphQuads, ...a.metadataQuads]),
         { graph: 'urn:meta', subject: 'urn:other', predicate: 'urn:p', object: '"keep"' }]);
       const select = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<urn:data:1>, <urn:data:2>, <urn:meta>)) } ORDER BY ?g ?s ?p ?o';
@@ -122,7 +126,10 @@ describe('atomic asset group', () => {
       const staged = parseNQuads(plan.nquads);
       const graphs = [...new Set(staged.map(q => q.graph))];
       expect(graphs).toHaveLength(4);
-      await store.insert(staged.filter(q => q.graph !== graphs[missing]));
+      const omitted = staged.find(q => q.graph === graphs[index])!;
+      const uploaded = staged.filter(q => mode === 'absent' ? q.graph !== graphs[index] : q !== omitted);
+      expect(uploaded.filter(q => q.graph === graphs[index])).toHaveLength(mode === 'partial' ? 1 : 0);
+      await store.insert(uploaded);
       await store.update(plan.update);
       expect(await store.query(plan.receiptQuery)).toEqual({ type: 'boolean', value: false });
       expect(await store.query(select)).toEqual(before);

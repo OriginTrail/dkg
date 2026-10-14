@@ -118,14 +118,19 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     }
   });
 
-  it.each([0, 1, 2, 3])('preserves all destinations when native staging member %s is absent', async missing => {
+  it.each([0, 1, 2, 3].flatMap(index => ['absent', 'partial'].map(mode => ({ index, mode }))))(
+    'preserves every destination when staging member $index is $mode', async ({ index, mode }) => {
     const root = `urn:incomplete-group:${randomUUID()}`, meta = `${root}:meta`;
     const member = (id: number, value: string): AtomicAssetReplacement => ({
       graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
       graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: JSON.stringify(value) }],
       metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: JSON.stringify(value) }],
     });
-    const plan = buildBulkAssetGroupPlan([member(1, 'new'), member(2, 'new')])!;
+    const members = [member(1, 'new'), member(2, 'new')].map(a => ({ ...a,
+      graphQuads: [...a.graphQuads, { ...a.graphQuads[0]!, predicate: 'urn:second' }],
+      metadataQuads: [...a.metadataQuads, { ...a.metadataQuads[0]!, predicate: 'urn:second' }],
+    }));
+    const plan = buildBulkAssetGroupPlan(members)!;
     const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
     try {
       await store.insert([...[member(1, 'old'), member(2, 'old')].flatMap(a => [...a.graphQuads, ...a.metadataQuads]),
@@ -133,8 +138,11 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       const before = await store.query(select);
       const staged = parseNQuadsTextTolerant(plan.nquads), graphs = [...new Set(staged.map(q => q.graph))];
       expect(graphs).toHaveLength(4);
+      const omitted = staged.find(q => q.graph === graphs[index])!;
+      const uploaded = staged.filter(q => mode === 'absent' ? q.graph !== graphs[index] : q !== omitted);
+      expect(uploaded.filter(q => q.graph === graphs[index])).toHaveLength(mode === 'partial' ? 1 : 0);
       const response = await fetch(BLAZEGRAPH_URL!, { method: 'POST', headers: { 'Content-Type': 'text/x-nquads' },
-        body: quadsToNQuads(staged.filter(q => q.graph !== graphs[missing])) });
+        body: quadsToNQuads(uploaded) });
       await response.text(); expect(response.ok).toBe(true);
       await store.update(plan.update);
       expect(await store.query(plan.receiptQuery)).toEqual({ type: 'boolean', value: false });
