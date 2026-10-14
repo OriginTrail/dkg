@@ -1,3 +1,4 @@
+import { resolvePrivateRootLegacyLaneAdmission, type SwmReadAdmission } from './swm-read-admission.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -800,33 +801,19 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * or accepted graphs, and nodes with private access-policy authority keep
    * their RFC-64 behaviour.
    */
-  async rfc64PrivateRootSwmOnLegacyLaneV1(
-    this: DKGAgent,
-    contextGraphId: string, options: { signal?: AbortSignal; strict?: boolean } = {},
-  ): Promise<boolean> {
-    const authorityContextGraphId = this.rfc64PrivateRootLegacyLaneAuthorityIdV1(contextGraphId);
-    if (authorityContextGraphId === null) return false;
-    const localAgents = [
-      this.defaultAgentAddress,
-      ...this.listLocalAgents().map(({ agentAddress }) => agentAddress),
-    ];
-    // The cached merged projection only screens out the common case cheaply;
-    // it also holds replicated ONTOLOGY and AGENTS facts, so the decision is
-    // taken from the graph's own `_meta` alone.
-    try {
-      if (!isLocalPrivateMember(await this.getCgMeta(authorityContextGraphId, options), localAgents)) {
-        return false;
-      }
-      if (!isLocalPrivateMember(await this.getOwnCgMetaFacts(authorityContextGraphId, options), localAgents)) {
-        return false;
-      }
-    } catch (error) {
-      if (options.strict) throw error;
-      return false;
-    }
-    // RFC-64 authority can change while the metadata is read: decide on the
-    // authority as it stands now, not as it stood before the reads.
-    return this.rfc64PrivateRootLegacyLaneAuthorityIdV1(contextGraphId) === authorityContextGraphId;
+  async rfc64PrivateRootSwmOnLegacyLaneV1(this: DKGAgent, contextGraphId: string,
+    options: { signal?: AbortSignal } = {}): Promise<boolean> {
+    return (await this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, options)).outcome === 'allowed';
+  }
+
+  async resolvePrivateRootSwmLegacyLaneV1(this: DKGAgent, contextGraphId: string,
+    options: { signal?: AbortSignal } = {}): Promise<SwmReadAdmission> {
+    const localAgents = [this.defaultAgentAddress, ...this.listLocalAgents().map(({ agentAddress }) => agentAddress)];
+    return resolvePrivateRootLegacyLaneAdmission({
+      authorityId: () => this.rfc64PrivateRootLegacyLaneAuthorityIdV1(contextGraphId),
+      mergedMembership: async id => isLocalPrivateMember(await this.getCgMeta(id, options), localAgents),
+      ownMembership: async id => isLocalPrivateMember(await this.getOwnCgMetaFacts(id, options), localAgents),
+    });
   }
 
   /**
