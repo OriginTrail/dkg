@@ -308,7 +308,7 @@ it.each(['unavailable', 'nonmember'] as const)('distinguishes legacy shared-memo
   expect(execute).not.toHaveBeenCalled();
   const admission = await agent.resolveSharedMemoryReadAdmission.call(agent as never, 'test');
   expect(admission.outcome).toBe(outcome === 'unavailable' ? 'unavailable' : 'denied');
-  if (admission.outcome === 'unavailable') expect(admission.error).toBe(unavailable);
+  if (admission.outcome === 'unavailable' && admission.source === 'legacy-membership') expect(admission.error).toBe(unavailable);
   expect(await QueryMethods.prototype.query.call(agent as never, 'SELECT ?s WHERE { ?s ?p ?o }', {
     contextGraphId: 'test', view: 'shared-working-memory', callerAgentAddress: member,
   })).toEqual({ bindings: [] });
@@ -485,6 +485,12 @@ it.each(['unknown', 'thrown', 'ontology'] as const)('preserves metadata chain-pr
   expect(read.res.statusCode, read.res.body).toBe(proof === 'ontology' ? 200 : 503);
   if (proof !== 'ontology') {
     expect(JSON.parse(read.res.body)).toMatchObject({ retryable: true });
+    expect(execute).not.toHaveBeenCalled();
+    await expect(QueryMethods.prototype.query.call(agent as never, 'SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId: 'test', view: 'shared-working-memory',
+    })).resolves.toEqual({ bindings: [] });
+    await expect(LifecycleSyncMethods.prototype.canUseSharedMemoryForContextGraph.call(agent as never, 'test'))
+      .resolves.toBe(false);
     expect(execute).not.toHaveBeenCalled();
   } else expect(execute).toHaveBeenCalledOnce();
 });

@@ -105,7 +105,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'FinalizedSwmSyncGate', chainAdapter: chain });
     vi.spyOn(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(undefined);
-    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveMetadataConfirmation').mockResolvedValue({ outcome: 'confirmed' });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
     // Served fresh (a cache hit inside the tick), so the private roster decides.
@@ -137,7 +137,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'FinalizedSwmSyncFallback', chainAdapter: chain });
     vi.spyOn(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(undefined);
-    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveMetadataConfirmation').mockResolvedValue({ outcome: 'confirmed' });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
     const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
@@ -323,7 +323,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
       accessPolicy: 1,
       participantAgents: [member.agentAddress],
     });
-    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveMetadataConfirmation').mockResolvedValue({ outcome: 'confirmed' });
     const accessChecks = vi.spyOn(agent, 'canUseSharedMemoryForContextGraph');
     // Only the recipient resolver asks for the live roster. Each of its reads
     // after the first, one per stability attempt, starts a reconcile.
@@ -388,7 +388,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'FinalizedStaleRosterGates', chainAdapter: chain });
     vi.spyOn(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(undefined);
-    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveMetadataConfirmation').mockResolvedValue({ outcome: 'confirmed' });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(14n));
     const nameHash = agent.contextGraphNameCommitment(contextGraphId);
