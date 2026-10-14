@@ -636,6 +636,7 @@ export class QueryMethods extends DKGAgentBase {
       opts.signal?.throwIfAborted();
       return withPublicSnapshotQueryTrust(this.store, opts.contextGraphId, opts.chainEvidenceMode, () => this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,
+      requireCompleteGraphScope: opts.requireCompleteGraphScope,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,

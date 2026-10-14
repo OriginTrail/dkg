@@ -11,6 +11,8 @@ export interface QueryResult {
 export interface QueryOptions {
   contextGraphId?: string;
   timeout?: number;
+  /** Reject compatibility routing that would omit selected graphs. */
+  requireCompleteGraphScope?: boolean;
   /** Bound HTTP store responses before parsing; embedded stores remain post-checked. */
   maxResponseBytes?: number;
   /** Cancel queued and in-flight store work when the caller goes away. */

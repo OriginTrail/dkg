@@ -8,6 +8,8 @@ import type { PublicSnapshotMode } from "./public-snapshot-evidence.js";
 export interface AgentQueryOptions {
   contextGraphId?: string;
   accessDenied?: "empty" | "error";
+  /** Require routing to preserve every selected graph. */
+  requireCompleteGraphScope?: boolean;
   redactQuery?: boolean;
   maxResponseBytes?: number;
   /** Explicit acceptance of configured-core chain evidence for this graph. */
