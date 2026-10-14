@@ -188,7 +188,7 @@ export class PublicGraphSnapshotCache {
     private readonly clock: () => number = Date.now,
   ) {}
   private sequence = 0;
-  async get(id: string, onChainId: string, refresh = false): Promise<PublicGraphSnapshot> {
+  async get(id: string, onChainId: string, refresh = false, admitBuild?: () => () => void): Promise<PublicGraphSnapshot> {
     const key = JSON.stringify([id, onChainId]);
     // A forced observation must begin after THIS request, in the supplier's
     // own ordering domain. Never compare clocks belonging to different nodes.
@@ -204,15 +204,19 @@ export class PublicGraphSnapshotCache {
         continue;
       }
       if (this.pending.size >= 2) throw new Error("Snapshot builder busy");
+      const release = admitBuild?.();
       const sequence = ++this.sequence;
-      const operation = this.read(id, onChainId, AbortSignal.timeout(110_000)).then(snapshot => {
+      let read: Promise<PublicGraphSnapshot>;
+      try { read = this.read(id, onChainId, AbortSignal.timeout(110_000)); }
+      catch (error) { release?.(); throw error; }
+      const operation = read.then(snapshot => {
         if (this.entries.size >= 8) {
           const oldest = this.entries.keys().next().value!;
           this.entries.delete(oldest);
         }
         this.entries.set(key, { snapshot, sequence });
         return snapshot;
-      }).finally(() => { this.pending.delete(key); });
+      }).finally(() => { this.pending.delete(key); release?.(); });
       this.pending.set(key, { promise: operation, sequence });
       return operation;
     }
