@@ -32,6 +32,8 @@ export interface QueryOptions {
    * to their selected graph set unless this is true.
    */
   includeContextGraphPartitions?: boolean;
+  /** Restrict expanded partitions to shared content; never include WM drafts. */
+  excludeWorkingMemoryPartitions?: boolean;
   /**
    * Opt-in: allow the scoped query to explicitly reference the context
    * graph's own `_private` partition (`<cg>/_private`, or the sub-graph

@@ -16,9 +16,11 @@ export type EntityOperation =
   | { kind: 'index'; request: NormalizedIndexRequest }
   | { kind: 'readiness'; request: NormalizedReadinessRequest }
   | { kind: 'search'; request: NormalizedSearchRequest };
-export interface EntityDocument {
+export interface EntityIdentity {
   entityUri: string;
   sourceGraph: string;
+}
+export interface EntityDocument extends EntityIdentity {
   text: string;
   contentHash: string;
 }

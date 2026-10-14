@@ -635,6 +635,7 @@ export class QueryMethods extends DKGAgentBase {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
+      excludeWorkingMemoryPartitions: opts.excludeWorkingMemoryPartitions,
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,
