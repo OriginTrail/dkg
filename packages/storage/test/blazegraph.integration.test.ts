@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AtomicAssetReplacement } from '../src/atomic-asset-group.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../src/atomic-asset-group.js';
 import { buildBulkAssetGroupPlan } from '../src/adapters/bulk-asset-group.js';
 import { parseNQuadsTextTolerant } from '../src/nquads-text.js';
 import { quadsToNQuads } from '../src/bounded-rdf.js';
@@ -26,7 +26,7 @@ import { quadsToNQuads } from '../src/bounded-rdf.js';
  * BLAZEGRAPH_TEST_URL example:
  *   http://127.0.0.1:9999/bigdata/namespace/kb/sparql
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
 import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
@@ -115,6 +115,43 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     } finally {
       await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
       await store.close();
+    }
+  });
+
+  it('rolls back every fallback destination after a later statement fails', async () => {
+    const root = `urn:fallback-rollback:${randomUUID()}`, meta = `${root}:meta`;
+    const member = (id: number, value: string): AtomicAssetReplacement => ({
+      graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
+      graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: value }],
+      metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: '"2"' }],
+    });
+    const members = [member(1, '"01"^^<http://www.w3.org/2001/XMLSchema#integer>'), member(2, '"replacement"')];
+    members[0]!.graphQuads.push({ ...members[0]!.graphQuads[0]!, object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' });
+    expect(buildBulkAssetGroupPlan(members)).toBeNull();
+    const plan = buildAtomicAssetGroupUpdate(members);
+    const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
+    let intercept: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await store.insert([...[member(1, '"original-one"'), member(2, '"original-two"')]
+        .flatMap(a => [...a.graphQuads, ...a.metadataQuads]),
+        { graph: meta, subject: `${root}:unrelated`, predicate: 'urn:p', object: '"keep"' }]);
+      const before = await store.query(select), transport = globalThis.fetch;
+      let injected = false;
+      intercept = vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
+        if (init?.body === plan.update) {
+          injected = true;
+          // CREATE on the nonempty metadata graph fails at execution time,
+          // after every generated CLEAR/DELETE/INSERT has been evaluated.
+          return transport(url, { ...init, body: `${plan.update}; CREATE GRAPH <${meta}>` });
+        }
+        return transport(url, init);
+      });
+      await expect(store.replaceAssetGroup(members)).rejects.toThrow();
+      expect(injected).toBe(true);
+      expect(await store.query(select)).toEqual(before);
+    } finally {
+      intercept?.mockRestore();
+      await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
     }
   });
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { withMaterializationLock } from '@origintrail-official/dkg-publisher';
+import { withMaterializationLocks } from '@origintrail-official/dkg-publisher';
 import type { AtomicAssetReplacement, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import type { VerifiedGraphScopedAsset, GraphScopedMaterializationOutcome } from './graph-scoped-materialization.js';
 import { prepareGraphScopedReplacementUnderLock } from './graph-scoped-replacement.js';
@@ -37,9 +37,6 @@ export async function executeGraphScopedPublication<T extends GraphScopedMateria
     }
     return params.complete();
   };
-  const ordered = [...assets].sort((a,b) => `${a.metaGraph}\0${a.ual}` < `${b.metaGraph}\0${b.ual}` ? -1 : 1);
-  const lock = (index: number): Promise<T | 'quarantined'> => index < ordered.length
-    ? withMaterializationLock(ordered[index]!.metaGraph, ordered[index]!.ual, () => lock(index + 1), { signal: options.signal })
-    : apply();
-  return params.lockAlreadyHeldByCaller ? apply() : lock(0);
+  return params.lockAlreadyHeldByCaller ? apply()
+    : withMaterializationLocks(assets, apply, { signal: options.signal });
 }
