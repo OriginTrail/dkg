@@ -1,11 +1,20 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
-import { EntitySearchError, checkDeadline, unitVector, type EntityDocument, type EntityIndexSpec } from './types.js';
+import { EntitySearchError, checkDeadline, unitVector, type EntityDocument, type EntityIndexSpec, type EntityIdentity } from './types.js';
 import { documentKey } from './documents.js';
 
 export interface IndexState {
   id: string; spec: EntityIndexSpec; fingerprint: string;
-  cursor: string | null; scanComplete: boolean; completedAt: string | null;
+  cursor: EntityIdentity | null; scanComplete: boolean; completedAt: string | null;
+}
+/** Version-1 checkpoints retain their original tuple encoding only on disk. */
+function decodeState(raw: string): IndexState {
+  const state = JSON.parse(raw) as Omit<IndexState, 'cursor'> & { cursor: unknown };
+  if (state.cursor === null) return { ...state, cursor: null };
+  const cursor: unknown = typeof state.cursor === 'string' ? JSON.parse(state.cursor) : undefined;
+  if (!Array.isArray(cursor) || cursor.length !== 2 || cursor.some(value => typeof value !== 'string'))
+    throw new Error('Invalid entity scan checkpoint');
+  return { ...state, cursor: { sourceGraph: cursor[0], entityUri: cursor[1] } };
 }
 export class EntityIndexStore {
   private db: Database.Database;
@@ -35,7 +44,7 @@ export class EntityIndexStore {
         if (columns.some(column => column.name === 'generation')) this.db.exec(`ALTER TABLE ${table} DROP COLUMN generation`);
       }
       for (const row of this.db.prepare('SELECT state FROM entity_indexes').all() as Array<{ state: string }>) {
-        const state = JSON.parse(row.state) as IndexState & { generation?: number };
+        const state = decodeState(row.state) as IndexState & { generation?: number };
         delete state.generation;
         // Completed-only legacy scans have no independent checkpoint payload.
         // Retain their visible documents and revisit the unfinished scan from zero.
@@ -48,10 +57,11 @@ export class EntityIndexStore {
 
   state(id: string): IndexState | undefined {
     const row = this.db.prepare('SELECT state FROM entity_indexes WHERE id = ?').get(id) as { state: string } | undefined;
-    return row ? JSON.parse(row.state) : undefined;
+    return row ? decodeState(row.state) : undefined;
   }
   save(state: IndexState): void {
-    this.db.prepare('INSERT OR REPLACE INTO entity_indexes VALUES (?, ?)').run(state.id, JSON.stringify(state));
+    const cursor = state.cursor ? JSON.stringify([state.cursor.sourceGraph, state.cursor.entityUri]) : null;
+    this.db.prepare('INSERT OR REPLACE INTO entity_indexes VALUES (?, ?)').run(state.id, JSON.stringify({ ...state, cursor }));
   }
   /** A restart drops only the unfinished scan; the last completed index survives. */
   begin(state: IndexState): void {
