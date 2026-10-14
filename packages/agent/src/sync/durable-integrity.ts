@@ -16,7 +16,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { appendInPlace } from './append-in-place.js';
 import { compareCodePoint } from './code-point-order.js';
-import { isIriMetaSubject } from './iri-term.js';
+import { prepareDurableMeta, type PreparedDurableMeta } from './durable-metadata-intake.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const MERKLE_ROOT = `${DKG_NS}merkleRoot`;
@@ -25,7 +25,6 @@ const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
-const AUTHENTICATED_SUB_GRAPH = `${DKG_NS}authenticatedSubGraphName`;
 const BATCH_ID = `${DKG_NS}batchId`;
 const STATUS = `${DKG_NS}status`;
 const RESERVED_UAL = `${DKG_NS}reservedUal`;
@@ -65,7 +64,6 @@ const DURABLE_INTEGRITY_META_PREDICATE_SET: ReadonlySet<string> = new Set(
  */
 const DURABLE_SYNC_CONTROL_PREDICATE_SET: ReadonlySet<string> = new Set([
   BATCH_ID,
-  AUTHENTICATED_SUB_GRAPH,
   ASSERTION_GRAPH,
   ASSERTION_VERSION,
 ]);
@@ -73,41 +71,6 @@ const DURABLE_SYNC_CONTROL_PREDICATE_SET: ReadonlySet<string> = new Set([
 export interface DurableMetaGraphClassification {
   hasMerkleRoot: boolean;
   hasIntegrityEnvelope: boolean;
-}
-
-/**
- * One intake boundary for peer-supplied durable metadata.
- *
- * Verification consumes only IRI-subject rows. Admission retains indexes into
- * the caller's original array so selected rows can be persisted without a
- * positional remap, while the rejected-row count advances the wire cursor.
- */
-interface PreparedDurableMeta {
-  readonly originalMetaQuads: readonly Quad[];
-  readonly verificationView: readonly Quad[];
-  readonly admissibleOriginalIndexes: readonly number[];
-  readonly droppedNonIriSubjectTriples: number;
-}
-
-function prepareDurableMeta(metaQuads: readonly Quad[]): PreparedDurableMeta {
-  const verificationView: Quad[] = [];
-  const admissibleOriginalIndexes: number[] = [];
-  let droppedNonIriSubjectTriples = 0;
-  for (let index = 0; index < metaQuads.length; index++) {
-    const quad = metaQuads[index]!;
-    if (!isIriMetaSubject(quad.subject)) {
-      droppedNonIriSubjectTriples += 1;
-      continue;
-    }
-    verificationView.push(quad);
-    admissibleOriginalIndexes.push(index);
-  }
-  return {
-    originalMetaQuads: metaQuads,
-    verificationView,
-    admissibleOriginalIndexes,
-    droppedNonIriSubjectTriples,
-  };
 }
 
 /** Classify a parsed durable metadata record using the verifier's predicates. */
@@ -1404,13 +1367,9 @@ function selectAdmittedMetadataIndexes(
   authenticatedMetadataUals: ReadonlySet<string>,
 ): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
-  let droppedControls = 0;
+  let droppedControls = preparedMeta.droppedReceiverOwnedTriples;
   for (const index of preparedMeta.admissibleOriginalIndexes) {
     const quad = preparedMeta.originalMetaQuads[index]!;
-    if (quad.predicate === AUTHENTICATED_SUB_GRAPH) {
-      droppedControls += 1;
-      continue;
-    }
     if (
       metadata.merkleSubjects.has(quad.subject)
       || metadata.markerSubjects.has(quad.subject)
@@ -1472,13 +1431,9 @@ function selectSystemOverrideMetadataIndexes(
   kaToKc: ReadonlyMap<string, string>,
 ): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
-  let droppedControls = 0;
+  let droppedControls = preparedMeta.droppedReceiverOwnedTriples;
   for (const index of preparedMeta.admissibleOriginalIndexes) {
     const quad = preparedMeta.originalMetaQuads[index]!;
-    if (quad.predicate === AUTHENTICATED_SUB_GRAPH) {
-      droppedControls += 1;
-      continue;
-    }
     if (
       isDurableSyncControlQuad(quad, metadata, 'standalone')
       && !isAuthenticatedSyncControl(
