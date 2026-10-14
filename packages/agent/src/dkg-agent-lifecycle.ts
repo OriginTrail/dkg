@@ -2,6 +2,7 @@ import { asSyncFetchAbortError, authenticateChallengePinnedGraphScopedAssetWithi
 export { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
 import { createRecoveryAuthority, memoizeRecoveryBindingProof, type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
 import { createRemoteQueryHandler } from "./remote-query-handler.js";
+import { resolveSharedMemoryAdmission, admittedSharedMemoryAuthority, type SwmReadAdmission } from './swm-read-admission.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -11005,47 +11006,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return this.hasConfirmedMetaState(contextGraphId, options);
   }
 
-  async canUseSharedMemoryForContextGraph(this: DKGAgent,
-    contextGraphId: string,
-    opts: {
-      callerAgentAddress?: string; signal?: AbortSignal; strict?: boolean;
-      readAuthority?: ContextGraphReadAuthorityDecision;
-    } = {},
+  async canUseSharedMemoryForContextGraph(this: DKGAgent, contextGraphId: string,
+    opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision } = {},
   ): Promise<boolean> {
-    opts.signal?.throwIfAborted();
-    const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
-      contextGraphId,
-      opts,
-    );
-    // The accepted snapshot is itself finalized, name-bound authority for a
-    // catalog-owned graph. It replaces both the legacy registration read and
-    // its metadata-bootstrap proof at this internal transport boundary.
-    if (acceptedRfc64Authority === true) return true;
-    // A private graph whose RFC-64 authority is not active keeps the legacy
-    // member checks below (#2858); a refusal by an active authority stands.
-    if (
-      acceptedRfc64Authority === false
-      && !(await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId, opts))
-    ) return false;
-    if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId, opts))) {
-      return false;
-    }
-    // Whether to host, sync, or serve SWM for a selected graph is a read-only
-    // authorization decision: the finalized, name-bound snapshot answers it
-    // whenever the index has one, and only a graph the index has no snapshot
-    // for, or a private roster the reader could not serve fresh, reaches the
-    // current-state read. Encryption and roster mutations keep their live
-    // reads elsewhere.
-    return opts.readAuthority !== undefined
-      ? opts.readAuthority.outcome === 'allowed'
-      : withRpcUsageSite(
-          CG_AUTH_RPC_SITES.sharedMemoryRead,
-          () => this.canReadContextGraph(contextGraphId, {
-            callerAgentAddress: opts.callerAgentAddress, signal: opts.signal,
-            allowSubscriptionFallback: false,
-            authorityReadMode: 'finalized-index-or-live',
-          }),
-        );
+    return (await this.resolveSharedMemoryReadAdmission(contextGraphId, opts)).outcome === 'allowed';
+  }
+
+  async resolveSharedMemoryReadAdmission(this: DKGAgent, contextGraphId: string,
+    opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision } = {},
+  ): Promise<SwmReadAdmission> {
+    return resolveSharedMemoryAdmission({
+      acceptedAuthority: () => { opts.signal?.throwIfAborted(); return this.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId, opts); },
+      legacyLane: () => this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, opts),
+      confirmedMetadata: () => this.hasConfirmedSharedMemoryMetaState(contextGraphId, opts),
+      // Reuse the caller's fresh authority, or retain the finalized-index/live policy.
+      canRead: async () => opts.readAuthority !== undefined ? admittedSharedMemoryAuthority(contextGraphId, opts.readAuthority)
+        : withRpcUsageSite(CG_AUTH_RPC_SITES.sharedMemoryRead, () => this.canReadContextGraph(contextGraphId, {
+          callerAgentAddress: opts.callerAgentAddress, signal: opts.signal,
+          allowSubscriptionFallback: false, authorityReadMode: 'finalized-index-or-live',
+        })),
+    });
   }
 
   async verifySyncedDataInWorker(this: DKGAgent,
