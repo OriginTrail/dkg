@@ -680,7 +680,7 @@ describe('family definitions drive both directions', () => {
       // It owns every concept quad of the family but the derived ones, so the
       // exporter reads none of them as a producer key.
       const derived = new Set([OKF_TRUST_TIER, PROV_WAS_DERIVED_FROM]);
-      expect(conceptQuads.filter((q) => !decoded.consumed.has(q) && !derived.has(q.predicate))).toEqual([]);
+      expect(decoded.remaining.filter((q) => !derived.has(q.predicate))).toEqual([]);
     });
   }
 });
@@ -693,11 +693,11 @@ describe('the family decoder owns what the encoder keeps for a family', () => {
   };
   const usageWindow = SCHEMA_NS + 'usageWindow';
 
-  it('reads a list kept verbatim back under the family key and consumes it', () => {
+  it('reads a list kept verbatim back under the family key and leaves none of it', () => {
     const quads = conceptQuads('usage_window: [{ from: 2026-06-01T00:00:00Z }]');
     const decoded = decodeFamilies(quads, () => [], decodeCtx);
     expect(decoded.frontmatter.usage_window).toEqual([{ from: '2026-06-01T00:00:00Z' }]);
-    expect(quads.filter((q) => q.predicate === usageWindow).every((q) => decoded.consumed.has(q))).toBe(true);
+    expect(decoded.remaining.filter((q) => q.predicate === usageWindow)).toEqual([]);
   });
 
   it('reads a single value back by its ownership marker, and leaves an unmarked one to the exporter', () => {
@@ -706,25 +706,25 @@ describe('the family decoder owns what the encoder keeps for a family', () => {
     const kept = conceptQuads('usage_window: Q2');
     const decodedKept = decodeFamilies(kept, () => [], decodeCtx);
     expect(decodedKept.frontmatter.usage_window).toBe('Q2');
-    expect(kept.filter((q) => q.predicate === usageWindow).every((q) => decodedKept.consumed.has(q))).toBe(true);
+    expect(decodedKept.remaining.filter((q) => q.predicate === usageWindow)).toEqual([]);
     const producer = conceptQuads('usageWindow: Q2');
     const decodedProducer = decodeFamilies(producer, () => [], decodeCtx);
     expect('usage_window' in decodedProducer.frontmatter).toBe(false);
-    expect(producer.some((q) => q.predicate === usageWindow && decodedProducer.consumed.has(q))).toBe(false);
+    expect(decodedProducer.remaining.filter((q) => q.predicate === usageWindow)).toEqual(producer.filter((q) => q.predicate === usageWindow));
   });
 
-  it('reads a lone generated.at back by its own predicate and consumes its dateModified copy', () => {
+  it('reads a lone generated.at back by its own predicate, its dateModified copy with it', () => {
     const quads = conceptQuads('generated: { at: 2026-06-30T00:00:00Z }');
     const decoded = decodeFamilies(quads, () => [], decodeCtx);
     expect(decoded.frontmatter).toEqual({ generated: { at: '2026-06-30T00:00:00Z' } });
-    expect(quads.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED).every((q) => decoded.consumed.has(q))).toBe(true);
+    expect(decoded.remaining.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED)).toEqual([]);
   });
 
   it('leaves the dateModified copy a producer value also holds to the exporter', () => {
     const quads = conceptQuads('generated: { at: 2026-06-30T00:00:00Z }\ndateModified: 2026-06-30T00:00:00Z');
     const decoded = decodeFamilies(quads, () => [], decodeCtx);
     expect(decoded.frontmatter).toEqual({ generated: { at: '2026-06-30T00:00:00Z' } });
-    expect(quads.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED).some((q) => decoded.consumed.has(q))).toBe(false);
+    expect(decoded.remaining.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED)).toEqual(quads.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED));
   });
 });
 

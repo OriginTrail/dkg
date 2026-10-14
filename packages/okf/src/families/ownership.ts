@@ -17,8 +17,8 @@
  * marker where the graph has one, and each marker it adds is the only one on
  * its predicate a reader picks from (producer markers are read as a set), so
  * where it goes changes no reading. The markers it adds are new quads, for
- * decoding only; every quad of the graph is passed on as the same object,
- * since the exporter tells what the families read by identity.
+ * decoding only: never stored or exported, since the decoder returns only
+ * the graph's own quads that no family read.
  */
 
 import { OKF_GENERATED_AT, OKF_LEGACY_TIMESTAMP, OKF_PRODUCER_DATE_MODIFIED, RDF_JSON, SCHEMA_DATE_MODIFIED } from '../constants.js';

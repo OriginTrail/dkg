@@ -429,8 +429,11 @@ it; the CLI summary reports it against the current time.
   then read declared ownership alone. It never adds a marker where the graph
   has one, keeps every precedence (a family's fields or list entries beat a
   value kept verbatim, a declared marker beats an inferred one, a value kept
-  verbatim has no `at`), and passes the graph's quads on as the same objects;
-  the markers it adds are internal to decoding and never stored or exported.
+  verbatim has no `at`), and the markers it adds are internal to decoding,
+  never stored or exported: the decoder returns the concept quads no family
+  read, told apart from the rest by their triple values (subject, predicate,
+  object), not by the objects holding them, so a step that copies quads
+  changes nothing.
   On a list entry's node, which carries no producer keys, the value on a
   nested family's predicate is the family's; a node holding two (only a
   merged graph does) reads the canonical last, as any single value does.

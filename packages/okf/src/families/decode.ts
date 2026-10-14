@@ -8,15 +8,16 @@
  * the family key's generic predicate (`decode-fields.ts`). `generated` and the
  * legacy `timestamp` are read back by their codec (`generated.ts`). Ownership
  * is made explicit first (`ownership.ts`), so every reader reads the markers a
- * graph written now carries, whenever the graph was written. It reports
- * every concept quad it read, so the exporter reads only the rest, as base
- * fields and producer keys, and needs no knowledge of the families. Derived
+ * graph written now carries, whenever the graph was written. It returns the
+ * concept quads no family read, told apart by their triple values, so the
+ * exporter reads only those, as base fields and producer keys, and needs no
+ * knowledge of the families. Derived
  * triples (`okf:trustTier`, `prov:wasDerivedFrom`) are never read back; the
  * next import re-derives them.
  */
 
 import { byNodeIndex, orderKeys, termValue, type ExportContext } from '../decode-terms.js';
-import { dict } from '../utils.js';
+import { dict, tripleKey } from '../utils.js';
 import type { Quad } from '../types.js';
 import { decodeFields, decodeMapping, formOf, keptVerbatim, type Read } from './decode-fields.js';
 import { decodeGenerated } from './generated.js';
@@ -27,8 +28,13 @@ import { FAMILY_SPECS, GENERATED, type ListFamilySpec, type ScalarFamilySpec } f
 export interface DecodedFamilies {
   /** Frontmatter key → value: every family on the concept, and the legacy `timestamp` (§13.1). */
   readonly frontmatter: Record<string, unknown>;
-  /** The concept quads these were read from; the exporter reads the rest as base fields and producer keys. */
-  readonly consumed: ReadonlySet<Quad>;
+  /**
+   * The concept quads no family read, in their order: the exporter reads them
+   * as base fields and producer keys. A triple a family read is told apart by
+   * its value (subject, predicate and object), never by the object holding it,
+   * so no step between the graph and the readers has to keep its objects.
+   */
+  readonly remaining: readonly Quad[];
 }
 
 function decodeEntry(
@@ -73,10 +79,10 @@ export function decodeFamilies(
   // reads as one written now, and each reader below reads declared ownership.
   const { conceptQuads, nodeQuads } = normalizeOwnership(graphConceptQuads, graphNodeQuads, ctx);
   const frontmatter = dict();
-  const consumed = new Set<Quad>();
-  const put = (key: string, read: Read): void => {
-    frontmatter[key] = read.value;
-    for (const q of read.quads) consumed.add(q);
+  const read = new Set<string>();
+  const put = (key: string, decoded: Read): void => {
+    frontmatter[key] = decoded.value;
+    for (const q of decoded.quads) read.add(tripleKey(q));
   };
   for (const spec of FAMILY_SPECS) {
     // `generated` shares its last-modified time with the legacy `timestamp`:
@@ -109,5 +115,5 @@ export function decodeFamilies(
       }
     }
   }
-  return { frontmatter, consumed };
+  return { frontmatter, remaining: graphConceptQuads.filter((q) => !read.has(tripleKey(q))) };
 }

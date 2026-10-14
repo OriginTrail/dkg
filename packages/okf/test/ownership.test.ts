@@ -63,12 +63,6 @@ describe('ownership is made explicit before the families are decoded', () => {
     }
   });
 
-  it('passes every quad of the graph on as the same object', () => {
-    const concept = onConcept(imported("generated: [a]\ntimestamp: '2026-01-01T00:00:00Z'").filter((q) => !isMarker(q)));
-    const out = normalizeOwnership(concept, () => [], ctx).conceptQuads;
-    concept.forEach((q, i) => expect(out[i]).toBe(q));
-  });
-
   it('keeps an owner the graph names, and infers none beside it', () => {
     // `okf:legacyTimestamp` names the timestamp, so an unmarked date beside it is a producer value.
     const graph = [

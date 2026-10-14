@@ -149,7 +149,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   }
   const conceptQuads = bySubject.get(c.iri) ?? [];
   // The families read their own quads, a value kept verbatim and the legacy
-  // `timestamp` included; every other quad is a base field or a producer key.
+  // `timestamp` included, and return the rest: base fields and producer keys.
   const families = decodeFamilies(conceptQuads, (node) => bySubject.get(node) ?? [], ctx);
 
   // Dictionaries: producer keys are arbitrary (`constructor`, `__proto__`).
@@ -159,8 +159,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   const citations: string[] = [];
   const extras = new ValueBuckets();
 
-  for (const q of conceptQuads) {
-    if (families.consumed.has(q)) continue;
+  for (const q of families.remaining) {
     switch (q.predicate) {
       case RDF_TYPE:
         frontmatter.type = typeValue(q.object);

@@ -84,6 +84,11 @@ export function sanitizeForBlank(value: string): string {
   return value.replace(/[^A-Za-z0-9]+/g, '_');
 }
 
+/** A triple's identity by value: its subject, predicate and object, the named graph aside. */
+export function tripleKey(q: { subject: string; predicate: string; object: string }): string {
+  return `${q.subject}\u0000${q.predicate}\u0000${q.object}`;
+}
+
 /**
  * Drop repeated quads, keeping the first occurrence (and so the emission
  * order). An RDF store holds a set: two identical triples are one triple, so a
@@ -97,7 +102,7 @@ export function dedupeQuads<T extends { subject: string; predicate: string; obje
   const seen = new Set<string>();
   const out: T[] = [];
   for (const q of quads) {
-    const key = `${q.subject}\u0000${q.predicate}\u0000${q.object}\u0000${q.graph ?? ''}`;
+    const key = `${tripleKey(q)}\u0000${q.graph ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(q);
@@ -176,7 +181,7 @@ export function distinctTriples<T extends { subject: string; predicate: string; 
   const seen = new Set<string>();
   const out: T[] = [];
   for (const q of quads) {
-    const key = `${q.subject}\u0000${q.predicate}\u0000${q.object}`;
+    const key = tripleKey(q);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(q);
