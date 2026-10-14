@@ -79,8 +79,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return this.inner.insert(quads, options);
-    return this.withExternalizedQuads(quads, (externalized) =>
-      this.inner.insert(externalized, options));
+    return this.inner.insert(await this.externalizeQuads(quads), options);
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -126,16 +125,15 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    await this.withExternalizedQuads(quads, (externalized) =>
-      this.inner.replaceGraph!(graphUri, externalized, options));
+    await this.inner.replaceGraph(graphUri, await this.externalizeQuads(quads), options);
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
     if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
     const replaced = await Promise.all(assets.map(async asset => {
       const [graphQuads, metadataQuads] = await Promise.all([
-        Promise.all(asset.graphQuads.map(quad => this.externalizeInsertQuad(quad))),
-        Promise.all(asset.metadataQuads.map(quad => this.externalizeInsertQuad(quad))),
+        this.externalizeQuads(asset.graphQuads),
+        this.externalizeQuads(asset.metadataQuads),
       ]);
       return { ...asset, graphQuads, metadataQuads };
     }));
@@ -156,17 +154,11 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    await this.withExternalizedQuads(
-      [...graphQuads, ...metadataQuads],
-      (externalized) => this.inner.replaceGraphAndSubject!(
-        graphUri,
-        externalized.slice(0, graphQuads.length),
-        metaGraphUri,
-        metadataSubject,
-        externalized.slice(graphQuads.length),
-        options,
-      ),
-    );
+    const [externalizedGraph, externalizedMetadata] = await Promise.all([
+      this.externalizeQuads(graphQuads), this.externalizeQuads(metadataQuads),
+    ]);
+    await this.inner.replaceGraphAndSubject(graphUri, externalizedGraph,
+      metaGraphUri, metadataSubject, externalizedMetadata, options);
   }
 
   async replaceSubject(
@@ -184,8 +176,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     // Externalize oversized literals before the replace, exactly like insert() /
     // replaceGraph() — so a large job payload is stored as a blob ref rather than
     // inline, keeping the atomic path byte-consistent with the fallback.
-    await this.withExternalizedQuads(quads, (externalized) =>
-      this.inner.replaceSubject!(graphUri, subject, externalized, options));
+    await this.inner.replaceSubject(graphUri, subject, await this.externalizeQuads(quads), options);
   }
 
   async rfc64AuthorCommitCasV1(
@@ -279,14 +270,8 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     return this.inner.close();
   }
 
-  private async withExternalizedQuads<T>(
-    quads: readonly Quad[],
-    work: (externalized: Quad[]) => Promise<T>,
-  ): Promise<T> {
-    const externalized = await Promise.all(
-      quads.map((quad) => this.externalizeInsertQuad(quad)),
-    );
-    return work(externalized);
+  private async externalizeQuads(quads: readonly Quad[]): Promise<Quad[]> {
+    return Promise.all(quads.map((quad) => this.externalizeInsertQuad(quad)));
   }
 
   private async externalizeInsertQuad(
