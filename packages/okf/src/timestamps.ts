@@ -59,8 +59,9 @@ function isValidZone(zone?: string): boolean {
 export function dateTimeLexical(value: unknown): string | null {
   if (value instanceof Date) {
     if (Number.isNaN(value.getTime())) return null;
-    // A date-only or offset-less YAML timestamp is read as written, as its
-    // quoted form would be: no invented UTC offset, no date turned into a time.
+    // A date-only or offset-less YAML timestamp (a `YamlTimestamp`) is read as
+    // written, as its quoted form would be: no invented UTC offset, no date
+    // turned into a time.
     const lexical = yamlLexicalOf(value);
     if (lexical !== undefined && !hasExplicitOffset(lexical)) return lexical;
     const iso = value.toISOString(); // always `YYYY-MM-DDThh:mm:ss.sssZ`

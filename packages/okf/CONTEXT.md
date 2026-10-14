@@ -244,8 +244,9 @@ it; the CLI summary reports it against the current time.
   March and read an offset-less value as UTC before any check saw it, so the OKF
   document schema validates the text first: an unquoted value that is not a
   valid xsd:dateTime / xsd:date (or uses a YAML-only spelling such as
-  `2001-12-14 21:59:43.10 -5`) stays the string it was, and a valid one keeps
-  its original text alongside the `Date`. Quoted or not, a value therefore gets
+  `2001-12-14 21:59:43.10 -5`) stays the string it was, and a valid one is a
+  `YamlTimestamp`: a `Date` for its instant that declares its original text,
+  which YAML, JSON and RDF all write. Quoted or not, a value therefore gets
   the same diagnostics: an invalid one is kept as a **plain** literal with a
   warning, never as a bogus typed literal that would poison date comparisons,
   and a missing explicit offset (§5 requires one) warns. Offset-less and

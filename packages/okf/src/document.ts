@@ -23,7 +23,7 @@ import * as jsYaml from 'js-yaml';
 import type { OkfDocument } from './types.js';
 import { pathToConceptId } from './paths.js';
 import { dateTimeLexical, isXsdDate, isXsdDateTime } from './timestamps.js';
-import { withYamlLexical, yamlLexicalOf } from './yaml-lexical.js';
+import { YamlTimestamp, yamlLexicalOf } from './yaml-lexical.js';
 
 /** js-yaml's built-in timestamp type (exported at runtime, absent from its type declarations). */
 const BUILTIN_TIMESTAMP = (jsYaml as unknown as {
@@ -36,13 +36,14 @@ const BUILTIN_TIMESTAMP = (jsYaml as unknown as {
  * over to March 2 and reads an offset-less value as UTC, before any check can
  * see the producer's text. Here an unquoted timestamp whose text is not a
  * valid xsd:dateTime / xsd:date stays the string it was — exactly what the
- * quoted form gives — and a valid one becomes a `Date` that carries its
- * original text (`yaml-lexical.ts`), so offset-less and date-only values are
- * diagnosed and typed the same quoted or not. Valid values with an offset keep
- * their usual UTC canonical form.
+ * quoted form gives — and a valid one becomes a `YamlTimestamp`, the instant
+ * js-yaml reads with its original text (`yaml-lexical.ts`), so offset-less and
+ * date-only values are diagnosed and typed the same quoted or not. Valid
+ * values with an offset keep their usual UTC canonical form. The one place a
+ * `YamlTimestamp` is made.
  */
-function constructTimestamp(data: string): Date | string {
-  return isXsdDateTime(data) || isXsdDate(data) ? withYamlLexical(BUILTIN_TIMESTAMP.construct(data), data) : data;
+function constructTimestamp(data: string): YamlTimestamp | string {
+  return isXsdDateTime(data) || isXsdDate(data) ? new YamlTimestamp(data, BUILTIN_TIMESTAMP.construct(data)) : data;
 }
 
 const OKF_TIMESTAMP = new jsYaml.Type('tag:yaml.org,2002:timestamp', {
@@ -62,14 +63,14 @@ const OKF_TIMESTAMP = new jsYaml.Type('tag:yaml.org,2002:timestamp', {
 export const OKF_YAML_SCHEMA = jsYaml.DEFAULT_SCHEMA.extend({ implicit: [OKF_TIMESTAMP] });
 
 /**
- * What the unquoted YAML scalar `text` reads as when it is a timestamp: a
- * `Date` carrying `text`, as `parseDocument` builds it, or `null` when YAML
- * would read it as anything else.
+ * What the unquoted YAML scalar `text` reads as when it is a timestamp: the
+ * `YamlTimestamp` `parseDocument` builds for it, or `null` when YAML would
+ * read it as anything else.
  */
-export function yamlTimestamp(text: string): Date | null {
+export function yamlTimestamp(text: string): YamlTimestamp | null {
   if (!BUILTIN_TIMESTAMP.resolve(text)) return null;
   const value = constructTimestamp(text);
-  return value instanceof Date ? value : null;
+  return value instanceof YamlTimestamp ? value : null;
 }
 
 const DELIM = '---';
