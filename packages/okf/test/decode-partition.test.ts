@@ -11,13 +11,7 @@ import { bundle, semantic } from './helpers/okf-v02-fixtures.js';
 vi.mock('../src/families/ownership.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/families/ownership.js')>();
   const copy = (quads: readonly Quad[]) => quads.map((q) => ({ ...q }));
-  return {
-    ...actual,
-    normalizeOwnership: (...args: Parameters<typeof actual.normalizeOwnership>) => {
-      const owned = actual.normalizeOwnership(...args);
-      return { conceptQuads: copy(owned.conceptQuads), nodeQuads: (node: string) => copy(owned.nodeQuads(node)) };
-    },
-  };
+  return { ...actual, normalizeOwnership: (quads: readonly Quad[]) => copy(actual.normalizeOwnership(quads)) };
 });
 
 const frontmatterOf = (files: BundleFile[]) => {

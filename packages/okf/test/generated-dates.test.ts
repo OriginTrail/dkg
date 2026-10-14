@@ -232,10 +232,9 @@ describe('each value on schema:dateModified names its owner', () => {
   }
 });
 
-describe('a graph written before values were marked reads back for compatibility', () => {
-  // A v0.1 import, or one written before `okf:generatedAt`, leaves the values
-  // on schema:dateModified unmarked: what each owner can write decides whose
-  // each value is.
+describe('the dates of a graph the v0.1 mapper wrote read back by what each owner writes', () => {
+  // The v0.1 mapper marked no value on schema:dateModified: its timestamp and
+  // its producer values are told apart by what each can write.
   const DATE_MARKERS: readonly string[] = [OKF_GENERATED_AT, OKF_PRODUCER_DATE_MODIFIED, OKF_LEGACY_TIMESTAMP];
   const unmarked = (quads: readonly Quad[]) => quads.filter((q) => !DATE_MARKERS.includes(q.predicate));
   const graphOf = (yaml: string) => unmarked(importBundle(bundle(`type: Metric\n${yaml}`)).quads);
@@ -260,23 +259,7 @@ describe('a graph written before values were marked reads back for compatibility
     expect('dateModified' in frontmatterOf(graph)).toBe(false);
   });
 
-  it('reads an unmarked generated.at as the timestamp: the same triples, the same summary', () => {
-    const graph = graphOf('generated: { by: human:a, at: 2026-06-30T00:00:00Z }');
-    const again = importBundle(exportOf(graph));
-    expect(frontmatterOf(graph)).toMatchObject({ generated: { by: 'human:a' }, timestamp: '2026-06-30T00:00:00Z' });
-    expect(semantic(again.quads)).toBe(semantic(graph));
-    expect(again.concepts.find((c) => c.conceptId === 'metrics/revenue')!.trust.generatedAt).toBe('2026-06-30T00:00:00Z');
-  });
-
-  it('reads a non-empty JSON array as a generated.at kept verbatim, which no producer key writes', () => {
-    const graph = graphOf("generated: { by: human:a, at: [2026-06-30T00:00:00Z] }\ntimestamp: '2026-01-01T00:00:00Z'");
-    const fm = frontmatterOf(graph);
-    expect(fm).toMatchObject({ generated: { by: 'human:a' }, timestamp: '2026-01-01T00:00:00Z' });
-    expect(Array.isArray((fm.generated as Record<string, unknown>).at)).toBe(true);
-    expect(semantic(unmarked(importBundle(exportOf(graph)).quads))).toBe(semantic(graph));
-  });
-
-  it('never reads a timestamp beside a generated.at that gives a time', () => {
+  it('never reads a timestamp beside a generated.at that gives a time, as when a v0.1 import is merged with one written now', () => {
     const marked = importBundle(bundle('type: Metric\ngenerated: { by: human:a, at: 2026-06-30T00:00:00Z }')).quads;
     const graph = [...marked, { subject: IRI, predicate: SCHEMA_DATE_MODIFIED, object: DT('2026-01-01T00:00:00Z') }];
     const fm = frontmatterOf(graph);

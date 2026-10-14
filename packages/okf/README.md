@@ -132,9 +132,11 @@ where a producer value holds the same term, or where it is a list or mapping,
 which gives no time: that is kept whole, as one `rdf:JSON` value, with a
 warning, and the summary reports no last-modified time for it.
 Export reads the markers, so every value comes back under its own key with its
-own RDF kind. A graph written before them has the markers it lacks inferred
-before decoding (an unmarked time is the legacy `timestamp`, any other
-unmarked value a producer value), so it reads like one written now.
+own RDF kind. A graph the v0.1 mapper wrote, which marked nothing, has the
+owners of its `schema:dateModified` values inferred before decoding (an
+unmarked time is the legacy `timestamp`, any other unmarked value a producer
+value), so it reads like one written now; it kept no family value verbatim,
+so nothing else needs inferring.
 
 **Each triple once.** An RDF store holds a set, so the mapper emits every
 triple once: two sources naming the same resource yield two `okf:Source` nodes

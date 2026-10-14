@@ -4,8 +4,8 @@
  * field predicates and `okf:<familyKey>.<key>` extensions on one subject, and
  * a value the encoder kept verbatim on the family key's generic predicate, by
  * its marker. Every reader reports the quads it read, and reads declared
- * ownership alone: `ownership.ts` names every owner a graph leaves unnamed
- * before any of them runs.
+ * ownership alone: `ownership.ts` names the owners of the dates a graph leaves
+ * unnamed before any of them runs.
  */
 
 import { keptVerbatimPredicate, okfExtensionKey } from '../extensions.js';
@@ -101,8 +101,8 @@ export function decodeMapping(spec: MappingFamilySpec, quads: readonly Quad[], c
  * value even when a producer key of the same camelCase (`Sources`) shares the
  * predicate; both triples are the family's, and every other value on the
  * predicate is a producer value, which the exporter writes back under a
- * spelling of its own. A graph written before values were marked has its
- * markers added before decoding (`ownership.ts`).
+ * spelling of its own. A value is kept verbatim only by a mapper that marks
+ * it: the v0.1 mapper kept none.
  */
 export function keptVerbatim(spec: FamilySpec, quads: readonly Quad[], ctx: ExportContext): Read | null {
   const markers = quads.filter((q) => q.predicate === keptVerbatimPredicate(spec.key));

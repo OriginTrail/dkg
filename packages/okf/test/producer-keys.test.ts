@@ -5,10 +5,8 @@ import {
   importBundle,
   keptVerbatimPredicate,
   okfExtensionKey,
-  parseDocument,
   OKF_GENERATED_AT,
   OKF_LEGACY_TIMESTAMP,
-  OKF_NS,
   OKF_PRODUCER_DATE_MODIFIED,
   mapFrontmatter,
   OKF_RESOURCE,
@@ -24,7 +22,6 @@ import {
 import { readsAsProducerKey } from '../src/frontmatter-keys.js';
 import { genericQuads } from '../src/terms.js';
 import { IRI, bundle, exportedFrontmatter, objs, semantic, shuffled } from './helpers/okf-v02-fixtures.js';
-import type { Quad } from '../src/index.js';
 
 // A producer key is kept as `schema:<camelKey>`, so `Sources` lands on the
 // predicate `sources` would read back as. Export must write it back under a
@@ -164,19 +161,6 @@ describe('a family value kept verbatim is marked as the family\'s', () => {
       expect(second.warnings, yaml).toEqual(first.warnings);
       expect(exportedFrontmatter(files), yaml).toMatchObject(expected);
     }
-  });
-
-  it('still reads a graph written before values were marked', () => {
-    const unmarked = (quads: Quad[]) => quads.filter((q) => !q.predicate.startsWith(OKF_NS + 'keptVerbatim.'));
-    for (const yaml of ['generated: [a]\nGenerated: x', 'generated: x', 'sources: nope\nSources: x']) {
-      const files = bundle(`type: Metric\n${yaml}`);
-      const graph = unmarked(importBundle(files).quads);
-      const exported = exportBundle(exportInputFromQuads(graph));
-      expect(semantic(unmarked(importBundle(exported).quads)), yaml).toBe(semantic(graph));
-    }
-    // a non-empty list no producer key yields is still the family's
-    const fm = parseDocument('metrics/revenue.md', exportBundle(exportInputFromQuads(unmarked(importBundle(bundle('type: Metric\ngenerated: [a]')).quads))).find((f) => f.path === 'metrics/revenue.md')!.content).frontmatter;
-    expect(fm.generated).toEqual(['a']);
   });
 
   it('exports every collision the same from rows in any order', () => {

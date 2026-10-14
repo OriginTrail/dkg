@@ -319,13 +319,13 @@ it; the CLI summary reports it against the current time.
   urn:x` or `true` keeps both keys and both RDF kinds, a lone
   `generated: { at }` comes back inside `generated`, and one value two owners
   share (`generated.at` and `dateModified` on the same time) comes back under
-  both keys. A graph written before values were marked (a v0.1 import, or one
-  before `okf:generatedAt`) has its owners inferred before decoding (see
-  *Ownership is normalized before decoding*), by what each owner can write: a
-  non-empty `rdf:JSON` array is a `generated.at` kept verbatim (no producer
-  key writes one); the legacy `timestamp` is never there beside a
-  `generated.at` that gives a time, and is otherwise the canonical last typed
-  date, else plain text; every other value is a producer value. There, two
+  both keys. A graph the v0.1 mapper wrote marked nothing, so its values
+  there have their owners inferred before decoding (see *Ownership is
+  normalized before decoding*), by what each owner can write: the legacy
+  `timestamp` is the canonical last typed date (v0.1 typed every timestamp
+  `xsd:dateTime`), else plain text, and is never there beside a `generated.at`
+  that gives a time (as in a graph merging a v0.1 import with one written
+  now); every other value is a producer value. There, two
   unmarked dates (a v0.1 `timestamp` and an unquoted `dateModified`) cannot be
   told apart: the graph round-trips exactly, but the summary's last-modified
   time may come back as the other date. A graph the mapper writes now carries
@@ -421,28 +421,25 @@ it; the CLI summary reports it against the current time.
   predicate as the family's when the ownership marker names it; every other
   value there is a producer value. So `generated: [a]` beside `Generated: x`
   comes back as both, `Generated: { by: … }` never comes back as provenance,
-  and `Generated: []` stays a producer key. In a graph written before values
-  were marked, only one non-empty `rdf:JSON` array, which no producer key
-  yields, is taken as the family's on the concept, and an unmarked single
-  value stays a producer value (same graph, marker aside).
+  and `Generated: []` stays a producer key. The v0.1 mapper kept no family
+  value verbatim (to it `generated: [a]` was a producer key, one triple per
+  item), so an unmarked value is always a producer value; nothing infers a
+  family's ownership from a value's shape.
 - **Ownership is normalized before decoding.** Export reads one ownership
-  representation: the markers a graph written now carries. A graph written
-  before values were marked names fewer owners, so one step,
-  `normalizeOwnership` (`src/families/ownership.ts`), runs before any family
-  reader and adds the marker of every owner a graph leaves unnamed, inferred
-  from what each owner can write (the rules above), and the legacy
-  `timestamp`'s too, which the encoder leaves unmarked. The family readers
-  then read declared ownership alone. It never adds a marker where the graph
-  has one, keeps every precedence (a family's fields or list entries beat a
-  value kept verbatim, a declared marker beats an inferred one, a value kept
-  verbatim has no `at`), and the markers it adds are internal to decoding,
-  never stored or exported: the decoder returns the concept quads no family
-  read, told apart from the rest by their triple values (subject, predicate,
-  object), not by the objects holding them, so a step that copies quads
-  changes nothing.
-  On a list entry's node, which carries no producer keys, the value on a
-  nested family's predicate is the family's; a node holding two (only a
-  merged graph does) reads the canonical last, as any single value does.
+  representation: the markers a graph written now carries. The only values a
+  graph may leave unnamed are on `schema:dateModified`: the legacy
+  `timestamp` of a graph written now, and every value there of a graph the
+  v0.1 mapper wrote. One step, `normalizeOwnership`
+  (`src/families/ownership.ts`), runs before any family reader and adds the
+  marker of each of their owners, inferred from what each can write (the rules
+  above); the family readers then read declared ownership alone. Every other
+  value is read by its marker only, and no other format is read: the v0.1
+  mapper kept no family value verbatim and wrote no list entry. The step never
+  adds a marker where the graph has one, and the markers it adds are internal
+  to decoding, never stored or exported: the decoder returns the concept quads
+  no family read, told apart from the rest by their triple values (subject,
+  predicate, object), not by the objects holding them, so a step that copies
+  quads changes nothing.
 - **Each triple once.** The mapper deduplicates its output per concept: a store
   holds a set, so two `sources` naming one resource give two `okf:Source` nodes
   but a single `prov:wasDerivedFrom` edge. Without this the expected count in

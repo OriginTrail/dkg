@@ -4,107 +4,105 @@ import {
   exportInputFromQuads,
   importBundle,
   parseDocument,
-  GENID_TAGS,
   OKF_GENERATED_AT,
   OKF_LEGACY_TIMESTAMP,
   OKF_NS,
   OKF_PRODUCER_DATE_MODIFIED,
-  SCHEMA_DATE_MODIFIED,
   RDF_JSON,
+  RDF_TYPE,
+  SCHEMA_DATE_MODIFIED,
   SCHEMA_NS,
+  XSD_BOOLEAN,
+  XSD_DATE_TIME,
   YamlTimestamp,
 } from '../src/index.js';
 import type { Quad } from '../src/index.js';
 import { normalizeOwnership } from '../src/families/ownership.js';
-import { DT, IRI, bundle, node } from './helpers/okf-v02-fixtures.js';
+import { DT, IRI, bundle } from './helpers/okf-v02-fixtures.js';
 
-// A graph written before values were marked is read as one written now:
-// `normalizeOwnership` adds the marker of every owner the graph leaves
-// unnamed, and the family readers read declared ownership alone.
-const ctx = { iriBase: 'urn:okf:', conceptIris: new Set([IRI]) };
+// Only the values on schema:dateModified may be unnamed: the legacy timestamp
+// of a graph written now, and every one of a graph the v0.1 mapper wrote.
+// `normalizeOwnership` names their owners; every other value is read by its
+// marker alone.
 const DATE_MARKERS: readonly string[] = [OKF_GENERATED_AT, OKF_PRODUCER_DATE_MODIFIED, OKF_LEGACY_TIMESTAMP];
 const isMarker = (q: Quad) => q.predicate.startsWith(OKF_NS + 'keptVerbatim.') || DATE_MARKERS.includes(q.predicate);
 const imported = (yaml: string) => importBundle(bundle(`type: Metric\n${yaml}`)).quads;
 const onConcept = (quads: readonly Quad[]) => quads.filter((q) => q.subject === IRI);
 const markersOf = (quads: readonly Quad[]) => quads.filter(isMarker).map((q) => `${q.predicate} ${q.object}`).sort();
-const normalized = (quads: readonly Quad[]) => normalizeOwnership(onConcept(quads), (n) => quads.filter((q) => q.subject === n), ctx);
 const frontmatterOf = (quads: readonly Quad[]) => {
   const file = exportBundle(exportInputFromQuads(quads)).find((f) => f.path === 'metrics/revenue.md')!;
-  return parseDocument(file.path, file.content).frontmatter;
+  const { type: _type, ...fm } = parseDocument(file.path, file.content).frontmatter;
+  return fm;
 };
 const STAMP = DT('2026-01-01T00:00:00Z');
+const typed = (lexical: string, datatype: string) => `"${lexical}"^^<${datatype}>`;
+const json = (value: unknown) => `"${JSON.stringify(value).replaceAll('"', '\\"')}"^^<${RDF_JSON}>`;
+const triple = (predicate: string, object: string): Quad => ({ subject: IRI, predicate, object });
+
+// A concept as the v0.1 mapper (testnet-canary) wrote it: no marker, every
+// timestamp typed xsd:dateTime in ISO form, a list one triple per item, a
+// mapping as plain JSON text, and the v0.2 families producer keys like any other.
+const v01 = (...triples: Quad[]): Quad[] => [triple(RDF_TYPE, SCHEMA_NS + 'Metric'), ...triples];
 
 describe('ownership is made explicit before the families are decoded', () => {
-  it('names the owners of an unmarked graph with the markers the encoder writes', () => {
-    // The legacy timestamp is named too, which the encoder leaves unmarked.
-    for (const [yaml, timestamp] of [
-      ['generated: [a]', false],
-      ['usage_window: [{ from: 2026-06-01T00:00:00Z }]', false],
-      ['generated: { by: human:a, at: [2026-06-30T00:00:00Z] }', false],
-      ["timestamp: '2026-01-01T00:00:00Z'\ndateModified: urn:producer:x", true],
-      ["generated: [a]\ntimestamp: '2026-01-01T00:00:00Z'\ndateModified: true", true],
-    ] as const) {
-      const marked = imported(yaml);
-      const expected = [...markersOf(onConcept(marked)), ...(timestamp ? [`${OKF_LEGACY_TIMESTAMP} ${STAMP}`] : [])].sort();
-      expect(markersOf(normalized(marked.filter((q) => !isMarker(q))).conceptQuads), yaml).toEqual(expected);
-    }
-  });
-
-  it('adds only the unmarked legacy timestamp to a graph written now', () => {
+  it('names only the legacy timestamp a graph written now leaves unmarked', () => {
     for (const [yaml, added] of [
       ['generated: { by: human:a, at: 2026-06-30T00:00:00Z }\ndateModified: urn:producer:x', []],
       ["timestamp: '2026-01-01T00:00:00Z'", [`${OKF_LEGACY_TIMESTAMP} ${STAMP}`]],
       // a producer value on the timestamp's term: the graph names the timestamp itself
       ["timestamp: '2026-01-01T00:00:00Z'\ndateModified: 2026-01-01T00:00:00Z", []],
+      ['generated: [a]', []],
     ] as const) {
-      const marked = imported(yaml);
-      const out = normalized(marked).conceptQuads;
-      expect(markersOf(out.slice(onConcept(marked).length)), yaml).toEqual(added);
+      const concept = onConcept(imported(yaml));
+      expect(markersOf(normalizeOwnership(concept).slice(concept.length)), yaml).toEqual(added);
     }
+  });
+
+  it('names the dates of a graph the v0.1 mapper wrote by what each owner writes', () => {
+    const stamp = typed('2026-01-01T00:00:00.000Z', XSD_DATE_TIME);
+    const quads = v01(triple(SCHEMA_DATE_MODIFIED, stamp), triple(SCHEMA_DATE_MODIFIED, 'urn:producer:x'), triple(SCHEMA_DATE_MODIFIED, typed('true', XSD_BOOLEAN)));
+    expect(markersOf(normalizeOwnership(quads))).toEqual([
+      `${OKF_LEGACY_TIMESTAMP} ${stamp}`,
+      `${OKF_PRODUCER_DATE_MODIFIED} ${typed('true', XSD_BOOLEAN)}`,
+      `${OKF_PRODUCER_DATE_MODIFIED} urn:producer:x`,
+    ].sort());
+  });
+
+  it('exports a graph the v0.1 mapper wrote with its timestamp and producer keys, and no family', () => {
+    expect(frontmatterOf(v01(
+      triple(SCHEMA_DATE_MODIFIED, typed('2026-06-30T14:00:00.000Z', XSD_DATE_TIME)),
+      triple(SCHEMA_DATE_MODIFIED, 'urn:producer:x'),
+      // `generated: [a]`, a producer key to v0.1, its list flattened
+      triple(SCHEMA_NS + 'generated', '"a"'),
+      // a mapping, as plain JSON text
+      triple(SCHEMA_NS + 'owner', '"{\\"team\\":\\"f\\"}"'),
+    ))).toEqual({ timestamp: '2026-06-30T14:00:00.000Z', dateModified: 'urn:producer:x', Generated: 'a', owner: '{"team":"f"}' });
+    // The v0.1 mapper typed even text that is no time.
+    expect(frontmatterOf(v01(triple(SCHEMA_DATE_MODIFIED, typed('soon', XSD_DATE_TIME))))).toEqual({ timestamp: 'soon' });
   });
 
   it('keeps an owner the graph names, and infers none beside it', () => {
     // `okf:legacyTimestamp` names the timestamp, so an unmarked date beside it is a producer value.
     const graph = [
       ...imported("timestamp: '2026-01-01T00:00:00Z'\ndateModified: 2026-01-01T00:00:00Z"),
-      { subject: IRI, predicate: SCHEMA_DATE_MODIFIED, object: DT('2026-03-03T00:00:00Z') },
+      triple(SCHEMA_DATE_MODIFIED, DT('2026-03-03T00:00:00Z')),
     ];
     const fm = frontmatterOf(graph);
     expect(fm.timestamp).toBe('2026-01-01T00:00:00Z');
     expect((fm.dateModified as YamlTimestamp[]).map((d) => d.lexical)).toEqual(['2026-01-01T00:00:00Z', '2026-03-03T00:00:00Z']);
   });
 
-  it('reads a graph marked in part, its kept values marked and its dates not', () => {
-    const marked = imported("generated: [a]\ntimestamp: '2026-01-01T00:00:00Z'\ndateModified: urn:producer:x");
-    expect(frontmatterOf(marked.filter((q) => !DATE_MARKERS.includes(q.predicate)))).toEqual(frontmatterOf(marked));
-  });
-
-  it("reads an unmarked entry node's two values for one nested family as the last, as for any single value", () => {
-    // Only a merged graph holds two: two imports whose `usage_window` differs.
-    const marked = importBundle(bundle("type: Metric\nsources:\n  - { resource: 'https://x.example/s', usage_window: Q2 }")).quads;
-    const merged = [...marked.filter((q) => !isMarker(q)), { subject: node(GENID_TAGS.source, 0), predicate: SCHEMA_NS + 'usageWindow', object: '"Q3"' }];
-    expect(frontmatterOf(merged).sources).toEqual([{ resource: 'https://x.example/s', usage_window: 'Q3' }]);
-    expect(frontmatterOf(marked.filter((q) => !isMarker(q))).sources).toEqual([{ resource: 'https://x.example/s', usage_window: 'Q2' }]);
-  });
-
-  // Only a merged or hand-edited graph reaches these, and each reads as it did
-  // before ownership was normalized: fields beat a kept value, a declared
-  // marker beats an inferred one, and a value kept verbatim has no `at`.
-  const json = (value: unknown) => `"${JSON.stringify(value).replaceAll('"', '\\"')}"^^<${RDF_JSON}>`;
-  const extra = (predicate: string, value: unknown): Quad => ({ subject: IRI, predicate, object: json(value) });
-  const unmarkedGenerated = imported('generated: [a]').filter((q) => !isMarker(q));
+  // A value the encoder keeps for a family carries its marker; without one it
+  // is a producer value, whatever its shape.
   for (const [name, graph, expected] of [
-    ['two unmarked kept arrays name no owner', [...unmarkedGenerated, extra(SCHEMA_NS + 'generated', ['b'])], { Generated: [['a'], ['b']] }],
-    ['a list family reads an array as entries, never as a value it kept', [...onConcept(imported('')), extra(SCHEMA_NS + 'sources', ['x'])], { Sources: ['x'] }],
-    ['a declared kept value beats an unmarked one beside it', [...imported('generated: [a]'), extra(SCHEMA_NS + 'generated', ['b'])], { generated: ['a'], Generated: ['b'] }],
-    ['a declared kept single value beats an unmarked array beside it', [...imported('usage_window: Q2'), extra(SCHEMA_NS + 'usageWindow', ['x'])], { usage_window: 'Q2', usageWindow: ['x'] }],
-    ['a kept generated has no at, marked', [...imported('generated: [a]'), extra(SCHEMA_DATE_MODIFIED, ['x'])], { generated: ['a'], dateModified: ['x'] }],
-    ['a kept generated has no at, unmarked', [...unmarkedGenerated, extra(SCHEMA_DATE_MODIFIED, ['x'])], { generated: ['a'], dateModified: ['x'] }],
+    ['an unmarked array on a family predicate is a producer value', [...onConcept(imported('')), triple(SCHEMA_NS + 'generated', json(['b']))], { Generated: ['b'] }],
+    ['a declared kept value beats an unmarked one beside it', [...imported('generated: [a]'), triple(SCHEMA_NS + 'generated', json(['b']))], { generated: ['a'], Generated: ['b'] }],
+    ['a declared kept single value beats an unmarked array beside it', [...imported('usage_window: Q2'), triple(SCHEMA_NS + 'usageWindow', json(['x']))], { usage_window: 'Q2', usageWindow: ['x'] }],
+    ['an unmarked array on dateModified is a producer value, never generated.at', [...onConcept(imported('')), triple(SCHEMA_DATE_MODIFIED, json(['x']))], { dateModified: ['x'] }],
+    ['a kept generated has no at', [...imported('generated: [a]'), triple(SCHEMA_DATE_MODIFIED, json(['x']))], { generated: ['a'], dateModified: ['x'] }],
   ] as const) {
-    it(`keeps today's precedence: ${name}`, () => {
-      const { type: _type, ...fm } = frontmatterOf(graph);
-      expect(fm).toEqual(expected);
+    it(name, () => {
+      expect(frontmatterOf(graph)).toEqual(expected);
     });
   }
 });
-

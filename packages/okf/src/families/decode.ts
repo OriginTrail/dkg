@@ -8,7 +8,7 @@
  * the family key's generic predicate (`decode-fields.ts`). `generated` and the
  * legacy `timestamp` are read back by their codec (`generated.ts`). Ownership
  * is made explicit first (`ownership.ts`), so every reader reads the markers a
- * graph written now carries, whenever the graph was written. It returns the
+ * graph written now carries, a graph the v0.1 mapper wrote included. It returns the
  * concept quads no family read, told apart by their triple values, so the
  * exporter reads only those, as base fields and producer keys, and needs no
  * knowledge of the families. Derived
@@ -72,12 +72,12 @@ function decodeScalar(spec: ScalarFamilySpec, quads: readonly Quad[], ctx: Expor
  */
 export function decodeFamilies(
   graphConceptQuads: readonly Quad[],
-  graphNodeQuads: (node: string) => readonly Quad[],
+  nodeQuads: (node: string) => readonly Quad[],
   ctx: ExportContext,
 ): DecodedFamilies {
-  // Every owner named first, so a graph written before values were marked
-  // reads as one written now, and each reader below reads declared ownership.
-  const { conceptQuads, nodeQuads } = normalizeOwnership(graphConceptQuads, graphNodeQuads, ctx);
+  // Every owner named first, so a graph the v0.1 mapper wrote reads as one
+  // written now, and each reader below reads declared ownership.
+  const conceptQuads = normalizeOwnership(graphConceptQuads);
   const frontmatter = dict();
   const read = new Set<string>();
   const put = (key: string, decoded: Read): void => {
