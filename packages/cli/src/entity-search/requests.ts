@@ -1,3 +1,4 @@
+import { isPublicSnapshotMode, type PublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
 import { parseSpec } from './documents.js';
 import { EntitySearchError, type EntityOperation, type NormalizedIndexRequest,
   type NormalizedReadinessRequest, type NormalizedSearchRequest } from './types.js';
@@ -11,9 +12,9 @@ function body(raw: unknown): Record<string, unknown> {
     || (value.restart !== undefined && typeof value.restart !== 'boolean')) return invalid();
   return value;
 }
-function evidenceMode(value: Record<string, unknown>): 'core-cache' | 'rpc-only' {
+function evidenceMode(value: Record<string, unknown>): PublicSnapshotMode {
   if (value.chainEvidenceMode === undefined) return 'rpc-only';
-  if (value.chainEvidenceMode !== 'core-cache' && value.chainEvidenceMode !== 'rpc-only') return invalid();
+  if (!isPublicSnapshotMode(value.chainEvidenceMode)) return invalid();
   return value.chainEvidenceMode;
 }
 function timeout(value: Record<string, unknown>, preparation: boolean): number {

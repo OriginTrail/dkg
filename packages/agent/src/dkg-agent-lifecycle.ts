@@ -1,6 +1,8 @@
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import { registerPublicBulkGraph } from './sync/responder/bulk-graph-stream.js';
-import { memoizeRecoveryBindingProof, type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
+import { asSyncFetchAbortError, authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
+export { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
+import { createRecoveryAuthority, memoizeRecoveryBindingProof, type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
 import { createRemoteQueryHandler } from "./remote-query-handler.js";
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
@@ -118,7 +120,6 @@ import {
   type SubscriptionSource,
   pickNetworkTunables,
   tripleContentV10,
-  withRetry,
 } from '@origintrail-official/dkg-core';
 import type { RandomSamplingRepairOperation } from '@origintrail-official/dkg-random-sampling';
 import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
@@ -126,13 +127,10 @@ import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
 import {
-  authenticateChallengePinnedGraphScopedAsset,
-  authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
   type ChallengePinnedGraphScopedAsset,
-  type GraphScopedMaterializationOutcome,
   type VerifiedGraphScopedAsset,
-  type VerifyContextGraphBinding,
+  type GraphScopedMaterializationOutcome,
 } from './sync/requester/graph-scoped-materialization.js';
 import {
   type FinalizedSwmTwinRetirement,
@@ -144,11 +142,8 @@ import {
   EVMChainAdapter,
   NoChainAdapter,
   buildKnowledgeAssetUal,
-  createRpcTimeoutError,
   enrichEvmError,
-  isChainRpcTransportError,
   withOwnedRpcRequestContext,
-  type ChainAdapter,
   type CreateContextGraphParams,
   type CreateOnChainContextGraphParams,
   type CreateOnChainContextGraphResult,
@@ -325,7 +320,6 @@ import {
   exactAssetFilterKey,
   exactSyncPhaseAccumulationLimits,
   requireExactAssetSelection,
-  type ExactAssetCommitment,
   type ExactAssetSelection,
   type UalOnlyExactAssetSelection,
 } from './sync/exact-assets.js';
@@ -1443,18 +1437,6 @@ function nextSelectedSwmMetaRequesterScope(): SelectedSwmMetaRetentionScope {
   return `selected-swm-meta:retained:${selectedSwmMetaInvocationSequence}`;
 }
 
-function asSyncFetchAbortError(reason: unknown): Error {
-  if (reason instanceof Error) {
-    if (reason.name === 'AbortError') return reason;
-    const err = new Error(reason.message || 'aborted');
-    err.name = 'AbortError';
-    (err as Error & { cause?: unknown }).cause = reason;
-    return err;
-  }
-  const err = new Error(typeof reason === 'string' ? reason : 'aborted');
-  err.name = 'AbortError';
-  return err;
-}
 
 const DURABLE_SYNC_SETTLEMENT_HEADROOM_FRACTION = 0.2;
 const DURABLE_SYNC_SETTLEMENT_HEADROOM_MAX_MS = 60_000;
@@ -1776,184 +1758,6 @@ type LegacyDurableContextGraphOptions = {
   durableMetaContinuation?: DurableMetaContinuation;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
 };
-
-const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
-const DURABLE_AUTHENTICATION_RETRY_BASE_MS = 1_000;
-const DURABLE_AUTHENTICATION_RETRY_MAX_MS = 8_000;
-const DURABLE_AUTHENTICATION_ATTEMPT_TIMEOUT_MS = 15_000;
-
-function raceAuthenticationWithSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    const onAbort = () => {
-      cleanup();
-      reject(signal.reason);
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      },
-    );
-    if (signal.aborted) onAbort();
-  });
-}
-
-async function runAuthenticationWithinDeadline<T>(params: {
-  deadline: number;
-  deadlineError: Error;
-  signal?: AbortSignal;
-  operation(signal: AbortSignal): Promise<T>;
-}): Promise<T> {
-  const { deadline, deadlineError, signal, operation } = params;
-  const remaining = deadline - Date.now();
-  if (remaining <= 0) throw deadlineError;
-
-  const controller = new AbortController();
-  const abortFromOperation = () => controller.abort(asSyncFetchAbortError(signal?.reason));
-  if (signal?.aborted) abortFromOperation();
-  else signal?.addEventListener('abort', abortFromOperation, { once: true });
-  const timer = setTimeout(() => controller.abort(deadlineError), remaining);
-  try {
-    if (controller.signal.aborted) {
-      throw controller.signal.reason ?? deadlineError;
-    }
-    return await raceAuthenticationWithSignal(
-      operation(controller.signal),
-      controller.signal,
-    );
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw controller.signal.reason ?? deadlineError;
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', abortFromOperation);
-  }
-}
-
-export async function authenticateChallengePinnedGraphScopedAssetWithinDeadline(params: {
-  chain: ChainAdapter;
-  asset: VerifiedGraphScopedAsset;
-  commitment: ExactAssetCommitment;
-  verifyContextGraphBinding: VerifyContextGraphBinding;
-  authenticationDeadline: number;
-  signal?: AbortSignal;
-}): Promise<ChallengePinnedGraphScopedAsset> {
-  const {
-    chain,
-    asset,
-    commitment,
-    verifyContextGraphBinding,
-    authenticationDeadline,
-    signal,
-  } = params;
-  const deadlineError = createRpcTimeoutError(
-    `Challenge-pinned authentication for ${asset.ual} exceeded its deadline`,
-  );
-  const authenticated = await runAuthenticationWithinDeadline({
-    deadline: authenticationDeadline,
-    deadlineError,
-    signal,
-    operation: (authenticationSignal) => authenticateChallengePinnedGraphScopedAsset(
-      chain,
-      asset,
-      commitment,
-      verifyContextGraphBinding,
-      { signal: authenticationSignal },
-    ),
-  });
-  if (Date.now() >= authenticationDeadline) throw deadlineError;
-  return authenticated;
-}
-
-async function authenticateDurableGraphScopedAsset(params: {
-  chain: ChainAdapter;
-  asset: VerifiedGraphScopedAsset;
-  verifyContextGraphBinding: VerifyContextGraphBinding;
-  deadline: number;
-  signal?: AbortSignal;
-  onRetry: (error: unknown, attempt: number, maxAttempts: number) => void;
-}) {
-  const { chain, asset, verifyContextGraphBinding, deadline, signal, onRetry } = params;
-  const receivedAt = new Date();
-  const deadlineError = createRpcTimeoutError(
-    `Graph-scoped durable authentication for ${asset.ual} exceeded its context-graph deadline`,
-  );
-  const remaining = deadline - Date.now();
-  if (remaining <= 0) throw deadlineError;
-
-  const deadlineController = new AbortController();
-  const abortFromOperation = () => deadlineController.abort(
-    asSyncFetchAbortError(signal?.reason),
-  );
-  if (signal?.aborted) abortFromOperation();
-  else signal?.addEventListener('abort', abortFromOperation, { once: true });
-  const deadlineTimer = setTimeout(
-    () => deadlineController.abort(deadlineError),
-    remaining,
-  );
-  try {
-    return await withRetry(
-      async () => {
-        const attemptRemaining = deadline - Date.now();
-        if (attemptRemaining <= 0) throw deadlineError;
-        const attemptError = createRpcTimeoutError(
-          `Graph-scoped durable authentication attempt for ${asset.ual} timed out`,
-        );
-        const attemptController = new AbortController();
-        const abortFromDeadline = () => attemptController.abort(deadlineController.signal.reason);
-        deadlineController.signal.addEventListener('abort', abortFromDeadline, { once: true });
-        const attemptTimer = setTimeout(
-          () => attemptController.abort(attemptError),
-          Math.min(DURABLE_AUTHENTICATION_ATTEMPT_TIMEOUT_MS, attemptRemaining),
-        );
-        if (deadlineController.signal.aborted) abortFromDeadline();
-        try {
-          return await raceAuthenticationWithSignal(
-            authenticateVerifiedGraphScopedAsset(
-              chain,
-              asset,
-              verifyContextGraphBinding,
-              receivedAt,
-              { signal: attemptController.signal },
-            ),
-            attemptController.signal,
-          );
-        } finally {
-          if (!attemptController.signal.aborted) attemptController.abort();
-          clearTimeout(attemptTimer);
-          deadlineController.signal.removeEventListener('abort', abortFromDeadline);
-        }
-      },
-      {
-        maxAttempts: DURABLE_AUTHENTICATION_MAX_ATTEMPTS,
-        baseDelayMs: DURABLE_AUTHENTICATION_RETRY_BASE_MS,
-        maxDelayMs: DURABLE_AUTHENTICATION_RETRY_MAX_MS,
-        isRetryable: isChainRpcTransportError,
-        signal: deadlineController.signal,
-        onRetry: (attempt, _delayMs, error) => {
-          onRetry(error, attempt, DURABLE_AUTHENTICATION_MAX_ATTEMPTS);
-        },
-      },
-    );
-  } catch (error) {
-    if (deadlineController.signal.aborted) {
-      throw deadlineController.signal.reason ?? deadlineError;
-    }
-    throw error;
-  } finally {
-    clearTimeout(deadlineTimer);
-    signal?.removeEventListener('abort', abortFromOperation);
-  }
-}
 
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
  *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
@@ -5848,32 +5652,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
-  createRecoveryAuthority(
-    this: DKGAgent, ctx: OperationContext, input: DurableRecoveryInput = {},
-  ): DurableRecoveryAuthority {
-    if (input.recoveryAuthority) {
-      if (input.registeredPublicEvidence) throw new Error('Conflicting durable recovery authorities');
-      return input.recoveryAuthority;
-    }
-    const evidence = input.registeredPublicEvidence;
-    const verifyContextGraphBinding = memoizeRecoveryBindingProof(
-      (id, onChainId, signal) => this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
-    );
-    return {
-      admitVerifiedPage() { /* Ordinary exchanges preserve verified legacy compatibility. */ },
-      coalescing: evidence ? 'owner-only' : 'allowed',
-      isRegisteredPublic: async (id, signal) => evidence?.usableFor(id, signal) === true
-        || (await this.resolveRegisteredContextGraphAuthority(id, { authorityReadMode: 'finalized-index-or-live', signal })).kind === 'public',
-      authenticate: (asset, deadline, signal) => authenticateDurableGraphScopedAsset({
-        chain: this.chain, asset, verifyContextGraphBinding, deadline, signal,
-        onRetry: (error, attempt, maxAttempts) => this.log.warn(ctx,
-          `Retrying graph-scoped durable authentication for ${asset.ual} `
-          + `after transient chain verification failure (${attempt}/${maxAttempts}): `
-          + `${error instanceof Error ? error.message : String(error)}`),
-      }),
-    };
-  }
-
   async runLegacyDurableSyncDetailed(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
@@ -5883,7 +5661,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     options?: DurableSyncOptions,
   ): Promise<AdmittedDurableSyncResult> {
-    const authority = LifecycleSyncMethods.prototype.createRecoveryAuthority.call(this, ctx, options);
+    const authority = createRecoveryAuthority({
+      chain: this.chain,
+      verifyContextGraphBinding: (id, onChainId, signal) =>
+        this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+      resolveAuthority: (id, signal) => this.resolveRegisteredContextGraphAuthority(id,
+        { authorityReadMode: 'finalized-index-or-live', signal }),
+      warn: message => this.log.warn(ctx, message),
+    }, options);
     const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
@@ -6175,7 +5960,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? exactAssetFetchSessionPolicy(requireUalOnlyExactAssetSelection(selection), 'vm-update-refresh')
           : normalizeExactAssetFetchPolicy(undefined, () => selection, options.forceFreshExactSession),
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
-        recoveryAuthority: LifecycleSyncMethods.prototype.createRecoveryAuthority.call(this, ctx, options),
+        recoveryAuthority: createRecoveryAuthority({
+          chain: this.chain,
+          verifyContextGraphBinding: (id, onChainId, signal) =>
+            this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+          resolveAuthority: (id, signal) => this.resolveRegisteredContextGraphAuthority(id,
+            { authorityReadMode: 'finalized-index-or-live', signal }),
+          warn: message => this.log.warn(ctx, message),
+        }, options),
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
         priority: VM_RECOVERY_SYNC_PRIORITY,
@@ -6272,7 +6064,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const verifyContextGraphBinding = memoizeRecoveryBindingProof(
       (id, onChainId, signal) => this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
     );
-    const authority = options.recoveryAuthority ?? LifecycleSyncMethods.prototype.createRecoveryAuthority.call(this, ctx);
+    const authority = options.recoveryAuthority ?? createRecoveryAuthority({
+      chain: this.chain,
+      verifyContextGraphBinding: (id, onChainId, signal) =>
+        this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+      resolveAuthority: (id, signal) => this.resolveRegisteredContextGraphAuthority(id,
+        { authorityReadMode: 'finalized-index-or-live', signal }),
+      warn: message => this.log.warn(ctx, message),
+    });
     const contextGraphBudget = createDurableSyncBudget({
       fetchTimeoutMs,
       authenticationTimeoutMs,

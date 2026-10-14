@@ -1,3 +1,4 @@
+import type { PublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
 /** Derived entity indexes are discovery aids; the graph remains authoritative. */
 export interface EntityIndexSpec {
   contextGraphId: string;
@@ -5,7 +6,7 @@ export interface EntityIndexSpec {
   textPredicates: string[];
   types: string[];
 }
-interface EntityReadPolicy { chainEvidenceMode?: 'core-cache' | 'rpc-only' }
+interface EntityReadPolicy { chainEvidenceMode?: PublicSnapshotMode }
 export interface EntityIndexRequest extends EntityIndexSpec, EntityReadPolicy { restart?: boolean; timeoutMs?: number }
 export interface EntityReadinessRequest extends EntityReadPolicy { contextGraphId: string; indexId: string; warmup?: boolean; timeoutMs?: number }
 export interface EntitySearchRequest extends EntityReadPolicy { contextGraphId: string; indexId: string; query: string; limit?: number; timeoutMs?: number }
