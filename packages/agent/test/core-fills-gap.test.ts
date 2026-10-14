@@ -2691,7 +2691,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect((internals as any).vmReconcileExactPeerCapabilities.size)
       .toBeLessThanOrEqual(DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES);
 
-    (internals as any).closeVmReconcileRotationState();
+    (internals as any).workLifetime.close(); (internals as any).closeVmReconcileRotationState();
     expect((internals as any).vmReconcileExactPeerCapabilities.size).toBe(0);
   });
 
@@ -4104,7 +4104,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const shutdownRecord = (internals as any).prepareVmReconcileRotationTarget(
       target, [peerA], 3,
     ).record;
-    (internals as any).closeVmReconcileRotationState();
+    (internals as any).workLifetime.close(); (internals as any).closeVmReconcileRotationState();
     (internals as any).creditVmReconcileCleanAbsence(
       target, peerA, [peerA], shutdownRecord,
     );
@@ -4629,7 +4629,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'fallback-shutdown')], 100, () => true,
     );
     await fallbackStarted;
-    (internals as any).closeVmReconcileRotationState();
+    (internals as any).workLifetime.close(); (internals as any).closeVmReconcileRotationState();
     releaseFallback();
 
     await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
@@ -4670,11 +4670,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'restart-generation')], 100, () => true,
     );
     await fallbackStarted;
-    const priorGeneration = (internals as any).vmReconcileLifecycleGeneration;
-    (internals as any).closeVmReconcileRotationState();
-    (internals as any).openVmReconcileRotationState();
+    const priorGeneration = (internals as any).workLifetime.generation;
+    (internals as any).workLifetime.close(); (internals as any).closeVmReconcileRotationState();
+    (internals as any).workLifetime.open(); (internals as any).openVmReconcileRotationState();
     expect((internals as any).vmReconcileRotationClosed).toBe(false);
-    expect((internals as any).vmReconcileLifecycleGeneration).toBe(priorGeneration + 1);
+    expect((internals as any).workLifetime.generation).toBe(priorGeneration + 1);
     releaseFallback();
 
     await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
@@ -5090,10 +5090,10 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const abandoned = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
     await healStarted;
-    (internals as any).closeVmReconcileRotationState();
+    (internals as any).workLifetime.close(); (internals as any).closeVmReconcileRotationState();
     await expect(abandoned).rejects.toMatchObject({ name: 'VmReconcileQueueClosedError' });
 
-    (internals as any).openVmReconcileRotationState();
+    (internals as any).workLifetime.open(); (internals as any).openVmReconcileRotationState();
     await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
       .resolves.toMatchObject({ status: 'current' });
     expect(healCalls).toBe(2);
@@ -5126,7 +5126,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const reconcile = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
     await persistStarted;
-    expect((internals as any).vmReconcilePhysicalRuns.size).toBe(1);
+    expect((internals as any).workLifetime.physicalRuns.size).toBe(1);
     let settled = false;
     void reconcile.finally(() => { settled = true; });
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -5134,7 +5134,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     releasePersist();
     await expect(reconcile).resolves.toMatchObject({ watermarkAfter: 1 });
-    expect((internals as any).vmReconcilePhysicalRuns.size).toBe(0);
+    expect((internals as any).workLifetime.physicalRuns.size).toBe(0);
   });
 
   it('does not expose an advanced watermark when its durable save fails', async () => {

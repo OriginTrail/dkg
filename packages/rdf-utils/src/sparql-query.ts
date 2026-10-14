@@ -1,3 +1,4 @@
+import { readSolutionModifiers, type SparqlSolutionModifiers } from './sparql-solution-modifiers.js';
 import {
   type SparqlLexicalToken,
   type ValidPreparedSparql,
@@ -48,6 +49,8 @@ export interface PreparedSparqlQuery {
   readonly whereVariables: readonly SparqlQueryVariable[];
   readonly prefixes: ReadonlyMap<string, string>;
   readonly hasDatasetClause: boolean;
+  readonly hasServiceClause: boolean;
+  readonly solutionModifiers: SparqlSolutionModifiers;
   readonly hasGraphClause: boolean;
   readonly graphTargets: readonly SparqlGraphTarget[];
   readonly graphVariables: readonly SparqlQueryVariable[];
@@ -155,11 +158,13 @@ export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparq
   const graphVariables: SparqlQueryVariable[] = [];
   const graphVariableSet = new Set<string>();
   let hasDatasetClause = false;
+  let hasServiceClause = false;
 
   for (let index = 0; index < prepared.tokens.length; index++) {
     const token = prepared.tokens[index];
     if (token.kind !== 'word') continue;
     if (token.upper === 'FROM') hasDatasetClause = true;
+    if (token.upper === 'SERVICE') hasServiceClause = true;
     if (token.upper !== 'GRAPH') continue;
 
     const target = prepared.tokens[index + 1];
@@ -231,6 +236,8 @@ export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparq
       : [],
     prefixes,
     hasDatasetClause,
+    hasServiceClause,
+    solutionModifiers: readSolutionModifiers(prepared, structure),
     hasGraphClause: graphTargets.length > 0,
     graphTargets,
     graphVariables,

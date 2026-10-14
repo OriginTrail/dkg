@@ -1,4 +1,4 @@
-import { withPublicSnapshotQueryTrust } from "../../agent/src/public-snapshot-evidence.js";
+import { markCoreTrustedGraph, withPublicSnapshotQueryTrust } from "../../agent/src/public-snapshot-evidence.js";
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -127,6 +127,30 @@ function request(f, body, kind: 'anonymous' | 'nodeOperator' | 'agent' = 'anonym
     writeHead(status: number) { this.statusCode = status; return this; }, end(body: string) { this.body = body; this.writableEnded = true; } });
   return { res, ctx: { req, res, path, agent: f.agent, entitySearch: f.service, authentication: requestAuthentication(kind === 'agent' ? { kind, agentAddress } : { kind }) } as unknown as RequestContext };
 }
+it.each(['index', 'readiness', 'search'])('enforces and labels %s evidence mode even with a completed index', async operation => {
+  const f = await fixture();
+  await markCoreTrustedGraph(f.graph, spec.contextGraphId);
+  const first = request(f, { ...spec, chainEvidenceMode: 'core-cache' }, 'nodeOperator', '/api/entities/index');
+  await handleEntityRoutes(first.ctx);
+  expect(first.res.statusCode).toBe(200);
+  const indexed = JSON.parse(first.res.body);
+  expect(indexed.chainEvidenceMode).toBe('core-cache');
+  expect(indexed.scanComplete).toBe(true);
+  expect(f.agent.query.mock.calls.length).toBeGreaterThan(0);
+  expect(f.agent.query.mock.calls.every(([, options]) => options.chainEvidenceMode === 'core-cache')).toBe(true);
+  for (const mode of ['core-cache', 'rpc-only', undefined] as const) {
+    f.agent.query.mockClear();
+    const r = request(f, { ...spec, indexId: indexed.indexId, query: 'ocean', chainEvidenceMode: mode },
+      'nodeOperator', `/api/entities/${operation}`);
+    await handleEntityRoutes(r.ctx);
+    expect(f.agent.query).toHaveBeenCalled();
+    expect(f.agent.query.mock.calls.every(([, options]) => options.chainEvidenceMode === (mode ?? 'rpc-only'))).toBe(true);
+    expect(r.res.statusCode).toBe(mode === 'core-cache' ? 200 : 409);
+    expect(JSON.parse(r.res.body)).toMatchObject(mode === 'core-cache'
+      ? { chainEvidenceMode: mode } : { code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
+    expect(f.store.count(indexed.indexId)).toBe(3);
+  }
+});
 it('requires operator authority to index and exposes bounded typed search outcomes', async () => {
   const f = await fixture();
   const denied = request(f, spec, 'anonymous', '/api/entities/index'); await handleEntityRoutes(denied.ctx); expect(denied.res.statusCode).toBe(403);

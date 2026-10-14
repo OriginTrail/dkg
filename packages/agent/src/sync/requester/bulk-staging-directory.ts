@@ -9,9 +9,12 @@ export async function reserveBulkStagingDirectory(root: string): Promise<string>
   await mkdir(root, { recursive: true, mode: 0o700 });
   const entries = await readdir(root);
   // Older/random chunk directories and unknown entries consume capacity too.
-  const legacy = entries.filter(name => !/^chunk-slot-[0-7]$/.test(name)).length;
-  for (let slot = 0; slot < MAX_DIRECTORIES - legacy; slot++) {
-    const directory = join(root, `chunk-slot-${slot}`);
+  const capacity = Math.max(0, MAX_DIRECTORIES - entries.length);
+  const occupied = new Set(entries);
+  const candidates = Array.from({ length: MAX_DIRECTORIES }, (_, slot) => `chunk-slot-${slot}`)
+    .filter(name => !occupied.has(name)).slice(0, capacity);
+  for (const candidate of candidates) {
+    const directory = join(root, candidate);
     try {
       await mkdir(directory, { mode: 0o700 });
       return directory;

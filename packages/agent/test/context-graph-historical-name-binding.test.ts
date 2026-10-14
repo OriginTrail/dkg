@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
 import { projectContextGraphSubscriptionPersistence } from '../src/context-graph-subscription-policy.js';
@@ -448,7 +449,7 @@ describe('cold current-state Context Graph name binding', () => {
   it('lets a fresh reverse binding release a failed-live hold before the periodic sweep', async () => {
     const fixture = selectedFixture();
     fixture.agent.vmReconcileEnabled = () => true;
-    fixture.agent.vmReconcileLifecycleGeneration = 1;
+    fixture.agent.workLifetime = new AgentWorkLifetime();
     fixture.agent.vmReconcileRotationClosed = false;
     fixture.agent.resolveLocalCgIdByOnChainId = () => null;
     const sources: string[] = [];
@@ -612,7 +613,7 @@ describe('cold current-state Context Graph name binding', () => {
       NAME_HASH,
     );
     fixture.agent.vmReconcileEnabled = () => true;
-    fixture.agent.vmReconcileLifecycleGeneration = 1;
+    fixture.agent.workLifetime = new AgentWorkLifetime();
     fixture.agent.vmReconcileRotationClosed = false;
     fixture.agent.resolveLocalCgIdByOnChainId = () => null;
     const triggerLive = vi.fn();

@@ -27,3 +27,20 @@ it('charges historical failed directories before admitting new chunks', async ()
   await expect(reserveBulkStagingDirectory(root)).rejects.toThrow('retention capacity');
   expect(await readdir(root)).toHaveLength(8);
 });
+it.each([
+  { legacy: 7, retained: [7], expectedNew: 0 },
+  { legacy: 4, retained: [3, 4], expectedNew: 2 },
+  { legacy: 2, retained: [5, 6, 7], expectedNew: 3 },
+])('charges mixed legacy and high numbered reservations: $legacy/$retained', async ({ legacy, retained, expectedNew }) => {
+  const root = await mkdtemp(join(tmpdir(), 'bulk-staging-mixed-')); roots.push(root);
+  for (let i = 0; i < legacy; i++) await mkdir(join(root, `chunk-old-${i}`));
+  for (const slot of retained) {
+    const dir = join(root, `chunk-slot-${slot}`);
+    await mkdir(dir); await writeFile(join(dir, 'diagnostic.txt'), 'retained evidence');
+  }
+  const results = await Promise.allSettled(Array.from({ length: 32 }, () => reserveBulkStagingDirectory(root)));
+  expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(expectedNew);
+  for (const result of results) if (result.status === 'rejected') expect(result.reason).toMatchObject({ code: 'RESOURCE_LIMIT' });
+  expect(await readdir(root)).toHaveLength(8);
+  for (const slot of retained) expect(await readFile(join(root, `chunk-slot-${slot}`, 'diagnostic.txt'), 'utf8')).toBe('retained evidence');
+});
