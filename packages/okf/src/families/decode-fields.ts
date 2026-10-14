@@ -10,7 +10,7 @@ import { RDF_JSON, SCHEMA_NS } from '../constants.js';
 import { okfExtensionKey } from '../extensions.js';
 import { genericPredicate } from '../terms.js';
 import { dict, isMapping } from '../utils.js';
-import { accumulate, literalDatatype, orderKeys, termValue, type ExportContext, type TermForm } from '../decode-terms.js';
+import { literalDatatype, oneOrMany, orderKeys, termValue, ValueBuckets, type ExportContext, type TermForm } from '../decode-terms.js';
 import type { Quad } from '../types.js';
 import { parseList } from './parse.js';
 import type { FamilySpec, FieldSpec, ListFamilySpec, MappingFamilySpec } from './specs.js';
@@ -50,14 +50,14 @@ export function byListKey(a: unknown, b: unknown): number {
 
 /** A family's producer extensions on one subject (`okf:<familyKey>.<key>`), in quad order; adds the quads to `read`. */
 function extensionsOf(quads: readonly Quad[], familyKey: string, ctx: ExportContext, read: Quad[]): Record<string, unknown> {
-  const extras = dict();
+  const extras = new ValueBuckets();
   for (const q of quads) {
     const key = okfExtensionKey(familyKey, q.predicate);
     if (key === null) continue;
-    accumulate(extras, key, termValue(q.object, ctx));
+    extras.add(key, termValue(q.object, ctx));
     read.push(q);
   }
-  return extras;
+  return extras.toDict();
 }
 
 /** The decoded fields and extensions of a mapping / entry on one subject, and the quads they were read from. */
@@ -123,9 +123,7 @@ export function keptVerbatim(spec: FamilySpec, quads: readonly Quad[], ctx: Expo
   const predicate = genericPredicate(spec.key);
   const onPredicate = quads.filter((q) => q.predicate === predicate);
   if (on === 'node') {
-    const kept = dict();
-    for (const q of onPredicate) accumulate(kept, spec.key, termValue(q.object, ctx));
-    return onPredicate.length > 0 ? { value: kept[spec.key], quads: onPredicate } : null;
+    return onPredicate.length > 0 ? { value: oneOrMany(onPredicate.map((q) => termValue(q.object, ctx))), quads: onPredicate } : null;
   }
   const lists = onPredicate.filter((q) => {
     const value = termValue(q.object, ctx);

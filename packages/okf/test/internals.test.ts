@@ -161,3 +161,20 @@ describe('producer-defined keys', () => {
     expect(fm.generated).toBeUndefined();
   });
 });
+
+describe('ValueBuckets: one item per triple, materialised once', () => {
+  it('keeps a value that is itself a list apart from the list of a key read from several triples', async () => {
+    const { ValueBuckets } = await import('../src/decode-terms.js');
+    const buckets = new ValueBuckets();
+    buckets.add('k', []);
+    buckets.add('k', 'a');
+    buckets.add('k', 'b');
+    buckets.add('one', ['x']);
+    buckets.add('__proto__', 1);
+    const out = buckets.toDict();
+    expect(out.k).toEqual([[], 'a', 'b']);
+    expect(out.one).toEqual(['x']);
+    expect(Object.keys(out)).toEqual(['k', 'one', '__proto__']);
+    expect(Object.getOwnPropertyDescriptor(out, '__proto__')?.value).toBe(1);
+  });
+});

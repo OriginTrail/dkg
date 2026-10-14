@@ -42,7 +42,7 @@ import {
   SECTION_GENID_INFIX,
   DEFAULT_IRI_BASE,
 } from './constants.js';
-import { accumulate, conceptIdFromIri, literalValue, orderKeys, termValue, type ExportContext } from './decode-terms.js';
+import { conceptIdFromIri, literalValue, orderKeys, termValue, ValueBuckets, type ExportContext } from './decode-terms.js';
 import { decodeFamilies } from './families/decode.js';
 import { readsAsProducerKey } from './mapping.js';
 import { dict, distinctTriples, pascalCase } from './utils.js';
@@ -155,7 +155,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   const tags: string[] = [];
   const edges: string[] = [];
   const citations: string[] = [];
-  const extras = dict();
+  const extras = new ValueBuckets();
 
   for (const q of conceptQuads) {
     if (families.consumed.has(q)) continue;
@@ -193,7 +193,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         // directory; that edge is implied by the path and re-derived by the
         // option. Any other value is a producer key (`isPartOf: …`) and is kept.
         if (q.object !== parentDirectoryIri(c.conceptId, ctx.iriBase)) {
-          accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
+          extras.add(q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
         }
         break;
       case SCHEMA_CITATION:
@@ -203,7 +203,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         if (q.predicate.startsWith(SCHEMA_NS) && !CONCEPT_PREDICATES.has(q.predicate)) {
           // Producer-defined key: typed scalars and rdf:JSON objects come back
           // as native values so the datatype / structure survives re-import.
-          accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
+          extras.add(q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
         }
       // okf:* family predicates were read by the family decoder; derived triples are not read back.
     }
@@ -217,7 +217,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   // beside `sources`, a lone `Status`, `Type`), the name capitalised, which
   // camelCase reads back as the same predicate. The base field or family
   // keeps its key, and neither value replaces the other.
-  for (const [name, value] of Object.entries(extras)) {
+  for (const [name, value] of Object.entries(extras.toDict())) {
     frontmatter[readsAsProducerKey(name, frontmatter) ? name : capitalised(name)] = value;
   }
 

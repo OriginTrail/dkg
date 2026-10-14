@@ -125,28 +125,33 @@ export function termValue(term: string, ctx: ExportContext, form: TermForm = 'va
   return term;
 }
 
-/** The lists `accumulate` built from several triples, as opposed to one value that is itself a list (`[]`, an `rdf:JSON` array). */
-const ACCUMULATED = new WeakSet<unknown[]>();
+/** A key's value read from its triples: the one value, or the list of them. */
+export function oneOrMany(values: readonly unknown[]): unknown {
+  return values.length === 1 ? values[0] : [...values];
+}
 
 /**
- * Accumulate a (possibly multi-valued) key into a dictionary (`dict()`):
- * the value on first sight, a list of the values thereafter. A value that is
- * itself a list stays one item of that list, never merged into it. A producer
- * key named `constructor`, `toString` or `__proto__` is stored like any other.
+ * Values collected per key, one item per triple, so a key read from several
+ * triples and a value that is itself a list (`[]`, an `rdf:JSON` array) never
+ * blur: each key becomes its one value, or the list of its values, only once
+ * collection is done. Keys are arbitrary (`constructor`, `__proto__`); a Map
+ * holds them as they are.
  */
-export function accumulate(target: Record<string, unknown>, key: string, value: unknown): void {
-  if (!(key in target)) {
-    target[key] = value;
-    return;
+export class ValueBuckets {
+  private readonly values = new Map<string, unknown[]>();
+
+  add(key: string, value: unknown): void {
+    const bucket = this.values.get(key);
+    if (bucket) bucket.push(value);
+    else this.values.set(key, [value]);
   }
-  const cur = target[key];
-  if (Array.isArray(cur) && ACCUMULATED.has(cur)) {
-    cur.push(value);
-    return;
+
+  /** A dictionary (`dict()`), keys in the order first seen, each holding its one value or the list of them. */
+  toDict(): Record<string, unknown> {
+    const out = dict();
+    for (const [key, values] of this.values) out[key] = oneOrMany(values);
+    return out;
   }
-  const list = [cur, value];
-  ACCUMULATED.add(list);
-  target[key] = list;
 }
 
 /** Entry order baked into a family node IRI (`…_<n>`); unknown → last. */
