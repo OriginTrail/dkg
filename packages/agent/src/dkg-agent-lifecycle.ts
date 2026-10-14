@@ -11017,6 +11017,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<boolean> {
     const admission = await this.resolveSharedMemoryReadAdmission(contextGraphId, opts);
     opts.signal?.throwIfAborted();
+    if (admission.outcome === 'unavailable') throw admission.error;
     return admission.outcome === 'allowed';
   }
 

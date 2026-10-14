@@ -22,21 +22,22 @@ export function resolvePrivateRootLegacyLaneAdmission(reads: {
   });
 }
 
-export function resolveSharedMemoryAdmission(reads: {
+export async function resolveSharedMemoryAdmission(reads: {
   acceptedAuthority(): boolean | undefined;
   legacyLane(): Promise<SwmReadAdmission>;
   confirmedMetadata(): Promise<boolean>;
   canRead(): Promise<boolean>;
 }): Promise<SwmReadAdmission> {
-  return captureAdmission(async () => {
-    const accepted = reads.acceptedAuthority();
-    if (accepted === true) return true;
-    if (accepted === false) {
-      const legacy = await reads.legacyLane();
-      if (legacy.outcome !== 'allowed') return legacy;
-    }
-    return await reads.confirmedMetadata() && await reads.canRead();
-  });
+  const accepted = reads.acceptedAuthority();
+  if (accepted === true) return { outcome: 'allowed' };
+  if (accepted === false) {
+    const legacy = await reads.legacyLane();
+    if (legacy.outcome !== 'allowed') return legacy;
+  }
+  // These checks historically reject on dependency failure. Preserve that
+  // contract for every caller instead of turning an outage into a denial.
+  const allowed = await reads.confirmedMetadata() && await reads.canRead();
+  return { outcome: allowed ? 'allowed' : 'denied' };
 }
 
 export function admittedSharedMemoryAuthority(contextGraphId: string, decision: ContextGraphReadAuthorityDecision): boolean {
