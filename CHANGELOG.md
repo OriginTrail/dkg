@@ -39,6 +39,9 @@ every peer it selected, gets the graph's definition and reports synced
 within seconds. An Edge keeps its relay reservations on the relays its
 network lists.
 
+An Edge node can now hand its EVM signing to an external signer, so that it
+holds no operational private keys; this is off by default (#3177).
+
 **No smart-contract, ABI or deployment registry changes.** Message formats
 are unchanged; a node now announces only the newest head of a catalog
 (#3130) and runs the libp2p identify push protocol (#3145). A catalog
@@ -86,6 +89,8 @@ a node on an earlier version does not apply a catalog head with such a row
 | The peer that served a graph's seed is asked first for its definition (#3212) | For a public graph that is not registered on chain. An empty answer from a peer that does not hold the graph is logged as `Peer <suffix> holds no definition of "<graph>"` at info, where it read `Rejected curator metadata snapshot ... missing an unambiguous public definition` at warn | None. Tooling that counted the warning sees fewer of them |
 | A sender's Sender Key epoch for a private graph is replaced once after the upgrade (#3203) | One setup message per recipient, once per graph and sender agent, the first time the node shares into the graph. Shares that overlap get consecutive message indexes | None |
 | A catch-up job waits for the graph's policy to become active (#3217) | Once per job and for at most 10 s, only for a graph whose public policy the node has accepted and not yet activated. New line at info for a job that waited: `Catch-up for "<graph>": the selected SWM lane became active after <n> ms`, or `is still not active after <n> ms` | None |
+| An Edge node can sign its EVM transactions with an external signer (#3177) | Off by default: without a `chain.signer` block nothing changes. With `chain.signer.type: "remote"` the node signs through standard Ethereum JSON-RPC (eth dialect, Web3Signer-compatible, or Clef) over HTTP(S) or a unix socket, verifies every result and retries nothing; it still builds, records and broadcasts every transaction. Author and payer keys can both live in the signer. With a signer, the Core role, `publisher.enabled` and the mock chain are refused at start, and admin-key operations and `dkg set-ask` fail with an explicit error. `POST /api/agent/register` accepts `address` for an agent whose key the signer holds | None, unless you want it: see `docs/use-dkg/external-signer.md` |
+| The query-catalog read can be limited to one catalog and answers up to 2 MiB (#3235) | `POST /api/profile/query-catalog/read` accepts `catalogSlug` (a nonempty string of at most 512 characters; anything else answers 400 `QUERY_CATALOG_INVALID_FILTER`) and then reads that catalog only. The serialized response limit is 2 MiB, up from 1 MiB, because the response carries canonical items and legacy bindings together | None |
 
 ### Known issues
 
@@ -298,6 +303,11 @@ a node on an earlier version does not apply a catalog head with such a row
 - **Overlapping first shares into a private graph set up one epoch each, and
   a recipient that misses more than 64 shares of an epoch refuses the later
   ones until the epoch is replaced** (#3202).
+- **A catalog filter given a slug as a read returns it finds nothing when the
+  slug needed encoding** (#3235, #3239): a read returns a catalog's slug
+  percent-encoded, as its IRI stores it, and the filter encodes the value
+  again. Slugs made from a name by the node (`[a-z0-9-]`) are not affected.
+  Pass the slug as it was written.
 
 ### Fixed
 
@@ -799,6 +809,13 @@ a node on an earlier version does not apply a catalog head with such a row
   metadata has conflicting generations`, and the curator received none of
   that member's writes into the graph's root. The newest generation is now
   read.
+- **A local-model chat failed when a request exceeded the model's context**
+  (#3235): when the model endpoint rejects a request for its context size
+  before inference, the chat now retries without the earlier conversation
+  history, and then from the current tool results without tool schemas; at
+  most twice, and completed tool calls are not repeated. A domain profile can
+  name `requiredTools`; the chat then refuses to start when one of them is not
+  available.
 
 ### Changed
 
@@ -931,6 +948,13 @@ a node on an earlier version does not apply a catalog head with such a row
 
 ### Added
 
+- **External signer for EVM signing** (#3177): an Edge node can delegate the
+  signing of its transactions to an external signer, for example an HSM-backed
+  one, and hold no operational private keys. Authors and payers are separate
+  keys; payers covered by a Publishing Conviction Account need no TRAC, and a
+  node whose author keys live in the signer can register a curated context
+  graph backed by a PCA, into which every agent of the PCA can publish.
+  Configuration and limits: `docs/use-dkg/external-signer.md`.
 - **Timing of a queued publication's wait after finality** (#3081, #3120,
   #3136): one `async_publish_post_finality` line per finalized queued job,
   at info when the wait is 10 s or more and at debug otherwise. It names
