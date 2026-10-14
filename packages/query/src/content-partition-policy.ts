@@ -11,18 +11,23 @@ export function resolveDraftAccessPolicy(options?: {
   return options?.draftAccess ?? { kind: 'all' };
 }
 
-export interface ContentPartition {
+interface ContentPartitionScope {
   readonly graph: string;
-  readonly kind: 'content' | 'draft' | 'shared' | 'verified';
   readonly subGraphName?: string;
-  readonly draftOwner?: string;
 }
+export type ContentPartition = ContentPartitionScope & (
+  // Null explicitly represents a registered historical draft without an owner segment.
+  | { readonly kind: 'draft'; readonly draftOwner: string | null }
+  | { readonly kind: 'content' | 'shared' | 'verified'; readonly draftOwner?: never }
+);
 /** Apply caller policy to classified discovery, before merging static route graphs. */
 export function selectContentPartitions(partitions: readonly ContentPartition[],
   draftAccess: DraftAccessPolicy, subGraphName?: string): string[] {
-  return partitions.filter(partition => (!subGraphName || partition.subGraphName === subGraphName)
-    && (partition.kind !== 'draft' || draftAccess.kind === 'all'
-      || (draftAccess.kind === 'owners' && partition.draftOwner !== undefined
-        && draftAccess.owners.some(owner => knowledgeAssetAgentAddressesEqual(owner, partition.draftOwner!)))))
-    .map(partition => partition.graph);
+  return partitions.filter(partition => {
+    if (subGraphName && partition.subGraphName !== subGraphName) return false;
+    if (partition.kind !== 'draft' || draftAccess.kind === 'all') return true;
+    const owner = partition.draftOwner;
+    return draftAccess.kind === 'owners' && owner !== null
+      && draftAccess.owners.some(allowed => knowledgeAssetAgentAddressesEqual(allowed, owner));
+  }).map(partition => partition.graph);
 }
