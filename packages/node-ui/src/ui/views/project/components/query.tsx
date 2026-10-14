@@ -334,6 +334,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       contextGraphId,
       view: activeExecution.view,
       subGraphName: activeExecution.subGraphName,
+      ...(activeExecution.view === 'working-memory' ? { includeContextGraphPartitions: true } : {}),
     }),
     [activeExecution.sparql, activeExecution.subGraphName, activeExecution.view, contextGraphId],
     0,

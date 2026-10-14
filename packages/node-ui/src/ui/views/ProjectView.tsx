@@ -9,6 +9,7 @@ import {
   buildMemoryEntities,
   canonicalEntityUri,
   useMemoryEntities,
+  fetchMemoryEntity,
   type LayeredTriple,
   type TrustLevel,
 } from '../hooks/useMemoryEntities.js';
@@ -298,7 +299,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     if (!selectedUriRef.current || !detailOriginRef.current) {
       detailOriginRef.current = captureDetailOrigin(originScrollKey);
     }
-    setSelectedUri(uri);
+    setSelectedUri(canonicalEntityUri(uri));
   }, [captureDetailOrigin]);
 
   const clearDetailOrigin = useCallback(() => {
@@ -488,33 +489,33 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   useMemoryGraphEvents(contextGraphId, refreshSubGraphCount);
 
   const selectedLayerTrust = selectedLayerContext ? TRUST_FOR_LAYER[selectedLayerContext] : null;
+  const detailKey = JSON.stringify([contextGraphId, selectedUri, selectedLayerContext, includeQueryCatalogInMemory]);
+  const detailRead = useFetch(async () => ({
+    key: detailKey,
+    ...(selectedUri ? await fetchMemoryEntity(contextGraphId, selectedUri, selectedLayerContext ?? undefined, includeQueryCatalogInMemory) : { triples: [], partial: false }),
+  }), [detailKey]);
+  const fetchedDetail = detailRead.data?.key === detailKey ? detailRead.data : null;
+  useMemoryGraphEvents(contextGraphId, () => { if (selectedUri) detailRead.refresh(); });
   const detailEntityTriples = useMemo(
     () => selectedLayerTrust
-      ? rawMemory.allTriples.filter(t => t.layer === selectedLayerTrust)
-      : rawMemory.graphTriples,
-    [rawMemory.allTriples, rawMemory.graphTriples, selectedLayerTrust],
+      ? [...rawMemory.allTriples.filter(t => t.layer === selectedLayerTrust), ...(fetchedDetail?.triples ?? [])]
+      : [...rawMemory.allTriples, ...(fetchedDetail?.triples ?? [])],
+    [rawMemory.allTriples, fetchedDetail, selectedLayerTrust],
   );
   const detailTriples = useMemo(
-    () => selectedLayerTrust ? dedupeTriplesBySpo(detailEntityTriples) : detailEntityTriples,
-    [detailEntityTriples, selectedLayerTrust],
+    () => dedupeTriplesBySpo(detailEntityTriples),
+    [detailEntityTriples],
   );
   const detailEntities = useMemo(
     () => selectedLayerTrust
       ? buildMemoryEntities(detailEntityTriples as LayeredTriple[])
-      : rawMemory.entities,
-    [detailEntityTriples, rawMemory.entities, selectedLayerTrust],
+      : fetchedDetail ? buildMemoryEntities(detailEntityTriples as LayeredTriple[]) : rawMemory.entities,
+    [detailEntityTriples, fetchedDetail, rawMemory.entities, selectedLayerTrust],
   );
   const selectedEntity = useMemo(
-    () => selectedUri ? detailEntities.get(selectedUri) ?? null : null,
-    [selectedUri, detailEntities]
+    () => selectedUri ? detailEntities.get(selectedUri) ?? rawMemory.entities.get(selectedUri) ?? null : null,
+    [selectedUri, detailEntities, rawMemory.entities]
   );
-
-  useEffect(() => {
-    if (!selectedUri || selectedEntity || rawMemory.loading) return;
-    setSelectedUri(null);
-    setSelectedLayerContext(null);
-    clearDetailOrigin();
-  }, [selectedUri, selectedEntity, rawMemory.loading, clearDetailOrigin]);
 
   // Route a sub-graph chip click to the sub-graph page. Selecting "All"
   // (null) exits the page back to the current layer view, or overview if
@@ -788,6 +789,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     <ProjectProfileContext.Provider value={profile}>
     <AgentsContext.Provider value={agentsContextValue}>
     <div className="v10-memory-explorer">
+      {(rawMemory.hasMore || rawMemory.pageError) && <div className="v10-stale-banner" role="status">
+        <span>{rawMemory.pageError ?? 'More graph data is available. Counts and relationships describe the loaded pages.'}</span>
+        <button type="button" className="v10-retry-btn" disabled={rawMemory.loading} onClick={rawMemory.loadMore}>
+          {rawMemory.loading ? 'Loading graph data…' : 'Load more graph data'}
+        </button>
+      </div>}
       {/* GH #905: when a project is already open, `useFetch` keeps the
           last-good `cgData`, so a failing 30s refresh leaves `cg` truthy and
           the view would silently show stale data. Surface an inline,
@@ -836,6 +843,15 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       />
 
       <main className="v10-memory-explorer-page" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
+      {selectedUri && (detailRead.loading || detailRead.error || fetchedDetail?.partial || !selectedEntity) && (
+        <div className="v10-layer-action-note" role="status">
+          {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (fetchedDetail?.partial
+            ? 'Resource details are limited to 1,000 triples per layer. Use a scoped query for further relationships.'
+            : 'This resource is referenced here, but has no details in this view.')}
+          {detailRead.error && <button onClick={detailRead.refresh}>Retry resource details</button>}
+          {!selectedEntity && <button onClick={handleDetailClose}>Close resource</button>}
+        </div>
+      )}
       {/* Drilldown overlay */}
       {selectedEntity && (
         <KADetailView
@@ -845,7 +861,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           onNavigate={handleNavigate}
           onClose={handleDetailClose}
           contextGraphId={contextGraphId}
-          onRefresh={rawMemory.refresh}
+          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); }}
         />
       )}
 

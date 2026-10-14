@@ -182,6 +182,7 @@ vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({
 
 vi.mock('../src/ui/hooks/useMemoryEntities.js', () => ({
   useMemoryEntities: () => memory,
+  fetchMemoryEntity: vi.fn(async () => ({ triples: [], partial: false })),
   buildMemoryEntities: buildTestMemoryEntities,
   // ProjectView imports `canonicalEntityUri` for `dedupeTriplesBySpo`.
   // Idempotent strip of `<...>` wrappers mirrors the real impl.
