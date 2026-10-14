@@ -314,3 +314,26 @@ it('forwards the authenticated caller and response ceiling through scoped agent 
     expect(storeRead).not.toHaveBeenCalled();
   } finally { await store.close(); }
 });
+
+it('excludes another agent drafts from bounded partition scans without narrowing dashboard scans', async () => {
+  const store = new OxigraphStore(), engine = new DKGQueryEngine(store);
+  const root = 'did:dkg:context-graph:test', draft = `${root}/_working_memory/agent-b/1`;
+  const graphs = [draft, `${draft}/details`, `${root}/_shared_memory/a`, `${root}/_verifiable_memory/a`];
+  const agent = { queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' }),
+    subscribedContextGraphs: new Map() };
+  const query = QueryMethods.prototype.query.bind(agent as never);
+  try {
+    await store.insert([
+      { graph: `${root}/_meta`, subject: 'urn:draft', predicate: 'http://dkg.io/ontology/assertionGraph', object: draft },
+      ...graphs.map((graph, i) => ({ graph, subject: `urn:item:${i}`, predicate: 'urn:p', object: '"value"' })),
+    ]);
+    const sparql = 'SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o } }';
+    const dashboard = await query(sparql, { contextGraphId: 'test', includeContextGraphPartitions: true, callerAgentAddress: 'agent-a' });
+    expect(dashboard.bindings.map(row => row.g)).toContain(draft);
+    const read = context({ query }, { sparql, includeContextGraphPartitions: true, excludeWorkingMemoryPartitions: false }, 'agent-a');
+    await handleBoundedQueryRoutes(read.ctx);
+    expect(read.res.statusCode, read.res.body).toBe(200);
+    expect(JSON.parse(read.res.body).result.bindings.map(row => row.g).sort()).toEqual(graphs.slice(2).sort());
+  } finally { await store.close(); }
+});

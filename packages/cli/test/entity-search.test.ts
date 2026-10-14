@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import Database from 'better-sqlite3';
 import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
-import { OxigraphStore, SparqlHttpStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, SparqlHttpStore, SharedMemoryLiteralBlobStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import { EntityGraphReader, indexKey, parseSpec } from '../src/entity-search/documents.js';
 import { parseIndexRequest, parseSearchRequest, parseReadinessRequest } from '../src/entity-search/requests.js';
@@ -23,12 +23,13 @@ const spec = { contextGraphId: 'catalog', view: 'verifiable-memory' as const,
 const partition = 'did:dkg:context-graph:catalog/_verifiable_memory/a';
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-async function fixture(count = 3, capacity = 100_000, http = false) {
+async function fixture(count = 3, capacity = 100_000, http = false, blobs = false) {
   const dir = mkdtempSync(join(tmpdir(), 'entity-search-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const endpoint = http ? await startOxigraphSparqlEndpoint() : undefined;
   if (endpoint) cleanup.push(() => endpoint.close());
-  const graph = endpoint ? new SparqlHttpStore({ queryEndpoint: endpoint.queryEndpoint, updateEndpoint: endpoint.updateEndpoint }) : new OxigraphStore();
+  const inner = endpoint ? new SparqlHttpStore({ queryEndpoint: endpoint.queryEndpoint, updateEndpoint: endpoint.updateEndpoint }) : new OxigraphStore();
+  const graph = blobs ? new SharedMemoryLiteralBlobStore(inner, { blobDir: join(dir, 'blobs'), thresholdBytes: 40 }) : inner;
   cleanup.push(() => graph.close());
   const engine = new DKGQueryEngine(graph);
   let permitted = true;
@@ -413,7 +414,8 @@ it('migrates legacy counters while preserving completed and interrupted scan dat
     for (const table of ['entity_documents', 'entity_scan_documents']) {
       db.exec(`ALTER TABLE ${table} ADD COLUMN generation INTEGER NOT NULL DEFAULT 7`);
     }
-    const state = { ...f.store.state(id), generation: 7 };
+    const row = db.prepare('SELECT state FROM entity_indexes WHERE id = ?').get(id) as { state: string };
+    const state = { ...JSON.parse(row.state), generation: 7 };
     db.prepare('UPDATE entity_indexes SET state = ? WHERE id = ?').run(JSON.stringify(state), id);
   } finally { db.close(); }
   const migrated = new EntityIndexStore(f.dir); cleanup.push(() => migrated.close());
@@ -422,4 +424,70 @@ it('migrates legacy counters while preserving completed and interrupted scan dat
   const service = new EntitySearchService(migrated, f.embedder);
   expect(await service.index(parseIndexRequest(spec), f.reader, AbortSignal.timeout(5000), performance.now() + 5000))
     .toMatchObject({ scanComplete: true, indexedEntities: 10 });
+});
+
+
+it('rejects an externalized document before loading its oversized literal', async () => {
+  const f = await fixture(0, 100_000, false, true);
+  const sourceGraph = 'did:dkg:context-graph:catalog/_shared_memory';
+  await f.graph.insert([
+    { graph: sourceGraph, subject: 'urn:oversized', predicate: 'urn:description', object: JSON.stringify('x'.repeat(1024 * 1024)) },
+    { graph: sourceGraph, subject: 'urn:oversized', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:Topic' },
+  ]);
+  const unbounded = vi.spyOn(f.graph as unknown as { readBlob(hash: string): Promise<string> }, 'readBlob');
+  await expect(f.reader.document({ ...spec, view: 'shared-working-memory' },
+    { sourceGraph, entityUri: 'urn:oversized' }, AbortSignal.timeout(5000), performance.now() + 5000))
+    .rejects.toMatchObject({ code: 'ENTITY_DOCUMENT_TOO_LARGE' });
+  expect(unbounded).not.toHaveBeenCalled();
+  expect(f.embedder.embed).not.toHaveBeenCalled();
+});
+
+it.each(['finish', 'count'] as const)('rejects a deadline crossed during final index %s and preserves committed work', async stage => {
+  const f = await fixture(1);
+  let now = 1000;
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  const original = f.store[stage].bind(f.store);
+  vi.spyOn(f.store, stage).mockImplementation((...args: never[]) => {
+    const value = (original as (...a: never[]) => unknown)(...args);
+    now = 1100; return value as never;
+  });
+  await expect(f.service.index(parseIndexRequest(spec), f.reader, new AbortController().signal, 1050))
+    .rejects.toMatchObject({ code: 'QUERY_DEADLINE_EXCEEDED' });
+  const id = indexKey(parseSpec(spec), f.embedder.fingerprint);
+  expect(f.store.state(id)?.scanComplete).toBe(true);
+  expect(f.store.count(id)).toBe(1);
+});
+
+it('checks the monotonic deadline at the HTTP success boundary', async () => {
+  const f = await fixture(1);
+  const indexed = await f.index();
+  let now = 1000;
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  vi.spyOn(f.service, 'index').mockImplementation(async () => { now = 4000; return indexed; });
+  const r = request(f, { ...spec, timeoutMs: 1000 }, 'nodeOperator', '/api/entities/index');
+  await handleEntityRoutes(r.ctx);
+  expect(r.res.statusCode).toBe(503);
+  expect(JSON.parse(r.res.body).code).toBe('QUERY_DEADLINE_EXCEEDED');
+});
+
+it('revalidates graph membership after registration removal while retaining RDF and cached vectors', async () => {
+  const f = await fixture(1);
+  const root = 'did:dkg:context-graph:catalog', child = `${root}/named`;
+  const sourceGraph = `${child}/_verifiable_memory/a`;
+  const registration = [
+    { graph: `${root}/_meta`, subject: child, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph' },
+    { graph: `${root}/_meta`, subject: child, predicate: 'http://dkg.io/ontology/parentContextGraph', object: root },
+    { graph: `${root}/_meta`, subject: child, predicate: 'http://schema.org/name', object: '"named"' },
+  ];
+  await f.graph.insert([...registration,
+    { graph: sourceGraph, subject: 'urn:removed', predicate: 'urn:description', object: '"ocean removed"' },
+    { graph: sourceGraph, subject: 'urn:removed', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:Topic' },
+  ]);
+  const indexed = await f.index();
+  expect((await f.search()).entities.map(e => e.entityUri)).toContain('urn:removed');
+  await f.graph.delete(registration);
+  expect(await f.graph.hasGraph(sourceGraph)).toBe(true);
+  expect(f.store.count(indexed.indexId)).toBe(2);
+  expect(await f.search()).toMatchObject({ staleCandidates: 1, entities: [{ entityUri: 'urn:entity:0' }] });
+  expect(f.store.count(indexed.indexId)).toBe(2);
 });
