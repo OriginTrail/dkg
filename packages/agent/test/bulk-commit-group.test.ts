@@ -36,7 +36,7 @@ describe('bulk group independent parsed heap fence', () => {
     // 12 MB fixture again in the coverage-instrumented test thread six times.
     const root = Buffer.from('adc2431ba3d563c081f0ed5fad9b3b7783fede8feb978602d194c142cf4ed361', 'hex');
     const uals = [1, 2, 3, 4, 5, 6].map(id => `did:dkg:base:84532/${address}/${id}`);
-    const verify = createAssetPayloadVerifier({ contextGraphId: cg, assetUals: uals,
+    const verify = createAssetPayloadVerifier({ contextGraphId: cg,
       ctx: createOperationContext('sync'), parseAndFilter: worker.parseAndFilter.bind(worker),
       processDurableBatchInWorker: (data, meta, _ctx, accept, mode) => worker.processDurableBatch(data, meta, accept, mode),
     });
