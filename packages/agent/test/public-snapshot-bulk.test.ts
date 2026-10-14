@@ -45,7 +45,7 @@ describe('public bulk snapshot recovery', () => {
     const probe = vi.spyOn(f.router, 'probeProtocol');
     const agent: PublicSnapshotBulkHost = { store: f.target, router: f.router, ensurePeerConnected: ensure, getPeerProtocols: protocols,
       getOrCreateSyncVerifyWorker: () => f.worker,
-      processDurableBatchInWorker: (data, meta, _ctx, accept, mode) => f.worker.processDurableBatch(data, meta, accept, mode),
+      processDurableBatchInWorker: (data, meta, _ctx, accept = false, mode) => f.worker.processDurableBatch(data, meta, accept, mode),
       reconcileAfterGraphScopedMaterialization: async (asset: { ual: string }) => {
         if (failure !== 'reconciliation') return;
         started.add(asset.ual); await held; completed.add(asset.ual);
