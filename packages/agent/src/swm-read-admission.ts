@@ -8,9 +8,9 @@ export type PrivateRootLegacyLaneAdmission = AdmissionDecision | {
 export type SwmReadAdmission = PrivateRootLegacyLaneAdmission | {
   outcome: 'unavailable'; source: 'confirmed-metadata';
   confirmation: Extract<ContextGraphMetadataConfirmation, { outcome: 'unavailable' }>;
-} | { outcome: 'unavailable'; source: 'read-authority'; kind: 'decision';
+} | { outcome: 'unavailable'; source: 'read-authority';
   decision: Extract<ContextGraphReadAuthorityDecision, { outcome: 'unavailable' }>;
-} | { outcome: 'unavailable'; source: 'read-authority'; kind: 'dependency'; error: unknown };
+};
 
 async function captureLegacyAdmission(
   check: () => Promise<boolean>, signal?: AbortSignal): Promise<PrivateRootLegacyLaneAdmission> {
@@ -47,37 +47,23 @@ export async function resolveSharedMemoryAdmission(reads: {
   signal?: AbortSignal;
 }): Promise<SwmReadAdmission> {
   reads.signal?.throwIfAborted();
-  let accepted: boolean | undefined;
-  try { accepted = reads.acceptedAuthority(); }
-  catch (error) {
-    reads.signal?.throwIfAborted();
-    return { outcome: 'unavailable', source: 'read-authority', kind: 'dependency', error };
-  }
-  if (accepted === true) return { outcome: 'allowed' };
-  if (accepted === false) {
-    const legacy = await reads.legacyLane();
-    reads.signal?.throwIfAborted();
-    if (legacy.outcome !== 'allowed') return legacy;
-  }
   try {
+    const accepted = reads.acceptedAuthority();
+    if (accepted === true) return { outcome: 'allowed' };
+    if (accepted === false) {
+      const legacy = await reads.legacyLane();
+      reads.signal?.throwIfAborted();
+      if (legacy.outcome !== 'allowed') return legacy;
+    }
     const confirmation = await reads.confirmedMetadata();
     reads.signal?.throwIfAborted();
     if (confirmation.outcome === 'unavailable') return { outcome: 'unavailable', source: 'confirmed-metadata', confirmation };
     if (confirmation.outcome === 'unconfirmed') return { outcome: 'denied' };
-  } catch (error) {
-    reads.signal?.throwIfAborted();
-    return { outcome: 'unavailable', source: 'confirmed-metadata', confirmation: { outcome: 'unavailable', source: 'dependency', error } };
-  }
-  try {
     const decision = await reads.readAuthority();
-    reads.signal?.throwIfAborted();
     return decision.outcome === 'unavailable'
-      ? { outcome: 'unavailable', source: 'read-authority', kind: 'decision', decision }
+      ? { outcome: 'unavailable', source: 'read-authority', decision }
       : { outcome: decision.outcome };
-  } catch (error) {
-    reads.signal?.throwIfAborted();
-    return { outcome: 'unavailable', source: 'read-authority', kind: 'dependency', error };
-  }
+  } finally { reads.signal?.throwIfAborted(); }
 }
 
 /** Legacy callers fail closed for these facts; strict reads still expose outages. */
@@ -92,9 +78,7 @@ export function sharedMemoryAdmissionError(contextGraphId: string,
 ): unknown {
   switch (admission.source) {
     case 'legacy-membership': return admission.error;
-    case 'read-authority': return admission.kind === 'dependency' ? admission.error
-      : new ContextGraphReadAuthorityUnavailableError(contextGraphId, admission.decision);
-    case 'confirmed-metadata': return admission.confirmation.source === 'dependency' ? admission.confirmation.error
-      : new Error('Context Graph metadata chain proof unavailable', { cause: admission.confirmation.proof });
+    case 'read-authority': return new ContextGraphReadAuthorityUnavailableError(contextGraphId, admission.decision);
+    case 'confirmed-metadata': return new Error('Context Graph metadata chain proof unavailable', { cause: admission.confirmation.proof });
   }
 }
