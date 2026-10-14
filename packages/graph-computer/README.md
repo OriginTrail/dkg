@@ -297,13 +297,56 @@ term encoding. Adding PostgreSQL or LLM integrations still requires real approve
 child Programs/adapters; those names do not create built-in services.
 
 The executor compiles the source during approval using ComponentizeJS and runs
-it in Wasm in an isolated process. Only the guest API import is accepted. Calls
+it in Wasm in an isolated process. Imports resolve only to the public guest API
+or explicitly supplied, checksummed files in a source bundle. Calls
 are returned to the host, where permissions and budgets are checked. Inputs are
 limited to a JSON array of 64 KiB/depth 20, returned messages to 256 KiB, and guest
 linear memory to 64 MiB. The host enforces call counts, concurrency and a deadline
 independently of the helpers. JSON-incompatible results such as `NaN` fail.
 The same memory ceiling applies to guest module initialization during approval;
 compilations have a 30-second deadline and at most two run concurrently.
+
+### Import a library
+
+Use `createTypeScriptProgramBundle` to package the entry and all dependency sources.
+The executor never installs packages or resolves imports from its own filesystem.
+For an npm library, pin its version and bundle its required exports at authoring
+time into a self-contained JavaScript module. Keep its license and provenance.
+
+```ts
+import { createTypeScriptProgramBundle } from '@origintrail-official/dkg-graph-computer';
+
+const source = createTypeScriptProgramBundle({
+  entry: 'main.ts',
+  files: {
+    'main.ts': `import { double } from 'math';
+      export function run(value: number) { return double(value); }`,
+    'vendor/math.js': 'export const double = value => value * 2;',
+  },
+  imports: { math: 'vendor/math.js' },
+});
+const program = await owner.programs.upload({
+  graphId: programGraph, source, language: 'typescript-v1', requiredTools: [],
+});
+// Approve the exact returned Program version using the ordinary approval flow.
+```
+
+Supplied `.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts` and JSON files support exact
+relative imports; bare imports require an explicit mapping. The total serialized
+source remains bounded to 256 KiB, with at most 64 files and 64 mappings. Every
+file, including an unused one, is checksummed. The approved source hash and compiler
+cache key cover the entire serialized bundle, including paths and mappings.
+Editing any file requires a new source version and approval. Plain single-file
+source keeps its existing representation and hash.
+
+The node editor shows the entry and dependency files separately, retains the full
+bundle in drafts, and exposes dependency pins for review. Libraries execute inside
+the same Wasm sandbox, including module initialization. There is no direct filesystem,
+process, environment or network authority, and the existing memory and timeout
+limits still apply. `node:crypto` is not a native guest module; use a supplied pure
+JavaScript hash implementation. Authorized I/O goes through `invoke_tool` or
+`invoke_program` and consumes the same host budgets regardless of which file calls it.
+This is capability isolation, not a static proof that arbitrary JavaScript is pure.
 
 TypeScript parents and children execute on the same executor in this version;
 the root invocation can arrive through another DKG node. Remote arguments use

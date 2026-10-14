@@ -44,6 +44,8 @@ export default defineConfig({
           'test/semantic-runtime-query-pins.test.ts',
           'test/semantic-runtime-program-policy.test.ts',
           'test/semantic-runtime-program-bindings.test.ts',
+          'test/semantic-runtime-graph-configuration-limits.test.ts',
+          'test/semantic-runtime-execution-output.test.ts',
           'test/semantic-runtime-asset-program.test.ts',
           'test/semantic-runtime-sparql-adapter.test.ts',
           'test/semantic-runtime-configuration-api.test.ts',
@@ -240,6 +242,7 @@ export default defineConfig({
           'test/daemon-sse-final-frame.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
+          'test/context-graph-authority-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/
           // wallets) — no hardhat.
