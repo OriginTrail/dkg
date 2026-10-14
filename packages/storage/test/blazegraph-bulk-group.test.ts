@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as core from '@origintrail-official/dkg-core';
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import * as fallbackPlanner from '../src/atomic-asset-group.js';
 import * as bulkPlanner from '../src/adapters/bulk-asset-group.js';
@@ -12,6 +13,45 @@ const members = [{ graphUri: 'urn:data', metaGraphUri: 'urn:meta', metadataSubje
 }];
 
 describe('Blazegraph confirmed bulk publication', () => {
+  it('keeps native staging independent of consensus hashing', () => {
+    const hashing = vi.spyOn(core, 'canonicalizeObjectTermForHash').mockImplementation(() => {
+      throw new Error('Storage strategy must not invoke the Merkle canonicalizer');
+    });
+    const graphQuads = ['1', '2'].map(value => ({ ...members[0]!.graphQuads[0]!,
+      object: `"${value}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+    }));
+    expect(bulkPlanner.buildBulkAssetGroupPlan([{ ...members[0]!, graphQuads }])).not.toBeNull();
+    expect(hashing).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['"one"', '"\\u006fne"^^<http://www.w3.org/2001/XMLSchema#string>'],
+    ['"one"@en', '"one"@EN'],
+    ['"true"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"1"^^<http://www.w3.org/2001/XMLSchema#boolean>'],
+    ['"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"01.00"^^<http://www.w3.org/2001/XMLSchema#decimal>'],
+    ['"1e0"^^<http://www.w3.org/2001/XMLSchema#double>', '"1.0"^^<http://www.w3.org/2001/XMLSchema#double>'],
+    ['"1.00000001"^^<http://www.w3.org/2001/XMLSchema#float>', '"1"^^<http://www.w3.org/2001/XMLSchema#float>'],
+    ['"2026-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', '"2026-01-01T00:00:00+00:00"^^<http://www.w3.org/2001/XMLSchema#dateTime>'],
+  ])('uses fallback for potentially aliased staging terms %s / %s', (left, right) => {
+    const graphQuads = [left, right].map(object => ({ ...members[0]!.graphQuads[0]!, object }));
+    expect(bulkPlanner.buildBulkAssetGroupPlan([{ ...members[0]!, graphQuads }])).toBeNull();
+  });
+
+  it('retains native staging for repeated identical and distinct string terms', () => {
+    const graphQuads = ['"one"', '"one"', '"two"'].map(object => ({ ...members[0]!.graphQuads[0]!, object }));
+    const plan = bulkPlanner.buildBulkAssetGroupPlan([{ ...members[0]!, graphQuads }]);
+    expect(plan).not.toBeNull();
+    expect(plan!.update).toContain('FILTER(?n0 = 2)');
+  });
+
+  it('uses conservative fallback for multiple unmodeled XSD values at one subject/predicate', () => {
+    const graphQuads = ['2026-01-01', '2026-01-02'].map(value => ({ ...members[0]!.graphQuads[0]!,
+      object: `"${value}"^^<http://www.w3.org/2001/XMLSchema#date>`,
+    }));
+    expect(bulkPlanner.buildBulkAssetGroupPlan([{ ...members[0]!, graphQuads }])).toBeNull();
+    expect(bulkPlanner.buildBulkAssetGroupPlan([{ ...members[0]!, graphQuads: [graphQuads[0]!] }])).not.toBeNull();
+  });
+
   it('uses identical native wire terms for ordinary and staged uploads', async () => {
     const values = ['"001"^^<http://www.w3.org/2001/XMLSchema#integer>', '"café 😀"@fr',
       '"quoted \\"text\\" and \\n newline"', '"\\\\U0001F600"'];
