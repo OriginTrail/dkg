@@ -7,11 +7,11 @@ const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)
 const invalidRequests = [null, [], {}, { ...request, extra: true }, { ...request, refresh: undefined },
   { ...request, version: 2 }, { ...request, refresh: 'false' }, { ...request, contextGraphId: '../private' },
   { ...request, onChainId: 1 }, { ...request, onChainId: '0' }, { ...request, onChainId: '01' },
-  { ...request, onChainId: '1'.repeat(79) }].map(bytes);
+  { ...request, onChainId: '1'.repeat(79) }, { ...request, onChainId: (1n << 256n).toString() }].map(bytes);
 invalidRequests.push(Uint8Array.of(0xff), new TextEncoder().encode('{'), new Uint8Array(PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES + 1));
 
 it.each([false, true])('round trips the exact version-one contract (refresh=%s)', refresh => {
-  const value = { ...request, refresh, onChainId: '9'.repeat(78) };
+  const value = { ...request, refresh, onChainId: ((1n << 256n) - 1n).toString() };
   expect(decodePublicGraphSnapshotRequest(encodePublicGraphSnapshotRequest(value))).toEqual(value);
 });
 

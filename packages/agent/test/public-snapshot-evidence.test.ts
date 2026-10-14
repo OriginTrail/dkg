@@ -65,6 +65,20 @@ const asset = (): VerifiedGraphScopedAsset => ({
   })),
 });
 describe("job-scoped public snapshot evidence", () => {
+  it('owns immutable scope, asset roots and provenance independently of the input wrapper', () => {
+    const original = { ...snapshot, assets: snapshot.assets.map(asset => ({ ...asset })) };
+    const input = { snapshot: original, mode: 'core-cache' as const, sourceCore: 'original-core' };
+    const evidence = new PublicSnapshotEvidence(input, () => true);
+    input.snapshot = { ...original, contextGraphId: 'other' };
+    input.sourceCore = 'other-core';
+    original.assets[0]!.root = `0x${'c'.repeat(64)}`;
+    expect(evidence.snapshot.contextGraphId).toBe(graph);
+    expect(evidence.sourceCore).toBe('original-core');
+    expect(evidence.authenticate(asset()).onChainContextGraphId).toBe('1');
+    expect(Object.isFrozen(evidence.observation)).toBe(true);
+    expect(Object.isFrozen(evidence.snapshot.assets[0])).toBe(true);
+  });
+
   it("labels local trust and removes peer receipt claims; closed jobs cannot authenticate", () => {
     let current = true;
     const evidence = new PublicSnapshotEvidence({snapshot, mode: "core-cache", sourceCore: "configured-core"}, () => current,

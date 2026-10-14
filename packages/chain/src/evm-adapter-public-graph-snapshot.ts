@@ -1,3 +1,4 @@
+import { isPublicGraphSnapshotScope } from "./public-graph-snapshot-scope.js";
 // SPDX-License-Identifier: Apache-2.0
 import { Contract, ethers, type JsonRpcProvider } from "ethers";
 import {
@@ -30,7 +31,7 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
     onChainId: string,
     options: ChainReadOptions = {},
   ): Promise<PublicGraphSnapshot> {
-    if (!/^[1-9][0-9]{0,77}$/.test(onChainId) || contextGraphId.length > 256)
+    if (!isPublicGraphSnapshotScope({ contextGraphId, onChainId }))
       throw new Error("Invalid snapshot scope");
     const signal = options.signal ?? AbortSignal.timeout(110_000);
     signal.throwIfAborted();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash } from "node:crypto";
 import { ethers } from "ethers";
+import { isCanonicalSnapshotInteger as decimal, isPublicGraphSnapshotScope } from "./public-graph-snapshot-scope.js";
 
 /** Public chain statements, not a light-client proof. All integers are canonical decimal strings. */
 export interface PublicGraphSnapshot {
@@ -33,11 +34,6 @@ export const PUBLIC_GRAPH_SNAPSHOT_MAX_AGE_MS = 120_000;
 export const PUBLIC_GRAPH_SNAPSHOT_CLOCK_SKEW_MS = 5_000;
 const hash = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const decimal = (value: unknown, positive = false): value is string =>
-  typeof value === "string" &&
-  /^(0|[1-9][0-9]{0,77})$/.test(value) &&
-  (!positive || BigInt(value) > 0n) &&
-  BigInt(value) < 2n ** 256n;
 const hex = (value: unknown, size: number): value is string =>
   typeof value === "string" &&
   new RegExp(`^0x[0-9a-f]{${size * 2}}$`).test(value);
@@ -126,7 +122,7 @@ export function normalizePublicGraphSnapshot(
     s.deploymentId !== expected.deploymentId ||
     s.contextGraphId !== expected.contextGraphId ||
     s.onChainId !== expected.onChainId ||
-    !decimal(s.onChainId, true) ||
+    !isPublicGraphSnapshotScope(s) ||
     !decimal(s.blockNumber) ||
     !hex(s.blockHash, 32) ||
     !hex(s.contextGraphStorage, 20) ||
