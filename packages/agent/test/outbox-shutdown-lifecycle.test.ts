@@ -631,3 +631,31 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     );
   });
 });
+
+
+it('drains the registered sync cache before dependency teardown and fences a restart', async () => {
+  const agent = syntheticShutdownAgent();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const closeAndDrain = vi.fn(() => held), stopNode = vi.fn(async () => {}), closeStore = vi.fn(async () => {});
+  Object.assign(agent, {
+    started: true, chainPoller: null, coreHostRecordingsClosed: false,
+    drainCoreHostRecordings: vi.fn(async () => {}), messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+    clearStorageACKRegistrationRetry: vi.fn(), storageACKRegistrationRetryInFlight: false,
+    inFlightSubstrateFanOutCount: () => 0, router: { closePooling: vi.fn(async () => {}) },
+    node: { libp2p: { getPeers: () => [] }, stop: stopNode }, finalizationRuntime: new FinalizationRuntime(),
+    store: { close: closeStore }, log: { warn: vi.fn() }, syncResponderPreparedCacheOwner: { closeAndDrain },
+  });
+  let stopped = false;
+  const stopping = agent.stop().then(() => { stopped = true; });
+  expect(closeAndDrain).toHaveBeenCalledOnce();
+  await Promise.resolve();
+  expect(stopped).toBe(false);
+  expect(stopNode).not.toHaveBeenCalled(); expect(closeStore).not.toHaveBeenCalled();
+  expect(agent.started).toBe(true);
+  await agent.start();
+  expect(agent.syncResponderPreparedCacheOwner.closeAndDrain).toBe(closeAndDrain);
+  expect(stopped).toBe(false);
+  release(); await stopping;
+  expect(stopped).toBe(true); expect(closeStore).toHaveBeenCalledOnce();
+});

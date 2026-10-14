@@ -77,7 +77,7 @@ export function resolvePreparedContentCacheConfig(config: PreparedContentCacheCo
 export function createPreparedContentCache(
   options: NonNullable<ReturnType<typeof resolvePreparedContentCacheConfig>>,
   onError: (error: unknown, operation: 'initialize' | 'read' | 'publish') => void = () => {},
-): PreparedContentCache {
+): PreparedContentCache & { closeAndDrain(): Promise<void> } {
   const { maxBytes, maxEntries, ttlMs } = options;
   // Retain room for one bounded atomic write without evicting valid entries
   // before preparation succeeds. Small configured caches split their budget.
@@ -87,14 +87,15 @@ export function createPreparedContentCache(
   const directory = resolve(options.directory);
   // Iteration order is oldest first; successful reads/writes move to the end.
   const entries = new Map<string, { size: number; expiresAt: number }>();
-  let initialized = false, total = 0;
+  let initialized = false, closed = false, total = 0;
   let tail: Promise<unknown> = Promise.resolve();
-  // Reads and writes serialize within the bounded responder admission. No
-  // background writer survives a response or shutdown and no whole graph is held.
+  // Close admission synchronously, then drain every admitted filesystem task.
+  // Transport cancellation cannot detach physical writes from agent shutdown.
   const run = <T>(operation: 'read' | 'publish', fallback: T, work: () => Promise<T>): Promise<T> => {
+    if (closed) return Promise.resolve(fallback);
     const next = tail.then(async () => {
       let phase: 'initialize' | 'read' | 'publish' = 'initialize';
-      try { await initialize(); phase = operation; await reclaimExpired(); return await work(); }
+      try { await initialize(); phase = operation; await reclaimExpired(); await evict(); return await work(); }
       catch (error) { try { onError(error, phase); } catch { /* diagnostics cannot deny a valid response */ } return fallback; }
     });
     tail = next.then(() => undefined);
@@ -154,6 +155,7 @@ export function createPreparedContentCache(
     await evict(); initialized = true;
   }
   return {
+    closeAndDrain() { closed = true; return tail.then(() => undefined); },
     get(key) {
       return run<PreparedContent | null>('read', null, async () => {
         const name = digest(key) + SUFFIX;
@@ -191,29 +193,22 @@ export function createPreparedContentCache(
         const size = 4 + header.byteLength + value.body.byteLength;
         if (header.byteLength > HEADER_LIMIT || size > stagingBytes) return;
         const name = digest(key) + SUFFIX;
-        // Plan replacement-aware retention without deleting any live entry.
+        // Staging headroom permits the commit before any destructive eviction.
+        // If prior cleanup failed, run() must restore retention before admission.
         const old = entries.get(name);
-        let retainedBytes = total - (old?.size ?? 0) + size;
-        let retainedEntries = entries.size + (old ? 0 : 1);
-        const victims: string[] = [];
-        for (const [key, entry] of entries) {
-          if (retainedBytes <= retainedLimit && retainedEntries <= maxEntries) break;
-          if (key === name) continue;
-          victims.push(key); retainedBytes -= entry.size; retainedEntries--;
-        }
-        if (total + size > maxBytes || retainedBytes > retainedLimit || retainedEntries > maxEntries) return;
+        if (total + size > maxBytes) return;
         const temp = join(directory, `${name}.${randomUUID()}.tmp`);
         const handle = await open(temp, 'wx', 0o600);
         try {
           const prefix = Buffer.alloc(4); prefix.writeUInt32BE(header.byteLength);
           await handle.writeFile(prefix); await handle.writeFile(header); await handle.writeFile(value.body);
           await handle.sync(); await handle.close();
-          // Preparation succeeded. Keep eviction, publication and accounting in
-          // this serialized commit; no cache reader can observe an intermediate map.
-          for (const victim of victims) await remove(victim);
+          // Rename is the publication point. A failed rename preserves every
+          // retained entry. Post-commit cleanup is retried before the next IO.
           await rename(temp, join(directory, name));
           if (old) total -= old.size;
           entries.delete(name); entries.set(name, { size, expiresAt: createdAt + ttlMs }); total += size;
+          await evict();
         } finally {
           await handle.close().catch(() => {});
           await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; });

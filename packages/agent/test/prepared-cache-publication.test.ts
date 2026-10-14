@@ -1,18 +1,20 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, open, readdir, stat } from 'node:fs/promises';
+import { mkdtemp, rm, open, readdir, stat, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createPreparedContentCache, resolvePreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
 
 vi.mock('node:fs/promises', async importOriginal => {
   const fs = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...fs, open: vi.fn(fs.open) };
+  return { ...fs, open: vi.fn(fs.open), rename: vi.fn(fs.rename), unlink: vi.fn(fs.unlink) };
 });
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   vi.restoreAllMocks(); vi.useRealTimers();
   const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
   vi.mocked(open).mockReset().mockImplementation(real.open);
+  vi.mocked(rename).mockReset().mockImplementation(real.rename);
+  vi.mocked(unlink).mockReset().mockImplementation(real.unlink);
   for (const stop of cleanup.splice(0)) await stop();
 });
 const value = { body: new Uint8Array([1, 2, 3]), plainBytes: 3 };
@@ -87,4 +89,49 @@ it.each([false, true])('reclaims expired unreachable keys without looking them u
   await cache.put('new-root', value);
   expect(await readdir(f.directory)).toHaveLength(1);
   expect(await cache.get('new-root')).toEqual(value);
+});
+
+it('preserves all retained entries when publishing a new key fails at rename', async () => {
+  const f = await fixture();
+  vi.mocked(rename).mockRejectedValueOnce(new Error('injected rename failure'));
+  await f.cache.put('c', value);
+  expect(await f.cache.get('a')).toEqual(value);
+  expect(await f.cache.get('b')).toEqual(value);
+  expect(await f.cache.get('c')).toBeNull();
+  expect(await readdir(f.directory)).toHaveLength(2);
+});
+it('recovers post-publication eviction failure before admitting another write', async () => {
+  const f = await fixture();
+  vi.mocked(unlink).mockRejectedValueOnce(new Error('injected eviction failure'));
+  await f.cache.put('c', value);
+  expect(await readdir(f.directory)).toHaveLength(3);
+  await f.cache.put('d', value);
+  expect(await readdir(f.directory)).toHaveLength(2);
+  expect(await f.cache.get('c')).toEqual(value);
+  expect(await f.cache.get('d')).toEqual(value);
+});
+it('closes admission and drains a held fsync before a restarted owner opens the cache', async () => {
+  const f = await fixture();
+  const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  vi.mocked(open).mockImplementationOnce(async (...args) => {
+    const handle = await real.open(...args), sync = handle.sync.bind(handle);
+    vi.spyOn(handle, 'sync').mockImplementation(async () => { entered(); await held; await sync(); });
+    return handle;
+  });
+  const pending = f.cache.put('c', value); await started;
+  let closed = false;
+  const drain = f.cache.closeAndDrain().then(() => { closed = true; });
+  await f.cache.put('late', value);
+  expect(await f.cache.get('a')).toBeNull();
+  expect(closed).toBe(false);
+  expect((await readdir(f.directory)).filter(name => name.endsWith('.tmp'))).toHaveLength(1);
+  release(); await pending; await drain;
+  const restarted = createPreparedContentCache(f.options);
+  expect(await restarted.get('c')).toEqual(value);
+  expect(await restarted.get('b')).toEqual(value);
+  expect(await restarted.get('late')).toBeNull();
+  expect((await readdir(f.directory)).every(name => name.endsWith('.prepared'))).toBe(true);
 });
