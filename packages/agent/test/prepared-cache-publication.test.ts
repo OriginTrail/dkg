@@ -9,7 +9,12 @@ vi.mock('node:fs/promises', async importOriginal => {
   return { ...fs, open: vi.fn(fs.open) };
 });
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => { vi.restoreAllMocks(); for (const stop of cleanup.splice(0)) await stop(); });
+afterEach(async () => {
+  vi.restoreAllMocks(); vi.useRealTimers();
+  const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(open).mockReset().mockImplementation(real.open);
+  for (const stop of cleanup.splice(0)) await stop();
+});
 const value = { body: new Uint8Array([1, 2, 3]), plainBytes: 3 };
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'prepared-publish-'));
@@ -45,4 +50,41 @@ it('replaces an existing key at the entry limit without evicting a different ent
   expect(await f.cache.get('b')).toEqual(replacement);
   const sizes = await Promise.all((await readdir(f.directory)).map(async file => (await stat(join(f.directory, file))).size));
   expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(f.options.maxBytes);
+});
+it('keeps admitting newer assertions at the byte limit without exceeding physical bytes during preparation', async () => {
+  const f = await fixture();
+  const options = { ...f.options, maxBytes: 1024, maxEntries: 100 };
+  let cache = createPreparedContentCache(options);
+  const large = { body: new Uint8Array(300), plainBytes: 300 };
+  const real = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const handle = await real.open(...args);
+    if (args[1] === 'wx') {
+      const write = handle.writeFile.bind(handle);
+      vi.spyOn(handle, 'writeFile').mockImplementation(async (...data) => {
+        await write(...data);
+        const sizes = await Promise.all((await readdir(f.directory)).map(async name => (await stat(join(f.directory, name))).size));
+        expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(options.maxBytes);
+      });
+    }
+    return handle;
+  });
+  for (const key of ['new-a', 'new-b', 'new-c']) {
+    await cache.put(key, large);
+    cache = createPreparedContentCache(options);
+    expect(await cache.get(key)).toEqual(large);
+  }
+  expect(await cache.get('new-a')).toBeNull();
+});
+it.each([false, true])('reclaims expired unreachable keys without looking them up (restart=%s)', async restart => {
+  const createdAt = Date.now(); vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(createdAt);
+  const f = await fixture();
+  const options = { ...f.options, ttlMs: 1000 };
+  let cache = createPreparedContentCache(options);
+  await cache.put('obsolete-root', value);
+  vi.setSystemTime(createdAt + 1100);
+  if (restart) cache = createPreparedContentCache(options);
+  await cache.put('new-root', value);
+  expect(await readdir(f.directory)).toHaveLength(1);
+  expect(await cache.get('new-root')).toEqual(value);
 });
