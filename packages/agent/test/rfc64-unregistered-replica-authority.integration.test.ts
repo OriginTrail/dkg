@@ -11,7 +11,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   NoChainAdapter,
+  connectRemoteSigners,
   type ContextGraphAuthoritySnapshot,
+  type OperationalSigning,
 } from '@origintrail-official/dkg-chain';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
@@ -33,6 +35,8 @@ import {
   RFC64_ROLLOUT_DEPLOYMENT as DEPLOYMENT,
   RFC64_ROLLOUT_NETWORK_ID as NETWORK_ID,
 } from './_helpers/rfc64-rollout-agent-harness.js';
+import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
+import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
 const OWNER_WALLET = new ethers.Wallet(`0x${'71'.repeat(32)}`);
 const OWNER = OWNER_WALLET.address.toLowerCase() as EvmAddressV1;
@@ -44,6 +48,16 @@ const OTHER_CONTEXT_GRAPH_ID = `${OWNER}/other` as ContextGraphIdV1;
 const CONTEXT_GRAPH_SUBJECT = contextGraphDataGraphUri(CONTEXT_GRAPH_ID);
 const ONTOLOGY_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 const HUB = '0x3333333333333333333333333333333333333333';
+const EXTERNAL_PAYER_TOKEN = 'replica-authority-payer-credential-4e5f6a7b';
+const EXTERNAL_AUTHOR_TOKEN = 'replica-authority-author-credential-7b6a5f4e';
+const EXTERNAL_AUTHOR = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
+
+/** The chain adapter of a node whose operational wallets sign through an external signer. */
+class ExternallySignedNoChain extends NoChainAdapter {
+  operationalSigning(): OperationalSigning {
+    return { external: true, payerAddresses: [] };
+  }
+}
 
 const {
   createDataDir,
@@ -52,9 +66,11 @@ const {
   cleanup,
 } = createRfc64RolloutAgentHarness();
 
+const fakes: FakeSigner[] = [];
 afterEach(async () => {
   await cleanup();
   vi.restoreAllMocks();
+  while (fakes.length > 0) await fakes.pop()!.close();
 });
 
 describe('RFC-64 unregistered replica authority', () => {
@@ -123,17 +139,77 @@ describe('RFC-64 unregistered replica authority', () => {
     const publisher = await startPublisher('unregistered-evidence-admin-token');
     const namespaceAgent = await publisher.registerAgent('namespace-owner');
     const namespaceOwner = namespaceAgent.agentAddress.toLowerCase();
-    const getSigner = vi.spyOn(publisher, 'getWorkspaceSigningAgentForAddress');
+    const custodialKeys = vi.spyOn(publisher, 'getCustodialAgentPrivateKey');
+    const ownerKeyReads = () => custodialKeys.mock.calls
+      .filter(([address]) => address.toLowerCase() === namespaceOwner).length;
 
     await expect(publisher.createContextGraph({
       id: `${namespaceOwner}/admin-token-attempt`,
       name: 'Admin-token attempt',
       accessPolicy: 0,
     })).rejects.toThrow(/uses wallet namespace.*authenticated caller/iu);
-    expect(getSigner).not.toHaveBeenCalled();
+    expect(ownerKeyReads()).toBe(0);
     await expect(publisher.contextGraphExists(
       `${namespaceOwner}/admin-token-attempt`,
     )).resolves.toBe(false);
+
+    // The owner's own request reads its key and creates the graph.
+    await publisher.createContextGraph({
+      id: `${namespaceOwner}/owner-request`,
+      name: 'Owner request',
+      accessPolicy: 0,
+      callerAgentAddress: namespaceOwner,
+    });
+    expect(ownerKeyReads()).toBeGreaterThan(0);
+    await expect(publisher.contextGraphExists(`${namespaceOwner}/owner-request`)).resolves.toBe(true);
+  });
+
+  it('rejects a mismatched caller before looking up an external author key or asking the signer', async () => {
+    const fake = await startFakeRemoteSigner({
+      credentials: [
+        { token: EXTERNAL_PAYER_TOKEN, keys: [HARDHAT_KEYS.PUBLISHER] },
+        { token: EXTERNAL_AUTHOR_TOKEN, keys: [EXTERNAL_AUTHOR.privateKey] },
+      ],
+    });
+    fakes.push(fake);
+    const remote = await connectRemoteSigners({
+      url: fake.url,
+      authToken: EXTERNAL_PAYER_TOKEN,
+      author: { authToken: EXTERNAL_AUTHOR_TOKEN },
+    });
+    const publisher = await startAgent({
+      name: 'unregistered-evidence-external-author',
+      config: {
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        chainAdapter: new ExternallySignedNoChain(),
+        authorSigners: remote.authors,
+      },
+    });
+    const owner = EXTERNAL_AUTHOR.address.toLowerCase();
+    expect(publisher.getDefaultAgentAddress()?.toLowerCase()).toBe(owner);
+    const authors = remote.authors!;
+    const lookups = [vi.spyOn(authors, 'signerFor'), vi.spyOn(authors, 'firstSignerOf')];
+    const custodialKeys = vi.spyOn(publisher, 'getCustodialAgentPrivateKey');
+    const requestsBefore = fake.requests.length;
+
+    await expect(publisher.createContextGraph({
+      id: `${owner}/mismatched-caller`,
+      name: 'Mismatched caller',
+      accessPolicy: 0,
+      callerAgentAddress: ATTACKER,
+    })).rejects.toThrow(/uses wallet namespace.*authenticated caller/iu);
+    for (const lookup of lookups) expect(lookup).not.toHaveBeenCalled();
+    expect(custodialKeys.mock.calls.filter(([address]) => address.toLowerCase() === owner)).toEqual([]);
+    expect(fake.requests).toHaveLength(requestsBefore);
+    await expect(publisher.contextGraphExists(`${owner}/mismatched-caller`)).resolves.toBe(false);
+
+    // The owner's own request looks its author key up and has the signer sign the seed.
+    await publisher.createContextGraph({ id: `${owner}/owner-request`, name: 'Owner request', accessPolicy: 0 });
+    expect(lookups.some((lookup) => lookup.mock.calls.length > 0)).toBe(true);
+    const signed = fake.calls('eth_sign');
+    expect(signed).toHaveLength(1);
+    expect(signed[0]!.authorization).toBe(`Bearer ${EXTERNAL_AUTHOR_TOKEN}`);
+    await expect(publisher.contextGraphExists(`${owner}/owner-request`)).resolves.toBe(true);
   });
 
   it('rejects a matching caller when its custodial signing key is unavailable', async () => {
@@ -145,7 +221,7 @@ describe('RFC-64 unregistered replica authority', () => {
       name: 'Missing signer attempt',
       accessPolicy: 0,
       callerAgentAddress: externalOwner,
-    })).rejects.toThrow(/no custodial signing key/iu);
+    })).rejects.toThrow(/no signing key/iu);
     await expect(publisher.contextGraphExists(
       `${externalOwner}/missing-signer-attempt`,
     )).resolves.toBe(false);

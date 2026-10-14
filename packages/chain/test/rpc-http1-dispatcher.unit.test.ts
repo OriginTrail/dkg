@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
-import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chainRpcFetch } from '../src/rpc-http1-dispatcher.js';
 import {
   startConnectProxy,
   startHttp2AndHttp1JsonRpcServer,
+  withTrustedCertificate,
   type JsonRpcTlsServer,
 } from './helpers/local-tls.js';
 
@@ -50,15 +50,6 @@ async function withBundledUndici<T>(version: string, run: () => T | Promise<T>):
   }
 }
 
-async function withTrustedCertificate<T>(cert: string, run: () => Promise<T>): Promise<T> {
-  const defaults = tls.getCACertificates('default');
-  tls.setDefaultCACertificates([...defaults, cert]);
-  try {
-    return await run();
-  } finally {
-    tls.setDefaultCACertificates(defaults);
-  }
-}
 
 /** Environment variables that would route a child's requests through a proxy. */
 const PROXY_ENV = ['NODE_USE_ENV_PROXY', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy'];
