@@ -1,5 +1,4 @@
 import { createStoreReadLane, createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
-import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
@@ -495,6 +494,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     reads: StoreReadLane,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
+    // Authority discovery retains caller cancellation/priority, with the store's
+    // own response budget. The caller ceiling only bounds caller-derived reads.
+    const { maxResponseBytes: _callerLimit, ...authorityOptions } = storeOptions(options) ?? {};
+    const authorityReads = createStoreReadLane(this.store, authorityOptions);
+    const catalog = await readScopedContentGraphCatalog(contextGraphId, authorityReads.query, false);
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
     // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
     // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass
@@ -554,11 +558,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // by-name WM read); fanning out would broaden it across every sub-graph's
     // VM partition and return unrelated rows.
     if (!options.subGraphName && !options.verifiedGraph && !(view === 'working-memory' && options.assertionName)) {
-      const subNames = await this.discoverRegisteredSubGraphNames(
-        contextGraphId,
-        reads,
-      );
-      for (const sub of subNames) {
+      for (const sub of catalog.subGraphs) {
         const subResolution = resolveViewGraphs(view, contextGraphId, {
           agentAddress: options.agentAddress,
           subGraphName: sub,
@@ -589,7 +589,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     // Parent authorization never grants access to a registered child context graph.
-    const { childContextGraphs: children } = await readScopedContentGraphCatalog(contextGraphId, reads.query, false);
+    const children = catalog.childContextGraphs;
     const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
     allGraphs.length = 0;
     allGraphs.push(...dedupedGraphs);
@@ -942,23 +942,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       : filteredInventory!;
     return { inventory, subGraphs: [...catalog.subGraphs],
       assertionGraphs: [...catalog.assertionGraphs], childContextGraphs: [...catalog.childContextGraphs] };
-  }
-
-  private async discoverRegisteredSubGraphNames(
-    contextGraphId: string,
-    reads: StoreReadLane,
-  ): Promise<Set<string>> {
-    const names = new Set<string>();
-    const result = await reads.query(`SELECT ?name WHERE { ${registeredSubGraphPattern(contextGraphId)} }`);
-    if (result.type !== 'bindings') return names;
-
-    for (const row of result.bindings) {
-      const name = decodeRegisteredSubGraphName(row['name']);
-      if (name !== undefined) {
-        names.add(name);
-      }
-    }
-    return names;
   }
 
   /**

@@ -1,3 +1,4 @@
+import { setImmediate } from 'node:timers/promises';
 import { withAdmittedReadCancellation } from '../src/admitted-read-cancellation.js';
 import { QueryReadAdmission } from '../src/query-read-admission.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -52,11 +53,15 @@ describe('query read admission', () => {
       store.query('SELECT ?authority WHERE {}', { ...options, signal: owner === 'read' ? controller.signal : undefined }),
       store.query('SELECT ?data WHERE {}', options),
     ]), { ...options, signal: owner === 'admission' ? controller.signal : undefined });
+    let settled = false;
+    void work.then(() => { settled = true; }, () => { settled = true; });
     const rejected = expect(work).rejects.toBe(failure);
     await started; controller.abort(failure);
     let nextStarted = false;
     const next = scheduler.run('background', 'next', async () => { nextStarted = true; });
-    await Promise.resolve(); expect(nextStarted).toBe(false); expect(fetcher).toHaveBeenCalledTimes(1);
+    // Drain cancellation and scheduler continuations while fetch remains held.
+    await setImmediate();
+    expect(settled).toBe(false); expect(nextStarted).toBe(false); expect(fetcher).toHaveBeenCalledTimes(1);
     settle(); await rejected; await next;
     expect(fetcher).toHaveBeenCalledTimes(1); expect(nextStarted).toBe(true);
   });
