@@ -3291,7 +3291,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
       this.log.info(ctx, `[sync] pooled wire variant ${PROTOCOL_SYNC_POOLED} enabled`);
     }
-    registerSyncHandler({
+    this.syncResponderPreparedCacheOwner = registerSyncHandler({
       register: (protocol, handler) =>
         this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
       protocolSync: PROTOCOL_SYNC,
