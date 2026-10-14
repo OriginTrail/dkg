@@ -22,6 +22,9 @@ export interface PreparedContent {
 export interface PreparedContentCache {
   /** Each hit transfers ownership of fresh bytes; callers may mutate the returned body. */
   get(key: string): Promise<PreparedContent | null>;
+  /** Borrows value and its body without copying until the promise settles.
+   * Keep both unchanged and retain the response-memory reservation while awaiting
+   * publication; ownership is not transferred to the cache. */
   put(key: string, value: PreparedContent): Promise<void>;
 }
 const HEADER_LIMIT = 16 * 1024;
