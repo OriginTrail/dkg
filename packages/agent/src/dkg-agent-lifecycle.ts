@@ -11009,7 +11009,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async canUseSharedMemoryForContextGraph(this: DKGAgent, contextGraphId: string,
     opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision } = {},
   ): Promise<boolean> {
-    return (await this.resolveSharedMemoryReadAdmission(contextGraphId, opts)).outcome === 'allowed';
+    const admission = await this.resolveSharedMemoryReadAdmission(contextGraphId, opts);
+    opts.signal?.throwIfAborted();
+    return admission.outcome === 'allowed';
   }
 
   async resolveSharedMemoryReadAdmission(this: DKGAgent, contextGraphId: string,
