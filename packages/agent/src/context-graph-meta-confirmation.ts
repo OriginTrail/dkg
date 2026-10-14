@@ -40,8 +40,6 @@ import type { ApprovedMemberAcceptance } from
 export type ConfirmContextGraphMetadataInput =
   | {
       readonly purpose?: 'read';
-      /** Shared-memory admission preserves dependency outages instead of presenting denial. */
-      readonly unavailable?: 'error';
       readonly rejectUnregisteredPlaceholder?: boolean;
     }
   | {
@@ -60,18 +58,55 @@ export interface ContextGraphMetadataConfirmationDependencies {
   readonly subscriptions: ReadonlyMap<string, Readonly<{ pendingMeta?: boolean }>>;
 }
 
-/** Canonical authority policy shared by bootstrap, gossip, and shared-memory admission. */
+export type ContextGraphMetadataConfirmation =
+  | { readonly outcome: 'confirmed' | 'unconfirmed' }
+  | { readonly outcome: 'unavailable'; readonly source: 'chain-proof';
+      readonly proof: Extract<ActivePublicContextGraphChainProof, { state: 'unknown' }> }
+  | { readonly outcome: 'unavailable'; readonly source: 'dependency'; readonly error: unknown };
+
+/** Legacy boolean presentation preserves its fail-closed chain-proof behavior. */
+export function confirmedMetadataBoolean(result: ContextGraphMetadataConfirmation): boolean {
+  if (result.outcome === 'unavailable' && result.source === 'dependency') throw result.error;
+  return result.outcome === 'confirmed';
+}
+
 export async function confirmContextGraphMetadataV1(
   dependencies: ContextGraphMetadataConfirmationDependencies,
   contextGraphId: string,
   input: ConfirmContextGraphMetadataInput = {},
 ): Promise<boolean> {
+  return confirmedMetadataBoolean(await resolveContextGraphMetadataConfirmationV1(dependencies, contextGraphId, input));
+}
+
+/** Canonical facts shared by bootstrap, gossip, and shared-memory admission. */
+export async function resolveContextGraphMetadataConfirmationV1(
+  dependencies: ContextGraphMetadataConfirmationDependencies,
+  contextGraphId: string,
+  input: ConfirmContextGraphMetadataInput = {},
+): Promise<ContextGraphMetadataConfirmation> {
+  dependencies.signal?.throwIfAborted();
+  try {
+    const result = await resolveMetadataConfirmation(dependencies, contextGraphId, input);
+    dependencies.signal?.throwIfAborted();
+    return result;
+  } catch (error) {
+    dependencies.signal?.throwIfAborted();
+    return { outcome: 'unavailable', source: 'dependency', error };
+  }
+}
+
+/** Canonical authority policy shared by bootstrap, gossip, and shared-memory admission. */
+async function resolveMetadataConfirmation(
+  dependencies: ContextGraphMetadataConfirmationDependencies,
+  contextGraphId: string,
+  input: ConfirmContextGraphMetadataInput = {},
+): Promise<ContextGraphMetadataConfirmation> {
   dependencies.signal?.throwIfAborted();
   if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
-    return true;
+    return { outcome: 'confirmed' };
   }
   if (isPublicMetaDurabilityPending(dependencies.store, contextGraphId)) {
-    return false;
+    return { outcome: 'unconfirmed' };
   }
 
   if (input.purpose === 'approved-member') {
@@ -82,7 +117,7 @@ export async function confirmContextGraphMetadataV1(
       dependencies.localApprovedAgentByContextGraph.get(contextGraphId)?.toLowerCase()
         === proof.approvedAgentAddress.toLowerCase()
     );
-    if (!stillApproved()) return false;
+    if (!stillApproved()) return { outcome: 'unconfirmed' };
     const confirmed = await findAuthoritativeDefinition(
       dependencies,
       contextGraphId,
@@ -92,7 +127,7 @@ export async function confirmContextGraphMetadataV1(
     // Readiness is declared now, so the authority behind the acceptance and
     // this node's approval must both still hold now, after the awaits: a
     // rejection or a new join request can change the binding while they run.
-    return confirmed && await input.acceptance.stillHolds() && stillApproved();
+    return { outcome: confirmed && await input.acceptance.stillHolds() && stillApproved() ? 'confirmed' : 'unconfirmed' };
   }
 
   const memberProof = await resolveApprovedMemberProof(dependencies, contextGraphId);
@@ -109,26 +144,25 @@ export async function confirmContextGraphMetadataV1(
   );
   const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean'
     && unregisteredPlaceholderResult.value === true;
-  let hasActivePublicOnChainProof: boolean | undefined;
-  let proofUnavailable = false;
+  let publicProof: ActivePublicContextGraphChainProof | undefined;
   const readPublicProof = async () => {
     let proof: ActivePublicContextGraphChainProof;
     try { proof = await dependencies.resolveActivePublicChainProof(); }
-    catch { proof = { state: 'unknown', reason: 'rpc-failure' }; }
+    catch (error) {
+      proof = { state: 'unknown', reason: 'rpc-failure',
+        detail: error instanceof Error ? error.message : String(error) };
+    }
     dependencies.signal?.throwIfAborted();
-    proofUnavailable = proof.state === 'unknown';
-    return proof.state === 'public';
+    return proof;
   };
-  const unconfirmed = () => {
-    dependencies.signal?.throwIfAborted();
-    if (proofUnavailable && input.unavailable === 'error') throw new Error('Context Graph metadata chain proof unavailable');
-    return false;
-  };
+  const unconfirmed = (): ContextGraphMetadataConfirmation => publicProof?.state === 'unknown'
+    ? { outcome: 'unavailable', source: 'chain-proof', proof: publicProof }
+    : { outcome: 'unconfirmed' };
   if (
     hasUnregisteredPlaceholder
     && input.rejectUnregisteredPlaceholder === true
   ) {
-    hasActivePublicOnChainProof = await readPublicProof();
+    publicProof = await readPublicProof();
   }
 
   const authoritativeDefinition = await findAuthoritativeDefinition(
@@ -137,34 +171,29 @@ export async function confirmContextGraphMetadataV1(
     [{ definition: 'private', memberProof }, { definition: 'public' }],
     'agent.contextGraph.confirmedMeta',
   );
-  if (authoritativeDefinition === 'private') return true;
+  if (authoritativeDefinition === 'private') return { outcome: 'confirmed' };
   if (
     authoritativeDefinition === 'public'
     && (
       !hasUnregisteredPlaceholder
       || input.rejectUnregisteredPlaceholder !== true
-      || hasActivePublicOnChainProof === true
+      || publicProof?.state === 'public'
     )
   ) {
-    return true;
+    return { outcome: 'confirmed' };
   }
 
-  if (hasActivePublicOnChainProof === undefined) {
-    hasActivePublicOnChainProof = await readPublicProof();
+  if (publicProof === undefined) {
+    publicProof = await readPublicProof();
   }
-  if (hasActivePublicOnChainProof) return true;
+  if (publicProof?.state === 'public') return { outcome: 'confirmed' };
 
   if (
     hasUnregisteredPlaceholder
     && (
       dependencies.localApprovedAgentByContextGraph.has(contextGraphId)
-      || (
-        !hasActivePublicOnChainProof
-        && (
-          input.rejectUnregisteredPlaceholder === true
-          || dependencies.subscriptions.get(contextGraphId)?.pendingMeta === true
-        )
-      )
+      || input.rejectUnregisteredPlaceholder === true
+      || dependencies.subscriptions.get(contextGraphId)?.pendingMeta === true
     )
   ) {
     return unconfirmed();
@@ -181,7 +210,7 @@ export async function confirmContextGraphMetadataV1(
     }`,
     { source: 'agent.contextGraph.confirmedMeta.ontologyDeclaration', signal: dependencies.signal },
   );
-  if (ontologyResult.type === 'boolean' && ontologyResult.value === true) return true;
+  if (ontologyResult.type === 'boolean' && ontologyResult.value === true) return { outcome: 'confirmed' };
   return unconfirmed();
 }
 
