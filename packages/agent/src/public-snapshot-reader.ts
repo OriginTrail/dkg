@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { decodePublicGraphSnapshot, normalizePublicGraphSnapshot, PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES } from '@origintrail-official/dkg-chain';
-import type { DKGAgent } from './dkg-agent.js';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ProtocolRouter } from '@origintrail-official/dkg-core';
 import type { PublicSnapshotMode, PublicSnapshotObservation } from './public-snapshot-evidence.js';
 
 export const PUBLIC_GRAPH_SNAPSHOT_PROTOCOL = '/dkg/10.0.0/public-graph-snapshot/1';
 import { encodePublicGraphSnapshotRequest } from './public-snapshot-wire.js';
 export function createPublicSnapshotReader(options: {
   mode: PublicSnapshotMode;
-  chain: DKGAgent['chain']; router: DKGAgent['router'];
+  chain: Pick<ChainAdapter, 'readPublicGraphSnapshot'>; router: Pick<ProtocolRouter, 'send'>;
   peers: readonly string[]; signal: AbortSignal; assertCurrent(): void;
   expected: Parameters<typeof decodePublicGraphSnapshot>[1];
 }): (refresh?: boolean) => Promise<PublicSnapshotObservation> {
