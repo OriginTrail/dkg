@@ -1,3 +1,4 @@
+import type { PublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
 import { createHash } from 'node:crypto';
 import { isSafeIri, sparqlIri, sparqlString } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
@@ -40,7 +41,7 @@ function selection(spec: EntityIndexSpec, graphOperand: string): string {
     ${spec.types.length ? `FILTER EXISTS { ?entity a ?type . VALUES ?type { ${spec.types.map(iri).join(' ')} } }` : ''} }`;
 }
 export class EntityGraphReader {
-  constructor(private agent: { query: OmitThisParameter<DKGAgent['query']> }, readonly callerAgentAddress?: string, private priority: 'normal' | 'background' = 'normal', private chainEvidenceMode?: 'core-cache' | 'rpc-only') {}
+  constructor(private agent: { query: OmitThisParameter<DKGAgent['query']> }, readonly callerAgentAddress?: string, private priority: 'normal' | 'background' = 'normal', private chainEvidenceMode?: PublicSnapshotMode) {}
   async query(spec: EntityIndexSpec, sparql: string, signal: AbortSignal, deadline: number, maxResponseBytes = 256 * 1024) {
     checkDeadline(signal, deadline);
     const result = await this.agent.query(sparql, { contextGraphId: spec.contextGraphId, view: spec.view,
