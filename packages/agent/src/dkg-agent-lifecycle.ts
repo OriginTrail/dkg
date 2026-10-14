@@ -2,7 +2,8 @@ import { asSyncFetchAbortError, authenticateChallengePinnedGraphScopedAssetWithi
 export { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
 import { createRecoveryAuthority, memoizeRecoveryBindingProof, type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
 import { createRemoteQueryHandler } from "./remote-query-handler.js";
-import { resolveSharedMemoryAdmission, admittedSharedMemoryAuthority, type SwmReadAdmission } from './swm-read-admission.js';
+import { observedReadAuthorityDecision } from './internal/context-graph-authority/unanswered-authority-read.js';
+import { resolveSharedMemoryAdmission, sharedMemoryAdmissionError, type SwmReadAdmission } from './swm-read-admission.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -201,6 +202,8 @@ import {
 } from './configured-context-graph-metadata-reconciliation.js';
 import {
   confirmContextGraphMetadataV1,
+  resolveContextGraphMetadataConfirmationV1, confirmedMetadataBoolean,
+  type ContextGraphMetadataConfirmation,
   type ConfirmContextGraphMetadataInput,
 } from './context-graph-meta-confirmation.js';
 import {
@@ -10932,17 +10935,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }, contextGraphId);
   }
 
-  async hasConfirmedMetaState(this: DKGAgent,
+  async hasConfirmedMetaState(this: DKGAgent, contextGraphId: string,
+    options: ConfirmContextGraphMetadataInput & { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    return confirmedMetadataBoolean(await this.resolveMetadataConfirmation(contextGraphId, options));
+  }
+
+  async resolveMetadataConfirmation(this: DKGAgent,
     contextGraphId: string,
     options: ConfirmContextGraphMetadataInput & {
       /**
-       * Caller deadline for the chain proof. An aborted proof is `unknown`,
-       * which confirms nothing, so the answer fails closed.
+       * Caller deadline covers the confirmation; cancellation propagates.
        */
       readonly signal?: AbortSignal;
     } = {},
-  ): Promise<boolean> {
-    return confirmContextGraphMetadataV1({
+  ): Promise<ContextGraphMetadataConfirmation> {
+    return resolveContextGraphMetadataConfirmationV1({
       chain: this.chain, signal: options.signal,
       resolveActivePublicChainProof: () => this.resolveActivePublicContextGraphChainProof(
         contextGraphId,
@@ -11008,16 +11016,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
-  async hasConfirmedSharedMemoryMetaState(this: DKGAgent, contextGraphId: string, options: { signal?: AbortSignal } = {}): Promise<boolean> {
-    return this.hasConfirmedMetaState(contextGraphId, { ...options, unavailable: 'error' });
-  }
-
   async canUseSharedMemoryForContextGraph(this: DKGAgent, contextGraphId: string,
     opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision } = {},
   ): Promise<boolean> {
     const admission = await this.resolveSharedMemoryReadAdmission(contextGraphId, opts);
     opts.signal?.throwIfAborted();
-    if (admission.outcome === 'unavailable' && admission.source !== 'legacy-membership') throw admission.error;
+    // Existing lifecycle boolean callers fail closed while observations retain outages.
+    if ('decision' in admission && opts.readAuthority === undefined) {
+      observedReadAuthorityDecision(contextGraphId, admission.decision);
+      return false;
+    }
+    if (admission.outcome === 'unavailable' && admission.source !== 'legacy-membership') throw sharedMemoryAdmissionError(contextGraphId, admission);
     return admission.outcome === 'allowed';
   }
 
@@ -11028,10 +11037,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal: opts.signal,
       acceptedAuthority: () => { opts.signal?.throwIfAborted(); return this.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId, opts); },
       legacyLane: () => this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, opts),
-      confirmedMetadata: () => this.hasConfirmedSharedMemoryMetaState(contextGraphId, opts),
+      confirmedMetadata: () => this.resolveMetadataConfirmation(contextGraphId, opts),
       // Reuse the caller's fresh authority, or retain the finalized-index/live policy.
-      canRead: async () => opts.readAuthority !== undefined ? admittedSharedMemoryAuthority(contextGraphId, opts.readAuthority)
-        : withRpcUsageSite(CG_AUTH_RPC_SITES.sharedMemoryRead, () => this.canReadContextGraph(contextGraphId, {
+      readAuthority: async () => opts.readAuthority !== undefined ? opts.readAuthority
+        : withRpcUsageSite(CG_AUTH_RPC_SITES.sharedMemoryRead, () => this.resolveContextGraphReadAuthority(contextGraphId, {
           callerAgentAddress: opts.callerAgentAddress, signal: opts.signal,
           allowSubscriptionFallback: false, authorityReadMode: 'finalized-index-or-live',
         })),

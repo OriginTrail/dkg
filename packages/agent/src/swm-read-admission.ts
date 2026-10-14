@@ -1,7 +1,12 @@
 import { ContextGraphReadAuthorityUnavailableError, type ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
+import type { ContextGraphMetadataConfirmation } from './context-graph-meta-confirmation.js';
 /** Shared admission facts; presentation belongs to each caller. */
 export type SwmReadAdmission = { outcome: 'allowed' | 'denied' } | {
   outcome: 'unavailable'; source: 'legacy-membership' | 'confirmed-metadata' | 'read-authority'; error: unknown;
+} | { outcome: 'unavailable'; source: 'confirmed-metadata';
+  confirmation: Extract<ContextGraphMetadataConfirmation, { outcome: 'unavailable' }>;
+} | { outcome: 'unavailable'; source: 'read-authority';
+  decision: Extract<ContextGraphReadAuthorityDecision, { outcome: 'unavailable' }>;
 };
 
 async function captureAdmission(source: Extract<SwmReadAdmission, { outcome: 'unavailable' }>['source'],
@@ -34,8 +39,8 @@ export function resolvePrivateRootLegacyLaneAdmission(reads: {
 export async function resolveSharedMemoryAdmission(reads: {
   acceptedAuthority(): boolean | undefined;
   legacyLane(): Promise<SwmReadAdmission>;
-  confirmedMetadata(): Promise<boolean>;
-  canRead(): Promise<boolean>;
+  confirmedMetadata(): Promise<ContextGraphMetadataConfirmation>;
+  readAuthority(): Promise<ContextGraphReadAuthorityDecision>;
   signal?: AbortSignal;
 }): Promise<SwmReadAdmission> {
   reads.signal?.throwIfAborted();
@@ -51,12 +56,33 @@ export async function resolveSharedMemoryAdmission(reads: {
     reads.signal?.throwIfAborted();
     if (legacy.outcome !== 'allowed') return legacy;
   }
-  const confirmed = await captureAdmission('confirmed-metadata', reads.confirmedMetadata, reads.signal);
-  if (confirmed.outcome !== 'allowed') return confirmed;
-  return captureAdmission('read-authority', reads.canRead, reads.signal);
+  try {
+    const confirmation = await reads.confirmedMetadata();
+    reads.signal?.throwIfAborted();
+    if (confirmation.outcome === 'unavailable') return { outcome: 'unavailable', source: 'confirmed-metadata', confirmation };
+    if (confirmation.outcome === 'unconfirmed') return { outcome: 'denied' };
+  } catch (error) {
+    reads.signal?.throwIfAborted();
+    return { outcome: 'unavailable', source: 'confirmed-metadata', error };
+  }
+  try {
+    const decision = await reads.readAuthority();
+    reads.signal?.throwIfAborted();
+    return decision.outcome === 'unavailable'
+      ? { outcome: 'unavailable', source: 'read-authority', decision }
+      : { outcome: decision.outcome };
+  } catch (error) {
+    reads.signal?.throwIfAborted();
+    return { outcome: 'unavailable', source: 'read-authority', error };
+  }
 }
 
-export function admittedSharedMemoryAuthority(contextGraphId: string, decision: ContextGraphReadAuthorityDecision): boolean {
-  if (decision.outcome === 'unavailable') throw new ContextGraphReadAuthorityUnavailableError(contextGraphId, decision);
-  return decision.outcome === 'allowed';
+/** Boolean/query adapters choose error presentation without discarding the evidence. */
+export function sharedMemoryAdmissionError(contextGraphId: string,
+  admission: Extract<SwmReadAdmission, { outcome: 'unavailable' }>,
+): unknown {
+  if ('error' in admission) return admission.error;
+  if ('decision' in admission) return new ContextGraphReadAuthorityUnavailableError(contextGraphId, admission.decision);
+  return admission.confirmation.source === 'dependency' ? admission.confirmation.error
+    : new Error('Context Graph metadata chain proof unavailable', { cause: admission.confirmation.proof });
 }
