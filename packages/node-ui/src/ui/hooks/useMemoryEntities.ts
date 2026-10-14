@@ -420,12 +420,6 @@ const LOADING_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
   vm: 'loading',
 };
 
-const ERROR_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
-  wm: 'error',
-  swm: 'error',
-  vm: 'error',
-};
-
 export function useMemoryEntities(
   contextGraphId: string,
   opts?: { signalErrors?: boolean; includeQueryCatalog?: boolean },

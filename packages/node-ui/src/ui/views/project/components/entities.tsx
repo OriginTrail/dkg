@@ -1,7 +1,6 @@
 import React, { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
-import { truncateMiddle } from '../../../lib/truncate.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
