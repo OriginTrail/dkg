@@ -3,14 +3,26 @@ import { EventEmitter } from 'node:events';
 import { boundSelect, boundedResult } from '../src/daemon/bounded-query.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
-import { QueryMethods } from '../../agent/src/dkg-agent-query.js';
-import { LifecycleSyncMethods } from '../../agent/src/dkg-agent-lifecycle.js';
-import { SwmSubstrateMethods } from '../../agent/src/dkg-agent-swm-substrate.js';
+import { DKGAgent } from '../../agent/src/dkg-agent.js';
 import { handleBoundedQueryRoutes } from '../src/daemon/routes/bounded-query.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
-function context(agent: Record<string, unknown>, payload: Record<string, unknown> = {}, agentAddress?: string) {
+/** Production method composition with only inert, scenario-specific dependencies. */
+function composedAgent(overrides: Record<string, unknown> = {}) {
+  const { peerId = 'fixture', ...dependencies } = overrides;
+  const agent = Object.create(DKGAgent.prototype) as DKGAgent;
+  Object.assign(agent, {
+    config: {}, log: { info() {}, warn() {}, debug() {}, error() {} },
+    store: { query: async () => ({ type: 'bindings', bindings: [] }) },
+    subscribedContextGraphs: new Map(), localApprovedAgentByCG: new Map(),
+    ...dependencies,
+  });
+  Object.defineProperty(agent, 'peerId', { value: peerId, configurable: true });
+  return agent;
+}
+
+function context(agent: Pick<DKGAgent, 'query'> | Record<string, unknown>, payload: Record<string, unknown> = {}, agentAddress?: string) {
   const req = Object.assign(new EventEmitter(), {
     method: 'POST', aborted: false,
     __dkgPrebufferedBody: Buffer.from(JSON.stringify({ version: 1, contextGraphId: 'test', maxRows: 10,
@@ -238,7 +250,7 @@ it.each([
     if (phase === 'execution') await pause(opts.signal);
     return { bindings: [] };
   });
-  const agent = {
+  const agent = composedAgent({
     queryEngine: { query: callerQuery }, log: { info() {} }, peerId: 'fixture',
     // Explicit empty local trust inventory for snapshot-aware agent wrappers.
     store: { query: async () => ({ type: 'bindings', bindings: [] }) },
@@ -246,8 +258,8 @@ it.each([
       if (phase === 'admission') await pause(opts.signal);
       return { outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' };
     },
-  };
-  const read = context({ query: QueryMethods.prototype.query.bind(agent as never) });
+  });
+  const read = context(agent);
   const writeHead = vi.spyOn(read.res, 'writeHead');
   const end = vi.spyOn(read.res, 'end');
   const operation = handleBoundedQueryRoutes(read.ctx);
@@ -284,19 +296,15 @@ it('bounds stalled shared-memory metadata admission and prevents a late caller q
   const pending = new Promise<{ type: 'boolean'; value: boolean }>(resolve => { release = resolve; });
   const metadata = vi.fn(async () => pending);
   const callerQuery = vi.fn(async () => ({ bindings: [] }));
-  const agent = {
+  const agent = composedAgent({
     queryEngine: { query: callerQuery }, log: { info() {} },
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' }),
     resolveAcceptedRfc64SharedMemoryAuthorityV1: () => undefined,
-    resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
-    canUseSharedMemoryForContextGraph: LifecycleSyncMethods.prototype.canUseSharedMemoryForContextGraph,
-    resolveMetadataConfirmation: LifecycleSyncMethods.prototype.resolveMetadataConfirmation,
-    hasConfirmedMetaState: LifecycleSyncMethods.prototype.hasConfirmedMetaState,
     store: { query: metadata }, chain: {}, peerId: 'fixture',
     localApprovedAgentByCG: new Map(), subscribedContextGraphs: new Map(),
     isPrivateContextGraph: async () => false,
-  };
-  const read = context({ query: QueryMethods.prototype.query.bind(agent as never) }, {
+  });
+  const read = context(agent, {
     view: 'shared-working-memory', timeoutMs: 20,
   });
   const started = performance.now();
@@ -331,13 +339,9 @@ it.each(['unavailable', 'nonmember'] as const)('distinguishes legacy shared-memo
   const meta = { accessPolicy: 'private', allowedAgents: [member], participantAgents: [], curators: [], creators: [], revokedAgents: [] };
   const unavailable = new Error('metadata store unavailable');
   const execute = vi.fn(async () => ({ bindings: [] }));
-  const agent = { queryEngine: { query: execute }, log: { info() {} }, peerId: 'fixture',
+  const agent = composedAgent({ queryEngine: { query: execute }, log: { info() {} }, peerId: 'fixture',
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'private-roster' }),
     resolveAcceptedRfc64SharedMemoryAuthorityV1: () => false,
-    resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
-    canUseSharedMemoryForContextGraph: LifecycleSyncMethods.prototype.canUseSharedMemoryForContextGraph,
-    resolvePrivateRootSwmLegacyLaneV1: SwmSubstrateMethods.prototype.resolvePrivateRootSwmLegacyLaneV1,
-    rfc64PrivateRootSwmOnLegacyLaneV1: SwmSubstrateMethods.prototype.rfc64PrivateRootSwmOnLegacyLaneV1,
     rfc64PrivateRootLegacyLaneAuthorityIdV1: () => 'test', listLocalAgents: () => [{ agentAddress: member }],
     getCgMeta: async () => meta,
     getOwnCgMetaFacts: async () => {
@@ -345,34 +349,33 @@ it.each(['unavailable', 'nonmember'] as const)('distinguishes legacy shared-memo
       return { ...meta, allowedAgents: [] };
     },
     subscribedContextGraphs: new Map(),
-  };
-  const read = context({ query: QueryMethods.prototype.query.bind(agent as never) }, { view: 'shared-working-memory' }, member);
+  });
+  const read = context(agent, { view: 'shared-working-memory' }, member);
   await handleBoundedQueryRoutes(read.ctx);
   expect(read.res.statusCode).toBe(outcome === 'unavailable' ? 503 : 403);
   expect(JSON.parse(read.res.body).code).toBe(outcome === 'unavailable' ? 'QUERY_UNAVAILABLE' : 'QUERY_ACCESS_DENIED');
   expect(execute).not.toHaveBeenCalled();
-  const admission = await agent.resolveSharedMemoryReadAdmission.call(agent as never, 'test');
+  const admission = await agent.resolveSharedMemoryReadAdmission('test');
   expect(admission.outcome).toBe(outcome === 'unavailable' ? 'unavailable' : 'denied');
   if (admission.outcome === 'unavailable' && admission.source === 'legacy-membership') expect(admission.error).toBe(unavailable);
-  expect(await QueryMethods.prototype.query.call(agent as never, 'SELECT ?s WHERE { ?s ?p ?o }', {
+  expect(await agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
     contextGraphId: 'test', view: 'shared-working-memory', callerAgentAddress: member,
   })).toEqual({ bindings: [] });
   // Existing boolean callers retain their conservative unavailable-as-false contract.
-  expect(await agent.rfc64PrivateRootSwmOnLegacyLaneV1.call(agent as never, 'test')).toBe(false);
+  expect(await agent.rfc64PrivateRootSwmOnLegacyLaneV1('test')).toBe(false);
 });
 
 
 it('propagates metadata confirmation outages for both legacy and bounded shared-memory queries', async () => {
   const failure = new Error('STORE_UNAVAILABLE');
   const execute = vi.fn();
-  const agent = { queryEngine: { query: execute }, log: { info() {} }, peerId: 'fixture',
+  const agent = composedAgent({ queryEngine: { query: execute }, log: { info() {} }, peerId: 'fixture',
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', source: 'system', reason: 'fixture' }),
     resolveAcceptedRfc64SharedMemoryAuthorityV1: () => undefined,
-    resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
     resolveMetadataConfirmation: async () => { throw failure; },
     subscribedContextGraphs: new Map(),
-  };
-  const query = QueryMethods.prototype.query.bind(agent as never);
+  });
+  const query = agent.query.bind(agent);
   await expect(query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'test', view: 'shared-working-memory' })).rejects.toBe(failure);
   const read = context({ query }, { view: 'shared-working-memory' }, 'member');
   await handleBoundedQueryRoutes(read.ctx);
@@ -393,9 +396,9 @@ it('forwards the authenticated caller and response ceiling through scoped agent 
     grantScope: options.callerAgentAddress === 'member' ? 'caller' : 'none',
     source: 'registered-chain', reason: 'private-roster', metadataBootstrap: 'forbidden',
   }));
-  const agent = { queryEngine: engine, log: { info() {} }, peerId: 'fixture',
-    resolveContextGraphReadAuthority: authority, subscribedContextGraphs: new Map() };
-  const routeAgent = { query: QueryMethods.prototype.query.bind(agent as never) };
+  const agent = composedAgent({ queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+    resolveContextGraphReadAuthority: authority, subscribedContextGraphs: new Map() });
+  const routeAgent = agent;
   try {
     await store.insert([{ subject: 'urn:allowed', predicate: 'urn:p', object: '"value"',
       graph: 'did:dkg:context-graph:test' }]);
@@ -422,10 +425,10 @@ it.each(['_working_memory/agent-b/1', 'assertion/agent-b/draft', 'code/_working_
   const store = new OxigraphStore(), engine = new DKGQueryEngine(store);
   const contextGraphId = 'team/assertion/policies', root = `did:dkg:context-graph:${contextGraphId}`, draft = `${root}/${draftTail}`;
   const graphs = [draft, `${draft}/_named_graph/details`, `${root}/_shared_memory/a`, `${root}/_verifiable_memory/a`, `${root}/_shared_memory/assertion/1`, root];
-  const agent = { store, queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+  const agent = composedAgent({ store, queryEngine: engine, log: { info() {} }, peerId: 'fixture',
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' }),
-    subscribedContextGraphs: new Map() };
-  const query = QueryMethods.prototype.query.bind(agent as never);
+    subscribedContextGraphs: new Map() });
+  const query = agent.query.bind(agent);
   try {
     await store.insert([
       { graph: `${root}/_meta`, subject: 'urn:draft', predicate: 'http://dkg.io/ontology/assertionGraph', object: draft },
@@ -454,10 +457,10 @@ it.each([undefined, 'agent-a', 'legacy-peer', 'agent-b', '0x52908400098527886E0F
   const drafts = owners.flatMap(owner => ['', 'code/'].flatMap(prefix =>
     [`${root}/${prefix}assertion/${owner}/draft`, `${root}/${prefix}_working_memory/${owner}/1`]));
   const graphs = drafts.flatMap(graph => [graph, `${graph}/_named_graph/details`]);
-  const agent = { store, queryEngine: engine, log: { info() {} }, peerId: 'legacy-peer', defaultAgentAddress: 'agent-a',
+  const agent = composedAgent({ store, queryEngine: engine, log: { info() {} }, peerId: 'legacy-peer', defaultAgentAddress: 'agent-a',
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' }),
-    subscribedContextGraphs: new Map() };
-  const query = QueryMethods.prototype.query.bind(agent as never);
+    subscribedContextGraphs: new Map() });
+  const query = agent.query.bind(agent);
   try {
     await store.insert([
       ...drafts.map((graph, i) => ({ graph: `${root}/_meta`, subject: `urn:draft:${i}`, predicate: 'http://dkg.io/ontology/assertionGraph', object: graph })),
@@ -492,11 +495,11 @@ it.each(['complete', 'page'] as const)('never claims a complete %s result after 
     await store.insert([{ subject: 'urn:vm-only', predicate: 'urn:p', object: '"match"',
       graph: 'did:dkg:context-graph:test/_verifiable_memory/a' }]);
     const engine = new DKGQueryEngine(store);
-    const agent = { queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+    const agent = composedAgent({ queryEngine: engine, log: { info() {} }, peerId: 'fixture',
       resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public',
         source: 'registered-chain', reason: 'fixture', metadataBootstrap: 'eligible' }),
-      subscribedContextGraphs: new Map() };
-    const read = context({ query: QueryMethods.prototype.query.bind(agent as never) }, {
+      subscribedContextGraphs: new Map() });
+    const read = context(agent, {
       mode, sparql: 'SELECT ?s WHERE { { ?s <urn:p> ?o } UNION { ?s <urn:q> ?o } } ORDER BY ?s',
     });
     await handleBoundedQueryRoutes(read.ctx);
@@ -509,12 +512,9 @@ it.each(['complete', 'page'] as const)('never claims a complete %s result after 
 
 it.each(['unknown', 'thrown', 'ontology'] as const)('preserves metadata chain-proof %s without inventing denial', async proof => {
   const execute = vi.fn(async () => ({ bindings: [] }));
-  const agent = { queryEngine: { query: execute }, log: { info() {} }, peerId: 'fixture',
+  const agent = composedAgent({ queryEngine: { query: execute }, log: { info() {} }, peerId: 'fixture',
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'fixture' }),
     resolveAcceptedRfc64SharedMemoryAuthorityV1: () => undefined,
-    resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
-    resolveMetadataConfirmation: LifecycleSyncMethods.prototype.resolveMetadataConfirmation,
-    hasConfirmedMetaState: LifecycleSyncMethods.prototype.hasConfirmedMetaState,
     resolveActivePublicContextGraphChainProof: async () => {
       if (proof === 'thrown') throw new Error('RPC unavailable');
       return { state: 'unknown', reason: 'rpc-failure' };
@@ -523,17 +523,17 @@ it.each(['unknown', 'thrown', 'ontology'] as const)('preserves metadata chain-pr
       value: proof === 'ontology' && options.source.endsWith('ontologyDeclaration') }) },
     chain: {}, localApprovedAgentByCG: new Map(), subscribedContextGraphs: new Map(),
     isPrivateContextGraph: async () => false,
-  };
-  const read = context({ query: QueryMethods.prototype.query.bind(agent as never) }, { view: 'shared-working-memory' });
+  });
+  const read = context(agent, { view: 'shared-working-memory' });
   await handleBoundedQueryRoutes(read.ctx);
   expect(read.res.statusCode, read.res.body).toBe(proof === 'ontology' ? 200 : 503);
   if (proof !== 'ontology') {
     expect(JSON.parse(read.res.body)).toMatchObject({ retryable: true });
     expect(execute).not.toHaveBeenCalled();
-    await expect(QueryMethods.prototype.query.call(agent as never, 'SELECT ?s WHERE { ?s ?p ?o }', {
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId: 'test', view: 'shared-working-memory',
     })).resolves.toEqual({ bindings: [] });
-    await expect(LifecycleSyncMethods.prototype.canUseSharedMemoryForContextGraph.call(agent as never, 'test'))
+    await expect(agent.canUseSharedMemoryForContextGraph('test'))
       .resolves.toBe(false);
     expect(execute).not.toHaveBeenCalled();
   } else expect(execute).toHaveBeenCalledOnce();
@@ -548,11 +548,11 @@ it.each(['complete', 'page'].flatMap(mode => ['verifiable-memory', 'shared-worki
     try {
       await store.insert(['a', 'b'].map(id => ({ subject: `urn:${id}`, predicate: 'urn:p', object: '"match"', graph: `${prefix}/${id}` })));
       const engine = new DKGQueryEngine(store);
-      const agent = { queryEngine: engine, store, log: { info() {} }, peerId: 'fixture',
+      const agent = composedAgent({ queryEngine: engine, store, log: { info() {} }, peerId: 'fixture',
         resolveSharedMemoryReadAdmission: async () => ({ outcome: 'allowed' }),
         resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'fixture', metadataBootstrap: 'eligible' }),
-        subscribedContextGraphs: new Map() };
-      const read = context({ query: QueryMethods.prototype.query.bind(agent as never) }, {
+        subscribedContextGraphs: new Map() });
+      const read = context(agent, {
         mode, view, sparql: 'SELECT ?s WHERE { { ?s <urn:p> ?o } UNION { ?s <urn:q> ?o } } ORDER BY ?s',
       });
       await handleBoundedQueryRoutes(read.ctx);
