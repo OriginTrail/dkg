@@ -21,7 +21,7 @@ export class BulkGraphPartialError extends Error {
   }
 }
 /** Preserve durable progress if closing an otherwise completed physical stream fails. */
-export async function exchangeBulkGraphVerified(router: ProtocolRouter, peer: string, request: BulkGraphRequest,
+export async function exchangeBulkGraphVerified(router: Pick<ProtocolRouter, 'withDuplexStream'>, peer: string, request: BulkGraphRequest,
   transport: DuplexStreamOptions, options: Parameters<typeof consumeBulkGraph>[2]) {
   let completed: Awaited<ReturnType<typeof consumeBulkGraph>> | undefined;
   try {

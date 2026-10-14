@@ -21,8 +21,11 @@ it.each(['sparql', 'native'] as const)('bounds the actual %s serialization on bo
   expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES);
   expect(Buffer.byteLength(encoded)).toBeGreaterThan(31 * 1024 * 1024);
   expect(encoded.length).toBeLessThan(ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES);
-  expect(() => plan === 'sparql' ? buildAtomicAssetGroupUpdate(group(70)) : buildBulkAssetGroupPlan(group(35)))
-    .toThrow('byte allowance exceeded');
+  if (plan === 'sparql') expect(() => buildAtomicAssetGroupUpdate(group(70))).toThrow('byte allowance exceeded');
+  else {
+    expect(buildBulkAssetGroupPlan(group(35))).toBeNull();
+    expect(Buffer.byteLength(buildAtomicAssetGroupUpdate(group(35)).update)).toBeLessThanOrEqual(ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES);
+  }
 }, 30_000);
 it.each(['oxigraph', 'sparql', 'native'] as const)('rejects an oversized group before %s dispatch', async backend => {
   const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
@@ -31,7 +34,7 @@ it.each(['oxigraph', 'sparql', 'native'] as const)('rejects an oversized group b
     : new SparqlHttpStore({ queryEndpoint: 'http://fixture.invalid/sparql', consistencyProfile: 'atomic-update' });
   try {
     if (backend === 'oxigraph') await store.insert([{ graph: 'urn:bound:data:0', subject: 'urn:old', predicate: 'urn:value', object: '"keep"' }]);
-    await expect(store.replaceAssetGroup(group(backend === 'native' ? 35 : 70))).rejects.toThrow('byte allowance exceeded');
+    await expect(store.replaceAssetGroup(group(70))).rejects.toThrow('byte allowance exceeded');
     expect(fetcher).not.toHaveBeenCalled();
     if (backend === 'oxigraph') expect(await store.query('ASK { GRAPH <urn:bound:data:0> { <urn:old> <urn:value> "keep" } }'))
       .toEqual({ type: 'boolean', value: true });

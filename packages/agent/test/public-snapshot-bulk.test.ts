@@ -1,11 +1,21 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { BULK_GRAPH_KIND as K, BULK_GRAPH_PROTOCOL, BULK_GRAPH_CHUNK_BYTES, contextGraphMetaUri, knowledgeAssetLayerGraphUri,
   MemoryLayer, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
-import type { DKGAgent } from '../src/dkg-agent.js';
-import { recoverPublicSnapshotBulk } from '../src/public-snapshot-bulk.js';
+import { recoverPublicSnapshotBulk, type PublicSnapshotBulkHost } from '../src/public-snapshot-bulk.js';
 import { PublicSnapshotEvidence } from '../src/public-snapshot-evidence.js';
 import { fixture, cg } from './helpers/bulk-graph-fixture.js';
+
+const unusedStore = new OxigraphStore();
+afterAll(() => unusedStore.close());
+const unusedRecoveryCapabilities: Pick<PublicSnapshotBulkHost, 'store' | 'getOrCreateSyncVerifyWorker'
+  | 'processDurableBatchInWorker' | 'reconcileAfterGraphScopedMaterialization'> = {
+  store: unusedStore,
+  getOrCreateSyncVerifyWorker: () => { throw new Error('Unexpected verifier'); },
+  processDurableBatchInWorker: async () => { throw new Error('Unexpected verification'); },
+  reconcileAfterGraphScopedMaterialization: async () => { throw new Error('Unexpected reconciliation'); },
+};
 
 // Reduce only the local fixture's chunk bound; run the real stream, verifier,
 // snapshot authentication and group publication on each side of the boundary.
@@ -33,14 +43,14 @@ describe('public bulk snapshot recovery', () => {
     const ensure = vi.fn(async (peer: string) => { if (peer === 'offline' && failure === 'connect') throw new Error('admission unavailable'); });
     const protocols = vi.fn(async (peer: string) => { if (peer === 'offline') throw new Error('probe unavailable'); return failure === 'delayed-identify' ? [] : [BULK_GRAPH_PROTOCOL]; });
     const probe = vi.spyOn(f.router, 'probeProtocol');
-    const agent = { store: f.target, router: f.router, ensurePeerConnected: ensure, getPeerProtocols: protocols,
+    const agent: PublicSnapshotBulkHost = { store: f.target, router: f.router, ensurePeerConnected: ensure, getPeerProtocols: protocols,
       getOrCreateSyncVerifyWorker: () => f.worker,
-      processDurableBatchInWorker: ((data, meta, _ctx, accept, mode) => f.worker.processDurableBatch(data, meta, accept, mode)) as DKGAgent['processDurableBatchInWorker'],
+      processDurableBatchInWorker: (data, meta, _ctx, accept, mode) => f.worker.processDurableBatch(data, meta, accept, mode),
       reconcileAfterGraphScopedMaterialization: async (asset: { ual: string }) => {
         if (failure !== 'reconciliation') return;
         started.add(asset.ual); await held; completed.add(asset.ual);
       },
-    } as unknown as DKGAgent;
+    };
     const requests: string[][] = [], peers: string[] = [];
     const exchange = f.router.withDuplexStream.bind(f.router);
     vi.spyOn(f.router, 'withDuplexStream').mockImplementation((peer, protocol, options, consume) => {
@@ -89,10 +99,10 @@ describe('public bulk snapshot recovery', () => {
   }, 30_000);
 
   it('negotiates missing advertisements and rejects genuinely unsupported cores without sending a snapshot', async () => {
-    const probe = vi.fn(async (_peer: string, _protocol: string, _timeout: number, _signal: AbortSignal) => 'unsupported');
+    const probe = vi.fn(async (_peer: string, _protocol: string, _timeout: number, _signal?: AbortSignal) => 'unsupported' as const);
     const exchange = vi.fn();
-    const agent = { ensurePeerConnected: vi.fn(), getPeerProtocols: async () => [],
-      router: { probeProtocol: probe, withDuplexStream: exchange } } as unknown as DKGAgent;
+    const agent: PublicSnapshotBulkHost = { ...unusedRecoveryCapabilities, ensurePeerConnected: vi.fn(), getPeerProtocols: async () => [],
+      router: { probeProtocol: probe, withDuplexStream: exchange } };
     const signal = new AbortController().signal;
     await expect(recoverPublicSnapshotBulk(agent, { contextGraphId: cg, peers: ['unsupported'], uals: [],
       evidence: {} as PublicSnapshotEvidence, signal, assertCurrent: () => {}, deadline: Date.now() + 500,
@@ -112,7 +122,7 @@ describe('public bulk snapshot recovery', () => {
     const fail = async () => { if (mode === 'cancel') controller.abort(reason); else current = false; throw new Error('peer failed'); };
     const ensure = vi.fn(async () => { if (stage === 'connect') await fail(); });
     const probe = vi.fn(fail);
-    const agent = { ensurePeerConnected: ensure, getPeerProtocols: async () => [], router: { probeProtocol: probe } } as unknown as DKGAgent;
+    const agent: PublicSnapshotBulkHost = { ...unusedRecoveryCapabilities, ensurePeerConnected: ensure, getPeerProtocols: async () => [], router: { probeProtocol: probe, withDuplexStream: () => { throw new Error('Unexpected stream'); } } };
     await expect(recoverPublicSnapshotBulk(agent, { contextGraphId: cg, peers: ['first', 'second'], uals: [],
       evidence: {} as PublicSnapshotEvidence, signal: controller.signal,
       assertCurrent: () => { if (!current) throw reason; }, deadline: Date.now() + 1000, dataDir: '/unused',
