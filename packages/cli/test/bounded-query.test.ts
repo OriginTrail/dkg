@@ -227,6 +227,7 @@ it('bounds stalled shared-memory metadata admission and prevents a late caller q
     queryEngine: { query: callerQuery }, log: { info() {} },
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' }),
     resolveAcceptedRfc64SharedMemoryAuthorityV1: () => undefined,
+    resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
     canUseSharedMemoryForContextGraph: LifecycleSyncMethods.prototype.canUseSharedMemoryForContextGraph,
     hasConfirmedSharedMemoryMetaState: LifecycleSyncMethods.prototype.hasConfirmedSharedMemoryMetaState,
     hasConfirmedMetaState: LifecycleSyncMethods.prototype.hasConfirmedMetaState,
@@ -267,16 +268,19 @@ it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
 it.each(['unavailable', 'nonmember'] as const)('distinguishes legacy shared-memory metadata %s at the bounded route', async outcome => {
   const member = '0x1111111111111111111111111111111111111111';
   const meta = { accessPolicy: 'private', allowedAgents: [member], participantAgents: [], curators: [], creators: [], revokedAgents: [] };
+  const unavailable = new Error('metadata store unavailable');
   const execute = vi.fn(async () => ({ bindings: [] }));
   const agent = { queryEngine: { query: execute }, log: { info() {} }, peerId: 'fixture',
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'private-roster' }),
     resolveAcceptedRfc64SharedMemoryAuthorityV1: () => false,
+    resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
     canUseSharedMemoryForContextGraph: LifecycleSyncMethods.prototype.canUseSharedMemoryForContextGraph,
+    resolvePrivateRootSwmLegacyLaneV1: SwmSubstrateMethods.prototype.resolvePrivateRootSwmLegacyLaneV1,
     rfc64PrivateRootSwmOnLegacyLaneV1: SwmSubstrateMethods.prototype.rfc64PrivateRootSwmOnLegacyLaneV1,
     rfc64PrivateRootLegacyLaneAuthorityIdV1: () => 'test', listLocalAgents: () => [{ agentAddress: member }],
     getCgMeta: async () => meta,
     getOwnCgMetaFacts: async () => {
-      if (outcome === 'unavailable') throw new Error('metadata store unavailable');
+      if (outcome === 'unavailable') throw unavailable;
       return { ...meta, allowedAgents: [] };
     },
     subscribedContextGraphs: new Map(),
@@ -286,6 +290,12 @@ it.each(['unavailable', 'nonmember'] as const)('distinguishes legacy shared-memo
   expect(read.res.statusCode).toBe(outcome === 'unavailable' ? 503 : 403);
   expect(JSON.parse(read.res.body).code).toBe(outcome === 'unavailable' ? 'QUERY_UNAVAILABLE' : 'QUERY_ACCESS_DENIED');
   expect(execute).not.toHaveBeenCalled();
+  const admission = await agent.resolveSharedMemoryReadAdmission.call(agent as never, 'test');
+  expect(admission.outcome).toBe(outcome === 'unavailable' ? 'unavailable' : 'denied');
+  if (admission.outcome === 'unavailable') expect(admission.error).toBe(unavailable);
+  expect(await QueryMethods.prototype.query.call(agent as never, 'SELECT ?s WHERE { ?s ?p ?o }', {
+    contextGraphId: 'test', view: 'shared-working-memory', callerAgentAddress: member,
+  })).toEqual({ bindings: [] });
   // Existing boolean callers retain their conservative unavailable-as-false contract.
   expect(await agent.rfc64PrivateRootSwmOnLegacyLaneV1.call(agent as never, 'test')).toBe(false);
 });
