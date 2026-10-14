@@ -103,11 +103,13 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: EVM_SCOPES,
   },
   'packages/query': {
+    // The UI assertion paging suite runs the real scoped query engine.
     lanes: [
       'tornado_publisher',
       'tornado_agent',
       'bura_cli',
       'bura_query',
+      'kosava_node_ui',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -301,8 +303,8 @@ const BLAZEGRAPH_ARM64_PATTERNS = [
 const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/src\/ui\/web3\//,
   /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,
-  /^packages\/node-ui\/src\/ui\/(?:api|http|identity-wallet-api|pca-api)\.ts$/,
-  /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken)|stores\/wallet)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:api|query-api|http|identity-wallet-api|pca-api)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken|randomUUID|read-cache)|stores\/wallet)\.ts$/,
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
   /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
