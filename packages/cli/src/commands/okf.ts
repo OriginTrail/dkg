@@ -20,11 +20,10 @@ import {
 } from '@origintrail-official/dkg-okf';
 import {
   bindingsOf,
-  cell,
-  distinctPairCount,
   distinctTripleCountsByPredicate,
   exportInputFromBindings,
   parseRelateRules,
+  quadsFromBindings,
   summarizeOkfImport,
 } from './okf-helpers.js';
 import { batchEntityQuads, type PublishQuad } from '../batching.js';
@@ -604,21 +603,21 @@ export function registerOkfCommand(program: Command): void {
         const queryOptions = opts.subGraphName
           ? { view: 'shared-working-memory' as const, subGraphName: String(opts.subGraphName) }
           : { includeSharedMemory: true };
-        const countFor = async (predicate: string): Promise<number> => {
-          // Scope the count to subjects under this bundle's IRI base. A graph-wide
-          // count would let unrelated pre-existing triples mask a real shortfall
-          // (or inflate it) and report "complete" when concepts are actually missing.
-          // Count each triple once, as the expectation does: a COUNT(*) over the
-          // named graphs counts a triple once per graph holding it, so two copies
-          // of one tag could stand in for another tag that is missing. The pairs
-          // are counted here, since a scoped query may not nest its GRAPH
-          // variable in a subquery, and across graphs DISTINCT may not hold.
-          const sparql =
-            `SELECT DISTINCT ?s ?o WHERE { GRAPH ?g { ?s <${predicate}> ?o ` +
-            `FILTER(STRSTARTS(STR(?s), "${iriBase}")) } }`;
-          const { result } = await client.query(sparql, contextGraphId, queryOptions);
-          return distinctPairCount(bindingsOf(result));
-        };
+        // One scoped read of the triples the bundle defines: the expected
+        // predicates, on subjects under this bundle's IRI base. A graph-wide read
+        // would let unrelated pre-existing triples mask a real shortfall (or
+        // inflate it) and report "complete" when concepts are actually missing.
+        // The stored triples are then counted as the expectation is, each
+        // distinct triple once (`distinctTripleCountsByPredicate`), so a triple
+        // held in several named graphs never stands in for a missing one.
+        const expectedPredicates = [...expectedByPred.keys()];
+        const stored = expectedPredicates.length === 0 ? [] : quadsFromBindings(bindingsOf((await client.query(
+          `SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o FILTER(STRSTARTS(STR(?s), "${iriBase}") && ` +
+            `?p IN (${expectedPredicates.map((p) => `<${p}>`).join(', ')})) } }`,
+          contextGraphId,
+          queryOptions,
+        )).result));
+        const actualByPred = distinctTripleCountsByPredicate(stored);
 
         // Verify EVERY predicate the bundle actually produced, not a fixed
         // allowlist — otherwise a shortfall in e.g. schema:hasPart (--relate),
@@ -632,18 +631,14 @@ export function registerOkfCommand(program: Command): void {
         for (const predicate of orderedPreds) {
           const expected = expectedByPred.get(predicate) ?? 0;
           if (expected === 0) continue; // predicate not used by this bundle
-          const actual = await countFor(predicate);
+          const actual = actualByPred.get(predicate) ?? 0;
           rows.push({ predicate, expected, actual, missing: Math.max(0, expected - actual) });
         }
 
-        // Best-effort concept-level diff (subjects present with rdf:type).
+        // Best-effort concept-level diff (subjects present with rdf:type), from the same read.
         let missingConcepts: string[] | undefined;
         if (opts.listMissing) {
-          const sparql = `SELECT DISTINCT ?s WHERE { GRAPH ?g { ?s <${RDF_TYPE}> ?o } }`;
-          const { result } = await client.query(sparql, contextGraphId, queryOptions);
-          const bindings = bindingsOf(result);
-          const unwrap = (t: string): string => (t.startsWith('<') && t.endsWith('>') ? t.slice(1, -1) : t);
-          const present = new Set(bindings.map((b) => unwrap(cell(b.s))));
+          const present = new Set(stored.filter((q) => q.predicate === RDF_TYPE).map((q) => q.subject));
           missingConcepts = imported.concepts
             .map((c) => c.iri)
             .filter((iri) => !present.has(iri))

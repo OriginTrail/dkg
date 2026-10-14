@@ -16,12 +16,12 @@ import {
 } from '@origintrail-official/dkg-okf';
 import {
   bindingsOf,
-  cell,
-  distinctPairCount,
   distinctTripleCountsByPredicate,
   exportInputFromBindings,
   parseRelateRules,
+  quadsFromBindings,
   summarizeOkfImport,
+  termOfCell,
 } from '../src/commands/okf-helpers.js';
 
 const acme = loadBundleDir(fileURLToPath(new URL('../../okf/test/fixtures/acme_retail', import.meta.url)));
@@ -44,16 +44,43 @@ function shuffled<T>(items: T[], seed: number): T[] {
   return out;
 }
 
-describe('bindingsOf / cell (daemon result readers)', () => {
-  it('reads bindings structurally and normalises bare-string and SPARQL-JSON cells', () => {
+describe('bindingsOf / termOfCell (daemon result readers)', () => {
+  const XSD = 'http://www.w3.org/2001/XMLSchema#';
+
+  it('reads bindings structurally', () => {
     expect(bindingsOf({ bindings: [{ s: 'a' }] })).toEqual([{ s: 'a' }]);
     expect(bindingsOf({ type: 'bindings' })).toEqual([]);
     expect(bindingsOf(null)).toEqual([]);
-    expect(cell('x')).toBe('x');
-    expect(cell({ value: 'y', type: 'uri' })).toBe('y');
-    expect(cell({ value: null })).toBe('');
-    expect(cell(undefined)).toBe('');
-    expect(cell(7)).toBe('7');
+  });
+
+  it('reads every wire form of one term as the same RDF term', () => {
+    const forms: Array<[unknown[], string]> = [
+      [['urn:okf:x', '<urn:okf:x>', { type: 'uri', value: 'urn:okf:x' }, { value: 'urn:okf:x' }], 'urn:okf:x'],
+      [['_:b0', { type: 'bnode', value: 'b0' }], '_:b0'],
+      [['"a"', '"a"^^<http://www.w3.org/2001/XMLSchema#string>', { type: 'literal', value: 'a' }, { type: 'literal', value: 'a', datatype: `${XSD}string` }], '"a"'],
+      [[`"1"^^<${XSD}integer>`, { type: 'literal', value: '1', datatype: `${XSD}integer` }, { type: 'typed-literal', value: '1', datatype: `${XSD}integer` }], `"1"^^<${XSD}integer>`],
+      [['"hi"@en', { type: 'literal', value: 'hi', 'xml:lang': 'en' }], '"hi"@en'],
+      // a literal the store escaped otherwise reads as its canonical form
+      [['"caf\\u00E9 \\"q\\""', { type: 'literal', value: 'café "q"' }], '"café \\"q\\""'],
+    ];
+    for (const [cells, term] of forms) {
+      for (const c of cells) expect(termOfCell(c), JSON.stringify(c)).toBe(term);
+    }
+    // literals with one lexical form and different datatypes or languages stay apart
+    expect(new Set([`"1"^^<${XSD}integer>`, '"1"', '"1"@en'].map((c) => termOfCell(c))).size).toBe(3);
+  });
+
+  it('reads an empty cell, or a kind no quad holds, as no term', () => {
+    for (const c of [undefined, null, '', { value: null }, { type: 'uri', value: '' }, { type: 'triple', value: 'x' }]) {
+      expect(termOfCell(c), JSON.stringify(c)).toBeNull();
+    }
+  });
+
+  it('gives export and verification the same quads from either wire form', () => {
+    const asStrings = [{ s: '<urn:okf:x>', p: 'http://schema.org/count', o: `"1"^^<${XSD}integer>` }];
+    const asObjects = [{ s: { type: 'uri', value: 'urn:okf:x' }, p: { type: 'uri', value: 'http://schema.org/count' }, o: { type: 'literal', value: '1', datatype: `${XSD}integer` } }];
+    expect(quadsFromBindings(asObjects)).toEqual(quadsFromBindings(asStrings));
+    expect(distinctTripleCountsByPredicate([...quadsFromBindings(asStrings), ...quadsFromBindings(asObjects)])).toEqual(new Map([['http://schema.org/count', 1]]));
   });
 });
 
@@ -196,29 +223,6 @@ describe('distinctTripleCountsByPredicate (verify expectations)', () => {
       { subject: 'urn:okf:m', predicate: 'urn:p:lineage', object: 'urn:okf:p', graph: 'urn:g:two' },
     ]);
     expect(Object.fromEntries(counts)).toEqual({ 'urn:p:lineage': 1 });
-  });
-});
-
-describe('distinctPairCount', () => {
-  it('counts a triple read from several named graphs once', () => {
-    const a = { s: 'urn:okf:x', o: '"a"' };
-    expect(distinctPairCount([a, { ...a }, { s: 'urn:okf:x', o: '"b"' }])).toBe(2);
-    expect(distinctPairCount([a, { ...a }])).toBe(1);
-  });
-
-  it('reads a bracketed IRI as the bare one, and keeps literals with one lexical form apart', () => {
-    expect(distinctPairCount([{ s: '<urn:okf:x>', o: 'urn:okf:y' }, { s: 'urn:okf:x', o: '<urn:okf:y>' }])).toBe(1);
-    const XSD = 'http://www.w3.org/2001/XMLSchema#';
-    expect(distinctPairCount([
-      { s: { value: 'urn:okf:x', type: 'uri' }, o: { value: '1', type: 'literal', datatype: `${XSD}integer` } },
-      { s: { value: 'urn:okf:x', type: 'uri' }, o: { value: '1', type: 'literal' } },
-      { s: { value: 'urn:okf:x', type: 'uri' }, o: { value: '1', type: 'literal', 'xml:lang': 'en' } },
-      { s: { value: 'urn:okf:x', type: 'uri' }, o: { value: '1', type: 'literal', datatype: `${XSD}integer` } },
-    ])).toBe(3);
-  });
-
-  it('skips a row without both terms', () => {
-    expect(distinctPairCount([{ s: 'urn:okf:x' }, { o: '"a"' }, {}])).toBe(0);
   });
 });
 

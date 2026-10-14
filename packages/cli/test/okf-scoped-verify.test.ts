@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { rm } from 'node:fs/promises';
+import { importBundle, loadBundleDir } from '@origintrail-official/dkg-okf';
 import { registerOkfCommand } from '../src/commands/okf.js';
 import { makeBundle, makeOkfCliHome, startStub } from './okf-test-helpers.js';
 
@@ -15,10 +16,9 @@ describe('registered OKF verify HTTP contract', () => {
     const previousPort = process.env.DKG_API_PORT;
     process.env.DKG_HOME = home;
     process.env.DKG_API_PORT = String(stub.port);
-    stub.setHandler((_req, body) => ({ status: 200, body: { result: {
-      type: 'bindings', bindings: /SELECT DISTINCT \?s \?o/.test(JSON.parse(body).sparql)
-        ? Array.from({ length: 1000 }, (_, i) => ({ s: `urn:okf:s${i}`, o: `"v${i}"` })) : [{ s: 'urn:okf:a' }, { s: 'urn:okf:b' }],
-    } } }));
+    // The store holds every triple of the bundle: verification reads them once.
+    const stored = importBundle(loadBundleDir(bundle)).quads.map((q) => ({ s: q.subject, p: q.predicate, o: q.object }));
+    stub.setHandler(() => ({ status: 200, body: { result: { type: 'bindings', bindings: stored } } }));
     const output = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       const program = new Command();
@@ -27,8 +27,9 @@ describe('registered OKF verify HTTP contract', () => {
         ...(subGraphName ? ['--sub-graph-name', subGraphName] : [])], { from: 'user' });
       const report = JSON.parse(String(output.mock.calls.at(-1)?.[0]));
       expect(report).toMatchObject({ complete: true, missingConcepts: [] });
-      expect(stub.calls.filter((call) => /SELECT DISTINCT \?s \?o/.test(JSON.parse(call.body).sparql)).length).toBeGreaterThan(1);
-      expect(stub.calls.some((call) => JSON.parse(call.body).sparql.includes('SELECT DISTINCT ?s WHERE'))).toBe(true);
+      // One scoped read serves every count and the missing-concept report.
+      expect(stub.calls).toHaveLength(1);
+      expect(JSON.parse(stub.calls[0].body).sparql).toMatch(/^SELECT \?s \?p \?o WHERE \{ GRAPH \?g \{ \?s \?p \?o FILTER\(STRSTARTS\(STR\(\?s\), "urn:okf:"\) && \?p IN \(</);
       for (const call of stub.calls) {
         const body = JSON.parse(call.body);
         expect(body.contextGraphId).toBe('cg');

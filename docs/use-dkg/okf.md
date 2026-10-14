@@ -114,7 +114,7 @@ dkg okf verify ./bundle --context-graph-id okf-demo --list-missing 20
 dkg okf verify ./bundle --context-graph-id okf-demo --sub-graph-name science --list-missing 20
 ```
 
-Verify compares the deterministic RDF expected from the local OKF bundle with triples currently visible from the node, predicate by predicate, counting each distinct triple once on both sides: a triple stored in several named graphs counts once, so its copies never stand in for a triple that is missing. Without `--sub-graph-name`, it retains the existing context-graph read including SWM. With the flag, every count and missing-concept query reads only that sub-graph's SWM, using the same scope as export. Match the scope and mapping flags used for import:
+Verify compares the deterministic RDF expected from the local OKF bundle with triples currently visible from the node, predicate by predicate, counting each distinct triple once on both sides: a triple stored in several named graphs counts once, so its copies never stand in for a triple that is missing. It reads the node once, the bundle's predicates on subjects under its IRI base, and finds missing concepts in the same read. Without `--sub-graph-name`, it retains the existing context-graph read including SWM. With the flag, every count and missing-concept query reads only that sub-graph's SWM, using the same scope as export. Match the scope and mapping flags used for import:
 
 ```bash
 dkg okf import ./bundle --context-graph-id okf-demo --sub-graph-name science --share

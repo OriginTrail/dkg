@@ -6,6 +6,7 @@
  * a daemon.
  */
 
+import { formatCanonicalRdfLiteralTerm, formatCanonicalRdfTerm, parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import {
   distinctTriples,
   exportInputFromQuads,
@@ -32,20 +33,41 @@ export function bindingsOf(result: unknown): Array<Record<string, unknown>> {
 }
 
 /**
- * A `/api/query` binding cell can arrive as a bare string OR a SPARQL-JSON
- * object (`{ value, type, datatype? }`); calling `.startsWith()`/`.exec()` on
- * the object form throws at runtime. Normalise every cell to its string value
- * before use (mirrors the daemon's `bindingValue`). The static `QueryResult`
- * type annotates cells as strings, but the runtime path can return objects.
+ * A `/api/query` binding cell as an RDF term, in the one form DKG quads use:
+ * the form the stores return (`formatCanonicalRdfTerm`) and the OKF mapper
+ * writes, a bare IRI, `_:label` for a blank node and a literal in its
+ * canonical form. A cell arrives as that string (an IRI may be bracketed, a
+ * literal escaped otherwise) or as a SPARQL-JSON object (`{ type, value,
+ * datatype?, "xml:lang"? }`; one without a `type` is read as its value's
+ * string form); every wire form of one term gives the same string, so export
+ * and verification compare the same terms. `null` for an empty cell or a kind
+ * of term no quad holds.
  */
-export function cell(v: unknown): string {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
-    const raw = (v as { value?: unknown }).value;
-    return raw === null || raw === undefined ? '' : String(raw);
+export function termOfCell(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'object') {
+    const { type, value, datatype } = v as { type?: unknown; value?: unknown; datatype?: unknown };
+    if (value === null || value === undefined) return null;
+    const text = String(value);
+    if (type === undefined) return termOfCell(text);
+    if (type === 'uri') return text === '' ? null : text;
+    if (type === 'bnode') return text === '' ? null : `_:${text}`;
+    if (type !== 'literal' && type !== 'typed-literal') return null;
+    const language = (v as Record<string, unknown>)['xml:lang'];
+    return formatCanonicalRdfTerm({
+      termType: 'Literal',
+      value: text,
+      language: typeof language === 'string' && language !== '' ? language : undefined,
+      datatype: typeof datatype === 'string' && datatype !== '' ? { value: datatype } : undefined,
+    });
   }
-  return String(v);
+  const text = String(v);
+  if (text === '') return null;
+  if (text.startsWith('<') && text.endsWith('>')) return text.slice(1, -1);
+  if (!text.startsWith('"')) return text;
+  // A literal escaped otherwise reads as its canonical form; one that does not parse is kept as given.
+  const literal = parseRdfLiteralTerm(text, { combineSurrogatePairs: true });
+  return literal ? formatCanonicalRdfLiteralTerm(literal) : text;
 }
 
 export interface OkfImportSummary {
@@ -149,55 +171,22 @@ export function distinctTripleCountsByPredicate(quads: Quad[]): Map<string, numb
   return counts;
 }
 
-/** Daemon bindings carry IRIs raw or as `<…>`; strip the brackets so terms match the mapper's raw-IRI convention. */
-function unwrapIri(term: string): string {
-  return term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
-}
-
 /**
- * A binding cell as a term identity: a bare string is the term (an IRI with or
- * without brackets), and a SPARQL-JSON object keeps its type, datatype and
- * language, so two literals with one lexical form stay apart.
- */
-function cellTerm(v: unknown): string {
-  if (v !== null && typeof v === 'object' && 'value' in v) {
-    const { type, value, datatype } = v as { type?: unknown; value?: unknown; datatype?: unknown };
-    return JSON.stringify([type ?? null, value ?? null, datatype ?? null, (v as Record<string, unknown>)['xml:lang'] ?? null]);
-  }
-  return unwrapIri(cell(v));
-}
-
-/**
- * The distinct (subject, object) pairs among `?s ?o` bindings: a triple held in
- * several named graphs counts once, as the expected counts count it
- * (`distinctTripleCountsByPredicate`), so a repeated triple can never stand in
- * for a missing one.
- */
-export function distinctPairCount(bindings: Array<Record<string, unknown>>): number {
-  const pairs = new Set<string>();
-  for (const b of bindings) {
-    if (b.s === undefined || b.o === undefined) continue;
-    pairs.add(`${cellTerm(b.s)}\u0000${cellTerm(b.o)}`);
-  }
-  return pairs.size;
-}
-
-/**
- * `?s ?p ?o` bindings from one Context Graph view → quads. The daemon returns
- * cells as bare strings or SPARQL-JSON objects, and IRIs raw or bracketed;
- * both are normalised — in every position, so a bracketed object IRI (a
- * family link, an edge, an `rdf:type`) still matches the unbracketed subject
- * it names. Literals (`"…"`) and blank nodes (`_:…`) pass through. Bindings
- * with an empty cell are skipped. Pure; no daemon.
+ * `?s ?p ?o` bindings from one Context Graph view → quads, every cell read as
+ * an RDF term by `termOfCell`, so a bracketed object IRI (a family link, an
+ * edge, an `rdf:type`) still matches the unbracketed subject it names, and a
+ * literal is the same term whichever wire form it came in. Bindings with an
+ * empty cell are skipped. Export and verification both read the graph this
+ * way. Pure; no daemon.
  */
 export function quadsFromBindings(bindings: Array<Record<string, unknown>>): Quad[] {
   const quads: Quad[] = [];
   for (const b of bindings) {
-    const s = cell(b.s);
-    const p = cell(b.p);
-    const o = cell(b.o);
-    if (!s || !p || !o) continue;
-    quads.push({ subject: unwrapIri(s), predicate: unwrapIri(p), object: unwrapIri(o) });
+    const subject = termOfCell(b.s);
+    const predicate = termOfCell(b.p);
+    const object = termOfCell(b.o);
+    if (!subject || !predicate || !object) continue;
+    quads.push({ subject, predicate, object });
   }
   return quads;
 }

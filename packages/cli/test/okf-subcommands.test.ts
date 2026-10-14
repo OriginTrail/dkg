@@ -51,10 +51,11 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
   const clear = () => {
     stub.calls.length = 0;
   };
-  // A verify count query's rows: one `?s ?o` binding per stored copy. IRIs come
-  // as SPARQL-JSON object cells, literals as the term strings the daemon sends.
-  const pairRows = (pairs: Array<[string, string]>) =>
-    pairs.map(([s, o]) => ({ s: { value: s, type: 'uri' }, o: o.startsWith('"') ? o : { value: o, type: 'uri' } }));
+  // Rows of verify's one scoped read: a `?s ?p ?o` binding per stored copy of a
+  // triple. IRIs come as SPARQL-JSON object cells, literals as the term strings
+  // the daemon sends.
+  const tripleRows = (triples: Array<[string, string, string]>) =>
+    triples.map(([s, p, o]) => ({ s: { value: s, type: 'uri' }, p: { value: p, type: 'uri' }, o: o.startsWith('"') ? o : { value: o, type: 'uri' } }));
   // The (subject, object) pairs of each predicate in `quads`: the store's triples after a complete import.
   const pairsByPredicate = (quads: Array<{ subject: string; predicate: string; object: string }>) => {
     const out = new Map<string, Array<[string, string]>>();
@@ -64,12 +65,10 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     }
     return out;
   };
-  // A store answering each count query with its pairs, every pair held in `copies` named graphs.
-  const storeHandler = (stored: Map<string, Array<[string, string]>>, copies: number): StubHandler => (req, body) => {
-    const sparql = String(JSON.parse(body || '{}').sparql ?? '');
-    const predicate = [...stored.keys()].find((p) => sparql.includes(`<${p}>`)) ?? '';
-    const pairs = stored.get(predicate) ?? [];
-    return { status: 200, body: { result: { bindings: pairRows(Array.from({ length: copies }, () => pairs).flat()) } } };
+  // A store answering the read with its triples, every triple held in `copies` named graphs.
+  const storeHandler = (stored: Map<string, Array<[string, string]>>, copies: number): StubHandler => () => {
+    const triples = [...stored].flatMap(([p, pairs]) => pairs.map(([s, o]): [string, string, string] => [s, p, o]));
+    return { status: 200, body: { result: { bindings: tripleRows(Array.from({ length: copies }, () => triples).flat()) } } };
   };
 
   it('dry-run prints the mapping and NEVER contacts the node', async () => {
@@ -450,8 +449,8 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
       (req, body) => {
         const sparql = String(JSON.parse(body || '{}').sparql ?? '');
         issuedSparql.push(sparql);
-        const pred = Object.keys(counts).find((p) => sparql.includes(`<${p}>`)) ?? '';
-        return { status: 200, body: { result: { bindings: pairRows(Array.from({ length: counts[pred] ?? 0 }, (_, i) => [`urn:okf:c${i}`, `v${i}`])) } } };
+        const triples = Object.entries(counts).flatMap(([p, n]) => Array.from({ length: n }, (_, i): [string, string, string] => [`urn:okf:c${i}`, p, `"v${i}"`]));
+        return { status: 200, body: { result: { bindings: tripleRows(triples) } } };
       };
 
     // All present → complete, zero missing, exit 0.
@@ -553,7 +552,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
 
     const countOne: StubHandler = () => ({
       status: 200,
-      body: { result: { bindings: pairRows([['urn:okf:ds', 'urn:okf:t']]) } },
+      body: { result: { bindings: tripleRows([['urn:okf:ds', 'http://schema.org/mentions', 'urn:okf:t']]) } },
     });
     const verifySparql = async (extra: string[]): Promise<string> => {
       const issued: string[] = [];
