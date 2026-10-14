@@ -612,7 +612,7 @@ export class QueryMethods extends DKGAgentBase {
       && targetsSharedMemory
       && !(await this.canUseSharedMemoryForContextGraph(opts.contextGraphId, {
         callerAgentAddress: callerAgentAddressStr,
-        readAuthority: scopedReadAuthority, signal: opts.signal,
+        readAuthority: scopedReadAuthority, signal: opts.signal, strict: opts.accessDenied === 'error',
       }))
     ) {
       this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
@@ -701,7 +701,7 @@ export class QueryMethods extends DKGAgentBase {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
-      excludeWorkingMemoryPartitions: opts.excludeWorkingMemoryPartitions,
+      excludeWorkingMemoryPartitions: opts.excludeWorkingMemoryPartitions ?? true,
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,
