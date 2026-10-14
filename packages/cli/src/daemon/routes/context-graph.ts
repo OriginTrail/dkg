@@ -2161,6 +2161,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       catchupTracker,
       contextGraphId,
       includeSharedMemory: shouldSyncSharedMemory,
+      requestAgentAddress,
       callerAgentAddress: callerAddr,
       admissionAuthority: readAuthority,
     });
