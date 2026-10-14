@@ -5,6 +5,11 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./typescript-program-bundle": {
+      "types": "./dist/typescript-program-bundle.d.ts",
+      "import": "./dist/typescript-program-bundle.js",
+      "default": "./dist/typescript-program-bundle.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
