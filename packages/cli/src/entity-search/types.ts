@@ -5,6 +5,17 @@ export interface EntityIndexSpec {
   textPredicates: string[];
   types: string[];
 }
+interface EntityReadPolicy { chainEvidenceMode?: 'core-cache' | 'rpc-only' }
+export interface EntityIndexRequest extends EntityIndexSpec, EntityReadPolicy { restart?: boolean; timeoutMs?: number }
+export interface EntityReadinessRequest extends EntityReadPolicy { contextGraphId: string; indexId: string; warmup?: boolean; timeoutMs?: number }
+export interface EntitySearchRequest extends EntityReadPolicy { contextGraphId: string; indexId: string; query: string; limit?: number; timeoutMs?: number }
+export type NormalizedIndexRequest = EntityIndexSpec & Required<EntityReadPolicy> & { restart: boolean; timeoutMs: number };
+export type NormalizedReadinessRequest = Required<EntityReadinessRequest>;
+export type NormalizedSearchRequest = Required<EntitySearchRequest>;
+export type EntityOperation =
+  | { kind: 'index'; request: NormalizedIndexRequest }
+  | { kind: 'readiness'; request: NormalizedReadinessRequest }
+  | { kind: 'search'; request: NormalizedSearchRequest };
 export interface EntityDocument {
   entityUri: string;
   sourceGraph: string;
