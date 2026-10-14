@@ -7,21 +7,23 @@ import { MULTICALL3_RUNTIME_CODE } from './fixtures/multicall3-runtime-code.js';
 
 const hub = `0x${'1'.repeat(40)}`, cg = `0x${'2'.repeat(40)}`, ka = `0x${'3'.repeat(40)}`;
 const mc = new Interface(['function aggregate3((address target,bool allowFailure,bytes callData)[] calls) payable returns ((bool success,bytes returnData)[])']);
-function fixture(aggregate: boolean, reorg: boolean, depth: number) {
-  const reads: {name:string,tag:unknown}[] = [];
+function fixture(aggregate: boolean, reorg: boolean, depth: number, assetCount = 2) {
+  const reads: {name:string,tag:unknown,args?:unknown[]}[] = [];
+  const batches: {tag:unknown,size:number}[] = [];
   let head = 10, collected = false;
   const anchor = 11-depth;
   const blockReads: unknown[] = [];
   const interfaces: Record<string, Interface> = { [hub]:new Interface(loadAbi('Hub')), [cg]:new Interface(loadAbi('ContextGraphStorage')), [ka]:new Interface(loadAbi('DKGKnowledgeAssets')) };
   function reply(to: string, data: string, tag: unknown): string {
     const iface = interfaces[to]!; const call = iface.parseTransaction({ data })!;
-    reads.push({name:call.name, tag});
+    reads.push({name:call.name, tag, args:Array.from(call.args)});
     // The head moves during inventory collection. Every contract read must still use the originally selected anchor.
     if(call.name === 'getContextGraphKaAt') { head = 11; collected = true; }
     const v: Record<string, unknown[]> = {
       getAssetStorageAddress:[call.args[0] === 'ContextGraphStorage' ? cg : ka],
-      getNameHash:[ethers.id('coherent-snapshot')], getContextGraphKaCount:[2n], getContextGraphKaAt:[call.name === 'getContextGraphKaAt' ? BigInt(call.args[1])+1n : 0n],
-      getLatestMerkleRoot:[`0x${(tag === anchor ? (call.args[0] === 1n ? 'a' : 'b') : 'c').repeat(64)}`], kaToContextGraph:[1n],
+      getNameHash:[ethers.id('coherent-snapshot')], getContextGraphKaCount:[BigInt(assetCount)], getContextGraphKaAt:[call.name === 'getContextGraphKaAt' ? BigInt(call.args[1])+1n : 0n],
+      getLatestMerkleRoot:[assetCount > 2 ? ethers.id(`asset:${call.args[0]}:block:${tag}`)
+        : `0x${(tag === anchor ? (call.args[0] === 1n ? 'a' : 'b') : 'c').repeat(64)}`], kaToContextGraph:[1n],
     };
     if(call.name === 'getContextGraph') {
       const outputs = iface.getFunction(call.name)!.outputs;
@@ -42,13 +44,14 @@ function fixture(aggregate: boolean, reorg: boolean, depth: number) {
     call: async (tx:any) => {
       if(interfaces[tx.to]) return reply(tx.to,tx.data,tx.blockTag);
       const parsed = mc.parseTransaction({data:tx.data})!;
+      batches.push({tag:tx.blockTag,size:parsed.args[0].length});
       return mc.encodeFunctionResult('aggregate3',[parsed.args[0].map((c:any) => [true,reply(c.target,c.callData,tx.blockTag)])]);
     },
     resolveName: async (name:string) => name,
   };
   const a: any = new EVMChainAdapter({rpcUrl:'http://127.0.0.1:59998',chainId:'evm:31337',hubAddress:hub,privateKey:ethers.Wallet.createRandom().privateKey,finalityConfirmations:depth});
   a.init=vi.fn(async()=>{}); a.providers=[provider];
-  return {a, reads, blockReads, anchor, provider, interfaces};
+  return {a, reads, blockReads, anchor, provider, interfaces, batches};
 }
 describe('public snapshot coherent provider reads', () => {
   const cases = [true,false].flatMap(aggregate => [1,3].map(depth => ({aggregate,depth})));
@@ -59,6 +62,23 @@ describe('public snapshot coherent provider reads', () => {
     expect(snapshot.assets).toEqual([{id:'1',root:`0x${'a'.repeat(64)}`,version:'1'},{id:'2',root:`0x${'b'.repeat(64)}`,version:'2'}]);
     expect(reads.length).toBeGreaterThan(8); expect(reads.every(r=>r.tag===anchor)).toBe(true);
     expect(blockReads).toEqual(depth===1 ? ['latest',anchor] : ['latest',anchor,anchor]);
+  });
+  it.each([true, false])('collects all 33 ordered assets across batches (multicall=%s)', async aggregate => {
+    const {a,reads,batches,anchor,blockReads} = fixture(aggregate,false,3,33);
+    const snapshot = await a.readPublicGraphSnapshot('coherent-snapshot','1');
+    const ids = Array.from({length:33}, (_, i) => BigInt(i+1));
+    expect(snapshot.assets).toEqual(ids.map(id => ({
+      id:String(id), root:ethers.id(`asset:${id}:block:${anchor}`), version:String(id),
+    })));
+    expect(snapshot.blockNumber).toBe(String(anchor));
+    expect(blockReads).toEqual(['latest',anchor,anchor]);
+    expect(reads.filter(r => r.name === 'getContextGraphKaAt').map(r => r.args)).toEqual(
+      ids.map(id => [1n,id-1n]));
+    for (const method of ['getLatestMerkleRoot','getKnowledgeAssetUpdateContext','kaToContextGraph']) {
+      expect(reads.filter(r => r.name === method).map(r => r.args)).toEqual(ids.map(id => [id]));
+    }
+    expect(reads.every(r => r.tag === anchor)).toBe(true);
+    expect(batches).toEqual(aggregate ? [32,96,1,3].map(size => ({tag:anchor,size})) : []);
   });
   it.each(cases)('rejects anchor replacement ($aggregate, depth=$depth)', async ({aggregate,depth}) => {
     const {a} = fixture(aggregate,true,depth);
