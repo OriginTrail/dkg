@@ -18,8 +18,8 @@ import { packKnowledgeAssetIdFromIdentity } from "./ka-identity.js";
 import type { PublicSnapshotMode } from './public-snapshot-mode.js';
 export type { PublicSnapshotMode } from './public-snapshot-mode.js';
 export type PublicSnapshotObservation =
-  | { mode: "core-cache"; snapshot: PublicGraphSnapshot; sourceCore: string }
-  | { mode: "rpc-only"; snapshot: PublicGraphSnapshot; sourceCore: null };
+  | { readonly mode: "core-cache"; readonly snapshot: PublicGraphSnapshot; readonly sourceCore: string }
+  | { readonly mode: "rpc-only"; readonly snapshot: PublicGraphSnapshot; readonly sourceCore: null };
 export const SNAPSHOT_TRUST_GRAPH = "urn:dkg:local:public-snapshot-trust";
 const DKG = "http://dkg.io/ontology/";
 /** Query guard is durable and conservative across partial jobs, upgrades and process restarts. */
@@ -81,11 +81,16 @@ export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
   }
   readonly coalescing = 'owner-only' as const;
   private readonly assets: ReadonlyMap<string, PublicGraphSnapshot["assets"][number]>;
+  readonly observation: PublicSnapshotObservation;
   constructor(
-    readonly observation: PublicSnapshotObservation,
+    observation: PublicSnapshotObservation,
     readonly isCurrent: () => boolean,
   ) {
-    this.assets = new Map(observation.snapshot.assets.map((a) => [a.id, a]));
+    const snapshot = Object.freeze({ ...observation.snapshot,
+      assets: Object.freeze(observation.snapshot.assets.map(asset => Object.freeze({ ...asset }))),
+    });
+    this.observation = Object.freeze({ ...observation, snapshot });
+    this.assets = new Map(snapshot.assets.map((a) => [a.id, a]));
   }
   get snapshot() { return this.observation.snapshot; }
   get mode() { return this.observation.mode; }
