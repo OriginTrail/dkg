@@ -16,7 +16,6 @@ import { useFetch } from '../../../hooks.js';
 import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
-
 function contextGraphQueryTemplate(contextGraphId: string): string {
   return `SELECT ?g ?s ?p ?o WHERE {
   GRAPH ?g { ?s ?p ?o }

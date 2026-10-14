@@ -1,5 +1,6 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
+import { dedupeTriplesBySpo } from './project/entity-detail.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
@@ -83,23 +84,6 @@ const TRUST_FOR_LAYER: Record<MemoryLayerView, TrustLevel> = {
 
 function isMemoryLayerView(layer: LayerView): layer is MemoryLayerView {
   return layer === 'wm' || layer === 'swm' || layer === 'vm';
-}
-
-function dedupeTriplesBySpo<T extends { subject: string; predicate: string; object: string }>(triples: T[]): T[] {
-  const seen = new Set<string>();
-  return triples.filter(t => {
-    // Canonicalise wrapped/bare IRIs so this dedup agrees with
-    // `buildEntities`' per-entity `tripleCount` dedup
-    // (`useMemoryEntities.ts` builds its SPO key from canonical
-    // subject/object). Daemon sometimes ships wrapped `<urn:...>`
-    // for the same triple it returns bare elsewhere; without
-    // canonicalisation here the detail-page Triples tab would show
-    // two rows for what the badge counts as one.
-    const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }
 
 function scrollElementFor(key: string, fallback: HTMLElement | null): HTMLElement | null {

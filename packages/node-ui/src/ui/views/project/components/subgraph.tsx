@@ -16,7 +16,6 @@ import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../../lib/subGraphs.js';
 import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js';
 import { EntityList, DocumentsList } from './entities.js';
-
 // ─── Subgraph Explorer header (page identity + permanent intro) ────
 // Shared between the All / Subgraphs-overview state and every chip
 // detail (named or Root). The three-sentence intro is non-dismissible —

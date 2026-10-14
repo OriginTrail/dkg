@@ -4,7 +4,6 @@ import { useJourneyStore } from '../../../stores/journey.js';
 import { useProjectsStore } from '../../../stores/projects.js';
 import {
   importFile,
-  type AgentIdentity,
   type LocalAgentChatAttachmentRef,
   type LocalAgentIntegration,
   type LocalAgentStreamEvent,
@@ -52,10 +51,6 @@ import {
 } from './selection.js';
 import type { AgentInfo, ConnectionRow, LocalAgentAttachmentDraft, LocalAgentAttachmentStatus, LocalAgentMessage, LocalAgentSessionSummary } from './types.js';
 
-function useSharedCurrentAgent(): AgentIdentity | null {
-  return useSharedCurrentAgentRaw().data;
-}
-
 export function PanelRight() {
   const { stage, advance } = useJourneyStore();
   const [mode, setMode] = useState<'agents' | 'network' | 'sessions'>('agents');
@@ -68,7 +63,7 @@ export function PanelRight() {
   // race-fetch its own copy of the current agent on every mount
   // (BUG-007). The boolean `loading` flag is intentionally ignored;
   // callers below already null-check `currentAgent`.
-  const currentAgent = useSharedCurrentAgent();
+  const { data: currentAgent } = useSharedCurrentAgentRaw();
 
   const [integrations, setIntegrations] = useState<LocalAgentIntegration[]>([]);
   const [selectedIntegrationId, setSelectedIntegrationId] = useState('openclaw');
