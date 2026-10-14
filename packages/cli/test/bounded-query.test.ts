@@ -229,7 +229,7 @@ it('bounds stalled shared-memory metadata admission and prevents a late caller q
     resolveAcceptedRfc64SharedMemoryAuthorityV1: () => undefined,
     resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
     canUseSharedMemoryForContextGraph: LifecycleSyncMethods.prototype.canUseSharedMemoryForContextGraph,
-    hasConfirmedSharedMemoryMetaState: LifecycleSyncMethods.prototype.hasConfirmedSharedMemoryMetaState,
+    resolveMetadataConfirmation: LifecycleSyncMethods.prototype.resolveMetadataConfirmation,
     hasConfirmedMetaState: LifecycleSyncMethods.prototype.hasConfirmedMetaState,
     store: { query: metadata }, chain: {}, peerId: 'fixture',
     localApprovedAgentByCG: new Map(), subscribedContextGraphs: new Map(),
@@ -308,7 +308,7 @@ it('propagates metadata confirmation outages for both legacy and bounded shared-
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', source: 'system', reason: 'fixture' }),
     resolveAcceptedRfc64SharedMemoryAuthorityV1: () => undefined,
     resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
-    hasConfirmedSharedMemoryMetaState: async () => { throw failure; },
+    resolveMetadataConfirmation: async () => { throw failure; },
     subscribedContextGraphs: new Map(),
   };
   const query = QueryMethods.prototype.query.bind(agent as never);
@@ -452,7 +452,7 @@ it.each(['unknown', 'thrown', 'ontology'] as const)('preserves metadata chain-pr
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'fixture' }),
     resolveAcceptedRfc64SharedMemoryAuthorityV1: () => undefined,
     resolveSharedMemoryReadAdmission: LifecycleSyncMethods.prototype.resolveSharedMemoryReadAdmission,
-    hasConfirmedSharedMemoryMetaState: LifecycleSyncMethods.prototype.hasConfirmedSharedMemoryMetaState,
+    resolveMetadataConfirmation: LifecycleSyncMethods.prototype.resolveMetadataConfirmation,
     hasConfirmedMetaState: LifecycleSyncMethods.prototype.hasConfirmedMetaState,
     resolveActivePublicContextGraphChainProof: async () => {
       if (proof === 'thrown') throw new Error('RPC unavailable');
@@ -471,3 +471,29 @@ it.each(['unknown', 'thrown', 'ontology'] as const)('preserves metadata chain-pr
     expect(execute).not.toHaveBeenCalled();
   } else expect(execute).toHaveBeenCalledOnce();
 });
+
+
+it.each(['complete', 'page'].flatMap(mode => ['verifiable-memory', 'shared-working-memory'].map(view => ({ mode, view }))))(
+  'rejects an unsupported $view $mode UNION as a client error', async ({ mode, view }) => {
+    const store = new OxigraphStore();
+    const root = 'did:dkg:context-graph:test';
+    const prefix = view === 'verifiable-memory' ? `${root}/_verifiable_memory` : `${root}/_shared_memory`;
+    try {
+      await store.insert(['a', 'b'].map(id => ({ subject: `urn:${id}`, predicate: 'urn:p', object: '"match"', graph: `${prefix}/${id}` })));
+      const engine = new DKGQueryEngine(store);
+      const agent = { queryEngine: engine, store, log: { info() {} }, peerId: 'fixture',
+        resolveSharedMemoryReadAdmission: async () => ({ outcome: 'allowed' }),
+        resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'fixture', metadataBootstrap: 'eligible' }),
+        subscribedContextGraphs: new Map() };
+      const read = context({ query: QueryMethods.prototype.query.bind(agent as never) }, {
+        mode, view, sparql: 'SELECT ?s WHERE { { ?s <urn:p> ?o } UNION { ?s <urn:q> ?o } } ORDER BY ?s',
+      });
+      await handleBoundedQueryRoutes(read.ctx);
+      expect(read.res.statusCode, read.res.body).toBe(400);
+      const body = JSON.parse(read.res.body);
+      expect(body.error).toContain('Multi-graph query');
+      expect(body).not.toHaveProperty('result');
+      expect(body.retryable).not.toBe(true);
+    } finally { await store.close(); }
+  },
+);
