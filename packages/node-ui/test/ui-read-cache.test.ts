@@ -36,11 +36,12 @@ describe('bounded read cache', () => {
 });
 
 describe('scoped UI reads', () => {
-  it('lets console queries run without an implicit deadline while bounded reads opt in', async () => {
+  it('lets explicit console queries opt out while automatic reads have a deadline', async () => {
+    vi.useFakeTimers();
     const fetch = vi.fn(async () => response()); vi.stubGlobal('fetch', fetch);
+    await postQueryDeduped(body(), { timeoutMs: null, maxResponseBytes: null });
+    expect(vi.getTimerCount()).toBe(0);
     await postQueryDeduped(body());
-    expect(fetch.mock.calls[0][1]?.signal).toBeUndefined();
-    await postQueryDeduped(body(), { timeoutMs: 60_000 });
     expect(fetch.mock.calls[1][1]?.signal).toBeInstanceOf(AbortSignal);
   });
   it.each(['subscribe', 'join'])('invalidates a pre-mutation list after successful %s without SSE', async action => {

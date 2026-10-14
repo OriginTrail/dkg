@@ -56,3 +56,16 @@ test('real WebGL icons retain their Three.js scene parent after redraws', async 
     expect(await hasIcon()).toBe(true);
   }
 });
+test('Memory Stack keeps a budget warning after graph continuation ends', async ({ page }) => {
+  const graph = `did:dkg:context-graph:${cg}/_working_memory/${owner}/00`;
+  await store.insert(Array.from({ length: 5001 }, (_, i) => ({
+    subject: `_:blank${i}`, predicate: 'urn:value', object: '"value"', graph,
+  })));
+  await page.goto('/');
+  await expect(page.getByText('Memory preview limit reached.', { exact: false })).toBeVisible();
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('≥ 5000');
+  await page.getByRole('button', { name: 'Load more graph data' }).click();
+  await expect(page.getByRole('button', { name: 'Load more graph data' })).toHaveCount(0);
+  await expect(page.getByText('Memory preview limit reached.', { exact: false })).toBeVisible();
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('≥ 5001');
+});

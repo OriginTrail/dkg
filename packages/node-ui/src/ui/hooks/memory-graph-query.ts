@@ -1,5 +1,6 @@
 import { postQueryDeduped } from '../api.js';
 import { UI_READ_MAX_AGE_MS } from '../lib/read-cache.js';
+import { QueryResponseLimitError } from '../query-transport.js';
 import { decodeRdfStringLiteral } from '../../rdf-literal.js';
 import { sparqlIri } from '@origintrail-official/dkg-core/sparql-safe';
 import type { Triple, LayeredTriple, MemoryLayerKey } from './useMemoryEntities.js';
@@ -182,7 +183,8 @@ export function subGraphOf(gUri: string, cgId: string): string | undefined {
 }
 
 type MemoryGraphCursor = [string, string, string, string, string, string, string, boolean?];
-export interface LayerResult { triples: Triple[]; ok: boolean; truncated: boolean; rowCount: number; cursor?: MemoryGraphCursor }
+export interface LayerResult { triples: Triple[]; ok: boolean; truncated: boolean; rowCount: number; cursor?: MemoryGraphCursor; incomplete?: boolean }
+export const MEMORY_LIMIT_MESSAGE = 'Memory preview limit reached. Some relationships remain unloaded. Use a narrower query to inspect them.';
 
 interface QueryLayerOptions {
   view?: string;
@@ -194,6 +196,8 @@ interface QueryLayerOptions {
   cursor?: MemoryGraphCursor;
   /** Resource lookups already bind a term and do not need graph inventory paging. */
   direct?: boolean;
+  /** Stop dependent reads after the owning hook is replaced or unmounted. */
+  isCurrent?: () => boolean;
 }
 
 function cursorForRow(row: Record<string, unknown>): MemoryGraphCursor {
@@ -235,7 +239,10 @@ export async function readMemoryGraphPage(
     // here coalesces with any other concurrently-mounted instance of
     // this hook (e.g. Dashboard card + ProjectView both subscribed to
     // the same CG). One underlying fetch instead of N for each layer.
-    const { layerLimit = WM_LIMIT, cursor, direct = false, ...requestOpts } = opts ?? {};
+    const { layerLimit: requestedLimit = WM_LIMIT, cursor, direct = false, isCurrent, ...requestOpts } = opts ?? {};
+    const layerLimit = Math.max(1, Math.min(WM_LIMIT, Math.trunc(requestedLimit) || WM_LIMIT));
+    const checkCurrent = () => { if (isCurrent && !isCurrent()) throw new Error('Obsolete memory read'); };
+    checkCurrent();
     const ordered = sparql.replace(/\s+LIMIT\s+\d+\s*$/i, '');
     let graphValues = '';
     let graphNames: string[] = [];
@@ -249,6 +256,7 @@ export async function readMemoryGraphPage(
         .replace(/\?s\s+\?p\s+\?o\b/g, `FILTER EXISTS { ?s ?p ?o ${predicateFilter ? `FILTER(${predicateFilter})` : ''} }`)
         .replace(/}\s*$/, `${cursor ? `FILTER(STR(?g) ${cursor[7] ? '>' : '>='} ${JSON.stringify(cursor[0])})` : ''} }`);
       const catalog = await postQueryDeduped({ sparql: `${inventory} ORDER BY STR(?g) LIMIT 6`, contextGraphId, ...requestOpts }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
+      checkCurrent();
       const names = [...new Set((catalog.result?.bindings ?? []).map(row => canonicalEntityUri(bv(row.g) ?? '')).filter(Boolean))];
       graphNames = names.slice(0, 5);
       moreGraphs = names.length > 5;
@@ -270,24 +278,29 @@ export async function readMemoryGraphPage(
     }`);
     const body = { sparql: `${seek} ORDER BY ${CURSOR_VARIABLES.join(' ')} LIMIT ${layerLimit}`, contextGraphId, ...requestOpts };
     const data = await postQueryDeduped(body, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
-    const bindings = data?.result?.bindings ?? [];
+    checkCurrent();
+    const bindings = (data?.result?.bindings ?? []).slice(0, layerLimit);
     const clipped = bindings.length >= layerLimit;
     const truncated = clipped || moreGraphs;
     // Blank labels cannot be used in portable SPARQL seek filters. Read the
-    // blank edges of each newly entered graph together, without a row cutoff;
-    // subsequent pages seek only through IRI/literal rows. This also preserves
-    // a blank component's identity within one result document.
+    // blank edges together within the remaining page budget. Portable SPARQL
+    // cannot continue from a result-local blank label: a clipped blank read
+    // therefore remains explicitly incomplete through later IRI pages.
     const lastGraphIndex = clipped ? graphNames.indexOf(cursorForRow(bindings.at(-1)!)[0]) : graphNames.length - 1;
     const enteredGraphs = graphNames.slice(0, lastGraphIndex + 1);
     const blankGraphs = enteredGraphs.filter(graph => !cursor || cursor[7] || graph !== cursor[0]);
+    const blankBudget = layerLimit - bindings.length;
     const blankData = blankGraphs.length || (direct && !cursor) ? await postQueryDeduped({
       sparql: ordered.replace(/WHERE\s*{/i, `WHERE { ${blankGraphs.length ? `VALUES ?g { ${blankGraphs.map(sparqlIri).join(' ')} }` : ''}`)
-        .replace(/}\s*$/, 'FILTER(isBlank(?s) || isBlank(?o)) }'),
+        .replace(/}\s*$/, `FILTER(isBlank(?s) || isBlank(?o)) } LIMIT ${blankBudget + 1}`),
       contextGraphId, ...requestOpts,
     }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 }) : undefined;
+    checkCurrent();
     const blankBindings = (blankData?.result?.bindings ?? []).filter(row =>
       rdfBindingValue(row.s)?.startsWith('_:') || rdfBindingValue(row.o)?.startsWith('_:'));
-    const triples = [...bindings, ...blankBindings]
+    const incomplete = blankBindings.length > blankBudget;
+    const visibleBlanks = blankBindings.slice(0, blankBudget);
+    const triples = [...bindings, ...visibleBlanks]
       .map((row: any) => {
         const g = bv(row.g);
         return {
@@ -298,11 +311,11 @@ export async function readMemoryGraphPage(
         };
       })
       .filter((t: Triple) => t.subject && t.predicate && t.object);
-    return { triples, ok: true, truncated, rowCount: bindings.length + blankBindings.length,
+    return { triples, ok: true, truncated, incomplete, rowCount: bindings.length + visibleBlanks.length,
       cursor: !clipped && graphNames.length ? [graphNames.at(-1)!, '', '', '', '', '', '', true]
         : bindings.length ? cursorForRow(bindings.at(-1)!) : undefined };
-  } catch {
-    return { triples: [], ok: false, truncated: false, rowCount: 0 };
+  } catch (error) {
+    return { triples: [], ok: false, truncated: false, rowCount: 0, incomplete: error instanceof QueryResponseLimitError };
   }
 }
 
@@ -332,10 +345,11 @@ export async function fetchMemoryEntity(
       // Compare the returned terms in the client; _:label in a WHERE pattern
       // would be an existential variable and STR(blank) is undefined.
       const data = await postQueryDeduped({
-        sparql: definition.sparql.replace(/}\s+LIMIT\s+\d+\s*$/i, `FILTER(${match}) }`),
+        sparql: definition.sparql.replace(/}\s+LIMIT\s+\d+\s*$/i, `FILTER(${match}) } LIMIT 1001`),
         contextGraphId, includeContextGraphPartitions: true,
       }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
-      return { truncated: false, triples: (data.result?.bindings ?? []).flatMap(row => {
+      const rows = data.result?.bindings ?? [];
+      return { truncated: rows.length > 1000, triples: rows.slice(0, 1000).flatMap(row => {
         const subject = rdfBindingValue(row.s) ?? ''; const object = rdfBindingValue(row.o) ?? '';
         return subject === target || object === target ? [{ subject, predicate: bv(row.p) ?? '', object,
           subGraph: subGraphOf(bv(row.g) ?? '', contextGraphId) }] : [];

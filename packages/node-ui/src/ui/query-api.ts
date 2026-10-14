@@ -1,7 +1,8 @@
 import type { GetView } from '@origintrail-official/dkg-core';
 import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
 import type { PublicQueryQuad, PublicQueryResponse, PublicQueryResult } from '@origintrail-official/dkg-core/query-result';
-import { BASE, authHeaders, HttpError, fetchWithTimeout, getWithTimeout } from './http.js';
+import { BASE, authHeaders, HttpError, getWithTimeout } from './http.js';
+import { fetchQueryJson, AUTOMATIC_QUERY_TIMEOUT_MS, AUTOMATIC_QUERY_MAX_BYTES } from './query-transport.js';
 import { ReadCache, UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
 
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60_000;
@@ -79,7 +80,12 @@ export function invalidateQueryCache(contextGraphId?: string): void {
   }
 }
 
-export interface QueryReadOptions { maxAgeMs?: number; timeoutMs?: number; }
+export interface QueryReadOptions {
+  maxAgeMs?: number;
+  /** null is reserved for explicit interactive execution. */
+  timeoutMs?: number | null;
+  maxResponseBytes?: number | null;
+}
 
 export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadOptions = {}): Promise<QueryExecutionResponse> {
   const headers = authHeaders();
@@ -92,7 +98,9 @@ export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadO
   const generation = queryGenerations.get(scope) ?? 0;
   const globalGeneration = queryGeneration;
   const requestBody = JSON.stringify(body);
-  const key = JSON.stringify([session, globalGeneration, generation, requestBody, read.timeoutMs]);
+  const timeoutMs = read.timeoutMs === undefined ? AUTOMATIC_QUERY_TIMEOUT_MS : read.timeoutMs;
+  const maxResponseBytes = read.maxResponseBytes === undefined ? AUTOMATIC_QUERY_MAX_BYTES : read.maxResponseBytes;
+  const key = JSON.stringify([session, globalGeneration, generation, requestBody, timeoutMs, maxResponseBytes]);
   const maxAgeMs = read.maxAgeMs ?? 0;
   const operation = classifySparqlOperation(String(body.sparql ?? '')).kind;
   const cacheable = maxAgeMs > 0 && operation === 'read';
@@ -106,15 +114,16 @@ export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadO
       headers: { 'Content-Type': 'application/json', ...headers },
       body: requestBody,
     };
-    const res = await (read.timeoutMs ? fetchWithTimeout(`${BASE}/api/query`, init, read.timeoutMs)
-      : fetch(`${BASE}/api/query`, init));
+    const { response: res, body: responseBody } = await fetchQueryJson(`${BASE}/api/query`, init,
+      { timeoutMs, maxResponseBytes }, response => {
+        if (response.status === 401 || response.status === 403) invalidateQueryCache();
+      });
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) invalidateQueryCache();
-      const errBody = await res.json().catch(() => ({}));
+      const errBody = responseBody;
       const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
       throw new HttpError(res.status, msg, errBody);
     }
-    const result = normalizeQueryExecutionResponse(await res.json(), String(body.sparql ?? ''));
+    const result = normalizeQueryExecutionResponse(responseBody, String(body.sparql ?? ''));
     if (session !== JSON.stringify(authHeaders())) throw new HttpError(401, 'The session changed while loading data.');
     if (operation !== 'read') invalidateQueryCache(scope || undefined);
     if (cacheable && session === querySession && globalGeneration === queryGeneration && generation === (queryGenerations.get(scope) ?? 0)) {

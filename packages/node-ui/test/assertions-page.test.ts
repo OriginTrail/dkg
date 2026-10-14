@@ -44,7 +44,7 @@ beforeEach(() => {
 afterEach(async () => { vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 
 describe('assertion pages against the native scoped query engine', () => {
-  it('keeps blank-node subjects and objects complete across tiny page boundaries and detail reads', async () => {
+  it('keeps under-budget blank-node subjects and objects complete, including detail reads', async () => {
     await assertion('blank-edges');
     const graph = content('blank-edges');
     await store.insert(Array.from({ length: 7 }, (_, i) => [
@@ -55,7 +55,7 @@ describe('assertion pages against the native scoped query engine', () => {
     const triples: Array<{ subject: string; predicate: string; object: string }> = [];
     let cursor;
     for (let page = 0; page < 20; page++) {
-      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
+      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 20, cursor });
       expect(result.ok).toBe(true);
       triples.push(...result.triples);
       if (!result.truncated) break;
@@ -79,31 +79,37 @@ describe('assertion pages against the native scoped query engine', () => {
     expect([...first.items, ...second.items].map(item => item.name).sort()).toEqual(['query-catalog-visible', 'visible']);
     expect(second.nextCursor).toBeUndefined();
   });
-  it('does not cut off a blank component at the production 5,000-row budget', async () => {
+  it('bounds an oversized blank component and explicitly reports incomplete memory', async () => {
     await assertion('large-blank');
     await store.insert(Array.from({ length: 5001 }, (_, i) => ({
       subject: `_:large${i}`, predicate: 'urn:value', object: `"${i}"`, graph: content('large-blank'),
     })));
     const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
     const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true });
-    expect(result.ok).toBe(true); expect(result.truncated).toBe(false);
-    expect(result.triples).toHaveLength(5002);
+    expect(result.ok).toBe(true); expect(result.incomplete).toBe(true);
+    expect(result.triples.length).toBeLessThanOrEqual(5000);
+    expect(requests.filter(request => request.sparql.includes('FILTER(isBlank(?s) || isBlank(?o))')).every(request => /LIMIT\s+5000\s*$/.test(request.sparql))).toBe(true);
+    const detail = await fetchMemoryEntity(cg, result.triples.find(triple => triple.subject.startsWith('_:'))!.subject, 'wm');
+    expect(detail.partial).toBe(true); expect(detail.triples.length).toBeLessThanOrEqual(1000);
+    expect(requests.at(-1)!.sparql).toMatch(/LIMIT\s+1001\s*$/);
   });
-  it('reads each graph blank component once when nonblank pages stop in earlier graphs', async () => {
+  it('explicitly flags omitted blank edges while continuing bounded nonblank pages', async () => {
     for (let i = 0; i < 7; i++) {
       const name = `mix-${i}`; await assertion(name);
       await store.insert([{ subject: `_:blank${i}`, predicate: 'urn:blank', object: `"${i}"`, graph: content(name) }]);
     }
     const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
-    const triples = []; let cursor;
+    const triples = []; let cursor; let incomplete = false;
     for (let i = 0; i < 10; i++) {
       const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
-      expect(result.ok).toBe(true); triples.push(...result.triples);
+      expect(result.ok).toBe(true); expect(result.triples.length).toBeLessThanOrEqual(2);
+      incomplete ||= result.incomplete ?? false; triples.push(...result.triples);
       if (!result.truncated) break;
       cursor = result.cursor;
     }
-    expect(triples).toHaveLength(14);
-    expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(14);
+    expect(incomplete).toBe(true);
+    expect(triples.filter(triple => !triple.subject.startsWith('_:'))).toHaveLength(7);
+    expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(triples.length);
   });
   it('continues across bounded graph-inventory pages even when a triple page is not full', async () => {
     for (let i = 0; i < 12; i++) await assertion(`graph-${String(i).padStart(2, '0')}`);
@@ -119,15 +125,13 @@ describe('assertion pages against the native scoped query engine', () => {
     expect(sizes).toEqual([5, 5, 2]);
     expect(new Set(seen).size).toBe(12);
   });
-  it('seeks through graph rows without skipping datatype/language variants or blank-node edges', async () => {
+  it('seeks through graph rows without skipping datatype/language variants', async () => {
     await assertion('seek');
     await store.insert([
       { subject: 'urn:seek', predicate: 'urn:value', object: '"1"', graph: content('seek') },
       { subject: 'urn:seek', predicate: 'urn:value', object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: content('seek') },
       { subject: 'urn:seek', predicate: 'urn:value', object: '"1"@en', graph: content('seek') },
       { subject: 'urn:seek', predicate: 'urn:value', object: '"1"@fr', graph: content('seek') },
-      { subject: 'urn:seek', predicate: 'urn:value', object: '_:step', graph: content('seek') },
-      { subject: '_:step', predicate: 'urn:value', object: 'urn:seek', graph: content('seek') },
     ]);
     const query = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ' + JSON.stringify(root + '/_working_memory/') + ')) }';
     const triples: Array<{ subject: string; predicate: string; object: string }> = [];
@@ -139,8 +143,8 @@ describe('assertion pages against the native scoped query engine', () => {
       if (!result.truncated) break;
       cursor = result.cursor;
     }
-    expect(triples).toHaveLength(7);
-    expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(7);
+    expect(triples).toHaveLength(5);
+    expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(5);
     expect(triples.filter(triple => triple.subject === 'urn:seek').map(triple => triple.object)).toEqual(expect.arrayContaining([
       '"1"', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"@en', '"1"@fr',
     ]));

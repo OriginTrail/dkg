@@ -20,6 +20,7 @@ import { useCurrentAgent } from '../hooks/useCurrentAgent.js';
 import { useSwmAttributions } from '../hooks/useSwmAttributions.js';
 import { useAssertionLifecycleEvents } from '../hooks/useAssertionLifecycleEvents.js';
 import { ActivityFeed } from '../components/ActivityFeed.js';
+import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
 import { useTabsStore } from '../stores/tabs.js';
@@ -769,12 +770,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     <ProjectProfileContext.Provider value={profile}>
     <AgentsContext.Provider value={agentsContextValue}>
     <div className="v10-memory-explorer">
-      {(rawMemory.hasMore || rawMemory.pageError) && <div className="v10-stale-banner" role="status">
-        <span>{rawMemory.pageError ?? 'More graph data is available. Counts and relationships describe the loaded pages.'}</span>
-        <button type="button" className="v10-retry-btn" disabled={rawMemory.loading} onClick={rawMemory.loadMore}>
-          {rawMemory.loading ? 'Loading graph data…' : 'Load more graph data'}
-        </button>
-      </div>}
+      <MemoryReadStatus memory={rawMemory} />
       {/* GH #905: when a project is already open, `useFetch` keeps the
           last-good `cgData`, so a failing 30s refresh leaves `cg` truthy and
           the view would silently show stale data. Surface an inline,
@@ -825,7 +821,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       {selectedUri && (detailRead.loading || detailRead.error || fetchedDetail?.partial || !selectedEntity) && (
         <div className="v10-layer-action-note" role="status">
           {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (fetchedDetail?.partial
-            ? 'Resource details are limited to 1,000 triples per layer. Use a scoped query for further relationships.'
+            ? 'The resource detail read reached its limit. Some relationships may be missing. Use a narrower query to inspect them.'
             : 'This resource is referenced here, but has no details in this view.')}
           {detailRead.error && <button onClick={detailRead.refresh}>Retry resource details</button>}
           {!selectedEntity && <button onClick={handleDetailClose}>Close resource</button>}

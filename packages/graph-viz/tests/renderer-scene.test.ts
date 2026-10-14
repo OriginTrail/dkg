@@ -1,16 +1,12 @@
 // @vitest-environment happy-dom
-import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three';
+import ThreeForceGraph from 'three-forcegraph';
 import { WebGL3DRenderer } from '../src/core/renderer-3d.js';
 import { GraphEventEmitter } from '../src/core/events.js';
 
-// Resolve the real scene mapper used by the installed 3d-force-graph. No
+// Use the same real scene mapper version locked for 3d-force-graph. No
 // WebGL context is needed to test its object ownership and disposal behavior.
-const require = createRequire(import.meta.url);
-const mapperPath = createRequire(require.resolve('3d-force-graph')).resolve('three-forcegraph');
-const { default: ThreeForceGraph } = await import(pathToFileURL(mapperPath).href);
 const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 
 describe('3D renderer with the real Three.js scene mapper', () => {

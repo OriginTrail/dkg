@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { invalidateQueryCache } from '../api.js';
-import { readMemoryGraphPage, wmSparql, swmSparql, vmSparql, queryCatalogLayerSparql, WM_LIMIT, isUri, canonicalEntityUri, type LayerResult } from './memory-graph-query.js';
+import { readMemoryGraphPage, wmSparql, swmSparql, vmSparql, queryCatalogLayerSparql, WM_LIMIT, MEMORY_LIMIT_MESSAGE, isUri, canonicalEntityUri, type LayerResult } from './memory-graph-query.js';
 export { canonicalEntityUri, rdfBindingValue, subGraphOf, readMemoryGraphPage, fetchMemoryEntity } from './memory-graph-query.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
 import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
@@ -82,6 +82,8 @@ export interface MemoryData {
   hasMore?: boolean;
   loadMore?: () => void;
   pageError?: string | null;
+  /** A deterministic read budget left relationships outside the preview. */
+  limitMessage?: string | null;
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -457,6 +459,7 @@ export function useMemoryEntities(
       return running.promise;
     }
     const version = ++versionRef.current;
+    const isCurrent = () => activeRef.current && version === versionRef.current;
     setLoading(true);
     setError(null);
     setPageError(null);
@@ -476,12 +479,13 @@ export function useMemoryEntities(
       const results = await Promise.all(definitions.map(async definition => {
         const depth = depthRef.current.depths.get(definition.sparql) ?? 1;
         let result = await readMemoryGraphPage(definition.sparql, contextGraphId,
-          { includeContextGraphPartitions: true, layerLimit: WM_LIMIT });
-        for (let page = 1; page < depth && result.ok && result.truncated; page++) {
+          { includeContextGraphPartitions: true, layerLimit: WM_LIMIT, isCurrent });
+        for (let page = 1; page < depth && result.ok && result.truncated && isCurrent(); page++) {
           const next = await readMemoryGraphPage(definition.sparql, contextGraphId,
-            { includeContextGraphPartitions: true, layerLimit: WM_LIMIT, cursor: result.cursor });
-          if (!next.ok) { result = { ...result, ok: false }; break; }
-          result = { ...next, triples: [...result.triples, ...next.triples], rowCount: result.rowCount + next.rowCount };
+            { includeContextGraphPartitions: true, layerLimit: WM_LIMIT, cursor: result.cursor, isCurrent });
+          if (!next.ok) { result = { ...result, ok: false, incomplete: result.incomplete || next.incomplete }; break; }
+          result = { ...next, incomplete: result.incomplete || next.incomplete,
+            triples: [...result.triples, ...next.triples], rowCount: result.rowCount + next.rowCount };
         }
         return result;
       }));
@@ -496,7 +500,7 @@ export function useMemoryEntities(
       const more = results.some(result => result.truncated);
       setLayerStatus(statuses);
       setHasMore(more);
-      setPartial(failed > 0 || more);
+      setPartial(failed > 0 || more || results.some(result => result.incomplete));
       setError(signalErrors && failed === 3 ? 'Failed to load memory data' : null);
     })().finally(() => {
       if (version === versionRef.current && activeRef.current) setLoading(false);
@@ -513,25 +517,30 @@ export function useMemoryEntities(
     const pages = pagesRef.current.filter(page => page.result.truncated);
     if (!pages.length) return Promise.resolve();
     const version = ++versionRef.current;
+    const isCurrent = () => activeRef.current && version === versionRef.current;
     const entry = { key, promise: Promise.resolve(), again: false };
     setLoading(true);
     setPageError(null);
     entry.promise = (async () => {
       const results = await Promise.all(pages.map(page => readMemoryGraphPage(page.sparql, contextGraphId, {
-        includeContextGraphPartitions: true, layerLimit: WM_LIMIT, cursor: page.result.cursor,
+        includeContextGraphPartitions: true, layerLimit: WM_LIMIT, cursor: page.result.cursor, isCurrent,
       })));
       if (version !== versionRef.current || !activeRef.current) return;
       const added: LayeredTriple[] = [];
       for (const [index, result] of results.entries()) {
-        if (!result.ok) { setPageError('Could not load more graph data. Retry to continue from the last loaded page.'); continue; }
+        if (!result.ok) {
+          if (result.incomplete) pages[index].result = { ...pages[index].result, incomplete: true, truncated: false };
+          setPageError(result.incomplete ? MEMORY_LIMIT_MESSAGE : 'Could not load more graph data. Retry to continue from the last loaded page.');
+          continue;
+        }
         depthRef.current.depths.set(pages[index].sparql, (depthRef.current.depths.get(pages[index].sparql) ?? 1) + 1);
-        pages[index].result = result;
+        pages[index].result = { ...result, incomplete: pages[index].result.incomplete || result.incomplete };
         added.push(...result.triples.map(triple => ({ ...triple, layer: pages[index].layer })));
       }
       setLayeredTriples(previous => [...previous, ...added]);
       const more = pagesRef.current.some(page => page.result.truncated);
       setHasMore(more);
-      setPartial(more || pagesRef.current.some(page => !page.result.ok));
+      setPartial(more || pagesRef.current.some(page => !page.result.ok || page.result.incomplete));
     })().finally(() => {
       if (version === versionRef.current && activeRef.current) setLoading(false);
       if (requestRef.current !== entry) return;
@@ -615,5 +624,6 @@ export function useMemoryEntities(
     hasMore: loadedKey === key && hasMore,
     loadMore: nextPage,
     pageError,
+    limitMessage: loadedKey === key && pagesRef.current.some(page => page.result.incomplete) ? MEMORY_LIMIT_MESSAGE : null,
   };
 }

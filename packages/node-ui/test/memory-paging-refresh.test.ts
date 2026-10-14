@@ -6,13 +6,17 @@ import { OxigraphStore } from '../../storage/dist/index.js';
 import { DKGQueryEngine } from '../../query/dist/dkg-query-engine.js';
 import { invalidateQueryCache } from '../src/ui/api.js';
 import { useMemoryEntities, type MemoryData } from '../src/ui/hooks/useMemoryEntities.js';
+import { MemoryReadStatus } from '../src/ui/components/MemoryReadStatus.js';
 const events = vi.hoisted(() => ({ refresh: () => {} }));
 vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({ useMemoryGraphEvents: (_id: string, refresh: () => void) => { events.refresh = refresh; } }));
 const owner = '0x1111111111111111111111111111111111111111'; const cg = `${owner}/preview`;
 let store: OxigraphStore; let engine: DKGQueryEngine; let root: Root; let container: HTMLDivElement; let memory: MemoryData;
 let holdOldPage: boolean; let resolveOldPage: (() => void) | undefined;
+let holdRefresh: boolean; let resolveRefresh: (() => void) | undefined;
+let requests: Array<{ contextGraphId: string; sparql: string }>;
 function Probe({ id = cg, catalog = false }: { id?: string; catalog?: boolean }) {
-  memory = useMemoryEntities(id, { includeQueryCatalog: catalog }); return React.createElement('div', null, memory.entityList.length);
+  memory = useMemoryEntities(id, { includeQueryCatalog: catalog });
+  return React.createElement('div', null, memory.entityList.length, React.createElement(MemoryReadStatus, { memory }));
 }
 async function seed(id: string, count: number) {
   const base = `did:dkg:context-graph:${id}`;
@@ -29,10 +33,15 @@ async function seed(id: string, count: number) {
 beforeEach(() => {
   invalidateQueryCache(); store = new OxigraphStore(); engine = new DKGQueryEngine(store);
   holdOldPage = false; resolveOldPage = undefined;
+  holdRefresh = false; resolveRefresh = undefined; requests = [];
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
   vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
     const request = JSON.parse(String(init.body));
+    requests.push(request);
+    if (holdRefresh && !resolveRefresh && request.contextGraphId === cg && request.sparql.includes('SELECT DISTINCT') && request.sparql.includes('"/_working_memory/"')) {
+      await new Promise<void>(resolve => { resolveRefresh = resolve; });
+    }
     if (holdOldPage && request.contextGraphId === cg && request.sparql.includes(`> "did:dkg:context-graph:${cg}/_working_memory/`)) {
       await new Promise<void>(resolve => { resolveOldPage = resolve; });
     }
@@ -42,6 +51,37 @@ beforeEach(() => {
 });
 afterEach(async () => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 describe('memory continuation and refresh with the scoped native store', () => {
+  it('keeps a clipped blank read partial after all IRI continuation pages finish', async () => {
+    await seed(cg, 1); const graph = `did:dkg:context-graph:${cg}/_working_memory/${owner}/00`;
+    await store.insert([
+      ...Array.from({ length: 5000 }, (_, i) => ({ subject: `urn:regular:${String(i).padStart(4, '0')}`, predicate: 'urn:p', object: '"value"', graph })),
+      { subject: '_:blank', predicate: 'urn:p', object: '"blank"', graph },
+    ]);
+    await act(async () => root.render(React.createElement(Probe)));
+    expect(memory.graphTriples).toHaveLength(5000); expect(memory.hasMore).toBe(true);
+    expect(container.textContent).toContain('Memory preview limit reached');
+    await act(async () => memory.loadMore?.());
+    expect(memory.hasMore).toBe(false); expect(memory.partial).toBe(true);
+    expect(memory.limitMessage).toContain('relationships remain unloaded');
+    expect(container.textContent).toContain('Memory preview limit reached');
+    expect(container.querySelector('button')).toBeNull();
+  });
+  it.each(['switch', 'unmount'])('stops refreshed depth reads after %s while the first inventory is pending', async action => {
+    await seed(cg, 12);
+    await act(async () => root.render(React.createElement(Probe)));
+    await act(async () => memory.loadMore?.()); await act(async () => memory.loadMore?.());
+    expect(memory.entityList).toHaveLength(12);
+    holdRefresh = true; invalidateQueryCache(cg);
+    await act(async () => events.refresh());
+    expect(resolveRefresh).toBeTypeOf('function');
+    const started = requests.filter(request => request.contextGraphId === cg).length;
+    if (action === 'switch') {
+      const next = `${owner}/replacement`; await seed(next, 1);
+      await act(async () => root.render(React.createElement(Probe, { id: next })));
+    } else act(() => root.unmount());
+    await act(async () => resolveRefresh!());
+    expect(requests.filter(request => request.contextGraphId === cg)).toHaveLength(started);
+  });
   it('exposes the sixth partition and retains loaded depth after a write and catalog toggle', async () => {
     await seed(cg, 6);
     await act(async () => root.render(React.createElement(Probe)));

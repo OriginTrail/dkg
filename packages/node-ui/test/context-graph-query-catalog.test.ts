@@ -283,6 +283,7 @@ describe('ContextGraphQueryView', () => {
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
       { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
+      { timeoutMs: null, maxResponseBytes: null },
     );
 
     const runButton = Array.from(container.querySelectorAll('button'))
@@ -296,6 +297,7 @@ describe('ContextGraphQueryView', () => {
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
       { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
+      { timeoutMs: null, maxResponseBytes: null },
     );
 
     apiMocks.executeQuery.mockClear();
@@ -306,6 +308,7 @@ describe('ContextGraphQueryView', () => {
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('# edited'),
       { contextGraphId: 'cg-test', subGraphName: undefined, view: undefined },
+      { timeoutMs: null, maxResponseBytes: null },
     );
 
     await act(async () => { root.unmount(); });
@@ -381,6 +384,7 @@ describe('ContextGraphQueryView', () => {
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('"748387\\" } UNION { ?s ?p ?o"'),
       { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'verifiable-memory' },
+      { timeoutMs: null, maxResponseBytes: null },
     );
     await act(async () => {
       setFieldValue(parameterInput, 'different configuration');
