@@ -434,11 +434,13 @@ it('rejects an externalized document before loading its oversized literal', asyn
     { graph: sourceGraph, subject: 'urn:oversized', predicate: 'urn:description', object: JSON.stringify('x'.repeat(1024 * 1024)) },
     { graph: sourceGraph, subject: 'urn:oversized', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:Topic' },
   ]);
-  const unbounded = vi.spyOn(f.graph as unknown as { readBlob(hash: string): Promise<string> }, 'readBlob');
+  const reads = vi.spyOn(f.graph as unknown as { readBlob(hash: string, constraints: { maxBytes?: number }): Promise<string> }, 'readBlob');
   await expect(f.reader.document({ ...spec, view: 'shared-working-memory' },
     { sourceGraph, entityUri: 'urn:oversized' }, AbortSignal.timeout(5000), performance.now() + 5000))
     .rejects.toMatchObject({ code: 'ENTITY_DOCUMENT_TOO_LARGE' });
-  expect(unbounded).not.toHaveBeenCalled();
+  expect(reads).toHaveBeenCalledOnce();
+  expect(reads.mock.calls[0]![1].maxBytes).toBeLessThanOrEqual(16_384);
+  expect(reads.mock.calls[0]![1].maxBytes).toBeGreaterThan(0);
   expect(f.embedder.embed).not.toHaveBeenCalled();
 });
 
