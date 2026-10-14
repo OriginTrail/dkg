@@ -8,12 +8,12 @@ export interface ScopedContentGraphDiscoveryMemoOptions {
   maxEntries?: number;
 }
 
-export interface ScopedContentGraphDiscoveryRequest {
+export interface ScopedContentGraphDiscoveryRequest<T> {
   contentKey: string;
   laneKey: string;
   graphPrefix: string;
   signal?: AbortSignal;
-  load: () => Promise<readonly string[]>;
+  load: () => Promise<readonly T[]>;
 }
 
 /**
@@ -22,9 +22,9 @@ export interface ScopedContentGraphDiscoveryRequest {
  * explicitly observes every writer that can mutate the live store. A local
  * generation cannot authorize reuse for an externally mutable SPARQL backend.
  */
-export class ScopedContentGraphDiscoveryMemo {
-  private readonly completed: BoundedLruCache<string, readonly string[]>;
-  private readonly inFlight = new Map<string, Promise<readonly string[]>>();
+export class ScopedContentGraphDiscoveryMemo<T = string> {
+  private readonly completed: BoundedLruCache<string, readonly T[]>;
+  private readonly inFlight = new Map<string, Promise<readonly T[]>>();
 
   constructor(
     private readonly revisionSource: GraphWriteRevisionSource | null,
@@ -33,7 +33,7 @@ export class ScopedContentGraphDiscoveryMemo {
     this.completed = new BoundedLruCache(options.maxEntries ?? DEFAULT_MAX_ENTRIES);
   }
 
-  get(request: ScopedContentGraphDiscoveryRequest): Promise<readonly string[]> {
+  get(request: ScopedContentGraphDiscoveryRequest<T>): Promise<readonly T[]> {
     if (request.signal?.aborted) return Promise.reject(callerAbortReason(request.signal));
     if (this.revisionSource?.writeRevisionCoverage !== 'all-writers') {
       return raceAgainstCallerAbort(request.load(), request.signal);

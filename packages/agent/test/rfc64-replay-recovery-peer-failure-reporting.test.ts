@@ -10,6 +10,7 @@ import {
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from '../src/rfc64/catalog-peers-v1.js';
@@ -1173,20 +1174,24 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       activation: activation('catalog'),
     });
     await applyConsistentGenesisHead(edge);
-    const acceptedPolicySnapshot = vi.spyOn(
-      (edge as any).rfc64PublicCatalogServiceV1,
-      'acceptedPolicySnapshot',
-    );
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const original = service.acceptedPolicySnapshot.bind(service);
+    const statusRequest = new AsyncLocalStorage<boolean>();
+    let reads = 0;
+    vi.spyOn(service, 'acceptedPolicySnapshot').mockImplementation((...args: unknown[]) => {
+      if (statusRequest.getStore() && args[1] === CONTEXT_GRAPH_ID) reads++;
+      return original(...args);
+    });
 
-    await readStatus(edge);
+    // Background replay also reads policy. Count this request's async chain,
+    // not unrelated supervisor work that can overlap on a busy CI runner.
+    await statusRequest.run(true, () => readStatus(edge));
 
     // The promised-target fence and the replay status must share one snapshot.
     // Reading it a second time spans the durable promised-row load, so an
     // accepted policy that rotates in that window pairs an old-digest promise
     // set with a null replay status, and the projection then publishes numbers
     // built from promises the runtime dropped at the rotation.
-    expect(acceptedPolicySnapshot.mock.calls.filter(
-      ([, contextGraphId]) => contextGraphId === CONTEXT_GRAPH_ID,
-    )).toHaveLength(1);
+    expect(reads).toBe(1);
   });
 });
