@@ -91,6 +91,28 @@ describe('a family list kept verbatim survives a producer value on its predicate
   }
 });
 
+describe('a family list kept verbatim survives an empty producer list on its predicate', () => {
+  // A producer key's empty list is one `[]` (rdf:JSON) too: the family's
+  // non-empty array is still the family's, and both terms come back.
+  for (const [family, producer, list] of [
+    ['generated', 'Generated', '[a]'],
+    ['executor', 'Executor', '[/policies/revenue-recognition.md]'],
+    ['attester', 'Attester', '[{ resource: https://x.example/a }]'],
+  ]) {
+    it(`keeps ${family}: ${list} beside ${producer}: []`, () => {
+      const { files, first, second } = roundTrip(`${family}: ${list}\n${producer}: []`);
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      const terms = objs(first.quads, SCHEMA_NS + family);
+      expect(terms).toHaveLength(2);
+      expect(terms).toContain(`"[]"^^<${RDF_JSON}>`);
+      for (const term of terms) expect(objs(second.quads, SCHEMA_NS + family)).toContain(term);
+      const fm = exportedFrontmatter(files);
+      expect(Array.isArray(fm[family]) && (fm[family] as unknown[]).length).toBe(1);
+      expect(fm[producer]).toEqual([]);
+    });
+  }
+});
+
 describe('an empty list is a value, for a producer key too', () => {
   it('keeps owners: [] and the empty item of nested: [a, []] through a round trip', () => {
     const { files, first, second } = roundTrip('owners: []\nnested: [a, []]');

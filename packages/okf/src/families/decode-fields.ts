@@ -110,8 +110,9 @@ function keepsVerbatim(spec: FamilySpec, value: unknown): boolean {
  * family's:
  *
  *   - a list, one `rdf:JSON` array the family keeps verbatim, whatever else
- *     shares the predicate: no producer key yields one, since a producer
- *     key's list is one triple per item;
+ *     shares the predicate: a producer key's list is one triple per item, and
+ *     yields an array only when it is empty (`[]`), so a non-empty array is
+ *     the family's, and an empty one is when it is the only array there;
  *   - where the key reads back as the family key (`generated`), the one
  *     triple on the predicate, holding a value the family keeps verbatim (the
  *     encoder writes exactly one).
@@ -129,7 +130,9 @@ export function keptVerbatim(spec: FamilySpec, quads: readonly Quad[], ctx: Expo
     const value = termValue(q.object, ctx);
     return literalDatatype(q.object) === RDF_JSON && Array.isArray(value) && keepsVerbatim(spec, value);
   });
-  if (lists.length === 1) return { value: termValue(lists[0].object, ctx), quads: lists };
+  const full = lists.filter((q) => (termValue(q.object, ctx) as unknown[]).length > 0);
+  const list = full.length === 1 ? full[0] : full.length === 0 && lists.length === 1 ? lists[0] : undefined;
+  if (list) return { value: termValue(list.object, ctx), quads: [list] };
   if (predicate === SCHEMA_NS + spec.key && onPredicate.length === 1) {
     const value = termValue(onPredicate[0].object, ctx);
     if (keepsVerbatim(spec, value)) return { value, quads: onPredicate };

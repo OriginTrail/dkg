@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { ValueBuckets } from '../src/decode-terms.js';
 import {
   exportBundle,
   frontmatterQuads,
@@ -163,8 +164,7 @@ describe('producer-defined keys', () => {
 });
 
 describe('ValueBuckets: one item per triple, materialised once', () => {
-  it('keeps a value that is itself a list apart from the list of a key read from several triples', async () => {
-    const { ValueBuckets } = await import('../src/decode-terms.js');
+  it('keeps a value that is itself a list apart from the list of a key read from several triples', () => {
     const buckets = new ValueBuckets();
     buckets.add('k', []);
     buckets.add('k', 'a');
