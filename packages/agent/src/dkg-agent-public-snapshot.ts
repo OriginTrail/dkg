@@ -1,3 +1,4 @@
+import { DKGAgentBase } from './dkg-agent-base.js';
 import { PublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
 import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -18,7 +19,7 @@ const encoder = new TextEncoder();
 const jobs = new WeakSet<DKGAgent>();
 import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
-export class PublicSnapshotMethods {
+export class PublicSnapshotMethods extends DKGAgentBase {
   startPublicGraphSnapshots(this: DKGAgent): void {
     if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
       return;
