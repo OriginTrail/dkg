@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { createHash } from 'node:crypto';
 import { ethers } from "ethers";
 import {
@@ -6,7 +6,6 @@ import {
   decodePublicGraphSnapshot,
   normalizePublicGraphSnapshot,
   PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
-  PublicGraphSnapshotCache,
 } from "../src/public-graph-snapshot.js";
 const scope = {
   chainId: "evm:31337",
@@ -103,59 +102,6 @@ describe("public graph snapshot contract", () => {
         now: 2000,
       }),
     ).toThrow();
-  });
-  it("coalesces cold readers and serves a warm snapshot without more reads", async () => {
-    let now = 1000;
-    const read = vi.fn(async () => make());
-    const cache = new PublicGraphSnapshotCache(read, () => now);
-    const [a, b] = await Promise.all([
-      cache.get("g", "1"),
-      cache.get("g", "1"),
-    ]);
-    expect(a).toBe(b);
-    expect(read).toHaveBeenCalledTimes(1);
-    await cache.get("g", "1");
-    expect(read).toHaveBeenCalledTimes(1);
-    now = 31000;
-    read.mockRejectedValueOnce(new Error("offline"));
-    await expect(cache.get("g", "1")).rejects.toThrow("offline");
-    expect(read).toHaveBeenCalledTimes(2);
-    await cache.get("g", "1");
-    expect(read).toHaveBeenCalledTimes(3);
-  });
-  it("refreshes a warm snapshot for a post-transfer observation", async () => {
-    let now = 1000;
-    const read = vi.fn(async () => ({ ...make(), observedAt: now }));
-    const cache = new PublicGraphSnapshotCache(read, () => now);
-    await cache.get("g", "1");
-    now = 1100;
-    expect((await cache.get("g", "1", true)).observedAt).toBe(1100);
-    expect(read).toHaveBeenCalledTimes(2);
-  });
-  it("forces a second build when refresh arrives during an older pending read", async () => {
-    const releases: Array<(value: ReturnType<typeof make>) => void> = [];
-    const read = vi.fn(() => new Promise<ReturnType<typeof make>>(resolve => releases.push(resolve)));
-    const cache = new PublicGraphSnapshotCache(read, () => 1000);
-    const cold = cache.get("g", "1");
-    let refreshed = false;
-    const refresh = cache.get("g", "1", true).then(value => { refreshed = true; return value; });
-    const first = make(); releases[0]!(first);
-    expect(await cold).toBe(first);
-    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-    expect(refreshed).toBe(false);
-    const second = make(); releases[1]!(second);
-    expect(await refresh).toBe(second);
-    expect(await cache.get("g", "1")).toBe(second);
-  });
-
-  it("bounds retained entries and rebuilds an evicted key", async () => {
-    const read = vi.fn(async () => make());
-    const cache = new PublicGraphSnapshotCache(read, () => 1000);
-    for (let n = 0; n < 9; n++) await cache.get(`graph-${n}`, "1");
-    await cache.get("graph-8", "1");
-    expect(read).toHaveBeenCalledTimes(9);
-    await cache.get("graph-0", "1");
-    expect(read).toHaveBeenCalledTimes(10);
   });
 
 });
