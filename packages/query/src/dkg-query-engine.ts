@@ -510,7 +510,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         ? await this.resolveScopedGraphVariableAllowList(
             effectiveContextGraphId,
             explicitAllowedGraphs,
-            { subGraphName, isSwmOnlyRoute, selection: options?.excludeWorkingMemoryPartitions ? 'published-content' : 'all-content' },
+            { subGraphName, isSwmOnlyRoute, selection: options?.excludeWorkingMemoryPartitions ? 'published-content' : 'all-content',
+              authorizedWorkingMemoryOwners: options?.authorizedWorkingMemoryOwners },
             reads,
           )
         : explicitAllowedGraphs;
@@ -1075,7 +1076,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async resolveScopedGraphVariableAllowList(
     contextGraphId: string,
     staticAllowedGraphs: string[],
-    opts: { subGraphName?: string; isSwmOnlyRoute: boolean; selection: ContentPartitionSelection },
+    opts: { subGraphName?: string; isSwmOnlyRoute: boolean; selection: ContentPartitionSelection; authorizedWorkingMemoryOwners?: readonly string[] },
     reads: QueryStoreReadContext,
   ): Promise<string[]> {
     if (opts.isSwmOnlyRoute) {
@@ -1088,7 +1089,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       reads,
       opts.subGraphName,
     );
-    for (const graph of selectContentPartitions(scopedContentGraphs, opts.selection)) {
+    for (const graph of selectContentPartitions(scopedContentGraphs, opts.selection, undefined, opts.authorizedWorkingMemoryOwners)) {
       allowed.add(graph);
     }
 
