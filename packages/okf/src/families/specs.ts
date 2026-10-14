@@ -15,7 +15,9 @@
  *
  * Every behaviour a family has is a field of its definition (lineage, the
  * trust tier, allowed values, a type-dependent requirement); no code checks
- * which definition object it was handed. The definitions are internal to the
+ * which definition object it was handed, but for `generated`, whose
+ * last-modified time the legacy `timestamp` shares: one codec
+ * (`generated.ts`) writes and reads both keys. The definitions are internal to the
  * package — the public API is the mapping, export, validation and trust
  * operations built on them.
  */
@@ -25,6 +27,7 @@ import {
   SCHEMA_IDENTIFIER,
   SCHEMA_NAME,
   OKF_GENERATED_BY,
+  OKF_GENERATED_AT,
   OKF_VERIFICATION,
   OKF_VERIFIED_BY,
   OKF_VERIFIED_AT,
@@ -143,7 +146,7 @@ export const GENERATED: MappingFamilySpec = {
   shapeNote: 'must be a `{ by, at }` mapping (§5.2); preserved verbatim',
   fields: [
     { key: 'by', predicate: OKF_GENERATED_BY, kind: 'actor', requiredNote: 'is required within `generated` (§5.2)', omitWhenBlank: true },
-    { key: 'at', predicate: SCHEMA_DATE_MODIFIED, kind: 'date' },
+    { key: 'at', predicate: OKF_GENERATED_AT, kind: 'date' },
   ],
 };
 

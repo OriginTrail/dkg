@@ -162,6 +162,8 @@ it; the CLI summary reports it against the current time.
   `schema:dateModified`, so a mixed v0.1 / v0.2 corpus is uniformly queryable
   by one last-modified predicate. `generated.at` wins when both are present;
   the leftover `timestamp` is preserved as the producer key `schema:timestamp`.
+  `generated.at` is also on its own predicate, `okf:generatedAt`, which names
+  its value there (see *Who owns a value on `schema:dateModified`*).
 - **Opt-in typed edges (`typeRelations` / `--relate`).** By default every edge is
   `schema:mentions` (zero interpretation, faithful to OKF §6.1's untyped links).
   A caller may supply deterministic `(fromType, toType) → predicate` rules to
@@ -263,25 +265,41 @@ it; the CLI summary reports it against the current time.
   value kept verbatim as one `rdf:JSON` literal keeps its internal order.
 - **Both `timestamp` and `generated` present.** Unusual (a migration leftover).
   One codec, `src/families/generated.ts`, owns this rule in both directions:
-  the mapper's `timestamp` triples, the summary's last-modified time, whether
-  `timestamp` is a producer key, and how export gives each value back. A
-  producer key named `dateModified` lands on that predicate too: the codec
-  claims one value for `generated.at` and one for `timestamp` and leaves every
-  other value to the producer key, so nothing is lost. Two typed dates beside
-  a `generated` value kept verbatim (a `timestamp` and an unquoted
-  `dateModified`) cannot be told apart: the graph round-trips exactly, but the
-  summary's last-modified time may come back as the other date.
-  `generated.at` → `schema:dateModified`; `timestamp` → `schema:timestamp` (the
-  node extractor's own slug for that key), preserved and exported verbatim.
-  Export writes both back even when `generated` has no `by`: since only a
-  `generated.at` makes `timestamp` a producer key, the lone `at` is then
-  written inside `generated`, not as the legacy `timestamp`, so neither date
+  the mapper's quads for each, the summary's last-modified time, whether
+  `timestamp` is a producer key, and how export gives each value back.
+  `generated.at` → `okf:generatedAt`, copied to `schema:dateModified`;
+  `timestamp` → `schema:timestamp` (the node extractor's own slug for that
+  key), preserved and exported verbatim. Export writes both back even when
+  `generated` has no `by`, the `at` inside `generated`, so neither date
   replaces the other. A blank `generated.at` is missing (§11) and does not
-  supersede the `timestamp`. A `generated.at` of the wrong shape (a mapping or
-  list, kept verbatim as `rdf:JSON`) is no time either: it shares
-  `schema:dateModified` with a legacy `timestamp` beside it, and export tells
-  the two apart by datatype, writing the structure back inside `generated` and
-  the date as `timestamp`.
+  supersede the `timestamp`, and neither does one of the wrong shape (a mapping
+  or list, kept verbatim as `rdf:JSON`): a legacy `timestamp` beside it keeps
+  its own date.
+- **Who owns a value on `schema:dateModified`.** `generated.at`, the legacy
+  `timestamp` and a producer key named `dateModified` (or `date_modified`,
+  `DateModified`) can all write it, so each value names its owner with a
+  marker holding the same term: `okf:generatedAt` for `generated.at`,
+  `okf:producerDateModified` for a producer value. The legacy `timestamp` is
+  written unmarked, as the v0.1 mapper wrote it, so it maps to the same triple
+  as before: a v0.1 bundle changes only where a producer key lands on
+  `schema:dateModified`, whose values gain their marker (a store the v0.1
+  mapper wrote lacks it until re-imported). The timestamp is named
+  (`okf:legacyTimestamp`) only where a producer value holds the same term,
+  whose marker would otherwise claim the one triple. Export reads ownership
+  from the markers, so `generated.at` beside a producer `dateModified:
+  urn:x` or `true` keeps both keys and both RDF kinds, a lone
+  `generated: { at }` comes back inside `generated`, and one value two owners
+  share (`generated.at` and `dateModified` on the same time) comes back under
+  both keys. A graph written before values were marked (a v0.1 import, or one
+  before `okf:generatedAt`) is read for compatibility, by what each owner can
+  write: a non-empty `rdf:JSON` array is a `generated.at` kept verbatim (no
+  producer key writes one); the legacy `timestamp` is never there beside a
+  `generated.at` that gives a time, and is otherwise the canonical last typed
+  date, else plain text; every other value is a producer value. There, two
+  unmarked dates (a v0.1 `timestamp` and an unquoted `dateModified`) cannot be
+  told apart: the graph round-trips exactly, but the summary's last-modified
+  time may come back as the other date. A graph the mapper writes now carries
+  the markers, so both round-trip exactly.
 - **An empty list is a value.** A producer key's or family extension's list
   is one triple per item, so an empty one would leave nothing: it is kept as
   one `[]` (`rdf:JSON`) and exported as `[]` (a parameter `default: []` is not

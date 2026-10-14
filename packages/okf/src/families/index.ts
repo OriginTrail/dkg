@@ -5,9 +5,10 @@
  * (`diagnostics.ts`).
  */
 
-import { genericQuads, type PathContext } from '../terms.js';
+import type { PathContext } from '../terms.js';
 import { prepareFamily, resolveReferences, type FamilyResult, type PreparedQuad } from './encode.js';
-import { FAMILY_BY_KEY } from './specs.js';
+import { generatedQuads, producerQuads } from './generated.js';
+import { FAMILY_BY_KEY, GENERATED } from './specs.js';
 
 export * from './specs.js';
 export { parseList, type ParsedEntry, type ParsedList, type SkippedEntry, type UsableEntry } from './parse.js';
@@ -18,11 +19,13 @@ export { familyDiagnostics, sourceIds, declaresSources } from './diagnostics.js'
 /**
  * The frontmatter value of the family `key` as quads on the concept `iri`,
  * path-valued fields left as references for `resolveReferences`; an unknown
- * key is a producer key.
+ * key is a producer key. `generated` and a producer key are written by the
+ * codec that owns `schema:dateModified` (`generated.ts`), which both can write.
  */
 export function prepareFamilyQuads(iri: string, conceptId: string, key: string, value: unknown): PreparedQuad[] {
   const spec = FAMILY_BY_KEY.get(key);
-  return spec ? prepareFamily(iri, conceptId, spec, value) : genericQuads(iri, key, value);
+  if (spec === GENERATED) return generatedQuads(iri, conceptId, value);
+  return spec ? prepareFamily(iri, conceptId, spec, value) : producerQuads(iri, key, value);
 }
 
 /** Map the frontmatter value of the family `key` onto the concept `iri`; an unknown key is a producer key. */

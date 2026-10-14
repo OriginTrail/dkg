@@ -1,7 +1,21 @@
 import { describe, it, expect } from 'vitest';
-import { exportBundle, importBundle, RDF_JSON, SCHEMA_DATE_MODIFIED, SCHEMA_NS } from '../src/index.js';
+import {
+  exportBundle,
+  exportInputFromQuads,
+  importBundle,
+  parseDocument,
+  OKF_GENERATED_AT,
+  OKF_LEGACY_TIMESTAMP,
+  OKF_NS,
+  OKF_PRODUCER_DATE_MODIFIED,
+  RDF_JSON,
+  SCHEMA_DATE_MODIFIED,
+  SCHEMA_NS,
+  XSD_BOOLEAN,
+} from '../src/index.js';
+import type { Quad } from '../src/index.js';
 import { generatedAtOf, lastModifiedOf, timestampIsProducerKey, timestampQuads } from '../src/families/generated.js';
-import { bundle, exportedFrontmatter, objs, DT, semantic } from './helpers/okf-v02-fixtures.js';
+import { IRI, bundle, exportedFrontmatter, objs, DT, semantic, shuffled } from './helpers/okf-v02-fixtures.js';
 
 // `generated.at` and the v0.1 `timestamp` share `schema:dateModified` (§13.1):
 // export has to give each value back to the key it came from.
@@ -16,8 +30,7 @@ const messages = (r: ReturnType<typeof importBundle>) => r.warnings.map((w) => w
 describe('a last-modified time and a legacy timestamp both survive a round trip', () => {
   // `generated.at` supersedes the v0.1 `timestamp` (§13.1), which is then kept
   // as a producer key: export must write both back, so neither date replaces
-  // the other, while a concept with only a last-modified time keeps the
-  // legacy `timestamp` key.
+  // the other, and each comes back under the key it was written with.
   for (const [name, at, timestamp] of [
     ['a quoted timestamp', '2026-06-30T00:00:00Z', "'2026-01-01T00:00:00Z'"],
     ['an unquoted timestamp', '2026-06-30T00:00:00Z', '2026-01-01T00:00:00Z'],
@@ -33,13 +46,19 @@ describe('a last-modified time and a legacy timestamp both survive a round trip'
     });
   }
 
-  it('still writes a lone last-modified time as the legacy timestamp', () => {
-    for (const yaml of ["timestamp: '2026-05-28T22:44:47+00:00'", 'generated: { at: 2026-06-30T00:00:00Z }']) {
+  it('writes a lone timestamp back as itself, and a lone generated.at inside generated', () => {
+    // The legacy `timestamp` is the unmarked value (a v0.1 import);
+    // `generated.at` is named by its own predicate, so it is written back where
+    // it was, with no actor invented for it.
+    for (const [yaml, expected] of [
+      ["timestamp: '2026-05-28T22:44:47+00:00'", { timestamp: '2026-05-28T22:44:47+00:00' }],
+      ['generated: { at: 2026-06-30T00:00:00Z }', { generated: { at: '2026-06-30T00:00:00Z' } }],
+      ["generated: { by: human:a }\ntimestamp: '2026-01-01T00:00:00Z'", { generated: { by: 'human:a' }, timestamp: '2026-01-01T00:00:00Z' }],
+    ] as const) {
       const { files, first, second } = roundTrip(yaml);
       expect(semantic(second.quads)).toBe(semantic(first.quads));
-      const fm = exportedFrontmatter(files);
-      expect('generated' in fm).toBe(false);
-      expect('timestamp' in fm).toBe(true);
+      const { type: _type, ...fm } = exportedFrontmatter(files);
+      expect(fm).toEqual(expected);
     }
   });
 
@@ -122,8 +141,8 @@ describe('a generated value kept verbatim stays itself beside a timestamp and a 
 
 describe('a producer key named dateModified keeps its value beside generated and the timestamp', () => {
   // schema:dateModified carries generated.at, the legacy timestamp, and a
-  // producer key named `dateModified`: the codec claims one value for each of
-  // the first two, and every other value comes back as the producer key's.
+  // producer key named `dateModified`: each value names its owner, so every
+  // value comes back under its own key.
   for (const yaml of [
     'generated: [a]\ndateModified: { note: producer }',
     'generated: { by: human:a, at: 2026-06-30T00:00:00Z }\ndateModified: 2026-01-01T00:00:00Z',
@@ -144,5 +163,121 @@ describe('a producer key named dateModified keeps its value beside generated and
       expect(objs(c.quads, SCHEMA_NS + 'generated')).toEqual([`"[\\"a\\"]"^^<${RDF_JSON}>`]);
       expect(objs(c.quads, SCHEMA_DATE_MODIFIED)).toEqual([`"{\\"note\\":\\"producer\\"}"^^<${RDF_JSON}>`]);
     }
+  });
+});
+
+describe('each value on schema:dateModified names its owner', () => {
+  const AT = DT('2026-06-30T00:00:00Z');
+  const concept = (r: ReturnType<typeof importBundle>) => r.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+
+  it('keeps generated.at and an IRI or boolean dateModified apart, kinds and summary unchanged', () => {
+    for (const [producer, term, value] of [
+      ['urn:producer:x', 'urn:producer:x', 'urn:producer:x'],
+      ['true', `"true"^^<${XSD_BOOLEAN}>`, true],
+    ] as const) {
+      const { files, first, second } = roundTrip(`generated: { by: human:a, at: 2026-06-30T00:00:00Z }\ndateModified: ${producer}`);
+      for (const r of [first, second]) {
+        const c = concept(r);
+        expect(objs(c.quads, SCHEMA_DATE_MODIFIED).sort()).toEqual([AT, term].sort());
+        expect(objs(c.quads, OKF_GENERATED_AT)).toEqual([AT]);
+        expect(objs(c.quads, OKF_PRODUCER_DATE_MODIFIED)).toEqual([term]);
+        expect(c.trust.generatedAt).toBe('2026-06-30T00:00:00Z');
+      }
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      const fm = exportedFrontmatter(files);
+      expect(fm.generated).toEqual({ by: 'human:a', at: '2026-06-30T00:00:00Z' });
+      expect(fm.dateModified).toBe(value);
+    }
+  });
+
+  it('writes the legacy timestamp unmarked, as v0.1 did, and names it only where a producer value holds its term', () => {
+    const okfOn = (r: ReturnType<typeof importBundle>) => r.quads.filter((q) => q.subject === IRI && q.predicate.startsWith(OKF_NS));
+    expect(okfOn(roundTrip("timestamp: '2026-01-01T00:00:00Z'").first)).toEqual([]);
+    expect(okfOn(roundTrip("timestamp: '2026-01-01T00:00:00Z'\ndateModified: 2026-02-02T00:00:00Z").first).map((q) => q.predicate)).toEqual([OKF_PRODUCER_DATE_MODIFIED]);
+    const { first } = roundTrip("timestamp: '2026-01-01T00:00:00Z'\ndateModified: 2026-01-01T00:00:00Z");
+    const stamp = DT('2026-01-01T00:00:00Z');
+    expect(objs(first.quads, SCHEMA_DATE_MODIFIED)).toEqual([stamp]);
+    expect(objs(first.quads, OKF_LEGACY_TIMESTAMP)).toEqual([stamp]);
+    expect(objs(first.quads, OKF_PRODUCER_DATE_MODIFIED)).toEqual([stamp]);
+  });
+
+  // Each owner's value comes back under its own key, the summary unchanged,
+  // whatever order the rows come in: generated.at, the timestamp and producer
+  // values on one term, structured values included.
+  for (const yaml of [
+    'generated: { by: human:a, at: 2026-06-30T00:00:00Z }\ndateModified: 2026-06-30T00:00:00Z',
+    'generated: { by: human:a, at: soon }\ndateModified: soon',
+    'generated: { by: human:a, at: { when: 2026-06-30T00:00:00Z } }\ndateModified: { when: 2026-06-30T00:00:00Z }',
+    'generated: { by: human:a, at: [] }\ndateModified: []',
+    'generated: { at: [2026-06-30T00:00:00Z] }\ntimestamp: 2026-01-01T00:00:00Z\ndateModified: 2026-01-01T00:00:00Z',
+    'timestamp: 2026-01-01T00:00:00Z\ndateModified: 2026-01-01T00:00:00Z',
+    'timestamp: yesterday\ndateModified: yesterday',
+    'timestamp: 2026-01-01T00:00:00Z\ndateModified: [2026-01-01T00:00:00Z, urn:x]',
+    'generated: [a]\ntimestamp: 2026-01-01T00:00:00Z\ndateModified: 2026-02-02',
+    'dateModified: 2026-01-01T00:00:00Z',
+  ]) {
+    it(`gives every value back to its key: ${yaml.replaceAll('\n', ' + ')}`, () => {
+      const { files, first, second } = roundTrip(yaml);
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      expect(concept(second).trust).toEqual(concept(first).trust);
+      const fm = exportedFrontmatter(files);
+      for (const key of yaml.split('\n').map((line) => line.split(':')[0])) expect(key in fm, key).toBe(true);
+      const direct = exportBundle(first);
+      for (const seed of [7, 42, 2026]) expect(exportBundle(exportInputFromQuads(shuffled(first.quads, seed)))).toEqual(direct);
+    });
+  }
+});
+
+describe('a graph written before values were marked reads back for compatibility', () => {
+  // A v0.1 import, or one written before `okf:generatedAt`, leaves the values
+  // on schema:dateModified unmarked: what each owner can write decides whose
+  // each value is.
+  const DATE_MARKERS: readonly string[] = [OKF_GENERATED_AT, OKF_PRODUCER_DATE_MODIFIED, OKF_LEGACY_TIMESTAMP];
+  const unmarked = (quads: readonly Quad[]) => quads.filter((q) => !DATE_MARKERS.includes(q.predicate));
+  const graphOf = (yaml: string) => unmarked(importBundle(bundle(`type: Metric\n${yaml}`)).quads);
+  const exportOf = (quads: readonly Quad[]) => exportBundle(exportInputFromQuads(quads));
+  const frontmatterOf = (quads: readonly Quad[]) => {
+    const file = exportOf(quads).find((f) => f.path === 'metrics/revenue.md')!;
+    return parseDocument(file.path, file.content).frontmatter;
+  };
+
+  it('reads a time as the legacy timestamp and a value of any other kind as a producer value', () => {
+    expect(frontmatterOf(graphOf("timestamp: '2026-01-01T00:00:00Z'\ndateModified: urn:producer:x"))).toMatchObject({ timestamp: '2026-01-01T00:00:00Z', dateModified: 'urn:producer:x' });
+    expect(frontmatterOf(graphOf("timestamp: '2026-01-01T00:00:00Z'\ndateModified: hello"))).toMatchObject({ timestamp: '2026-01-01T00:00:00Z', dateModified: 'hello' });
+  });
+
+  it('reads text a store returns as xsd:string as the timestamp, the same literal as plain text', () => {
+    const plain = '"yesterday"';
+    const graph = graphOf('timestamp: yesterday').map((q) =>
+      q.predicate === SCHEMA_DATE_MODIFIED && q.object === plain ? { ...q, object: '"yesterday"^^<http://www.w3.org/2001/XMLSchema#string>' } : q,
+    );
+    expect(objs(graph, SCHEMA_DATE_MODIFIED)).not.toContain(plain);
+    expect(frontmatterOf(graph)).toMatchObject({ timestamp: 'yesterday' });
+    expect('dateModified' in frontmatterOf(graph)).toBe(false);
+  });
+
+  it('reads an unmarked generated.at as the timestamp: the same triples, the same summary', () => {
+    const graph = graphOf('generated: { by: human:a, at: 2026-06-30T00:00:00Z }');
+    const again = importBundle(exportOf(graph));
+    expect(frontmatterOf(graph)).toMatchObject({ generated: { by: 'human:a' }, timestamp: '2026-06-30T00:00:00Z' });
+    expect(semantic(again.quads)).toBe(semantic(graph));
+    expect(again.concepts.find((c) => c.conceptId === 'metrics/revenue')!.trust.generatedAt).toBe('2026-06-30T00:00:00Z');
+  });
+
+  it('reads a non-empty JSON array as a generated.at kept verbatim, which no producer key writes', () => {
+    const graph = graphOf("generated: { by: human:a, at: [2026-06-30T00:00:00Z] }\ntimestamp: '2026-01-01T00:00:00Z'");
+    const fm = frontmatterOf(graph);
+    expect(fm).toMatchObject({ generated: { by: 'human:a' }, timestamp: '2026-01-01T00:00:00Z' });
+    expect(Array.isArray((fm.generated as Record<string, unknown>).at)).toBe(true);
+    expect(semantic(unmarked(importBundle(exportOf(graph)).quads))).toBe(semantic(graph));
+  });
+
+  it('never reads a timestamp beside a generated.at that gives a time', () => {
+    const marked = importBundle(bundle('type: Metric\ngenerated: { by: human:a, at: 2026-06-30T00:00:00Z }')).quads;
+    const graph = [...marked, { subject: IRI, predicate: SCHEMA_DATE_MODIFIED, object: DT('2026-01-01T00:00:00Z') }];
+    const fm = frontmatterOf(graph);
+    expect(fm.generated).toEqual({ by: 'human:a', at: '2026-06-30T00:00:00Z' });
+    expect('timestamp' in fm).toBe(false);
+    expect(objs(importBundle(exportOf(graph)).quads, OKF_PRODUCER_DATE_MODIFIED)).toEqual([DT('2026-01-01T00:00:00Z')]);
   });
 });

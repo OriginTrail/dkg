@@ -74,7 +74,7 @@ verified one, and is never rejected — SPEC §11).
 |---|---|---|
 | `type` | `rdf:type schema:<PascalCase>` | `Attested Computation` ↔ `schema:AttestedComputation` (exact spelling restored on export) |
 | `title`, `description`, `tags`, `resource` | `schema:name`, `schema:description`, `schema:keywords`, `schema:url` | unchanged from v0.1 |
-| `generated.at` / legacy `timestamp` (§5.2, §13.1) | `schema:dateModified` (xsd:dateTime) | one predicate for both versions; `generated.at` wins, a leftover `timestamp` is kept as `schema:timestamp` |
+| `generated.at` / legacy `timestamp` (§5.2, §13.1) | `schema:dateModified` (xsd:dateTime); `generated.at` also on `okf:generatedAt` | one predicate to query for both versions; `generated.at` wins, a leftover `timestamp` is kept as `schema:timestamp` (see *Last-modified times*) |
 | `generated.by` (§5.2, §7) | `okf:generatedBy` (actor literal) | extra keys inside `generated` → `okf:generated.<key>` (see *Family extensions*) |
 | `verified[]` (§5.2) | `okf:verification → okf:Verification` node: `okf:verifiedBy`, `okf:verifiedAt` | a bare `{ by, at }` is a one-element list; entry order is in the node IRI |
 | derived tier (§5.3) | `okf:trustTier` = `machine-confirmed` \| `human-reviewed` | emitted only when a verifier exists; absent ⇒ `unverified` |
@@ -108,6 +108,21 @@ predicate is always IRI-safe (`okf:generated.sample%20rate`,
 camelCase convention for top-level producer keys, which folds `timeout_s` to
 `timeoutS`. `okfExtensionPredicate` / `okfExtensionKey` are the two directions.
 
+**Last-modified times.** `generated.at` and the legacy `timestamp` both put
+the concept's last-modified time on `schema:dateModified`, so one predicate
+answers it across v0.1 and v0.2, and a producer key named `dateModified` (or
+`date_modified`) lands there too. Each value names its owner with a marker
+holding the same term: `generated.at` its own predicate, `okf:generatedAt`
+(beside `okf:generatedBy`), and a producer value `okf:producerDateModified`.
+The legacy `timestamp` is written unmarked, as the v0.1 mapper writes it, so it
+maps to the same triple as before (a v0.1 bundle changes only where a producer
+key lands on `schema:dateModified`, whose values gain their marker); it is
+named (`okf:legacyTimestamp`) only where a producer value holds the same term.
+Export reads the markers, so every value comes back under its own key with its
+own RDF kind, and a graph written before them is read for compatibility (an
+unmarked time is the legacy `timestamp`, any other unmarked value a producer
+value).
+
 **Each triple once.** An RDF store holds a set, so the mapper emits every
 triple once: two sources naming the same resource yield two `okf:Source` nodes
 but one `prov:wasDerivedFrom` edge, and `tags: [a, a]` yields one
@@ -123,11 +138,11 @@ ontology, so it never collides with the node's own `dkg:status` /
 `dkg okf export` is graph-faithful, not byte-faithful. The v0.2 families are
 rebuilt in their original order; derived triples (`okf:trustTier`,
 `prov:wasDerivedFrom`) are not written back and are re-derived on the next
-import. A concept that only carries a last-modified time (a v0.1 import) is
-written with the legacy `timestamp` key — `generated` requires a `by` actor and
-the exporter never invents provenance. When a legacy `timestamp` was kept
-beside a `generated.at`, both are written back, the `at` inside `generated`,
-so neither date replaces the other. A graph keeps no order, so export
+import. A last-modified time comes back under the key it was written with: a
+legacy `timestamp` (a v0.1 import) as `timestamp`, and a `generated.at` inside
+`generated`, with no `by` invented for it (the exporter never invents
+provenance). When a legacy `timestamp` was kept beside a `generated.at`, both
+are written back, so neither date replaces the other. A graph keeps no order, so export
 depends only on which triples it holds: entry order is restored from the node
 IRIs (a skipped entry takes no number, so they are the same after a round
 trip), and everything else is written in a canonical order, so two stores holding

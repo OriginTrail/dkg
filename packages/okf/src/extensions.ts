@@ -56,7 +56,10 @@ export function okfExtensionKey(familyKey: string, predicate: string): string | 
  * producer key of the same camelCase (`Sources`) lands on that `schema:`
  * predicate too; the marker says which value is the family's, so export
  * reads it back without inferring ownership from the value's shape. No
- * family is named `keptVerbatim`, so it never reads as an extension.
+ * family is named `keptVerbatim`, so it never reads as an extension. The
+ * values on `schema:dateModified` name their owners the same way
+ * (`OKF_GENERATED_AT`, `OKF_PRODUCER_DATE_MODIFIED`, `OKF_LEGACY_TIMESTAMP`;
+ * `families/generated.ts`), none of them under a family's `okf:<familyKey>.`.
  */
 export function keptVerbatimPredicate(familyKey: string): string {
   return `${OKF_NS}keptVerbatim.${encodeURIComponent(familyKey)}`;

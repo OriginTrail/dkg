@@ -73,6 +73,21 @@ export const DKG_HAS_SECTION = 'http://dkg.io/ontology/hasSection';
 export const OKF_NS = 'http://dkg.io/ontology/okf/';
 /** `generated.by` — actor literal (§5.2, §7). */
 export const OKF_GENERATED_BY = OKF_NS + 'generatedBy';
+/**
+ * `generated.at` (§5.2). Its value is copied to `schema:dateModified`, the
+ * last-modified time a v0.1 `timestamp` gives too, which is the one to query;
+ * the codec writes the copy (`families/generated.ts`).
+ */
+export const OKF_GENERATED_AT = OKF_NS + 'generatedAt';
+/**
+ * Ownership markers on `schema:dateModified`, each holding the same term as
+ * the value it names: a producer key's value (`dateModified`,
+ * `date_modified`), and the legacy `timestamp`, which is written unmarked, as
+ * the v0.1 mapper wrote it, and named only where a producer value holds the
+ * same term.
+ */
+export const OKF_PRODUCER_DATE_MODIFIED = OKF_NS + 'producerDateModified';
+export const OKF_LEGACY_TIMESTAMP = OKF_NS + 'legacyTimestamp';
 /** Concept → one `okf:Verification` node per `verified[]` event (§5.2). */
 export const OKF_VERIFICATION = OKF_NS + 'verification';
 export const OKF_VERIFIED_BY = OKF_NS + 'verifiedBy';

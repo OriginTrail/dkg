@@ -49,7 +49,7 @@ The importer targets OKF v0.2 and reads v0.1 bundles under the spec's fallbacks 
 | Question | OKF field | In the graph |
 |---|---|---|
 | Provenance | `sources[]` | one `okf:Source` node per entry (`okf:resource`, `okf:author`, `okf:usageCount`, `schema:dateModified`) plus a `prov:wasDerivedFrom` edge to every source that has an IRI |
-| Trust | `generated`, `verified[]` | `okf:generatedBy`, `schema:dateModified`; one `okf:Verification` node per event (`okf:verifiedBy`, `okf:verifiedAt`); derived `okf:trustTier` |
+| Trust | `generated`, `verified[]` | `okf:generatedBy`, `okf:generatedAt` (copied to `schema:dateModified`, the last-modified time to query); one `okf:Verification` node per event (`okf:verifiedBy`, `okf:verifiedAt`); derived `okf:trustTier` |
 | Freshness | `stale_after` | `okf:staleAfter` (consumers compare against now) |
 | Lifecycle | `status` | `okf:status` (absent ⇒ stable) |
 | Attestation | `runtime`, `parameters`, `computation`, `executor`, `attester` | `okf:runtime`, `okf:Parameter` nodes, `okf:computation`, `okf:executorResource` / `okf:executorReceipt`, `okf:attesterResource` |
@@ -104,7 +104,7 @@ dkg okf export okf-demo ./out --sub-graph-name science
 
 Export reads a context graph view and writes an OKF v0.2 bundle to the output directory (the root `index.md` declares `okf_version: "0.2"`). Use export views to choose Working Memory, Shared Working Memory, or Verifiable Memory.
 
-Export is graph-faithful, not byte-faithful: bodies are regenerated structurally, the v0.2 families come back in their original order, set-valued lists (`tags`, links, citations) and producer keys come back in a canonical order so the output depends only on which triples the graph holds, derived triples (`okf:trustTier`, `prov:wasDerivedFrom`) are re-derived on the next import rather than written, and a concept that only carries a last-modified time (a v0.1 import) is written with the legacy `timestamp` key because `generated` requires a `by` actor the exporter will not invent.
+Export is graph-faithful, not byte-faithful: bodies are regenerated structurally, the v0.2 families come back in their original order, set-valued lists (`tags`, links, citations) and producer keys come back in a canonical order so the output depends only on which triples the graph holds, derived triples (`okf:trustTier`, `prov:wasDerivedFrom`) are re-derived on the next import rather than written, and a last-modified time comes back under the key it was written with (a v0.1 import's legacy `timestamp` as `timestamp`, a `generated.at` inside `generated`, with no `by` invented for it), since each value on `schema:dateModified` names its owner.
 
 ## Verify
 

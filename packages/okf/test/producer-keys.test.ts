@@ -6,7 +6,10 @@ import {
   keptVerbatimPredicate,
   okfExtensionKey,
   parseDocument,
+  OKF_GENERATED_AT,
+  OKF_LEGACY_TIMESTAMP,
   OKF_NS,
+  OKF_PRODUCER_DATE_MODIFIED,
   mapFrontmatter,
   OKF_RESOURCE,
   OKF_SOURCE,
@@ -20,7 +23,7 @@ import {
 } from '../src/index.js';
 import { readsAsProducerKey } from '../src/mapping.js';
 import { genericQuads } from '../src/terms.js';
-import { IRI, bundle, exportedFrontmatter, objs, semantic } from './helpers/okf-v02-fixtures.js';
+import { IRI, bundle, exportedFrontmatter, objs, semantic, shuffled } from './helpers/okf-v02-fixtures.js';
 import type { Quad } from '../src/index.js';
 
 // A producer key is kept as `schema:<camelKey>`, so `Sources` lands on the
@@ -140,9 +143,11 @@ describe('a family value kept verbatim is marked as the family\'s', () => {
     expect(objs(first.quads, SCHEMA_NS + 'generated').sort()).toEqual(['"x"', kept].sort());
   });
 
-  it('never reads the marker as a family extension', () => {
+  it('never reads a marker as a family extension', () => {
+    // `okf:<familyKey>.<key>` is an extension, so no marker may start `okf:generated.`.
+    const markers = [...[...V02_FAMILY_KEYS].map(marker), OKF_GENERATED_AT, OKF_PRODUCER_DATE_MODIFIED, OKF_LEGACY_TIMESTAMP];
     for (const family of V02_FAMILY_KEYS) {
-      for (const other of V02_FAMILY_KEYS) expect(okfExtensionKey(family, marker(other))).toBeNull();
+      for (const m of markers) expect(okfExtensionKey(family, m), m).toBeNull();
     }
     expect(V02_FAMILY_KEYS).not.toContain('keptVerbatim');
   });
@@ -175,16 +180,6 @@ describe('a family value kept verbatim is marked as the family\'s', () => {
   });
 
   it('exports every collision the same from rows in any order', () => {
-    const shuffled = <T,>(items: T[], seed: number): T[] => {
-      const out = [...items];
-      let x = seed;
-      for (let i = out.length - 1; i > 0; i--) {
-        x = (x * 1103515245 + 12345) % 2147483648;
-        const j = x % (i + 1);
-        [out[i], out[j]] = [out[j], out[i]];
-      }
-      return out;
-    };
     for (const yaml of [
       'sources: [{ resource: https://example.org/source }]\nSources: producer-value',
       'generated: [a]\nGenerated: x',

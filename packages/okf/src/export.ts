@@ -14,10 +14,11 @@
  *
  * This module rebuilds the base fields, body and indexes; the v0.2 families
  * are rebuilt by `families/decode.ts` from the same definitions the importer
- * encodes with, in the entry order baked into the node IRIs. A concept that
- * only carries a last-modified time (a v0.1 import) is written with the legacy
- * `timestamp` key, since `generated` requires a `by` actor (§5.2) and the
- * exporter never invents one.
+ * encodes with, in the entry order baked into the node IRIs. A last-modified
+ * time comes back under the key it was written with (a v0.1 import's legacy
+ * `timestamp`, a `generated.at`): each value on `schema:dateModified` names
+ * its owner (`families/generated.ts`), so no `generated` actor (§5.2) is ever
+ * invented for a time.
  *
  * Pure: `exportBundle` consumes an `ExportInput` and returns `BundleFile[]`.
  * `exportInputFromQuads` builds that input from a graph's quads — the
@@ -73,8 +74,9 @@ function typeValue(object: string): string {
 
 /**
  * Base fields read on the concept subject. The family decoder reads its own
- * quads (`schema:dateModified` is `generated.at`); any other `schema:`
- * predicate is a producer key.
+ * quads (the `generated.at` and legacy `timestamp` values on
+ * `schema:dateModified` among them); any other `schema:` predicate is a
+ * producer key.
  */
 const CONCEPT_PREDICATES = new Set([
   RDF_TYPE,

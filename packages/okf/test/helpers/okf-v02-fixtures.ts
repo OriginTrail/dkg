@@ -54,3 +54,15 @@ export function semantic(quads: Quad[]): string {
   const sectionNode = SECTION_GENID_INFIX + GENID_TAGS.section;
   return quadsToNQuads(quads.filter((q) => !q.subject.includes(sectionNode) && q.predicate !== DKG_HAS_SECTION));
 }
+
+/** The same items in a seeded pseudo-random order: a store may return a graph's rows in any order. */
+export function shuffled<T>(items: readonly T[], seed: number): T[] {
+  const out = [...items];
+  let x = seed;
+  for (let i = out.length - 1; i > 0; i--) {
+    x = (x * 1103515245 + 12345) % 2147483648;
+    const j = x % (i + 1);
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}

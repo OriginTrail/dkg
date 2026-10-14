@@ -3,7 +3,7 @@
  * fields (`export.ts`) and the family decoder (`families/decode.ts`).
  */
 
-import { parseRdfLiteralTerm, type RdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { parseRdfLiteralTerm, XSD_STRING_DATATYPE, type RdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { RDF_JSON, XSD_BOOLEAN, XSD_DATE, XSD_DATE_TIME, XSD_DECIMAL, XSD_INTEGER } from './constants.js';
 import { yamlTimestamp } from './document.js';
 import { dict } from './utils.js';
@@ -46,6 +46,12 @@ function parseLiteral(term: string): RdfLiteralTerm | null {
 export function literalDatatype(term: string): string | null {
   const literal = parseLiteral(term);
   return literal?.kind === 'typed' ? literal.datatype : null;
+}
+
+/** Whether a term is a string literal: plain, or typed `xsd:string`, the same RDF 1.1 literal. */
+export function isStringLiteral(term: string): boolean {
+  const literal = parseLiteral(term);
+  return literal?.kind === 'plain' || (literal?.kind === 'typed' && literal.datatype === XSD_STRING_DATATYPE);
 }
 
 /** Lexical value of a literal term, or `null` for an IRI / blank node or a literal that does not parse. */

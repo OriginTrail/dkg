@@ -670,11 +670,18 @@ describe('the family decoder owns what the encoder keeps for a family', () => {
     expect(producer.some((q) => q.predicate === usageWindow && decodedProducer.consumed.has(q))).toBe(false);
   });
 
-  it('reads a lone generated.at back as the legacy timestamp and consumes it', () => {
+  it('reads a lone generated.at back by its own predicate and consumes its dateModified copy', () => {
     const quads = conceptQuads('generated: { at: 2026-06-30T00:00:00Z }');
     const decoded = decodeFamilies(quads, () => [], decodeCtx);
-    expect(decoded.frontmatter).toEqual({ timestamp: '2026-06-30T00:00:00Z' });
+    expect(decoded.frontmatter).toEqual({ generated: { at: '2026-06-30T00:00:00Z' } });
     expect(quads.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED).every((q) => decoded.consumed.has(q))).toBe(true);
+  });
+
+  it('leaves the dateModified copy a producer value also holds to the exporter', () => {
+    const quads = conceptQuads('generated: { at: 2026-06-30T00:00:00Z }\ndateModified: 2026-06-30T00:00:00Z');
+    const decoded = decodeFamilies(quads, () => [], decodeCtx);
+    expect(decoded.frontmatter).toEqual({ generated: { at: '2026-06-30T00:00:00Z' } });
+    expect(quads.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED).some((q) => decoded.consumed.has(q))).toBe(false);
   });
 });
 
