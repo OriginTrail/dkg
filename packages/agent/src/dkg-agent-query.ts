@@ -630,8 +630,6 @@ export class QueryMethods extends DKGAgentBase {
     // Ordinary dashboard scans may read only the authenticated caller's drafts.
     // Explicit exclusion (the bounded product route) grants no draft owners.
     const partitionOwner = callerAgentAddressStr ?? this.defaultAgentAddress ?? this.peerId;
-    const authorizedWorkingMemoryOwners = opts.excludeWorkingMemoryPartitions === true || !partitionOwner
-      ? undefined : [partitionOwner, ...(resolveWmIdentity(partitionOwner).aliases ?? [])];
 
     const execute = () => {
       opts.signal?.throwIfAborted();
@@ -640,8 +638,8 @@ export class QueryMethods extends DKGAgentBase {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
-      excludeWorkingMemoryPartitions: opts.excludeWorkingMemoryPartitions ?? true,
-      authorizedWorkingMemoryOwners,
+      draftAccess: opts.excludeWorkingMemoryPartitions === true || !partitionOwner ? { kind: 'none' }
+        : { kind: 'owners', owners: [partitionOwner, ...(resolveWmIdentity(partitionOwner).aliases ?? [])] },
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,
