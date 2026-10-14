@@ -1,3 +1,4 @@
+import type { QueryReadAdmissionCapability } from '@origintrail-official/dkg-storage';
 import { resolveDraftAccessPolicy, type DraftAccessPolicy } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
 import type { PreparedGraphScope } from './sparql-graph-scope.js';
@@ -10,7 +11,8 @@ export type QueryReadPlan = { kind: 'unscoped' } | {
   kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
   execution: ScopedRoute['execution']; draftAccess: DraftAccessPolicy;
   discovery: {
-    catalog: 'none' | 'shared' | 'admission-owned';
+    catalog: { kind: 'none' | 'shared' }
+      | { kind: 'admission-owned'; owner: QueryReadAdmissionCapability };
     contentPrefixes: readonly { root: string; prefix: string }[];
     privatePartitions: boolean;
   };
@@ -18,7 +20,7 @@ export type QueryReadPlan = { kind: 'unscoped' } | {
 
 /** Resolve route policy once; execution and admission consume the same decision. */
 export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOptions | undefined,
-  supportsCompleteAdmission: boolean): QueryReadPlan {
+  completeAdmissionOwner: QueryReadAdmissionCapability | null): QueryReadPlan {
   if (options?.view) {
     if (!options.contextGraphId) throw new Error(`view '${options.view}' requires a contextGraphId to scope the query`);
     return { kind: 'view', options: { ...options, contextGraphId: options.contextGraphId, view: options.view } };
@@ -40,8 +42,9 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     draftAccess: resolveDraftAccessPolicy(options),
     discovery: { contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,
       // Other routes can depend on a decorator refresh queued behind an owned slot.
-      catalog: !expandGraphVariables ? 'none'
-        : supportsCompleteAdmission && !options.includePrivate ? 'admission-owned' : 'shared',
+      catalog: !expandGraphVariables ? { kind: 'none' }
+        : completeAdmissionOwner && !options.includePrivate
+          ? { kind: 'admission-owned', owner: completeAdmissionOwner } : { kind: 'shared' },
     },
   };
 }
