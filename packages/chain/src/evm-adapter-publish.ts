@@ -9,9 +9,9 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
+import { EVMChainAdapterBase, decodeConvictionCostCovered, type EvmSigner } from './evm-adapter-base.js';
 import { numericChainIdOf } from './evm-adapter-storage-reads.js';
-import { ethers, Wallet, Contract } from 'ethers';
+import { ethers, Contract } from 'ethers';
 import type {
   BatchMintParams,
   BatchMintResult,
@@ -40,7 +40,7 @@ import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & {
-  signer: Wallet;
+  signer: EvmSigner;
   address: string;
   pcaPricing: PublisherPcaPricingEvidence;
 };
@@ -115,7 +115,7 @@ export class PublishMethods extends EVMChainAdapterBase {
   }
 
   private async _publisherCandidatePlan(
-    signer: Wallet,
+    signer: EvmSigner,
     request: PublisherPublishPlanRequest,
     quote: (epochs: number, purpose: 'pca' | 'direct') => Promise<bigint>,
   ): Promise<PublisherCandidatePlan> {
@@ -227,7 +227,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       }
       return this._selectFundedPublisherPlanOrThrow(plans, request, quote);
     });
-    // Do not expose the internal Wallet carried only for cursor advancement.
+    // Do not expose the internal signer carried only for cursor advancement.
     return {
       publisherAddress: selectedPlan.publisherAddress,
       publishEpochs: selectedPlan.publishEpochs,
@@ -1244,7 +1244,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       throw new Error('KnowledgeAssetsLifecycle contract not deployed — cannot update via V10 path.');
     }
 
-    let signer: Wallet | undefined;
+    let signer: EvmSigner | undefined;
 
     // Look up the on-chain publisher to select the correct signer.
     const kas = this.contracts.knowledgeAssetStorage;
@@ -1435,7 +1435,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           false,
           ctx.sendContractTransaction,
         );
-        return this.populateAndSignV10WithAllowanceRecovery(
+        return this.signPreparedTransaction(await this.prepareV10WithAllowanceRecovery(
           signer,
           ka as Contract,
           'update',
@@ -1444,7 +1444,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           newTokenAmount,
           'approve V10 update TRAC (forced re-approve, #888)',
           ctx.sendContractTransaction,
-        );
+        ));
       },
       (preBroadcastTxHash) => {
         throw new Error(

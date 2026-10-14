@@ -6,7 +6,7 @@
  * #1336 extracted the per-endpoint read loop out of `EVMChainAdapterBase` (the
  * old protected `readWithFailover` / `contractReadWithFailover` seams) into the
  * pure `RpcFailoverClient`. These tests now construct that module DIRECTLY with
- * hand-made provider doubles + a never-called `signPopulated` stub and call
+ * hand-made provider doubles + a never-called signer-side preparation stub and call
  * `.read` / `.readContract` — no more reaching through `as any` protected seams
  * (the testability win the issue asks for). They drive the loop with bare-object
  * provider doubles (the same style the write loops use): cheap, fast, no HTTP
@@ -28,7 +28,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { RpcFailoverClient, type RpcFailoverClientOptions, type SignPopulatedFn } from '../src/rpc-failover-client.js';
+import { RpcFailoverClient, type RpcFailoverClientOptions, type PrepareForSigningFn } from '../src/rpc-failover-client.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { getRpcFailoverStats, _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
@@ -68,24 +68,23 @@ function freshAdapter(cfg: EVMAdapterConfig): EVMChainAdapter {
 const retryable429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
 const callExceptionErr = () => { const e = new Error('execution reverted'); (e as any).code = 'CALL_EXCEPTION'; return e; };
 
-// A `signPopulated` stub the read family never reaches — wired so that if a read
-// path ever tried to sign (it must not), the test fails loudly.
-const NEVER_SIGN: SignPopulatedFn = async () => {
-  throw new Error('signPopulated must never be reached by a read-family test');
+// A signer-side preparation stub the read family never reaches — wired so that if a
+// read path ever tried to prepare a transaction (it must not), the test fails loudly.
+const NEVER_PREPARE: PrepareForSigningFn = async () => {
+  throw new Error('transaction preparation must never be reached by a read-family test');
 };
 
 /**
  * Construct the module under test directly (PLAN §0 D1): LIVE thunks over the
- * bare provider doubles + their host URLs, and the never-signing callback. This
+ * bare provider doubles + their host URLs, and the never-called preparation hook. This
  * is the exact shape the adapter constructs it with, minus the adapter — so a
  * read failover regression is caught without a god-object back-reference.
  */
-function makeClient(providers: unknown[], rpcUrls: string[], signPopulated: SignPopulatedFn = NEVER_SIGN, options?: RpcFailoverClientOptions): RpcFailoverClient {
+function makeClient(providers: unknown[], rpcUrls: string[], prepareForSigning: PrepareForSigningFn = NEVER_PREPARE, options?: RpcFailoverClientOptions): RpcFailoverClient {
   return new RpcFailoverClient(
     () => providers.map((p, i) => ({ provider: p as any, rpcUrl: rpcUrls[i] })),
-    signPopulated,
     () => 'evm:31337',
-    options,
+    { ...options, prepareForSigning },
   );
 }
 
@@ -106,7 +105,7 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
   it('exhausts ALL endpoints → ChainRpcTransportError RPC_ENDPOINTS_EXHAUSTED, one attempt each', async () => {
     const primary = { read: recorder(async () => { throw retryable429(); }) };
     const backup = { read: recorder(async () => { throw retryable429(); }) };
-    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_PREPARE, {
       readThrottleRetries: 0,
     });
 
@@ -129,7 +128,7 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
       if (round === 1) throw retryable429();
       return 'recovered';
     }) };
-    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_PREPARE, {
       readThrottleRetries: 2,
       readThrottleBackoffMs: 1,
     });
@@ -151,7 +150,7 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
       if (backupAttempt === 1) throw new Error('Too Many Requests');
       return 'recovered-from-message-only-throttle';
     }) };
-    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_PREPARE, {
       readThrottleRetries: 2,
       readThrottleBackoffMs: 1,
     });
@@ -167,7 +166,7 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
   it('records one terminal exhaustion after all throttle retries are spent', async () => {
     const primary = { read: recorder(async () => { throw retryable429(); }) };
     const backup = { read: recorder(async () => { throw retryable429(); }) };
-    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_PREPARE, {
       readThrottleRetries: 2,
       readThrottleBackoffMs: 1,
     });
@@ -208,7 +207,7 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
   it('does not retry a mixed timeout plus 429 endpoint exhaustion', async () => {
     const primary = { read: recorder(async () => { const error: any = new Error('timed out'); error.code = 'TIMEOUT'; throw error; }) };
     const backup = { read: recorder(async () => { throw retryable429(); }) };
-    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example'], NEVER_PREPARE, {
       readThrottleRetries: 2,
       readThrottleBackoffMs: 1,
     });
@@ -480,7 +479,7 @@ describe('RpcFailoverClient.readContract — per-provider rebinding + view class
       return 'RECOVERED-CONTRACT-RESULT';
     });
     const contract = perProviderContract((p) => (p === p0 ? { view: primaryView } : { view: backupView }));
-    const client = makeClient([p0, p1], ['https://primary.example', 'https://backup.example'], NEVER_SIGN, {
+    const client = makeClient([p0, p1], ['https://primary.example', 'https://backup.example'], NEVER_PREPARE, {
       readThrottleRetries: 2,
       readThrottleBackoffMs: 1,
     });
