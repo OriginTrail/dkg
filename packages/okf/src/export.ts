@@ -189,10 +189,12 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         break;
       }
       case SCHEMA_IS_PART_OF:
-        // `emitFolderHierarchy` points a nested concept at its own parent
-        // directory; that edge is implied by the path and re-derived by the
-        // option. Any other value is a producer key (`isPartOf: …`) and is kept.
-        if (q.object !== parentDirectoryIri(c.conceptId, ctx.iriBase)) {
+        // An export told the graph was imported with `emitFolderHierarchy`
+        // omits the edge to the concept's own parent directory, which the path
+        // implies and the option re-derives. Any other value, that same edge
+        // included when the option is off, is a producer key (`isPartOf: …`)
+        // and is kept: matching the parent's IRI alone does not make it inferred.
+        if (!ctx.folderHierarchy || q.object !== parentDirectoryIri(c.conceptId, ctx.iriBase)) {
           extras.add(q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
         }
         break;
@@ -288,6 +290,7 @@ export function exportBundle(input: ExportInput, opts: OkfMappingOptions = {}): 
   const ctx: ExportContext = {
     iriBase: opts.iriBase ?? DEFAULT_IRI_BASE,
     conceptIris: new Set(input.concepts.map((c) => c.iri)),
+    folderHierarchy: opts.emitFolderHierarchy === true,
   };
   const concepts = input.concepts.map((c) => reconstructConcept(c, ctx));
   const indexes = regenerateIndexes(input.concepts.map((c) => c.conceptId));

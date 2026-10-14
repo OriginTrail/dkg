@@ -119,3 +119,30 @@ describe('a generated value kept verbatim stays itself beside a timestamp and a 
     expect(fm.Timestamp).toBe('producer-value');
   });
 });
+
+describe('a producer key named dateModified keeps its value beside generated and the timestamp', () => {
+  // schema:dateModified carries generated.at, the legacy timestamp, and a
+  // producer key named `dateModified`: the codec claims one value for each of
+  // the first two, and every other value comes back as the producer key's.
+  for (const yaml of [
+    'generated: [a]\ndateModified: { note: producer }',
+    'generated: { by: human:a, at: 2026-06-30T00:00:00Z }\ndateModified: 2026-01-01T00:00:00Z',
+    'generated: { by: human:a, at: [2026-06-30T00:00:00Z] }\ndateModified: { note: producer }',
+  ]) {
+    it(`keeps every value of ${yaml.replace('\n', ' + ')}`, () => {
+      const { files, first, second } = roundTrip(yaml);
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      expect(messages(second)).toEqual(messages(first));
+      expect('dateModified' in exportedFrontmatter(files)).toBe(true);
+    });
+  }
+
+  it('keeps the kept generated array and its marker beside a JSON dateModified', () => {
+    const { first, second } = roundTrip('generated: [a]\ndateModified: { note: producer }');
+    for (const r of [first, second]) {
+      const c = r.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+      expect(objs(c.quads, SCHEMA_NS + 'generated')).toEqual([`"[\\"a\\"]"^^<${RDF_JSON}>`]);
+      expect(objs(c.quads, SCHEMA_DATE_MODIFIED)).toEqual([`"{\\"note\\":\\"producer\\"}"^^<${RDF_JSON}>`]);
+    }
+  });
+});

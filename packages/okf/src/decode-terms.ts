@@ -28,6 +28,8 @@ export interface ExportContext {
   iriBase: string;
   /** Subject IRIs of the concepts in this export — the only IRIs a path-valued field may be rewritten to a path for. */
   conceptIris: ReadonlySet<string>;
+  /** The graph was imported with `emitFolderHierarchy`, so a nested concept's edge to its parent directory is inferred. */
+  folderHierarchy?: boolean;
 }
 
 /**

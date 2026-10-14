@@ -264,7 +264,13 @@ it; the CLI summary reports it against the current time.
 - **Both `timestamp` and `generated` present.** Unusual (a migration leftover).
   One codec, `src/families/generated.ts`, owns this rule in both directions:
   the mapper's `timestamp` triples, the summary's last-modified time, whether
-  `timestamp` is a producer key, and how export gives each value back.
+  `timestamp` is a producer key, and how export gives each value back. A
+  producer key named `dateModified` lands on that predicate too: the codec
+  claims one value for `generated.at` and one for `timestamp` and leaves every
+  other value to the producer key, so nothing is lost. Two typed dates beside
+  a `generated` value kept verbatim (a `timestamp` and an unquoted
+  `dateModified`) cannot be told apart: the graph round-trips exactly, but the
+  summary's last-modified time may come back as the other date.
   `generated.at` → `schema:dateModified`; `timestamp` → `schema:timestamp` (the
   node extractor's own slug for that key), preserved and exported verbatim.
   Export writes both back even when `generated` has no `by`: since only a
@@ -328,9 +334,13 @@ it; the CLI summary reports it against the current time.
   the bundle imports. That
   is the only failure caught: any other exception in the mapper is a defect and
   propagates.
-- **`schema:isPartOf` on export.** The edge `emitFolderHierarchy` infers (to the
-  concept's own parent directory) is omitted, since the path implies it and the
-  option re-derives it; any other `isPartOf` value is a producer key and is kept.
+- **`schema:isPartOf` on export.** An export told the graph was imported with
+  `emitFolderHierarchy` (`exportBundle(input, { emitFolderHierarchy: true })`)
+  omits the edge to the concept's own parent directory, since the path implies
+  it and the option re-derives it. Otherwise every `isPartOf` value is a
+  producer key and is kept, that same edge included: matching the parent's IRI
+  alone does not make a value inferred (`isPartOf: urn:okf:reports` on
+  `reports/q.md`), and keeping an inferred edge gives back the same triple.
 - **Keys are arbitrary strings.** Producer keys, extension keys and concept
   IDs (file paths) may be `constructor`, `toString` or `__proto__`. Export uses
   own-property checks and defined (not assigned) properties throughout, and the

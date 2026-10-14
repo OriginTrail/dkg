@@ -305,15 +305,29 @@ describe('schema:isPartOf and schema:url on export', () => {
     );
   });
 
-  it('omits only the folder edge emitFolderHierarchy infers, which the option re-derives', () => {
+  it('omits only the folder edge emitFolderHierarchy infers, when told the graph used it', () => {
     const files = [IDX_V02(), { path: 'reports/q.md', content: '---\ntype: Metric\nisPartOf: FY2026 reporting\n---\n\nbody\n' }];
     const first = importBundle(files, { emitFolderHierarchy: true });
     expect(objs(first.quads, SCHEMA_IS_PART_OF, 'urn:okf:reports/q').sort()).toEqual(['"FY2026 reporting"', 'urn:okf:reports']);
-    const exported = exportBundle(first);
+    const exported = exportBundle(first, { emitFolderHierarchy: true });
     expect(parseDocument('reports/q.md', exported.find((f) => f.path === 'reports/q.md')!.content).frontmatter.isPartOf).toBe('FY2026 reporting');
     expect(quadsToNQuads(importBundle(exported, { emitFolderHierarchy: true }).quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF))).toBe(
       quadsToNQuads(first.quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF)),
     );
+  });
+
+  it('keeps an explicit isPartOf that names the parent directory, with the folder hierarchy off', () => {
+    // Matching the parent's IRI does not make a value inferred: with default
+    // options nothing infers it, so it is the producer's and comes back.
+    const files = [IDX_V02(), { path: 'reports/q.md', content: '---\ntype: Metric\nisPartOf: urn:okf:reports\n---\n\nbody\n' }];
+    const first = importBundle(files);
+    expect(objs(first.quads, SCHEMA_IS_PART_OF, 'urn:okf:reports/q')).toEqual(['urn:okf:reports']);
+    const exported = exportBundle(first);
+    expect(parseDocument('reports/q.md', exported.find((f) => f.path === 'reports/q.md')!.content).frontmatter.isPartOf).toBe('urn:okf:reports');
+    expect(objs(importBundle(exported).quads, SCHEMA_IS_PART_OF, 'urn:okf:reports/q')).toEqual(['urn:okf:reports']);
+    // An export not told about the hierarchy keeps an inferred edge as an explicit value: the same triple either way.
+    const inferred = importBundle([IDX_V02(), { path: 'reports/r.md', content: '---\ntype: Metric\n---\n\nbody\n' }], { emitFolderHierarchy: true });
+    expect(objs(importBundle(exportBundle(inferred)).quads, SCHEMA_IS_PART_OF, 'urn:okf:reports/r')).toEqual(['urn:okf:reports']);
   });
 
   it('writes a resource that is not an IRI back by value, not as a quoted term', () => {

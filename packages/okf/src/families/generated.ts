@@ -10,7 +10,7 @@
  * export gives each stored value back to its key.
  */
 
-import { RDF_JSON, SCHEMA_DATE_MODIFIED } from '../constants.js';
+import { RDF_JSON, SCHEMA_DATE_MODIFIED, XSD_DATE, XSD_DATE_TIME } from '../constants.js';
 import { literalDatatype, orderKeys, termValue, type ExportContext } from '../decode-terms.js';
 import { dateTerm, genericPredicate, genericQuads } from '../terms.js';
 import { dateTimeLexical } from '../timestamps.js';
@@ -51,45 +51,69 @@ export function lastModifiedOf(frontmatter: Record<string, unknown>): string | n
 
 /**
  * Export: `generated` and the legacy `timestamp` from a concept's quads, and
- * the quads each was read from. `generated` needs its actor (§5.2): it is
- * there with a `by` or an extension. Its `at` shares `schema:dateModified`
- * with a legacy `timestamp` the importer writes when no `generated.at` gives a
- * time, and the two are told apart triple by triple:
+ * the quads each was read from. `schema:dateModified` can hold three kinds of
+ * value: `generated.at`, the legacy `timestamp` (written there when no
+ * `generated.at` gives a time), and a producer key named `dateModified`. The
+ * codec claims at most one value for `generated.at` and one for `timestamp`;
+ * every other value stays a producer value, which the exporter writes back.
  *
- *   - an `rdf:JSON` value is one `generated.at` kept verbatim (a mapping or
- *     list where one time belongs), which a `timestamp` could not carry: it is
- *     `generated`'s, and a time beside it is the `timestamp`'s;
- *   - otherwise a time is `generated.at` when `generated` is there, or when
- *     the concept keeps a producer `timestamp` (`schema:timestamp`), which only
- *     a `generated.at` makes, unless `generated` itself was kept verbatim (no
- *     mapping, so no `generated.at`); else it is the legacy `timestamp` (a
- *     v0.1 last-modified time).
- *
- * A `generated` value of the wrong shape, kept verbatim, comes back as itself.
+ *   - A `generated` value kept verbatim (its ownership marker) was no mapping,
+ *     so it has no `at`: a date there is the legacy `timestamp` (which types
+ *     its date), and anything else a producer value.
+ *   - Otherwise `generated` is there with its actor (`by`, or an extension),
+ *     or with an `at` kept verbatim (an `rdf:JSON` value: a mapping or list
+ *     where one time belongs); a time beside such an `at` is the legacy
+ *     `timestamp`'s.
+ *   - A lone time is `generated.at` when `generated` is there, or when the
+ *     concept keeps a producer `timestamp` (`schema:timestamp`), which only a
+ *     `generated.at` makes; else it is the legacy `timestamp` (a v0.1
+ *     last-modified time).
  */
 export function decodeGenerated(conceptQuads: readonly Quad[], ctx: ExportContext): Array<[string, Read]> {
   const decoded = decodeFields(GENERATED, conceptQuads, ctx);
-  const atQuads = decoded.quads.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED);
-  const kept = atQuads.filter((q) => literalDatatype(q.object) === RDF_JSON);
-  const times = atQuads.filter((q) => literalDatatype(q.object) !== RDF_JSON);
+  const own = decoded.quads.filter((q) => q.predicate !== SCHEMA_DATE_MODIFIED);
+  const dates = decoded.quads.filter((q) => q.predicate === SCHEMA_DATE_MODIFIED);
+  const json = dates.filter((q) => literalDatatype(q.object) === RDF_JSON);
+  const times = dates.filter((q) => literalDatatype(q.object) !== RDF_JSON);
   const present = 'by' in decoded.fields || Object.keys(decoded.extensions).length > 0;
-  // A `generated` value kept verbatim was no mapping, so no `generated.at`
-  // superseded the legacy timestamp: a `schema:timestamp` beside it is then a
-  // producer value (`Timestamp`), not the sign of a `generated.at`.
-  const verbatim = present || kept.length > 0 ? null : keptVerbatim(GENERATED, conceptQuads, ctx, 'concept');
-  const producerTimestamp = verbatim === null && conceptQuads.some((q) => q.predicate === genericPredicate('timestamp'));
-  const generatedTimes = kept.length === 0 && (present || producerTimestamp);
-  const timestampQuadsRead = generatedTimes ? [] : times;
-  const generatedQuads = decoded.quads.filter((q) => !timestampQuadsRead.includes(q));
   const out: Array<[string, Read]> = [];
-  if (generatedQuads.length > 0 && (present || kept.length > 0 || generatedTimes)) {
-    const generated = decodeFields(GENERATED, generatedQuads, ctx);
-    out.push([GENERATED.key, { value: orderKeys(generated.value, GENERATED.fields.map((f) => f.key)), quads: generatedQuads }]);
-  } else if (verbatim) {
+  const timestamp = (q: Quad | undefined) => {
+    if (q) out.push(['timestamp', { value: termValue(q.object, ctx, 'date'), quads: [q] }]);
+  };
+
+  const verbatim = present ? null : keptVerbatim(GENERATED, conceptQuads, ctx, 'concept');
+  if (verbatim) {
     out.push([GENERATED.key, verbatim]);
+    timestamp(last(times.filter((q) => isTypedDate(q.object))));
+    return out;
   }
-  const last = timestampQuadsRead[timestampQuadsRead.length - 1];
-  if (last) out.push(['timestamp', { value: termValue(last.object, ctx, 'date'), quads: timestampQuadsRead }]);
+
+  // A producer key never yields a non-empty `rdf:JSON` array (its list is one
+  // triple per item), so such an array is `generated.at`'s; a JSON mapping
+  // could be either, and then reads canonically.
+  const keptAt = last(json.filter((q) => isNonEmptyList(termValue(q.object, ctx)))) ?? last(json);
+  const producerTimestamp = conceptQuads.some((q) => q.predicate === genericPredicate('timestamp'));
+  const at = keptAt ?? (present || producerTimestamp ? last(times) : undefined);
+  if (present || at) {
+    const read = at ? [...own, at] : own;
+    out.push([GENERATED.key, { value: orderKeys(decodeFields(GENERATED, read, ctx).value, GENERATED.fields.map((f) => f.key)), quads: read }]);
+  }
+  timestamp(at === undefined || keptAt ? last(times) : undefined);
   return out;
+}
+
+/** The last quad in canonical order, the one a single-valued field reads back. */
+function last(quads: readonly Quad[]): Quad | undefined {
+  return quads[quads.length - 1];
+}
+
+function isNonEmptyList(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
+/** Whether a term is a typed xsd:dateTime / xsd:date literal, as the legacy `timestamp` maps a date. */
+function isTypedDate(term: string): boolean {
+  const datatype = literalDatatype(term);
+  return datatype === XSD_DATE_TIME || datatype === XSD_DATE;
 }
 
