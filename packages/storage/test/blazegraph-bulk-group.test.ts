@@ -148,4 +148,18 @@ describe('Blazegraph confirmed bulk publication', () => {
       expect(request).toHaveBeenCalledTimes(4);
     } finally { await store.close(); }
   });
+
+  it('preserves a receipt read error when cleanup also fails, without replay', async () => {
+    const failure = new Error('receipt read failed');
+    const request = vi.fn().mockResolvedValueOnce(new Response('')).mockResolvedValueOnce(new Response(''))
+      .mockRejectedValueOnce(failure).mockRejectedValueOnce(new Error('cleanup failed'));
+    vi.stubGlobal('fetch', request);
+    const store = new BlazegraphStore('http://fixture.invalid/sparql');
+    try {
+      await expect(store.replaceAssetGroup(members)).rejects.toBe(failure);
+      expect(request).toHaveBeenCalledTimes(4);
+      expect(String(request.mock.calls[2]![1].body)).toMatch(/^ASK/);
+      expect(String(request.mock.calls[3]![1].body)).toMatch(/^DROP SILENT GRAPH/);
+    } finally { await store.close(); }
+  });
 });
