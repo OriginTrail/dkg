@@ -9,7 +9,7 @@ import { withPublicSnapshotQueryTrust } from './public-snapshot-evidence.js';
  * so cross-calls resolve against the composed class.
  */
 
-import { sharedMemoryAdmissionError } from './swm-read-admission.js';
+import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from './swm-read-admission.js';
 import { deniedResult } from './query-denied-result.js';
 import { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
@@ -548,7 +548,7 @@ export class QueryMethods extends DKGAgentBase {
       });
       opts.signal?.throwIfAborted();
       if (admission.outcome === 'unavailable'
-        && (admission.source !== 'legacy-membership' || opts.accessDenied === 'error')) throw sharedMemoryAdmissionError(opts.contextGraphId, admission);
+        && (!sharedMemoryAdmissionFailsClosed(admission) || opts.accessDenied === 'error')) throw sharedMemoryAdmissionError(opts.contextGraphId, admission);
       if (admission.outcome !== 'allowed') {
         this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
         return deniedResult(sparql, opts.accessDenied);

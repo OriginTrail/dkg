@@ -64,7 +64,7 @@ async function subscribedHost(script: readonly LiveAuthorityRead[]) {
   internals.subscribedContextGraphs.set(localCgId, {
     subscribed: true, synced: false, syncMode: 'always-on', onChainId: h.contextGraphId.toString(),
   });
-  internals.hasConfirmedSharedMemoryMetaState = async () => true;
+  internals.resolveMetadataConfirmation = async () => ({ outcome: 'confirmed' });
   /** The request class each authority read was issued in. */
   const readClasses: string[] = [];
   const authorityReads = vi.fn<LiveAuthorityRead>();
@@ -125,12 +125,16 @@ describe('shared-memory gossip reconcile whose authority check gets no answer', 
       await host.reconcile();
       expect(host.subscribed()).toBe(true);
       const failure = new Error('STORE_UNAVAILABLE');
-      host.internals.hasConfirmedSharedMemoryMetaState = async () => { throw failure; };
+      const confirmation = vi.fn(async () => ({ outcome: 'unavailable' as const, source: 'dependency' as const, error: failure }));
+      host.internals.resolveMetadataConfirmation = confirmation;
       await expect(host.reconcile()).rejects.toBe(failure);
+      expect(confirmation).toHaveBeenCalledTimes(1);
       expect(host.subscribed()).toBe(true);
       expect(host.manager.unsubscribe).not.toHaveBeenCalled();
-      host.internals.hasConfirmedSharedMemoryMetaState = async () => true;
+      const recovered = vi.fn(async () => ({ outcome: 'confirmed' as const }));
+      host.internals.resolveMetadataConfirmation = recovered;
       await host.reconcile();
+      expect(recovered).toHaveBeenCalledTimes(1);
       expect(host.subscribed()).toBe(true);
     } finally { await host.close(); }
   });
