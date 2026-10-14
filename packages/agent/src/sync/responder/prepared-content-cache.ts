@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { mkdir, lstat, open, readdir, rename, unlink, utimes } from 'node:fs/promises';
+import { mkdir, lstat, open, readdir, rename, unlink, utimes, type FileHandle } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES } from '../wire-compression.js';
@@ -8,7 +8,7 @@ import { EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES, EXACT_SYNC_GZIP_MAX_INFLATED_BYTE
 export interface PreparedContentCacheConfig {
   enabled: boolean;
   directory?: string;
-  /** Physical bytes, including manifests. Default 1 GiB; maximum 16 GiB. */
+  /** Physical bytes, including manifests and bounded write headroom. Default 1 GiB; maximum 16 GiB. */
   maxBytes?: number;
   /** Default 8,192 immutable assertions; maximum 65,536. */
   maxEntries?: number;
@@ -37,11 +37,12 @@ interface ManifestV1 {
 function encodeManifest(manifest: ManifestV1): Buffer {
   return Buffer.from(JSON.stringify(manifest));
 }
-function decodeManifest(header: string, key: string, encodedBytes: number, now: number, ttlMs: number): ManifestV1 | null {
+function decodeManifest(header: string, key: string | undefined, encodedBytes: number, now: number, ttlMs: number): ManifestV1 | null {
   const value: unknown = JSON.parse(header);
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const m = value as Record<string, unknown>;
-  if (m.version !== 1 || m.key !== key || typeof m.createdAt !== 'number' || !Number.isSafeInteger(m.createdAt)
+  if (m.version !== 1 || typeof m.key !== 'string' || (key !== undefined && m.key !== key)
+    || typeof m.createdAt !== 'number' || !Number.isSafeInteger(m.createdAt)
     || m.createdAt > now || now - m.createdAt >= ttlMs
     || !positive(m.plainBytes, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES)
     || !positive(m.encodedBytes, EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES) || m.encodedBytes !== encodedBytes
@@ -78,10 +79,14 @@ export function createPreparedContentCache(
   onError: (error: unknown, operation: 'initialize' | 'read' | 'publish') => void = () => {},
 ): PreparedContentCache {
   const { maxBytes, maxEntries, ttlMs } = options;
+  // Retain room for one bounded atomic write without evicting valid entries
+  // before preparation succeeds. Small configured caches split their budget.
+  const stagingBytes = Math.min(HEADER_LIMIT + 4 + EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES, Math.floor(maxBytes / 2));
+  const retainedLimit = maxBytes - stagingBytes;
   // lstat follows a final symlink spelled with a trailing separator on POSIX.
   const directory = resolve(options.directory);
   // Iteration order is oldest first; successful reads/writes move to the end.
-  const entries = new Map<string, { size: number }>();
+  const entries = new Map<string, { size: number; expiresAt: number }>();
   let initialized = false, total = 0;
   let tail: Promise<unknown> = Promise.resolve();
   // Reads and writes serialize within the bounded responder admission. No
@@ -89,7 +94,7 @@ export function createPreparedContentCache(
   const run = <T>(operation: 'read' | 'publish', fallback: T, work: () => Promise<T>): Promise<T> => {
     const next = tail.then(async () => {
       let phase: 'initialize' | 'read' | 'publish' = 'initialize';
-      try { await initialize(); phase = operation; return await work(); }
+      try { await initialize(); phase = operation; await reclaimExpired(); return await work(); }
       catch (error) { try { onError(error, phase); } catch { /* diagnostics cannot deny a valid response */ } return fallback; }
     });
     tail = next.then(() => undefined);
@@ -102,9 +107,27 @@ export function createPreparedContentCache(
   };
   const evict = async (incomingBytes = 0, incomingEntries = 0) => {
     while (entries.size > 0 && (
-      total + incomingBytes > maxBytes || entries.size + incomingEntries > maxEntries
+      total + incomingBytes > retainedLimit || entries.size + incomingEntries > maxEntries
     )) await remove(entries.keys().next().value!);
   };
+  const reclaimExpired = async () => {
+    const now = Date.now();
+    for (const [name, entry] of entries) if (entry.expiresAt <= now) await remove(name);
+  };
+  async function readHeader(handle: FileHandle, key?: string) {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size < 5 || stat.size > HEADER_LIMIT + 4 + EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES) return null;
+    const prefix = Buffer.alloc(4);
+    if ((await handle.read(prefix, 0, 4, 0)).bytesRead !== 4) return null;
+    const length = prefix.readUInt32BE();
+    if (length < 1 || length > HEADER_LIMIT || stat.size <= 4 + length) return null;
+    const header = Buffer.alloc(length);
+    if ((await handle.read(header, 0, length, 4)).bytesRead !== length) return null;
+    let manifest: ManifestV1 | null;
+    try { manifest = decodeManifest(header.toString('utf8'), key, stat.size - 4 - length, Date.now(), ttlMs); }
+    catch { return null; }
+    return manifest ? { manifest, length, size: stat.size } : null;
+  }
   async function initialize() {
     if (initialized) return;
     await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -112,18 +135,21 @@ export function createPreparedContentCache(
     entries.clear(); total = 0;
     // Ignore unrelated files. Never follow links or recursively clean a directory.
     const dir = await readdir(directory, { withFileTypes: true });
-    const discovered: Array<{ name: string; size: number; mtimeMs: number }> = [];
+    const discovered: Array<{ name: string; size: number; mtimeMs: number; expiresAt: number }> = [];
     for (const file of dir) {
       // Exclusive directory ownership makes these abandoned atomic writes.
       if (file.isFile() && TEMP_PATTERN.test(file.name)) { await unlink(join(directory, file.name)); continue; }
       if (!FILE_PATTERN.test(file.name) || !file.isFile()) continue;
       const stat = await lstat(join(directory, file.name));
       if (!stat.isFile()) continue;
-      if (stat.size > HEADER_LIMIT + 4 + EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES) { await remove(file.name); continue; }
-      discovered.push({ name: file.name, size: stat.size, mtimeMs: stat.mtimeMs });
+      const handle = await open(join(directory, file.name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      let header;
+      try { header = await readHeader(handle); } finally { await handle.close(); }
+      if (!header || digest(header.manifest.key) + SUFFIX !== file.name) { await remove(file.name); continue; }
+      discovered.push({ name: file.name, size: header.size, mtimeMs: stat.mtimeMs, expiresAt: header.manifest.createdAt + ttlMs });
     }
     for (const file of discovered.sort((a, b) => a.mtimeMs - b.mtimeMs)) {
-      entries.set(file.name, { size: file.size }); total += file.size;
+      entries.set(file.name, { size: file.size, expiresAt: file.expiresAt }); total += file.size;
     }
     await evict(); initialized = true;
   }
@@ -135,15 +161,9 @@ export function createPreparedContentCache(
         const handle = await open(join(directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
         let result: PreparedContent | null = null;
         try {
-          const stat = await handle.stat();
-          if (!stat.isFile() || stat.size < 5 || stat.size > HEADER_LIMIT + 4 + EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES) return null;
-          const prefix = Buffer.alloc(4); await handle.read(prefix, 0, 4, 0);
-          const length = prefix.readUInt32BE();
-          if (length < 1 || length > HEADER_LIMIT || stat.size <= 4 + length) return null;
-          const header = Buffer.alloc(length);
-          if ((await handle.read(header, 0, length, 4)).bytesRead !== length) return null;
-          const manifest = decodeManifest(header.toString('utf8'), key, stat.size - 4 - length, Date.now(), ttlMs);
-          if (!manifest) return null;
+          const header = await readHeader(handle, key);
+          if (!header) return null;
+          const { manifest, length } = header;
           const body = Buffer.alloc(manifest.encodedBytes);
           if ((await handle.read(body, 0, body.length, 4 + length)).bytesRead !== body.length
             || digest(body) !== manifest.sha256) return null;
@@ -165,10 +185,11 @@ export function createPreparedContentCache(
       return run<void>('publish', undefined, async () => {
         if (!positive(value.body.byteLength, EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES)
           || !positive(value.plainBytes, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES)) return;
-        const header = encodeManifest({ version: 1, key, createdAt: Date.now(),
+        const createdAt = Date.now();
+        const header = encodeManifest({ version: 1, key, createdAt,
           plainBytes: value.plainBytes, encodedBytes: value.body.byteLength, sha256: digest(value.body) });
         const size = 4 + header.byteLength + value.body.byteLength;
-        if (header.byteLength > HEADER_LIMIT || size > maxBytes) return;
+        if (header.byteLength > HEADER_LIMIT || size > stagingBytes) return;
         const name = digest(key) + SUFFIX;
         // Plan replacement-aware retention without deleting any live entry.
         const old = entries.get(name);
@@ -176,13 +197,11 @@ export function createPreparedContentCache(
         let retainedEntries = entries.size + (old ? 0 : 1);
         const victims: string[] = [];
         for (const [key, entry] of entries) {
-          if (retainedBytes <= maxBytes && retainedEntries <= maxEntries) break;
+          if (retainedBytes <= retainedLimit && retainedEntries <= maxEntries) break;
           if (key === name) continue;
           victims.push(key); retainedBytes -= entry.size; retainedEntries--;
         }
-        // maxBytes includes the temporary file. Decline optional persistence if
-        // preparing it would exceed that budget; do not evict to make room first.
-        if (total + size > maxBytes || retainedBytes > maxBytes || retainedEntries > maxEntries) return;
+        if (total + size > maxBytes || retainedBytes > retainedLimit || retainedEntries > maxEntries) return;
         const temp = join(directory, `${name}.${randomUUID()}.tmp`);
         const handle = await open(temp, 'wx', 0o600);
         try {
@@ -194,7 +213,7 @@ export function createPreparedContentCache(
           for (const victim of victims) await remove(victim);
           await rename(temp, join(directory, name));
           if (old) total -= old.size;
-          entries.delete(name); entries.set(name, { size }); total += size;
+          entries.delete(name); entries.set(name, { size, expiresAt: createdAt + ttlMs }); total += size;
         } finally {
           await handle.close().catch(() => {});
           await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; });
