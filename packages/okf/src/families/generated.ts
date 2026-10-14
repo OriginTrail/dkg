@@ -61,8 +61,9 @@ export function lastModifiedOf(frontmatter: Record<string, unknown>): string | n
  *     `generated`'s, and a time beside it is the `timestamp`'s;
  *   - otherwise a time is `generated.at` when `generated` is there, or when
  *     the concept keeps a producer `timestamp` (`schema:timestamp`), which only
- *     a `generated.at` makes; else it is the legacy `timestamp` (a v0.1
- *     last-modified time).
+ *     a `generated.at` makes, unless `generated` itself was kept verbatim (no
+ *     mapping, so no `generated.at`); else it is the legacy `timestamp` (a
+ *     v0.1 last-modified time).
  *
  * A `generated` value of the wrong shape, kept verbatim, comes back as itself.
  */
@@ -72,7 +73,11 @@ export function decodeGenerated(conceptQuads: readonly Quad[], ctx: ExportContex
   const kept = atQuads.filter((q) => literalDatatype(q.object) === RDF_JSON);
   const times = atQuads.filter((q) => literalDatatype(q.object) !== RDF_JSON);
   const present = 'by' in decoded.fields || Object.keys(decoded.extensions).length > 0;
-  const producerTimestamp = conceptQuads.some((q) => q.predicate === genericPredicate('timestamp'));
+  // A `generated` value kept verbatim was no mapping, so no `generated.at`
+  // superseded the legacy timestamp: a `schema:timestamp` beside it is then a
+  // producer value (`Timestamp`), not the sign of a `generated.at`.
+  const verbatim = present || kept.length > 0 ? null : keptVerbatim(GENERATED, conceptQuads, ctx, 'concept');
+  const producerTimestamp = verbatim === null && conceptQuads.some((q) => q.predicate === genericPredicate('timestamp'));
   const generatedTimes = kept.length === 0 && (present || producerTimestamp);
   const timestampQuadsRead = generatedTimes ? [] : times;
   const generatedQuads = decoded.quads.filter((q) => !timestampQuadsRead.includes(q));
@@ -80,9 +85,8 @@ export function decodeGenerated(conceptQuads: readonly Quad[], ctx: ExportContex
   if (generatedQuads.length > 0 && (present || kept.length > 0 || generatedTimes)) {
     const generated = decodeFields(GENERATED, generatedQuads, ctx);
     out.push([GENERATED.key, { value: orderKeys(generated.value, GENERATED.fields.map((f) => f.key)), quads: generatedQuads }]);
-  } else {
-    const verbatim = keptVerbatim(GENERATED, conceptQuads, ctx, 'concept');
-    if (verbatim) out.push([GENERATED.key, verbatim]);
+  } else if (verbatim) {
+    out.push([GENERATED.key, verbatim]);
   }
   const last = timestampQuadsRead[timestampQuadsRead.length - 1];
   if (last) out.push(['timestamp', { value: termValue(last.object, ctx, 'date'), quads: timestampQuadsRead }]);

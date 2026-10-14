@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { exportBundle, importBundle, SCHEMA_DATE_MODIFIED, SCHEMA_NS } from '../src/index.js';
+import { exportBundle, importBundle, RDF_JSON, SCHEMA_DATE_MODIFIED, SCHEMA_NS } from '../src/index.js';
 import { generatedAtOf, lastModifiedOf, timestampIsProducerKey, timestampQuads } from '../src/families/generated.js';
 import { bundle, exportedFrontmatter, objs, DT, semantic } from './helpers/okf-v02-fixtures.js';
 
@@ -98,5 +98,24 @@ describe('one codec owns the generated / timestamp rule', () => {
       expect(timestampQuads(iri, fm, fm.timestamp).map((q) => q.predicate)).toEqual([supersedes ? SCHEMA_NS + 'timestamp' : SCHEMA_DATE_MODIFIED]);
       expect(lastModifiedOf(fm)).toBe(lastModified);
     }
+  });
+});
+
+describe('a generated value kept verbatim stays itself beside a timestamp and a Timestamp producer key', () => {
+  it('keeps the array, the legacy timestamp and the producer value apart', () => {
+    // `generated: [a]` is no mapping, so no `generated.at` supersedes the
+    // timestamp: the schema:timestamp beside it is the `Timestamp` producer
+    // key's, not the sign of a generated.at.
+    const { files, first, second } = roundTrip("generated: [a]\ntimestamp: '2026-01-01T00:00:00Z'\nTimestamp: producer-value");
+    expect(semantic(second.quads)).toBe(semantic(first.quads));
+    expect(messages(second)).toEqual(messages(first));
+    const c = second.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(objs(c.quads, SCHEMA_NS + 'generated')).toEqual([`"[\\"a\\"]"^^<${RDF_JSON}>`]);
+    expect(objs(c.quads, SCHEMA_DATE_MODIFIED)).toEqual([DT('2026-01-01T00:00:00Z')]);
+    expect(objs(c.quads, SCHEMA_NS + 'timestamp')).toEqual(['"producer-value"']);
+    const fm = exportedFrontmatter(files);
+    expect(fm.generated).toEqual(['a']);
+    expect(fm.timestamp).toBe('2026-01-01T00:00:00Z');
+    expect(fm.Timestamp).toBe('producer-value');
   });
 });
