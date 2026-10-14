@@ -68,8 +68,10 @@ import type {
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
+  ExternalAuthorSigners,
   RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
+import type { AgentChainSignerSource } from './agent-chain-signer-source.js';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -1776,15 +1778,11 @@ export interface DKGAgentConfig {
    */
   publisherAddress?: string;
   /**
-   * EVM chain configuration. If omitted, publishing won't have on-chain finality.
-   * `adminPrivateKey` is the private key for the profile admin wallet used
-   * only for profile/key-management transactions. Nodes may omit it when they
-   * already have an on-chain identity and do not need profile creation/key-repair
-   * privileges; profile mutation paths will fail fast if admin authority is
-   * required but unavailable.
-   * `operationalKeys` are the private keys for operational wallets.
-   * The first key is the primary signer (identity, staking); all are used
-   * round-robin for publish TXs to avoid nonce collisions on parallel publishes.
+   * EVM chain configuration; without it publishing has no on-chain finality. `adminPrivateKey`:
+   * profile admin key, only for profile/key-management txs (optional; those paths fail fast without
+   * it). One source of operational wallets (`AgentChainSignerSource`): `operationalKeys` (first =
+   * primary signer; all pay publish txs round-robin), or `signers` (external only, not with a
+   * supplied `chainAdapter`), or neither. External author keys are `authorSigners`, beside it.
    */
   chainConfig?: {
     rpcUrl: string;
@@ -1797,7 +1795,6 @@ export interface DKGAgentConfig {
     /** Optional TRAC token contract override. When omitted, the adapter resolves Hub.Token. */
     tokenAddress?: string;
     adminPrivateKey?: string;
-    operationalKeys: string[];
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
     receiptTimeoutMs?: number;
@@ -1850,7 +1847,9 @@ export interface DKGAgentConfig {
      */
     minPublisherNativeWei?: bigint;
     minPublisherTracWei?: bigint;
-  };
+  } & AgentChainSignerSource;
+  /** Author keys of an external signer, which never pay: agents registered by their addresses sign through it, with or without `chainConfig`. Its default author authors the node's own publishes only when its operational wallets sign externally too. */
+  authorSigners?: ExternalAuthorSigners;
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
   /** User-selected context graph IDs to sync automatically on peer connect. */

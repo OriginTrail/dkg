@@ -7,6 +7,7 @@ import {
 import { requireExactAssetUals } from '../exact-assets.js';
 import { encodePipeSyncRequestTail } from './pipe-request-tail.js';
 import { EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from '../wire-compression.js';
+import type { SyncRequestSigner } from './request-signing.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -115,7 +116,7 @@ interface BuildSyncRequestParams {
    */
   recovery?: boolean;
   /**
-   * Force the authenticated envelope to be signed by `claimedAgentPrivateKey`
+   * Force the authenticated envelope to be signed by `claimedAgentSigner`
    * even when the node also has an on-chain identity signer. Use this for
    * protocols whose responder authorizes the recovered signer as the claimed
    * agent itself, not as the node identity/op-key.
@@ -144,8 +145,13 @@ interface BuildSyncRequestParams {
    * envelope tampering can't steer the responder's delegation lookup.
    */
   claimedAgentAddress?: string;
-  /** Private key matching `claimedAgentAddress`, used as a fallback signer when no chain identity is available. */
-  claimedAgentPrivateKey?: string;
+  /**
+   * The signing capability of `claimedAgentAddress` (see
+   * `claimedAgentSyncRequestSigner`), used when no chain identity signs and
+   * whenever the agent's own signature is required. Its signature must recover
+   * to `claimedAgentAddress`.
+   */
+  claimedAgentSigner?: SyncRequestSigner;
 }
 
 export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): Promise<Uint8Array> {
@@ -170,7 +176,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     getIdentityId,
     signMessage,
     claimedAgentAddress,
-    claimedAgentPrivateKey,
+    claimedAgentSigner,
   } = params;
 
   // R9: recovery serves plaintext member-to-member and is authorized by the
@@ -281,6 +287,25 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     request.authPurpose,
     request.authSelector,
   );
+  // The claimed agent's signature, which must recover to the claimed agent.
+  const signAsClaimedAgent = claimedAgentAddress && claimedAgentSigner
+    ? async (): Promise<string> => {
+      const signature = await claimedAgentSigner(digest);
+      if (ethers.verifyMessage(digest, signature).toLowerCase() !== claimedAgentAddress.toLowerCase()) {
+        throw new Error(
+          `Cannot build authenticated sync request for "${contextGraphId}": the signature does not recover to claimed agent ${claimedAgentAddress}`,
+        );
+      }
+      return signature;
+    }
+    : undefined;
+  const setClaimedAgentSignature = (signature: string): void => {
+    const sig = ethers.Signature.from(signature);
+    request.requesterIdentityId = '0';
+    // requesterAgentAddress was already set above (and bound into the digest).
+    request.requesterSignatureR = ethers.hexlify(sig.r);
+    request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
+  };
 
   // Phase C: ride the envelope unsigned, after the digest (cannot influence
   // authorization; only narrows the responder's result set).
@@ -300,34 +325,24 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // responder matches against the members-only agent gate. So a recovery
   // request MUST be signed by the member agent's OWN key (edge path) — the node
   // identity op-key would recover to a non-member and be hard-denied. Force the
-  // edge path and require the agent key locally (the recovering node IS the
-  // member, so it holds the key).
+  // edge path and require the agent's signature (the recovering node IS the
+  // member, so it holds the key, or its external signer does).
   const mustSignWithClaimedAgent = Boolean(recovery || forceClaimedAgentSignature);
   const identityId = mustSignWithClaimedAgent ? 0n : await getIdentityId();
   if (mustSignWithClaimedAgent) {
-    if (!claimedAgentAddress || !claimedAgentPrivateKey) {
+    if (!signAsClaimedAgent) {
       const requestType = recovery ? 'member-recovery' : 'agent-signed';
       throw new Error(`Cannot build ${requestType} sync request for "${contextGraphId}": missing claimed agent signing key`);
     }
-    const wallet = new ethers.Wallet(claimedAgentPrivateKey);
-    const sig = ethers.Signature.from(await wallet.signMessage(digest));
-    request.requesterIdentityId = '0';
-    // requesterAgentAddress was already set above (and bound into the digest);
-    // the responder enforces recoveredAddress === member gate entry.
-    request.requesterSignatureR = ethers.hexlify(sig.r);
-    request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
+    // The responder enforces recoveredAddress === member gate entry.
+    setClaimedAgentSignature(await signAsClaimedAgent());
   } else if (identityId > 0n && typeof signMessage === 'function') {
     const signature = await signMessage(digest);
     request.requesterIdentityId = identityId.toString();
     request.requesterSignatureR = ethers.hexlify(signature.r);
     request.requesterSignatureVS = ethers.hexlify(signature.vs);
-  } else if (claimedAgentAddress && claimedAgentPrivateKey) {
-    const wallet = new ethers.Wallet(claimedAgentPrivateKey);
-    const sig = ethers.Signature.from(await wallet.signMessage(digest));
-    request.requesterIdentityId = '0';
-    // requesterAgentAddress was already set above (and bound into the digest).
-    request.requesterSignatureR = ethers.hexlify(sig.r);
-    request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
+  } else if (signAsClaimedAgent) {
+    setClaimedAgentSignature(await signAsClaimedAgent());
   }
 
   if (needsAuth && (!request.requesterSignatureR || !request.requesterSignatureVS)) {
