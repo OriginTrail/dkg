@@ -28,7 +28,9 @@ The smoke helper explicitly excludes paid publication and has no publish command
 
 ## Review follow-up — 14 October 2026
 
-- Eighteen dependency-free regression tests pass: eleven execute the actual HTTP client against a controlled loopback responder, and seven exercise the documentation checker in temporary repository fixtures.
+- Twenty-one dependency-free regression tests pass: fourteen execute the actual HTTP client with controlled responders or a network trap, and seven exercise the documentation checker in temporary repository fixtures.
+- Credential transport cases reject a remote plaintext URL before invoking fetch and refuse same-origin 302 and cross-origin 307 redirects without a second request. Removing the HTTPS guard or allowing redirects in disposable copies makes these tests fail. The plaintext test traps fetch, so even a broken guard cannot reach an external host.
+- Both documentation test files are registered in the repository test inventory with the same Node.js command used by the Documentation contracts workflow. Inventory route resolution and the existing route tests pass.
 - HTTP cases cover 207 responses without error fields, 200 responses with nonempty error objects/arrays or a singular error, 409 failures, stopping after an incomplete WM write, and successful writes with empty error collections. Incomplete operations exit unsuccessfully without subsequent requests or automatic retries.
 - Share cases cover a completed response, a lost response after commit, a partial response, and a post-commit bookkeeping error. Explicit retries preserve the graph/KA identity and return the same committed operation after WM empties.
 - Regression sensitivity was checked in disposable copies: accepting HTTP 207, accepting nonempty errors, or restoring unconditional finalization each caused the corresponding tests to fail.

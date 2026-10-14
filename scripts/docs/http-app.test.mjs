@@ -10,6 +10,16 @@ const name = 'atlas-app';
 const ka = `/api/knowledge-assets/${name}`;
 const token = 'test-only-token';
 
+function runClient(url, args, preload) {
+  return new Promise(resolve => {
+    execFile(process.execPath, [...(preload ? ['--import', preload] : []), app, ...args], {
+      env: { ...process.env, DKG_NODE_URL: url, DKG_CONTEXT_GRAPH: contextGraphId,
+        DKG_KA_NAME: name, DKG_AUTH_TOKEN: token },
+      timeout: 10_000, encoding: 'utf8',
+    }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
+  });
+}
+
 async function responder(t, respond) {
   const requests = [];
   const server = createServer(async (req, res) => {
@@ -21,7 +31,7 @@ async function responder(t, respond) {
     requests.push(request);
     const reply = respond(request, requests.length);
     if (reply.disconnect) { res.destroy(); return; }
-    res.writeHead(reply.status ?? 200, { 'Content-Type': 'application/json' });
+    res.writeHead(reply.status ?? 200, { 'Content-Type': 'application/json', ...reply.headers });
     res.end(JSON.stringify(reply.body ?? {}));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -30,20 +40,42 @@ async function responder(t, respond) {
     server.close(resolve);
   }));
   const url = `http://127.0.0.1:${server.address().port}`;
-  const run = (...args) => new Promise(resolve => {
-    execFile(process.execPath, [app, ...args], {
-      env: { ...process.env, DKG_NODE_URL: url, DKG_CONTEXT_GRAPH: contextGraphId,
-        DKG_KA_NAME: name, DKG_AUTH_TOKEN: token },
-      timeout: 10_000, encoding: 'utf8',
-    }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
-  });
-  return { requests, run };
+  const run = (...args) => runClient(url, args);
+  return { requests, run, url };
 }
 
 function assertStopped(result, status) {
   assert.equal(result.error?.code, 1, result.stderr);
   assert.match(result.stderr, new RegExp(`Node operation incomplete \\(HTTP ${status}\\)`));
   assert.equal(result.stdout, '');
+}
+
+test('remote plaintext HTTP is rejected before invoking fetch', async () => {
+  // Trap fetch in the child so even a broken guard cannot reach an external host.
+  const preload = `data:text/javascript,${encodeURIComponent(
+    "globalThis.fetch = () => { console.error('UNEXPECTED_NETWORK_REQUEST'); throw new Error('fetch must not run'); };"
+  )}`;
+  const result = await runClient('http://dkg.example.invalid', ['write'], preload);
+  assert.equal(result.error?.code, 1, result.stderr);
+  assert.match(result.stderr, /Use HTTPS for a remote node/);
+  assert.ok(!result.stderr.includes('UNEXPECTED_NETWORK_REQUEST'));
+  assert.equal(result.stdout, '');
+});
+
+for (const [status, destination] of [[302, 'same origin'], [307, 'another origin']]) {
+  test(`HTTP ${status} to ${destination} stops without following the redirect`, async t => {
+    const target = await responder(t, () => ({ body: { created: true } }));
+    const source = await responder(t, request => request.path === '/redirected'
+      ? { body: { created: true } }
+      : { status, headers: { Location: destination === 'same origin'
+        ? '/redirected' : `${target.url}/redirected` } });
+    const result = await source.run('write');
+    assert.equal(result.error?.code, 1, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.deepEqual(source.requests, [{ method: 'POST', path: '/api/knowledge-assets',
+      authorization: `Bearer ${token}`, body: { contextGraphId, name } }]);
+    assert.deepEqual(target.requests, [], 'No request or credential may reach the redirect target');
+  });
 }
 
 for (const [label, reply] of [
