@@ -30,7 +30,7 @@ export async function handleEntityRoutes(ctx: RequestContext): Promise<void> {
   const lifecycle = createStoreQueryRequestLifecycle(req, res, 'api.entities');
   const deadline = performance.now() + timeoutMs;
   const signal = AbortSignal.any([lifecycle.signal, AbortSignal.timeout(timeoutMs)]);
-  const reader = new EntityGraphReader(agent, authenticatedAgentAddress(authentication), operation.kind === 'index' ? 'background' : lifecycle.priority, operation.request.chainEvidenceMode);
+  const reader = new EntityGraphReader(agent, authenticatedAgentAddress(authentication), operation.kind === 'index' ? 'background' : lifecycle.priority);
   try {
     let reply;
     switch (operation.kind) {

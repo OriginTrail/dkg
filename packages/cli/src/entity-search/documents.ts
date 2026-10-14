@@ -1,9 +1,8 @@
-import type { PublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
 import { createHash } from 'node:crypto';
 import { isSafeIri, sparqlIri, sparqlString } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { EntitySearchError, checkDeadline, type EntityDocument, type EntityIndexSpec, type EntityIdentity } from './types.js';
+import { EntitySearchError, checkDeadline, type EntityDocument, type EntityIndexSpec, type EntityReadSpec, type EntityIdentity } from './types.js';
 
 export const PAGE_SIZE = 8;
 export const MAX_DOCUMENT_ROWS = 256;
@@ -41,20 +40,20 @@ function selection(spec: EntityIndexSpec, graphOperand: string): string {
     ${spec.types.length ? `FILTER EXISTS { ?entity a ?type . VALUES ?type { ${spec.types.map(iri).join(' ')} } }` : ''} }`;
 }
 export class EntityGraphReader {
-  constructor(private agent: { query: OmitThisParameter<DKGAgent['query']> }, readonly callerAgentAddress?: string, private priority: 'normal' | 'background' = 'normal', private chainEvidenceMode?: PublicSnapshotMode) {}
-  async query(spec: EntityIndexSpec, sparql: string, signal: AbortSignal, deadline: number, maxResponseBytes = 256 * 1024) {
+  constructor(private agent: { query: OmitThisParameter<DKGAgent['query']> }, readonly callerAgentAddress?: string, private priority: 'normal' | 'background' = 'normal') {}
+  async query(spec: EntityReadSpec, sparql: string, signal: AbortSignal, deadline: number, maxResponseBytes = 256 * 1024) {
     checkDeadline(signal, deadline);
     const result = await this.agent.query(sparql, { contextGraphId: spec.contextGraphId, view: spec.view,
       includeContextGraphPartitions: true, callerAgentAddress: this.callerAgentAddress,
-      accessDenied: 'error', redactQuery: true, chainEvidenceMode: this.chainEvidenceMode, signal, source: 'api.entities', priority: this.priority, maxResponseBytes });
+      accessDenied: 'error', redactQuery: true, chainEvidenceMode: spec.chainEvidenceMode, signal, source: 'api.entities', priority: this.priority, maxResponseBytes });
     checkDeadline(signal, deadline);
     return result.bindings;
   }
-  async authorize(spec: EntityIndexSpec, signal: AbortSignal, deadline: number): Promise<void> {
+  async authorize(spec: EntityReadSpec, signal: AbortSignal, deadline: number): Promise<void> {
     // Always traverse the normal graph/view guard, including empty and stale indexes.
     await this.query(spec, 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 0', signal, deadline);
   }
-  async page(spec: EntityIndexSpec, after: EntityIdentity | null, signal: AbortSignal, deadline: number) {
+  async page(spec: EntityReadSpec, after: EntityIdentity | null, signal: AbortSignal, deadline: number) {
     let cursor = '';
     if (after) {
       cursor = `FILTER(STR(?sourceGraph) > ${sparqlString(after.sourceGraph)} ||
@@ -64,7 +63,7 @@ export class EntityGraphReader {
       ${selection(spec, '?sourceGraph')} ${cursor} } ORDER BY STR(?sourceGraph) STR(?entity) LIMIT ${PAGE_SIZE}`, signal, deadline);
     return rows.map(row => ({ sourceGraph: row.sourceGraph, entityUri: row.entity }));
   }
-  async document(spec: EntityIndexSpec, entity: Pick<EntityDocument, 'sourceGraph' | 'entityUri'>,
+  async document(spec: EntityReadSpec, entity: Pick<EntityDocument, 'sourceGraph' | 'entityUri'>,
     signal: AbortSignal, deadline: number): Promise<EntityDocument | null> {
     const selected = `VALUES (?sourceGraph ?entity) { (${iri(entity.sourceGraph)} ${iri(entity.entityUri)}) }
       ${selection(spec, '?sourceGraph')}`;
