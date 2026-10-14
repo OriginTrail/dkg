@@ -886,7 +886,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const partitions: ContentPartition[] = [];
     for (const graph of inventory) {
       const partition = classifyScopedContentGraph(graph, contextGraphId,
-        catalog.subGraphs, catalog.assertionGraphs, catalog.childContextGraphs, { includeUnregisteredSubGraphs: true });
+        catalog.subGraphs, catalog.assertionGraphs, catalog.childContextGraphs);
       if (partition) partitions.push(partition);
     }
     return { inventory, partitions };

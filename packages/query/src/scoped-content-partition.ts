@@ -12,7 +12,6 @@ export function classifyScopedContentGraph(
   registeredSubGraphs: Set<string>,
   registeredAssertionGraphs: Set<string>,
   knownChildContextGraphs: Set<string>,
-  options: { includeUnregisteredSubGraphs?: boolean } = {},
 ): ContentPartition | undefined {
   const root = contextGraphDataUri(contextGraphId);
   const admit = (kind: ContentPartition['kind'], subGraphName?: string, draftTail?: string): ContentPartition =>
@@ -40,7 +39,7 @@ export function classifyScopedContentGraph(
   const slash = tail.indexOf('/');
   const firstSegment = slash >= 0 ? tail.slice(0, slash) : tail;
   const remaining = slash >= 0 ? tail.slice(slash + 1) : '';
-  if ((!registeredSubGraphs.has(firstSegment) && !options.includeUnregisteredSubGraphs) || !validateSubGraphName(firstSegment).valid) {
+  if (!validateSubGraphName(firstSegment).valid) {
     return undefined;
   }
 
