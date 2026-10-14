@@ -611,6 +611,7 @@ export class QueryMethods extends DKGAgentBase {
       const admission = await this.resolveSharedMemoryReadAdmission(opts.contextGraphId, {
         callerAgentAddress: callerAgentAddressStr, readAuthority: scopedReadAuthority, signal: opts.signal,
       });
+      opts.signal?.throwIfAborted();
       if (admission.outcome === 'unavailable' && opts.accessDenied === 'error') throw admission.error;
       if (admission.outcome !== 'allowed') {
         this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
