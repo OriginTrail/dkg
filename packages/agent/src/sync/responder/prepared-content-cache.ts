@@ -170,16 +170,30 @@ export function createPreparedContentCache(
         const size = 4 + header.byteLength + value.body.byteLength;
         if (header.byteLength > HEADER_LIMIT || size > maxBytes) return;
         const name = digest(key) + SUFFIX;
-        // A new valid assertion can replace an expired/corrupt copy atomically.
-        await evict(size, 1);
+        // Plan replacement-aware retention without deleting any live entry.
+        const old = entries.get(name);
+        let retainedBytes = total - (old?.size ?? 0) + size;
+        let retainedEntries = entries.size + (old ? 0 : 1);
+        const victims: string[] = [];
+        for (const [key, entry] of entries) {
+          if (retainedBytes <= maxBytes && retainedEntries <= maxEntries) break;
+          if (key === name) continue;
+          victims.push(key); retainedBytes -= entry.size; retainedEntries--;
+        }
+        // maxBytes includes the temporary file. Decline optional persistence if
+        // preparing it would exceed that budget; do not evict to make room first.
+        if (total + size > maxBytes || retainedBytes > maxBytes || retainedEntries > maxEntries) return;
         const temp = join(directory, `${name}.${randomUUID()}.tmp`);
         const handle = await open(temp, 'wx', 0o600);
         try {
           const prefix = Buffer.alloc(4); prefix.writeUInt32BE(header.byteLength);
           await handle.writeFile(prefix); await handle.writeFile(header); await handle.writeFile(value.body);
           await handle.sync(); await handle.close();
+          // Preparation succeeded. Keep eviction, publication and accounting in
+          // this serialized commit; no cache reader can observe an intermediate map.
+          for (const victim of victims) await remove(victim);
           await rename(temp, join(directory, name));
-          const old = entries.get(name); if (old) total -= old.size;
+          if (old) total -= old.size;
           entries.delete(name); entries.set(name, { size }); total += size;
         } finally {
           await handle.close().catch(() => {});

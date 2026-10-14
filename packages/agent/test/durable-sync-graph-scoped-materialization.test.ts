@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
@@ -300,6 +301,7 @@ describe('durable graph-scoped KA materialization', () => {
     const historicalData = dataQuad(1);
     const historicalRoot = computeFlatKCRootV10([historicalData], []);
     const historicalAsset: VerifiedGraphScopedAsset = {
+      merkleRootHex: Buffer.from(historicalRoot).toString('hex'),
       contextGraphId,
       ual,
       assertionVersion: 1n,
@@ -347,6 +349,7 @@ describe('durable graph-scoped KA materialization', () => {
     const historicalData = dataQuad(1);
     const historicalRoot = computeFlatKCRootV10([historicalData], []);
     const historicalAsset: VerifiedGraphScopedAsset = {
+      merkleRootHex: Buffer.from(historicalRoot).toString('hex'),
       contextGraphId,
       ual,
       assertionVersion: 1n,
@@ -404,6 +407,7 @@ describe('durable graph-scoped KA materialization', () => {
   it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
     const store = new OxigraphStore();
     const asset = {
+      merkleRootHex: fixtureRoot(metadata(1)),
       contextGraphId,
       ual,
       assertionVersion: 1n,
@@ -471,6 +475,7 @@ describe('durable graph-scoped KA materialization', () => {
     const authenticated = await authenticateVerifiedGraphScopedAsset(
       chain,
       {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -521,6 +526,7 @@ describe('durable graph-scoped KA materialization', () => {
       await expect(authenticateVerifiedGraphScopedAsset(
         chain,
         {
+      merkleRootHex: fixtureRoot(metadata(2)),
           contextGraphId,
           ual,
           assertionVersion: 2n,
@@ -556,6 +562,7 @@ describe('durable graph-scoped KA materialization', () => {
     const authenticated = await authenticateVerifiedGraphScopedAsset(
       chain,
       {
+      merkleRootHex: fixtureRoot(finalizedMaterializationMetadata(2, root)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -603,6 +610,7 @@ describe('durable graph-scoped KA materialization', () => {
     const authenticated = await authenticateVerifiedGraphScopedAsset(
       chain,
       {
+      merkleRootHex: fixtureRoot(metadata(1, toHex(root))),
         contextGraphId,
         ual,
         assertionVersion: 1n,
@@ -647,6 +655,7 @@ describe('durable graph-scoped KA materialization', () => {
         subject: ual, predicate: `${DKG}confirmationKind`, object: `"${kind}"`, graph: metaGraph,
       })));
       const authenticate = authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(meta),
         contextGraphId, ual, assertionVersion: 1n, assertionGraph, metaGraph,
         dataQuads: [data], metadataQuads: meta,
       }, strictContextGraphBindingVerifier(chain));
@@ -684,6 +693,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(authenticateVerifiedGraphScopedAsset(
       chain,
       {
+      merkleRootHex: fixtureRoot(metadata(1, toHex(root))),
         contextGraphId,
         ual,
         assertionVersion: 1n,
@@ -710,6 +720,9 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(authenticateVerifiedGraphScopedAsset(
       chain,
       {
+      merkleRootHex: fixtureRoot(metadata(2, toHex(root)).filter(
+          (quad) => quad.predicate !== `${DKG}transactionHash`,
+        )),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -739,6 +752,7 @@ describe('durable graph-scoped KA materialization', () => {
       publisherAddress: '0x1111111111111111111111111111111111111111',
     };
     const firstPublish = (metadataQuads: Quad[] = metadata(1, toHex(root))): VerifiedGraphScopedAsset => ({
+      merkleRootHex: fixtureRoot(metadataQuads),
       contextGraphId,
       ual,
       assertionVersion: 1n,
@@ -1084,6 +1098,7 @@ describe('durable graph-scoped KA materialization', () => {
       const authenticated = await authenticateVerifiedGraphScopedAsset(
         chain,
         {
+      merkleRootHex: fixtureRoot(metadata(2, toHex(v2Root))),
           contextGraphId,
           ual,
           assertionVersion: 2n,
@@ -1118,6 +1133,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId,
       ual,
       assertionVersion: 2n,
@@ -1142,6 +1158,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId,
       ual,
       assertionVersion: 2n,
@@ -1168,6 +1185,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId: '0014',
       ual,
       assertionVersion: 2n,
@@ -1201,6 +1219,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     const authenticated = await authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId: wireId,
       ual,
       assertionVersion: 2n,
@@ -1232,6 +1251,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     const authenticated = await authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId: '14',
       ual,
       assertionVersion: 2n,
@@ -1899,6 +1919,7 @@ describe('durable graph-scoped KA materialization', () => {
     const outcome = await materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(v1Meta),
         contextGraphId,
         ual,
         assertionVersion: 1n,
@@ -1977,6 +1998,11 @@ describe('durable graph-scoped KA materialization', () => {
 
   it('rejects a peer assertion version that does not match chain root history', async () => {
     const asset = {
+      merkleRootHex: fixtureRoot(metadata(2).map((quad) => (
+        quad.predicate === `${DKG}assertionVersion`
+          ? { ...quad, object: '"999999999"' }
+          : quad
+      ))),
       contextGraphId,
       ual,
       assertionVersion: 999_999_999n,
@@ -2011,6 +2037,7 @@ describe('durable graph-scoped KA materialization', () => {
 
   it('rejects a valid-root KA replayed into a different context graph', async () => {
     const asset = {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId,
       ual,
       assertionVersion: 2n,
@@ -2049,6 +2076,7 @@ describe('durable graph-scoped KA materialization', () => {
     const outcome = await materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(v2Meta),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -2097,6 +2125,7 @@ describe('durable graph-scoped KA materialization', () => {
     const outcome = await materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -2141,6 +2170,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(finalized),
         contextGraphId,
         ual,
         assertionVersion: 1n,
@@ -2190,6 +2220,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(finalized),
         contextGraphId,
         ual,
         assertionVersion: 1n,
@@ -2236,6 +2267,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -2269,6 +2301,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -2292,6 +2325,7 @@ describe('durable graph-scoped KA materialization', () => {
     const outcome = await materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -2339,6 +2373,7 @@ describe('durable graph-scoped KA materialization', () => {
     const materialization = materializeVerifiedGraphScopedAsset({
       store: gatedStore,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -2394,6 +2429,7 @@ describe('durable graph-scoped KA materialization', () => {
     const materialization = materializeVerifiedGraphScopedAsset({
       store: gatedStore,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -2433,6 +2469,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store: failingStore,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -2464,6 +2501,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store: updateOnlyStore,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,

@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { DKGQueryEngine } from "../../query/src/dkg-query-engine.js";
 import { describe, it, expect } from "vitest";
 import { ethers } from "ethers";
@@ -37,6 +38,7 @@ const meta = `did:dkg:context-graph:${graph}/_meta`,
   ual = `did:dkg:evm:31337/${address}/1`;
 const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${address}/1`;
 const asset = (): VerifiedGraphScopedAsset => ({
+      merkleRootHex: fixtureRoot([{ predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${"b".repeat(64)}"`, graph: '', subject: '' }]),
   contextGraphId: graph,
   ual,
   assertionVersion: 2n,
@@ -91,7 +93,7 @@ describe("job-scoped public snapshot evidence", () => {
     "rejects mismatched %s",
     (kind) => {
       const a = asset();
-      if (kind === "root") a.metadataQuads[0]!.object = `"${"c".repeat(64)}"`;
+      if (kind === "root") Object.assign(a, { merkleRootHex: "c".repeat(64) });
       if (kind === "version") a.assertionVersion = 3n;
       if (kind === "graph") a.contextGraphId = "other";
       if (kind === "identity") a.ual = a.ual.slice(0, -1) + "2";
