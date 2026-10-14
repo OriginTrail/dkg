@@ -380,3 +380,5 @@ export {
 } from './evm-chain-index-runtime.js';
 
 export { normalizeKnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateMetadata } from './knowledge-asset-update-identity.js';
+
+export { isPublicGraphSnapshotScope } from './public-graph-snapshot-scope.js';
