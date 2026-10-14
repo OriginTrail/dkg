@@ -52,7 +52,7 @@ import {
 import * as okfPublic from '../src/index.js';
 import { decodeFamilies, prepareFamily, resolveReferences, FAMILY_SPECS, FAMILY_BY_KEY, VERIFIED } from '../src/families/index.js';
 import type { Quad } from '../src/index.js';
-import { DT, IDX_V02, objs, node, bundle, conceptOf, exportedFrontmatter } from './helpers/okf-v02-fixtures.js';
+import { DT, IDX_V02, objs, node, bundle, conceptOf, exportedFrontmatter, semantic } from './helpers/okf-v02-fixtures.js';
 
 describe('§5.2 generated / legacy timestamp', () => {
   it('maps generated.by → okf:generatedBy and generated.at → schema:dateModified (canonical lexical)', () => {
@@ -485,6 +485,22 @@ describe('family extensions (SPEC §4.1) are preserved invertibly', () => {
     expect(fm.generated).toEqual({ by: 'human:a', 'sample rate': 0.5, run_id: 'r1', café: 'ja' });
     expect(fm.executor).toEqual({ resource: 'https://x.example/run', retry_count: 2 });
     expect(fm.verified).toEqual([{ by: 'human:a', 'review note': 'ok', ticket_id: 'T-1' }]);
+  });
+});
+
+describe('an empty list in a family extension is a value, not an absence', () => {
+  it('keeps a parameter default of [] and an executor extension of [] through a round trip', () => {
+    const files = bundle(
+      'type: Attested Computation\nruntime: bigquery\nparameters:\n  - { name: regions, type: array, required: false, default: [] }\nexecutor: { resource: https://x.example/run, retries: [] }',
+    );
+    const { c } = conceptOf(files);
+    const empty = `"[]"^^<${RDF_JSON}>`;
+    expect(objs(c.quads, okfExtensionPredicate('parameters', 'default'), node(GENID_TAGS.parameter, 0))).toEqual([empty]);
+    expect(objs(c.quads, okfExtensionPredicate('executor', 'retries'))).toEqual([empty]);
+    const fm = exportedFrontmatter(files);
+    expect((fm.parameters as Array<Record<string, unknown>>)[0]).toEqual({ name: 'regions', type: 'array', required: false, default: [] });
+    expect((fm.executor as Record<string, unknown>).retries).toEqual([]);
+    expect(semantic(conceptOf(exportBundle(importBundle(files))).c.quads)).toBe(semantic(c.quads));
   });
 });
 

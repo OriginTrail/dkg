@@ -7,6 +7,7 @@ import {
   OKF_SOURCE,
   OKF_STATUS,
   PROV_WAS_DERIVED_FROM,
+  RDF_JSON,
   RDF_TYPE,
   SCHEMA_NAME,
   SCHEMA_NS,
@@ -88,6 +89,17 @@ describe('a family list kept verbatim survives a producer value on its predicate
       expect(fm[producer]).toBe('x');
     });
   }
+});
+
+describe('an empty list is a value, for a producer key too', () => {
+  it('keeps owners: [] and the empty item of nested: [a, []] through a round trip', () => {
+    const { files, first, second } = roundTrip('owners: []\nnested: [a, []]');
+    expect(semantic(second.quads)).toBe(semantic(first.quads));
+    expect(objs(first.quads, SCHEMA_NS + 'owners')).toEqual([`"[]"^^<${RDF_JSON}>`]);
+    const fm = exportedFrontmatter(files);
+    expect(fm.owners).toEqual([]);
+    expect(fm.nested).toEqual([[], 'a']);
+  });
 });
 
 describe('the exporter and the importer agree on which keys are producer keys', () => {

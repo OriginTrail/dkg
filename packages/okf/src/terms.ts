@@ -95,11 +95,13 @@ export function actorTerm(value: unknown): string {
 
 /**
  * Producer-defined scalar/array values → object terms (typed where possible).
- * Nested mappings become `rdf:JSON` literals so they round-trip as objects.
+ * A list is one term per item (set semantics); an empty list is still a value,
+ * kept as one `[]` (`rdf:JSON`), so it is never lost. Nested mappings become
+ * `rdf:JSON` literals so they round-trip as objects.
  */
 export function valueToTerms(value: unknown): string[] {
   if (value === null || value === undefined) return [];
-  if (Array.isArray(value)) return value.flatMap(valueToTerms);
+  if (Array.isArray(value)) return value.length === 0 ? [jsonTerm(value)] : value.flatMap(valueToTerms);
   if (value instanceof Date) {
     const t = dateTerm(value);
     return t ? [t] : [];

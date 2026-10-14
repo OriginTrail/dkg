@@ -276,6 +276,10 @@ it; the CLI summary reports it against the current time.
   `schema:dateModified` with a legacy `timestamp` beside it, and export tells
   the two apart by datatype, writing the structure back inside `generated` and
   the date as `timestamp`.
+- **An empty list is a value.** A producer key's or family extension's list
+  is one triple per item, so an empty one would leave nothing: it is kept as
+  one `[]` (`rdf:JSON`) and exported as `[]` (a parameter `default: []` is not
+  an absent default), and an empty item of a list (`[a, []]`) stays an item.
 - **Nested producer values are `rdf:JSON`.** A mapping-valued producer key (e.g.
   the `not:` extension in `acme_retail`) is carried as
   `"…"^^rdf:JSON` so it exports back as an object; previously it degraded to a

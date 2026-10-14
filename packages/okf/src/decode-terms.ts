@@ -125,18 +125,28 @@ export function termValue(term: string, ctx: ExportContext, form: TermForm = 'va
   return term;
 }
 
+/** The lists `accumulate` built from several triples, as opposed to one value that is itself a list (`[]`, an `rdf:JSON` array). */
+const ACCUMULATED = new WeakSet<unknown[]>();
+
 /**
  * Accumulate a (possibly multi-valued) key into a dictionary (`dict()`):
- * scalar on first sight, list thereafter. A producer key named `constructor`,
- * `toString` or `__proto__` is stored like any other.
+ * the value on first sight, a list of the values thereafter. A value that is
+ * itself a list stays one item of that list, never merged into it. A producer
+ * key named `constructor`, `toString` or `__proto__` is stored like any other.
  */
 export function accumulate(target: Record<string, unknown>, key: string, value: unknown): void {
-  if (key in target) {
-    const cur = target[key];
-    target[key] = Array.isArray(cur) ? [...cur, value] : [cur, value];
-  } else {
+  if (!(key in target)) {
     target[key] = value;
+    return;
   }
+  const cur = target[key];
+  if (Array.isArray(cur) && ACCUMULATED.has(cur)) {
+    cur.push(value);
+    return;
+  }
+  const list = [cur, value];
+  ACCUMULATED.add(list);
+  target[key] = list;
 }
 
 /** Entry order baked into a family node IRI (`…_<n>`); unknown → last. */
