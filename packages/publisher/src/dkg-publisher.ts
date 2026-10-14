@@ -114,12 +114,9 @@ import {
   type WorkspaceAgentRecipientResolver,
 } from './workspace-agent-recipients.js';
 import {
-  createCapturedWorkspaceGossipPayload,
-  createResolveCurrentWorkspaceGossipPayload,
-  type ConfirmWorkspaceGossipBeforeCommit,
-  type EncodedWorkspaceGossipPayload,
-  type PrepareWorkspaceGossip,
-  withWorkspaceGossipEnvelope,
+  createCapturedWorkspaceGossipPayload, createResolveCurrentWorkspaceGossipPayload,
+  type ConfirmWorkspaceGossipBeforeCommit, type EncodedWorkspaceGossipPayload,
+  type PrepareWorkspaceGossip, withWorkspaceGossipEnvelope,
 } from './workspace-gossip-payload.js';
 import {
   PublisherWalletRequiredError,

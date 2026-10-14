@@ -3713,9 +3713,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     await save;
   }
 
-  async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
-    contextGraphId: string,
-  ): Promise<WorkspaceGossipSigner | null> {
+  async resolveWorkspaceGossipSigningAgent(this: DKGAgent, contextGraphId: string): Promise<WorkspaceGossipSigner | null> {
     const authority = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.signer,
       () => this.resolveContextGraphAgentGateAuthority(contextGraphId),
@@ -3753,11 +3751,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     throw new Error(`Cannot gossip SWM write for agent-gated context graph "${contextGraphId}": no local allowed signing agent key`);
   }
 
-  async encodeWorkspaceGossipMessage(this: DKGAgent,
-    contextGraphId: string,
-    message: Uint8Array,
-    resolvedSigner?: WorkspaceGossipSigner | null,
-  ): Promise<Uint8Array> {
+  async encodeWorkspaceGossipMessage(this: DKGAgent, contextGraphId: string, message: Uint8Array, resolvedSigner?: WorkspaceGossipSigner | null): Promise<Uint8Array> {
     const signer = resolvedSigner === undefined
       ? await this.resolveWorkspaceGossipSigningAgent(contextGraphId)
       : resolvedSigner;
