@@ -256,6 +256,8 @@ it.each([
   });
   const agent = {
     queryEngine: { query: callerQuery }, log: { info() {} }, peerId: 'fixture',
+    // Explicit empty local trust inventory for snapshot-aware agent wrappers.
+    store: { query: async () => ({ type: 'bindings', bindings: [] }) },
     resolveContextGraphReadAuthority: async (_id: string, opts: { signal: AbortSignal }) => {
       if (phase === 'admission') await pause(opts.signal);
       return { outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' };
@@ -265,7 +267,7 @@ it.each([
   const writeHead = vi.spyOn(read.res, 'writeHead');
   const end = vi.spyOn(read.res, 'end');
   const operation = handleBoundedQueryRoutes(read.ctx);
-  await started;
+  await Promise.race([started, operation.then(() => { throw new Error('Query ended before the pending phase'); })]);
   try {
     expect(read.req.listenerCount('aborted')).toBe(1);
     expect(read.res.listenerCount('close')).toBe(1);
