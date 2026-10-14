@@ -1,16 +1,19 @@
 import { ContextGraphReadAuthorityUnavailableError, type ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import type { ContextGraphMetadataConfirmation } from './context-graph-meta-confirmation.js';
-/** Shared admission facts; presentation belongs to each caller. */
-export type SwmReadAdmission = { outcome: 'allowed' | 'denied' } | {
-  outcome: 'unavailable'; source: 'legacy-membership' | 'confirmed-metadata' | 'read-authority'; error: unknown;
-} | { outcome: 'unavailable'; source: 'confirmed-metadata';
-  confirmation: Extract<ContextGraphMetadataConfirmation, { outcome: 'unavailable' }>;
-} | { outcome: 'unavailable'; source: 'read-authority';
-  decision: Extract<ContextGraphReadAuthorityDecision, { outcome: 'unavailable' }>;
+type AdmissionDecision = { outcome: 'allowed' | 'denied' };
+export type PrivateRootLegacyLaneAdmission = AdmissionDecision | {
+  outcome: 'unavailable'; source: 'legacy-membership'; error: unknown;
 };
+/** Shared admission facts; each failure has one explicitly discriminated shape. */
+export type SwmReadAdmission = PrivateRootLegacyLaneAdmission | {
+  outcome: 'unavailable'; source: 'confirmed-metadata';
+  confirmation: Extract<ContextGraphMetadataConfirmation, { outcome: 'unavailable' }>;
+} | { outcome: 'unavailable'; source: 'read-authority'; kind: 'decision';
+  decision: Extract<ContextGraphReadAuthorityDecision, { outcome: 'unavailable' }>;
+} | { outcome: 'unavailable'; source: 'read-authority'; kind: 'dependency'; error: unknown };
 
-async function captureAdmission(source: Extract<SwmReadAdmission, { outcome: 'unavailable' }>['source'],
-  check: () => Promise<boolean>, signal?: AbortSignal): Promise<SwmReadAdmission> {
+async function captureLegacyAdmission(
+  check: () => Promise<boolean>, signal?: AbortSignal): Promise<PrivateRootLegacyLaneAdmission> {
   signal?.throwIfAborted();
   try {
     const allowed = await check();
@@ -18,7 +21,7 @@ async function captureAdmission(source: Extract<SwmReadAdmission, { outcome: 'un
     return { outcome: allowed ? 'allowed' : 'denied' };
   } catch (error) {
     signal?.throwIfAborted();
-    return { outcome: 'unavailable', source, error };
+    return { outcome: 'unavailable', source: 'legacy-membership', error };
   }
 }
 
@@ -27,8 +30,8 @@ export function resolvePrivateRootLegacyLaneAdmission(reads: {
   mergedMembership(id: string): Promise<boolean>;
   ownMembership(id: string): Promise<boolean>;
   signal?: AbortSignal;
-}): Promise<SwmReadAdmission> {
-  return captureAdmission('legacy-membership', async () => {
+}): Promise<PrivateRootLegacyLaneAdmission> {
+  return captureLegacyAdmission(async () => {
     const id = reads.authorityId();
     if (id === null || !await reads.mergedMembership(id) || !await reads.ownMembership(id)) return false;
     // Authority can change while metadata is read; fence against its fresh state.
@@ -38,7 +41,7 @@ export function resolvePrivateRootLegacyLaneAdmission(reads: {
 
 export async function resolveSharedMemoryAdmission(reads: {
   acceptedAuthority(): boolean | undefined;
-  legacyLane(): Promise<SwmReadAdmission>;
+  legacyLane(): Promise<PrivateRootLegacyLaneAdmission>;
   confirmedMetadata(): Promise<ContextGraphMetadataConfirmation>;
   readAuthority(): Promise<ContextGraphReadAuthorityDecision>;
   signal?: AbortSignal;
@@ -48,7 +51,7 @@ export async function resolveSharedMemoryAdmission(reads: {
   try { accepted = reads.acceptedAuthority(); }
   catch (error) {
     reads.signal?.throwIfAborted();
-    return { outcome: 'unavailable', source: 'read-authority', error };
+    return { outcome: 'unavailable', source: 'read-authority', kind: 'dependency', error };
   }
   if (accepted === true) return { outcome: 'allowed' };
   if (accepted === false) {
@@ -63,26 +66,35 @@ export async function resolveSharedMemoryAdmission(reads: {
     if (confirmation.outcome === 'unconfirmed') return { outcome: 'denied' };
   } catch (error) {
     reads.signal?.throwIfAborted();
-    return { outcome: 'unavailable', source: 'confirmed-metadata', error };
+    return { outcome: 'unavailable', source: 'confirmed-metadata', confirmation: { outcome: 'unavailable', source: 'dependency', error } };
   }
   try {
     const decision = await reads.readAuthority();
     reads.signal?.throwIfAborted();
     return decision.outcome === 'unavailable'
-      ? { outcome: 'unavailable', source: 'read-authority', decision }
+      ? { outcome: 'unavailable', source: 'read-authority', kind: 'decision', decision }
       : { outcome: decision.outcome };
   } catch (error) {
     reads.signal?.throwIfAborted();
-    return { outcome: 'unavailable', source: 'read-authority', error };
+    return { outcome: 'unavailable', source: 'read-authority', kind: 'dependency', error };
   }
+}
+
+/** Legacy callers fail closed for these facts; strict reads still expose outages. */
+export function sharedMemoryAdmissionFailsClosed(admission: SwmReadAdmission): boolean {
+  return admission.outcome === 'unavailable' && (admission.source === 'legacy-membership'
+    || (admission.source === 'confirmed-metadata' && admission.confirmation.source === 'chain-proof'));
 }
 
 /** Boolean/query adapters choose error presentation without discarding the evidence. */
 export function sharedMemoryAdmissionError(contextGraphId: string,
   admission: Extract<SwmReadAdmission, { outcome: 'unavailable' }>,
 ): unknown {
-  if ('error' in admission) return admission.error;
-  if ('decision' in admission) return new ContextGraphReadAuthorityUnavailableError(contextGraphId, admission.decision);
-  return admission.confirmation.source === 'dependency' ? admission.confirmation.error
-    : new Error('Context Graph metadata chain proof unavailable', { cause: admission.confirmation.proof });
+  switch (admission.source) {
+    case 'legacy-membership': return admission.error;
+    case 'read-authority': return admission.kind === 'dependency' ? admission.error
+      : new ContextGraphReadAuthorityUnavailableError(contextGraphId, admission.decision);
+    case 'confirmed-metadata': return admission.confirmation.source === 'dependency' ? admission.confirmation.error
+      : new Error('Context Graph metadata chain proof unavailable', { cause: admission.confirmation.proof });
+  }
 }

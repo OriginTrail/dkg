@@ -1,4 +1,4 @@
-import { resolvePrivateRootLegacyLaneAdmission, type SwmReadAdmission } from './swm-read-admission.js';
+import { resolvePrivateRootLegacyLaneAdmission, type PrivateRootLegacyLaneAdmission } from './swm-read-admission.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -806,7 +806,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   async resolvePrivateRootSwmLegacyLaneV1(this: DKGAgent, contextGraphId: string,
-    options: { signal?: AbortSignal } = {}): Promise<SwmReadAdmission> {
+    options: { signal?: AbortSignal } = {}): Promise<PrivateRootLegacyLaneAdmission> {
     const localAgents = [this.defaultAgentAddress, ...this.listLocalAgents().map(({ agentAddress }) => agentAddress)];
     return resolvePrivateRootLegacyLaneAdmission({
       signal: options.signal,
