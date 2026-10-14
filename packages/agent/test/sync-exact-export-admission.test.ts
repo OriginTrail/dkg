@@ -11,7 +11,9 @@ describe('exact export metadata under background store contention', () => {
     const f = fixture(3);
     const cold = (await f.cache.acquireEncoded(f))!;
     await cold.assertCurrent(); cold.release();
-    const warm = stage === 'source-fence' ? (await f.cache.acquireEncoded(f))! : undefined;
+    const controller = new AbortController();
+    const warm = stage === 'source-fence' ? (await f.cache.acquireEncoded({ ...f, signal: controller.signal }))! : undefined;
+    const attemptsStart = f.query.mock.calls.length;
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
       healthReservedSlots: 0, backgroundReservedSlots: 0, queueWaitTimeoutMs: 20 });
     let release!: () => void;
@@ -22,7 +24,6 @@ describe('exact export metadata under background store contention', () => {
       try { return await scheduler.run(options?.priority, options?.source ?? 'unknown', () => original(query, options), options?.signal); }
       catch (error) { if (isStoreSchedulerBusyError(error)) { rejections++; release(); } throw error; }
     });
-    const controller = new AbortController();
     let lease = warm;
     try {
       lease ??= (await f.cache.acquireEncoded({ ...f, signal: controller.signal }))!;
@@ -30,7 +31,9 @@ describe('exact export metadata under background store contention', () => {
       expect(lease.wholePayloadExports).toBe(0);
       expect(rejections).toBe(1);
       expect(f.cache.stats().exports).toBe(1);
-      expect(f.reads.every(read => read.options?.signal === undefined || read.options.signal === controller.signal)).toBe(true);
+      const attempts = f.query.mock.calls.slice(attemptsStart);
+      expect(attempts.length).toBeGreaterThan(1);
+      for (const [, options] of attempts) expect(options?.signal).toBe(controller.signal);
     } finally { lease?.release(); release(); await blocker; }
     await vi.waitFor(() => expect(scheduler.snapshot).toMatchObject({ backgroundInflight: 0, backgroundQueued: 0 }));
   });
@@ -59,7 +62,7 @@ describe('exact export metadata under background store contention', () => {
     expect(f.cache.stats().exports).toBe(1);
   });
 
-  it('cancels a queued final fence and releases its response reservation', async () => {
+  it.each([false, true])('cancels a queued final fence and releases its reservation (re-admitted=%s)', async readmitted => {
     const f = fixture(3), controller = new AbortController();
     const cold = (await f.cache.acquireEncoded(f))!;
     await cold.assertCurrent(); cold.release();
@@ -70,13 +73,28 @@ describe('exact export metadata under background store contention', () => {
     let release!: () => void;
     const blocker = scheduler.run('background', 'api.query', () => new Promise<void>(done => { release = done; }));
     const original = f.query.getMockImplementation()!;
-    f.query.mockImplementation((query, options) => scheduler.run(options?.priority, options?.source ?? '', () => original(query, options), options?.signal));
+    const attemptsStart = f.query.mock.calls.length;
+    let attempts = 0;
+    f.query.mockImplementation((query, options) => {
+      if (++attempts === 1 && readmitted) return Promise.reject(
+        new StoreSchedulerBusyError('queue_wait_timeout', 'background', EXACT_EXPORT_METADATA_OPERATION));
+      return scheduler.run(options?.priority, options?.source ?? '', () => original(query, options), options?.signal);
+    });
     const reason = new Error('session stopped'), pending = warm.assertCurrent();
     const rejected = expect(pending).rejects.toBe(reason);
-    expect(scheduler.snapshot.backgroundQueued).toBe(1);
-    controller.abort(reason);
-    try { await rejected; }
-    finally { warm.release(); release(); await blocker; }
+    try {
+      await vi.waitFor(() => expect(scheduler.snapshot.backgroundQueued).toBe(1));
+      expect(attempts).toBe(readmitted ? 2 : 1);
+      for (const [, options] of f.query.mock.calls.slice(attemptsStart)) expect(options?.signal).toBe(controller.signal);
+      const cancelledAt = performance.now();
+      controller.abort(reason);
+      await rejected;
+      expect(performance.now() - cancelledAt).toBeLessThan(1000);
+      expect(scheduler.snapshot.backgroundQueued).toBe(0);
+      warm.release();
+      expect(f.budget.stats()).toEqual(before);
+    }
+    finally { controller.abort(reason); release(); await blocker; await rejected; warm.release(); }
     await vi.waitFor(() => expect(scheduler.snapshot).toMatchObject({ backgroundInflight: 0, backgroundQueued: 0 }));
     expect(f.budget.stats()).toEqual(before);
   });
