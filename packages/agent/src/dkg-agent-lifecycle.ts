@@ -1734,8 +1734,7 @@ type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
   readonly admission: DurableSyncAdmissionOutcome;
 };
 
-type LegacyDurableContextGraphOptions = {
-  recoveryAuthority?: DurableRecoveryAuthority;
+type LegacyDurableContextGraphOptions = DurableRecoveryInput & {
   onPhase?: PhaseCallback;
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   onAccessDenied?: (contextGraphId: string) => void;
@@ -5635,6 +5634,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
+  /** Normalize caller input once at an entry boundary; orchestration shares this wiring. */
+  protected resolveRecoveryAuthority(this: DKGAgent,
+    ctx: OperationContext, input: DurableRecoveryInput = {},
+  ): DurableRecoveryAuthority {
+    return createRecoveryAuthority({
+      chain: this.chain,
+      verifyContextGraphBinding: (id, onChainId, signal) =>
+        this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+      resolveAuthority: (id, signal) => this.resolveRegisteredContextGraphAuthority(id,
+        { authorityReadMode: 'finalized-index-or-live', signal }),
+      warn: message => this.log.warn(ctx, message),
+    }, input);
+  }
+
   async runLegacyDurableSyncDetailed(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
@@ -5644,14 +5657,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     options?: DurableSyncOptions,
   ): Promise<AdmittedDurableSyncResult> {
-    const authority = createRecoveryAuthority({
-      chain: this.chain,
-      verifyContextGraphBinding: (id, onChainId, signal) =>
-        this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
-      resolveAuthority: (id, signal) => this.resolveRegisteredContextGraphAuthority(id,
-        { authorityReadMode: 'finalized-index-or-live', signal }),
-      warn: message => this.log.warn(ctx, message),
-    }, options);
+    const authority = LifecycleSyncMethods.prototype.resolveRecoveryAuthority.call(this, ctx, options);
     const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
@@ -5702,7 +5708,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           lane: 'durable' as const,
           operationId: `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
           run: async (remainingContextGraphs) => {
-            const detailed = await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(
+            const detailed = await LifecycleSyncMethods.prototype.runAdmittedLegacyDurableContextGraph.call(
               this,
               ctx,
               remotePeerId,
@@ -5939,18 +5945,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       undefined,
       undefined,
       {
+        ...options,
         exactAssetFetchPolicy: options.exactFetchPurpose === 'vm-update-refresh'
           ? exactAssetFetchSessionPolicy(requireUalOnlyExactAssetSelection(selection), 'vm-update-refresh')
           : normalizeExactAssetFetchPolicy(undefined, () => selection, options.forceFreshExactSession),
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
-        recoveryAuthority: createRecoveryAuthority({
-          chain: this.chain,
-          verifyContextGraphBinding: (id, onChainId, signal) =>
-            this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
-          resolveAuthority: (id, signal) => this.resolveRegisteredContextGraphAuthority(id,
-            { authorityReadMode: 'finalized-index-or-live', signal }),
-          warn: message => this.log.warn(ctx, message),
-        }, options),
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
         priority: VM_RECOVERY_SYNC_PRIORITY,
@@ -6015,6 +6014,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remainingContextGraphs: number,
     options: LegacyDurableContextGraphOptions = {},
   ): Promise<PhysicalDurableSyncResult> {
+    return LifecycleSyncMethods.prototype.runAdmittedLegacyDurableContextGraph.call(
+      this, ctx, remotePeerId, contextGraphId, remainingContextGraphs,
+      { ...options, recoveryAuthority: LifecycleSyncMethods.prototype.resolveRecoveryAuthority.call(this, ctx, options) },
+    );
+  }
+
+  /** @internal The admitted executor receives one resolved operation-owned authority. */
+  async runAdmittedLegacyDurableContextGraph(this: DKGAgent,
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphId: string,
+    remainingContextGraphs: number,
+    options: Omit<LegacyDurableContextGraphOptions, keyof DurableRecoveryInput> & { recoveryAuthority: DurableRecoveryAuthority },
+  ): Promise<PhysicalDurableSyncResult> {
     const {
       onPhase,
       onAtomicCommitStarted,
@@ -6047,14 +6060,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const verifyContextGraphBinding = memoizeRecoveryBindingProof(
       (id, onChainId, signal) => this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
     );
-    const authority = options.recoveryAuthority ?? createRecoveryAuthority({
-      chain: this.chain,
-      verifyContextGraphBinding: (id, onChainId, signal) =>
-        this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
-      resolveAuthority: (id, signal) => this.resolveRegisteredContextGraphAuthority(id,
-        { authorityReadMode: 'finalized-index-or-live', signal }),
-      warn: message => this.log.warn(ctx, message),
-    });
+    const authority = options.recoveryAuthority;
     const contextGraphBudget = createDurableSyncBudget({
       fetchTimeoutMs,
       authenticationTimeoutMs,
