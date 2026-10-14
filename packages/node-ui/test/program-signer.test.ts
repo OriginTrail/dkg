@@ -1,7 +1,10 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { programClient } from '../src/ui/components/Programs/client.js';
-vi.mock('../src/ui/api.js', () => ({ fetchStatus: async () => ({ peerId: 'peer-node' }) }));
+vi.mock('../src/ui/api.js', async (original) => ({
+  ...(await original<typeof import('../src/ui/api.js')>()),
+  fetchStatus: async () => ({ peerId: 'peer-node' }),
+}));
 const address = '0x0000000000000000000000000000000000000001';
 afterEach(() => { delete window.__DKG_TOKEN__; vi.restoreAllMocks(); });
 describe('Program editor node agent', () => {

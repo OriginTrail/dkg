@@ -282,7 +282,7 @@ describe('ContextGraphQueryView', () => {
     expect(textarea.value).toContain('schema.org/name');
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory' },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
     );
 
     const runButton = Array.from(container.querySelectorAll('button'))
@@ -295,7 +295,7 @@ describe('ContextGraphQueryView', () => {
     });
     expect(apiMocks.executeQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('schema.org/name'),
-      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory' },
+      { contextGraphId: 'cg-test', subGraphName: 'docs', view: 'working-memory', includeContextGraphPartitions: true },
     );
 
     apiMocks.executeQuery.mockClear();

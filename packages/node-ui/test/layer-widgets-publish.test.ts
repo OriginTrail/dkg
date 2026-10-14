@@ -337,7 +337,8 @@ describe('LayerWidgetStrip — visibility does not widen mutation scope', () => 
       }),
     );
 
-    expect(container.textContent).toContain('QueryCatalog');
+    expect(container.textContent).toContain('Entity1');
+    expect(container.textContent).toContain('Triples1');
     expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
     await unmount();
   });

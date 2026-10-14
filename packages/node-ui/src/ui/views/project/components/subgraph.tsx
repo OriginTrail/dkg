@@ -1425,6 +1425,7 @@ export function SubGraphDetailView({
         contextGraphId,
         view: execution.view,
         subGraphName: execution.subGraphName,
+        ...(execution.view === 'working-memory' ? { includeContextGraphPartitions: true } : {}),
       });
       const result = r.result;
       const resultType = result.type;
