@@ -21,6 +21,7 @@ import {
 import {
   bindingsOf,
   cell,
+  distinctPairCount,
   distinctTripleCountsByPredicate,
   exportInputFromBindings,
   parseRelateRules,
@@ -607,14 +608,16 @@ export function registerOkfCommand(program: Command): void {
           // Scope the count to subjects under this bundle's IRI base. A graph-wide
           // count would let unrelated pre-existing triples mask a real shortfall
           // (or inflate it) and report "complete" when concepts are actually missing.
+          // Count each triple once, as the expectation does: a COUNT(*) over the
+          // named graphs counts a triple once per graph holding it, so two copies
+          // of one tag could stand in for another tag that is missing. The pairs
+          // are counted here, since a scoped query may not nest its GRAPH
+          // variable in a subquery, and across graphs DISTINCT may not hold.
           const sparql =
-            `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s <${predicate}> ?o ` +
+            `SELECT DISTINCT ?s ?o WHERE { GRAPH ?g { ?s <${predicate}> ?o ` +
             `FILTER(STRSTARTS(STR(?s), "${iriBase}")) } }`;
           const { result } = await client.query(sparql, contextGraphId, queryOptions);
-          const bindings = bindingsOf(result);
-          const raw = cell(bindings[0]?.c) || '0';
-          const m = /^"?(\d+)"?/.exec(raw);
-          return m ? parseInt(m[1], 10) : 0;
+          return distinctPairCount(bindingsOf(result));
         };
 
         // Verify EVERY predicate the bundle actually produced, not a fixed

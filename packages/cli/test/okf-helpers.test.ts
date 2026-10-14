@@ -16,6 +16,7 @@ import {
 import {
   bindingsOf,
   cell,
+  distinctPairCount,
   distinctTripleCountsByPredicate,
   exportInputFromBindings,
   parseRelateRules,
@@ -196,3 +197,27 @@ describe('distinctTripleCountsByPredicate (verify expectations)', () => {
     expect(Object.fromEntries(counts)).toEqual({ 'urn:p:lineage': 1 });
   });
 });
+
+describe('distinctPairCount', () => {
+  it('counts a triple read from several named graphs once', () => {
+    const a = { s: 'urn:okf:x', o: '"a"' };
+    expect(distinctPairCount([a, { ...a }, { s: 'urn:okf:x', o: '"b"' }])).toBe(2);
+    expect(distinctPairCount([a, { ...a }])).toBe(1);
+  });
+
+  it('reads a bracketed IRI as the bare one, and keeps literals with one lexical form apart', () => {
+    expect(distinctPairCount([{ s: '<urn:okf:x>', o: 'urn:okf:y' }, { s: 'urn:okf:x', o: '<urn:okf:y>' }])).toBe(1);
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    expect(distinctPairCount([
+      { s: { value: 'urn:okf:x', type: 'uri' }, o: { value: '1', type: 'literal', datatype: `${XSD}integer` } },
+      { s: { value: 'urn:okf:x', type: 'uri' }, o: { value: '1', type: 'literal' } },
+      { s: { value: 'urn:okf:x', type: 'uri' }, o: { value: '1', type: 'literal', 'xml:lang': 'en' } },
+      { s: { value: 'urn:okf:x', type: 'uri' }, o: { value: '1', type: 'literal', datatype: `${XSD}integer` } },
+    ])).toBe(3);
+  });
+
+  it('skips a row without both terms', () => {
+    expect(distinctPairCount([{ s: 'urn:okf:x' }, { o: '"a"' }, {}])).toBe(0);
+  });
+});
+

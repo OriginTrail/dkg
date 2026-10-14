@@ -51,6 +51,26 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
   const clear = () => {
     stub.calls.length = 0;
   };
+  // A verify count query's rows: one `?s ?o` binding per stored copy. IRIs come
+  // as SPARQL-JSON object cells, literals as the term strings the daemon sends.
+  const pairRows = (pairs: Array<[string, string]>) =>
+    pairs.map(([s, o]) => ({ s: { value: s, type: 'uri' }, o: o.startsWith('"') ? o : { value: o, type: 'uri' } }));
+  // The (subject, object) pairs of each predicate in `quads`: the store's triples after a complete import.
+  const pairsByPredicate = (quads: Array<{ subject: string; predicate: string; object: string }>) => {
+    const out = new Map<string, Array<[string, string]>>();
+    for (const line of new Set(quadsToNQuads(quads).split('\n').filter(Boolean))) {
+      const [, s, p, o] = /^<([^>]+)> <([^>]+)> (.+) \.$/.exec(line)!;
+      out.set(p, [...(out.get(p) ?? []), [s, o.startsWith('<') ? o.slice(1, -1) : o]]);
+    }
+    return out;
+  };
+  // A store answering each count query with its pairs, every pair held in `copies` named graphs.
+  const storeHandler = (stored: Map<string, Array<[string, string]>>, copies: number): StubHandler => (req, body) => {
+    const sparql = String(JSON.parse(body || '{}').sparql ?? '');
+    const predicate = [...stored.keys()].find((p) => sparql.includes(`<${p}>`)) ?? '';
+    const pairs = stored.get(predicate) ?? [];
+    return { status: 200, body: { result: { bindings: pairRows(Array.from({ length: copies }, () => pairs).flat()) } } };
+  };
 
   it('dry-run prints the mapping and NEVER contacts the node', async () => {
     clear();
@@ -413,7 +433,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     await rm(outDir, { recursive: true, force: true });
   });
 
-  it('verify gates on scoped per-predicate counts and normalizes object-form count cells', async () => {
+  it('verify gates on scoped per-predicate counts and reads object-form cells', async () => {
     clear();
     // Clean 2-concept bundle, no headings/links: predicates are rdf:type×2, schema:name×2.
     const dir = await mkdtemp(join(tmpdir(), 'okf-verify-'));
@@ -423,7 +443,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
 
     const TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
     const NAME = 'http://schema.org/name';
-    // COUNT(*) returned as a SPARQL-JSON OBJECT cell (exercises the cell() fix in verify).
+    // The stored pairs come back as SPARQL-JSON OBJECT cells (exercises the cell reading in verify).
     const issuedSparql: string[] = [];
     const countHandler =
       (counts: Record<string, number>): StubHandler =>
@@ -431,10 +451,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
         const sparql = String(JSON.parse(body || '{}').sparql ?? '');
         issuedSparql.push(sparql);
         const pred = Object.keys(counts).find((p) => sparql.includes(`<${p}>`)) ?? '';
-        return {
-          status: 200,
-          body: { result: { bindings: [{ c: { value: String(counts[pred] ?? 0), type: 'literal' } }] } },
-        };
+        return { status: 200, body: { result: { bindings: pairRows(Array.from({ length: counts[pred] ?? 0 }, (_, i) => [`urn:okf:c${i}`, `v${i}`])) } } };
       };
 
     // All present → complete, zero missing, exit 0.
@@ -445,7 +462,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(okOut.complete).toBe(true);
     expect(okOut.totalMissingTriples).toBe(0);
 
-    // SCOPING CONTRACT: every COUNT must be filtered to subjects under the bundle's
+    // SCOPING CONTRACT: every count must be filtered to subjects under the bundle's
     // IRI prefix — otherwise unrelated pre-existing graph triples could mask (or
     // inflate) a real shortfall and report "complete" while concepts are missing.
     // A regression dropping the STRSTARTS filter fails here.
@@ -481,17 +498,9 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     ];
     for (const f of files) await writeFile(join(dir, f.path), f.content);
 
-    // The store after a complete import: a SET of triples, counted per predicate.
-    const stored = new Map<string, number>();
-    for (const line of new Set(quadsToNQuads(importBundle(files).quads).split('\n').filter(Boolean))) {
-      const predicate = /^\S+ <([^>]+)>/.exec(line)![1];
-      stored.set(predicate, (stored.get(predicate) ?? 0) + 1);
-    }
-    stub.setHandler((req, body) => {
-      const sparql = String(JSON.parse(body || '{}').sparql ?? '');
-      const predicate = [...stored.keys()].find((p) => sparql.includes(`<${p}>`)) ?? '';
-      return { status: 200, body: { result: { bindings: [{ c: { value: String(stored.get(predicate) ?? 0), type: 'literal' } }] } } };
-    });
+    // The store after a complete import: a SET of triples, each held in two named graphs.
+    const stored = pairsByPredicate(importBundle(files).quads);
+    stub.setHandler(storeHandler(stored, 2));
     const r = await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-dup'], env());
     stub.setHandler(okfDaemonHandler(createdCGs));
     expect(r.exitCode).toBe(0);
@@ -500,6 +509,37 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(out.totalMissingTriples).toBe(0);
     const rows = out.predicates as Array<{ predicate: string; expected: number; actual: number; missing: number }>;
     expect(rows.find((row) => row.predicate === PROV_WAS_DERIVED_FROM)).toMatchObject({ expected: 2, actual: 2, missing: 0 });
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('verify counts a triple held in several named graphs once, so a copy never hides a missing triple', async () => {
+    clear();
+    // tags: [a, a, b] is two triples. Two named graphs holding the `a` triple,
+    // and none holding `b`, leave one missing; with `b` there too it is complete.
+    const dir = await mkdtemp(join(tmpdir(), 'okf-verify-copies-'));
+    const files = [
+      { path: 'index.md', content: '---\nokf_version: "0.1"\n---\n# Root\n' },
+      { path: 'x.md', content: '---\ntype: Thing\ntags: [a, a, b]\n---\n\nbody\n' },
+    ];
+    for (const f of files) await writeFile(join(dir, f.path), f.content);
+    const KEYWORDS = 'http://schema.org/keywords';
+    const complete = pairsByPredicate(importBundle(files).quads);
+    const verifyWith = async (keywords: Array<[string, string]>) => {
+      stub.setHandler(storeHandler(new Map([...complete, [KEYWORDS, keywords]]), 1));
+      const r = await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-copies'], env());
+      stub.setHandler(okfDaemonHandler(createdCGs));
+      const out = parseJsonTail(r.stdout);
+      const row = (out.predicates as Array<{ predicate: string; expected: number; actual: number; missing: number }>).find((p) => p.predicate === KEYWORDS);
+      return { exitCode: r.exitCode, complete: out.complete, row };
+    };
+    const missingB = await verifyWith([['urn:okf:x', '"a"'], ['urn:okf:x', '"a"']]);
+    expect(missingB.exitCode).not.toBe(0);
+    expect(missingB.complete).toBe(false);
+    expect(missingB.row).toMatchObject({ expected: 2, actual: 1, missing: 1 });
+    const withCopies = await verifyWith([['urn:okf:x', '"a"'], ['urn:okf:x', '"a"'], ['urn:okf:x', '"b"']]);
+    expect(withCopies.exitCode).toBe(0);
+    expect(withCopies.complete).toBe(true);
+    expect(withCopies.row).toMatchObject({ expected: 2, actual: 2, missing: 0 });
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -513,7 +553,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
 
     const countOne: StubHandler = () => ({
       status: 200,
-      body: { result: { bindings: [{ c: { value: '1', type: 'literal' } }] } },
+      body: { result: { bindings: pairRows([['urn:okf:ds', 'urn:okf:t']]) } },
     });
     const verifySparql = async (extra: string[]): Promise<string> => {
       const issued: string[] = [];

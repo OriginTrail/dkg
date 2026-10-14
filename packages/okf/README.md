@@ -140,7 +140,9 @@ unmarked value a producer value), so it reads like one written now.
 triple once: two sources naming the same resource yield two `okf:Source` nodes
 but one `prov:wasDerivedFrom` edge, and `tags: [a, a]` yields one
 `schema:keywords`. The mapped quad count is therefore exactly what a complete
-import leaves in the store, which is what `dkg okf verify` compares against.
+import leaves in the store, which is what `dkg okf verify` compares against;
+it counts the stored triples the same way, each distinct triple once however
+many named graphs hold it.
 
 Namespaces: `okf:` = `http://dkg.io/ontology/okf/` (a sub-namespace of the DKG
 ontology, so it never collides with the node's own `dkg:status` /

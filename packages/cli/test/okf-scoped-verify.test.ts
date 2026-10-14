@@ -16,8 +16,8 @@ describe('registered OKF verify HTTP contract', () => {
     process.env.DKG_HOME = home;
     process.env.DKG_API_PORT = String(stub.port);
     stub.setHandler((_req, body) => ({ status: 200, body: { result: {
-      type: 'bindings', bindings: JSON.parse(body).sparql.includes('COUNT(*)')
-        ? [{ c: '1000' }] : [{ s: 'urn:okf:a' }, { s: 'urn:okf:b' }],
+      type: 'bindings', bindings: /SELECT DISTINCT \?s \?o/.test(JSON.parse(body).sparql)
+        ? Array.from({ length: 1000 }, (_, i) => ({ s: `urn:okf:s${i}`, o: `"v${i}"` })) : [{ s: 'urn:okf:a' }, { s: 'urn:okf:b' }],
     } } }));
     const output = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
@@ -27,8 +27,8 @@ describe('registered OKF verify HTTP contract', () => {
         ...(subGraphName ? ['--sub-graph-name', subGraphName] : [])], { from: 'user' });
       const report = JSON.parse(String(output.mock.calls.at(-1)?.[0]));
       expect(report).toMatchObject({ complete: true, missingConcepts: [] });
-      expect(stub.calls.filter((call) => JSON.parse(call.body).sparql.includes('COUNT(*)')).length).toBeGreaterThan(1);
-      expect(stub.calls.some((call) => JSON.parse(call.body).sparql.includes('SELECT DISTINCT ?s'))).toBe(true);
+      expect(stub.calls.filter((call) => /SELECT DISTINCT \?s \?o/.test(JSON.parse(call.body).sparql)).length).toBeGreaterThan(1);
+      expect(stub.calls.some((call) => JSON.parse(call.body).sparql.includes('SELECT DISTINCT ?s WHERE'))).toBe(true);
       for (const call of stub.calls) {
         const body = JSON.parse(call.body);
         expect(body.contextGraphId).toBe('cg');

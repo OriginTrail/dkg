@@ -155,6 +155,34 @@ function unwrapIri(term: string): string {
 }
 
 /**
+ * A binding cell as a term identity: a bare string is the term (an IRI with or
+ * without brackets), and a SPARQL-JSON object keeps its type, datatype and
+ * language, so two literals with one lexical form stay apart.
+ */
+function cellTerm(v: unknown): string {
+  if (v !== null && typeof v === 'object' && 'value' in v) {
+    const { type, value, datatype } = v as { type?: unknown; value?: unknown; datatype?: unknown };
+    return JSON.stringify([type ?? null, value ?? null, datatype ?? null, (v as Record<string, unknown>)['xml:lang'] ?? null]);
+  }
+  return unwrapIri(cell(v));
+}
+
+/**
+ * The distinct (subject, object) pairs among `?s ?o` bindings: a triple held in
+ * several named graphs counts once, as the expected counts count it
+ * (`distinctTripleCountsByPredicate`), so a repeated triple can never stand in
+ * for a missing one.
+ */
+export function distinctPairCount(bindings: Array<Record<string, unknown>>): number {
+  const pairs = new Set<string>();
+  for (const b of bindings) {
+    if (b.s === undefined || b.o === undefined) continue;
+    pairs.add(`${cellTerm(b.s)}\u0000${cellTerm(b.o)}`);
+  }
+  return pairs.size;
+}
+
+/**
  * `?s ?p ?o` bindings from one Context Graph view → quads. The daemon returns
  * cells as bare strings or SPARQL-JSON objects, and IRIs raw or bracketed;
  * both are normalised — in every position, so a bracketed object IRI (a
