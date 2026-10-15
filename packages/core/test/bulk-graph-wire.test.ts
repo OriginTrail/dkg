@@ -19,4 +19,8 @@ describe('versioned bulk graph wire', () => {
     await expect(decode(big,20)).rejects.toThrow('length');
     await expect(decode(good.slice(0,20),20)).rejects.toThrow('Truncated');
   });
+  it('refuses to encode a frame outside the header ranges', () => {
+    for(const header of [{kind:9,index:0,sequence:0},{kind:K.DATA,index:1025,sequence:0},{kind:K.DATA,index:0,sequence:2**32}])
+      expect(()=>encodeBulkGraphFrame({...header,payload:new Uint8Array([1])})).toThrow('Invalid bulk graph frame header');
+  });
 });
