@@ -58,15 +58,24 @@ export class LiftJobStoreSelectors {
     lifecycleKey: string,
     keyOfJob: (job: PersistedLiftJob) => string | null,
   ): Promise<PersistedLiftJob[]> {
-    const indexed = await this.store.query(
-      `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> {
-        ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(lifecycleKey)} ; <${CONTROL_PAYLOAD}> ?payload .
-        OPTIONAL { ?job <${CONTROL_STATUS}> ?status }
+    const result = await this.store.query(
+      `SELECT ?payload ?status ?indexed WHERE { GRAPH <${this.graphUri}> {
+        {
+          ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(lifecycleKey)} ; <${CONTROL_PAYLOAD}> ?payload .
+          OPTIONAL { ?job <${CONTROL_STATUS}> ?status }
+          BIND(true AS ?indexed)
+        } UNION {
+          ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_PAYLOAD}> ?payload .
+          FILTER NOT EXISTS { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey }
+        }
       } }`,
       { source: 'publisher.asyncLift.findActiveVmPublish' },
     );
+    const rows = expectBindings(result);
     const jobs = new Map<string, PersistedLiftJob>();
-    for (const row of expectBindings(indexed)) {
+    // Decode the indexed branch first regardless of backend UNION row order.
+    for (const row of rows) {
+      if (row['indexed'] === undefined) continue;
       const job = decodedLiftJobOrThrow(decodeLiftJobPayload(row['payload']));
       if (job !== null && keyOfJob(job) !== lifecycleKey) {
         throw new Error(`Malformed persisted LiftJob payload: lifecycle index does not match ${lifecycleKey}`);
@@ -75,14 +84,8 @@ export class LiftJobStoreSelectors {
       if (job !== null && row['status'] !== undefined) jobs.set(job.jobId, job);
     }
     // Include all statuses: finalized siblings demote ordinary failed history, but never held jobs.
-    const unindexed = await this.store.query(
-      `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> {
-        ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_PAYLOAD}> ?payload .
-        FILTER NOT EXISTS { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey }
-      } }`,
-      { source: 'publisher.asyncLift.unindexedVmPublishAdmission' },
-    );
-    for (const row of expectBindings(unindexed)) {
+    for (const row of rows) {
+      if (row['indexed'] !== undefined) continue;
       const job = parseInventoryPayload(row['payload']);
       if (job !== null) jobs.set(job.jobId, job);
     }

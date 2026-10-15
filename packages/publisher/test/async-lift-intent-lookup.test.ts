@@ -6,6 +6,7 @@ import {
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
 import type { LiftJob } from '../src/lift-job.js';
+import { LiftJobStoreSelectors } from '../src/lift-job-store-selectors.js';
 import {
   CONTROL_LIFECYCLE_KEY,
   CONTROL_PAYLOAD,
@@ -518,7 +519,7 @@ describe('#1828 async lift intent lookup', () => {
     expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('active');
   });
 
-  it('admission does not transfer unrelated indexed history payloads', async () => {
+  it('admission uses one bounded candidate read without transferring unrelated indexed history', async () => {
     const publisher = createPublisher();
     const request = kaVmPublishRequest();
     const targetId = await publisher.enqueueKnowledgeAssetVmPublish(request);
@@ -540,7 +541,9 @@ describe('#1828 async lift intent lookup', () => {
     await store.insert(history.flatMap((job) => serializeJob(job, DEFAULT_CONTROL_GRAPH_URI)));
     const query = store.query.bind(store);
     let transferredPayloads = 0;
+    const queries: Parameters<typeof store.query>[] = [];
     store.query = async (...args) => {
+      queries.push(args);
       const result = await query(...args);
       if (result.type === 'bindings') {
         transferredPayloads += result.bindings.filter((row) => row.payload !== undefined).length;
@@ -549,6 +552,52 @@ describe('#1828 async lift intent lookup', () => {
     };
     expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(targetId);
     expect(transferredPayloads).toBe(1);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.[1]).toEqual({ source: 'publisher.asyncLift.findActiveVmPublish' });
+    expect(queries[0]?.[0]).toContain('UNION');
+  });
+
+  it('keeps legacy duplicate payload precedence regardless of candidate row order', async () => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    const indexed = await publisher.getStatus(jobId);
+    if (!indexed) throw new Error('seed missing');
+    const legacy = { ...indexed, timestamps: { ...indexed.timestamps, updatedAt: now + 100 } };
+    await store.insert(serializeJob(legacy, DEFAULT_CONTROL_GRAPH_URI)
+      .filter((entry) => entry.predicate !== CONTROL_LIFECYCLE_KEY)
+      .map((entry) => ({ ...entry, subject: jobSubject('legacy-duplicate') })));
+    const query = store.query.bind(store);
+    store.query = async (...args) => {
+      const result = await query(...args);
+      return result.type === 'bindings' ? { ...result, bindings: result.bindings.reverse() } : result;
+    };
+    const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
+    const candidates = await selectors.vmPublishAdmissionCandidates(
+      knowledgeAssetVmPublishLifecycleKey(request),
+      (job) => job.request.jobType === 'knowledge-asset-vm-publish'
+        ? knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish) : null,
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.timestamps.updatedAt).toBe(legacy.timestamps.updatedAt);
+  });
+
+  it.each(['rejected', 'non-bindings'] as const)('does not admit after a %s candidate query', async (failure) => {
+    const publisher = createPublisher();
+    const seedId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'existing' }));
+    const query = store.query.bind(store);
+    store.query = async () => {
+      if (failure === 'rejected') throw new Error('candidate backend unavailable');
+      return { type: 'boolean', value: false };
+    };
+    try {
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest())).rejects.toThrow(
+        failure === 'rejected' ? 'candidate backend unavailable' : /bindings/i,
+      );
+    } finally {
+      store.query = query;
+    }
+    expect((await publisher.list()).map((job) => job.jobId)).toEqual([seedId]);
   });
 
   it('deduplicates a legacy unindexed accepted job while ignoring malformed unindexed neighbors', async () => {
