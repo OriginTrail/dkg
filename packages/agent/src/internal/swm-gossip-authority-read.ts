@@ -11,8 +11,9 @@
  * reconcile it.
  *
  * Nor is a "no" given while the graph's RFC-64 authority is not in place on
- * this node a refusal: the node's log says what the subscription waits for,
- * and says so again when the wait is over and the subscription is made.
+ * this node a refusal: the check says so through its `onAuthorityWait`
+ * option, the node's log says what the subscription waits for, and says so
+ * again when the wait is over and the subscription is made.
  */
 
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
@@ -20,14 +21,16 @@ import { sharedMemoryAuthorityRecheckOf } from '../gossip-session.js';
 import { UnansweredAuthorityObservation } from './context-graph-authority/unanswered-authority-read.js';
 import {
   describeSharedMemoryAuthorityWait,
-  SharedMemoryAuthorityWaitObservation,
   sharedMemoryAuthorityWaitsOf,
+  type SharedMemoryAuthorityWait,
+  type SharedMemoryAuthorityWaitSink,
 } from './shared-memory-authority-wait.js';
 import { describeUnansweredAuthorityCheck } from './unanswered-authority-recheck.js';
 
 export class SharedMemoryGossipAuthorityRead {
   readonly #read: UnansweredAuthorityObservation;
-  readonly #wait: SharedMemoryAuthorityWaitObservation;
+  /** What the check's "no" waits for, as its `onAuthorityWait` option heard. */
+  #wait: SharedMemoryAuthorityWait | undefined;
   /** Whether the graph's member subscription was wanted when the check began. */
   #subscribedAtCheck = false;
 
@@ -37,20 +40,23 @@ export class SharedMemoryGossipAuthorityRead {
     private readonly memberSubscribed: () => boolean,
   ) {
     this.#read = new UnansweredAuthorityObservation(contextGraphId);
-    this.#wait = new SharedMemoryAuthorityWaitObservation(contextGraphId);
   }
 
+  /** The check's `onAuthorityWait` option. */
+  readonly onAuthorityWait: SharedMemoryAuthorityWaitSink = (wait) => {
+    this.#wait = wait;
+  };
+
   /**
-   * Run the authority check so that a chain read without an answer, and a
-   * "no" that waits for the graph's authority, are noticed. Returns exactly
-   * what the check returns: awaiting it through here takes no more turns than
-   * awaiting it directly.
+   * Run the authority check so that a chain read without an answer is
+   * noticed. Returns exactly what the check returns: awaiting it through here
+   * takes no more turns than awaiting it directly.
    */
   run<T>(check: () => T): T {
     // Taken before the chain read: a member subscription withdrawn while the
     // read is out must not make this pass look like one that held none.
     this.#subscribedAtCheck = this.memberSubscribed();
-    return this.#read.run(() => this.#wait.run(check));
+    return this.#read.run(check);
   }
 
   /**
@@ -122,7 +128,7 @@ export class SharedMemoryGossipAuthorityRead {
       } after waiting for ${waited.waitingFor}`);
       return;
     }
-    const wait = this.#wait.wait;
+    const wait = this.#wait;
     if (wait === undefined) {
       waits.settle(this.contextGraphId);
       pass.log.warn(pass.ctx, pass.isRegistered

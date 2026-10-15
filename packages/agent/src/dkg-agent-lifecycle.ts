@@ -877,9 +877,9 @@ import {
 } from './internal/owed-legacy-swm-retirements.js';
 import {
   rfc64SharedMemoryAuthorityWaitV1,
-  sharedMemoryAuthorityNo,
   sharedMemoryAuthorityWaitsOf,
   SharedMemorySyncAuthorityCheck,
+  type SharedMemoryAuthorityWaitSink,
 } from './internal/shared-memory-authority-wait.js';
 import {
   describeRfc64LegacySwmFenceEventV1,
@@ -5133,7 +5133,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (
         completeSwmProviders.length === 0
         && !syncAuthority.answer(
-          await syncAuthority.run(() => this.canUseSharedMemoryForContextGraph(contextGraphId)),
+          await this.canUseSharedMemoryForContextGraph(contextGraphId, { onAuthorityWait: syncAuthority.onAuthorityWait }),
           this.log,
           ctx,
         )
@@ -11260,6 +11260,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       readAuthority?: ContextGraphReadAuthorityDecision;
+      /**
+       * Receives what the "no" waits for when no accepted RFC-64 policy
+       * governs the graph yet, for a caller that has to tell that wait from a
+       * refusal. Not called for a refusal or a "yes".
+       */
+      onAuthorityWait?: SharedMemoryAuthorityWaitSink;
     } = {},
   ): Promise<boolean> {
     const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
@@ -11275,13 +11281,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Without an accepted policy governing the graph, the "no" only waits for
     // one. That is read in the turn the "no" was given: the policy can be
     // accepted at the next await.
-    const rfc64Wait = acceptedRfc64Authority === false
+    const rfc64Wait = acceptedRfc64Authority === false && opts.onAuthorityWait !== undefined
       ? rfc64SharedMemoryAuthorityWaitV1(this, contextGraphId)
       : undefined;
     if (
       acceptedRfc64Authority === false
       && !(await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId))
-    ) return sharedMemoryAuthorityNo(contextGraphId, rfc64Wait);
+    ) {
+      if (rfc64Wait !== undefined) opts.onAuthorityWait?.(rfc64Wait);
+      return false;
+    }
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }

@@ -915,7 +915,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       contextGraphId,
       () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
     );
-    const canUseSharedMemory = await authorityRead.run(() => this.canUseSharedMemoryForContextGraph(contextGraphId));
+    const canUseSharedMemory = await authorityRead.run(() => this.canUseSharedMemoryForContextGraph(contextGraphId, { onAuthorityWait: authorityRead.onAuthorityWait }));
     if (!session.active || this.gossipSession !== session) return;
     if (authorityRead.deferIfUnanswered({
       session, canUseSharedMemory, isRegistered, log: this.log, ctx,

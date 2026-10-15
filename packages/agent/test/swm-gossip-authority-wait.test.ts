@@ -44,6 +44,10 @@ interface Internals {
   rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId: string): Promise<boolean>;
   hasConfirmedSharedMemoryMetaState(contextGraphId: string): Promise<boolean>;
   canReadContextGraph(contextGraphId: string, options: unknown): Promise<boolean>;
+  canUseSharedMemoryForContextGraph(
+    contextGraphId: string,
+    options?: { onAuthorityWait?: (wait: unknown) => void },
+  ): Promise<boolean>;
   reconcileSwmHostModeSubscription(contextGraphId: string): Promise<void>;
   reconcileSharedMemoryGossipSubscription(contextGraphId: string): Promise<void>;
   planSharedMemorySyncContextGraphs(
@@ -297,6 +301,28 @@ describe('shared-memory gossip and sync of a graph whose RFC-64 authority is not
       waits(NOT_ACCEPTED, 'not subscribed yet'),
       `SWM gossip subscription for "${CG}" is in place after waiting for ${WAITING_FOR}`,
     ]);
+  });
+
+  it('tells the check\'s option only what a wait waits for, and answers the same without it', async () => {
+    const heard: unknown[] = [];
+    const onAuthorityWait = (wait: unknown): void => { heard.push(wait); };
+    const refreshReads = vi.mocked(internals.rfc64CatalogAuthorityRefreshFailureReasonV1);
+
+    await expect(internals.canUseSharedMemoryForContextGraph(CG, { onAuthorityWait })).resolves.toBe(false);
+    expect(heard).toEqual([{ waitingFor: WAITING_FOR, detail: NOT_ACCEPTED }]);
+    // A caller without the option gets the same answer, and the wait is not
+    // worked out for it.
+    refreshReads.mockClear();
+    await expect(internals.canUseSharedMemoryForContextGraph(CG)).resolves.toBe(false);
+    expect(refreshReads).not.toHaveBeenCalled();
+
+    // A refusal and a "yes" tell the option nothing.
+    rfc64.transport = 'catalog-active';
+    rfc64.accepted = 'private-without-this-node';
+    await expect(internals.canUseSharedMemoryForContextGraph(CG, { onAuthorityWait })).resolves.toBe(false);
+    acceptPublicPolicy();
+    await expect(internals.canUseSharedMemoryForContextGraph(CG, { onAuthorityWait })).resolves.toBe(true);
+    expect(heard).toHaveLength(1);
   });
 
   it('keeps a refusal by the legacy checks a warning while the RFC-64 authority is not in place', async () => {

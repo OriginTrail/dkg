@@ -12,12 +12,11 @@
  * is a wait. A refusal is an accepted policy that does not admit this node,
  * or a legacy check that answered "no".
  *
- * The check keeps its signature and its fail-closed result. A caller that
- * logs the "no" opens an observation around its check; outside one a report
- * goes nowhere.
+ * The check keeps its fail-closed boolean result. A caller that logs the "no"
+ * passes the check an `onAuthorityWait` option, which hears what a "no" waits
+ * for; it is not called for a refusal or a "yes".
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
 
 /** What a graph's shared-memory check waits for, as the node's log names it. */
@@ -27,6 +26,9 @@ export interface SharedMemoryAuthorityWait {
   /** Where that stands, e.g. `last refresh: registered-authority-unfinalized`. */
   readonly detail: string;
 }
+
+/** The shared-memory check's `onAuthorityWait` option. */
+export type SharedMemoryAuthorityWaitSink = (wait: SharedMemoryAuthorityWait) => void;
 
 /** The node's reads of one graph's RFC-64 authority that tell a wait from a refusal. */
 export interface Rfc64SharedMemoryAuthorityReads {
@@ -56,46 +58,6 @@ export function rfc64SharedMemoryAuthorityWaitV1(
     waitingFor: 'the graph\'s RFC-64 authority',
     detail: failure === null ? 'not accepted on this node yet' : `last refresh: ${failure}`,
   };
-}
-
-/** One caller's observation of one shared-memory check of one graph. */
-export class SharedMemoryAuthorityWaitObservation {
-  #wait: SharedMemoryAuthorityWait | undefined;
-
-  constructor(private readonly contextGraphId: string) {}
-
-  /**
-   * Run `check` inside the observation and return exactly what it returns:
-   * awaiting a check through here takes no more turns than awaiting it
-   * directly.
-   */
-  run<T>(check: () => T): T {
-    return observations.run(this, check);
-  }
-
-  /**
-   * What the check's "no" waits for, or undefined for a refusal or a "yes".
-   * Read it when the check has ended.
-   */
-  get wait(): SharedMemoryAuthorityWait | undefined {
-    return this.#wait;
-  }
-
-  /** Only a check of the observed graph counts. */
-  report(contextGraphId: string, wait: SharedMemoryAuthorityWait): void {
-    if (contextGraphId === this.contextGraphId) this.#wait ??= wait;
-  }
-}
-
-const observations = new AsyncLocalStorage<SharedMemoryAuthorityWaitObservation>();
-
-/** The check's "no", reported first as a wait when `wait` names one. */
-export function sharedMemoryAuthorityNo(
-  contextGraphId: string,
-  wait: SharedMemoryAuthorityWait | undefined,
-): false {
-  if (wait !== undefined) observations.getStore()?.report(contextGraphId, wait);
-  return false;
 }
 
 /** `<what it waits for> (<where that stands>)`, as a log line names a wait. */
@@ -162,24 +124,22 @@ export function sharedMemoryAuthorityWaitsOf(owner: object): SharedMemoryAuthori
 }
 
 /**
- * The shared-memory check of one graph in the node's SWM sync planning, and
- * the line its "no" gets.
+ * The shared-memory check of one graph in the node's SWM sync planning: what
+ * its "no" waits for, and the line that "no" gets.
  */
 export class SharedMemorySyncAuthorityCheck {
-  readonly #observation: SharedMemoryAuthorityWaitObservation;
+  #wait: SharedMemoryAuthorityWait | undefined;
 
   constructor(
     private readonly contextGraphId: string,
     /** The planning node's waits, from {@link sharedMemoryAuthorityWaitsOf}. */
     private readonly waits: SharedMemoryAuthorityWaits,
-  ) {
-    this.#observation = new SharedMemoryAuthorityWaitObservation(contextGraphId);
-  }
+  ) {}
 
-  /** Run the check and return exactly what it returns. */
-  run<T>(check: () => T): T {
-    return this.#observation.run(check);
-  }
+  /** The check's `onAuthorityWait` option. */
+  readonly onAuthorityWait: SharedMemoryAuthorityWaitSink = (wait) => {
+    this.#wait = wait;
+  };
 
   /**
    * Call with the check's result; returns it. A "no" that waits is said at
@@ -191,7 +151,7 @@ export class SharedMemorySyncAuthorityCheck {
     log: Pick<Logger, 'info' | 'debug' | 'warn'>,
     ctx: OperationContext,
   ): boolean {
-    const wait = canUse ? undefined : this.#observation.wait;
+    const wait = canUse ? undefined : this.#wait;
     if (wait === undefined) {
       this.waits.settle(this.contextGraphId);
       if (!canUse) {

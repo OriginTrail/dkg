@@ -12,9 +12,7 @@ import {
   describeSharedMemoryAuthorityWait,
   rfc64SharedMemoryAuthorityWaitV1,
   SHARED_MEMORY_AUTHORITY_WAITS_MAX,
-  SharedMemoryAuthorityWaitObservation,
   SharedMemoryAuthorityWaits,
-  sharedMemoryAuthorityNo,
   sharedMemoryAuthorityWaitsOf,
   SharedMemorySyncAuthorityCheck,
   type SharedMemoryAuthorityWait,
@@ -78,44 +76,6 @@ describe('what a "no" from the graph\'s RFC-64 authority waits for', () => {
   });
 });
 
-describe('observing one check', () => {
-  it('returns exactly what the check returns', async () => {
-    const result = Promise.resolve(true);
-    const observation = new SharedMemoryAuthorityWaitObservation(CG);
-    expect(observation.run(() => result)).toBe(result);
-    await expect(result).resolves.toBe(true);
-    expect(observation.wait).toBeUndefined();
-  });
-
-  it('learns a wait the check reports, after its awaits too', async () => {
-    const observation = new SharedMemoryAuthorityWaitObservation(CG);
-    const canUse = await observation.run(async () => {
-      await Promise.resolve();
-      return sharedMemoryAuthorityNo(CG, NOT_ACCEPTED);
-    });
-    expect(canUse).toBe(false);
-    expect(observation.wait).toEqual(NOT_ACCEPTED);
-  });
-
-  it('keeps the first wait of the check, and only for the observed graph', () => {
-    const observation = new SharedMemoryAuthorityWaitObservation(CG);
-    observation.run(() => {
-      sharedMemoryAuthorityNo(OTHER_CG, UNFINALIZED);
-      sharedMemoryAuthorityNo(CG, NOT_ACCEPTED);
-      sharedMemoryAuthorityNo(CG, UNFINALIZED);
-    });
-    expect(observation.wait).toEqual(NOT_ACCEPTED);
-  });
-
-  it('learns nothing from a refusal, or from a check it does not run', () => {
-    const observation = new SharedMemoryAuthorityWaitObservation(CG);
-    expect(observation.run(() => sharedMemoryAuthorityNo(CG, undefined))).toBe(false);
-    // Outside any observation the report goes nowhere.
-    expect(sharedMemoryAuthorityNo(CG, NOT_ACCEPTED)).toBe(false);
-    expect(observation.wait).toBeUndefined();
-  });
-});
-
 describe('the waits one owner\'s log has reported', () => {
   it('says a new wait at info, a repeat at debug, and a changed one at info again', () => {
     const waits = new SharedMemoryAuthorityWaits();
@@ -171,44 +131,49 @@ describe('the SWM sync planning\'s check of one graph', () => {
     return { info: vi.fn(), debug: vi.fn(), warn: vi.fn() };
   }
 
-  async function check(
+  /**
+   * One planning pass: the check says `canUse`, after telling the option what
+   * its "no" waits for when `wait` is given.
+   */
+  function check(
     waits: SharedMemoryAuthorityWaits,
     log: ReturnType<typeof logger>,
-    answer: () => boolean,
-  ): Promise<boolean> {
+    canUse: boolean,
+    wait?: SharedMemoryAuthorityWait,
+  ): boolean {
     const syncCheck = new SharedMemorySyncAuthorityCheck(CG, waits);
-    return syncCheck.answer(await syncCheck.run(async () => answer()), log, ctx);
+    if (wait !== undefined) syncCheck.onAuthorityWait(wait);
+    return syncCheck.answer(canUse, log, ctx);
   }
 
-  it('says nothing for a "yes" and returns it', async () => {
+  it('says nothing for a "yes" and returns it', () => {
     const log = logger();
-    await expect(check(new SharedMemoryAuthorityWaits(), log, () => true)).resolves.toBe(true);
+    expect(check(new SharedMemoryAuthorityWaits(), log, true)).toBe(true);
     expect(log.info).not.toHaveBeenCalled();
     expect(log.debug).not.toHaveBeenCalled();
     expect(log.warn).not.toHaveBeenCalled();
   });
 
-  it('says a wait at info once, its repeats at debug, and a wait after a "yes" at info again', async () => {
+  it('says a wait at info once, its repeats at debug, and a wait after a "yes" at info again', () => {
     const waits = new SharedMemoryAuthorityWaits();
     const log = logger();
-    const wait = () => sharedMemoryAuthorityNo(CG, NOT_ACCEPTED);
-    await expect(check(waits, log, wait)).resolves.toBe(false);
-    await expect(check(waits, log, wait)).resolves.toBe(false);
+    expect(check(waits, log, false, NOT_ACCEPTED)).toBe(false);
+    expect(check(waits, log, false, NOT_ACCEPTED)).toBe(false);
     expect(log.info.mock.calls).toEqual([[ctx, waiting(NOT_ACCEPTED)]]);
     expect(log.debug.mock.calls).toEqual([[ctx, waiting(NOT_ACCEPTED)]]);
 
-    await expect(check(waits, log, () => true)).resolves.toBe(true);
+    expect(check(waits, log, true)).toBe(true);
     expect(waits.size).toBe(0);
-    await check(waits, log, wait);
+    check(waits, log, false, NOT_ACCEPTED);
     expect(log.info).toHaveBeenCalledTimes(2);
     expect(log.warn).not.toHaveBeenCalled();
   });
 
-  it('keeps a refusal at warn, and a refusal ends the wait', async () => {
+  it('keeps a refusal at warn, and a refusal ends the wait', () => {
     const waits = new SharedMemoryAuthorityWaits();
     const log = logger();
-    await check(waits, log, () => sharedMemoryAuthorityNo(CG, NOT_ACCEPTED));
-    await expect(check(waits, log, () => sharedMemoryAuthorityNo(CG, undefined))).resolves.toBe(false);
+    check(waits, log, false, NOT_ACCEPTED);
+    expect(check(waits, log, false)).toBe(false);
     expect(log.warn.mock.calls).toEqual([[ctx, refused]]);
     expect(waits.size).toBe(0);
   });
