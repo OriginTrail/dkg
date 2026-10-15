@@ -82,7 +82,7 @@ import {
   type CatalogPlacementAttemptV1,
 } from './internal/catalog-placement-timing.js';
 import { readOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
-import { rfc64SwmInventoryAssetKeyIsAuthorsV1 } from './internal/swm-inventory-asset-key.js';
+import { rfc64SwmInventoryAuthorKeyV1 } from './internal/swm-inventory-asset-key.js';
 import { healFinalizedSwmInventoryRowsV1 } from './internal/finalized-row-heal.js';
 import { catalogRepairDiagnosticV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
@@ -193,13 +193,13 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       const scope = Object.freeze({ ...decision.lane.scopeBase, authorAddress }) as SwmAuthorInventoryScopeV1;
       const scopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
       const runtime = rfc64SwmInventoryShadowRuntimeV1(this);
-      const authorsAssets = (key: string) => rfc64SwmInventoryAssetKeyIsAuthorsV1(key, { contextGraphId, authorAddress });
+      const authorKey = rfc64SwmInventoryAuthorKeyV1({ contextGraphId, authorAddress });
       // No inventory and no share of this author's on its way into one: no row to remove.
       if (
         persistence.swmAuthorInventory.readSwmAuthorInventoryHeadDigestV1(scopeDigest, authorAddress) === null
-        && !runtime.hasQueued(authorsAssets)
+        && !runtime.hasAuthorWork(authorKey)
       ) return;
-      runtime.scheduleAfter(authorsAssets, JSON.stringify(['finalized-twin', contextGraphId, authorAddress, input.kaUal]), async () => {
+      runtime.scheduleAfterAuthorWork(authorKey, JSON.stringify(['finalized-twin', authorKey, input.kaUal]), async () => {
         try {
           const row = this.rfc64PersistenceV1?.swmAuthorInventory.readSwmAuthorInventoryRowV1(
             scopeDigest,
@@ -212,8 +212,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
             contextGraphId,
             scope,
             expectedRow: { assertionVersion: row.assertionVersion, kaUal: row.kaUal, sealDigest: row.sealDigest },
-            ctx,
           });
+          if (removed.status !== 'applied' && removed.status !== 'absent') return;
+          this.requestRfc64SwmCatalogProjectionV1({ contextGraphId, authorAddress, ctx });
           if (removed.status === 'applied') this.log.info(ctx, `Removed the RFC-64 SWM inventory row of finalized ${row.kaUal}`);
         } catch (cause) {
           failed(cause);

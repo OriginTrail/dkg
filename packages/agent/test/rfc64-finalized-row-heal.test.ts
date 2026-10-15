@@ -75,6 +75,22 @@ describe('the sweep of rows of finalized assets (GH#3134)', () => {
     await expect(healFinalizedSwmInventoryRowsV1(inventory, sweep(store, inventory))).resolves.toBe(0);
     expect(finalizedRowHealCountsV1(inventory)).toEqual({ finalizedRowHealPasses: 1, finalizedRowsHealed: 2 });
   });
+
+  it('tries a removal that failed again at the next sweep of the same head', async () => {
+    const store = new OxigraphStore();
+    const stale = row(1n, '1');
+    await finalize(store, stale, '1');
+    const inventory = fakeInventory([stale]);
+    // The author's signer is briefly unavailable.
+    inventory.failNextRemoval(stale.kaUal);
+
+    await expect(healFinalizedSwmInventoryRowsV1(inventory, sweep(store, inventory))).resolves.toBe(0);
+    expect(inventory.current.rows).toEqual([stale]);
+    // It is back: the unchanged head is swept again, and the row goes.
+    await expect(healFinalizedSwmInventoryRowsV1(inventory, sweep(store, inventory))).resolves.toBe(1);
+    expect(inventory.current.rows).toEqual([]);
+    expect(finalizedRowHealCountsV1(inventory)).toEqual({ finalizedRowHealPasses: 2, finalizedRowsHealed: 1 });
+  });
 });
 
 function row(kaNumber: bigint, assertionVersion: string): SwmAuthorInventoryRowV1 {
@@ -150,6 +166,7 @@ async function shareCopy(store: OxigraphStore, asset: SwmAuthorInventoryRowV1): 
 function fakeInventory(rows: readonly SwmAuthorInventoryRowV1[]) {
   let heads = 0;
   const held = new Map<string, Readonly<{ until: Promise<void>; meanwhile: () => void }>>();
+  const failing = new Set<string>();
   const inventory = {
     current: snapshotOf(rows, heads),
     removed: [] as string[],
@@ -160,7 +177,11 @@ function fakeInventory(rows: readonly SwmAuthorInventoryRowV1[]) {
     holdRemoval(kaUal: string, until: Promise<void>, meanwhile: () => void) {
       held.set(kaUal, { until, meanwhile });
     },
-    async removeRow(target: Readonly<SwmAuthorInventoryRowV1>) {
+    failNextRemoval(kaUal: string) {
+      failing.add(kaUal);
+    },
+    async removeRow(target: Readonly<SwmAuthorInventoryRowV1>): Promise<'applied' | 'absent' | 'failed'> {
+      if (failing.delete(target.kaUal)) return 'failed';
       const hold = held.get(target.kaUal);
       if (hold !== undefined) {
         held.delete(target.kaUal);

@@ -63,6 +63,8 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   };
   readonly #inFlight = new Set<Promise<void>>();
   readonly #assetTails = new Map<string, Promise<void>>();
+  /** Per author key, the registered inventory writes still queued or running. */
+  readonly #authorWork = new Map<string, Set<Promise<void>>>();
   readonly #scopeRuntime = new Rfc64SerializedScopeRuntimeV1(
     'RFC-64 SWM inventory scope operation aborted',
   );
@@ -100,32 +102,32 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     });
   }
 
-  schedule(assetKey: string, observer: () => Promise<void>): boolean {
+  /** `authorKey` registers the work as one of that author's inventory writes (GH#3134). */
+  schedule(assetKey: string, observer: () => Promise<void>, authorKey?: string): boolean {
     if (this.#closed) return false;
-    this.enqueue(assetKey, observer, false);
+    this.enqueue(assetKey, observer, false, [], authorKey);
     return true;
   }
 
-  runExclusive(assetKey: string, observer: () => Promise<void>): Promise<void> {
+  runExclusive(assetKey: string, observer: () => Promise<void>, authorKey?: string): Promise<void> {
     if (this.#closed) {
       return Promise.reject(new Error('RFC-64 SWM inventory observer runtime is closed'));
     }
-    return this.enqueue(assetKey, observer, true);
+    return this.enqueue(assetKey, observer, true, [], authorKey);
   }
 
-  /** GH#3134 — whether work is queued for an asset whose key `matches`. */
-  hasQueued(matches: (assetKey: string) => boolean): boolean {
-    return [...this.#assetTails.keys()].some(matches);
+  /** GH#3134 — whether any inventory write registered for this author is queued or running. */
+  hasAuthorWork(authorKey: string): boolean {
+    return (this.#authorWork.get(authorKey)?.size ?? 0) > 0;
   }
 
   /**
-   * GH#3134 — `schedule`, after the work already queued for every other asset whose key `after`
-   * matches has ended: what the observer then reads includes those assets' commits.
+   * GH#3134 — `schedule`, to start once the inventory writes registered for this author so far
+   * have ended: what the observer then reads includes their commits.
    */
-  scheduleAfter(after: (assetKey: string) => boolean, assetKey: string, observer: () => Promise<void>): boolean {
+  scheduleAfterAuthorWork(authorKey: string, assetKey: string, observer: () => Promise<void>): boolean {
     if (this.#closed) return false;
-    const queued = [...this.#assetTails].filter(([key]) => key !== assetKey && after(key)).map(([, tail]) => tail);
-    this.enqueue(assetKey, observer, false, queued);
+    this.enqueue(assetKey, observer, false, [...(this.#authorWork.get(authorKey) ?? [])]);
     return true;
   }
 
@@ -232,6 +234,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     observer: () => Promise<void>,
     priority: boolean,
     after: readonly Promise<void>[] = [],
+    authorKey?: string,
   ): Promise<void> {
     const tail = this.#assetTails.get(assetKey);
     const predecessor = after.length === 0
@@ -242,15 +245,23 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
       : predecessor.catch(() => undefined).then(
         () => this.runBounded(observer, priority),
       );
+    let authorWork: Set<Promise<void>> | undefined;
+    if (authorKey !== undefined) {
+      authorWork = this.#authorWork.get(authorKey) ?? new Set();
+      this.#authorWork.set(authorKey, authorWork);
+    }
     let tracked!: Promise<void>;
     tracked = pending.finally(() => {
       this.#inFlight.delete(tracked);
       if (this.#assetTails.get(assetKey) === tracked) {
         this.#assetTails.delete(assetKey);
       }
+      authorWork?.delete(tracked);
+      if (authorWork?.size === 0 && this.#authorWork.get(authorKey!) === authorWork) this.#authorWork.delete(authorKey!);
     });
     this.#assetTails.set(assetKey, tracked);
     this.#inFlight.add(tracked);
+    authorWork?.add(tracked);
     void tracked.catch(() => undefined);
     return tracked;
   }

@@ -52,8 +52,9 @@ export function finalizedRowHealCountsV1(owner: object): FinalizedRowHealCountsV
 /**
  * Sweep one author's inventory unless its head was swept before: remove each row whose asset is
  * finalized at or above the row's version and has no shared-memory head left. A head counts as
- * swept only once every row of it was examined: rows that other work commits while the sweep
- * awaits its reads and removals are examined in a further round. Answers how many rows went.
+ * swept only once every row of it was examined and every eligible one removed: rows that other
+ * work commits while the sweep awaits its reads and removals are examined in a further round, and
+ * a removal that failed is tried again by the next sweep. Answers how many rows went.
  */
 export async function healFinalizedSwmInventoryRowsV1(
   owner: object,
@@ -81,6 +82,7 @@ export async function healFinalizedSwmInventoryRowsV1(
   const examined = new Set<string>();
   let snapshot: SwmAuthorInventorySnapshotV1 | null = input.snapshot;
   let removed = 0;
+  let failed = false;
   try {
     for (let round = 0; round < MAX_SWEEP_ROUNDS_V1 && snapshot !== null; round += 1) {
       for (const row of snapshot.rows) {
@@ -90,9 +92,12 @@ export async function healFinalizedSwmInventoryRowsV1(
         input.signal?.throwIfAborted();
         if (!await finalizedAtOrAboveV1(input.store, input.contextGraphId, row)) continue;
         if (!await sharedCopyRetiredV1(input.store, graphManager, input.contextGraphId, row)) continue;
-        if (await input.removeRow(row) === 'applied') removed += 1;
+        const outcome = await input.removeRow(row);
+        if (outcome === 'applied') removed += 1;
+        else if (outcome === 'failed') failed = true;
       }
-      state.sweptHeads.set(key, snapshot.head.objectDigest);
+      // A head with an eligible row that could not be removed stays eligible for the next sweep.
+      if (!failed) state.sweptHeads.set(key, snapshot.head.objectDigest);
       const current = input.readSnapshot();
       if (current?.head.objectDigest === snapshot.head.objectDigest) break;
       snapshot = current;

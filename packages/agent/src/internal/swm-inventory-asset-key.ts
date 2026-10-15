@@ -18,11 +18,14 @@ export function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
   ]);
 }
 
-/** Whether `assetKey` is the key of one of this author's assets in the graph's root lane. */
-export function rfc64SwmInventoryAssetKeyIsAuthorsV1(
-  assetKey: string,
-  author: Readonly<{ contextGraphId: string; authorAddress: string }>,
-): boolean {
-  const lane = JSON.stringify([author.contextGraphId, null, author.authorAddress.toLowerCase()]);
-  return assetKey.startsWith(`${lane.slice(0, -1)},`);
+/**
+ * GH#3134 — the key one author's inventory writes in one graph lane register under, so that work
+ * which must read their commits can start after them.
+ */
+export function rfc64SwmInventoryAuthorKeyV1(input: Readonly<{
+  contextGraphId: string;
+  subGraphName?: string | null;
+  authorAddress: string;
+}>): string {
+  return JSON.stringify([input.contextGraphId, input.subGraphName ?? null, input.authorAddress.toLowerCase()]);
 }

@@ -227,6 +227,35 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
     expect(projectionRepair(member)).toMatchObject({ outcome: 'reconciled', inventoryRowCount: '1' });
   }, 120_000);
 
+  it('keeps a finalized row without its shared copy on a finalized private lane when another row fails the projection', async () => {
+    const member = await startAgent('finalized-twin-private-heal');
+    const a = await share(member, 1n, 'member-asset-a');
+    const x = await share(member, 2n, 'member-asset-x');
+    // A is finalized and its shared copy retired; X's shared copy is gone and nothing finalized X.
+    await writeCuratorPublication(member, a);
+    await expect(retireTwinOnly(member, a)).resolves.toBe('retired');
+    await member.retireFinalizedSwmTwinCandidate({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: x.kaUal,
+      swmGraph: '',
+      agentAddress: MEMBER,
+      kaNumber: 2n,
+    }, createOperationContext('share'));
+
+    // On a finalized private lane A resolves from its verified copy, and X fails the projection.
+    const lane = asFinalizedPrivateLane(member);
+    const failure = await member.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: MEMBER,
+    }).then(() => null, (error: unknown) => error);
+    lane.mockRestore();
+    expect(causes(failure).some((cause) => cause instanceof CatalogRepairIntegrityErrorV1)).toBe(true);
+
+    // That lane keeps its rows: nothing was swept, and A's row stays.
+    expect(inventoryRows(member)).toEqual([a.kaUal, x.kaUal].sort());
+    expect(healCounts(member)).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
+  }, 120_000);
+
   it('keeps the row on a lane whose catalog places finalized assets', async () => {
     const member = await startAgent('finalized-twin-private-lane');
     const a = await share(member, 1n, 'member-asset-a');
@@ -546,6 +575,22 @@ function holdNextInventorySignature(agent: DKGAgent) {
     });
   });
   return { entered, release };
+}
+
+/** The graph's authoring lane, as a finalized private graph's: its catalog keeps finalized rows. */
+function asFinalizedPrivateLane(agent: DKGAgent) {
+  type LaneDecision = { status: string; lane?: Record<string, unknown> };
+  const lanes = agent as unknown as {
+    resolveRfc64CatalogAuthoringLaneDecisionV1: (contextGraphId: string, subGraphName: string | null) => LaneDecision;
+  };
+  const decide = lanes.resolveRfc64CatalogAuthoringLaneDecisionV1.bind(agent);
+  return vi.spyOn(lanes, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockImplementation((contextGraphId, subGraphName) => {
+    const decision = decide(contextGraphId, subGraphName);
+    return decision.status !== 'active' ? decision : {
+      ...decision,
+      lane: { ...decision.lane, kind: 'private', projectionTargetPolicy: 'monotonic-union', acceptsFinalizedVmRepair: true },
+    };
+  });
 }
 
 function healCounts(agent: DKGAgent) {
