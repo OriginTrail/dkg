@@ -165,7 +165,11 @@ interface WalletLockSnapshot {
   readonly claimToken?: string;
   readonly status: string;
   readonly expiresAt?: number;
-  readonly decodedJob?: PersistedLiftJob | null;
+}
+
+interface WalletOwnershipSnapshot {
+  readonly lock: WalletLockSnapshot;
+  readonly job: PersistedLiftJob | null;
 }
 
 export type AsyncLiftClaimProcessingRelease =
@@ -921,16 +925,29 @@ export class AsyncLiftClaimCoordinator {
     this.dependencies.notifyWalletRelease(walletId);
   }
 
-  private async readWalletLock(walletId: string, includeJobPayload = false): Promise<WalletLockSnapshot | null> {
-    // Keep the OPTIONAL join unfiltered: Blazegraph can lose its payload with a correlated status filter.
-    const jobPattern = includeJobPayload ? ` OPTIONAL { GRAPH <${this.config.graphUri}> { ?job <${PAYLOAD_PREDICATE}> ?payload } }` : '';
+  private async readWalletLock(walletId: string): Promise<WalletLockSnapshot | null> {
     const result = await this.store.query(
-      `SELECT ?job ?status ?expiresAt ?claimToken${includeJobPayload ? ' ?payload' : ''} WHERE { GRAPH <${this.config.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ?status . OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt } OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_CLAIM_TOKEN}> ?claimToken } }${jobPattern} }`,
-      { source: includeJobPayload ? 'publisher.asyncLift.walletLock.ownership' : 'publisher.asyncLift.walletLock.read' },
+      `SELECT ?job ?status ?expiresAt ?claimToken WHERE { GRAPH <${this.config.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ?status . OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt } OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_CLAIM_TOKEN}> ?claimToken } } }`,
+      { source: 'publisher.asyncLift.walletLock.read' },
     );
-    const rows = expectBindings(result);
-    if (rows.length === 0) return null;
-    const row = rows[0] ?? {};
+    return this.parseWalletLock(walletId, expectBindings(result)[0]);
+  }
+
+  private async readWalletOwnership(walletId: string): Promise<WalletOwnershipSnapshot | null> {
+    // Keep the OPTIONAL join unfiltered: Blazegraph can lose its payload with a correlated status filter.
+    const result = await this.store.query(
+      `SELECT ?job ?status ?expiresAt ?claimToken ?payload WHERE { GRAPH <${this.config.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ?status . OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt } OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_CLAIM_TOKEN}> ?claimToken } } OPTIONAL { GRAPH <${this.config.graphUri}> { ?job <${PAYLOAD_PREDICATE}> ?payload } } }`,
+      { source: 'publisher.asyncLift.walletLock.ownership' },
+    );
+    const row = expectBindings(result)[0];
+    const lock = this.parseWalletLock(walletId, row);
+    if (!lock) return null;
+    const job = lock.status === 'active' ? decodedLiftJobOrThrow(decodeLiftJobPayload(row?.['payload'])) : null;
+    return { lock, job };
+  }
+
+  private parseWalletLock(walletId: string, row: Record<string, string> | undefined): WalletLockSnapshot | null {
+    if (!row) return null;
     const jobId = this.jobIdFromRef(row['job'] ?? '');
     const status = parseLiteral(row['status'] ?? '""');
     if (!jobId || typeof status !== 'string') return null;
@@ -941,13 +958,13 @@ export class AsyncLiftClaimCoordinator {
       claimToken: typeof claimToken === 'string' ? claimToken : undefined,
       status,
       expiresAt: row['expiresAt'] ? parseIntegerLiteral(row['expiresAt']) : undefined,
-      ...(includeJobPayload && status === 'active' ? { decodedJob: decodedLiftJobOrThrow(decodeLiftJobPayload(row['payload'])) } : {}),
     };
   }
 
   private async hasActiveWalletLock(walletId: string, trace: ClaimLockTrace): Promise<boolean> {
-    const lock = await this.readWalletLock(walletId, true);
-    const job = lock?.decodedJob ?? null;
+    const ownership = await this.readWalletOwnership(walletId);
+    const lock = ownership?.lock ?? null;
+    const job = ownership?.job ?? null;
     const usableActiveLock = job !== null && lock !== null && this.isUsableActiveLock(lock, job);
     trace.emit('wallet_checked', {
       usableActiveLock, matching: job !== null && lock !== null && this.lockMatchesJob(lock, job),
