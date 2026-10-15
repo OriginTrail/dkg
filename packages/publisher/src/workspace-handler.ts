@@ -139,6 +139,7 @@ function appliedSharedMemoryOutcome(
     cgId: fields.contextGraphId,
     shareOperationId: fields.shareOperationId,
     publisherPeerId: fields.publisherPeerId,
+    subGraphName: fields.subGraphName || undefined,
     insertedTriples,
   };
 }
@@ -220,6 +221,8 @@ export type SharedMemoryApplyOutcome =
        * Caller addresses the PROTOCOL_SWM_SHARE_ACK to this peer.
        */
       publisherPeerId?: string;
+      /** Named sub-graph the share applied into; undefined for the context graph's root. */
+      subGraphName?: string;
       /**
        * Number of N-Quads that were inserted into the SWM graph
        * by this apply (i.e., `quads.length` after decode + decrypt).

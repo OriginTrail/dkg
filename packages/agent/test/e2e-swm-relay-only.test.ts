@@ -19,9 +19,10 @@
  *   -  the members follow the graph and receive a root share (works today);
  *   2. a share by the owner into a named sub-graph reaches the members;
  *   3. a share by a member into a named sub-graph reaches the owner;
- *   4. a share by a member is sent to the other member only when the two are
- *      connected; until then the other member syncs it from the owner, and
- *      that registers the sub-graph there (#1611).
+ *   4. a share by a member reaches the other member through the owner while
+ *      the two are not connected (the owner's change notice, #1611), and is
+ *      sent to it directly once they are;
+ *   5. a member without the change notice protocol is left alone.
  * Without the fix the deliveries of 2, 3 and 4 do not happen: see
  * `SUB_GRAPH_SHARES_CROSS_THE_RELAY`.
  *
@@ -42,7 +43,8 @@
  *     is made once those rounds have ended (`whenNobodyPulls`). After a
  *     share the test only reads the receiver's shared memory.
  */
-import { describe, it, expect, afterAll, beforeAll } from 'vitest';
+import { describe, it, expect, afterAll, beforeAll, vi } from 'vitest';
+import { PROTOCOL_SWM_CHANGE_NOTICE } from '@origintrail-official/dkg-core';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -146,6 +148,29 @@ async function partitionsHolding(reader: DKGAgent, contextGraphId: string, share
     { contextGraphId, includeContextGraphPartitions: true },
   );
   return result.bindings.map((row) => String(row['g']));
+}
+
+/** The disposition of every change notice `agent` handles from now on (`swm/shared-memory-change-notice.ts`). */
+function recordChangeNotices(agent: DKGAgent): string[] {
+  const dispositions: string[] = [];
+  const handle = agent.handleSwmChangeNoticeV1.bind(agent);
+  agent.handleSwmChangeNoticeV1 = async (data, fromPeerId) => {
+    const disposition = await handle(data, fromPeerId);
+    dispositions.push(disposition);
+    return disposition;
+  };
+  return dispositions;
+}
+
+/** The authors of the root catalog heads `owner` forwards to its followers from now on. */
+function recordForwardedRootHeads(owner: DKGAgent): string[] {
+  const authors: string[] = [];
+  const forward = owner.forwardRemoteRfc64CatalogHeadV1.bind(owner);
+  owner.forwardRemoteRfc64CatalogHeadV1 = (announcement, providerPeerId) => {
+    authors.push(announcement.authorAddress.toLowerCase());
+    forward(announcement, providerPeerId);
+  };
+  return authors;
 }
 
 /**
@@ -485,54 +510,62 @@ describe('E2E: shared memory between agents linked only through a relay, public 
     expectRelayOnlyLink(network, member1, owner, 'after the member\'s sub-graph share');
   }, 240_000);
 
-  it('4. a share by a member is sent to the other member only when the two are connected, and synced from the owner until then', async () => {
+  it('4. a share by a member reaches the other member through the owner, and directly once the two are connected', async () => {
     buildsOn(FOLLOWING);
     await whenNobodyPulls(everyone);
 
     // What this expects, and why.
     //
     // A share is delivered by its author to the peers the author is connected
-    // to. No node passes it on: gossip would, but gossip does not run across a
-    // relayed connection, and the owner does not fan a member's share out
-    // again (#1611). So member 2, which so far is connected to the owner only,
-    // must NOT be sent member 1's share: neither before the fix nor with it.
-    // This half is a control for the second half, and it pins the present
-    // design: when shares are passed on one day, it is this half that changes.
+    // to, and member 2 is connected to the owner only. Gossip does not run
+    // across a relayed connection, so the owner passes member 1's share on
+    // (#1611): for a named sub-graph it sends its followers a change notice,
+    // and member 2 pulls the graph's shared memory from the owner at once,
+    // which also registers the sub-graph there; for the root it forwards the
+    // announcement of member 1's catalog head, and member 2's catalog receiver
+    // pulls the head from the owner. Neither carries any data.
     expect(linkConnections(network, member1, member2), 'the members are not connected to each other').toEqual([]);
-    const unconnected = await share(member1, contextGraphId, 'member-sub-graph-unconnected', 'member-1-notes');
-    const stray = await arrival(member2, contextGraphId, unconnected, ABSENCE_WATCH_MS);
-    expect(
-      stray.afterMs,
-      'member 1\'s share at member 2, which member 1 has no connection to: ' + stray.detail,
-    ).toBeNull();
-    expect(
-      linkConnections(network, member1, member2),
-      'the members were not connected while that share was watched',
-    ).toEqual([]);
+    // The owner's notice of assertion 3's share started a pull on member 2
+    // that may still run; a notice that arrives meanwhile joins it.
+    await member2.swmChangeNoticeReceiverV1().settled();
+    const notices = recordChangeNotices(member2);
+    const forwardedRootHeads = recordForwardedRootHeads(owner);
 
-    // Member 2 gets it from the owner instead, by its own sync of the graph's
-    // shared memory, as a node does every few minutes: the owner was sent the
-    // share, registered the sub-graph, and serves it. That sync registers the
-    // sub-graph on member 2 as well, so the share is in a read over the
-    // graph's partitions and in the sub-graphs member 2 lists (#1611).
-    const atOwner = await arrival(owner, contextGraphId, unconnected, DELIVERY_BOUND_MS);
-    expect(atOwner.afterMs, 'member 1\'s share at the owner: ' + atOwner.detail).not.toBeNull();
-    await askForSharedMemory(member2, owner, contextGraphId, 'member 2, of the owner, after member 1\'s share,');
+    const subGraphShare = await share(member1, contextGraphId, 'member-sub-graph-unconnected', 'member-1-notes');
+    const subGraphAtMember2 = await arrival(member2, contextGraphId, subGraphShare, DELIVERY_BOUND_MS);
     expect(
-      (await readSharedMemory(member2, contextGraphId, unconnected)).names,
-      'member 1\'s share at member 2 after member 2 synced the graph from the owner',
-    ).toEqual(['"' + unconnected.name + '"']);
+      subGraphAtMember2.afterMs,
+      'member 1\'s sub-graph share at member 2, which member 1 has no connection to: ' + subGraphAtMember2.detail,
+    ).not.toBeNull();
     expect(
-      await partitionsHolding(member2, contextGraphId, unconnected),
-      'member 1\'s share in member 2\'s read over the graph\'s partitions',
+      notices.filter((disposition) => disposition === 'pulling' || disposition === 'coalesced'),
+      'member 2 pulled on the owner\'s change notice (dispositions: ' + notices.join(', ') + ')',
+    ).not.toEqual([]);
+    expect(
+      await partitionsHolding(member2, contextGraphId, subGraphShare),
+      'member 1\'s sub-graph share in member 2\'s read over the graph\'s partitions',
     ).toHaveLength(1);
     expect(
       (await member2.listSubGraphs(contextGraphId)).map((subGraph) => subGraph.name),
       'the sub-graphs member 2 lists',
     ).toContain('member-1-notes');
+
+    const rootShare = await share(member1, contextGraphId, 'member-root-unconnected');
+    const rootAtMember2 = await arrival(member2, contextGraphId, rootShare, DELIVERY_BOUND_MS);
+    expect(
+      rootAtMember2.afterMs,
+      'member 1\'s root share at member 2, which member 1 has no connection to: ' + rootAtMember2.detail,
+    ).not.toBeNull();
+    expect(forwardedRootHeads, 'the owner forwarded member 1\'s root head').toContain(
+      member1.getDefaultAgentAddress()!.toLowerCase(),
+    );
+    console.log(
+      '[#1611] member 1 to member 2 through the owner: sub-graph share ' + subGraphAtMember2.afterMs
+        + ' ms, root share ' + rootAtMember2.afterMs + ' ms',
+    );
     expect(
       linkConnections(network, member1, member2),
-      'the members were still not connected when member 2 synced from the owner',
+      'the members were still not connected when member 2 got both shares',
     ).toEqual([]);
 
     // Then the two connect, through the relay like every other link here, and
@@ -557,4 +590,30 @@ describe('E2E: shared memory between agents linked only through a relay, public 
     await expectDeliveredDirectly('member 1\'s sub-graph share after the members connected', member1, contextGraphId, deliveriesBefore, 2);
     expectRelayOnlyLink(network, member1, member2, 'the members, after the sub-graph share');
   }, 360_000);
+
+  it('5. a member without the change notice protocol is left alone', async () => {
+    buildsOn(FOLLOWING);
+    await whenNobodyPulls(everyone);
+    // A node of an older release has no handler for the notice: take member
+    // 2's away. The owner then fails to open the stream, once, and goes on.
+    (member2 as unknown as { router: { unregister(protocolId: string): void } }).router
+      .unregister(PROTOCOL_SWM_CHANGE_NOTICE);
+    const ownerLog = vi.spyOn((owner as unknown as { log: { info(...args: unknown[]): void } }).log, 'info');
+    try {
+      const shared = await share(member1, contextGraphId, 'member-sub-graph-older-reader', 'member-1-notes');
+      const atOwner = await arrival(owner, contextGraphId, shared, DELIVERY_BOUND_MS);
+      expect(atOwner.afterMs, 'member 1\'s share at the owner: ' + atOwner.detail).not.toBeNull();
+      const noticeLine = await pollUntil(
+        async () => ownerLog.mock.calls
+          .map(([, message]) => String(message))
+          .find((message) => message.startsWith('SWM change notice for') && message.includes('sub-graph "member-1-notes"')),
+        (line) => line !== undefined,
+        DELIVERY_BOUND_MS,
+        500,
+      );
+      expect(noticeLine, 'the owner\'s change notice line after the share').toMatch(/reached 0 of 1 follower\(s\)$/);
+    } finally {
+      ownerLog.mockRestore();
+    }
+  }, 180_000);
 });

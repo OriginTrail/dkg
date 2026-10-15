@@ -84,6 +84,7 @@ export const SYNC_ADMISSION_SOURCES = [
   'reconcile',
   'vm-recovery',
   'swm-recovery',
+  'change-notice',
   'control-plane',
   'unspecified',
 ] as const;
