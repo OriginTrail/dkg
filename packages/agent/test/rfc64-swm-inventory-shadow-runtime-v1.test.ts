@@ -77,6 +77,43 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     expect(runtime.isVmConfirmed(assetKey, '2', 'share-1')).toBe(false);
   });
 
+  it('returns each exclusive result and rejection without releasing the asset early', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const firstResult = { status: 'committed' } as const;
+    const first: Promise<typeof firstResult> = runtime.runExclusive('asset', async () => {
+      events.push('first-enter');
+      await gate;
+      events.push('first-exit');
+      return firstResult;
+    });
+    const failure = new Error('second failed');
+    const second = runtime.runExclusive('asset', async () => {
+      events.push('second');
+      throw failure;
+    });
+    const rejected = expect(second).rejects.toBe(failure);
+    const third: Promise<boolean> = runtime.runExclusive('asset', async () => {
+      events.push('third');
+      return false;
+    });
+    const unrelated = runtime.runExclusive('other-asset', async () => {
+      events.push('unrelated');
+      return 7;
+    });
+    await expect(unrelated).resolves.toBe(7);
+    expect(events).toEqual(['first-enter', 'unrelated']);
+    release();
+    await expect(first).resolves.toBe(firstResult);
+    await rejected;
+    await expect(third).resolves.toBe(false);
+    await runtime.drain();
+    expect(events).toEqual(['first-enter', 'unrelated', 'first-exit', 'second', 'third']);
+    expect(runtime.inFlightCount).toBe(0);
+  });
+
   it('bounds retained VM tombstones while keeping the newest replay fence', () => {
     const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
     for (

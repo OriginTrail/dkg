@@ -61,8 +61,8 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     lastHeadDigest: null as string | null,
     lastError: null as string | null,
   };
-  readonly #inFlight = new Set<Promise<void>>();
-  readonly #assetTails = new Map<string, Promise<void>>();
+  readonly #inFlight = new Set<Promise<unknown>>();
+  readonly #assetTails = new Map<string, Promise<unknown>>();
   readonly #scopeRuntime = new Rfc64SerializedScopeRuntimeV1(
     'RFC-64 SWM inventory scope operation aborted',
   );
@@ -106,7 +106,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     return true;
   }
 
-  runExclusive(assetKey: string, observer: () => Promise<void>): Promise<void> {
+  runExclusive<T>(assetKey: string, observer: () => Promise<T>): Promise<T> {
     if (this.#closed) {
       return Promise.reject(new Error('RFC-64 SWM inventory observer runtime is closed'));
     }
@@ -211,18 +211,18 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     stats.lastError = result.error;
   }
 
-  private enqueue(
+  private enqueue<T>(
     assetKey: string,
-    observer: () => Promise<void>,
+    observer: () => Promise<T>,
     priority: boolean,
-  ): Promise<void> {
+  ): Promise<T> {
     const predecessor = this.#assetTails.get(assetKey);
     const pending = predecessor === undefined
       ? this.runBounded(observer, priority)
       : predecessor.catch(() => undefined).then(
         () => this.runBounded(observer, priority),
       );
-    let tracked!: Promise<void>;
+    let tracked!: Promise<T>;
     tracked = pending.finally(() => {
       this.#inFlight.delete(tracked);
       if (this.#assetTails.get(assetKey) === tracked) {
@@ -235,11 +235,11 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     return tracked;
   }
 
-  private runBounded(observer: () => Promise<void>, priority: boolean): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  private runBounded<T>(observer: () => Promise<T>, priority: boolean): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
       const start = (): void => {
         this.#activeExecutions += 1;
-        let execution: Promise<void>;
+        let execution: Promise<T>;
         try {
           execution = observer();
         } catch (cause) {
@@ -250,8 +250,8 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
           queueMicrotask(() => this.pump());
         };
         void execution.then(
-          () => {
-            resolve();
+          (result) => {
+            resolve(result);
             finish();
           },
           (cause) => {

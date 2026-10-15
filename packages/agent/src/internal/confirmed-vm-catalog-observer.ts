@@ -66,82 +66,86 @@ export async function observeConfirmedVmCatalogV1(
     authorAddress: confirmedSeal.authorAddress,
     assertionCoordinate,
   });
-  let finalizedPrivateInventoryScope: SwmAuthorInventoryScopeV1 | null = null;
   try {
-    finalizedPrivateInventoryScope = deps.finalizedPrivateScope(contextGraphId, subGraphName, confirmedSeal.authorAddress);
-  } catch (cause) {
-    deps.log.warn(
-      params.ctx,
-      `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
-    );
-    return false;
-  }
-  // Fence every confirmed version, including confirmation-gated finalized
-  // private repairs, until the asset-tail repair and queued observers drain.
-  // Newer assertion versions use distinct fence entries and remain eligible.
-  // The fence is set before the first await and outlives this call.
-  if (params.shareOperationId !== undefined) {
-    shadowRuntime.markVmConfirmed(
-      assetKey,
-      confirmedSeal.assertionVersion,
-      params.shareOperationId,
-    );
-  }
-  let markerStored = false;
-  let completed = false;
-  try {
+    let finalizedPrivateInventoryScope: SwmAuthorInventoryScopeV1 | null;
+    try {
+      finalizedPrivateInventoryScope = deps.finalizedPrivateScope(contextGraphId, subGraphName, confirmedSeal.authorAddress);
+    } catch (cause) {
+      deps.log.warn(
+        params.ctx,
+        `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      return false;
+    }
+    // Fence every confirmed version before the first await; newer versions have distinct entries.
+    // The fence outlives this call until the asset-tail repair and queued observers drain.
+    if (params.shareOperationId !== undefined) {
+      shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion, params.shareOperationId);
+    }
     if (finalizedPrivateInventoryScope !== null) {
-      const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
-        version: 1,
-        contextGraphId: contextGraphId as ContextGraphIdV1,
-        authorAddress: confirmedSeal.authorAddress,
-        inventoryScope: finalizedPrivateInventoryScope,
-        assertionCoordinate,
-        assertionVersion: confirmedSeal.assertionVersion,
-        kaUal: confirmedSeal.kaUal,
-        sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal),
-      });
-      // GH#3081 — the terminal boundary of a confirmed private publication.
-      // This durable marker is the restart boundary: pre-confirmation rows
-      // have none, while every post-confirmation placement survives a crash
-      // or transient signing/catalog failure. The supervisor alone owns the
-      // attempt, its retries and its drain: nothing here waits for it, or
-      // queues on the asset tail that a running placement holds.
-      await deps.storeRepair(repair);
-      markerStored = true;
-      // The supervisor durably owes placement now. Its availability or latency does not
-      // gate publication completion; restart also resumes this exact marker.
-      completed = true;
-      placementWait.requested();
-      const request = deps.requestPlacement({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
-      if (!request.accepted) deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
-    } else {
-      await shadowRuntime.runExclusive(assetKey, async () => {
-        const result = await deps.removeShadow({
-          contextGraphId,
-          subGraphName,
-          seal: params.seal,
+      let repair: Rfc64FinalizedPrivatePlacementRepairV1;
+      try {
+        repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
+          version: 1,
+          contextGraphId: contextGraphId as ContextGraphIdV1,
+          authorAddress: confirmedSeal.authorAddress,
+          inventoryScope: finalizedPrivateInventoryScope,
+          assertionCoordinate,
+          assertionVersion: confirmedSeal.assertionVersion,
+          kaUal: confirmedSeal.kaUal,
+          sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal),
         });
-        completed = result.status === 'applied' || result.status === 'absent'
-          || result.status === 'dormant';
-        if (result.status === 'applied' || result.status === 'absent') {
-          deps.requestProjection({
-            contextGraphId: contextGraphId as ContextGraphIdV1,
-            authorAddress: confirmedSeal.authorAddress,
-            ctx: params.ctx,
-          });
+        // This committed marker owns placement across restart and transient catalog failures.
+        // Nothing here waits for the supervisor or queues behind its running asset-tail repair.
+        await deps.storeRepair(repair);
+      } catch (cause) {
+        placementWait.observer.released();
+        deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 finalized-private placement was not recorded, so nothing owes it: ${cause instanceof Error ? cause.message : String(cause)}`);
+        return false;
+      }
+      // Notification is best-effort after the durable obligation has committed.
+      try {
+        placementWait.requested();
+        const request = deps.requestPlacement({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
+        if (!request.accepted) deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
+      } catch (cause) {
+        placementWait.observer.released(); // A request that threw has no waiter to release it later.
+        deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 finalized-private placement could not be requested; its durable marker stays for the next pass or start: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+      return true;
+    }
+    try {
+      return await shadowRuntime.runExclusive(assetKey, async () => {
+        const result = await deps.removeShadow({ contextGraphId, subGraphName, seal: params.seal });
+        switch (result.status) {
+          case 'applied':
+          case 'absent':
+            // Keep notification within the asset lock, but do not revoke the committed removal.
+            try {
+              deps.requestProjection({
+                contextGraphId: contextGraphId as ContextGraphIdV1,
+                authorAddress: confirmedSeal.authorAddress,
+                ctx: params.ctx,
+              });
+            } catch (cause) {
+              placementWait.observer.released();
+              deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`);
+            }
+            return true;
+          case 'dormant':
+            return true;
+          default:
+            return false;
         }
       });
+    } catch (cause) {
+      placementWait.observer.released();
+      deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`);
+      return false;
     }
-  } catch (cause) {
-    placementWait.observer.released(); // A request that threw has no waiter to release it later.
-    const failed = finalizedPrivateInventoryScope === null ? 'SWM inventory shadow removal escaped its failure boundary'
-      : markerStored ? 'finalized-private placement could not be requested; its durable marker stays for the next pass or start'
-        : 'finalized-private placement was not recorded, so nothing owes it';
-    deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 ${failed}: ${cause instanceof Error ? cause.message : String(cause)}`);
+  } finally {
+    placementWait.end(deps.log);
   }
-  placementWait.end(deps.log);
-  return completed;
 }
 
 export function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
