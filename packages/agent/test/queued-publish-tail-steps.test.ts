@@ -80,11 +80,17 @@ function harness(options: {
   clearPublishedGraph?: () => Promise<void>;
   retireLegacySwm?: () => Promise<void>;
   observer?: (step: LiftJobTailStep) => void;
+  failStep?: string;
+  catalogCompletion?: boolean;
+  cleanupCompletion?: boolean;
 } = {}) {
   const calls: string[] = [];
   /** The options of every publish or update call the executor made. */
   const passedOn: Array<Record<string, unknown>> = [];
-  const call = (name: string) => async (): Promise<void> => { calls.push(name); };
+  const call = (name: string) => async (): Promise<void> => {
+    calls.push(name);
+    if (options.failStep === name) throw new Error(`failed ${name}`);
+  };
   const publisher = {
     publish: async (passed: Record<string, unknown>) => {
       calls.push('publish()');
@@ -94,6 +100,7 @@ function harness(options: {
     clearPublishedKnowledgeAssetSwm: async () => {
       calls.push('clearPublishedGraph()');
       await options.clearPublishedGraph?.();
+      return options.cleanupCompletion ?? true;
     },
     clearRemainingSharedMemory: call('clearRemainingSharedMemory()'),
     clearSwmShareComplete: call('clearShareMarker()'),
@@ -131,7 +138,10 @@ function harness(options: {
       calls.push('retireLegacySwm()');
       await options.retireLegacySwm?.();
     },
-    observeRfc64ConfirmedVmV1: call('catalogObserver()'),
+    observeRfc64ConfirmedVmV1: async () => {
+      await call('catalogObserver()')();
+      return options.catalogCompletion ?? true;
+    },
   }, PublishMethods.prototype) as unknown as DKGAgent;
   const publishOptions = {
     contextGraphId: 'tail-steps',
@@ -184,11 +194,12 @@ describe('the steps a queued executor reports after the confirmation', () => {
     ]);
   });
 
-  it('reports an update: no receipt write, and the graph id read for the announcement', async () => {
+  it('writes the update receipt before cleanup and reads the graph id for the announcement', async () => {
     const { calls, execute } = harness();
     await execute(request({ vmCurrentAssertion: `0x${'cd'.repeat(32)}` }));
     expect(calls).toEqual([
       'update()', 'ended:publish',
+      'writeReceipt()', 'ended:receiptWrite',
       'clearPublishedGraph()', 'ended:publishedGraphClear',
       'retireLegacySwm()', 'ended:legacySwmRetire',
       'stampLifecycle()', 'ended:lifecycleStamp',
@@ -197,6 +208,41 @@ describe('the steps a queued executor reports after the confirmation', () => {
       'clearShareMarker()', 'ended:shareMarkerClear',
       'catalogObserver()', 'ended:catalogObserver',
     ]);
+  });
+
+  it.each(['create', 'update'])('certifies the complete %s lifecycle, including its receipt', async (kind) => {
+    const { calls, execute } = harness();
+    const result = await execute(request(kind === 'update'
+      ? { vmCurrentAssertion: `0x${'cd'.repeat(32)}` } : {}));
+    expect(result.localFinalizationComplete).toBe(true);
+    expect(calls.indexOf('writeReceipt()')).toBeLessThan(calls.indexOf('clearPublishedGraph()'));
+  });
+
+  it.each(['writeReceipt()', 'stampLifecycle()', 'clearShareMarker()', 'clearRemainingSharedMemory()'])(
+    'leaves recovery responsible when %s fails, even if an upstream result claims completeness', async (failStep) => {
+      const { execute } = harness({ failStep, publish: async () => ({
+        ...publishResult(), localFinalizationComplete: true,
+      }) });
+      const result = await execute(request({ clearSharedMemoryAfter: true }));
+      expect(result.status).toBe('confirmed');
+      expect(result.localFinalizationComplete).toBeUndefined();
+    },
+  );
+
+  it('does not certify a publication whose catalog completion was not recorded', async () => {
+    const { execute } = harness({ catalogCompletion: false });
+    expect((await execute()).localFinalizationComplete).toBeUndefined();
+  });
+
+  it('leaves recovery responsible when cleanup retained a corrupt unresolved head', async () => {
+    const { execute } = harness({ cleanupCompletion: false });
+    expect((await execute()).localFinalizationComplete).toBeUndefined();
+  });
+
+  it.each(['clear', 'retire'])('retains recovery after a swallowed %s failure', async (step) => {
+    const fail = async () => { throw new Error('store refused cleanup'); };
+    const { execute } = harness(step === 'clear' ? { clearPublishedGraph: fail } : { retireLegacySwm: fail });
+    expect((await execute()).localFinalizationComplete).toBeUndefined();
   });
 
   it('keeps the observer to itself: the publish and the update are called without it', async () => {

@@ -7518,7 +7518,7 @@ export class DKGPublisher implements Publisher {
    * holds the per-KA SWM write lock and runs only while the head it finds is
    * at or below that version: a newer head keeps its graph, operation rows,
    * snapshot and StorageACK copies, and so does a head that cannot be
-   * resolved. Without a version the caller must already hold that lock and
+   * resolved (returning false). Without a version the caller must hold that lock and
    * have ruled out a newer head itself.
    */
   async clearPublishedKnowledgeAssetSwm(
@@ -7528,7 +7528,7 @@ export class DKGPublisher implements Publisher {
     ctx: OperationContext,
     kaUal: string,
     finalizedAssertionVersion?: string | number | bigint,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (scope.kind !== 'named-lifecycle') {
       throw new Error('Graph-scoped KA SWM cleanup requires an exact named-lifecycle scope');
     }
@@ -7540,13 +7540,12 @@ export class DKGPublisher implements Publisher {
       throw new Error('Graph-scoped KA SWM cleanup UAL does not match the named-lifecycle scope');
     }
     if (finalizedAssertionVersion === undefined) {
-      await this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope);
-      return;
+      return this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope).then(() => true);
     }
     const finalizedVersion = BigInt(
       createGraphKnowledgeAssetScope(kaUal, finalizedAssertionVersion).assertionVersion,
     );
-    await this.withWriteLocks(
+    return await this.withWriteLocks(
       [swmKaWriteLockKey(contextGraphId, subGraphName, kaScope.ual)],
       async () => {
         const headResolution = await tryResolveKnowledgeAssetWorkspaceHead({
@@ -7564,7 +7563,7 @@ export class DKGPublisher implements Publisher {
             `Kept graph-scoped KA SWM ${kaScope.ual} after finalized version ${finalizedVersion}: ` +
               `its head cannot be resolved (${headResolution.error.message})`,
           );
-          return;
+          return false;
         }
         if (
           headResolution.status === 'resolved'
@@ -7575,9 +7574,9 @@ export class DKGPublisher implements Publisher {
             `Kept graph-scoped KA SWM ${kaScope.ual} after finalized version ${finalizedVersion}: ` +
               `its head is at version ${headResolution.head.assertionVersion}`,
           );
-          return;
+          return true;
         }
-        await this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope);
+        return this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope).then(() => true);
       },
     );
   }

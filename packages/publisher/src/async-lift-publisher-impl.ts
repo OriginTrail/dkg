@@ -1,3 +1,4 @@
+import { LiftJobStoreSelectors } from './lift-job-store-selectors.js';
 import { LiftJobChainObservations } from './lift-job-chain-observations.js';
 import { committedLiftJob, type CommittedLiftJob } from './lift-job-committed.js';
 import type { PreBroadcastRecord } from './publisher.js';
@@ -44,6 +45,7 @@ import {
 } from './lift-job.js';
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
+  AsyncKnowledgeAssetVmPublishExecutionResult,
   ActiveLiftJobClaim,
   ActiveLiftJobClaimSession,
   AsyncLiftAdministrativeMutations,
@@ -126,16 +128,12 @@ import {
   JOURNAL_LIFECYCLE_KEY,
   JOURNAL_JOB_ID,
   PAYLOAD_PREDICATE,
-  STATUS_PREDICATE,
-  ACCEPTED_AT_PREDICATE,
   CONTROL_LIFECYCLE_KEY,
   knowledgeAssetVmPublishLifecycleKey,
   serializeJournalEntry,
   parseJournalEntry,
   summarizeJournal,
   serializeVmPublishIntentIndex,
-  compareAcceptedJobs,
-  projectListedLiftJobs,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
@@ -582,6 +580,7 @@ export class TripleStoreAsyncLiftPublisher
    * consumption, invalidation (hash mismatch / terminal disposition), or eviction.
    */
   private readonly chainObservations: LiftJobChainObservations;
+  private readonly jobSelectors: LiftJobStoreSelectors;
   private readonly executorProofHints = new Map<string, {
     readonly txHash: string;
     proof?: {
@@ -679,6 +678,7 @@ export class TripleStoreAsyncLiftPublisher
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.chainObservations = LiftJobChainObservations.shared(store, this.graphUri);
+    this.jobSelectors = new LiftJobStoreSelectors(store, this.graphUri, (job) => this.chainObservations.project(job));
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
     this.journalWrites = config.journalWrites ?? false;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
@@ -702,7 +702,7 @@ export class TripleStoreAsyncLiftPublisher
     this.chainProofDispatchBatchSize = config.chainProofDispatchBatchSize ?? 25;
     this.chainProofDispatchTimeBudgetMs = config.chainProofDispatchTimeBudgetMs ?? 15_000;
     this.reconciliationSnapshotCoordinator = new ReconciliationSnapshotCoordinator({
-      readInventory: () => this.list(),
+      readInventory: () => this.jobSelectors.reconciliationInventory(),
       beginScope: () => this.chainProofRetrySchedule.beginPass(this.now()),
       leaseMs: config.reconciliationAcquisitionLeaseMs ?? 30_000,
     });
@@ -950,32 +950,12 @@ export class TripleStoreAsyncLiftPublisher
 
   async list(filter: { status?: LiftJobState; contextGraphId?: string } = {}): Promise<PersistedLiftJob[]> {
     await this.ensureGraph();
-    const statusFilter = filter.status ? `FILTER (?status = ${literal(filter.status)})` : '';
-    const result = await this.store.query(
-      `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ?status ; <${PAYLOAD_PREDICATE}> ?payload . ${statusFilter} } }`,
-      { source: 'publisher.asyncLift.list' },
-    );
-    return projectListedLiftJobs(expectBindings(result).map(row => this.parseJobPayloadForScan(row['payload'])),
-      filter.contextGraphId, job => this.chainObservations.project(job));
+    return this.jobSelectors.list(filter);
   }
 
-  /**
-   * Persistence-owned claim selector. The status triple bounds the read to the
-   * actionable queue, while decoding remains best-effort so one corrupt legacy
-   * row cannot block valid work behind it. Ordering is explicit over the
-   * decoded durable values: acceptedAt first, then jobId for deterministic ties.
-   */
   private async readNextAcceptedJob(): Promise<LiftJobAccepted | undefined> {
     await this.ensureGraph();
-    const result = await this.store.query(
-      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ${literal('accepted')} ; <${ACCEPTED_AT_PREDICATE}> ?acceptedAt ; <${PAYLOAD_PREDICATE}> ?payload } }`,
-      { source: 'publisher.asyncLift.nextAccepted' },
-    );
-    return expectBindings(result)
-      .map((row) => this.parseJobPayloadForScan(row['payload']))
-      .filter((job): job is LiftJobAccepted => job?.status === 'accepted')
-      .sort(compareAcceptedJobs)
-      .at(0);
+    return this.jobSelectors.nextAccepted();
   }
 
   async inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null> {
@@ -1282,12 +1262,10 @@ export class TripleStoreAsyncLiftPublisher
         broadcastAccepted.then(() => ({ kind: 'accepted' as const })),
       ]);
       if (outcome.kind === 'accepted' && canDetachReceiptReconciliation) {
-        // Receipt success, revert, timeout, or temporary lookup failure is now
-        // owned solely by chain-proof recovery. The execution continues so the
-        // normal publisher can finish any local post-receipt work, but its
-        // return value is intentionally not allowed to rewrite queue truth in
-        // parallel with recovery.
-        this.trackDetachedExecution(claimed.jobId, execution);
+        // The executor keeps ownership through its local tail. A certified successful result
+        // can finish this exact claim; every other outcome remains owned by chain recovery.
+        // Tracking includes terminal persistence so recovery cannot run a competing repair.
+        this.trackDetachedExecution(claim, execution, { publicByteSize });
         return { kind: 'detached' as const, job: await this.getRequiredJob(claimed.jobId) };
       }
       const publishResult = outcome.kind === 'settled' ? outcome.result : await execution;
@@ -1426,20 +1404,32 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  private trackDetachedExecution(jobId: string, execution: Promise<unknown>): void {
+  private trackDetachedExecution(
+    claim: ActiveLiftJobClaim,
+    execution: Promise<AsyncKnowledgeAssetVmPublishExecutionResult>,
+    options: { publicByteSize?: number },
+  ): void {
+    const jobId = claim.jobId;
+    let completed = false;
     let tracked!: Promise<void>;
     tracked = execution.then(
-      () => undefined,
-      () => undefined,
-    ).finally(() => {
-      this.chainObservations.completion.executorSettled(jobId);
+      async (result) => {
+        this.chainObservations.completion.executorSettled(jobId);
+        if (result?.localFinalizationComplete !== true) return;
+        completed = await this.claimCoordinator.recordDetachedPublishResult(claim, result, options);
+        if (completed) this.executorProofHints.delete(jobId);
+      },
+      () => { this.chainObservations.completion.executorSettled(jobId); },
+    ).catch(() => {
+      // A rejected/malformed result or a local persistence fault leaves the durable transaction
+      // on the recovery track. Never manufacture a terminal failure after an accepted send.
+    }).finally(() => {
       if (this.detachedExecutions.get(jobId) === tracked) {
         this.detachedExecutions.delete(jobId);
       }
-      // The job just stopped being executor-owned (line-of-ownership: reconciliation skips jobs
-      // in this map). Whatever the execution's outcome, only chain proof can settle the record
-      // now, so invite the reconcile pass instead of leaving the job to the idle sweep.
-      this.notifyReconciliationDemand();
+      // Only after executor completion/persistence releases ownership may recovery repair an
+      // uncertified result or a failed terminal write. Successful completion needs no scan.
+      if (!completed) this.notifyReconciliationDemand();
     });
     this.detachedExecutions.set(jobId, tracked);
   }
@@ -3348,14 +3338,6 @@ export class TripleStoreAsyncLiftPublisher
     return decodedLiftJobOrThrow(decodeLiftJobPayload(binding));
   }
 
-  /** Queue inventories are best-effort selectors; exact reads and indexed admissions stay strict. */
-  private parseJobPayloadForScan(binding?: string): PersistedLiftJob | null {
-    const decoded = decodeLiftJobPayload(binding);
-    return decoded.kind === 'canonical' || decoded.kind === 'compatibility'
-      ? decoded.job
-      : null;
-  }
-
   // Target-state constructors select only metadata legal for the destination. No transition can
   // accidentally carry a prior state's progress fields into the new durable union member.
   private buildTransitionJob<State extends LiftJobState>(
@@ -3429,8 +3411,10 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async reacceptDueFailedJobs(now: number): Promise<number> {
+    if (!this.autoRetryEnabled) return 0;
+    const candidates = await this.jobSelectors.dueRetries(now);
     let retried = 0;
-    for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+    for (const job of candidates.filter(isFailedJob)) {
       if (retried >= TripleStoreAsyncLiftPublisher.MAX_REACCEPTS_PER_SWEEP) break;
       if (job.timestamps.nextRetryAt === undefined || job.timestamps.nextRetryAt > now) continue;
       if (!this.isAutomaticallyRetryable(job)) continue;

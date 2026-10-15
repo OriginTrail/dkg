@@ -131,8 +131,13 @@ describe('async-lift accepted-job selection', () => {
 
     const originalQuery = store.query.bind(store);
     let selectedBindingCount = -1;
+    let failedBindingsRead = 0;
     store.query = async (...args) => {
       const result = await originalQuery(...args);
+      if (args[1]?.source === 'publisher.asyncLift.list' || args[1]?.source === 'publisher.asyncLift.dueRetries') {
+        if (result.type !== 'bindings') throw new Error('expected retry bindings');
+        failedBindingsRead += result.bindings.length;
+      }
       if (args[1]?.source === 'publisher.asyncLift.nextAccepted') {
         if (result.type !== 'bindings') throw new Error('expected selector bindings');
         selectedBindingCount = result.bindings.length;
@@ -142,5 +147,45 @@ describe('async-lift accepted-job selection', () => {
 
     expect((await publisher.claimNext('wallet-1'))?.jobId).toBe(oldestId);
     expect(selectedBindingCount).toBe(2);
+    expect(failedBindingsRead).toBe(0);
+  });
+
+  it('reconciliation excludes accepted and finalized history before transferring payloads from the store', async () => {
+    const publisher = createPublisher();
+    for (let index = 0; index < 20; index += 1) {
+      await seedLegacyRawLiftTestJob(store, rawLiftRequest(`pending-${index}`), {
+        idGenerator: () => `pending-${index}`,
+        now: () => index,
+      });
+    }
+    for (let index = 0; index < 20; index += 1) {
+      await seedLegacyRawLiftTestJob(store, rawLiftRequest(`done-${index}`), {
+        idGenerator: () => `done-${index}`,
+        now: () => index,
+        overrides: {
+          status: 'finalized',
+          claim: { walletId: 'historical-wallet' },
+          validation: {
+            canonicalRoots: [], canonicalRootMap: {}, swmQuadCount: 0,
+            authorityProofRef: 'proof:old', transitionType: 'CREATE',
+          },
+          finalization: { mode: 'local' },
+        },
+      });
+    }
+    expect((await publisher.list({ status: 'finalized' })).length).toBe(20);
+    const originalQuery = store.query.bind(store);
+    const inventorySizes: number[] = [];
+    store.query = async (...args) => {
+      const result = await originalQuery(...args);
+      if (args[1]?.source === 'publisher.asyncLift.list' || args[1]?.source === 'publisher.asyncLift.reconciliationInventory') {
+        if (result.type !== 'bindings') throw new Error('expected inventory bindings');
+        inventorySizes.push(result.bindings.length);
+      }
+      return result;
+    };
+    expect(await publisher.reconcileTransactions()).toBe(0);
+    expect(inventorySizes).toEqual([0]);
+    expect((await publisher.claimNext('wallet-1'))?.jobId).toBe('pending-0');
   });
 });

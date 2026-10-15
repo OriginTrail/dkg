@@ -567,9 +567,19 @@ export type AsyncKnowledgeAssetVmPublishPreflightResult =
   | { readonly action: 'execute' }
   | { readonly action: 'noop'; readonly reason?: string };
 
+/** Process-local completion evidence returned by the named-KA executor. */
+export interface AsyncKnowledgeAssetVmPublishExecutionResult extends PublishResult {
+  /**
+   * Process-local evidence from the executor: all required local finalization writes succeeded,
+   * or catalog placement has a durable independent repair owner. Existing best-effort gossip
+   * and legacy retirement remain best-effort. Requires a confirmed on-chain result; absent means recovery.
+   */
+  readonly localFinalizationComplete?: true;
+}
+
 /** Cohesive lifecycle boundary for one named-KA async queue job. */
 export interface AsyncKnowledgeAssetVmPublishJobHandler {
-  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<PublishResult>;
+  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<AsyncKnowledgeAssetVmPublishExecutionResult>;
   preflight?(
     input: AsyncKnowledgeAssetVmPublishPreflightInput,
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;

@@ -1,3 +1,4 @@
+import { recordDetachedPublishResult } from './detached-publish-completion.js';
 import type { PublishResult } from './publisher.js';
 import {
   deleteByPatternWithoutCount,
@@ -44,38 +45,8 @@ import {
   type StructurallyValidLiftJobPayload,
 } from './lift-job-payload-codec.js';
 
-export interface ActiveLiftJobClaimTransitionBoundary {
-  run<T>(transition: (current: LiftJob, scope: LiftJobTransitionScope) => Promise<T>): Promise<T>;
-}
-
-export interface LiftJobRecoveryTransitionScope {
-  commitRecoveryReset(reset: LiftJobAccepted): Promise<LiftJobAccepted>;
-  commitProofFailure(failed: LiftJob): Promise<LiftJob>;
-  commitProofFinalization(
-    finalize: () => Promise<LiftJob | null>,
-  ): Promise<LiftJob | null>;
-  commitReaccept(accepted: LiftJobAccepted): Promise<LiftJobAccepted>;
-  commitRemoval(): Promise<void>;
-}
-
-export interface LiftJobTransitionScope extends LiftJobRecoveryTransitionScope {
-  commit(next: LiftJob, kind: JournalKind): Promise<LiftJob>;
-  commitProofInclusion(included: LiftJob): Promise<LiftJob>;
-}
-
-/** One atomic per-job read under the lock that owns its transition scope. */
-export type LiftJobTransaction =
-  | { readonly kind: 'missing' }
-  | {
-    readonly kind: 'present';
-    readonly current: LiftJob;
-    readonly scope: LiftJobTransitionScope;
-  }
-  | {
-    readonly kind: 'compatibility';
-    readonly current: LiftJobCompatibility;
-    readonly scope: LiftJobRecoveryTransitionScope;
-  };
+import type { ActiveLiftJobClaimTransitionBoundary, LiftJobRecoveryTransitionScope, LiftJobTransitionScope, LiftJobTransaction } from './lift-job-transition-scope.js';
+export type { ActiveLiftJobClaimTransitionBoundary, LiftJobRecoveryTransitionScope, LiftJobTransitionScope, LiftJobTransaction } from './lift-job-transition-scope.js';
 
 /** Diagnostic read variants exposed only to the targeted terminal-clear operation. */
 export type ClassifiedLiftJobClearTransaction =
@@ -634,6 +605,12 @@ export class AsyncLiftClaimCoordinator {
       await this.assertActiveClaimLock(current);
       return await transition(current, this.createTransitionScope(current));
     });
+  }
+
+  async recordDetachedPublishResult(
+    claim: ActiveLiftJobClaim, result: PublishResult, options: { publicByteSize?: number },
+  ): Promise<boolean> {
+    return recordDetachedPublishResult(this, this.dependencies.mutations, claim, result, options);
   }
 
   /**

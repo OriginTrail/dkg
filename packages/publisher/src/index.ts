@@ -399,6 +399,7 @@ export {
   type AsyncLiftRetryOutcome,
   type AsyncLiftRetryStateReader,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishExecutionResult,
   type AsyncKnowledgeAssetVmPublishJobHandler,
   type AsyncKnowledgeAssetVmPublishPreflightInput,
   type AsyncKnowledgeAssetVmPublishPreflightResult,

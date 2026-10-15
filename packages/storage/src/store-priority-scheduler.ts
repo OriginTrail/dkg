@@ -687,8 +687,14 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   private observeDuration(entry: QueueEntry<unknown>, startedAt: number, outcome: 'ok' | 'error'): void {
+    const durationMs = Math.max(0, this.now() - startedAt);
+    getMetrics().storeSchedulerOperationDurationMs.record(durationMs, {
+      priority: entry.priority,
+      operation: metricOperation(entry.operation),
+      outcome,
+    });
     if (entry.priority !== 'ack') return;
-    getMetrics().storageAckStoreOpDurationMs.record(Math.max(0, this.now() - startedAt), {
+    getMetrics().storageAckStoreOpDurationMs.record(durationMs, {
       operation: metricOperation(entry.operation),
       outcome,
     });

@@ -26,6 +26,7 @@ export default defineConfig({
       'test/async-lift-validation.test.ts',
       'test/async-lift-publish-result.test.ts',
       'test/async-lift-claim-fencing.test.ts',
+      'test/async-lift-detached-completion.test.ts',
       'test/async-lift-claim-selection.test.ts',
       'test/async-lift-journal-serialize.test.ts',
       'test/async-lift-journal-append.test.ts',

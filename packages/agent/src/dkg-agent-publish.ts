@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { retireLegacySwmAfterConfirmedLocalPublish } from './queued-publish-finalization.js';
+
 /**
  * Publish / share write-pipeline extracted from dkg-agent.ts as a mixin
  * holder: gossip publish, publishAsync/_publish, update/share/conditionalShare,
@@ -164,6 +166,7 @@ import  {
   type PublishOptions,
   type UpdateOptions,
   type PublishResult,
+  type AsyncKnowledgeAssetVmPublishExecutionResult,
   type PhaseCallback,
   type KAMetadata,
   type CASCondition,
@@ -5177,7 +5180,7 @@ export class PublishMethods extends DKGAgentBase {
     // retired the exact SWM twin; complete its lane-specific signed inventory
     // transition as well so a public catalog cannot retain an unresolvable
     // asset after recovery (private lanes keep their finalized placement).
-    await this.afterConfirmedGraphScopedVmPublishV1({
+    const catalogCompletionRecorded = await this.afterConfirmedGraphScopedVmPublishV1({
       status: 'confirmed',
       contextGraphId: request.contextGraphId,
       subGraphName: request.subGraphName,
@@ -5193,6 +5196,10 @@ export class PublishMethods extends DKGAgentBase {
       ctx,
       publicationLabel: 'queued publish',
     });
+    if (!catalogCompletionRecorded) {
+      throw Object.assign(new Error('Named KA recovery catalog finalization is not durably recorded; recovery will retry'),
+        { code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    }
 
     // SWM-source materialization owns its exact transition. VM-only recovery
     // must not run a second, unlocked cleanup: a newer unpublished assertion
@@ -5215,7 +5222,7 @@ export class PublishMethods extends DKGAgentBase {
       /** GH#3081 — observation only: where the queue hears of each step that ends after the confirmation. */
       onPostConfirmationStep?: LiftJobTailStepObserver;
     },
-  ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+  ): Promise<AsyncKnowledgeAssetVmPublishExecutionResult & { assertionUri: string; seal: AssertionSeal }> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
     // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
@@ -5398,9 +5405,29 @@ export class PublishMethods extends DKGAgentBase {
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     let result: PublishResult;
+    // A confirmed transaction is not sufficient to skip queue recovery: several historical
+    // best-effort local writes below can fail while execution still returns confirmed.
+    let localFinalizationComplete = true;
+    // Both operation kinds need the same durable receipt before cleanup and fast completion.
+    const writeReceipt = async (): Promise<void> => {
+      if (result.status !== 'confirmed' || !result.onChainResult) return;
+      try {
+        await this._writeQueuedKnowledgeAssetVmPublishReceipt(
+          request,
+          result.onChainResult.txHash ?? '',
+          result.onChainResult.blockNumber ?? 0,
+          seal.reservedKaId ?? result.onChainResult.kaId ?? result.onChainResult.batchId ?? 0n,
+        );
+      } catch (err) {
+        localFinalizationComplete = false;
+        this.log.warn(ctx, `Failed to write publish receipt for <${assertionUri}>: `
+          + (err instanceof Error ? err.message : String(err)));
+      }
+      endedTailStep('receiptWrite');
+    };
     const clearPublishedGraph = async (label: string): Promise<void> => {
       try {
-        await publisher.clearPublishedKnowledgeAssetSwm(
+        const cleared = await publisher.clearPublishedKnowledgeAssetSwm(
           request.contextGraphId,
           sharedMemoryScope,
           request.subGraphName,
@@ -5408,7 +5435,9 @@ export class PublishMethods extends DKGAgentBase {
           graphScope.ual,
           graphScope.assertionVersion,
         );
+        if (cleared !== true) localFinalizationComplete = false;
       } catch (err) {
+        localFinalizationComplete = false;
         this.log.warn(
           ctx,
           `Failed to clear published SWM graph after confirmed queued ${label} of <${lifecycleUri}>: ` +
@@ -5418,19 +5447,21 @@ export class PublishMethods extends DKGAgentBase {
       } finally {
         endedTailStep('publishedGraphClear');
       }
-      await this.retireLegacySwmAfterConfirmedLocalPublish(
+      const retired = await retireLegacySwmAfterConfirmedLocalPublish(this, this.log,
         request.contextGraphId,
         graphScope.ual,
         graphScope.assertionVersion,
         request.subGraphName,
         ctx,
       );
+      if (!retired) localFinalizationComplete = false;
       endedTailStep('legacySwmRetire');
     };
     const clearRemainingSharedMemory = async (): Promise<void> => {
       try {
         await publisher.clearRemainingSharedMemory(request.contextGraphId, request.subGraphName, ctx);
       } catch (err) {
+        localFinalizationComplete = false;
         this.log.warn(
           ctx,
           `Failed to clear remaining SWM after confirmed queued publish of <${lifecycleUri}>: ` +
@@ -5481,6 +5512,7 @@ export class PublishMethods extends DKGAgentBase {
       );
       endedTailStep('publish');
 
+      await writeReceipt();
       if (result.status === 'confirmed') {
         await clearPublishedGraph('update');
         if (request.clearSharedMemoryAfter === true) {
@@ -5501,6 +5533,7 @@ export class PublishMethods extends DKGAgentBase {
             { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
           ]);
         } catch (err) {
+          localFinalizationComplete = false;
           this.log.warn(
             ctx,
             `Failed to stamp queued update provenance for <${lifecycleUri}>: ` +
@@ -5620,24 +5653,7 @@ export class PublishMethods extends DKGAgentBase {
       });
       endedTailStep('publish');
 
-      if (result.status === 'confirmed' && result.onChainResult) {
-        try {
-          await this._writeQueuedKnowledgeAssetVmPublishReceipt(
-            request,
-            result.onChainResult.txHash ?? '',
-            result.onChainResult.blockNumber ?? 0,
-            seal.reservedKaId ?? result.onChainResult.kaId ?? result.onChainResult.batchId ?? 0n,
-          );
-        } catch (err) {
-          this.log.warn(
-            ctx,
-            `Failed to write publish receipt for <${assertionUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-        endedTailStep('receiptWrite');
-      }
-
+      await writeReceipt();
       if (result.status === 'confirmed') {
         await clearPublishedGraph('publish');
         if (request.clearSharedMemoryAfter === true) {
@@ -5654,6 +5670,7 @@ export class PublishMethods extends DKGAgentBase {
           packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
         );
       } catch (err) {
+        localFinalizationComplete = false;
         this.log.warn(
           ctx,
           `Failed to stamp queued VM lifecycle marker for <${lifecycleUri}>: ` +
@@ -5709,6 +5726,7 @@ export class PublishMethods extends DKGAgentBase {
       try {
         await publisher.clearSwmShareComplete(request.contextGraphId, request.name, agentAddress, request.subGraphName);
       } catch (err) {
+        localFinalizationComplete = false;
         this.log.warn(
           ctx,
           `Failed to clear swmShareComplete after queued publish of <${lifecycleUri}>: ` +
@@ -5718,7 +5736,7 @@ export class PublishMethods extends DKGAgentBase {
       endedTailStep('shareMarkerClear');
     }
 
-    await this.afterConfirmedGraphScopedVmPublishV1({
+    const catalogCompletionRecorded = await this.afterConfirmedGraphScopedVmPublishV1({
       status: result.status,
       contextGraphId: request.contextGraphId,
       subGraphName: request.subGraphName,
@@ -5731,7 +5749,13 @@ export class PublishMethods extends DKGAgentBase {
     });
     endedTailStep('catalogObserver');
 
-    return { ...result, assertionUri, seal };
+    return {
+      ...result, assertionUri, seal,
+      // Override any upstream marker: only this complete queued lifecycle can certify its tail.
+      localFinalizationComplete: result.status === 'confirmed' && result.onChainResult
+        && localFinalizationComplete && catalogCompletionRecorded
+        ? true : undefined,
+    };
   }
 
   async publishFromFinalizedAssertion(this: DKGAgent,
@@ -6039,7 +6063,7 @@ export class PublishMethods extends DKGAgentBase {
             graphScope.ual,
             graphScope.assertionVersion,
           );
-          await this.retireLegacySwmAfterConfirmedLocalPublish(
+          await retireLegacySwmAfterConfirmedLocalPublish(this, this.log,
             contextGraphId,
             graphScope.ual,
             graphScope.assertionVersion,
@@ -6346,35 +6370,11 @@ export class PublishMethods extends DKGAgentBase {
       ctx: OperationContext;
       publicationLabel: 'publish' | 'queued publish';
     }>,
-  ): Promise<void> {
-    if (input.status !== 'confirmed') return;
-    await this.observeRfc64ConfirmedVmV1(input);
+  ): Promise<boolean> {
+    if (input.status !== 'confirmed') return false;
+    return await this.observeRfc64ConfirmedVmV1(input);
   }
 
-  /** The local confirmed publisher has already written VM and drained this exact SWM root. */
-  private async retireLegacySwmAfterConfirmedLocalPublish(
-    this: DKGAgent,
-    contextGraphId: string,
-    kaUal: string,
-    assertionVersion: string,
-    subGraphName: string | undefined,
-    ctx: OperationContext,
-  ): Promise<void> {
-    try {
-      await this.retireLegacySwmAfterVerifiedVmTwin({
-        contextGraphId,
-        kaUal,
-        assertionVersion,
-        subGraphName,
-      });
-    } catch (err) {
-      this.log.warn(
-        ctx,
-        `Failed to retire the legacy SWM boundary after confirmed local VM publish: ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-    }
-  }
 
   /**
    * OT-RFC-43 A2 — mint a `precomputedUpdateAttestation` over
@@ -6799,7 +6799,7 @@ export class PublishMethods extends DKGAgentBase {
       && options?.kaUal !== undefined
       && options.assertionVersion !== undefined
     ) {
-      await this.retireLegacySwmAfterConfirmedLocalPublish(
+      await retireLegacySwmAfterConfirmedLocalPublish(this, this.log,
         contextGraphId,
         options.kaUal,
         String(options.assertionVersion),

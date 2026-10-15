@@ -9,6 +9,7 @@ export type {
   AsyncLiftRetryOutcome,
   AsyncLiftRetryStateReader,
   AsyncKnowledgeAssetVmPublishExecutionInput,
+  AsyncKnowledgeAssetVmPublishExecutionResult,
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishPreflightInput,
   AsyncKnowledgeAssetVmPublishPreflightResult,
