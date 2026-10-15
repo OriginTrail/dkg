@@ -9,7 +9,7 @@
  * path over real sync in `e2e-swm-relay-only.test.ts`.
  */
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_SWM_CHANGE_NOTICE } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SWM_CHANGE_NOTICE, ProtocolRouter, type DKGNode } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
 import {
@@ -181,6 +181,108 @@ describe('the notice protocol, as the agent registers it', () => {
 
     expect(follower.logLines).toContain(`SWM change notice from ${CURATOR.slice(-8)} not handled: store closed`);
     expect(follower.syncs).toEqual([]);
+  });
+});
+
+/** An inbound stream of the notice protocol: the chunks a peer writes, and what the reader did with them. */
+class InboundStream extends EventTarget {
+  reads = 0;
+  sent: Uint8Array | null = null;
+  aborted: Error | null = null;
+
+  constructor(private readonly written: () => Iterator<Uint8Array>) {
+    super();
+  }
+
+  send(data: Uint8Array): void {
+    this.sent = data;
+  }
+
+  async close(): Promise<void> {}
+
+  abort(error: Error): void {
+    this.aborted = error;
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+    const chunks = this.written();
+    return {
+      next: async () => {
+        this.reads += 1;
+        return chunks.next();
+      },
+    };
+  }
+}
+
+describe('the notice protocol on the production router', () => {
+  /** A follower whose notice protocol the agent registered on a real router, with the router-wide read limit. */
+  function routed() {
+    const follower = host();
+    const inbound = new Map<string, (stream: InboundStream, connection: unknown) => Promise<void>>();
+    const node = {
+      libp2p: {
+        handle: (protocolId: string, handler: (stream: InboundStream, connection: unknown) => Promise<void>) => {
+          inbound.set(protocolId, handler);
+        },
+        unhandle: () => undefined,
+      },
+    } as unknown as DKGNode;
+    Object.assign(follower.agent, { router: new ProtocolRouter(node) });
+    const handled: string[] = [];
+    const handle = follower.agent.handleSwmChangeNoticeV1.bind(follower.agent);
+    follower.agent.handleSwmChangeNoticeV1 = async (data, peerId) => {
+      handled.push(peerId);
+      return handle(data, peerId);
+    };
+    follower.agent.registerSwmChangeNoticeProtocolV1();
+    const connection = {
+      remotePeer: { toString: () => CURATOR, toMultihash: () => ({ bytes: new Uint8Array([1]) }) },
+    };
+    const deliver = (stream: InboundStream) => inbound.get(PROTOCOL_SWM_CHANGE_NOTICE)!(stream, connection);
+    return { follower, handled, deliver };
+  }
+
+  it('stops reading a request past a notice\'s size and aborts the stream; the agent never sees it', async () => {
+    const { follower, handled, deliver } = routed();
+    const errors: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); };
+    // A peer that writes without end, 1 KiB at a time.
+    const stream = new InboundStream(function* endless() {
+      for (;;) yield new Uint8Array(1_024).fill(0x20);
+    });
+    try {
+      await deliver(stream);
+    } finally {
+      console.error = consoleError;
+    }
+    await follower.agent.whenSwmChangeNoticesSettledV1();
+
+    // 1 KiB, 2 KiB, and the third chunk passes the limit: nothing further is read.
+    expect(stream.reads).toBe(3);
+    expect(stream.aborted).not.toBeNull();
+    expect(stream.sent).toBeNull();
+    expect(errors.join('\n')).toContain(`Read limit exceeded (${SWM_CHANGE_NOTICE_MAX_BYTES} bytes)`);
+    expect(handled).toEqual([]);
+    expect(follower.syncs).toEqual([]);
+  });
+
+  it('reads a notice within its size, answers at once and pulls on it', async () => {
+    const { follower, handled, deliver } = routed();
+    const bytes = noticeBytes();
+    const stream = new InboundStream(function* once() {
+      yield bytes;
+    });
+
+    await deliver(stream);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await follower.agent.whenSwmChangeNoticesSettledV1();
+
+    expect(stream.sent).toEqual(new Uint8Array());
+    expect(stream.aborted).toBeNull();
+    expect(handled).toEqual([CURATOR]);
+    expect(follower.syncs.map(({ peerId }) => peerId)).toEqual([CURATOR]);
   });
 });
 
