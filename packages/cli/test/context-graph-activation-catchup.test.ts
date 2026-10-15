@@ -309,6 +309,55 @@ describe('a subscription restored unsynced is caught up', () => {
     expect(armed()[0].delayMs).toBe(ACTIVATION_ADMISSION_RETRY_DELAYS_MS[0]);
   });
 
+  it('catches up a subscription saved under its name hash that the agent adopted while it waited', async () => {
+    const member = memberEdge();
+    const nameHash = `0x${'ab'.repeat(32)}`;
+    const cleartext = `${CG}-cleartext`;
+    member.restore({ ...RESTORED_UNSYNCED });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const runs = runner([cleanEmptyRound], held);
+    const { logs } = start(member);
+    await waitUntil(() => (runs.length === 1 ? true : undefined), 'the first job');
+
+    // A subscription saved under its name hash comes back while the first job
+    // runs, and name resolution adopts its cleartext id before the queue gets to it.
+    member.restore({ ...RESTORED_UNSYNCED }, nameHash);
+    member.agent.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: nameHash });
+    member.adopt(nameHash, cleartext);
+    release();
+
+    await waitUntil(() => (runs.length === 2 ? true : undefined), 'the job of the adopted graph');
+    expect(runs).toEqual([CG, cleartext]);
+    expect(logs).toContain(`[catchup] catching up "${cleartext}": its subscription came back unsynced`);
+  });
+
+  it('catches it up under its cleartext id when the agent adopts that while the admission is read', async () => {
+    const member = memberEdge();
+    const nameHash = `0x${'ab'.repeat(32)}`;
+    const cleartext = `${CG}-cleartext`;
+    member.restore({ ...RESTORED_UNSYNCED }, nameHash);
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => { answer = resolve; });
+    const asked: string[] = [];
+    const read = member.agent.resolveContextGraphSubscriptionBootstrapAuthority.bind(member.agent);
+    member.agent.resolveContextGraphSubscriptionBootstrapAuthority = (async (...args: Parameters<typeof read>) => {
+      asked.push(args[0]);
+      if (args[0] === nameHash) await answered;
+      return read(...args);
+    }) as typeof read;
+    const runs = runner([cleanEmptyRound]);
+    start(member);
+    await waitUntil(() => (asked.length === 1 ? true : undefined), 'the admission read of the name hash');
+
+    member.adopt(nameHash, cleartext);
+    answer();
+    await waitUntil(() => (runs.length === 1 ? true : undefined), 'the job under the cleartext id');
+    // The cleartext id is admitted on its own before its job starts.
+    expect(asked.slice(0, 2)).toEqual([nameHash, cleartext]);
+    expect(runs).toEqual([cleartext]);
+  });
+
   it('runs one job at a time', async () => {
     const member = memberEdge();
     const second = `${CG}-second`;

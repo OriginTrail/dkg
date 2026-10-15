@@ -132,6 +132,8 @@ export function memberEdge() {
     namedAgent: undefined as string | undefined,
     /** The agent each admission read asked as, in order. */
     admissionCallers: [] as Array<string | undefined>,
+    /** Name hashes the agent adopted, by their verified cleartext id. */
+    aliases: new Map<string, string>(),
   };
   const agent = {
     resolveContextGraphSubscriptionBootstrapAuthority: async (
@@ -142,6 +144,7 @@ export function memberEdge() {
       return typeof node.authority === 'function' ? node.authority(options?.callerAgentAddress) : node.authority;
     },
     findLocalAgentForContextGraph: async () => node.namedAgent ?? DEFAULT_AGENT,
+    resolveContextGraphIdAlias: (contextGraphId: string) => node.aliases.get(contextGraphId) ?? null,
     listLocalAgents: () => node.localAgents.map((agentAddress) => ({ agentAddress })),
     subscribedContextGraphs: subscriptions,
     getSubscribedContextGraphs: () => subscriptions,
@@ -210,6 +213,13 @@ export function memberEdge() {
     /** Install a row the way the agent's activation restores a persisted one. */
     restore: (row: Record<string, unknown>, contextGraphId: string = CG) => subscriptions.set(contextGraphId, row),
     unsubscribe: () => subscriptions.set(CG, { ...subscriptions.get(CG), subscribed: false }),
+    /** Adopt a row saved under its name hash under its verified cleartext id, as name resolution does. */
+    adopt: (nameHash: string, cleartextId: string) => {
+      const row = subscriptions.get(nameHash);
+      subscriptions.delete(nameHash);
+      subscriptions.set(cleartextId, { ...row, subscribed: true, synced: false, sharedMemorySynced: false });
+      node.aliases.set(nameHash, cleartextId);
+    },
     readiness: () => readiness,
     store: {
       getContextGraphReadinessProvenance: () => readiness ?? null,

@@ -17,7 +17,9 @@
 // readiness migration is migrated first, so its persisted flags are judged as
 // those of every other row. The graph is read as its own local agent, not as
 // the node's default agent. An admission that cannot be read now is asked again
-// after a growing delay, a bounded number of times; a refusal is final.
+// after a growing delay, a bounded number of times; a refusal is final. A
+// subscription saved under its on-chain name hash that the agent replaces by
+// its verified cleartext id while it waits here is caught up under that id.
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -50,8 +52,11 @@ export const ACTIVATION_ADMISSION_RETRY_DELAYS_MS = CONTEXT_GRAPH_READINESS_REPE
 
 const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 
-/** What one catch-up did: started a job, found none wanted, or could not read the admission. */
-type CatchUpOutcome = 'started' | 'skipped' | 'unavailable';
+/**
+ * What one catch-up did: started a job, found none wanted, could not read the
+ * admission, or found the subscription under its cleartext id, to catch up anew.
+ */
+type CatchUpOutcome = 'started' | 'skipped' | 'unavailable' | { readonly requeue: string };
 
 /**
  * Start catching up unsynced subscriptions, now and on every later
@@ -120,6 +125,7 @@ export function startActivationCatchups(input: ActivationCatchupInput): () => vo
         if (stopped) break;
         if (outcome === 'unavailable') askAgainLater(contextGraphId);
         else forgetRetry(contextGraphId);
+        if (typeof outcome === 'object') enqueue(outcome.requeue);
       }
     } finally {
       draining = false;
@@ -147,6 +153,15 @@ export function startActivationCatchups(input: ActivationCatchupInput): () => vo
   };
 }
 
+/**
+ * The id a subscription is caught up under. One saved under its on-chain name
+ * hash lives under its verified cleartext id once the agent has adopted that;
+ * the hash-keyed row is gone then.
+ */
+function currentContextGraphId(input: ActivationCatchupInput, contextGraphId: string): string {
+  return input.agent.resolveContextGraphIdAlias?.(contextGraphId) ?? contextGraphId;
+}
+
 /** Whether a job may start for this subscription now. */
 function wanted(input: ActivationCatchupInput, contextGraphId: string, live: () => boolean): boolean {
   if (!live() || !daemonState.catchupAcceptingJobs || !daemonState.catchupRunner) return false;
@@ -160,7 +175,7 @@ function wanted(input: ActivationCatchupInput, contextGraphId: string, live: () 
 
 async function catchUp(
   input: ActivationCatchupInput,
-  contextGraphId: string,
+  queuedContextGraphId: string,
   live: () => boolean,
 ): Promise<CatchUpOutcome> {
   // A stopping daemon touches no readiness store.
@@ -168,8 +183,13 @@ async function catchUp(
   // A no-op for rows that carry current provenance; a row that was dormant
   // when the startup pass ran is classified here instead.
   await migrateLegacyContextGraphReadiness({ agent: input.agent, store: input.store, log: input.log });
+  const contextGraphId = currentContextGraphId(input, queuedContextGraphId);
   if (!wanted(input, contextGraphId, live)) return 'skipped';
   const admission = await readLocalAgentSubscriptionAdmission(input.agent, contextGraphId);
+  // Adopted under its cleartext id while the admission was read: that id is
+  // caught up anew, with an admission of its own.
+  const adoptedContextGraphId = currentContextGraphId(input, contextGraphId);
+  if (adoptedContextGraphId !== contextGraphId) return { requeue: adoptedContextGraphId };
   if (admission === 'unavailable') return 'unavailable';
   if (admission === 'denied') return 'skipped';
   // No await from here to the mint, as on the subscribe route.
