@@ -2,6 +2,7 @@ import {
   SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
+  computeAuthorCatalogScopeDigestV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaProjectionDigestV1,
   computeSwmAuthorInventoryHeadObjectDigestV1,
@@ -28,6 +29,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   prepareRfc64SwmInventoryCatalogTargetV1,
+  readCurrentAuthorCatalogScopeV1,
 } from '../src/rfc64/swm-inventory-catalog-reconciler-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'41'.repeat(32)}`);
@@ -334,6 +336,100 @@ describe('RFC-64 catalog target rows the applied catalog already holds (GH#3134)
       snapshot,
       resolveAsset,
       readPlacedAssets: 'not a function' as never,
+    })).rejects.toMatchObject({ code: 'swm-catalog-reconcile-input' });
+    expect(resolveAsset).not.toHaveBeenCalled();
+  });
+});
+
+describe('the author\'s current catalog scope (GH#3134)', () => {
+  /** Applied heads at these bucket counts of SCOPE's lane, and every bucket count asked for. */
+  function inventoryWith(bucketCounts: readonly string[]) {
+    const digests = new Map(bucketCounts.map((bucketCount) => [
+      computeAuthorCatalogScopeDigestV1({ ...SCOPE, bucketCount } as never),
+      bucketCount,
+    ]));
+    const asked: string[] = [];
+    return {
+      asked,
+      inventory: {
+        readAppliedCatalogHeadV1: (catalogScopeDigest: string, authorAddress: string) => {
+          expect(authorAddress).toBe(AUTHOR);
+          asked.push(digests.get(catalogScopeDigest) ?? 'none');
+          return digests.has(catalogScopeDigest) ? ({ catalogScopeDigest } as never) : null;
+        },
+      },
+    };
+  }
+
+  it('is the lane\'s largest bucket count with an applied head, and one bucket with none', () => {
+    expect(readCurrentAuthorCatalogScopeV1(inventoryWith([]).inventory, SCOPE))
+      .toEqual({ ...SCOPE, bucketCount: '1' });
+    expect(readCurrentAuthorCatalogScopeV1(inventoryWith(['1']).inventory, SCOPE))
+      .toEqual({ ...SCOPE, bucketCount: '1' });
+    // After a move the author keeps the one-bucket head to serve; the moved catalog is current.
+    expect(readCurrentAuthorCatalogScopeV1(inventoryWith(['1', '4']).inventory, SCOPE))
+      .toEqual({ ...SCOPE, bucketCount: '4' });
+    expect(readCurrentAuthorCatalogScopeV1(inventoryWith(['1', '4', '65536']).inventory, SCOPE))
+      .toEqual({ ...SCOPE, bucketCount: '65536' });
+  });
+
+  it('asks for 65,536 buckets down to two, largest first, and for nothing larger', () => {
+    const probed = inventoryWith(['131072']);
+
+    expect(readCurrentAuthorCatalogScopeV1(probed.inventory, SCOPE)).toEqual({ ...SCOPE, bucketCount: '1' });
+    expect(probed.asked).toHaveLength(16);
+    expect(probed.asked).not.toContain('131072');
+  });
+
+  it('prepares the target of the current catalog, bounded by that catalog\'s capacity', async () => {
+    const rows = (count: number) => Array.from({ length: count }, (_, index) => Object.freeze({
+      assertionCoordinate: `capacity-${index + 1}`,
+      assertionVersion: '1',
+      kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${index + 1}`,
+      shareOperationId: `capacity-share-${index + 1}`,
+      projectionDigest: `0x${(index + 1).toString(16).padStart(64, '0')}`,
+      publicTripleCount: '1',
+      privateTripleCount: '0',
+      sealDigest: `0x${(index + 2).toString(16).padStart(64, '0')}`,
+      sharedAt: '1773900000000',
+      expiresAt: null,
+    }) as SwmAuthorInventoryRowV1);
+    const twoBuckets = () => ({ ...SCOPE, bucketCount: '2' }) as never;
+
+    // 1,025 rows fit a catalog of two buckets: past the capacity check, into resolution.
+    const readPlacedAssets = vi.fn(async () => () => undefined);
+    await expect(prepareRfc64SwmInventoryCatalogTargetV1({
+      snapshot: await signedSnapshot(rows(1_025), AUTHOR_WALLET),
+      resolveAsset: async () => { throw new Error('stop here'); },
+      readPlacedAssets,
+      currentCatalogScope: twoBuckets,
+    })).rejects.toMatchObject({ code: 'swm-catalog-reconcile-resolution' });
+    expect(readPlacedAssets).toHaveBeenCalledWith({ ...SCOPE, bucketCount: '2' });
+
+    // 2,049 do not.
+    await expect(prepareRfc64SwmInventoryCatalogTargetV1({
+      snapshot: await signedSnapshot(rows(2_049), AUTHOR_WALLET),
+      resolveAsset: vi.fn(),
+      currentCatalogScope: twoBuckets,
+    })).rejects.toMatchObject({
+      code: 'swm-catalog-reconcile-capacity',
+      message: expect.stringContaining('2049 rows exceeds the 2048 rows of a catalog of 2 bucket(s)'),
+    });
+  });
+
+  it.each([
+    ['another graph', { contextGraphId: '99' }],
+    ['another author', { authorAddress: `0x${'43'.repeat(20)}` }],
+    ['a bucket count that is not a catalog\'s', { bucketCount: '3' }],
+    ['a missing bucket count', { bucketCount: undefined }],
+  ] as const)('refuses a current catalog scope with %s', async (_difference, change) => {
+    const seal = await authorSeal();
+    const resolveAsset = vi.fn();
+
+    await expect(prepareRfc64SwmInventoryCatalogTargetV1({
+      snapshot: await signedSnapshot([inventoryRow(seal, PROJECTION)], AUTHOR_WALLET),
+      resolveAsset,
+      currentCatalogScope: () => ({ ...SCOPE, bucketCount: '1', ...change }) as never,
     })).rejects.toMatchObject({ code: 'swm-catalog-reconcile-input' });
     expect(resolveAsset).not.toHaveBeenCalled();
   });

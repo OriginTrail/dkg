@@ -15,6 +15,7 @@ import {
   assertSwmAuthorInventorySnapshotBindingV1,
   authorCatalogRowCapacityV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
+  computeAuthorCatalogScopeDigestV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -30,12 +31,38 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import type { Rfc64InventoryV1OperationsV1 } from './inventory-v1/index.js';
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
   './public-catalog-successor-producer-v1.js';
 import {
   assertExactFieldSetV1,
   snapshotPlainDataRecordV1,
 } from './inventory-v1/exact-record.js';
+
+/** Bucket counts probed for an author's current catalog, largest first: 2^16 down to 2. */
+const PROBED_CATALOG_BUCKET_COUNTS_V1 = Object.freeze(
+  Array.from({ length: 16 }, (_, index) => (1n << BigInt(16 - index)).toString(10)),
+);
+
+/**
+ * GH#3134 — the author's current catalog scope of a lane: the bucket count of the lane's newest
+ * applied head. A catalog only moves to more buckets, and the author keeps the old head to serve,
+ * so the largest count that has an applied head is the current one. With none it is one bucket.
+ */
+export function readCurrentAuthorCatalogScopeV1(
+  inventory: Pick<Rfc64InventoryV1OperationsV1, 'readAppliedCatalogHeadV1'>,
+  lane: Readonly<Omit<AuthorCatalogScopeV1, 'bucketCount'>>,
+): Readonly<AuthorCatalogScopeV1> {
+  for (const bucketCount of PROBED_CATALOG_BUCKET_COUNTS_V1) {
+    const scope = Object.freeze({ ...lane, bucketCount }) as AuthorCatalogScopeV1;
+    const applied = inventory.readAppliedCatalogHeadV1(
+      computeAuthorCatalogScopeDigestV1(scope),
+      lane.authorAddress,
+    );
+    if (applied !== null) return scope;
+  }
+  return Object.freeze({ ...lane, bucketCount: '1' }) as AuthorCatalogScopeV1;
+}
 
 /**
  * GH#3134 — the most rows an author catalog of `scope` may be planned to hold. The share-time
@@ -109,6 +136,14 @@ export interface PrepareRfc64SwmInventoryCatalogTargetInputV1 {
   readonly readPlacedAssets?: (
     catalogScope: Readonly<AuthorCatalogScopeV1>,
   ) => Promise<Rfc64PlacedCatalogAssetLookupV1>;
+  /**
+   * The author's current catalog scope for the inventory's lane (GH#3134), such as
+   * `readCurrentAuthorCatalogScopeV1` returns. It must be the lane's own; without it the catalog
+   * is one bucket.
+   */
+  readonly currentCatalogScope?: (
+    lane: Readonly<SwmAuthorInventoryScopeV1>,
+  ) => Readonly<AuthorCatalogScopeV1>;
 }
 
 /** The asset placed for a row's KA, if any. */
@@ -140,6 +175,9 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
   if (input.readPlacedAssets !== undefined && typeof input.readPlacedAssets !== 'function') {
     fail('swm-catalog-reconcile-input', 'readPlacedAssets must be a function');
   }
+  if (input.currentCatalogScope !== undefined && typeof input.currentCatalogScope !== 'function') {
+    fail('swm-catalog-reconcile-input', 'currentCatalogScope must be a function');
+  }
   try {
     await verifyControlEnvelopeIssuerSignatureV1(snapshot.head);
   } catch (cause) {
@@ -153,10 +191,7 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
   const inventoryScope = Object.freeze(
     deriveSwmAuthorInventoryScopeFromHeadV1(snapshot.head.payload),
   );
-  const catalogScope = Object.freeze({
-    ...inventoryScope,
-    bucketCount: '1',
-  }) as AuthorCatalogScopeV1;
+  const catalogScope = currentCatalogScopeV1(input, inventoryScope);
   // Nothing past what the catalog may hold is resolved (GH#3134).
   const capacity = rfc64CatalogTargetRowCapacityV1(catalogScope);
   if (BigInt(snapshot.rows.length) > capacity) {
@@ -290,6 +325,35 @@ function snapshotAsset(input: unknown): Rfc64PublicCatalogSuccessorAssetInputV1 
     fail(
       'swm-catalog-reconcile-resolution',
       'resolved catalog asset is not one canonical immutable snapshot',
+      cause,
+    );
+  }
+}
+
+/** The lane's catalog scope: the caller's current one, which must be of this very lane. */
+function currentCatalogScopeV1(
+  input: PrepareRfc64SwmInventoryCatalogTargetInputV1,
+  inventoryScope: Readonly<SwmAuthorInventoryScopeV1>,
+): Readonly<AuthorCatalogScopeV1> {
+  if (input.currentCatalogScope === undefined) {
+    return Object.freeze({ ...inventoryScope, bucketCount: '1' }) as AuthorCatalogScopeV1;
+  }
+  let scope: Readonly<AuthorCatalogScopeV1>;
+  try {
+    scope = input.currentCatalogScope(inventoryScope);
+    // The digest checks the bucket count and every other field of the scope.
+    const { bucketCount, ...lane } = scope;
+    const sameLane = Object.keys(inventoryScope).length === Object.keys(lane).length
+      && Object.entries(inventoryScope).every(([key, value]) => (
+        (lane as Record<string, unknown>)[key] === value
+      ));
+    if (!sameLane) throw new Error('the current catalog scope is of another lane');
+    computeAuthorCatalogScopeDigestV1(Object.freeze({ ...inventoryScope, bucketCount }) as AuthorCatalogScopeV1);
+    return Object.freeze({ ...inventoryScope, bucketCount }) as AuthorCatalogScopeV1;
+  } catch (cause) {
+    fail(
+      'swm-catalog-reconcile-input',
+      'the current catalog scope is not a scope of the inventory\'s lane',
       cause,
     );
   }

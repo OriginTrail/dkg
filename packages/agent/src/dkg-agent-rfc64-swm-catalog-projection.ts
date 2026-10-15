@@ -63,8 +63,10 @@ import {
 } from './rfc64/public-catalog-head-delivery-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from
   './rfc64/public-catalog-transport-v1.js';
-import { prepareRfc64SwmInventoryCatalogTargetV1 } from
-  './rfc64/swm-inventory-catalog-reconciler-v1.js';
+import {
+  prepareRfc64SwmInventoryCatalogTargetV1,
+  readCurrentAuthorCatalogScopeV1,
+} from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 import {
   resolveRfc64ConfirmedVmRepairCatalogAssetV1,
   resolveRfc64InventoryWorkspaceCatalogAssetV1,
@@ -200,10 +202,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const inventoryScope = params.inventoryScope;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const scope = Object.freeze({
-      ...inventoryScope,
-      bucketCount: '1',
-    }) as AuthorCatalogScopeV1;
+    // GH#3134: the author's current catalog, which may have moved to more buckets.
+    const scope = readCurrentAuthorCatalogScopeV1(persistence.inventory, inventoryScope);
     const covered = await placement.measure('coverage', () => this.rfc64CatalogCoversConfirmedSwmRowV1({
       scope,
       expectedRow: params,
@@ -373,6 +373,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
         snapshot,
         signal: params.signal,
+        currentCatalogScope: (inventoryLane) => (
+          readCurrentAuthorCatalogScopeV1(persistence.inventory, inventoryLane)
+        ),
         // GH#3134: a row the applied catalog already holds, byte for byte, is not resolved again.
         readPlacedAssets: async (catalogScope) => {
           const placed = await this.readRfc64PlacedCatalogAssetsV1(persistence, catalogScope);
