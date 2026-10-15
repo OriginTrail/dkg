@@ -19,8 +19,9 @@
  *   -  the members follow the graph and receive a root share (works today);
  *   2. a share by the owner into a named sub-graph reaches the members;
  *   3. a share by a member into a named sub-graph reaches the owner;
- *   4. a share by a member reaches the other member only when the two are
- *      connected.
+ *   4. a share by a member is sent to the other member only when the two are
+ *      connected; until then the other member syncs it from the owner, and
+ *      that registers the sub-graph there (#1611).
  * Without the fix the deliveries of 2, 3 and 4 do not happen: see
  * `SUB_GRAPH_SHARES_CROSS_THE_RELAY`.
  *
@@ -130,6 +131,21 @@ async function readSharedMemory(reader: DKGAgent, contextGraphId: string, shared
   } catch (error) {
     return { names: [], error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/**
+ * The graphs in which a read over all of the graph's partitions finds
+ * `shared`: the read of the node UI and of `/api/query` with
+ * `includeContextGraphPartitions`. Unlike `readSharedMemory` it names no
+ * sub-graph, so it sees a sub-graph's share only once the reader has the
+ * sub-graph registered.
+ */
+async function partitionsHolding(reader: DKGAgent, contextGraphId: string, shared: Shared): Promise<string[]> {
+  const result = await reader.query(
+    'SELECT DISTINCT ?g WHERE { GRAPH ?g { <' + shared.subject + '> <' + NAME + '> ?name } }',
+    { contextGraphId, includeContextGraphPartitions: true },
+  );
+  return result.bindings.map((row) => String(row['g']));
 }
 
 /**
@@ -469,7 +485,7 @@ describe('E2E: shared memory between agents linked only through a relay, public 
     expectRelayOnlyLink(network, member1, owner, 'after the member\'s sub-graph share');
   }, 240_000);
 
-  it('4. a share by a member reaches the other member only when the two are connected', async () => {
+  it('4. a share by a member is sent to the other member only when the two are connected, and synced from the owner until then', async () => {
     buildsOn(FOLLOWING);
     await whenNobodyPulls(everyone);
 
@@ -479,9 +495,9 @@ describe('E2E: shared memory between agents linked only through a relay, public 
     // to. No node passes it on: gossip would, but gossip does not run across a
     // relayed connection, and the owner does not fan a member's share out
     // again (#1611). So member 2, which so far is connected to the owner only,
-    // must NOT get member 1's share: neither before the fix nor with it. This
-    // half is a control for the second half, and it pins the present design:
-    // when shares are passed on one day, it is this half that changes.
+    // must NOT be sent member 1's share: neither before the fix nor with it.
+    // This half is a control for the second half, and it pins the present
+    // design: when shares are passed on one day, it is this half that changes.
     expect(linkConnections(network, member1, member2), 'the members are not connected to each other').toEqual([]);
     const unconnected = await share(member1, contextGraphId, 'member-sub-graph-unconnected', 'member-1-notes');
     const stray = await arrival(member2, contextGraphId, unconnected, ABSENCE_WATCH_MS);
@@ -492,6 +508,31 @@ describe('E2E: shared memory between agents linked only through a relay, public 
     expect(
       linkConnections(network, member1, member2),
       'the members were not connected while that share was watched',
+    ).toEqual([]);
+
+    // Member 2 gets it from the owner instead, by its own sync of the graph's
+    // shared memory, as a node does every few minutes: the owner was sent the
+    // share, registered the sub-graph, and serves it. That sync registers the
+    // sub-graph on member 2 as well, so the share is in a read over the
+    // graph's partitions and in the sub-graphs member 2 lists (#1611).
+    const atOwner = await arrival(owner, contextGraphId, unconnected, DELIVERY_BOUND_MS);
+    expect(atOwner.afterMs, 'member 1\'s share at the owner: ' + atOwner.detail).not.toBeNull();
+    await askForSharedMemory(member2, owner, contextGraphId, 'member 2, of the owner, after member 1\'s share,');
+    expect(
+      (await readSharedMemory(member2, contextGraphId, unconnected)).names,
+      'member 1\'s share at member 2 after member 2 synced the graph from the owner',
+    ).toEqual(['"' + unconnected.name + '"']);
+    expect(
+      await partitionsHolding(member2, contextGraphId, unconnected),
+      'member 1\'s share in member 2\'s read over the graph\'s partitions',
+    ).toHaveLength(1);
+    expect(
+      (await member2.listSubGraphs(contextGraphId)).map((subGraph) => subGraph.name),
+      'the sub-graphs member 2 lists',
+    ).toContain('member-1-notes');
+    expect(
+      linkConnections(network, member1, member2),
+      'the members were still not connected when member 2 synced from the owner',
     ).toEqual([]);
 
     // Then the two connect, through the relay like every other link here, and

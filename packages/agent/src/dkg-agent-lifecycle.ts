@@ -876,7 +876,7 @@ import {
   type OwedLegacySwmRetirementsV1,
 } from './internal/owed-legacy-swm-retirements.js';
 import {
-  describeRfc64LegacySwmFenceEventV1,
+  rfc64LegacySwmFenceEventLoggerV1,
   initializeRfc64LegacySwmBoundaryV1,
   rfc64LateLegacySwmCompanionResolverV1,
   retireRfc64LegacySwmAfterFinalizedVmV1,
@@ -2333,7 +2333,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this,
           this.rfc64PersistenceV1.rootPath,
           this.store,
-          { onFenceEvent: (event) => this.log.warn(ctx, describeRfc64LegacySwmFenceEventV1(event)) },
+          { onFenceEvent: rfc64LegacySwmFenceEventLoggerV1(this.log, ctx) },
         );
         await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,

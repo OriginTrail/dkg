@@ -44,9 +44,10 @@ import {
 import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
 
 /**
- * The FIRST thing graceful shutdown does: close catch-up admission, stop what
- * would start catch-up jobs later (activation catch-ups, readiness repeats),
- * announce, and give the supervisor's liveness watcher its signal.
+ * The FIRST thing graceful shutdown does: close catch-up admission, end the
+ * share admission waits, stop what would start catch-up jobs later (activation
+ * catch-ups, readiness repeats), announce, and give the supervisor's liveness
+ * watcher its signal.
  *
  * ## Why the flag write and the first await live in the SAME function
  *
@@ -72,17 +73,34 @@ import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
  * The `removeApiPort` failure stays swallowed: this runs before the cleanup
  * IIFE, and it is idempotent with the later `cleanupStateFiles()` call, so a
  * failure here lands us exactly where a failed late removal would.
+ *
+ * `endShareAdmissionWaits` runs first too (GH#3052): a share held back by a
+ * legacy SWM fence is refused at once from here on, so the promote worker
+ * records its job and retries it after the restart, instead of the shutdown
+ * deadline cutting the promote off in the middle (which leaves the job to an
+ * operator). A failure there is logged and does not stop the shutdown.
+ *
+ * `stopCatchupTriggers` follows, still before the first await: the activation
+ * catch-ups (their listener and pending admission reads) and the pending
+ * readiness repeats would only start jobs that are refused from here on. A
+ * failure there is logged and does not stop the shutdown either.
  */
 export async function beginGracefulShutdown(deps: {
   state: { catchupAcceptingJobs: boolean };
-  /** Stops the triggers of later catch-up jobs; their jobs would only be refused now. */
-  stopCatchupTriggers: () => void;
   removeApiPort: () => Promise<void>;
   log: (message: string) => void;
+  endShareAdmissionWaits?: () => void;
+  /** Stops the triggers of later catch-up jobs. */
+  stopCatchupTriggers?: () => void;
 }): Promise<void> {
   deps.state.catchupAcceptingJobs = false;
   try {
-    deps.stopCatchupTriggers();
+    deps.endShareAdmissionWaits?.();
+  } catch (err: any) {
+    deps.log(`Share admission wait shutdown error: ${err?.message ?? String(err)}`);
+  }
+  try {
+    deps.stopCatchupTriggers?.();
   } catch (err: any) {
     deps.log(`Catch-up trigger stop error: ${err?.message ?? String(err)}`);
   }

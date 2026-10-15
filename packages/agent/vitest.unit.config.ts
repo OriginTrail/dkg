@@ -28,6 +28,7 @@ export default defineConfig({
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",
       "test/swm-target-executor.test.ts",
+      "test/swm-sync-sub-graph-registration.test.ts",
       "test/dkg-agent-swm-target-executor-composition.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",
       "test/sync-work-admission.test.ts",

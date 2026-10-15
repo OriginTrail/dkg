@@ -620,18 +620,26 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
     expect(metrics.jobs()).toHaveLength(0);
   });
 
-  it('stops the triggers of later catch-up jobs after closing admission, before that first await', async () => {
+  it('stops the triggers of later catch-up jobs after closing admission and ending the share waits, before that first await', async () => {
     const order: string[] = [];
     await beginGracefulShutdown({
       state: daemonState,
+      endShareAdmissionWaits: () => {
+        order.push(`end share waits (accepting jobs: ${daemonState.catchupAcceptingJobs})`);
+      },
       stopCatchupTriggers: () => {
         order.push(`stop catch-up triggers (accepting jobs: ${daemonState.catchupAcceptingJobs})`);
       },
-      log: () => {},
+      log: (message) => order.push(`log: ${message}`),
       removeApiPort: async () => { order.push('remove api.port'); },
     });
 
-    expect(order).toEqual(['stop catch-up triggers (accepting jobs: false)', 'remove api.port']);
+    expect(order).toEqual([
+      'end share waits (accepting jobs: false)',
+      'stop catch-up triggers (accepting jobs: false)',
+      'log: Shutting down...',
+      'remove api.port',
+    ]);
   });
 
   it('goes on when stopping the catch-up triggers throws', async () => {
