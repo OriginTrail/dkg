@@ -1123,11 +1123,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         reannounce: (replayPeerId) =>
           this.reannounceRfc64CatalogHeadsToPeerV1(replayPeerId),
         replay: (contextGraphId, replayDemand) =>
-          this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
-            kind: 'connection-demand',
-            replayDemand,
-          }),
-        warn: (message) => this.log.warn(createOperationContext('system'), message),
+          this.requestRfc64CatalogHeadReplayV1(contextGraphId, { kind: 'connection-demand', replayDemand }),
+        replayStatus: (contextGraphId) => this.rfc64CatalogReplayRecoveryRuntimeV1().status(
+          contextGraphId, this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)?.policyDigest ?? ''),
+        log: (level, message) => this.log[level](createOperationContext('system'), message),
       });
       rfc64CatalogReplayConnectionRuntimesV1.set(this, runtime);
     }

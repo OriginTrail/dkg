@@ -3,7 +3,11 @@
 import type {
   Rfc64CatalogReplayPeerDemandV1,
   Rfc64CatalogReplayPeerFenceLeaseV1,
+  Rfc64CatalogReplayRecoveryStatusV1,
 } from './catalog-replay-recovery-runtime-v1.js';
+
+/** What one replay run reports; every demand that joins the run gets this one object. */
+export type Rfc64CatalogConnectionReplayResultV1 = Readonly<{ requested?: number; failed: number }>;
 
 export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
   selectContextGraphIds(): readonly string[];
@@ -15,8 +19,15 @@ export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
   replay(
     contextGraphId: string,
     demand: Rfc64CatalogReplayPeerDemandV1,
-  ): Promise<Readonly<{ failed: number }>>;
-  warn(message: string): void;
+  ): Promise<Rfc64CatalogConnectionReplayResultV1>;
+  /**
+   * The graph's replay status as its runs left it, or null when it has none
+   * under the graph's accepted policy.
+   */
+  replayStatus(
+    contextGraphId: string,
+  ): Readonly<Pick<Rfc64CatalogReplayRecoveryStatusV1, 'failed' | 'unresolvedPeerCount'>> | null;
+  log(level: 'warn' | 'debug', message: string): void;
 }
 
 export interface Rfc64CatalogReplayConnectionReservationV1 {
@@ -40,6 +51,8 @@ const DEFAULT_MAX_PEERS = 256;
  */
 export class Rfc64CatalogReplayConnectionRuntimeV1 {
   readonly #byPeer = new Map<string, DebounceEntryV1>();
+  /** Runs already reported: one run answers every demand that joined it. */
+  readonly #reportedRuns = new WeakSet<Rfc64CatalogConnectionReplayResultV1>();
   readonly #ports: Rfc64CatalogReplayConnectionRuntimePortsV1;
   readonly #debounceMs: number;
   readonly #maxPeers: number;
@@ -99,7 +112,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         if (settled) return;
         settled = true;
         void this.#ports.reannounce(peerId).catch((error: unknown) => {
-          this.#ports.warn(
+          this.#ports.log(
+            'warn',
             `RFC-64 compatibility re-announcement failed for ${peerId.slice(-8)}: ${
               error instanceof Error ? error.message : String(error)
             }`,
@@ -107,13 +121,10 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         });
         for (const { contextGraphId, demand } of replayDemands) {
           void this.#ports.replay(contextGraphId, demand).then((result) => {
-            if (result.failed > 0) {
-              this.#ports.warn(
-                `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${peerId.slice(-8)} connected`,
-              );
-            }
+            if (result.failed > 0) this.#reportUnfinishedRun(contextGraphId, peerId, result);
           }).catch((error: unknown) => {
-            this.#ports.warn(
+            this.#ports.log(
+              'warn',
               `RFC-64 catalog replay failed after ${peerId.slice(-8)} connected: ${
                 error instanceof Error ? error.message : String(error)
               }`,
@@ -122,5 +133,44 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         }
       },
     });
+  }
+
+  /**
+   * Say once per run what a replay that could not finish means. A warning is
+   * kept for evidence that this node's catalog may lack heads its peers hold:
+   * the graph's replay status then holds a full-replay witness (a promised
+   * head this node has not applied, or a run that could not cover its peers).
+   * Peers that could not be replayed from, because they were busy or did not
+   * answer, or because this node's catalog service was not available, are
+   * asked again by later replays and say nothing about this node's rows.
+   */
+  #reportUnfinishedRun(
+    contextGraphId: string,
+    peerId: string,
+    result: Rfc64CatalogConnectionReplayResultV1,
+  ): void {
+    if (this.#reportedRuns.has(result)) return;
+    this.#reportedRuns.add(result);
+    const status = this.#ports.replayStatus(contextGraphId);
+    const counts = `${result.requested ?? 0} peer(s) answered, ${result.failed} failed, ${
+      status?.unresolvedPeerCount ?? 'unknown'
+    } retried later`;
+    if (status !== null && !status.failed) {
+      this.#ports.log(
+        'debug',
+        `RFC-64 catalog replay for "${contextGraphId}" after ${peerId.slice(-8)} connected could not `
+          + `replay from every peer (busy, no answer, or no local catalog service); later replays ask `
+          + `again (${counts})`,
+      );
+      return;
+    }
+    this.#ports.log(
+      'warn',
+      `RFC-64 catalog replay incomplete for "${contextGraphId}" after ${peerId.slice(-8)} connected: ${
+        status === null
+          ? 'its replay status is not available'
+          : 'this node may lack catalog heads its peers hold until a full replay passes'
+      } (${counts})`,
+    );
   }
 }
