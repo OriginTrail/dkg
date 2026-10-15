@@ -1,8 +1,8 @@
 /**
  * The shared-memory change notice of a public graph's owner (#1611): its wire
  * form, the owner's coalesced fan-out, and the follower's gated, coalesced,
- * rate-limited pull. The agent wiring is covered end to end in
- * `e2e-swm-relay-only.test.ts`.
+ * rate-limited pull. The agent's wiring is in `swm-change-notice-wiring.test.ts`,
+ * and the whole path, over the production sync, in `e2e-swm-relay-only.test.ts`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -14,6 +14,7 @@ import {
   encodeSwmChangeNoticeV1,
   sendSwmChangeNotice,
   swmChangeNoticeHint,
+  swmChangeRecipients,
   type SwmChangeNoticeReceiverPorts,
   type SwmChangeNoticeV1,
   type SwmChangeNotifierPorts,
@@ -87,14 +88,14 @@ describe('the owner\'s notifier', () => {
     vi.useRealTimers();
   });
 
-  function notifier(overrides: Partial<SwmChangeNotifierPorts<string | undefined>> = {}) {
-    const deliveries: Array<{ change: SwmRemoteChange<string | undefined>; recipients: readonly string[] }> = [];
+  function notifier(overrides: Partial<SwmChangeNotifierPorts> = {}) {
+    const deliveries: Array<{ notice: SwmChangeNoticeV1; recipients: readonly string[] }> = [];
     const log = vi.fn();
-    const ports: SwmChangeNotifierPorts<string | undefined> = {
+    const ports: SwmChangeNotifierPorts = {
       ownsPublicGraph: async () => true,
       followers: async () => [MEMBER_1, MEMBER_2, MEMBER_3, OWNER, MEMBER_2],
-      deliver: async (change, recipients) => {
-        deliveries.push({ change, recipients });
+      deliver: async (delivered, recipients) => {
+        deliveries.push({ notice: delivered, recipients });
         return recipients.length;
       },
       selfPeerId: () => OWNER,
@@ -104,13 +105,11 @@ describe('the owner\'s notifier', () => {
     return { owner: new SwmChangeNotifier(ports), deliveries, log };
   }
 
-  const change = (sourcePeerId: string, hint: string, lane = '', subGraphName: string | null = 'notes'): SwmRemoteChange<string | undefined> => ({
+  const change = (sourcePeerId: string, hint: string, subGraphName: string | null = 'notes'): SwmRemoteChange => ({
     contextGraphId: CG,
     subGraphName,
     hint,
     sourcePeerId,
-    lane,
-    detail: lane === '' ? undefined : `head-${hint}`,
   });
 
   it('tells every follower except itself and the share\'s source, once each', async () => {
@@ -119,7 +118,7 @@ describe('the owner\'s notifier', () => {
     owner.afterRemoteChange(change(MEMBER_1, 'op-1'));
     await owner.settled();
 
-    expect(deliveries).toEqual([{ change: change(MEMBER_1, 'op-1'), recipients: [MEMBER_2, MEMBER_3] }]);
+    expect(deliveries).toEqual([{ notice: notice('notes', 'op-1'), recipients: [MEMBER_2, MEMBER_3] }]);
     expect(log).toHaveBeenCalledWith(
       `SWM change notice for "${CG}" sub-graph "notes" (op-1): reached 2 of 2 follower(s)`,
     );
@@ -153,7 +152,7 @@ describe('the owner\'s notifier', () => {
     expect(alone.deliveries).toEqual([]);
   });
 
-  it('coalesces the changes of one lane into one trailing delivery with the latest change', async () => {
+  it('coalesces the changes of one scope into one trailing notice with the latest change', async () => {
     vi.useFakeTimers();
     const { owner, deliveries } = notifier();
 
@@ -161,15 +160,15 @@ describe('the owner\'s notifier', () => {
     owner.afterRemoteChange(change(MEMBER_1, 'op-2'));
     owner.afterRemoteChange(change(MEMBER_1, 'op-3'));
     await owner.settled();
-    expect(deliveries.map(({ change: { hint } }) => hint)).toEqual(['op-1']);
+    expect(deliveries.map(({ notice: { hint } }) => hint)).toEqual(['op-1']);
 
     await vi.advanceTimersByTimeAsync(1_000);
     await owner.settled();
-    expect(deliveries.map(({ change: { hint } }) => hint)).toEqual(['op-1', 'op-3']);
+    expect(deliveries.map(({ notice: { hint } }) => hint)).toEqual(['op-1', 'op-3']);
     expect(deliveries[1]!.recipients).toEqual([MEMBER_2, MEMBER_3]);
   });
 
-  it('tells every source of a coalesced delivery about the others\' changes', async () => {
+  it('tells every source of a coalesced notice about the others\' changes', async () => {
     vi.useFakeTimers();
     const { owner, deliveries } = notifier();
 
@@ -182,19 +181,20 @@ describe('the owner\'s notifier', () => {
     expect(deliveries[1]!.recipients).toEqual([MEMBER_1, MEMBER_2, MEMBER_3]);
   });
 
-  it('keeps lanes apart: the root heads of two authors and a sub-graph each get their own delivery', async () => {
-    const { owner, deliveries } = notifier();
+  it('keeps scopes apart: the root and each sub-graph get their own notice', async () => {
+    const { owner, deliveries, log } = notifier();
 
-    owner.afterRemoteChange(change(MEMBER_1, 'h-1', '0xauthor-one', null));
-    owner.afterRemoteChange(change(MEMBER_2, 'h-2', '0xauthor-two', null));
-    owner.afterRemoteChange(change(MEMBER_1, 'op-1'));
+    owner.afterRemoteChange(change(MEMBER_1, 'op-1', null));
+    owner.afterRemoteChange(change(MEMBER_2, 'op-2', 'drafts'));
+    owner.afterRemoteChange(change(MEMBER_1, 'op-3'));
     await owner.settled();
 
-    expect(deliveries.map(({ change: { hint, detail } }) => [hint, detail])).toEqual([
-      ['h-1', 'head-h-1'],
-      ['h-2', 'head-h-2'],
-      ['op-1', undefined],
+    expect(deliveries.map(({ notice: { subGraphName, hint } }) => [subGraphName, hint])).toEqual([
+      [null, 'op-1'],
+      ['drafts', 'op-2'],
+      ['notes', 'op-3'],
     ]);
+    expect(log).toHaveBeenCalledWith(`SWM change notice for "${CG}" root (op-1): reached 2 of 2 follower(s)`);
   });
 
   it('logs a delivery that fails and stays usable', async () => {
@@ -202,46 +202,72 @@ describe('the owner\'s notifier', () => {
     const { owner, deliveries, log } = notifier({
       deliver: async (delivered, recipients) => {
         if (fail) throw new Error('relay closed');
-        deliveries.push({ change: delivered, recipients });
+        deliveries.push({ notice: delivered, recipients });
         return recipients.length;
       },
     });
 
-    owner.afterRemoteChange(change(MEMBER_1, 'op-1', '', 'one'));
+    owner.afterRemoteChange(change(MEMBER_1, 'op-1', 'one'));
     await owner.settled();
     fail = false;
-    owner.afterRemoteChange(change(MEMBER_1, 'op-2', '', 'two'));
+    owner.afterRemoteChange(change(MEMBER_1, 'op-2', 'two'));
     await owner.settled();
 
     expect(log).toHaveBeenCalledWith(`SWM change notice for "${CG}" not delivered: relay closed`);
-    expect(deliveries.map(({ change: { hint } }) => hint)).toEqual(['op-2']);
+    expect(deliveries.map(({ notice: { hint } }) => hint)).toEqual(['op-2']);
   });
 
-  it('forgets the oldest lanes past its memory, so their next change goes out at once', async () => {
+  it('forgets the oldest scopes past its memory, so their next change goes out at once', async () => {
     const { owner, deliveries } = notifier();
 
-    for (let index = 0; index < 1_100; index += 1) owner.afterRemoteChange(change(MEMBER_1, `op-${index}`, '', `s${index}`));
+    for (let index = 0; index < 1_100; index += 1) owner.afterRemoteChange(change(MEMBER_1, `op-${index}`, `s${index}`));
     await owner.settled();
-    owner.afterRemoteChange(change(MEMBER_1, 'again-0', '', 's0'));
-    owner.afterRemoteChange(change(MEMBER_1, 'again-1099', '', 's1099'));
+    owner.afterRemoteChange(change(MEMBER_1, 'again-0', 's0'));
+    owner.afterRemoteChange(change(MEMBER_1, 'again-1099', 's1099'));
     await owner.settled();
     owner.stop();
 
     expect(deliveries).toHaveLength(1_101);
-    expect(deliveries.at(-1)!.change.hint).toBe('again-0');
+    expect(deliveries.at(-1)!.notice.hint).toBe('again-0');
   });
 
-  it('drops a trailing delivery when stopped', async () => {
+  it('drops a trailing notice and sends no more once stopped', async () => {
     vi.useFakeTimers();
     const { owner, deliveries } = notifier();
 
     owner.afterRemoteChange(change(MEMBER_1, 'op-1'));
     owner.afterRemoteChange(change(MEMBER_1, 'op-2'));
     owner.stop();
+    owner.afterRemoteChange(change(MEMBER_2, 'op-3', 'drafts'));
     await vi.advanceTimersByTimeAsync(5_000);
     await owner.settled();
 
-    expect(deliveries.map(({ change: { hint } }) => hint)).toEqual(['op-1']);
+    expect(deliveries.map(({ notice: { hint } }) => hint)).toEqual(['op-1']);
+  });
+});
+
+describe('the recipients of a change', () => {
+  const ports = (owned: boolean, noted: Array<[string, string]>) => ({
+    ownsPublicGraph: async () => owned,
+    followers: async () => [MEMBER_1, MEMBER_2, OWNER, MEMBER_2, MEMBER_3],
+    noteFollower: (contextGraphId: string, peerId: string) => { noted.push([contextGraphId, peerId]); },
+    selfPeerId: () => OWNER,
+  });
+
+  it('are the followers of a public graph it owns but itself and a lone source; the sources are recorded', async () => {
+    const noted: Array<[string, string]> = [];
+
+    expect(await swmChangeRecipients(ports(true, noted), CG, new Set([MEMBER_1]))).toEqual([MEMBER_2, MEMBER_3]);
+    expect(await swmChangeRecipients(ports(true, noted), CG, new Set([MEMBER_1, MEMBER_2])))
+      .toEqual([MEMBER_1, MEMBER_2, MEMBER_3]);
+    expect(noted).toEqual([[CG, MEMBER_1], [CG, MEMBER_1], [CG, MEMBER_2]]);
+  });
+
+  it('are nobody for a graph it does not own, and no source is recorded', async () => {
+    const noted: Array<[string, string]> = [];
+
+    expect(await swmChangeRecipients(ports(false, noted), CG, new Set([MEMBER_1]))).toEqual([]);
+    expect(noted).toEqual([]);
   });
 });
 
@@ -249,7 +275,7 @@ describe('the follower\'s receiver', () => {
   function receiver(overrides: Partial<SwmChangeNoticeReceiverPorts> = {}) {
     const pulls: Array<{
       peerId: string;
-      notice: SwmChangeNoticeV1;
+      contextGraphId: string;
       finish: () => void;
       defer: () => void;
       fail: (error: Error) => void;
@@ -258,10 +284,10 @@ describe('the follower\'s receiver', () => {
     const ports: SwmChangeNoticeReceiverPorts = {
       follows: async (contextGraphId) => contextGraphId === CG,
       acceptsSender: async (_contextGraphId, peerId) => peerId !== MEMBER_3,
-      pull: (peerId, pulled) => new Promise<'pulled' | 'deferred'>((resolve, reject) => {
+      pull: (peerId, contextGraphId) => new Promise<'pulled' | 'deferred'>((resolve, reject) => {
         pulls.push({
           peerId,
-          notice: pulled,
+          contextGraphId,
           finish: () => resolve('pulled'),
           defer: () => resolve('deferred'),
           fail: reject,
@@ -277,7 +303,7 @@ describe('the follower\'s receiver', () => {
   );
   const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-  it('pulls a followed graph\'s scope from an accepted sender, and ignores the rest', async () => {
+  it('pulls a followed graph from an accepted sender, and ignores the rest', async () => {
     const { follower, pulls } = receiver();
 
     expect(await follower.handle(new Uint8Array([1, 2]), OWNER)).toBe('invalid');
@@ -286,34 +312,56 @@ describe('the follower\'s receiver', () => {
     expect(await follower.handle(bytes(), MEMBER_3)).toBe('sender-not-accepted');
     expect(await follower.handle(bytes(), OWNER)).toBe('pulling');
 
-    expect(pulls.map(({ peerId, notice: pulled }) => [peerId, pulled])).toEqual([[OWNER, notice()]]);
+    expect(pulls.map(({ peerId, contextGraphId }) => [peerId, contextGraphId])).toEqual([[OWNER, CG]]);
   });
 
-  it('runs one pull per scope, and one more after it for the notices that came meanwhile', async () => {
+  it('keeps one pull per graph and sender; the notices of any scope meanwhile share one more pull after it', async () => {
     const { follower, pulls } = receiver();
 
     expect(await follower.handle(bytes('notes', 'op-1'), OWNER)).toBe('pulling');
-    expect(await follower.handle(bytes('notes', 'op-2'), OWNER)).toBe('coalesced');
-    expect(await follower.handle(bytes('notes', 'op-3'), MEMBER_1)).toBe('coalesced');
-    expect(await follower.handle(bytes(null, 'h-1'), OWNER)).toBe('pulling');
-    expect(pulls).toHaveLength(2);
+    expect(await follower.handle(bytes('drafts', 'op-2'), OWNER)).toBe('coalesced');
+    expect(await follower.handle(bytes(null, 'op-3'), OWNER)).toBe('coalesced');
+    expect(await follower.handle(bytes('notes', 'op-4'), MEMBER_1)).toBe('pulling');
+    expect(pulls.map(({ peerId }) => peerId)).toEqual([OWNER, MEMBER_1]);
 
     pulls[0]!.finish();
     await tick();
-    expect(pulls.map(({ peerId, notice: { hint } }) => [peerId, hint])).toEqual([
-      [OWNER, 'op-1'],
-      [OWNER, 'h-1'],
-      [MEMBER_1, 'op-3'],
-    ]);
-
+    expect(pulls.map(({ peerId }) => peerId)).toEqual([OWNER, MEMBER_1, OWNER]);
+    // A notice during the trailing pull: one more after it.
+    expect(await follower.handle(bytes('drafts', 'op-5'), OWNER)).toBe('coalesced');
     pulls[2]!.finish();
+    await tick();
+    expect(pulls.map(({ peerId }) => peerId)).toEqual([OWNER, MEMBER_1, OWNER, OWNER]);
+
+    pulls[3]!.finish();
     pulls[1]!.finish();
     await follower.settled();
-    expect(await follower.handle(bytes('notes', 'op-4'), OWNER)).toBe('pulling');
     expect(pulls).toHaveLength(4);
+    expect(await follower.handle(bytes('notes', 'op-6'), OWNER)).toBe('pulling');
   });
 
-  it('pulls again after a pause when local admission deferred the pull, with the latest notice', async () => {
+  it('admits a trailing pull again: none once the graph is not followed or the sender not accepted', async () => {
+    let following = true;
+    let accepted = true;
+    const { follower, pulls } = receiver({ follows: async () => following, acceptsSender: async () => accepted });
+
+    await follower.handle(bytes('notes', 'op-1'), OWNER);
+    expect(await follower.handle(bytes('drafts', 'op-2'), OWNER)).toBe('coalesced');
+    following = false;
+    pulls[0]!.finish();
+    await follower.settled();
+    expect(pulls).toHaveLength(1);
+
+    following = true;
+    expect(await follower.handle(bytes('notes', 'op-3'), OWNER)).toBe('pulling');
+    expect(await follower.handle(bytes('drafts', 'op-4'), OWNER)).toBe('coalesced');
+    accepted = false;
+    pulls[1]!.finish();
+    await follower.settled();
+    expect(pulls).toHaveLength(2);
+  });
+
+  it('tries a deferred pull again after each pause, joined by the notices meanwhile, then leaves it to the periodic sync', async () => {
     const pauses: Array<{ ms: number; resume: () => void }> = [];
     const { follower, pulls } = receiver({
       deferredRetryDelaysMs: [2_000, 5_000],
@@ -324,44 +372,46 @@ describe('the follower\'s receiver', () => {
     pulls[0]!.defer();
     await tick();
     expect(pauses.map(({ ms }) => ms)).toEqual([2_000]);
-    expect(await follower.handle(bytes('notes', 'op-2'), MEMBER_1)).toBe('coalesced');
+    expect(await follower.handle(bytes('drafts', 'op-2'), OWNER)).toBe('coalesced');
     pauses[0]!.resume();
     await tick();
+    expect(pulls).toHaveLength(2);
     pulls[1]!.defer();
     await tick();
     pauses[1]!.resume();
     await tick();
-    pulls[2]!.finish();
-    await follower.settled();
-
-    expect(pulls.map(({ peerId, notice: { hint } }) => [peerId, hint])).toEqual([
-      [OWNER, 'op-1'],
-      [MEMBER_1, 'op-2'],
-      [MEMBER_1, 'op-2'],
-    ]);
-    expect(pauses.map(({ ms }) => ms)).toEqual([2_000, 5_000]);
-  });
-
-  it('leaves a pull that stays deferred to the periodic sync after the last pause', async () => {
-    const pauses: number[] = [];
-    const { follower, pulls } = receiver({
-      deferredRetryDelaysMs: [1, 2],
-      sleep: async (ms) => { pauses.push(ms); },
-    });
-
-    await follower.handle(bytes(), OWNER);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await tick();
-      pulls[attempt]!.defer();
-    }
+    pulls[2]!.defer();
     await follower.settled();
 
     expect(pulls).toHaveLength(3);
-    expect(pauses).toEqual([1, 2]);
+    expect(pauses.map(({ ms }) => ms)).toEqual([2_000, 5_000]);
     expect(await follower.handle(bytes(), OWNER)).toBe('pulling');
   });
 
-  it('logs a failed pull and frees its scope', async () => {
+  it('starts nothing once stopped: no notice is handled, and no trailing pull or retry runs', async () => {
+    const pauses: number[] = [];
+    const { follower, pulls } = receiver({
+      sleep: (ms) => {
+        pauses.push(ms);
+        return new Promise<void>(() => {});
+      },
+    });
+
+    await follower.handle(bytes('notes', 'op-1'), OWNER);
+    await follower.handle(bytes('notes', 'op-1'), MEMBER_1);
+    expect(await follower.handle(bytes('drafts', 'op-2'), OWNER)).toBe('coalesced');
+    pulls[1]!.defer();
+    await tick();
+    expect(pauses).toEqual([2_000]);
+    follower.stop();
+    pulls[0]!.finish();
+    await follower.settled();
+
+    expect(pulls).toHaveLength(2);
+    expect(await follower.handle(bytes(), OWNER)).toBe('stopped');
+  });
+
+  it('logs a failed pull and frees its graph', async () => {
     const { follower, pulls, log } = receiver();
 
     await follower.handle(bytes(), OWNER);
@@ -372,16 +422,36 @@ describe('the follower\'s receiver', () => {
     expect(await follower.handle(bytes(), OWNER)).toBe('pulling');
   });
 
+  it('ends the pulls of a graph when admitting the next one fails, and frees the graph', async () => {
+    let checks = 0;
+    const { follower, pulls, log } = receiver({
+      follows: async () => {
+        checks += 1;
+        if (checks === 3) throw new Error('store closed');
+        return true;
+      },
+    });
+
+    await follower.handle(bytes('notes', 'op-1'), OWNER);
+    await follower.handle(bytes('drafts', 'op-2'), OWNER);
+    pulls[0]!.finish();
+    await follower.settled();
+
+    expect(pulls).toHaveLength(1);
+    expect(log).toHaveBeenCalledWith(`SWM change notice pulls of "${CG}" from ${OWNER.slice(-8)} stopped: store closed`);
+    expect(await follower.handle(bytes(), OWNER)).toBe('pulling');
+  });
+
   it('drops a peer\'s notices over its limit in one window, and only that peer\'s', async () => {
     let now = 0;
     const { follower } = receiver({ perPeerLimit: 2, perPeerWindowMs: 60_000, now: () => now });
 
     expect(await follower.handle(bytes('a'), OWNER)).toBe('pulling');
-    expect(await follower.handle(bytes('b'), OWNER)).toBe('pulling');
+    expect(await follower.handle(bytes('b'), OWNER)).toBe('coalesced');
     expect(await follower.handle(bytes('c'), OWNER)).toBe('rate-limited');
     expect(await follower.handle(bytes('c'), MEMBER_1)).toBe('pulling');
     now = 60_000;
-    expect(await follower.handle(bytes('d'), OWNER)).toBe('pulling');
+    expect(await follower.handle(bytes('d'), OWNER)).toBe('coalesced');
   });
 
   it('forgets the counts of the longest silent peers past its memory', async () => {
@@ -394,12 +464,13 @@ describe('the follower\'s receiver', () => {
     expect(await follower.handle(bytes(), 'peer-0')).toBe('not-followed');
   });
 
-  it('pulls at most 64 scopes at once', async () => {
-    const { follower } = receiver({ perPeerLimit: 1_000 });
+  it('pulls from at most 64 graph and sender pairs at once', async () => {
+    const { follower } = receiver({ acceptsSender: async () => true });
 
     for (let index = 0; index < 64; index += 1) {
-      expect(await follower.handle(bytes(`scope-${index}`), OWNER)).toBe('pulling');
+      expect(await follower.handle(bytes('notes', 'op-1'), `peer-${index}`)).toBe('pulling');
     }
-    expect(await follower.handle(bytes('one-more'), OWNER)).toBe('busy');
+    expect(await follower.handle(bytes('notes', 'op-1'), 'peer-64')).toBe('busy');
+    expect(await follower.handle(bytes('drafts', 'op-2'), 'peer-0')).toBe('coalesced');
   });
 });

@@ -98,6 +98,8 @@ interface PublicSwmTargetBaseV1 {
   readonly stopOnBackoffWorthyFailure?: boolean;
   /** Include the catalog-owned root SWM scope as well as named subgraphs. */
   readonly includeRootScope?: boolean;
+  /** Read the peer's state at the call: join no page fetch of another round. */
+  readonly freshSnapshot?: boolean;
 }
 
 /** The only two valid public synchronization contracts. */
@@ -279,6 +281,7 @@ export class SwmTargetExecutorV1 {
     };
     return runSharedMemorySync({
       mode,
+      freshSnapshot: target.freshSnapshot,
       ctx: target.ctx,
       remotePeerId: target.remotePeerId,
       contextGraphIds: [target.contextGraphId],

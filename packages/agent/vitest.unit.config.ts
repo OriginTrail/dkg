@@ -30,6 +30,8 @@ export default defineConfig({
       "test/swm-target-executor.test.ts",
       "test/swm-sync-sub-graph-registration.test.ts",
       "test/swm-change-notice.test.ts",
+      "test/swm-change-notice-wiring.test.ts",
+      "test/shared-memory-sync-fresh-round.test.ts",
       "test/dkg-agent-swm-target-executor-composition.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",
       "test/sync-work-admission.test.ts",

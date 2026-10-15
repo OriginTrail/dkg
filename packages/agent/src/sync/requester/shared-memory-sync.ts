@@ -353,6 +353,8 @@ export type SharedMemorySyncMode = Readonly<
 export interface SharedMemorySyncContext {
   /** One discriminant owns every selected-recovery-only capability. */
   mode: SharedMemorySyncMode;
+  /** Read the peer's state at the call: the round joins no page fetch of another round. */
+  freshSnapshot?: boolean;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphIds: string[];
@@ -482,6 +484,9 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
   const recoveryGuard = context.mode.kind === 'selected-recovery'
     ? context.mode.recoveryGuard
     : undefined;
+  const roundFetchSharingIdentity = context.freshSnapshot === true
+    ? createSyncFetchSharingIdentity()
+    : sharedMemorySyncFetchSharingIdentity;
   const recoveryBoundary = createRecoveryExecutionAdmission(recoveryGuard);
   recoveryBoundary.assertCurrent();
   const fetchRecoveryPages = (
@@ -620,7 +625,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
       const workAdmission = composeSyncWorkAdmission({
         deadline,
-        fetchSharingIdentity: sharedMemorySyncFetchSharingIdentity,
+        fetchSharingIdentity: roundFetchSharingIdentity,
       });
 
       logInfo(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);

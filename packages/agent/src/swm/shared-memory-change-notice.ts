@@ -11,13 +11,23 @@
  * When the owner applies a share from another peer, it sends each of its
  * followers except the share's author this notice. The notice names the
  * graph, the scope (the root or a named sub-graph) and a hint for logs; it
- * carries no data. A follower that accepts it pulls that scope from the
- * sender at once, through the sync it already runs: the same authorization,
- * the same verification and the same storage path as a periodic pull. The
- * rules for receiving share data do not change.
+ * carries no data. A follower that accepts it pulls the graph's shared memory
+ * from the sender at once, through the sync it already runs: the same
+ * authorization, the same verification and the same storage path as a
+ * periodic pull. The rules for receiving share data do not change.
+ *
+ * That pull is of the whole graph, so the follower keeps one pull per graph
+ * and sender: the scope a notice names is for logs only. A notice that
+ * arrives while that pull runs is answered by one more pull after it, since
+ * the running one may have read the sender's metadata before the change.
  *
  * A node that does not know the protocol refuses the stream; the owner sends
  * once, without retries, and goes on. Nothing waits for the notice.
+ *
+ * A root share of a catalog-owned graph does not use this notice: it reaches
+ * the owner as its author's catalog head, and the owner passes the head's
+ * announcement on through the catalog's own delivery. The followers it tells
+ * are found the same way ({@link swmChangeRecipients}).
  */
 
 import { validateContextGraphId, validateSubGraphName } from '@origintrail-official/dkg-core';
@@ -31,7 +41,7 @@ export interface SwmChangeNoticeV1 {
   readonly contextGraphId: string;
   /** The named sub-graph that changed; null for the graph's root. */
   readonly subGraphName: string | null;
-  /** What changed, for logs only: the share's operation id or the catalog head. */
+  /** What changed, for logs only: the share's operation id. */
   readonly hint: string;
 }
 
@@ -91,69 +101,91 @@ export function swmChangeNoticeHint(value: string | undefined): string {
   return value !== undefined && HINT_PATTERN.test(value) ? value : 'share';
 }
 
-/** One key per graph and scope. */
-function scopeKey(contextGraphId: string, subGraphName: string | null): string {
-  return `${contextGraphId}\0${subGraphName ?? ''}`;
-}
-
 // ── Owner side ────────────────────────────────────────────────────────────
 
-/** What one applied share changed, as the owner saw it. */
-export interface SwmRemoteChange<TDetail> {
-  readonly contextGraphId: string;
-  readonly subGraphName: string | null;
-  readonly hint: string;
-  /** The peer the change came from; it holds the change and gets no notice of it. */
-  readonly sourcePeerId: string;
-  /** Changes of one lane coalesce: '' for a scope, the author for a root catalog head. */
-  readonly lane: string;
-  /** What the delivery needs besides the scope (the catalog head announcement of a root change). */
-  readonly detail: TDetail;
-}
-
-export interface SwmChangeNotifierPorts<TDetail> {
+/** What the owner needs to find whom to tell of a change. */
+export interface SwmChangeRecipientPorts {
   /** True when this node owns the graph and the graph is public. */
   readonly ownsPublicGraph: (contextGraphId: string) => Promise<boolean>;
   /** The graph's followers that a direct send reaches (see `shared-memory-followers.ts`). */
   readonly followers: (contextGraphId: string) => Promise<readonly string[]>;
   /** Record a change's source as a follower: a peer whose share this owner applied follows the graph. */
   readonly noteFollower?: (contextGraphId: string, peerId: string) => void;
-  /** One attempt per recipient, no retries; resolves with how many it reached. */
-  readonly deliver: (change: SwmRemoteChange<TDetail>, recipients: readonly string[]) => Promise<number>;
   readonly selfPeerId: () => string;
+}
+
+/**
+ * The followers to tell of the changes `sources` made to a graph, when this
+ * node owns the graph and it is public; nobody otherwise. The sources are
+ * recorded as followers of the graph. A lone source holds its change and is
+ * left out; with several (the changes of several peers told at once), each
+ * lacks the others' changes.
+ */
+export async function swmChangeRecipients(
+  ports: SwmChangeRecipientPorts,
+  contextGraphId: string,
+  sources: ReadonlySet<string>,
+): Promise<string[]> {
+  if (!await ports.ownsPublicGraph(contextGraphId)) return [];
+  for (const source of sources) ports.noteFollower?.(contextGraphId, source);
+  const self = ports.selfPeerId();
+  const skip = sources.size === 1 ? sources : new Set<string>();
+  return [...new Set(await ports.followers(contextGraphId))]
+    .filter((peerId) => peerId !== self && !skip.has(peerId));
+}
+
+/** One share from another peer, as the owner applied it. */
+export interface SwmRemoteChange {
+  readonly contextGraphId: string;
+  readonly subGraphName: string | null;
+  readonly hint: string;
+  /** The peer the share came from; it holds the change and gets no notice of it. */
+  readonly sourcePeerId: string;
+}
+
+export interface SwmChangeNotifierPorts extends SwmChangeRecipientPorts {
+  /** One attempt per recipient, no retries; resolves with how many it reached. */
+  readonly deliver: (notice: SwmChangeNoticeV1, recipients: readonly string[]) => Promise<number>;
   readonly log?: (message: string) => void;
-  /** Shortest gap between two deliveries of one lane; changes within it share one trailing delivery. */
+  /** Shortest gap between two notices of one scope; changes within it share one trailing notice. */
   readonly minIntervalMs?: number;
   readonly now?: () => number;
 }
 
 export const SWM_CHANGE_NOTICE_MIN_INTERVAL_MS = 1_000;
-/** Lanes with a trailing delivery waiting at once; a burst over more drops the excess, periodic sync stays. */
-const MAX_WAITING_LANES = 256;
+/** Scopes with a trailing notice waiting at once; a burst over more drops the excess, periodic sync stays. */
+const MAX_WAITING_SCOPES = 256;
 
-interface WaitingChange<TDetail> {
-  change: SwmRemoteChange<TDetail>;
+interface WaitingChange {
+  change: SwmRemoteChange;
   readonly sources: Set<string>;
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
-export class SwmChangeNotifier<TDetail> {
-  readonly #ports: SwmChangeNotifierPorts<TDetail>;
+/** One key per graph and scope. */
+function scopeKey(contextGraphId: string, subGraphName: string | null): string {
+  return `${contextGraphId}\0${subGraphName ?? ''}`;
+}
+
+export class SwmChangeNotifier {
+  readonly #ports: SwmChangeNotifierPorts;
   readonly #minIntervalMs: number;
   readonly #now: () => number;
   readonly #lastSentAt = new Map<string, number>();
-  readonly #waiting = new Map<string, WaitingChange<TDetail>>();
+  readonly #waiting = new Map<string, WaitingChange>();
   readonly #inFlight = new Set<Promise<void>>();
+  #stopped = false;
 
-  constructor(ports: SwmChangeNotifierPorts<TDetail>) {
+  constructor(ports: SwmChangeNotifierPorts) {
     this.#ports = ports;
     this.#minIntervalMs = ports.minIntervalMs ?? SWM_CHANGE_NOTICE_MIN_INTERVAL_MS;
     this.#now = ports.now ?? Date.now;
   }
 
   /** Called after a share from another peer was applied here. Never throws and never waits for the delivery. */
-  afterRemoteChange(change: SwmRemoteChange<TDetail>): void {
-    const key = `${scopeKey(change.contextGraphId, change.subGraphName)}\0${change.lane}`;
+  afterRemoteChange(change: SwmRemoteChange): void {
+    if (this.#stopped) return;
+    const key = scopeKey(change.contextGraphId, change.subGraphName);
     const waiting = this.#waiting.get(key);
     if (waiting !== undefined) {
       waiting.change = change;
@@ -165,7 +197,7 @@ export class SwmChangeNotifier<TDetail> {
       this.#start(key, change, new Set([change.sourcePeerId]));
       return;
     }
-    if (this.#waiting.size >= MAX_WAITING_LANES) return;
+    if (this.#waiting.size >= MAX_WAITING_SCOPES) return;
     const timer = setTimeout(() => {
       const due = this.#waiting.get(key);
       this.#waiting.delete(key);
@@ -180,16 +212,17 @@ export class SwmChangeNotifier<TDetail> {
     while (this.#inFlight.size > 0) await Promise.allSettled(this.#inFlight);
   }
 
-  /** Drop the trailing deliveries that wait. */
+  /** Shutdown: drop the trailing notices that wait and send no more. */
   stop(): void {
+    this.#stopped = true;
     for (const waiting of this.#waiting.values()) clearTimeout(waiting.timer);
     this.#waiting.clear();
   }
 
-  #start(key: string, change: SwmRemoteChange<TDetail>, sources: ReadonlySet<string>): void {
+  #start(key: string, change: SwmRemoteChange, sources: ReadonlySet<string>): void {
     this.#lastSentAt.delete(key);
     this.#lastSentAt.set(key, this.#now());
-    if (this.#lastSentAt.size > 4 * MAX_WAITING_LANES) {
+    if (this.#lastSentAt.size > 4 * MAX_WAITING_SCOPES) {
       const oldest = this.#lastSentAt.keys().next().value;
       if (oldest !== undefined) this.#lastSentAt.delete(oldest);
     }
@@ -200,21 +233,14 @@ export class SwmChangeNotifier<TDetail> {
     void run.finally(() => this.#inFlight.delete(run));
   }
 
-  async #fanOut(change: SwmRemoteChange<TDetail>, sources: ReadonlySet<string>): Promise<void> {
-    if (!await this.#ports.ownsPublicGraph(change.contextGraphId)) return;
-    for (const source of sources) this.#ports.noteFollower?.(change.contextGraphId, source);
-    const self = this.#ports.selfPeerId();
-    // A lone source holds the change. With several (changes of several peers
-    // shared one delivery), each of them lacks the others' changes.
-    const skip = sources.size === 1 ? sources : new Set<string>();
-    const recipients = [...new Set(await this.#ports.followers(change.contextGraphId))]
-      .filter((peerId) => peerId !== self && !skip.has(peerId));
+  async #fanOut(change: SwmRemoteChange, sources: ReadonlySet<string>): Promise<void> {
+    const recipients = await swmChangeRecipients(this.#ports, change.contextGraphId, sources);
     if (recipients.length === 0) return;
-    const reached = await this.#ports.deliver(change, recipients);
-    const scope = change.subGraphName === null ? 'root' : `sub-graph "${change.subGraphName}"`;
+    const { contextGraphId, subGraphName, hint } = change;
+    const reached = await this.#ports.deliver({ contextGraphId, subGraphName, hint }, recipients);
+    const scope = subGraphName === null ? 'root' : `sub-graph "${subGraphName}"`;
     this.#ports.log?.(
-      `SWM change notice for "${change.contextGraphId}" ${scope} (${change.hint}): `
-        + `reached ${reached} of ${recipients.length} follower(s)`,
+      `SWM change notice for "${contextGraphId}" ${scope} (${hint}): reached ${reached} of ${recipients.length} follower(s)`,
     );
   }
 }
@@ -238,11 +264,14 @@ export interface SwmChangeNoticeReceiverPorts {
   /** True when a notice about the graph from this peer is one to pull on. */
   readonly acceptsSender: (contextGraphId: string, peerId: string) => boolean | Promise<boolean>;
   /**
-   * Pull the scope from the peer through the existing validated sync.
-   * `deferred` when local admission turned the pull away (a busy sync slot):
-   * the receiver tries again after a pause.
+   * Pull the graph's shared memory from the peer through the existing
+   * validated sync, against the peer's state at the call: a sync of the graph
+   * from the peer that was already running may have read the peer before the
+   * change, so the pull must not join it. `deferred` when local admission
+   * turned the pull away (a busy sync slot): the receiver tries again after a
+   * pause.
    */
-  readonly pull: (peerId: string, notice: SwmChangeNoticeV1) => Promise<'pulled' | 'deferred'>;
+  readonly pull: (peerId: string, contextGraphId: string) => Promise<'pulled' | 'deferred'>;
   /** Pauses before the next attempts of a deferred pull; after the last, periodic sync takes over. */
   readonly deferredRetryDelaysMs?: readonly number[];
   readonly sleep?: (ms: number) => Promise<void>;
@@ -260,15 +289,22 @@ export type SwmChangeNoticeDisposition =
   | 'sender-not-accepted'
   | 'rate-limited'
   | 'busy'
-  | 'invalid';
+  | 'invalid'
+  | 'stopped';
 
 export const SWM_CHANGE_NOTICE_PER_PEER_LIMIT = 60;
 export const SWM_CHANGE_NOTICE_DEFERRED_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 15_000];
 export const SWM_CHANGE_NOTICE_PER_PEER_WINDOW_MS = 60_000;
-/** Scopes pulled at once; notices for more are dropped and periodic sync covers them. */
-const MAX_PULLING_SCOPES = 64;
+/** Graphs (each from one sender) pulled at once; notices for more are dropped and periodic sync covers them. */
+const MAX_PULLS = 64;
 /** Peers whose recent notices are counted; the longest silent makes room. */
 const MAX_COUNTED_PEERS = 1_024;
+
+/** One graph's pull from one sender. */
+interface GraphPull {
+  /** The latest notice that arrived while the pull ran or waited: one more pull follows it. */
+  trailing: SwmChangeNoticeV1 | null;
+}
 
 export class SwmChangeNoticeReceiver {
   readonly #ports: SwmChangeNoticeReceiverPorts;
@@ -278,9 +314,12 @@ export class SwmChangeNoticeReceiver {
   readonly #retryDelaysMs: readonly number[];
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #recent = new Map<string, number[]>();
-  /** Scopes with a pull running, each with the latest notice that arrived meanwhile. */
-  readonly #pulling = new Map<string, { next: { peerId: string; notice: SwmChangeNoticeV1 } | null }>();
+  /** Graph and sender of each pull that runs or waits for a retry. */
+  readonly #pulling = new Map<string, GraphPull>();
   readonly #runs = new Set<Promise<void>>();
+  readonly #whenStopped: Promise<void>;
+  #markStopped!: () => void;
+  #stopped = false;
 
   constructor(ports: SwmChangeNoticeReceiverPorts) {
     this.#ports = ports;
@@ -289,10 +328,12 @@ export class SwmChangeNoticeReceiver {
     this.#now = ports.now ?? Date.now;
     this.#retryDelaysMs = ports.deferredRetryDelaysMs ?? SWM_CHANGE_NOTICE_DEFERRED_RETRY_DELAYS_MS;
     this.#sleep = ports.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms).unref?.()));
+    this.#whenStopped = new Promise((resolve) => { this.#markStopped = resolve; });
   }
 
   /** Handle one notice from `fromPeerId`. Starts the pull and returns without waiting for it. */
   async handle(bytes: Uint8Array, fromPeerId: string): Promise<SwmChangeNoticeDisposition> {
+    if (this.#stopped) return 'stopped';
     let notice: SwmChangeNoticeV1;
     try {
       notice = decodeSwmChangeNoticeV1(bytes);
@@ -300,18 +341,19 @@ export class SwmChangeNoticeReceiver {
       return 'invalid';
     }
     if (!this.#admit(fromPeerId)) return 'rate-limited';
-    if (!await this.#ports.follows(notice.contextGraphId)) return 'not-followed';
-    if (!await this.#ports.acceptsSender(notice.contextGraphId, fromPeerId)) return 'sender-not-accepted';
-    const key = scopeKey(notice.contextGraphId, notice.subGraphName);
+    const refusal = await this.#refusal(notice.contextGraphId, fromPeerId);
+    if (refusal !== null) return refusal;
+    if (this.#stopped) return 'stopped';
+    const key = `${notice.contextGraphId}\0${fromPeerId}`;
     const running = this.#pulling.get(key);
     if (running !== undefined) {
-      running.next = { peerId: fromPeerId, notice };
+      running.trailing = notice;
       return 'coalesced';
     }
-    if (this.#pulling.size >= MAX_PULLING_SCOPES) return 'busy';
-    const state: { next: { peerId: string; notice: SwmChangeNoticeV1 } | null } = { next: null };
-    this.#pulling.set(key, state);
-    const run = this.#pullUntilQuiet(key, state, fromPeerId, notice);
+    if (this.#pulling.size >= MAX_PULLS) return 'busy';
+    const pull: GraphPull = { trailing: null };
+    this.#pulling.set(key, pull);
+    const run = this.#pullUntilQuiet(key, pull, fromPeerId, notice);
     this.#runs.add(run);
     void run.finally(() => this.#runs.delete(run));
     return 'pulling';
@@ -322,38 +364,60 @@ export class SwmChangeNoticeReceiver {
     while (this.#runs.size > 0) await Promise.allSettled(this.#runs);
   }
 
-  async #pullUntilQuiet(
-    key: string,
-    state: { next: { peerId: string; notice: SwmChangeNoticeV1 } | null },
-    peerId: string,
-    notice: SwmChangeNoticeV1,
-  ): Promise<void> {
-    let current: { peerId: string; notice: SwmChangeNoticeV1 } | null = { peerId, notice };
+  /** Shutdown: ignore notices from now on, and start no pull and no retry. A pull already running ends on its own. */
+  stop(): void {
+    this.#stopped = true;
+    this.#markStopped();
+  }
+
+  /** Why a notice about the graph from this peer is not one to pull on; null when it is. */
+  async #refusal(contextGraphId: string, peerId: string): Promise<'not-followed' | 'sender-not-accepted' | null> {
+    if (!await this.#ports.follows(contextGraphId)) return 'not-followed';
+    if (!await this.#ports.acceptsSender(contextGraphId, peerId)) return 'sender-not-accepted';
+    return null;
+  }
+
+  /** Never rejects. */
+  async #pullUntilQuiet(key: string, pull: GraphPull, peerId: string, first: SwmChangeNoticeV1): Promise<void> {
+    let notice = first;
     let deferrals = 0;
     try {
-      while (current !== null) {
-        let outcome: 'pulled' | 'deferred' | 'failed' = 'failed';
-        try {
-          outcome = await this.#ports.pull(current.peerId, current.notice);
-        } catch (error) {
-          this.#ports.log?.(
-            `SWM change notice pull of "${current.notice.contextGraphId}" from ${current.peerId.slice(-8)} failed: ${errorText(error)}`,
-          );
-        }
+      for (;;) {
+        // The notices that came before this point are covered by the pull below.
+        pull.trailing = null;
+        const outcome = await this.#pullOnce(peerId, notice);
+        let next: SwmChangeNoticeV1 | null = pull.trailing;
         if (outcome === 'deferred' && deferrals < this.#retryDelaysMs.length) {
-          // Still in flight while it waits: notices that arrive meanwhile join it, and the latest one is pulled.
-          await this.#sleep(this.#retryDelaysMs[deferrals]!);
+          // Still in flight while it waits: notices that arrive meanwhile join it.
+          await Promise.race([this.#sleep(this.#retryDelaysMs[deferrals]!), this.#whenStopped]);
           deferrals += 1;
-          current = state.next ?? current;
-          state.next = null;
-          continue;
+          next = pull.trailing ?? notice;
+        } else {
+          deferrals = 0;
         }
-        deferrals = 0;
-        current = state.next;
-        state.next = null;
+        if (next === null || this.#stopped) return;
+        // Admitted again: while the last pull ran, this node may have stopped
+        // following the graph, or the sender may have gone.
+        if (await this.#refusal(notice.contextGraphId, peerId) !== null || this.#stopped) return;
+        notice = pull.trailing ?? next;
       }
+    } catch (error) {
+      this.#ports.log?.(
+        `SWM change notice pulls of "${notice.contextGraphId}" from ${peerId.slice(-8)} stopped: ${errorText(error)}`,
+      );
     } finally {
       this.#pulling.delete(key);
+    }
+  }
+
+  async #pullOnce(peerId: string, notice: SwmChangeNoticeV1): Promise<'pulled' | 'deferred' | 'failed'> {
+    try {
+      return await this.#ports.pull(peerId, notice.contextGraphId);
+    } catch (error) {
+      this.#ports.log?.(
+        `SWM change notice pull of "${notice.contextGraphId}" from ${peerId.slice(-8)} failed: ${errorText(error)}`,
+      );
+      return 'failed';
     }
   }
 
