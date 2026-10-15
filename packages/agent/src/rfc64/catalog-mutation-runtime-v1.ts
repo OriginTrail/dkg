@@ -3,6 +3,7 @@
 import {
   computeAuthorCatalogScopeDigestV1,
   type AuthorCatalogScopeV1,
+  type CountV1,
 } from '@origintrail-official/dkg-core';
 
 import {
@@ -13,10 +14,16 @@ import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js'
 
 const RFC64_CATALOG_MUTATION_ABORT_MESSAGE_V1 = 'RFC-64 catalog mutation aborted';
 
+/**
+ * One key per author lane. The bucket count is part of the catalog scope, and a catalog moved to
+ * more buckets is a scope of its own (GH#3134): the key is the lane's one-bucket scope, so the move
+ * and every mutation of either scope take the same lock. A one-bucket scope keys as it always did.
+ */
 export function rfc64CatalogMutationScopeKeyV1(
   scope: Readonly<AuthorCatalogScopeV1>,
 ): string {
-  return `${computeAuthorCatalogScopeDigestV1(scope)}\n${scope.authorAddress}`;
+  const lane = { ...scope, bucketCount: '1' as CountV1 };
+  return `${computeAuthorCatalogScopeDigestV1(lane)}\n${scope.authorAddress}`;
 }
 
 /**
