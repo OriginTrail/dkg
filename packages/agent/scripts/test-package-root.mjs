@@ -302,6 +302,7 @@ const blockedRfc64Modules = [
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',
+  'catalog-native-multi-bucket-read-v1.js',
   'catalog-head-lineage-v1.js',
   'catalog-limits-v1.js',
   'catalog-peers-v1.js',
