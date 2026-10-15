@@ -1,3 +1,4 @@
+import type { ClaimLockQueue } from './async-lift-claim-lock.js';
 import { claimTrace, withObservedClaimLock, type ClaimLockKind, type ClaimLockTrace } from './async-lift-claim-trace.js';
 import type { PublishResult } from './publisher.js';
 import {
@@ -241,7 +242,7 @@ export interface AsyncLiftClaimCoordinatorConfig {
  * coordinator.
  */
 export class AsyncLiftClaimCoordinator {
-  private static readonly claimQueues = new Map<string, Promise<void>>();
+  private static readonly claimQueues = new Map<string, ClaimLockQueue>();
   private static readonly jobTransitionQueues = new Map<string, Promise<void>>();
 
   /** Latest in-process claim epoch for each job; stale epochs may overlap while unwinding. */

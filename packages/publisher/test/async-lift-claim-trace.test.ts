@@ -1,3 +1,4 @@
+import type { ClaimLockQueue } from '../src/async-lift-claim-lock.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Logger, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -67,7 +68,7 @@ describe('claim lock diagnostic isolation', () => {
     let time = 0;
     const trace = new ClaimTrace({ enabled: () => true, clock: () => time,
       wallClock: () => 1_000 - time, write: (line) => events.push(JSON.parse(line.slice(prefix.length))) });
-    const queues = new Map<string, Promise<void>>();
+    const queues = new Map<string, ClaimLockQueue>();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const failure = new Error('holder failure');
@@ -97,7 +98,7 @@ describe('claim lock diagnostic isolation', () => {
     const fail = () => { throw new Error('observer failure'); };
     const trace = new ClaimTrace({ enabled: () => true, clock: () => 0, wallClock: () => 0,
       write: () => undefined, [failing]: fail });
-    const queues = new Map<string, Promise<void>>();
+    const queues = new Map<string, ClaimLockQueue>();
     const first = withObservedClaimLock(queues, 'queue', async () => 'first', 'claim', 'wallet', trace);
     const second = withObservedClaimLock(queues, 'queue', async () => 'second', 'claim', 'wallet', trace);
     await expect(Promise.all([first, second])).resolves.toEqual(['first', 'second']);

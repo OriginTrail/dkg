@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
-import { withKeyedLocks } from './keyed-lock.js';
+import { withClaimDomainLock, type ClaimLockKind, type ClaimLockQueue } from './async-lift-claim-lock.js';
 
-export type ClaimLockKind = 'claim' | 'admission' | 'transition' | 'recovery' | 'sweep' | 'admin';
+export type { ClaimLockKind } from './async-lift-claim-lock.js';
 type TraceFields = Readonly<Record<string, string | number | boolean | undefined>>;
 export interface ClaimTraceSources {
   enabled(): boolean;
@@ -44,9 +44,9 @@ export interface ClaimLockTrace {
   emit(event: string, fields?: TraceFields): void;
 }
 
-/** Preserve the coordinator's queue and release ordering, with monotonic boundary observations. */
+/** Observe canonical claim-domain scheduling and release with monotonic boundary observations. */
 export async function withObservedClaimLock<T>(
-  queues: Map<string, Promise<void>>,
+  queues: Map<string, ClaimLockQueue>,
   key: string,
   fn: (trace: ClaimLockTrace) => Promise<T>,
   kind: ClaimLockKind,
@@ -61,7 +61,7 @@ export async function withObservedClaimLock<T>(
   let waitingAt: number | undefined;
   let acquiredAt: number | undefined;
   let result = 'error';
-  return await withKeyedLocks(queues, [key], async () => {
+  return await withClaimDomainLock(queues, key, kind, async () => {
     const value = await fn(trace);
     result = 'success';
     return value;
