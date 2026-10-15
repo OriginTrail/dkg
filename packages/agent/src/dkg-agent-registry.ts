@@ -226,7 +226,6 @@ import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   assertAgentNameFree, generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey, writeKeystoreEntry,
   agentKeystorePath, readAgentKeystore, assertKeystoreHoldsNoPayerKey,
-  ensureWorkspaceEncryptionKey,
   hashAgentToken,
   activeWorkspaceEncryptionKeys,
   appendCustodialWorkspaceEncryptionKey,
@@ -239,6 +238,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { externalSignerAgentPublicKey, signsThroughExternalSigner } from './external-author-signing.js';
+import { ensureAgentEncryptionKey, tryProvideExternalAuthorEncryptionKey } from './external-author-encryption-key.js';
 import { externalSignerDefaultAgent } from './default-agent.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
@@ -659,8 +659,6 @@ export class AgentRegistryMethods extends DKGAgentBase {
   ): Promise<AgentKeyRecord> {
     assertAgentNameFree(this.localAgents.values(), name);
     const publicKey = opts?.address === undefined ? opts?.publicKey : await externalSignerAgentPublicKey(this.config?.authorSigners, opts.address, name, opts.publicKey);
-    // Again after the signer answered: a concurrent registration may have taken the name meanwhile.
-    assertAgentNameFree(this.localAgents.values(), name);
     if (publicKey && (opts?.publicEncryptionKey || opts?.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
       throw new Error('Self-sovereign agents must provide both publicEncryptionKey and encryptionKeyProof');
     }
@@ -679,6 +677,9 @@ export class AgentRegistryMethods extends DKGAgentBase {
           : undefined,
       )
       : generateCustodialAgent(name, opts?.framework);
+    if (opts?.address !== undefined) await tryProvideExternalAuthorEncryptionKey(this.config?.authorSigners, record, this.log);
+    // Again after the signer answered: a concurrent registration may have taken the name meanwhile.
+    assertAgentNameFree(this.localAgents.values(), name);
 
     this.localAgents.set(record.agentAddress, record);
     this.agentTokenIndex.set(record.authToken, record.agentAddress);
@@ -1330,7 +1331,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
         }
 
         refreshDefaultEncryptionKeyView(record);
-        const generatedEncryptionKey = ensureWorkspaceEncryptionKey(record);
+        const generatedEncryptionKey = await ensureAgentEncryptionKey(this.config?.authorSigners, record, this.log);
 
         this.localAgents.set(record.agentAddress, record);
         if (record.authToken) {

@@ -99,6 +99,40 @@ export async function signGossipEnvelopeInTime(
 }
 
 /**
+ * The sender of an SWM sender-key epoch: a local agent whose key is on the
+ * node, or the signer of one whose author key the external signer holds. It
+ * signs each recipient's setup package, EIP-191 over the package's framed
+ * associated data, so receivers verify both alike.
+ */
+export type SwmSenderSigningAgent = { readonly agentAddress: string; readonly privateKey: string } | WorkspaceGossipSigner;
+
+/** Sign the framed associated data of an SWM sender-key setup package as `sender`. */
+export function signSwmSenderKeyPackage(sender: SwmSenderSigningAgent, aad: Uint8Array): Promise<string> {
+  return 'signMessage' in sender ? sender.signMessage(aad) : agentKeyWallet(sender.privateKey).signMessage(aad);
+}
+
+/**
+ * The SWM sender of `agentAddress` when it is a local agent without a key on
+ * the node whose author key the external signer holds (never a payer); null
+ * otherwise.
+ */
+export async function externalSwmSender(
+  authors: ExternalAuthorSigners | undefined,
+  agents: ReadonlyMap<string, AgentKeyRecord>,
+  agentAddress: string,
+): Promise<WorkspaceGossipSigner | null> {
+  if (authors === undefined || !ethers.isAddress(agentAddress)) return null;
+  for (const record of agents.values()) {
+    if (record.privateKey || record.agentAddress.toLowerCase() !== agentAddress.toLowerCase()) continue;
+    const externalSigner = await externalAuthorSignerFor(authors, record.agentAddress);
+    if (externalSigner) {
+      return { agentAddress: record.agentAddress, signMessage: (message) => externalSigner.signMessage(message) };
+    }
+  }
+  return null;
+}
+
+/**
  * The gossip signer of the first of `agents` whose author key the external
  * signer holds, chosen in one selection over the author accounts: of the agents
  * in `allowed` when the graph has a signing roster, else of every agent, with

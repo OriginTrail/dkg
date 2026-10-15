@@ -1,5 +1,6 @@
 import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../sync/work-admission.js';
 import { randomUUID } from 'node:crypto';
+import { isRemoteSignerError } from '@origintrail-official/dkg-chain';
 import {
   withRetryContext,
   withSpan,
@@ -251,8 +252,10 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       maxAttempts: params.retryAttempts,
       baseDelayMs: 1000,
       signal: params.signal,
+      // A failure of an external signer is final: the page is not signed again.
       isRetryable: (error) => params.signal?.aborted !== true
         && !(error instanceof SyncWorkAdmissionExhaustedError)
+        && !isRemoteSignerError(error)
         && workAdmission.canAdmitWork(),
       onRetry: params.onRetry,
     },

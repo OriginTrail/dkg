@@ -28,6 +28,7 @@ import {
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
+import { signingRfc64ControlObjectV1 } from './external-author-control-signing-v1.js';
 
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './author-catalog-producer.js';
 import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from './public-catalog-successor-producer-v1.js';
@@ -157,7 +158,10 @@ export async function produceDirectAuthorCatalogIssuerDelegationV1(
 
   let signature: string;
   try {
-    signature = await signer.signDigest(ethers.getBytes(objectDigest));
+    signature = await signingRfc64ControlObjectV1(
+      unsigned,
+      () => signer.signDigest(ethers.getBytes(objectDigest)),
+    );
   } catch (cause) {
     fail('catalog-delegation-signer', 'direct author failed to sign the delegation', cause);
   }

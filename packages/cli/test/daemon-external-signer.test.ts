@@ -85,6 +85,7 @@ async function spawnDaemon(
   nodeRole: 'edge' | 'core',
   socketPath: string,
   bootstrapPeers: string[] = [],
+  extraConfig: Record<string, unknown> = {},
 ): Promise<Daemon> {
   const { rpcUrl, hubAddress } = getSharedContext();
   const apiPort = await freePort();
@@ -118,6 +119,7 @@ async function spawnDaemon(
       },
     },
     contextGraphs: [],
+    ...extraConfig,
   }));
   const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
     env: {
@@ -178,6 +180,7 @@ describe('daemon with an external signer', () => {
   let pcaOwner: ReturnType<typeof createEVMAdapter> | undefined;
   let accountId: bigint;
   let core: DKGAgent | undefined;
+  let coreAddress: string;
 
   const api = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${daemon!.apiPort}${path}`, {
     ...init,
@@ -212,7 +215,7 @@ describe('daemon with an external signer', () => {
       syncOnConnectEnabled: false,
     });
     await core.start();
-    const coreAddress = core.multiaddrs.find((address) => address.includes('/tcp/') && !address.includes('/p2p-circuit'))!;
+    coreAddress = core.multiaddrs.find((address) => address.includes('/tcp/') && !address.includes('/p2p-circuit'))!;
     dir = await mkdtemp(join(tmpdir(), 'dkg-ext-'));
     fake = await startFakeRemoteSigner({
       socketPath: join(dir, 'signer.sock'),
@@ -362,18 +365,20 @@ describe('daemon with an external signer', () => {
     // The author key signed the author attestation, the shared-memory gossip
     // envelope (four length-framed fields: type, context graph, timestamp,
     // payload) and, where RFC-64 catalog authority is active, the control
-    // objects the author issues (EIP-191 over 32-byte object digests); the
-    // payers signed transactions only.
+    // objects the author issues, each shown to the signer as the object
+    // (dkg_signControlObject, see the next test) rather than as a bare digest;
+    // the payers signed transactions only. Sync requests the node may make
+    // meanwhile are signed from their fields (dkg_signSyncRequest) and are left
+    // out here.
     const journey = fake.requests.slice(before);
-    const author = journey.filter((request) => request.authorization === `Bearer ${AUTHOR_TOKEN}`);
-    expect(author.filter((request) => request.method === 'eth_signTypedData_v4')).toHaveLength(1);
-    const messages = author.filter((request) => request.method === 'eth_sign');
-    expect(messages.length + 1).toBe(author.length);
-    for (const message of messages) expect(ethers.getAddress(String(message.params[0]))).toBe(defaultAuthor.address);
-    const isDigest = (request: (typeof messages)[number]) => ethers.getBytes(String(request.params[1])).length === 32;
-    const envelopes = messages.filter((request) => !isDigest(request));
-    expect(envelopes).toHaveLength(1);
-    const fields = framedFields(ethers.getBytes(String(envelopes[0]!.params[1])));
+    const author = journey.filter((request) => (
+      request.authorization === `Bearer ${AUTHOR_TOKEN}`
+      && request.method !== 'dkg_signControlObject' && request.method !== 'dkg_signSyncRequest'
+    ));
+    expect(author.map((request) => request.method).sort()).toEqual(['eth_sign', 'eth_signTypedData_v4']);
+    const gossip = author.find((request) => request.method === 'eth_sign')!;
+    expect(ethers.getAddress(String(gossip.params[0]))).toBe(defaultAuthor.address);
+    const fields = framedFields(ethers.getBytes(String(gossip.params[1])));
     expect(fields).toHaveLength(4);
     expect(new TextDecoder().decode(fields[0])).toBe('share-write');
     expect(new Set(journey.filter((request) => request.authorization === `Bearer ${PAYER_TOKEN}`)
@@ -384,6 +389,26 @@ describe('daemon with an external signer', () => {
     ))).toEqual([]);
   }, 180_000);
 
+  it('signs the RFC-64 inventory and author catalog of its share through the signer, from the objects', async () => {
+    // The shared-memory inventory and the author catalog are produced after the
+    // share and the publication; each control object is shown to the signer.
+    const objectTypes = () => fake.calls('dkg_signControlObject')
+      .map((request) => JSON.parse(String((request.params[1] as { envelope: string }).envelope)) as { objectType: string; issuer: string });
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const types = new Set(objectTypes().map((object) => object.objectType));
+      if (types.has('SwmAuthorInventoryHeadV1') && types.has('AuthorCatalogHeadV1')) break;
+      await sleep(500);
+    }
+    const objects = objectTypes();
+    expect(new Set(objects.map((object) => object.objectType))).toEqual(new Set([
+      'SwmAuthorInventoryHeadV1', 'AuthorCatalogIssuerDelegationV1', 'AuthorCatalogDirectoryNodeV1',
+      'AuthorCatalogHeadV1', 'AuthorCatalogBucketV1',
+    ]));
+    expect(objects.every((object) => object.issuer === defaultAuthor.address.toLowerCase())).toBe(true);
+    expect(fake.calls('dkg_signControlObject').every((request) => request.authorization === `Bearer ${AUTHOR_TOKEN}`)).toBe(true);
+    expect(await allOutput(daemon!)).not.toMatch(/SWM inventory shadow upsert failed|signer callback failed/);
+  }, 60_000);
+
   it('logs the signer endpoint and accounts but never a credential', async () => {
     const output = await allOutput(daemon!);
     expect(output).toContain('external signer at');
@@ -392,6 +417,39 @@ describe('daemon with an external signer', () => {
     expect(output).not.toContain(PAYER_TOKEN);
     expect(output).not.toContain(AUTHOR_TOKEN);
   });
+
+  it('catches up the system graphs on connect, each request signed by the author key from its fields', async () => {
+    const home = join(dir, 'catch-up');
+    await mkdir(home);
+    const before = fake.requests.length;
+    const edge = await spawnDaemon(home, 'edge', fake.socketPath!, [coreAddress], { syncSystemContextGraphsOnConnect: true });
+    try {
+      await waitUntilReady(edge);
+      let synced: RegExpMatchArray | null = null;
+      for (let attempt = 0; attempt < 60 && synced === null; attempt++) {
+        synced = (await allOutput(edge)).match(/Synced ([1-9]\d*) data triples from peer/);
+        if (synced === null) await sleep(500);
+      }
+      const output = await allOutput(edge);
+      expect(synced, output.slice(-4000)).not.toBeNull();
+      expect(output).not.toContain('Cannot build authenticated sync request');
+      const requests = fake.requests.slice(before);
+      const signed = requests.filter((request) => request.method === 'dkg_signSyncRequest');
+      expect(new Set(signed.map((request) => (request.params[1] as { contextGraphId: string }).contextGraphId)))
+        .toEqual(new Set([SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]));
+      for (const request of signed) {
+        expect(request.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
+        expect(ethers.getAddress(String(request.params[0]))).toBe(defaultAuthor.address);
+      }
+      // No digest was signed blind (the framed proof of its encryption key, at start, is no digest).
+      expect(requests.filter((request) => (
+        request.method === 'personal_sign'
+        || (request.method === 'eth_sign' && ethers.dataLength(String(request.params[1])) === 32)
+      ))).toEqual([]);
+    } finally {
+      expect(await stop(edge)).toBe(0);
+    }
+  }, 120_000);
 
   it('refuses to start as a core node, before any key file exists', async () => {
     const home = join(dir, 'core');

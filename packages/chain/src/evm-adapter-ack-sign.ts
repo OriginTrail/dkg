@@ -13,7 +13,7 @@ import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { VerifyACKIdentityResult } from './chain-adapter.js';
 import { OPERATIONAL_KEY_PURPOSE } from './evm-adapter-constants.js';
-import { localPrivateKeyOf } from './evm-signer.js';
+import { localPrivateKeyOf, signMessageWithPreimage, type PreimageSigningRequest } from './evm-signer.js';
 
 export class AckSignMethods extends EVMChainAdapterBase {
   async getMinimumRequiredSignatures(): Promise<number> {
@@ -168,6 +168,11 @@ export class AckSignMethods extends EVMChainAdapterBase {
       r: ethers.getBytes(sig.r),
       vs: ethers.getBytes(sig.yParityAndS),
     };
+  }
+
+  async signMessageWithPreimage(request: PreimageSigningRequest): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    const sig = ethers.Signature.from(await signMessageWithPreimage(this.signer, request));
+    return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
   }
 
   async signMessageAs(address: string, messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {

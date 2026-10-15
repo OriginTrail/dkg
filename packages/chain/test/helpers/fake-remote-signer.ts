@@ -7,7 +7,11 @@
  * Accounts are scoped by bearer credential, as a multi-tenant signing service
  * would scope them: each credential maps to its own key set. The server signs
  * exactly what it is asked to sign (it never fills nonce, gas or fees) and
- * records every request so tests can assert on what the node sent.
+ * records every request so tests can assert on what the node sent. It also
+ * serves the optional `dkg_signSyncRequest`, `dkg_signControlObject`,
+ * `dkg_signAgentDelegation` and `dkg_signJoinEncryptionKeys` methods of the
+ * `eth` dialect with strict, independently written validators (list one in
+ * `unsupported` to stand in for a signer without it).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
@@ -47,6 +51,8 @@ export interface FakeSignerOptions {
   reject?: (method: string, request: FakeSignerRequest) => { code: number; message: string } | undefined;
   /** Answer with a raw HTTP response (status + body) instead of JSON-RPC. */
   rawResponse?: (method: string) => { status: number; body: string } | undefined;
+  /** Further methods taking `[address, preimage]`: each derives the bytes it signs with EIP-191 from the preimage. */
+  preimageMethods?: Record<string, (preimage: unknown) => Uint8Array>;
 }
 
 export interface FakeSigner {
@@ -112,7 +118,7 @@ export async function startFakeRemoteSigner(options: FakeSignerOptions): Promise
           return;
         }
         try {
-          const { result, wallet } = await answer(api, method, params, walletsOf(credential.keys));
+          const { result, wallet } = await answer(api, method, params, walletsOf(credential.keys), options.preimageMethods);
           const sent = options.tamper ? await options.tamper(method, result, request, wallet) : result;
           send(res, 200, { jsonrpc: '2.0', id: body.id, result: sent });
         } catch (err) {
@@ -169,6 +175,199 @@ export async function connectionsLeftOpen(signer: FakeSigner): Promise<number> {
   return open;
 }
 
+const SYNC_REQUEST_FIELDS = [
+  'contextGraphId', 'offset', 'limit', 'includeSharedMemory', 'targetPeerId',
+  'requesterPeerId', 'requestId', 'issuedAtMs', 'requesterAgentAddress',
+] as const;
+const BASE58_PEER_ID = /^[1-9A-HJ-NP-Za-km-z]{46,128}$/;
+
+function invalidParams(message: string): Error {
+  return Object.assign(new Error(`invalid params: ${message}`), { code: INVALID_PARAMS });
+}
+
+/**
+ * A strict validator for `dkg_signSyncRequest`, written from the documented
+ * request layout with ethers primitives only (it shares no code with the node):
+ * every field must have its grammar, the request must be fresh, and the digest
+ * is recomputed here. Returns the 32 digest bytes to sign with EIP-191.
+ */
+function syncRequestDigest(value: unknown): Uint8Array {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidParams('the request must be an object');
+  const request = value as Record<string, unknown>;
+  const authenticated = 'authPurpose' in request || 'authSelector' in request;
+  const allowed = new Set<string>([...SYNC_REQUEST_FIELDS, ...(authenticated ? ['authPurpose', 'authSelector'] : [])]);
+  for (const key of Object.keys(request)) if (!allowed.has(key)) throw invalidParams(`unexpected field ${key}`);
+  for (const key of allowed) if (!(key in request)) throw invalidParams(`missing field ${key}`);
+  const { contextGraphId, offset, limit, includeSharedMemory, targetPeerId, requesterPeerId, requestId, issuedAtMs, requesterAgentAddress } = request;
+  const text = (field: unknown, name: string, pattern?: RegExp): string => {
+    if (typeof field !== 'string' || field.length === 0 || field.length > 512 || (pattern && !pattern.test(field))) {
+      throw invalidParams(`bad ${name}`);
+    }
+    return field;
+  };
+  const integer = (field: unknown, name: string, min: number, max: number): number => {
+    if (typeof field !== 'number' || !Number.isSafeInteger(field) || field < min || field > max) throw invalidParams(`bad ${name}`);
+    return field;
+  };
+  if (typeof includeSharedMemory !== 'boolean') throw invalidParams('bad includeSharedMemory');
+  if (typeof requesterAgentAddress !== 'string' || !/^(0x[0-9a-f]{40})?$/.test(requesterAgentAddress)) {
+    throw invalidParams('bad requesterAgentAddress');
+  }
+  const issued = integer(issuedAtMs, 'issuedAtMs', 0, Number.MAX_SAFE_INTEGER);
+  if (issued < Date.now() - 60_000 || issued > Date.now() + 5_000) throw invalidParams('stale or future issuedAtMs');
+  const types = ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256', 'string'];
+  const values: unknown[] = [
+    text(contextGraphId, 'contextGraphId'),
+    integer(offset, 'offset', 0, Number.MAX_SAFE_INTEGER),
+    integer(limit, 'limit', 1, 500),
+    includeSharedMemory,
+    text(targetPeerId, 'targetPeerId', BASE58_PEER_ID),
+    text(requesterPeerId, 'requesterPeerId', BASE58_PEER_ID),
+    text(requestId, 'requestId', /^0x[0-9a-f]{24}$/),
+    issued,
+    requesterAgentAddress,
+  ];
+  if (authenticated) {
+    if (typeof request.authPurpose !== 'string' || typeof request.authSelector !== 'string'
+      || request.authPurpose.length > 512 || request.authSelector.length > 512) {
+      throw invalidParams('bad authPurpose or authSelector');
+    }
+    types.push('string', 'string');
+    values.push(request.authPurpose, request.authSelector);
+  }
+  return ethers.getBytes(ethers.solidityPackedKeccak256(types, values));
+}
+
+const CONTROL_OBJECT_DOMAIN = 'dkg-control-object-v1\n';
+const CONTROL_OBJECT_TYPES = new Set([
+  'SwmAuthorInventoryHeadV1', 'AuthorCatalogHeadV1', 'AuthorCatalogBucketV1', 'AuthorCatalogDirectoryNodeV1',
+  'AuthorCatalogIssuerDelegationV1', 'ContextGraphPolicyV1', 'MemberRosterV1',
+]);
+
+/** JSON text with sorted object keys and no whitespace (canonical for these objects). */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * A strict validator for `dkg_signControlObject`, written from the documented
+ * layout with ethers primitives only: the canonical unsigned object must be an
+ * allowed object type issued by the signing account, and the digest is
+ * recomputed here. Returns the 32 digest bytes to sign with EIP-191.
+ */
+function controlObjectDigest(value: unknown, account: string): Uint8Array {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidParams('the request must be an object');
+  const request = value as Record<string, unknown>;
+  if (Object.keys(request).sort().join() !== 'domain,envelope') throw invalidParams('expected exactly domain and envelope');
+  if (request.domain !== CONTROL_OBJECT_DOMAIN) throw invalidParams('bad domain');
+  if (typeof request.envelope !== 'string' || request.envelope.length > 1_048_576) throw invalidParams('bad envelope');
+  let envelope: Record<string, unknown>;
+  try {
+    envelope = JSON.parse(request.envelope) as Record<string, unknown>;
+  } catch {
+    throw invalidParams('the envelope is not JSON');
+  }
+  // Re-serializing must give the same text: no duplicate keys, no other spelling.
+  if (canonicalJson(envelope) !== request.envelope) throw invalidParams('the envelope is not canonical');
+  if (Object.keys(envelope).sort().join() !== 'issuer,objectType,payload,signatureEvidence,signatureSuite') {
+    throw invalidParams('unexpected envelope fields');
+  }
+  if (!CONTROL_OBJECT_TYPES.has(String(envelope.objectType))) throw invalidParams('object type not allowed');
+  if (envelope.issuer !== account.toLowerCase()) throw invalidParams('the issuer is not the signing account');
+  if (envelope.signatureSuite !== 'eip191-personal-sign-digest-v1') throw invalidParams('bad signature suite');
+  if (canonicalJson(envelope.signatureEvidence) !== '{"kind":"none"}') throw invalidParams('bad signature evidence');
+  return ethers.getBytes(ethers.sha256(ethers.toUtf8Bytes(CONTROL_OBJECT_DOMAIN + request.envelope)));
+}
+
+function exactObject(value: unknown, members: readonly string[]): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidParams('the request must be an object');
+  if (Object.keys(value).sort().join() !== [...members].sort().join()) throw invalidParams(`expected exactly ${members.join(', ')}`);
+  return value as Record<string, unknown>;
+}
+
+function peerIdOrEmpty(value: unknown, name: string): string {
+  if (typeof value !== 'string' || (value !== '' && !BASE58_PEER_ID.test(value))) throw invalidParams(`bad ${name}`);
+  return value;
+}
+
+/**
+ * A strict validator for `dkg_signAgentDelegation`, written from the documented
+ * layout with ethers primitives only. Returns the 32 digest bytes to sign.
+ */
+function agentDelegationDigest(value: unknown, account: string): Uint8Array {
+  const request = exactObject(value, ['scope', 'agentAddress', 'delegateePeerId', 'delegateeOpKey', 'issuedAtMs', 'expiresAtMs']);
+  if (request.agentAddress !== account.toLowerCase()) throw invalidParams('the agent is not the signing account');
+  if (typeof request.scope !== 'string' || !/^sync:deployment=[^:]+:.+$/.test(request.scope) || request.scope.length > 512) {
+    throw invalidParams('bad scope');
+  }
+  const peer = peerIdOrEmpty(request.delegateePeerId, 'delegateePeerId');
+  if (typeof request.delegateeOpKey !== 'string' || !/^(0x[0-9a-f]{40})?$/.test(request.delegateeOpKey)) throw invalidParams('bad delegateeOpKey');
+  if (peer === '' && request.delegateeOpKey === '') throw invalidParams('no delegatee');
+  const issued = request.issuedAtMs;
+  const expires = request.expiresAtMs;
+  if (typeof issued !== 'number' || !Number.isSafeInteger(issued) || Math.abs(issued - Date.now()) > 60_000) throw invalidParams('bad issuedAtMs');
+  if (typeof expires !== 'number' || !Number.isSafeInteger(expires) || (expires !== 0 && expires <= issued)) throw invalidParams('bad expiresAtMs');
+  return ethers.getBytes(ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+    ['string', 'string', 'address', 'string', 'string', 'uint256', 'uint256'],
+    ['dkg.agent-delegation.v2', request.scope, request.agentAddress, peer, request.delegateeOpKey, issued, expires],
+  )));
+}
+
+function framedProofPayload(agentAddress: string, publicKey: Uint8Array): Uint8Array {
+  const field = (bytes: Uint8Array) => ethers.concat([ethers.toBeHex(bytes.length, 4), bytes]);
+  const text = (value: string) => field(ethers.toUtf8Bytes(value));
+  return ethers.getBytes(ethers.concat([
+    text('domain'), text('dkg.workspace.agent-encryption-key-proof.v1'),
+    text('agentAddress'), text(agentAddress),
+    text('encryptionKeyAlgorithm'), text('X25519'),
+    text('publicEncryptionKey'), field(publicKey),
+  ]));
+}
+
+/**
+ * A strict validator for `dkg_signJoinEncryptionKeys`: each key in the bundle
+ * must be bound to the signing account by its own proof, and the bundle text
+ * must be canonical. Returns the 32 digest bytes to sign.
+ */
+function joinEncryptionKeysDigest(value: unknown, account: string): Uint8Array {
+  const request = exactObject(value, ['agentAddress', 'delegateePeerId', 'delegationSignature', 'workspaceEncryptionKeys']);
+  const agent = account.toLowerCase();
+  if (request.agentAddress !== agent) throw invalidParams('the agent is not the signing account');
+  const peer = peerIdOrEmpty(request.delegateePeerId, 'delegateePeerId');
+  if (typeof request.delegationSignature !== 'string' || !/^0x[0-9a-f]{130}$/.test(request.delegationSignature)) {
+    throw invalidParams('bad delegationSignature');
+  }
+  if (typeof request.workspaceEncryptionKeys !== 'string') throw invalidParams('bad workspaceEncryptionKeys');
+  let keys: unknown;
+  try {
+    keys = JSON.parse(request.workspaceEncryptionKeys);
+  } catch {
+    throw invalidParams('workspaceEncryptionKeys is not JSON');
+  }
+  if (!Array.isArray(keys) || keys.length === 0 || keys.length > 8) throw invalidParams('bad key count');
+  const entries = keys.map((key) => {
+    const entry = exactObject(key, ['encryptionKeyAlgorithm', 'publicEncryptionKey', 'encryptionKeyProof']);
+    if (entry.encryptionKeyAlgorithm !== 'X25519' || typeof entry.publicEncryptionKey !== 'string' || typeof entry.encryptionKeyProof !== 'string') {
+      throw invalidParams('bad key');
+    }
+    const publicKey = new Uint8Array(Buffer.from(entry.publicEncryptionKey, 'base64url'));
+    if (publicKey.length !== 32) throw invalidParams('bad key length');
+    if (ethers.verifyMessage(framedProofPayload(agent, publicKey), entry.encryptionKeyProof).toLowerCase() !== agent) {
+      throw invalidParams('a key is not bound to the signing account');
+    }
+    return JSON.stringify({ encryptionKeyAlgorithm: entry.encryptionKeyAlgorithm, publicEncryptionKey: entry.publicEncryptionKey, encryptionKeyProof: entry.encryptionKeyProof });
+  });
+  if (`[${[...entries].sort().join(',')}]` !== request.workspaceEncryptionKeys) throw invalidParams('workspaceEncryptionKeys is not canonical');
+  return ethers.getBytes(ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+    ['string', 'address', 'string', 'string', 'string'],
+    ['dkg.join-encryption-keys.v1', agent, peer, request.delegationSignature, request.workspaceEncryptionKeys],
+  )));
+}
+
 function send(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(payload));
@@ -179,6 +378,7 @@ async function answer(
   method: string,
   params: unknown[],
   wallets: readonly ethers.Wallet[],
+  preimageMethods: FakeSignerOptions['preimageMethods'],
 ): Promise<{ result: unknown; wallet?: ethers.Wallet }> {
   const byAddress = (value: unknown): ethers.Wallet => {
     const wallet = typeof value === 'string' && ethers.isAddress(value)
@@ -187,6 +387,11 @@ async function answer(
     if (!wallet) throw new Error('unknown account');
     return wallet;
   };
+  const derive = preimageMethods?.[method];
+  if (derive) {
+    const wallet = byAddress(params[0]);
+    return { result: await wallet.signMessage(derive(params[1])), wallet };
+  }
   switch (`${api}:${method}`) {
     case 'eth:eth_accounts':
     case 'clef:account_list':
@@ -236,6 +441,22 @@ async function answer(
     case 'eth:eth_sign': {
       const wallet = byAddress(params[0]);
       return { result: await wallet.signMessage(ethers.getBytes(String(params[1]))), wallet };
+    }
+    case 'eth:dkg_signSyncRequest': {
+      const wallet = byAddress(params[0]);
+      return { result: await wallet.signMessage(syncRequestDigest(params[1])), wallet };
+    }
+    case 'eth:dkg_signControlObject': {
+      const wallet = byAddress(params[0]);
+      return { result: await wallet.signMessage(controlObjectDigest(params[1], wallet.address)), wallet };
+    }
+    case 'eth:dkg_signAgentDelegation': {
+      const wallet = byAddress(params[0]);
+      return { result: await wallet.signMessage(agentDelegationDigest(params[1], wallet.address)), wallet };
+    }
+    case 'eth:dkg_signJoinEncryptionKeys': {
+      const wallet = byAddress(params[0]);
+      return { result: await wallet.signMessage(joinEncryptionKeysDigest(params[1], wallet.address)), wallet };
     }
     case 'eth:personal_sign': {
       const wallet = byAddress(params[1]);
