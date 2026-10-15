@@ -370,7 +370,7 @@ type PreparedReplacementBucketV1 =
       readonly rows: readonly AuthorCatalogRowV1[];
     };
 
-function prepareReplacementBucket(
+export function prepareReplacementBucket(
   scope: AuthorCatalogScopeV1,
   selectedBucketId: DecimalU64V1,
   rows: readonly AuthorCatalogRowV1[],
@@ -543,7 +543,7 @@ function assertSingleRemoval(previous: readonly string[], next: readonly string[
   }
 }
 
-async function signPreparedReplacementBucket(
+export async function signPreparedReplacementBucket(
   prepared: PreparedReplacementBucketV1,
   signer: SnapshotEip191SignerV1,
 ): Promise<SignedAuthorCatalogBucketEnvelopeV1 | null> {
@@ -561,7 +561,7 @@ async function signPreparedReplacementBucket(
   )) as SignedAuthorCatalogBucketEnvelopeV1;
 }
 
-async function signDirectoryNode(
+export async function signDirectoryNode(
   payload: AuthorCatalogDirectoryNodeV1,
   bucketCount: AuthorCatalogScopeV1['bucketCount'],
   signer: SnapshotEip191SignerV1,
@@ -581,7 +581,7 @@ async function signDirectoryNode(
   )) as SignedAuthorCatalogDirectoryNodeEnvelopeV1;
 }
 
-async function signHead(
+export async function signHead(
   payload: AuthorCatalogHeadV1,
   signer: SnapshotEip191SignerV1,
 ): Promise<SignedAuthorCatalogHeadEnvelopeV1> {
@@ -628,7 +628,7 @@ async function signEnvelope(
   }
 }
 
-function snapshotHead(
+export function snapshotHead(
   input: SignedAuthorCatalogHeadEnvelopeV1,
 ): SignedAuthorCatalogHeadEnvelopeV1 {
   try {
@@ -670,7 +670,7 @@ function snapshotDirectoryPath(
   return Object.freeze(snapshot);
 }
 
-function snapshotRows(input: readonly AuthorCatalogRowV1[]): readonly AuthorCatalogRowV1[] {
+export function snapshotRows(input: readonly AuthorCatalogRowV1[]): readonly AuthorCatalogRowV1[] {
   const length = input.length;
   if (!Number.isSafeInteger(length) || length < 0 || length > 1024) {
     fail('catalog-production-input', 'nextRows is outside the 0..1024 bucket-row bound');
@@ -708,7 +708,7 @@ function snapshotRows(input: readonly AuthorCatalogRowV1[]): readonly AuthorCata
   return Object.freeze(snapshot);
 }
 
-function snapshotSigner(input: Rfc64AuthorCatalogEip191SignerV1): SnapshotEip191SignerV1 {
+export function snapshotSigner(input: Rfc64AuthorCatalogEip191SignerV1): SnapshotEip191SignerV1 {
   const issuer = input.issuer;
   const signDigest = input.signDigest;
   if (typeof signDigest !== 'function') {
@@ -717,7 +717,7 @@ function snapshotSigner(input: Rfc64AuthorCatalogEip191SignerV1): SnapshotEip191
   return Object.freeze({ issuer, signDigest });
 }
 
-function assertEip191Issuer(
+export function assertEip191Issuer(
   envelope: SignedControlEnvelopeV1,
   issuer: EvmAddressV1,
   label: string,
@@ -734,7 +734,7 @@ function assertEip191Issuer(
   }
 }
 
-async function verifyExistingSignature(
+export async function verifyExistingSignature(
   envelope: SignedControlEnvelopeV1,
   label: string,
 ): Promise<void> {
@@ -798,7 +798,7 @@ function selectedEntryIndex(
   return Number(index);
 }
 
-function childDescriptor(
+export function childDescriptor(
   child: SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   bucketCount: AuthorCatalogScopeV1['bucketCount'],
 ): AuthorCatalogChildDescriptorV1 {
@@ -877,7 +877,7 @@ function snapshotScope(input: AuthorCatalogScopeV1): AuthorCatalogScopeV1 {
   return freezePlainSnapshot(candidate) as AuthorCatalogScopeV1;
 }
 
-function freezePlainSnapshot<T>(value: T): T {
+export function freezePlainSnapshot<T>(value: T): T {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     for (let index = 0; index < value.length; index += 1) {
@@ -891,12 +891,12 @@ function freezePlainSnapshot<T>(value: T): T {
   return Object.freeze(value);
 }
 
-function normalizePublicError(message: string, cause: unknown): never {
+export function normalizePublicError(message: string, cause: unknown): never {
   if (cause instanceof Rfc64AuthorCatalogProductionErrorV1) throw cause;
   fail('catalog-production-input', message, cause);
 }
 
-function fail(
+export function fail(
   code: Rfc64AuthorCatalogProductionErrorCodeV1,
   message: string,
   cause?: unknown,

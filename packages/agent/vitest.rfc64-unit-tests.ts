@@ -38,6 +38,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-swm-recovery-coordinator-v1.test.ts",
   "test/rfc64-agent-inventory-lifecycle.test.ts",
   "test/rfc64-author-catalog-producer.test.ts",
+  "test/rfc64-author-catalog-capacity-transition.test.ts",
   "test/rfc64-control-object-store-v1.test.ts",
   "test/rfc64-control-object-store-lifecycle-v1.test.ts",
   "test/rfc64-durable-file-store-v1.test.ts",
