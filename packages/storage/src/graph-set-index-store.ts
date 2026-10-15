@@ -319,28 +319,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       if (typeof this.inner.replaceGraph !== 'function') {
         throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'GraphSetIndexStore');
       }
-      if (!this.enabled) {
-        await this.inner.replaceGraph(graphUri, quads, options);
-        return;
-      }
-      try {
-        await this.inner.replaceGraph(graphUri, quads, options);
-      } catch (error) {
-        // The replaceGraph contract allows a rejected call to have committed the
-        // complete new graph (or dropped the old one). Serving the cached graph
-        // set would then hide a committed KA graph from enumeration, so mark the
-        // index dirty for a lazy rebuild — unless this was a clean preflight
-        // capability refusal or an admission rejection explicitly bound to this
-        // replace dispatch. A nested post-commit probe can also be rejected by
-        // the scheduler, but its storeOperation does not match replaceGraph and
-        // therefore still dirties this index.
-        if (!isStoreOperationNotStarted(error, 'replaceGraph')) {
-          this.scheduleFullRefresh('replaceGraph');
-        }
-        throw error;
-      }
-      this.bumpMutation();
-      await this.maintainTouchedGraphs([graphUri], 'replaceGraph', options);
+      return this.runReplacementMutation('replaceGraph', [graphUri], options,
+        () => this.inner.replaceGraph!(graphUri, quads, options));
     });
   }
 
@@ -394,23 +374,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       if (typeof this.inner.replaceSubject !== 'function') {
         throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'GraphSetIndexStore');
       }
-      if (!this.enabled) {
-        await this.inner.replaceSubject(graphUri, subject, quads, options);
-        return;
-      }
-      try {
-        await this.inner.replaceSubject(graphUri, subject, quads, options);
-      } catch (error) {
-        // A committed subject replace could add/remove the graph's first/last row;
-        // dirty the index so a lazy rebuild re-derives membership — unless this was
-        // a clean preflight capability refusal, where nothing was mutated.
-        if (!isStoreOperationNotStarted(error, 'replaceSubject')) {
-          this.scheduleFullRefresh('replaceSubject');
-        }
-        throw error;
-      }
-      this.bumpMutation();
-      await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
+      return this.runReplacementMutation('replaceSubject', [graphUri], options,
+        () => this.inner.replaceSubject!(graphUri, subject, quads, options));
     });
   }
 
@@ -423,21 +388,33 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
         throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'GraphSetIndexStore');
       }
-      if (!this.enabled) {
-        await this.inner.replaceSubjectAndInsert(graphUri, subject, replacementQuads, insertQuads, options);
-        return;
-      }
-      try {
-        await this.inner.replaceSubjectAndInsert(graphUri, subject, replacementQuads, insertQuads, options);
-      } catch (error) {
-        if (!isStoreOperationNotStarted(error, 'replaceSubjectAndInsert')) {
-          this.scheduleFullRefresh('replaceSubjectAndInsert');
-        }
-        throw error;
-      }
-      this.bumpMutation();
-      await this.maintainTouchedGraphs([graphUri], 'replaceSubjectAndInsert', options);
+      return this.runReplacementMutation('replaceSubjectAndInsert', [graphUri], options,
+        () => this.inner.replaceSubjectAndInsert!(graphUri, subject, replacementQuads, insertQuads, options));
     });
+  }
+
+  private async runReplacementMutation(
+    operation: 'replaceGraph' | 'replaceSubject' | 'replaceSubjectAndInsert',
+    touchedGraphs: string[],
+    options: QueryOptions | undefined,
+    execute: () => Promise<void>,
+  ): Promise<void> {
+    if (!this.enabled) {
+      await execute();
+      return;
+    }
+    try {
+      await execute();
+    } catch (error) {
+      // A rejected replacement may have committed. Only a not-started outcome
+      // bound to this dispatch is clean; a nested post-commit probe is not.
+      if (!isStoreOperationNotStarted(error, operation)) {
+        this.scheduleFullRefresh(operation);
+      }
+      throw error;
+    }
+    this.bumpMutation();
+    await this.maintainTouchedGraphs(touchedGraphs, operation, options);
   }
 
   async rfc64AuthorCommitCasV1(

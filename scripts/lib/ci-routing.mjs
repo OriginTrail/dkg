@@ -421,6 +421,12 @@ export const PATH_TRIGGERS = Object.freeze([
   // Files other packages load by relative path, outside their declared
   // dependencies.
   {
+    patterns: [/^packages\/agent\/src\/internal\/context-graph-cache-invalidating-store\.ts$/],
+    lanes: ['tornado_publisher'],
+    evmScopes: [],
+    reason: 'the publisher persistence integration tests import the Agent cache-invalidating store',
+  },
+  {
     patterns: [/^packages\/agent\/src\/sync\/(?:exact-assets|exact-batch-stream-contract|wire-compression)\.ts$/],
     lanes: ['tornado_core'],
     evmScopes: [],

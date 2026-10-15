@@ -391,6 +391,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   for (const [target, requirement, why] of [
     ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
+    ['packages/agent/src/internal/context-graph-cache-invalidating-store.ts', 'tornado_publisher', 'publisher persistence integration tests import the Agent store wrapper'],
     ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],
     ['packages/agent/src/dkg-agent-join.ts', 'tornado_core', 'the chain RPC-site census reads agent sources'],
     ['packages/agent/src/sync/exact-assets.ts', 'tornado_agent', 'the Agent stream receiver loads exact asset parsing'],
@@ -521,6 +522,18 @@ test('the Blazegraph lane follows the agent lane, whose live suites its job runs
     assert.equal(plan.lanes.tornado_blazegraph, true, filePath);
   }
   assert.equal(pullRequestPlan([change('packages/network-sim/src/index.ts')]).lanes.tornado_blazegraph, false);
+});
+
+test('the Agent store wrapper selects the publisher integration lane without broadening adjacent files', () => {
+  const wrapper = pullRequestPlan([change('packages/agent/src/internal/context-graph-cache-invalidating-store.ts')]);
+  assert.equal(wrapper.mode, 'delta');
+  assert.equal(wrapper.lanes.tornado_publisher, true);
+  assert.equal(wrapper.lanes.tornado_agent, true);
+  assert.equal(wrapper.lanes.tornado_blazegraph, true);
+  assert.match(wrapper.reasons.join('\n'), /publisher persistence integration tests/);
+  const adjacent = pullRequestPlan([change('packages/agent/src/internal/store-mutation.ts')]);
+  assert.equal(adjacent.lanes.tornado_publisher, false);
+  assert.equal(adjacent.lanes.tornado_agent, true);
 });
 
 test('identity-wallet browser actions select the real-EVM chain scope', () => {
