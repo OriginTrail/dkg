@@ -12,32 +12,58 @@ export type Rfc64LegacySwmFenceSourceV1 =
 
 export type Rfc64LegacySwmFenceScopeV1 = 'graph' | 'asset';
 
+/** What every fence event says: which fence, on which scope of which graph, and for how long. */
+interface Rfc64LegacySwmFenceEventBaseV1 {
+  readonly source: Rfc64LegacySwmFenceSourceV1;
+  readonly scope: Rfc64LegacySwmFenceScopeV1;
+  readonly contextGraphId: string;
+  readonly elapsedMs: number;
+}
+
+/** A retirement or a lease that gave up waiting for its turn: it did not run. */
+export interface Rfc64LegacySwmFenceWaitExceededEventV1 extends Rfc64LegacySwmFenceEventBaseV1 {
+  readonly kind: 'wait-exceeded';
+  /** The asset, for an asset's fence. */
+  readonly kaUal?: string;
+  /** What the fence was still waiting for. */
+  readonly waitingOn: 'mutation-chain' | 'preparations';
+  /** In-flight preparations of the scope when it gave up. */
+  readonly activePreparations: number;
+}
+
+/** A retirement or a lease that ran with its fence up for longer than {@link RFC64_LEGACY_SWM_FENCE_LONG_MS}. */
+export interface Rfc64LegacySwmFenceLongFenceEventV1 extends Rfc64LegacySwmFenceEventBaseV1 {
+  readonly kind: 'long-fence';
+  /** The asset, for an asset's fence. */
+  readonly kaUal?: string;
+}
+
+/**
+ * A promote that waited for a fence for longer than {@link RFC64_LEGACY_SWM_FENCE_LONG_MS}, or
+ * stopped waiting while a fence was still up. `source` and `scope` name the fence it waited for:
+ * the one in front when it began to wait if it was admitted, else the longest-standing one in
+ * front when it stopped.
+ */
+export interface Rfc64LegacySwmFenceAdmissionWaitEventV1 extends Rfc64LegacySwmFenceEventBaseV1 {
+  readonly kind: 'admission-wait';
+  /** The asset of the promote, whatever the scope of the fence. */
+  readonly kaUal: string;
+  /** How the wait ended. */
+  readonly waitEnd: Rfc64LegacySwmAdmissionWaitEndV1;
+}
+
 /**
  * A fence that is worth a log line: one that gave up waiting for its turn
  * (`wait-exceeded`, the retirement did not run), one that ran but was up for
  * longer than {@link RFC64_LEGACY_SWM_FENCE_LONG_MS} (`long-fence`), or a
  * promote that waited for a fence for longer than that, or stopped waiting
- * while the fence was still up (`admission-wait`).
+ * while the fence was still up (`admission-wait`). The kind says which fields
+ * an event carries.
  */
-export interface Rfc64LegacySwmFenceEventV1 {
-  readonly kind: 'wait-exceeded' | 'long-fence' | 'admission-wait';
-  /**
-   * For an `admission-wait`, the fence the promote waited for: the one in front when it began
-   * to wait if it was admitted, else the longest-standing one in front when it stopped.
-   */
-  readonly source: Rfc64LegacySwmFenceSourceV1;
-  readonly scope: Rfc64LegacySwmFenceScopeV1;
-  readonly contextGraphId: string;
-  /** For an `admission-wait`, the asset of the promote, whatever the scope of the fence. */
-  readonly kaUal?: string;
-  readonly elapsedMs: number;
-  /** What a `wait-exceeded` fence was still waiting for. */
-  readonly waitingOn?: 'mutation-chain' | 'preparations';
-  /** In-flight preparations of the scope when a `wait-exceeded` fence gave up. */
-  readonly activePreparations?: number;
-  /** How an `admission-wait` ended. */
-  readonly waitEnd?: Rfc64LegacySwmAdmissionWaitEndV1;
-}
+export type Rfc64LegacySwmFenceEventV1 =
+  | Rfc64LegacySwmFenceWaitExceededEventV1
+  | Rfc64LegacySwmFenceLongFenceEventV1
+  | Rfc64LegacySwmFenceAdmissionWaitEventV1;
 
 /** How loud a fence event is: a promote that waited and was then admitted is only information. */
 export function rfc64LegacySwmFenceEventLogLevelV1(
@@ -58,14 +84,27 @@ export function rfc64LegacySwmFenceEventLoggerV1<Context>(
 export function describeRfc64LegacySwmFenceEventV1(
   event: Readonly<Rfc64LegacySwmFenceEventV1>,
 ): string {
-  if (event.kind === 'admission-wait') {
-    const fence = `the RFC-64 legacy SWM fence raised by ${event.source} on the ${event.scope} `
-      + `of ${event.contextGraphId}`;
-    return event.waitEnd === 'unfenced'
-      ? `A promote of ${event.kaUal} waited ${event.elapsedMs} ms for ${fence}`
-      : `A promote of ${event.kaUal} stopped waiting after ${event.elapsedMs} ms for ${fence} `
-        + `(${event.waitEnd}); the promote is refused, and a queued share is retried later`;
-  }
+  return event.kind === 'admission-wait'
+    ? describeRfc64LegacySwmAdmissionWaitEventV1(event)
+    : describeRfc64LegacySwmRetirementFenceEventV1(event);
+}
+
+/** The line for a promote that waited for a fence. */
+function describeRfc64LegacySwmAdmissionWaitEventV1(
+  event: Readonly<Rfc64LegacySwmFenceAdmissionWaitEventV1>,
+): string {
+  const fence = `the RFC-64 legacy SWM fence raised by ${event.source} on the ${event.scope} `
+    + `of ${event.contextGraphId}`;
+  return event.waitEnd === 'unfenced'
+    ? `A promote of ${event.kaUal} waited ${event.elapsedMs} ms for ${fence}`
+    : `A promote of ${event.kaUal} stopped waiting after ${event.elapsedMs} ms for ${fence} `
+      + `(${event.waitEnd}); the promote is refused, and a queued share is retried later`;
+}
+
+/** The line for the fence of a retirement or a lease. */
+function describeRfc64LegacySwmRetirementFenceEventV1(
+  event: Readonly<Rfc64LegacySwmFenceWaitExceededEventV1 | Rfc64LegacySwmFenceLongFenceEventV1>,
+): string {
   const where = `${event.source} on the ${event.scope} of ${event.contextGraphId}`
     + (event.kaUal === undefined ? '' : ` (${event.kaUal})`);
   return event.kind === 'wait-exceeded'
@@ -454,8 +493,8 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     : rfc64LegacySwmAssetScopeKeyV1(target.contextGraphId, target.kaUal);
   const scope = fenceScope(fence, scopeKey);
   const holder: Rfc64LegacySwmFenceHolderV1 = { source: target.source, raisedAt: fence.now() };
-  const describe = (kind: Rfc64LegacySwmFenceEventV1['kind']) => ({
-    kind,
+  // What an event of this fence says besides its kind, at the moment it is reported.
+  const fenceFacts = () => ({
     source: target.source,
     scope: target.kaUal === undefined ? 'graph' as const : 'asset' as const,
     contextGraphId: target.contextGraphId,
@@ -482,7 +521,7 @@ export async function runRfc64LegacySwmRetirementV1<T>(
       resolve?.();
     }
     cleanFenceScope(fence, scopeKey, scope);
-    const event = describe('long-fence');
+    const event: Rfc64LegacySwmFenceLongFenceEventV1 = { kind: 'long-fence', ...fenceFacts() };
     if (!gaveUp && event.elapsedMs > fence.longFenceMs) reportFenceEvent(fence, event);
   };
   let resolveAbandoned!: () => void;
@@ -491,7 +530,8 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     if (workStarted) return;
     gaveUp = true;
     reportFenceEvent(fence, {
-      ...describe('wait-exceeded'),
+      kind: 'wait-exceeded',
+      ...fenceFacts(),
       waitingOn,
       activePreparations: scope.activePreparations,
     });
