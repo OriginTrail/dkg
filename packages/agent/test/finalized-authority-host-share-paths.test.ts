@@ -356,7 +356,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     // authority fact, so it cost no further attempt and moved no revision.
     expect(recipientReads).toBe(2);
     expect(reconciles).toHaveLength(1);
-    expect(accessChecks).toHaveBeenCalledWith(privateGraph);
+    expect(accessChecks).toHaveBeenCalledWith(privateGraph, { onAuthorityWait: expect.any(Function) });
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
     expect(projection.readContextGraphAuthorityFactsRevision(privateGraph)).toBe(perGraph);
   });
