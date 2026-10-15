@@ -459,31 +459,48 @@ provider trust is not inferred from peer discovery.
 
 ## Capacity limits
 
-These limits apply to the current catalog format. Each one is refused visibly
-when it is reached; none is silently dropped.
+These limits apply to the current catalog format. When one is reached, the
+node reports it as described below.
 
-- **Rows of one author catalog: 1,024.** An author's catalog for one graph is
-  one signed bucket of at most 1,024 rows. When a new asset finds its author's
-  catalog full, its placement is refused once with the diagnostic kind
-  `catalog_full`, parked, and attempted again when a row is free.
+- **Rows of one author catalog: 1,024 per author per graph.** An author's
+  catalog for one graph is one signed bucket of at most 1,024 rows. When a new
+  asset finds its author's catalog full, its placement is refused once with the
+  diagnostic kind `catalog_full`, parked, and attempted again when a row is
+  free. On a public graph the share-time projection refuses an inventory of
+  more than 1,024 rows as a whole, so the catalog keeps its last head.
   `rfc64Catalog.authorCatalogCapacity` in the node status counts the scopes at
-  the limit and the parked placements. Publishing itself is not refused: the
-  asset is finalized as usual and only its catalog row waits.
+  the limit (`scopesAtCap`) and the parked placements (`parkedPlacements`).
+  Publishing itself is not refused: the asset is finalized as usual and only
+  its catalog row waits. On a private graph registered on chain, a node that
+  applies the graph's catalogs (see the 818 limit below) refuses an author's
+  head while one of the author's finalized assets has no row in it, so a full
+  catalog stops that author's lane on such nodes (completion reason
+  `no-authorized-provider`).
+- **Authors with a catalog in one graph: 64.** A node tracks the catalog heads
+  of at most 64 authors per graph. Catalog replay, which a node uses to catch
+  up on a graph's catalog heads from its peers, covers at most 64 heads per
+  graph: above that a node does not serve the graph's replay, and a node
+  replaying the graph counts the replay as failed. Keep the number of authors
+  who share into one graph at 64 or fewer.
 - **Assets of one private graph registered on chain: 818, all authors
-  together.** Before a member applies an author's catalog head for such a
-  graph, it checks the head against the graph's whole on-chain inventory, read
-  at one finalized block within a fixed read budget. That budget covers 818
-  assets. Above it the member refuses the head, does not materialize it, and
-  reports the graph's catalog targets in `rfc64Catalog.privateRecovery` as
-  `known-incomplete` with the completion reason `chain-inventory-limit`
-  (counted per outcome in `outcomeCounts`). The authors of the graph are not
-  affected; members of the graph cannot verify new heads until the limit is
-  raised. Keep private on-chain graphs below this size, or split their content
-  across graphs.
-- **One author's shared-asset inventory per graph: about 19,500 rows.** The
-  node keeps a signed record of what an author has shared into a graph, and
-  the catalog is projected from it. Its rows are capped at 8 MiB in their
-  canonical form, which is about 19,500 rows at the usual row size. A share
-  past that is still made, but it is not recorded: the node logs a warning
-  whose cause is `swm-inventory-too-large`, and the share-time projection does
-  not place the asset.
+  together, for nodes that apply the graph's catalogs.** A node applies author
+  catalogs for a private graph itself when the graph is selected in its
+  `rfc64Catalog` configuration with `accessPolicyAuthority` (see the operator
+  shape above). Before such a node applies an author's catalog head, it checks
+  the head against the graph's whole on-chain inventory, read at one finalized
+  block within a fixed read budget. That budget covers 818 assets. Above it the
+  node refuses the head, does not materialize it, and reports the graph's
+  catalog targets in `rfc64Catalog.privateRecovery` as `known-incomplete` with
+  the completion reason `chain-inventory-limit` (counted per outcome in
+  `outcomeCounts`). A member on the default configuration receives a private
+  graph on the legacy member lane and does not run this check, and the
+  graph's authors are not affected. Keep private on-chain graphs that such
+  nodes verify below this size, or split their content across graphs.
+- **One author's shared-asset inventory per graph: 8 MiB, about 19,500 rows.**
+  The author's node keeps a signed record of what the author has shared into a
+  graph, and the author's catalog is projected from it. Its rows are capped at
+  8 MiB in their canonical form (and at 100,000 rows), which is about 19,500
+  rows at the usual row size. A share past that is still made, but it is not
+  recorded: the node logs a warning whose cause is `swm-inventory-too-large`,
+  and the share-time projection does not place the asset. With one bucket per
+  catalog, the 1,024-row limit above is reached first.
