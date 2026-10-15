@@ -2,6 +2,393 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.0.25] - 2026-10-15
+
+A patch for shared memory between the members of a public Context Graph,
+after a community report on 10.0.24 (#3251) and to finish #3198. A
+member's write into a public graph reached the graph's owner, but another
+member with no connection to the writer got it only at its next sync with
+the owner, minutes later or not at all. The owner of a public graph now
+tells the graph's followers when it applies a share from another peer, and
+they pull it at once. A member registers a sub-graph that reaches it by
+sync, shared-memory pulls have a sync slot of their own, and an Edge pulls
+a public graph it is using about once a minute. A subscription left
+unsynced by a lossy first round, or restored unsynced after a restart, is
+caught up again. A share that meets the legacy shared-memory fence waits
+for the fence to drop, for up to 60 seconds, where it was refused and
+retried a minute or more later.
+
+Two warnings that read as failures are gone. The owner of a new graph no
+longer logs that it is denied its own graph's shared memory while the
+graph's authority is being accepted, and the catalog replay after a
+connection warns only when this node may lack heads that its peers hold.
+
+**No smart-contract, ABI or deployment registry changes.** One new message:
+the owner of a public graph sends a change notice,
+`/dkg/10.0.1/swm-change-notice`, to the graph's followers when it applies a
+share from another peer (#3256). A node on an earlier version does not take
+that stream, and the owner goes on. For the root of a public graph that is
+not registered on chain the owner forwards the member's catalog head over
+the existing announcement protocol instead, which a node on 10.0.24 already
+accepts. Other message formats are unchanged.
+
+### Upgrading from 10.0.24
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| The owner of a public Context Graph tells the graph's followers when it applies a share from another peer (#3256) | New protocol `/dkg/10.0.1/swm-change-notice`. A notice is one canonical JSON object of at most 2 KiB that names the graph, the scope (the root or a sub-graph) and the share's operation id for logs, and carries no data. The owner sends it to every follower of the graph except the peer the share came from, at most once a second per graph and scope, one attempt per follower with no retry. For a share into the root of a graph that is not registered on chain it forwards the member's catalog head announcement instead. A follower that gets a notice from the graph's owner, or from a peer that asked it for the graph's shared memory, pulls the graph's shared memory from the sender at once: at most one pull per graph and scope at a time, at most 64 at once, at most 60 notices per peer a minute. The owner also counts the source of each share it applies among the graph's followers. A node on an earlier version refuses the notice stream, and the owner goes on | Upgrade the members of public graphs to receive the notices. A member on an earlier version still gets the write with its next sync |
+| A shared-memory pull takes a reserved sync slot when no general slot is free (#3258) | One reserved slot that durable and changelog transfers never take. A pull that finds no slot waits in a queue of its own, 16 long, for up to 60 s, where it was refused at once. The limits for large transfers are unchanged. The published `sync-global` capacity counts the reserve: one more running, 16 more queued | None. `DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT=0` restores the earlier behaviour |
+| An Edge pulls a public graph it is using about once a minute (#3258) | A public, always-on graph is in use on an Edge for 30 minutes after a subscribe call, a local share, a received shared-memory write, or a pull that stored new data. While it is in use, the node pulls it every 60 s from one connected peer: the graph's owner when it is connected, otherwise the connected peers in turn. For a graph that is not registered on chain it also replays the graph's catalog from the connected peers. At most 8 pulls each 30 s tick and 256 graphs tracked. It does not run on Cores, or when the reconciler, sync-on-connect or durable sync is switched off | None. `DKG_RECENT_SHARED_MEMORY_PULL_ENABLED=0` turns it off |
+| A sub-graph whose shared memory arrives by sync is registered (#3248) | A node that stores rows of a named sub-graph through the public sync lane registers the sub-graph as a live share does, once per sub-graph and sync session, and logs `Auto-registered sub-graph ... from SWM sync`. Reads over the graph's partitions then include it, writes into it are accepted, and the node serves it to peers. A node that already holds such rows gets the registration with its next sync round | None |
+| A subscription left unsynced is caught up again (#3249) | For a public graph that is not registered on chain, a subscribe job that ends with the graph still unsynced is run again after 15 s, 30 s, 1, 2, 4, 8, 16 and 30 minutes, at most eight times; a newer subscribe call starts a sequence of its own. A saved subscription that comes back active and unsynced after a restart, or once its authority recovers, gets the same job, and a saved row that the startup readiness migration skipped while it was dormant is migrated first | None |
+| A share that meets the legacy shared-memory fence waits for the fence to drop (#3250) | Up to 60 s, where it waited 2 s, was refused, and was retried 48 to 72 s later and then at growing intervals. A fence that has been up for 60 s without a break is not waited for, at most 16 promotes wait the full time, and every wait ends when the node begins to stop. A wait of more than 5 s is logged at info, for example `A promote of <ual> waited <n> ms for the RFC-64 legacy SWM fence raised by receiver-lease on the graph of <graph>`, and a wait that stopped is logged at warn. A synchronous share can take up to 60 s longer, and it holds its request meanwhile | None. Clients in this repository send shares with a 240 s timeout; other clients should allow 60 s more than before |
+| A gossip subscription that waits for the graph's RFC-64 authority is logged at info (#3246) | `SWM gossip subscription denied for "<graph>": local node is not authorized` and `SWM gossip unsubscribed for "<graph>": local node is no longer authorized` stay warnings, written only for a refusal. While the graph's RFC-64 authority is not accepted on the node, it logs `SWM gossip subscription for "<graph>" waits for the graph's RFC-64 authority (not accepted on this node yet); not subscribed yet` at info, with `last refresh: <reason>` after a failed authority refresh and repeats at debug, and once it subscribes `SWM gossip subscription for "<graph>" made after waiting for the graph's RFC-64 authority`. The SWM sync planning skips such a graph with `Skipping SWM sync for "<graph>" for now: it waits for the graph's RFC-64 authority (...)` at info, once per wait | None. Tooling that counted the denial warning sees it only for refusals |
+| The catalog replay after a connection warns only when this node may lack heads (#3255) | `RFC-64 catalog replay incomplete for "<graph>" after <peer> connected` now ends with its reason and counts, for example `: this node may lack catalog heads its peers hold until a full replay passes (1 peer(s) answered, 1 failed, 0 retried later)`. It is written once per replay run, only while the graph's replay status says that this node may lack heads its peers hold. A run that only could not replay from some peers writes one debug line, and each peer that gave no answer gets a debug line with its reason. A peer whose replay request this node authorized counts among the graph's followers at once, also when this node answers it busy | None. Tooling that counted the warning sees it only for heads this node may lack |
+
+### Known issues
+
+- **RFC-64 catalog replay loop**: replays that come back incomplete repeat on
+  every reconnect. Keep `rfc64Catalog.rollout.killSwitch` on wherever it is
+  set.
+- **A node asks a new peer to replay the catalog of every catalog-owned
+  graph at once** (#3251): a peer queues only a few replay requests per
+  requester and answers the rest busy, and a request that waits behind the
+  peer's other replays can outlast the requester's 10 s wait. Such a peer
+  is asked again by later replays, at the next connection, and heads that
+  only it holds reach this node later. The debug line for each peer that
+  gave no answer names the reason (#3255). Spreading these requests is
+  tracked in #3173.
+- **A node updated from git can report its build as `-dirty`** (#3169): a
+  source build is reported as `<commit>-dirty` when its checkout holds
+  untracked files, and the git updater can leave an untracked folder in
+  a release slot by itself, when it sets stale package copies aside. No
+  tracked file differs from the commit in that case, and the updater
+  keeps working. Nodes installed from npm are not affected.
+- **An author's catalog for a Context Graph holds 1,024 assets, and a graph
+  holds at most 64 author catalogs** (#3134): the catalog is one signed
+  bucket of at most 1,024 rows. A further new asset of that author in that
+  graph is published, finalized and stored as before, but the catalog does
+  not list it. Its placement is refused once and parked, and the node
+  reports it: a `catalog_full` warning when a catalog first refuses and then
+  at most one an hour, for the placement and for the share-time projection
+  each, and `rfc64Catalog.authorCatalogCapacity` in `GET /api/status`. A
+  newer version of an asset the catalog holds is still placed, and a
+  removal frees a row. The catalog replay covers at most 64 author catalogs
+  of one graph. A member on the default configuration keeps receiving such
+  assets, with a delay: in a test on a public testnet a member of a private
+  graph with 1,050 assets from one author held all of them, and in later
+  tests on that graph a further verified asset reached the member hours
+  after its confirmation. Retention of older rows and catalogs of more than
+  one bucket are planned in #3134.
+- **An author's catalog cannot leave out a finalized asset of a private
+  graph registered on chain** (#3134): a node that applies the catalogs of
+  such a graph itself refuses an author's head when the chain shows a
+  finalized asset of that author with no row in it. A catalog therefore
+  cannot drop such an asset to make room, and once an author's catalog
+  cannot list one of the author's finalized assets, such a node stops
+  receiving that author's updates for the graph. This is read from the code
+  and was not reproduced. A member on the default configuration takes
+  private graphs on the member lane and does not run this check.
+- **Under a burst of publications the author's catalog can trail them by
+  minutes** (#3128): a publication no longer waits for its placement, and
+  placements still run one at a time, in a fixed order. In a test on a
+  public testnet with the catalog at 700 to 880 rows one placement took 6
+  to 21 s at the median, and the catalog trailed a burst of 60
+  publications by up to about five minutes in one run and by under 20 s in
+  another. `pending` and `oldestPendingAgeMs` under
+  `rfc64Catalog.finalizedPrivatePlacementQueue` in `GET /api/status` show
+  the backlog.
+- **A finalized publication into a private graph can stay out of the
+  author's catalog** (#3128): a publication is terminal once its placement
+  is recorded, and in three cases, all older than this release, a
+  confirmation ends with nothing recorded. The catalog lane cannot be
+  resolved at the confirmation, which is logged as
+  `RFC-64 catalog authority was unavailable`; the graph has no catalog
+  lane at that moment, which writes no line; or the write of the placement
+  marker fails, which is logged as
+  `finalized-private placement was not recorded, so nothing owes it`. The
+  asset then reaches the catalog only through the projection that its
+  share requested, which the node retries when it fails. A fourth case
+  concerns one version: when an assertion is re-opened for editing twice
+  while the placement of its published version is still queued, and the
+  node then restarts, that version cannot be placed. Every attempt writes
+  `catalog_private_repair_failed` with `kind: integrity` and
+  `stage: seal`, at most once a minute, and the placement stays counted
+  in `pending` until the catalog holds a later version of the asset. Both
+  are tracked in #3128.
+- **A head replay to a peer that connects during a burst of publications
+  can be rejected** (#3129): a replay is rejected when a catalog change
+  overlaps it, before its snapshot or while it is sent, and during a burst
+  that is most replays. The requester asks again. Such a peer converges
+  when the burst pauses, through a later replay or the next delivered
+  head.
+- **A queued publication can still wait several seconds after finality on a
+  node with peers connected** (#3128): the wait in the retirement of the
+  asset's marker is gone (#3179). In the test of that change on a public
+  testnet, what was left was the clear of the published asset's shared
+  graph, 0.6 to 1.5 s at the median and about 10 s at the most, the
+  lifecycle stamp, up to 2.9 s, and the admission of the recovery turn, up
+  to 5.8 s. With no peer connected a publication waited 0.9 s at the median
+  after finality. The fields `tailPublishedGraphClearMs`,
+  `tailLifecycleStampMs` and `recoveryAdmissionMs` of the
+  `async_publish_post_finality` line show them (#3136). There is no fix yet.
+- **After a start a node may not serve its `ontology` graph for hours**
+  (#3157): a node whose `ontology` graph holds Context Graph bindings that
+  it cannot classify from its own data keeps the graph from peers until it
+  has classified them against the chain, at most 16 new bindings a pass. On
+  test nodes that took from one minute to about three hours after a start,
+  longest on a node whose store was under pressure. There is no time limit:
+  a node whose chain reads keep failing does not serve the graph. A peer
+  that asks is told to try again later, and other graphs are served as
+  before.
+- **Under load a subscriber of a public Context Graph may hold a newly
+  verified asset later than before** (#3179): a publication no longer waits
+  for the retirement of its marker, so a publish job ends sooner. In tests
+  under load on a public testnet a subscriber held newly verified assets
+  later, counted from their chain confirmation, than without the change. The
+  assets arrived in every run.
+- **The write-ahead log of a managed Oxigraph store grows until the store is
+  reopened** (#2395): the maintenance reopen is off by default, so only a
+  restart of the node or a recovery of the store truncates the log. In our
+  tests the log grew by 0.25 to 0.6 GiB an hour on nodes with a light write
+  load, and by 2.9 and 4.9 GiB an hour on two nodes under a mixed publish
+  and sync load. A large log takes disk space and lengthens the next start,
+  which replays it. The node reports the log from 4 GiB on. Restart the node
+  at a time of your choosing, or set
+  `store.options.walRestartThresholdBytes` and accept about a minute and a
+  half of refused store work for each cycle.
+- **A subscriber of a public Context Graph can receive a new asset minutes
+  late** (#3052): while a node applies a catalog update for a graph it
+  refuses Shared Working Memory writes for that graph. A share on such a
+  node now waits for the update to end (#3250), but a subscriber's sync
+  round that overlaps the update still writes none of the snapshots it
+  fetched, and the node does not pull that graph again at once: the assets
+  arrive with a later round or through the catalog, in our tests 6 to 7
+  minutes after they were shared. An asset that was finalized in the
+  meantime is then fetched on its own, and those fetches can fail and be
+  retried minutes apart: on a graph of a few hundred assets that was being
+  published to, single assets took up to 15 minutes. Nothing is lost, and
+  this is not new in this release.
+- **A member that restarted before its empty private graph was proven ready
+  stays not ready** (#3109): the readiness proof of an empty registered
+  private graph now runs again when the member's copy of the metadata
+  becomes authoritative (#3108). A node that restarted after that moment and
+  before the proof succeeded keeps the graph subscribed and not writable
+  until the member subscribes again or content arrives. Members that reached
+  this state on an earlier version are in the same position after the
+  upgrade. Subscribe again.
+- **A read by a newly approved member of an unregistered private graph can
+  answer a retryable 503** (#3064): before it reads such a graph, the
+  member's node has to accept a proof that the graph's name is not
+  registered on chain. One slow or discarded run of that proof no longer
+  fails a read (#3074), but in the seconds after an approval a read can
+  still answer 503 with `CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE`. Send the
+  read again.
+- **A member of private graphs that are not registered on chain reads the
+  chain much more often than other nodes** (#3064, #3184): the node proves
+  very often that the name of such a graph is not registered: one periodic
+  refresh asks the chain about every such graph on each pass. These reads no
+  longer keep a transaction waiting until its deadline, because such a read
+  and an ordinary request now take turns when both are waiting (#3194), and
+  a read that accepts bounded freshness no longer adds scans of its own
+  (#3183). The reads themselves are as frequent as before. They still use a
+  large part of the node's chain request budget, up to every other permit
+  when ordinary requests are waiting, so other chain work on that node is
+  slower.
+- **Recovery through the batch stream depends on the Cores that serve it**:
+  only Cores with the switch set serve the stream. A Core that is busy
+  answers `BUSY` and is asked again after a short pause, and a stream that
+  breaks is opened once more with the same Core (#2979, #2987); a stream that
+  stalls without closing is not detected. After a busy attempt, and after a
+  broken one on a Core that has already served the graph, the Core keeps its
+  turn, but between two stream attempts the node can probe peers without the
+  stream. Each such probe is bounded to two minutes while a stream-capable
+  Core is connected, three times out of four (#2978), and large assets still
+  take minutes each there. Serve the stream from more than one Core that
+  holds the graph.
+- **The catalog of an unregistered private graph can stay unverified on a
+  member** (#2993): after the approval, data and reads reach a member Core
+  within seconds and a member Edge after about a minute, but the member's
+  catalog status reaches `complete` only after about eight minutes on a
+  Core and may not reach it on an Edge, because the curator gives up its
+  replay to the approved peer before the member is ready. Delivery and reads
+  do not depend on it. These timings were measured before #3036, which
+  retries an incomplete private catalog within a short budget; they were not
+  measured again.
+- **A node on an earlier version does not learn the protocols a peer
+  registers after their connection opened** (#2854): a node on this release
+  announces such protocols to its connected peers, and it asks a connected
+  peer directly before it passes the peer over (#3145). A node on 10.0.23 or
+  earlier does neither. It learns a peer's protocols when the connection
+  opens, and two such nodes that connected before either had registered its
+  handlers recover when they reconnect, as before.
+- **A member added to a private Context Graph only by wallet address does not
+  receive its Shared Working Memory until it joins** (#2862): the member needs
+  the graph's metadata, which the curator sends on an approved join request.
+  Have the member send a signed join request; a pre-authorized member is
+  approved automatically.
+- **A restarted member Edge may not reconnect to its private graph's curator
+  Edge if the curator is unreachable** (#2865): approval now carries a
+  validated listener hint and recovery retries the curator connection
+  (#3058). This does not make an unavailable curator reachable. If automatic
+  discovery cannot establish the connection, connect to a reachable curator
+  multiaddr with `POST /api/connect`.
+- **Copies already stale before the upgrade may wait for another update**
+  (#2866): the update lane initially replays about 500 blocks. Older stale
+  copies, and refresh targets given up after 24 hours, need the next update
+  or an explicit asset fetch. The rate-limited backfill is not in this
+  release.
+- **The successor of an abandoned shared update draft is shared under the same
+  number** (#2964): peers' share gate, the RFC-64 catalog and curator
+  confirmation (`swmAwaitCuratorAck`) do not replace a draft with another of
+  the same number, so peers may keep showing the earlier draft until the
+  update is published, and the replacement replaces the private payload
+  sealed under that number.
+- **A catalog authority refresh can wait for the next five-minute pass on a
+  node with constant store writes** (#2968): a refresh that is composed while
+  the node's authority facts change is composed again, up to six more times
+  within about four seconds. On a node whose unrelated writes never pause,
+  every attempt can be discarded, and a newly approved member then receives
+  the catalog only after the next periodic pass.
+- **Some lifecycle pointer stamps are still only logged when they fail**
+  (#2962): the Verifiable Memory stamps after a confirmed publish, and the
+  shared pointer stamp of `publishAsync` between its share and its publish.
+- **A share from one member of a public graph reaches a member with no
+  connection to it only through the graph's owner** (#1611, #3251): the
+  owner passes it on with its change notice (#3256), and no other node does.
+  While the owner is offline or not connected to a member, that member gets
+  another member's write only through a sync with a peer that holds it. A
+  notice is sent once, with no retry; a member that misses it gets the write
+  with its next pull, within about 90 s while the graph is in use on that
+  member (#3258), and otherwise from the periodic sync, which re-syncs a
+  peer about every 15 minutes.
+- **A request over a relayed connection still sets up a second circuit that
+  is closed at once** (#3211): the request then goes out on the open
+  connection (#3216), but each one costs a circuit on a relay.
+- **A subscriber that does not get a graph's definition is not asked again
+  until the next subscribe call** (#3207): when no connected peer holds it,
+  or the request fails for a reason other than the one #3216 removes.
+- **A public graph that is not registered on chain can stay unsynced on a
+  member that already holds some of its content** (#3207, #3249): the
+  repeated catch-up job proves an empty graph only when every peer it asks
+  answers empty, and once sub-graph content has reached the member by
+  another path such a round no longer proves the graph. The repeats are
+  kept in memory, and a restart starts them over.
+- **A public graph created before 10.0.17, or with an id that its owner does
+  not namespace, has no owner-signed seed** (#3249): the owner makes the
+  seed when it creates a graph, and none is made later for an older graph.
+- **Blazegraph can return the delete character U+007F as another character**
+  (#3209): a catalog row whose literal holds it is refused on such a node.
+- **Overlapping first shares into a private graph set up one epoch each, and
+  a recipient that misses more than 64 shares of an epoch refuses the later
+  ones until the epoch is replaced** (#3202).
+- **A catalog filter given a slug as a read returns it finds nothing when the
+  slug needed encoding** (#3235, #3239): a read returns a catalog's slug
+  percent-encoded, as its IRI stores it, and the filter encodes the value
+  again. Slugs made from a name by the node (`[a-z0-9-]`) are not affected.
+  Pass the slug as it was written.
+
+### Fixed
+
+- **A member of a public graph gets another member's write through the
+  owner within seconds** (#3248, #3256, #3258, #3251): a member's share
+  reached the owner (#3208), and a member with no connection to the writer
+  got it only at its next sync with the owner, after a new connection or
+  from the periodic reconciler, minutes later. In the report, nothing had
+  arrived after 6 minutes. The owner now tells the graph's followers that
+  the graph changed, and they pull from it at once (#3256). A member that
+  stores a sub-graph's rows by sync registers the sub-graph (#3248):
+  before, it held the rows, but reads over the graph's partitions left them
+  out and writes into the sub-graph were refused. In an end-to-end test
+  with three nodes behind a relay, where the members were not connected to
+  each other, a member held the other member's sub-graph share 7 to 15 s
+  after it was shared, and its root share 10 to 16 s after.
+- **A large transfer of another graph no longer holds off every
+  shared-memory pull** (#3258, #3251): on a node with one sync slot and no
+  queue, a Verified Memory transfer of another graph held the slot for
+  minutes, and every shared-memory pull of a new graph was refused at once
+  with `Sync backpressure rejected shared-memory:...`. Nothing retried a
+  refused pull before the next connection or reconciler run. A
+  shared-memory pull now takes a reserved slot when no general slot is
+  free, and waits for up to 60 s in a queue of its own.
+- **An already synced member no longer waits 15 minutes or more for a write
+  that only the owner holds** (#3258, #3251): an always-on member pulled a
+  public graph again only from the peer reconciler, which re-syncs a peer
+  whose last sync is 10 minutes old on a five-minute tick, or at a new
+  connection. A write that reached only the owner changed nothing that the
+  member polled. While a graph is in use on an Edge it is now pulled every
+  60 s, from the owner when it is connected, and the member starts a pull
+  that fetches such a write within about 90 s.
+- **A subscription left unsynced by its first round is caught up again**
+  (#3249, #3207): a member subscribed to an empty public graph that is not
+  registered on chain, three of the eight syncs of its first round were
+  aborted, and the job ended unproven. Nothing ran it again, so the
+  subscription stayed `synced: false`, also after shares arrived, and the
+  graph was not writable on the member. The job is now repeated, at most
+  eight times over about an hour. In checks on a public network, 32 of 32
+  member subscriptions reported `synced` within 12 to 56 s.
+- **A saved subscription that comes back unsynced after a restart is caught
+  up** (#3249, #3251): a subscription restored at start, from the rolling
+  activation, or once its authority recovered, came back with the flags it
+  had saved, and only the subscribe route started a catch-up job. A
+  subscription whose job had not finished before the node stopped stayed
+  unsynced. Each activation of a saved, unsynced subscription now runs the
+  same job, as the graph's own local agent. The startup readiness migration
+  ran once over the rows that were live at the time, so a row that was
+  dormant then lost its flags at the next subscribe call; it is now
+  migrated when it activates.
+- **A share no longer fails on a fence that drops seconds later** (#3250,
+  #3052): a share whose root write met the legacy shared-memory retirement
+  fence waited 2 s and was refused, and the promote queue retried it 48 to
+  72 s later and then at growing intervals. A graph's fence is raised and
+  dropped many times a minute while the node's catalog receiver applies
+  heads, so in the 10.0.24 checks share calls took 60 to 80 s, and one
+  queued job was refused at every attempt for 16 minutes. A share now waits
+  for the fence in front of it to drop, for up to 60 s.
+- **The owner of a new public graph no longer logs that it is denied its
+  graph's shared memory** (#3246, #3198): the gossip subscription and the
+  shared-memory sync planning logged `SWM gossip subscription denied for
+  "<graph>": local node is not authorized` and `Skipping SWM sync for
+  unauthorized or unconfirmed context graph "<graph>"` at warn while the
+  graph's RFC-64 authority was not accepted on the node yet: on the owner
+  when it created the graph and after its restart, and on a member when it
+  subscribed. Nothing had refused the node. The node now says at info what
+  the subscription waits for, and says when it is made. A refusal is still a
+  warning.
+- **The catalog replay after a connection warns only when heads may be
+  missing** (#3255, #3251): the node logged `RFC-64 catalog replay
+  incomplete for "<graph>" after <peer> connected` at warn for any failure
+  in a replay run, and once for every connection that joined the same run,
+  so a node logged it for every connected peer. Most such failures are a
+  peer that was busy or did not answer, which later replays ask again.
+- **A peer whose catalog replay request was answered busy, or whose replay
+  failed, is a follower of the graph** (#3255): a peer that asked for a
+  graph's catalog heads under the accepted policy was counted among the
+  graph's followers only once this node's replay to it completed. A busy
+  answer or a failed replay left it out, and this node's own shares into
+  the graph did not go to it directly.
+
+### Changed
+
+- **`DKG_SYNC_GLOBAL_MAX_INFLIGHT=1` is for the cold-start soak only**
+  (#3258): the soak document in the repository prescribed one sync slot and
+  no queue. It now says that the setting is for the soak, and gives the
+  defaults for production: 10 running, 20 waiting.
+- **Fence events of the legacy shared-memory boundary are logged by
+  outcome** (#3250): a promote that waited and was admitted is logged at
+  info, and every other fence event at warn, where every event was logged
+  at warn.
+
+### Added
+
+- **A change notice from the owner of a public graph** (#3256): the owner
+  tells the graph's followers that the graph changed, and they pull the
+  change from it. It carries no data; see the upgrade table.
+- **Switches for the shared-memory pull changes** (#3258):
+  `DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT=0` gives up the reserved slot,
+  and `DKG_RECENT_SHARED_MEMORY_PULL_ENABLED=0` turns off the pull of public
+  graphs in use.
+
 ## [10.0.24] - 2026-10-14
 
 A patch for queued publications into private Context Graphs. A queued
