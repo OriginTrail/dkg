@@ -98,7 +98,9 @@
 //   MEMBER_SHARING_BOUND_SECS    time a write has to reach a node (60)
 //   MEMBER_SHARING_SYNCED_SECS   time a member has to list a graph as synced (90)
 //   MEMBER_SHARING_LATER_SECS    age of the members' subscription in case 5 (300)
-//   MEMBER_SHARING_NODES         temporary nodes owner,member1,member2 (7,8,9)
+//   MEMBER_SHARING_NODES         temporary nodes owner,member1,member2 (default: the
+//                                first three of 7, 8, 9, 10 with no folder and no
+//                                listener on their API or libp2p port)
 //   MEMBER_SHARING_BIG_ASSETS    assets of the large graph of case 6 (32)
 //   MEMBER_SHARING_BIG_TRIPLES   triples per asset of that graph (2000)
 //   MEMBER_SHARING_KEEP_NODES=1  leave the temporary nodes running (debugging)
@@ -106,6 +108,7 @@
 // Run against a running devnet: scripts/devnet-test-issue-3251-member-sharing.mjs
 
 import { spawn, spawnSync } from 'node:child_process';
+import { connect } from 'node:net';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,7 +134,11 @@ const DEFINITION_MS = 90_000;
 const LATER_MS = positive('MEMBER_SHARING_LATER_SECS', 300) * 1000;
 const BIG_ASSETS = Math.round(positive('MEMBER_SHARING_BIG_ASSETS', 32));
 const BIG_TRIPLES = Math.round(positive('MEMBER_SHARING_BIG_TRIPLES', 2000));
-const [OWNER, M1, M2] = (process.env.MEMBER_SHARING_NODES || '7,8,9').split(',').map(Number);
+const LIBP2P_PORT_BASE = Number(process.env.LIBP2P_PORT_BASE || 10001);
+// devnet.sh addnode takes node numbers up to 10 (one Hardhat key each).
+const NODE_CANDIDATES = [7, 8, 9, 10];
+// The temporary nodes; pickNodes() sets them before anything else runs.
+let [OWNER, M1, M2] = [7, 8, 9];
 const SUB = 's';
 const LABEL = 'urn:issue3251:label';
 // Nobody listens on the discard port: a dial of it is refused at once.
@@ -319,6 +326,22 @@ async function link(from, to) {
   return { readable: true, total: mine.length, relayed: mine.filter(c => c.transport === 'relayed').length };
 }
 
+/**
+ * The peers of this devnet: every node folder's address (`multiaddr`), or
+ * its status when that file is missing. A peer outside it (a node an earlier
+ * suite left running, say) is nothing the topology accounts for.
+ */
+async function devnetPeers() {
+  const peers = new Set(Object.values(PEER));
+  for (const node of readdirSync(DEVNET_DIR).map(entry => /^node(\d+)$/.exec(entry)?.[1]).filter(Boolean).map(Number)) {
+    let address = '';
+    try { address = readFileSync(join(DEVNET_DIR, `node${node}`, 'multiaddr'), 'utf8').trim(); } catch { /* none */ }
+    const id = address.split('/p2p/').at(-1) || (await api(node, 'GET', '/api/status', undefined, { timeoutMs: 5000 })).json?.peerId;
+    if (id) peers.add(id);
+  }
+  return peers;
+}
+
 /** The topology every conclusion rests on; the problems, or none. */
 async function topologyProblems() {
   const expected = [[M1, OWNER, 'relayed'], [OWNER, M1, 'relayed'], [M2, OWNER, 'relayed'], [OWNER, M2, 'relayed'], [M1, M2, 'none'], [M2, M1, 'none']];
@@ -326,6 +349,14 @@ async function topologyProblems() {
   for (const [a, b, expect] of expected) {
     const problem = linkProblem(await link(a, b), expect, label(a), label(b));
     if (problem) problems.push(problem);
+  }
+  // A member connected to a peer outside the devnet could get the graph from it.
+  const known = await devnetPeers();
+  for (const member of [M1, M2]) {
+    const answer = await api(member, 'GET', '/api/connections');
+    if (answer.status !== 200 || !Array.isArray(answer.json?.connections)) continue; // reported by the link checks
+    const strangers = [...new Set(answer.json.connections.map(c => c.peerId).filter(id => typeof id === 'string' && !known.has(id)))];
+    if (strangers.length) problems.push(`${label(member)} is connected to ${strangers.length} peer(s) that are no node of this devnet (${strangers.map(id => id.slice(-8)).join(', ')}): they could carry the graph`);
   }
   return problems;
 }
@@ -728,6 +759,48 @@ async function busyMember(pub, big) {
 // ── the run ──────────────────────────────────────────────────────────────────
 let EXIT = 0;
 
+/** Whether a connection to the port succeeds: something listens there. */
+function listening(port) {
+  return new Promise(resolve => {
+    const socket = connect({ host: '127.0.0.1', port });
+    const end = result => { socket.destroy(); resolve(result); };
+    socket.once('connect', () => end(true));
+    socket.once('error', () => end(false));
+    socket.setTimeout(1000, () => end(false));
+  });
+}
+
+/** Why a node number cannot be used: its folder exists, or its API or libp2p port is in use. */
+async function slotTaken(node) {
+  if (existsSync(join(DEVNET_DIR, `node${node}`))) return 'its folder exists';
+  for (const port of [API_PORT_BASE + node - 1, LIBP2P_PORT_BASE + node - 1]) {
+    if (await listening(port)) return `port ${port} is in use`;
+  }
+  return null;
+}
+
+/**
+ * The temporary nodes: the first three free numbers of 7, 8, 9, 10, or the
+ * three of MEMBER_SHARING_NODES, which must all be free. An earlier suite can
+ * leave a node folder or a running node behind; such a number is left alone.
+ */
+async function pickNodes() {
+  const explicit = process.env.MEMBER_SHARING_NODES;
+  const candidates = explicit ? explicit.split(',').map(Number) : NODE_CANDIDATES;
+  const free = [];
+  const taken = [];
+  for (const node of candidates) {
+    const why = await slotTaken(node);
+    if (why) taken.push(`node${node}: ${why}`);
+    else free.push(node);
+  }
+  if (explicit ? taken.length > 0 || free.length !== 3 : free.length < 3) {
+    return { problem: `no three free node numbers among ${candidates.join(', ')} (${taken.join('; ') || 'MEMBER_SHARING_NODES must name three'})` };
+  }
+  [OWNER, M1, M2] = free.slice(0, 3);
+  return { taken };
+}
+
 async function run() {
   if (!ADMIN_TOKEN) return skip('no devnet: no auth token');
   const multiaddrOf = node => { try { return readFileSync(join(DEVNET_DIR, `node${node}`, 'multiaddr'), 'utf8').trim(); } catch { return ''; } };
@@ -735,9 +808,9 @@ async function run() {
   RELAY2 = multiaddrOf(2);
   if (!RELAY1 || !RELAY2) return skip(`no devnet: the multiaddr of node 1 or node 2 is missing under ${DEVNET_DIR}`);
   if (nodeConfig(1)?.nodeRole !== 'core' || nodeConfig(2)?.nodeRole !== 'core') return skip('node 1 and node 2 must be Cores, the relays of the members');
-  for (const node of [OWNER, M1, M2]) {
-    if (existsSync(join(DEVNET_DIR, `node${node}`))) return skip(`${join(DEVNET_DIR, `node${node}`)} already exists (set MEMBER_SHARING_NODES)`);
-  }
+  const picked = await pickNodes();
+  if (picked.problem) return skip(picked.problem);
+  if (picked.taken.length) note(`node numbers in use, left alone: ${picked.taken.join('; ')}`);
   say(`bound ${seconds(BOUND_MS)} s per write, ${seconds(SYNCED_MS)} s for the synced flag; owner node${OWNER}, members node${M1} and node${M2} (member 2 with one sync slot and no queue); run ${STAMP}`);
 
   // Reachable through relays only: the owner through node 1 and node 2, member 1

@@ -50,7 +50,7 @@ function matchingReports(dir) {
 // A Node script with a shebang; the orchestrator runs it by its path, so a bash stub stands in for it.
 suiteFiles.push('devnet-test-issue-3251-member-sharing.mjs');
 
-test('the issue-3251 suite has one entry, after the rc.12 probes and before the node-ui smoke', async t => {
+test('the issue-3251 suite has one entry, after the rfc38 extras and before the rc.12 probes', async t => {
   // A run that stops at its first suite lists every later suite as NOT_RUN, with its command.
   const dir = setup(t, { first: 'exit 1' });
   assert.equal((await launch(dir, { FAIL_FAST: '1' }).done).status, 1);
@@ -59,8 +59,9 @@ test('the issue-3251 suite has one entry, after the rc.12 probes and before the 
   assert.deepEqual(entries.map(s => [s.id, s.command]),
     [['issue-3251-member-sharing', join(dir, 'scripts', 'devnet-test-issue-3251-member-sharing.mjs')]]);
   const at = suites.indexOf(entries[0]);
-  assert.equal(suites[at - 1].group, 'rc12-probes');
-  assert.equal(suites[at + 1].group, 'node-ui');
+  // Before the probes: one of them adds a node 7 of its own.
+  assert.equal(suites[at - 1].group, 'rfc38-extras');
+  assert.equal(suites[at + 1].group, 'rc12-probes');
   // Not optional: no SKIP_* switch removes it from a run that reaches it.
   const partial = setup(t, { first: 'exit 1' });
   await launch(partial, { FAIL_FAST: '1', SKIP_UI: '1', SKIP_PROBES: '1', SKIP_RFC38_EXTRAS: '1', SKIP_RFC49: '1' }).done;
