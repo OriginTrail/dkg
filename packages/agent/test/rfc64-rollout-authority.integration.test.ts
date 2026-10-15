@@ -7220,7 +7220,10 @@ describe('RFC-64 rollout authority integration', () => {
       subscribed: true,
       metaSynced: true,
     });
-    expect(memberAuthority).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
+    expect(memberAuthority).toHaveBeenCalledWith(
+      CONTEXT_GRAPH_ID,
+      { onAuthorityWait: expect.any(Function) },
+    );
     expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true);
 
     // A core's ordinary host reconciliation is another legacy entry point.

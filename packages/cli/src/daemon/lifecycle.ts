@@ -207,6 +207,8 @@ import {
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
 import { registerJoinMetadataEmptyVmSettlement } from '../context-graph-empty-vm-readiness.js';
+import { startActivationCatchups } from './context-graph-activation-catchup.js';
+import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -1256,7 +1258,14 @@ async function runDaemonInnerWithStartupOwnership(
 
   let startupUncaughtExceptionHandler: NodeJS.UncaughtExceptionListener | undefined;
   let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
+  // Stops what would start catch-up jobs later; replaced once they exist.
+  let stopCatchupTriggers = (): void => {};
   registerStartupFailureCleanup(async () => {
+    try {
+      stopCatchupTriggers();
+    } catch {
+      // The writer below must still retire.
+    }
     // The graceful shutdown handlers are registered only after startup succeeds. A rejection
     // before that boundary must still retire the writer it started; otherwise queued appends can
     // outlive the failed boot and race the next startup (or test teardown) through DKG_HOME.
@@ -3403,6 +3412,13 @@ async function runDaemonInnerWithStartupOwnership(
 
   let corsAllowed: CorsAllowlist = "*";
   daemonState.catchupRunner = createCatchupRunner(agent);
+  // A persisted subscription the agent restores unsynced (at start, or later
+  // when its authority recovers) gets the subscribe route's catch-up job.
+  const stopActivationCatchups = startActivationCatchups({ agent, store: dashDb, catchupTracker, log });
+  stopCatchupTriggers = () => {
+    stopActivationCatchups();
+    cancelContextGraphReadinessRepeats();
+  };
 
   const server = createServer(async (req, res) => {
     try {
@@ -3692,7 +3708,13 @@ async function runDaemonInnerWithStartupOwnership(
     // must land before the first suspension point. Extracted so a test can
     // suspend inside `removeApiPort` and prove a subscribe crossing that
     // window is already refused — which is not observable from here.
-    await beginGracefulShutdown({ state: daemonState, removeApiPort, log });
+    await beginGracefulShutdown({
+      state: daemonState,
+      removeApiPort,
+      log,
+      endShareAdmissionWaits: () => agent.endLegacySwmShareAdmissionWaits(),
+      stopCatchupTriggers,
+    });
     const cleanupStateFiles = async () => {
       await removeOwnedDaemonRuntimeState().catch((err: any) =>
         log(`Runtime state cleanup error: ${err?.message ?? String(err)}`),
