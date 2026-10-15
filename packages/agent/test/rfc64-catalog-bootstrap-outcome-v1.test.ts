@@ -174,6 +174,35 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
     }
   });
 
+  it('reports an ordinary failure when providers end in two different terminal reasons (GH#3134)', () => {
+    const overLimit = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-activation',
+      'the exact precommit failed',
+      { cause: new FinalizedVmChainInventoryLimitErrorV1('7' as never, 819n) },
+    );
+    const incomplete = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-incomplete',
+      'the authorized provider does not have the signed bundle',
+    );
+    for (const providerErrors of [
+      [overLimit, incomplete],
+      [incomplete, overLimit],
+    ]) {
+      const aggregate = new Rfc64CatalogProviderFailureAggregateV1(2, providerErrors.map(
+        (error, index) => ({ providerPeerId: `peer-${index}`, error }),
+      ));
+      const serviceFailure = new Rfc64CatalogReconciliationTerminalErrorV1({
+        outcome: 'failed',
+        error: aggregate,
+      });
+      expect(classifyRfc64CatalogReconciliationTerminalReasonV1(aggregate)).toBeNull();
+      expect(classifyRfc64CatalogBootstrapFailureV1(true, serviceFailure)).toEqual({
+        outcome: 'failed',
+        completionReason: null,
+      });
+    }
+  });
+
   it('classifies only an all-incomplete provider set as known-incomplete', () => {
     const aggregate = new Rfc64CatalogProviderFailureAggregateV1(2, [0, 1].map((index) => ({
       providerPeerId: `peer-${index}`,

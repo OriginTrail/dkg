@@ -20,6 +20,8 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64CatalogWorkloadOwnerV1 } from './rfc64/catalog-runtime-v1.js';
 import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
+import type { Rfc64CatalogReconciliationTerminalReasonV1 } from
+  './rfc64/public-catalog-reconciliation-outcome-v1.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import type { Rfc64ActivePeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
@@ -45,10 +47,8 @@ export type Rfc64PublicCatalogBootstrapOutcomeV1 =
   | 'known-incomplete'
   | 'failed';
 
-export type Rfc64CatalogBootstrapCompletionReasonV1 =
-  | 'no-authorized-provider'
-  /** GH#3134: the graph has more assets on chain than this node's pinned-snapshot scan reads. */
-  | 'chain-inventory-limit';
+/** Why a private finalized-VM target is known-incomplete: the reconciliation's terminal reason. */
+export type Rfc64CatalogBootstrapCompletionReasonV1 = Rfc64CatalogReconciliationTerminalReasonV1;
 
 export type Rfc64CatalogRecoveryQueueOutcomeV1 = Readonly<
   | { kind: 'not-authorized' }

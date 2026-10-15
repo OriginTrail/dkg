@@ -134,6 +134,29 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
     )).toBeNull();
   });
 
+  it('reports no terminal reason when providers end in two different ones, in either order (GH#3134)', () => {
+    const overLimit = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-activation',
+      'precommit failed',
+      { cause: new FinalizedVmChainInventoryLimitErrorV1('7' as never, 819n) },
+    );
+    const incomplete = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-incomplete',
+      'the authorized provider does not have the signed bundle',
+    );
+    // Each one alone is terminal, so a null below comes from the disagreement.
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(overLimit)).toBe('chain-inventory-limit');
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(incomplete)).toBe('no-authorized-provider');
+    for (const providerErrors of [[overLimit, incomplete], [incomplete, overLimit]]) {
+      expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
+        new Rfc64CatalogProviderFailureAggregateV1(2, providerErrors.map((error, index) => ({
+          providerPeerId: `peer-${index}`,
+          error,
+        }))),
+      )).toBeNull();
+    }
+  });
+
   it('translates only the exact typed private VM incomplete failure', () => {
     const incomplete = new FinalizedVmCompositionErrorV1(
       'finalized-vm-composition-incomplete',
