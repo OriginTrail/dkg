@@ -14,12 +14,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
-import {
-  loadBoundedAuthorCatalogHistoryV1,
-  type BoundedAuthorCatalogHistoryV1,
-  type PublishAuthorCatalogExactSetSuccessorResultV1,
-  type Rfc64CatalogSuccessorAssetInputV1,
-  type Rfc64StagedAuthorCatalogHeadRefV1,
+import type {
+  PublishAuthorCatalogExactSetSuccessorResultV1,
+  Rfc64CatalogSuccessorAssetInputV1,
+  Rfc64StagedAuthorCatalogHeadRefV1,
 } from '../dkg-agent-rfc64-catalog.js';
 import { mapWithConcurrencyDrained } from '../map-with-concurrency.js';
 import type { AppliedCatalogHeadSnapshotV1 } from '../rfc64/inventory-v1/index.js';
@@ -30,6 +28,10 @@ import { compareRfc64PublicCatalogSuccessorAssetsByKaIdV1 } from
   '../rfc64/public-catalog-successor-asset-v1.js';
 import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from
   '../rfc64/public-catalog-successor-producer-v1.js';
+import {
+  loadBoundedAuthorCatalogHistoryV1,
+  type BoundedAuthorCatalogHistoryV1,
+} from './author-catalog-history.js';
 import {
   Rfc64VerifiedCatalogRowSetV1,
   type Rfc64VerifiedCatalogRowsV1,

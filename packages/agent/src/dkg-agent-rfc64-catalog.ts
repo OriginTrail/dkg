@@ -24,14 +24,10 @@ export { RFC64_CATALOG_TARGET_MAX_ENTRIES_V1, RFC64_CATALOG_TARGET_MAX_CONTEXT_O
 import {
   SYSTEM_CONTEXT_GRAPHS,
   DKGEvent,
-  ZERO_DIGEST32_V1,
-  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
   assertContextGraphIdV1,
   assertNetworkIdV1,
-  assertSignedAuthorCatalogBucketEnvelopeV1,
-  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   computeAuthorCatalogScopeDigestV1,
@@ -53,8 +49,6 @@ import {
   type DecimalU64V1,
   type AuthorCatalogScopeV1,
   type CountV1,
-  type SignedAuthorCatalogBucketEnvelopeV1,
-  type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
@@ -181,6 +175,10 @@ import {
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
 import { Rfc64CatalogResponsibilityRosterV1 } from './internal/rfc64-catalog-responsibility-roster-v1.js';
+import {
+  loadBoundedAuthorCatalogHistoryV1,
+  type BoundedAuthorCatalogHistoryV1,
+} from './internal/author-catalog-history.js';
 import {
   projectRfc64CatalogTransportStateV1,
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
@@ -5453,74 +5451,4 @@ function countToSafeInteger(value: CountV1, label: string): number {
     throw new Error(`${label} is outside the exact safe-integer evidence boundary`);
   }
   return parsed;
-}
-
-export interface BoundedAuthorCatalogHistoryV1 {
-  readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
-  readonly previousDirectoryPath: readonly SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
-  readonly previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null;
-}
-
-export async function loadBoundedAuthorCatalogHistoryV1(
-  persistence: Rfc64PersistenceV1,
-  ref: Rfc64StagedAuthorCatalogHeadRefV1,
-): Promise<BoundedAuthorCatalogHistoryV1> {
-  const storedHead = await persistence.controlObjects.getVerifiedObject({
-    objectDigest: ref.objectDigest,
-    signatureVariantDigest: ref.signatureVariantDigest,
-    verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-  });
-  if (storedHead === null) throw new Error('RFC-64 predecessor head is not durably staged');
-  assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
-  const previousHead = storedHead.envelope;
-  if (
-    previousHead.payload.bucketCount !== '1'
-    || previousHead.payload.directoryHeight !== '0'
-    || BigInt(previousHead.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
-  ) {
-    throw new Error('RFC-64 predecessor is outside the bounded one-bucket successor slice');
-  }
-
-  const storedRoot = await persistence.controlObjects.getVerifiedObjectByDigest({
-    objectDigest: previousHead.payload.directoryRootDigest,
-    verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-  });
-  if (storedRoot === null) throw new Error('RFC-64 predecessor directory root is not staged');
-  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(
-    storedRoot.envelope,
-    previousHead.payload.bucketCount,
-  );
-  const root = storedRoot.envelope;
-  const descriptor = root.payload.entries[0];
-  if (descriptor === undefined || !('bucketDigest' in descriptor)) {
-    throw new Error('RFC-64 predecessor root has no level-zero bucket descriptor');
-  }
-  if (descriptor.rowCount !== previousHead.payload.totalRows) {
-    throw new Error('RFC-64 predecessor root row count does not match its head');
-  }
-  if (
-    (previousHead.payload.totalRows === '0')
-    !== (descriptor.bucketDigest === ZERO_DIGEST32_V1)
-  ) {
-    throw new Error('RFC-64 predecessor empty-bucket descriptor is inconsistent');
-  }
-
-  let previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null = null;
-  if (descriptor.bucketDigest !== ZERO_DIGEST32_V1) {
-    const storedBucket = await persistence.controlObjects.getVerifiedObjectByDigest({
-      objectDigest: descriptor.bucketDigest,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-    });
-    if (storedBucket === null) throw new Error('RFC-64 predecessor bucket is not staged');
-    assertSignedAuthorCatalogBucketEnvelopeV1(storedBucket.envelope);
-    previousBucket = storedBucket.envelope;
-    if (previousBucket.payload.rows.length !== Number(previousHead.payload.totalRows)) {
-      throw new Error('RFC-64 predecessor bucket row count does not match its head');
-    }
-  }
-  return Object.freeze({
-    previousHead,
-    previousDirectoryPath: Object.freeze([root]),
-    previousBucket,
-  });
 }

@@ -1,7 +1,8 @@
 /**
- * GH#3134 — reading the rows of a staged catalog head bucket by bucket, each through its verified
- * directory path. A catalog of real signed assets is placed one asset at a time in one bucket, then
- * moved to more buckets by the capacity transition producer.
+ * GH#3134 — reading a staged catalog head bucket by bucket, each through its verified directory
+ * path: the rows of an applied head, and the predecessor of a successor in one bucket. A catalog of
+ * real signed assets is placed one asset at a time in one bucket, then moved to more buckets by the
+ * capacity transition producer.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -21,6 +22,8 @@ import {
   readAppliedCatalogBucketsV1,
 } from '../src/rfc64/applied-catalog-authority-transition-v1.js';
 import { produceAuthorCatalogCapacityTransitionV1 } from '../src/rfc64/author-catalog-capacity-transition-v1.js';
+import { loadBoundedAuthorCatalogHistoryV1 } from '../src/internal/author-catalog-history.js';
+import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import {
   PRODUCER_DEPLOYMENT,
   producerAssetV1,
@@ -92,6 +95,60 @@ describe('reading an applied catalog bucket by bucket (GH#3134)', () => {
     store.add(moved.stagedObjects.filter((object) => object !== moved.buckets[0]));
 
     await expect(read(store, moved.head, scope('4'))).rejects.toThrow('catalog bucket is not staged');
+  });
+});
+
+describe('loading the predecessor of a successor in one bucket (GH#3134)', () => {
+  it('loads the root and the one bucket of a one-bucket catalog', async () => {
+    const { store, oneBucket } = await catalog();
+
+    const history = await loadBoundedAuthorCatalogHistoryV1(persistence(store), ref(oneBucket.head));
+
+    expect(history.previousHead).toEqual(oneBucket.head);
+    expect(history.previousDirectoryPath.map((node) => node.objectDigest))
+      .toEqual([oneBucket.head.payload.directoryRootDigest]);
+    expect(history.previousBucket).toEqual(oneBucket.bucket);
+  });
+
+  it('loads the bucket it is asked for, or none for an empty one, in a catalog of eight buckets', async () => {
+    const { store, oneBucket } = await catalog();
+    const moved = await moveTo(oneBucket, '8');
+    store.add(moved.stagedObjects);
+    const held = moved.buckets[0]!;
+    const empty = ['0', '1', '2', '3', '4', '5', '6', '7']
+      .find((bucketId) => !moved.buckets.some((bucket) => bucket.payload.bucketId === bucketId)) as DecimalU64V1;
+
+    const loaded = await loadBoundedAuthorCatalogHistoryV1(persistence(store), ref(moved.head), held.payload.bucketId);
+    const none = await loadBoundedAuthorCatalogHistoryV1(persistence(store), ref(moved.head), empty);
+
+    expect(loaded.previousBucket).toEqual(held);
+    expect(none.previousBucket).toBeNull();
+    expect(none.previousDirectoryPath).toEqual(loaded.previousDirectoryPath);
+  });
+
+  it('walks a two-level directory to the leaf over the bucket', async () => {
+    const { store, oneBucket } = await catalog();
+    const moved = await moveTo(oneBucket, '512');
+    store.add(moved.stagedObjects);
+    const last = moved.buckets.at(-1)!;
+
+    const history = await loadBoundedAuthorCatalogHistoryV1(persistence(store), ref(moved.head), last.payload.bucketId);
+
+    expect(history.previousDirectoryPath.map((node) => node.payload.level)).toEqual(['1', '0']);
+    expect(BigInt(history.previousDirectoryPath[1]!.payload.firstBucketId))
+      .toBe((BigInt(last.payload.bucketId) / 256n) * 256n);
+    expect(history.previousBucket).toEqual(last);
+  });
+
+  it('refuses a bucket outside the catalog and a directory node missing from the store', async () => {
+    const { store, oneBucket } = await catalog();
+    const moved = await moveTo(oneBucket, '512');
+    store.add(moved.stagedObjects.filter((object) => object !== moved.directoryNodes[1]));
+
+    await expect(loadBoundedAuthorCatalogHistoryV1(persistence(store), ref(moved.head), '512' as DecimalU64V1))
+      .rejects.toThrow('RFC-64 selected bucket is outside the predecessor catalog');
+    await expect(loadBoundedAuthorCatalogHistoryV1(persistence(store), ref(moved.head), '0' as DecimalU64V1))
+      .rejects.toThrow('RFC-64 predecessor directory node is not staged');
   });
 });
 
@@ -167,5 +224,20 @@ function memoryControlObjects() {
       if (envelope === undefined) return null;
       return { envelope, issuerSignature: await input.verifyIssuerSignature(envelope) };
     },
+    getVerifiedObject(input: Readonly<{
+      objectDigest: string;
+      signatureVariantDigest: string;
+      verifyIssuerSignature: typeof verify;
+    }>) {
+      return this.getVerifiedObjectByDigest(input);
+    },
   };
+}
+
+function persistence(store: ReturnType<typeof memoryControlObjects>): Rfc64PersistenceV1 {
+  return { controlObjects: store } as unknown as Rfc64PersistenceV1;
+}
+
+function ref(head: SignedAuthorCatalogHeadEnvelopeV1) {
+  return { objectDigest: head.objectDigest, signatureVariantDigest: head.objectDigest };
 }
