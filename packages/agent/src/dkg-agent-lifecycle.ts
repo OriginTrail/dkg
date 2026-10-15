@@ -7411,8 +7411,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ownerPeers.set(contextGraphId, { at: Date.now(), peerIds });
         return peerIds.includes(peerId);
       },
+      // The pull the reconciler would make, brought forward: classed and measured as one.
       pull: async (peerId, notice) => {
-        const result = await this.syncSharedMemoryFromPeerDetailed(peerId, [notice.contextGraphId], { source: 'change-notice' });
+        const result = await this.syncSharedMemoryFromPeerDetailed(peerId, [notice.contextGraphId], { source: 'reconcile' });
         return (result.deferredBackpressure ?? 0) > 0 ? 'deferred' : 'pulled';
       },
       log: (message) => this.log.info(ctx, message),
