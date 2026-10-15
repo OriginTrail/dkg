@@ -570,14 +570,21 @@ export type AsyncKnowledgeAssetVmPublishPreflightResult =
   | { readonly action: 'execute' }
   | { readonly action: 'noop'; readonly reason?: string };
 
+/** Unmarked legacy results remain eligible for recovery, never certified completion. */
+export type AsyncKnowledgeAssetVmPublishExecutionResult =
+  | (PublishResult & { readonly localFinalizationComplete?: undefined })
+  | AsyncKnowledgeAssetVmPublishCertifiedResult;
+
 /** Process-local completion evidence returned by the named-KA executor. */
-export interface AsyncKnowledgeAssetVmPublishExecutionResult extends PublishResult {
+export interface AsyncKnowledgeAssetVmPublishCertifiedResult extends PublishResult {
   /**
    * Process-local evidence from the executor: all required local finalization writes succeeded,
    * or catalog placement has a durable independent repair owner. Existing best-effort gossip
-   * and legacy retirement remain best-effort. Requires a confirmed on-chain result; absent means recovery.
+   * remains best-effort. The certificate requires a confirmed on-chain result.
    */
-  readonly localFinalizationComplete?: true;
+  readonly localFinalizationComplete: true;
+  readonly status: 'confirmed';
+  readonly onChainResult: NonNullable<PublishResult['onChainResult']>;
 }
 
 /** Cohesive lifecycle boundary for one named-KA async queue job. */

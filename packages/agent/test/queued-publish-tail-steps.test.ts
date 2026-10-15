@@ -216,6 +216,8 @@ describe('the steps a queued executor reports after the confirmation', () => {
     const result = await execute(request(kind === 'update'
       ? { vmCurrentAssertion: `0x${'cd'.repeat(32)}` } : {}));
     expect(result.localFinalizationComplete).toBe(true);
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
     expect(calls.indexOf('writeReceipt()')).toBeLessThan(calls.indexOf('clearPublishedGraph()'));
   });
 
@@ -314,7 +316,7 @@ describe('the steps a queued executor reports after the confirmation', () => {
 
   it.each(['tentative', 'confirmed'] as const)('does not access gossip for %s without a chain result', async (status) => {
     const { calls, execute, host } = harness({ publish: async () => ({
-      ...publishResult(status), onChainResult: undefined,
+      ...publishResult(status), onChainResult: undefined, localFinalizationComplete: true,
     }) });
     Object.defineProperty(host, 'gossip', { get: () => { throw new Error('gossip not initialized'); } });
     const result = await execute();

@@ -400,6 +400,7 @@ export {
   type AsyncLiftRetryStateReader,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
   type AsyncKnowledgeAssetVmPublishExecutionResult,
+  type AsyncKnowledgeAssetVmPublishCertifiedResult,
   type AsyncKnowledgeAssetVmPublishJobHandler,
   type AsyncKnowledgeAssetVmPublishPreflightInput,
   type AsyncKnowledgeAssetVmPublishPreflightResult,

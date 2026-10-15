@@ -5559,11 +5559,12 @@ export class PublishMethods extends DKGAgentBase {
       onPostConfirmationStep: opts?.onPostConfirmationStep,
     });
 
-    return {
-      ...result, assertionUri, seal,
-      // Override any upstream marker: only this complete queued lifecycle can certify its tail.
-      localFinalizationComplete,
-    };
+    // Override any upstream marker: only this complete queued lifecycle can certify its tail.
+    if (localFinalizationComplete === true && result.status === 'confirmed' && result.onChainResult) {
+      return { ...result, assertionUri, seal, status: 'confirmed',
+        onChainResult: result.onChainResult, localFinalizationComplete: true };
+    }
+    return { ...result, assertionUri, seal, localFinalizationComplete: undefined };
   }
 
   async publishFromFinalizedAssertion(this: DKGAgent,

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher } from '../src/async-lift-publisher-impl.js';
 import type { PublishResult } from '../src/publisher.js';
+import type { AsyncKnowledgeAssetVmPublishCertifiedResult, AsyncKnowledgeAssetVmPublishExecutionResult } from '../src/index.js';
 import { CONTROL_STATUS, DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI,
   jobSubject, serializeJobRecord, walletLockSubject } from '../src/async-lift-control-plane.js';
 import {
@@ -9,7 +10,7 @@ import {
   kaVmPublishRequest, kaVmRecoveryEvidence, recoveredResolution, stageKnowledgeAssetShareSnapshot,
 } from '../../../scripts/testing/ka-vm-publish.js';
 
-function completeResult(): PublishResult & { localFinalizationComplete?: true } {
+function completeResult(): AsyncKnowledgeAssetVmPublishCertifiedResult {
   return {
     status: 'confirmed', localFinalizationComplete: true,
     kaId: 7n, ual: KA_VM_KA_UAL, merkleRoot: new Uint8Array(32).fill(0x12), kaManifest: [],
@@ -20,9 +21,9 @@ function completeResult(): PublishResult & { localFinalizationComplete?: true } 
 
 async function scenario() {
   const store = new OxigraphStore();
-  let finish!: (result: PublishResult) => void;
+  let finish!: (result: AsyncKnowledgeAssetVmPublishExecutionResult) => void;
   let reject!: (error: Error) => void;
-  const execution = new Promise<PublishResult>((resolve, fail) => { finish = resolve; reject = fail; });
+  const execution = new Promise<AsyncKnowledgeAssetVmPublishExecutionResult>((resolve, fail) => { finish = resolve; reject = fail; });
   const repair = vi.fn(async () => {});
   let confirm!: () => void;
   let ids = 0;
@@ -78,16 +79,18 @@ describe('detached local completion', () => {
     expect(s.repair).not.toHaveBeenCalled();
   });
 
-  it.each(['unmarked', 'tentative', 'failed', 'local', 'wrong-hash', 'malformed'])(
+  it.each(['unmarked', 'tentative', 'failed', 'local', 'confirmed-no-chain', 'wrong-hash', 'malformed'])(
     'retains recovery for %s results', async (kind) => {
       const s = await scenario();
-      const result = completeResult();
+      const result: PublishResult & { localFinalizationComplete?: true } = { ...completeResult() };
       if (kind === 'unmarked') delete result.localFinalizationComplete;
       if (kind === 'tentative' || kind === 'failed') result.status = kind;
       if (kind === 'local') { result.status = 'tentative'; delete result.onChainResult; }
+      if (kind === 'confirmed-no-chain') delete result.onChainResult;
       if (kind === 'wrong-hash') result.onChainResult!.txHash = `0x${'ef'.repeat(32)}`;
       if (kind === 'malformed') (result as unknown as { merkleRoot: unknown }).merkleRoot = null;
-      s.finish(result);
+      // Untyped external executors can violate the TypeScript contract; retain runtime defenses.
+      s.finish(result as unknown as AsyncKnowledgeAssetVmPublishExecutionResult);
       await s.publisher.drainDetachedExecutions();
       expect((await s.publisher.getStatus(s.jobId))?.status).toBe('broadcast');
       expect(await s.publisher.reconcileTransactions()).toBe(1);
