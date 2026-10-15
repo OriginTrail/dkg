@@ -45,6 +45,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/index.js';
 import { CatalogRepairIntegrityErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
+import { rfc64SwmInventoryShadowRuntimeV1 } from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
 import {
   reconcileFinalizedSwmTwinFromCatalogProjection,
   type FinalizedSwmTwinCatalogProjectionEvidence,
@@ -88,6 +89,7 @@ const agents: DKGAgent[] = [];
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const agent of agents.splice(0)) {
     try { await agent.stop(); } catch { /* best-effort */ }
   }
@@ -126,8 +128,8 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
     expect(inventoryRows(member)).toEqual([b.kaUal]);
     expect(memberCatalog(member)).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
     expect(projectionRepair(member)).toMatchObject({ outcome: 'reconciled', consecutiveFailures: 0 });
-    // No projection failed, so nothing was swept and the capacity counts stand alone.
-    expect(healCounts(member)).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
+    // No projection failed, so nothing was swept.
+    expect(healCounts(member)).toBeUndefined();
     await whenDelivered(member, receiver);
     expect(memberCatalog(receiver)).toMatchObject({
       currentCatalogHeadDigest: memberCatalog(member)!.currentCatalogHeadDigest,
@@ -153,7 +155,7 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
     expect(memberCatalog(member)).toMatchObject({ inventoryRowCount: '1' });
     expect(memberCatalog(member)?.currentCatalogHeadDigest).not.toBe(catalogWithA?.currentCatalogHeadDigest);
     expect(projectionRepair(member)).toMatchObject({ outcome: 'reconciled', consecutiveFailures: 0 });
-    expect(healCounts(member)).toMatchObject({ finalizedRowHealPasses: 1, finalizedRowsHealed: 1 });
+    expect(healCounts(member)).toEqual({ finalizedRowHealPasses: 1, finalizedRowsHealed: 1 });
     expect(infos.filter((line) => /removed 1 row\(s\) of finalized assets/u.test(line))).toHaveLength(1);
   }, 120_000);
 
@@ -184,29 +186,34 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
 
     // The sweep kept both rows, and did not run again on the same inventory head.
     expect(inventoryRows(member)).toEqual([a.kaUal, b.kaUal].sort());
-    expect(healCounts(member)).toMatchObject({ finalizedRowHealPasses: 1, finalizedRowsHealed: 0 });
+    expect(healCounts(member)).toEqual({ finalizedRowHealPasses: 1, finalizedRowsHealed: 0 });
   }, 120_000);
 
   it('removes the row a pending share observer commits after the twin of its version was retired', async () => {
     const member = await startAgent('finalized-twin-pending-v2');
     await share(member, 1n, 'member-asset-a');
-    const removals = vi.spyOn(member, 'removeRfc64SwmAuthorInventoryConfirmedRowV1');
 
     // Version 2's observer has prepared its row and waits for its signature.
     const held = holdNextInventorySignature(member);
     const a2 = await share(member, 1n, 'member-asset-a', '2', false);
     await held.entered;
     expect(inventoryRows(member)).toEqual([a2.kaUal]);
+    // No projection, and so no sweep, runs until both settle: only the retirement may take the row.
+    const projections = vi.spyOn(member, 'requestRfc64SwmCatalogProjectionV1').mockReturnValue(true);
+    const removals = vi.spyOn(member, 'removeRfc64SwmAuthorInventoryRowV1');
     await writeCuratorPublication(member, a2);
     await finalizationRetiresTwin(member, a2);
     held.release();
     await member.awaitInFlightRfc64SwmInventoryObserversV1();
 
+    // It read the row the observer committed after it, and removed that version once.
     expect(inventoryRows(member)).toEqual([]);
-    expect(removals.mock.calls.map(([call]) => call.expectedRow.assertionVersion)).not.toContain('1');
+    expect(removals.mock.calls.map(([call]) => call.expectedRow.assertionVersion)).toEqual(['2']);
+    projections.mockRestore();
     const b = await share(member, 2n, 'member-asset-b');
     expect(inventoryRows(member)).toEqual([b.kaUal]);
     expect(projectionRepair(member)).toMatchObject({ outcome: 'reconciled', inventoryRowCount: '1' });
+    expect(healCounts(member)).toBeUndefined();
   }, 120_000);
 
   it('removes a first share\'s row that its observer commits after the twin was retired', async () => {
@@ -216,15 +223,52 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
     await held.entered;
     // Nothing is in the inventory yet: the row is still on its way.
     expect(inventoryRows(member)).toEqual([]);
+    // No projection, and so no sweep, runs until both settle: only the retirement may take the row.
+    const projections = vi.spyOn(member, 'requestRfc64SwmCatalogProjectionV1').mockReturnValue(true);
+    const removals = vi.spyOn(member, 'removeRfc64SwmAuthorInventoryRowV1');
     await writeCuratorPublication(member, a);
     await finalizationRetiresTwin(member, a);
     held.release();
     await member.awaitInFlightRfc64SwmInventoryObserversV1();
 
+    // The pending write kept the retirement from skipping it: it waited, read the row, removed it.
     expect(inventoryRows(member)).toEqual([]);
+    expect(removals.mock.calls.map(([call]) => call.expectedRow.assertionVersion)).toEqual(['1']);
+    projections.mockRestore();
     const b = await share(member, 2n, 'member-asset-b');
     expect(inventoryRows(member)).toEqual([b.kaUal]);
     expect(projectionRepair(member)).toMatchObject({ outcome: 'reconciled', inventoryRowCount: '1' });
+    expect(healCounts(member)).toBeUndefined();
+  }, 120_000);
+
+  it('stops a sweep cancelled while its removal waits on the signer, frees the inventory and commits nothing late', async () => {
+    const member = await startAgent('finalized-twin-heal-cancelled');
+    const a = await share(member, 1n, 'member-asset-a');
+    await writeCuratorPublication(member, a);
+    await expect(retireTwinOnly(member, a)).resolves.toBe('retired');
+
+    // The author's key signs the sweep's removal and does not answer.
+    const signature = holdNextWalletSignature();
+    const controller = new AbortController();
+    const reconcile = member.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: MEMBER,
+      signal: controller.signal,
+    }).then(() => null, (error: unknown) => error);
+    await signature.entered;
+    const reason = new Error('reconciliation cancelled');
+    controller.abort(reason);
+    await expect(within(reconcile, 10_000)).resolves.toBe(reason);
+
+    // The author's inventory is free again, and the late signature commits nothing.
+    await expect(within(rfc64SwmInventoryShadowRuntimeV1(member).runScopeExclusive(
+      `${INVENTORY_SCOPE_DIGEST}\n${MEMBER}`,
+      async () => 'free',
+    ), 10_000)).resolves.toBe('free');
+    signature.release();
+    await member.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(inventoryRows(member)).toEqual([a.kaUal]);
+    signature.restore();
   }, 120_000);
 
   it('keeps a finalized row without its shared copy on a finalized private lane when another row fails the projection', async () => {
@@ -253,7 +297,7 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
 
     // That lane keeps its rows: nothing was swept, and A's row stays.
     expect(inventoryRows(member)).toEqual([a.kaUal, x.kaUal].sort());
-    expect(healCounts(member)).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
+    expect(healCounts(member)).toBeUndefined();
   }, 120_000);
 
   it('keeps the row on a lane whose catalog places finalized assets', async () => {
@@ -594,7 +638,30 @@ function asFinalizedPrivateLane(agent: DKGAgent) {
 }
 
 function healCounts(agent: DKGAgent) {
-  return agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.authorCatalogCapacity;
+  return agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedRowHeal;
+}
+
+/** `promise`, or a rejection once `ms` passed without it settling. */
+function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => { setTimeout(() => reject(new Error(`not settled within ${ms} ms`)), ms).unref?.(); }),
+  ]);
+}
+
+/** Holds the next signature any wallet makes, below the signer's own cancellation, until released. */
+function holdNextWalletSignature() {
+  let release!: () => void;
+  let markEntered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+  const sign = ethers.BaseWallet.prototype.signMessage;
+  const spy = vi.spyOn(ethers.BaseWallet.prototype, 'signMessage').mockImplementationOnce(async function (this: ethers.BaseWallet, message) {
+    markEntered();
+    await gate;
+    return sign.call(this, message);
+  });
+  return { entered, release, restore: () => spy.mockRestore() };
 }
 
 function captured(agent: DKGAgent, level: 'info' | 'warn'): string[] {

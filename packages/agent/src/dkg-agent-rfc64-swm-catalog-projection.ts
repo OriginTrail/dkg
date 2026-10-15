@@ -199,6 +199,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         && !runtime.hasInventoryWrites(lane)
       ) return;
       runtime.scheduleAfterInventoryWrites(lane, input.kaUal, async () => {
+        if (runtime.shutdownSignal.aborted) return;
         try {
           const row = this.rfc64PersistenceV1?.swmAuthorInventory.readSwmAuthorInventoryRowV1(
             scopeDigest,
@@ -211,12 +212,13 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
             contextGraphId,
             scope,
             expectedRow: { assertionVersion: row.assertionVersion, kaUal: row.kaUal, sealDigest: row.sealDigest },
+            signal: runtime.shutdownSignal,
           });
           if (removed.status !== 'applied' && removed.status !== 'absent') return;
           this.requestRfc64SwmCatalogProjectionV1({ contextGraphId, authorAddress, ctx });
           if (removed.status === 'applied') this.log.info(ctx, `Removed the RFC-64 SWM inventory row of finalized ${row.kaUal}`);
         } catch (cause) {
-          failed(cause);
+          if (!runtime.shutdownSignal.aborted) failed(cause);
         }
       });
     } catch (cause) {
@@ -551,9 +553,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           contextGraphId: params.contextGraphId,
           scope,
           expectedRow: { assertionVersion: row.assertionVersion, kaUal: row.kaUal, sealDigest: row.sealDigest },
+          ...(params.signal === undefined ? {} : { signal: params.signal }),
         })).status,
-        readSnapshot: () => this.rfc64PersistenceV1?.swmAuthorInventory
-          .readSwmAuthorInventorySnapshotV1(scopeDigest, params.authorAddress) ?? null,
       });
       if (healed > 0) {
         this.log.info(ctx, `RFC-64 SWM inventory of ${params.authorAddress} in ${params.contextGraphId}: `
@@ -563,10 +564,10 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       return healed > 0 || this.rfc64PersistenceV1?.swmAuthorInventory
         .readSwmAuthorInventoryHeadDigestV1(scopeDigest, params.authorAddress) !== snapshot.head.objectDigest;
     } catch (cause) {
-      if (params.signal?.aborted !== true) {
-        this.log.warn(ctx, `RFC-64 SWM inventory rows of finalized assets were not swept: `
-          + (cause instanceof Error ? cause.message : String(cause)));
-      }
+      // A cancelled sweep ends the projection attempt with its cancellation.
+      if (params.signal?.aborted === true) throw cause;
+      this.log.warn(ctx, `RFC-64 SWM inventory rows of finalized assets were not swept: `
+        + (cause instanceof Error ? cause.message : String(cause)));
       return false;
     }
   }

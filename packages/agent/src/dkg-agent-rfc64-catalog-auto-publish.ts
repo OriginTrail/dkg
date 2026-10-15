@@ -1209,11 +1209,16 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       contextGraphId: string;
       scope: SwmAuthorInventoryScopeV1;
       expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
+      /** A removal that its caller's cancellation ended rejects with it, uncounted. */
+      signal?: AbortSignal;
     }>,
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
     const result = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1(params).then(
       (removed) => shadowResult(removed.status, 'remove', removed.attempts, removed.snapshot?.head.objectDigest ?? null, null),
-      (cause: unknown) => this.failRfc64SwmAuthorInventoryShadowV1('remove', cause),
+      (cause: unknown) => {
+        if (params.signal?.aborted === true) throw cause;
+        return this.failRfc64SwmAuthorInventoryShadowV1('remove', cause);
+      },
     );
     return this.recordRfc64SwmAuthorInventoryShadowStatsV1(result, params.contextGraphId, params.expectedRow.kaUal);
   }
@@ -1224,11 +1229,13 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     params: Readonly<{
       readonly scope: SwmAuthorInventoryScopeV1;
       readonly expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
+      /** The caller's cancellation: it ends the wait for the scope and the signer, and no successor commits after it. */
+      readonly signal?: AbortSignal;
     }>,
   ): Promise<RemoveRfc64SwmAuthorInventoryResultV1> {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const signer = this.createRfc64CatalogAuthorSignerV1(params.scope.authorAddress);
+    const signer = this.createRfc64CatalogAuthorSignerV1(params.scope.authorAddress, params.signal);
     const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(params.scope);
     return rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
       `${inventoryScopeDigest}\n${params.scope.authorAddress}`,
@@ -1258,11 +1265,16 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
             issuedAt: Date.now().toString() as TimestampMsV1,
             signer: Object.freeze({
               issuer: signer.address as EvmAddressV1,
-              signDigest: signer.signMessage,
+              signDigest: async (digest: Uint8Array) => {
+                const signature = await signer.signMessage(digest);
+                throwIfAbortedV1(params.signal);
+                return signature;
+              },
             }),
           },
         );
       },
+      params.signal,
     );
   }
 

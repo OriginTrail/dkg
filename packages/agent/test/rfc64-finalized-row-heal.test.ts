@@ -54,7 +54,7 @@ describe('the sweep of rows of finalized assets (GH#3134)', () => {
     expect(finalizedRowHealCountsV1(inventory)).toEqual({ finalizedRowHealPasses: 1, finalizedRowsHealed: 1 });
   });
 
-  it('examines rows that another commit adds while it waits on a removal before it counts their head as swept', async () => {
+  it('leaves a row that another commit adds while it waits on a removal to the next attempt, on the newer head', async () => {
     const store = new OxigraphStore();
     const first = row(1n, '1');
     const added = row(2n, '1');
@@ -68,13 +68,13 @@ describe('the sweep of rows of finalized assets (GH#3134)', () => {
       release();
     });
 
-    await expect(healFinalizedSwmInventoryRowsV1(inventory, sweep(store, inventory))).resolves.toBe(2);
-    expect(inventory.removed).toEqual([first.kaUal, added.kaUal]);
+    // One pass over the snapshot it was given: the added row is on a head it never saw.
+    await expect(healFinalizedSwmInventoryRowsV1(inventory, sweep(store, inventory))).resolves.toBe(1);
+    expect(inventory.current.rows).toEqual([added]);
+    // The caller's next attempt reads that newer head, which counts as not swept, and the row goes.
+    await expect(healFinalizedSwmInventoryRowsV1(inventory, sweep(store, inventory))).resolves.toBe(1);
     expect(inventory.current.rows).toEqual([]);
-
-    // Every head it left behind was examined, so the next failure on it has nothing to sweep.
-    await expect(healFinalizedSwmInventoryRowsV1(inventory, sweep(store, inventory))).resolves.toBe(0);
-    expect(finalizedRowHealCountsV1(inventory)).toEqual({ finalizedRowHealPasses: 1, finalizedRowsHealed: 2 });
+    expect(finalizedRowHealCountsV1(inventory)).toEqual({ finalizedRowHealPasses: 2, finalizedRowsHealed: 2 });
   });
 
   it('sweeps an unchanged head again a minute later, once its asset has been finalized meanwhile', async () => {
@@ -233,6 +233,5 @@ function sweep(store: OxigraphStore, inventory: ReturnType<typeof fakeInventory>
     authorAddress: AUTHOR,
     snapshot: inventory.current,
     removeRow: (target: Readonly<SwmAuthorInventoryRowV1>) => inventory.removeRow(target),
-    readSnapshot: () => inventory.current,
   };
 }

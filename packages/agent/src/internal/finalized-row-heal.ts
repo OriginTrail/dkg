@@ -28,9 +28,6 @@ export interface FinalizedRowHealCountsV1 {
   readonly finalizedRowsHealed: number;
 }
 
-/** Rounds of one sweep: rows committed while it ran are examined in the next, up to this many. */
-const MAX_SWEEP_ROUNDS_V1 = 4;
-
 /**
  * An unchanged inventory head is swept again after this long: whether a row may go also depends on
  * its asset's verified copy and shared copy, which change without the inventory changing.
@@ -56,12 +53,12 @@ export function finalizedRowHealCountsV1(owner: object): FinalizedRowHealCountsV
 }
 
 /**
- * Sweep one author's inventory unless its head was swept before: remove each row whose asset is
- * finalized at or above the row's version and has no shared-memory head left. A head counts as
- * swept only once every row of it was examined and every eligible one removed: rows that other
- * work commits while the sweep awaits its reads and removals are examined in a further round, and
- * a removal that failed is tried again by the next sweep. A head counted as swept is swept again
- * after `FINALIZED_ROW_RESWEEP_INTERVAL_MS_V1`. Answers how many rows went.
+ * One pass over one inventory snapshot, unless its head was swept less than
+ * `FINALIZED_ROW_RESWEEP_INTERVAL_MS_V1` ago: remove each row whose asset is finalized at or above
+ * the row's version and has no shared-memory head left. The head counts as swept once every row
+ * was examined and every eligible one removed, so a failed removal is tried again by the next
+ * sweep. Rows that other work commits meanwhile belong to a newer head, which the caller's next
+ * attempt sweeps. Answers how many rows went.
  */
 export async function healFinalizedSwmInventoryRowsV1(
   owner: object,
@@ -73,8 +70,6 @@ export async function healFinalizedSwmInventoryRowsV1(
     signal?: AbortSignal;
     /** One exact removal: the row, if it is still the inventory's, goes in its own successor. */
     removeRow: (row: Readonly<SwmAuthorInventoryRowV1>) => Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1['status']>;
-    /** The author's current inventory, read again after each round. */
-    readSnapshot: () => SwmAuthorInventorySnapshotV1 | null;
     now?: () => number;
   }>,
 ): Promise<number> {
@@ -85,39 +80,27 @@ export async function healFinalizedSwmInventoryRowsV1(
   }
   const key = `${input.contextGraphId}\n${input.authorAddress}`;
   const now = input.now ?? Date.now;
+  const head = input.snapshot.head.objectDigest;
   const swept = state.sweptHeads.get(key);
-  if (
-    swept?.head === input.snapshot.head.objectDigest
-    && now() - swept.atMs < FINALIZED_ROW_RESWEEP_INTERVAL_MS_V1
-  ) return 0;
+  if (swept?.head === head && now() - swept.atMs < FINALIZED_ROW_RESWEEP_INTERVAL_MS_V1) return 0;
   state.passes += 1;
   const graphManager = new GraphManager(input.store);
-  const examined = new Set<string>();
-  let snapshot: SwmAuthorInventorySnapshotV1 | null = input.snapshot;
   let removed = 0;
   let failed = false;
   try {
-    for (let round = 0; round < MAX_SWEEP_ROUNDS_V1 && snapshot !== null; round += 1) {
-      for (const row of snapshot.rows) {
-        const identity = `${row.kaUal}\n${row.assertionVersion}\n${row.sealDigest}`;
-        if (examined.has(identity)) continue;
-        examined.add(identity);
-        input.signal?.throwIfAborted();
-        if (!await finalizedAtOrAboveV1(input.store, input.contextGraphId, row)) continue;
-        if (!await sharedCopyRetiredV1(input.store, graphManager, input.contextGraphId, row)) continue;
-        const outcome = await input.removeRow(row);
-        if (outcome === 'applied') removed += 1;
-        else if (outcome === 'failed') failed = true;
-      }
-      // A head with an eligible row that could not be removed stays eligible for the next sweep.
-      if (!failed) state.sweptHeads.set(key, Object.freeze({ head: snapshot.head.objectDigest, atMs: now() }));
-      const current = input.readSnapshot();
-      if (current?.head.objectDigest === snapshot.head.objectDigest) break;
-      snapshot = current;
+    for (const row of input.snapshot.rows) {
+      input.signal?.throwIfAborted();
+      if (!await finalizedAtOrAboveV1(input.store, input.contextGraphId, row)) continue;
+      if (!await sharedCopyRetiredV1(input.store, graphManager, input.contextGraphId, row, input.signal)) continue;
+      const outcome = await input.removeRow(row);
+      if (outcome === 'applied') removed += 1;
+      else if (outcome === 'failed') failed = true;
     }
   } finally {
     state.rows += removed;
   }
+  // A head with an eligible row that could not be removed stays eligible for the next sweep.
+  if (!failed) state.sweptHeads.set(key, Object.freeze({ head, atMs: now() }));
   return removed;
 }
 
@@ -140,6 +123,7 @@ async function sharedCopyRetiredV1(
   graphManager: GraphManager,
   contextGraphId: ContextGraphIdV1,
   row: Readonly<SwmAuthorInventoryRowV1>,
+  signal: AbortSignal | undefined,
 ): Promise<boolean> {
   try {
     const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
@@ -147,6 +131,11 @@ async function sharedCopyRetiredV1(
       graphManager,
       contextGraphId,
       kaUal: row.kaUal,
+      queryOptions: {
+        source: 'agent.rfc64.finalizedRowHeal.workspaceHead',
+        priority: 'background',
+        ...(signal === undefined ? {} : { signal }),
+      },
     });
     return head === undefined;
   } catch (error) {

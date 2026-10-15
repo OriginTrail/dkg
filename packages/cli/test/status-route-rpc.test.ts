@@ -1041,17 +1041,17 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       expect(response.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
     });
 
-    it('adds the sweep counts of finalized assets\' inventory rows only as a pair of counts', async () => {
-      const swept = await requestCapacity({ authorCatalogCapacity: {
-        scopesAtCap: 0, parkedPlacements: 0, finalizedRowHealPasses: 1, finalizedRowsHealed: 2,
-      } });
-      expect(swept.body.rfc64Catalog.authorCatalogCapacity).toEqual({
-        scopesAtCap: 0, parkedPlacements: 0, finalizedRowHealPasses: 1, finalizedRowsHealed: 2,
+    it('reports the sweep counts of finalized assets\' inventory rows on their own, only as a pair of counts', async () => {
+      const swept = await requestCapacity({
+        authorCatalogCapacity: { scopesAtCap: 0, parkedPlacements: 0 },
+        finalizedRowHeal: { finalizedRowHealPasses: 1, finalizedRowsHealed: 2, contextGraphId: fullContextGraph },
       });
-      const half = await requestCapacity({ authorCatalogCapacity: {
-        scopesAtCap: 0, parkedPlacements: 0, finalizedRowHealPasses: 1, finalizedRowsHealed: -1,
-      } });
-      expect(half.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
+      expect(swept.body.rfc64Catalog.finalizedRowHeal).toEqual({ finalizedRowHealPasses: 1, finalizedRowsHealed: 2 });
+      expect(swept.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
+      const half = await requestCapacity({ finalizedRowHeal: { finalizedRowHealPasses: 1, finalizedRowsHealed: -1 } });
+      expect(half.body.rfc64Catalog.finalizedRowHeal).toBeNull();
+      const none = await requestCapacity({});
+      expect(none.body.rfc64Catalog.finalizedRowHeal).toBeNull();
     });
 
     it.each([
