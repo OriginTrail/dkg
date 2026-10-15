@@ -397,6 +397,18 @@ describe('reserved shared-memory slot (#3251)', () => {
     }
   });
 
+  it('gives a general slot back when the start fails', async () => {
+    const policy = oneSlotNoQueue();
+    const record = vi.spyOn(getMetrics().syncGlobalInflight, 'record')
+      .mockImplementationOnce(() => { throw new Error('metrics unavailable'); });
+    await expect(withGlobalSyncBackpressure(largeTransfer(policy), async () => undefined))
+      .rejects.toThrow('metrics unavailable');
+    record.mockRestore();
+    expect(getSyncBackpressureSnapshot(policy).inflight).toBe(0);
+    await expect(withGlobalSyncBackpressure(largeTransfer(policy), async () => 'transferred'))
+      .resolves.toBe('transferred');
+  });
+
   it('counts the reserve in the scheduler capacity it publishes', () => {
     const published = () => backpressureRegistry.capture().schedulers.find(
       (scheduler) => scheduler.scheduler === 'sync-global',

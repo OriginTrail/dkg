@@ -425,6 +425,50 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     expect(recentSharedMemoryPullsEnabled({})).toBe(false);
   });
 
+  it('skips graphs it may not pull and logs a pull that fails', async () => {
+    const debug = vi.fn();
+    const subscriptions = new Map<string, Record<string, unknown>>([
+      ['urn:cg:on-demand', { subscribed: true, synced: true, syncMode: 'on-demand' }],
+      ['urn:cg:private', { subscribed: true, synced: true, syncMode: 'always-on' }],
+      ['urn:cg:failing', { subscribed: true, synced: true, syncMode: 'always-on' }],
+    ]);
+    const attempted: string[] = [];
+    const agentLike = {
+      peerId: 'local-peer',
+      node: { libp2p: { getPeers: () => [{ toString: () => OTHER }] } },
+      subscribedContextGraphs: subscriptions,
+      preferredSyncPeers: new Map<string, string>(),
+      networkAdmissionCoordinator: { isAcceptedPeer: () => true },
+      eventBus: { on: () => {}, off: () => {} },
+      log: { debug },
+      getCgMeta: async () => ({ curators: [], creators: [] }),
+      isPrivateContextGraph: async (contextGraphId: string) => contextGraphId === 'urn:cg:private',
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
+      syncSharedMemoryFromPeerDetailed: async (peerId: string, [contextGraphId]: string[]) => {
+        attempted.push(`${contextGraphId}@${peerId}`);
+        throw new Error('stream reset');
+      },
+    };
+    let clock = 0;
+    const runtime = startRecentSharedMemoryPulls(agentLike, { now: () => clock, tickMs: 3_600_000 });
+    try {
+      for (const id of ['urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private', 'urn:cg:failing']) {
+        runtime.noteActivity(id);
+      }
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      // No owner is known, so the one connected peer is asked.
+      expect(attempted).toEqual([`urn:cg:failing@${OTHER}`]);
+      await vi.waitFor(() => expect(debug).toHaveBeenCalledWith(
+        expect.anything(),
+        'Safety-net shared-memory pull of "urn:cg:failing" did not run: stream reset',
+      ));
+    } finally {
+      runtime.stop();
+    }
+  });
+
   it('logs a failed tick, keeps its timer, and lets go of the event bus when stopped', async () => {
     const debug = vi.fn();
     const listeners = new Map<string, unknown>();

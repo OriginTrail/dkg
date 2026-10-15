@@ -9,6 +9,7 @@ import {
   resolveBooleanSwitch,
   resolveExactBatchStreamEnabled,
   resolveNonNegativeIntegerSwitch,
+  resolvePositiveIntegerSwitch,
   resolveSyncGlobalBackpressure,
   resolveSyncReconcilerEnabled,
   resolveVmReconcilerEnabled,
@@ -1513,6 +1514,9 @@ describe('sync global backpressure', () => {
 
       expect(resolveBooleanSwitch(true, 'DKG_SYNC_RECONCILER_ENABLED', true)).toBe(false);
       expect(resolveNonNegativeIntegerSwitch(15_000, 'DKG_STORAGE_ACK_HANDLER_DEADLINE_MS')).toBe(60_000);
+      expect(resolvePositiveIntegerSwitch(15_000, 'DKG_STORAGE_ACK_HANDLER_DEADLINE_MS')).toBe(60_000);
+      expect(resolvePositiveIntegerSwitch(0, 'DKG_UNSET_POSITIVE_SWITCH_FOR_TEST')).toBeUndefined();
+      expect(resolvePositiveIntegerSwitch(undefined, 'DKG_UNSET_POSITIVE_SWITCH_FOR_TEST')).toBeUndefined();
     } finally {
       if (oldReconciler === undefined) delete process.env.DKG_SYNC_RECONCILER_ENABLED;
       else process.env.DKG_SYNC_RECONCILER_ENABLED = oldReconciler;

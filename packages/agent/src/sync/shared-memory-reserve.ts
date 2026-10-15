@@ -87,10 +87,6 @@ export function withSharedMemoryReserveCapacity(
 export class ReservedSharedMemorySlots {
   #inflight = 0;
 
-  get inflight(): number {
-    return this.#inflight;
-  }
-
   canTake(reserve: SharedMemoryReserve | undefined): boolean {
     return reserve !== undefined && this.#inflight < reserve.maxInflight;
   }
