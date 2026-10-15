@@ -11,7 +11,12 @@
  * root scope.
  */
 
-import { createOperationContext, DKGEvent, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  createOperationContext,
+  DKGEvent,
+  SYSTEM_CONTEXT_GRAPHS,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 import type { ContextGraphSub, DKGAgentConfig, SharedMemorySyncResult } from './dkg-agent-types.js';
 import { resolveBoundedCuratorSyncPeer } from './dkg-agent-cg-resolve.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -30,6 +35,9 @@ import { resolveBooleanSwitch } from './sync/sync-switches.js';
 
 /** How long a resolved owner peer is reused before it is looked up again. */
 export const RECENT_SHARED_MEMORY_OWNER_TTL_MS = 5 * 60_000;
+
+/** The agent registry and the ontology have their own sync and no owner. */
+const SYSTEM_CONTEXT_GRAPH_IDS: ReadonlySet<string> = new Set(Object.values(SYSTEM_CONTEXT_GRAPHS));
 
 /** What the safety-net pull uses of the agent. */
 interface RecentSharedMemoryPullAgent {
@@ -135,6 +143,7 @@ export function startRecentSharedMemoryPulls(
       .filter(([, subscription]) => subscription.subscribed && subscription.syncMode === 'always-on')
       .map(([contextGraphId]) => contextGraphId),
     eligible: async (contextGraphId) => {
+      if (SYSTEM_CONTEXT_GRAPH_IDS.has(contextGraphId)) return false;
       const subscription = agent.subscribedContextGraphs.get(contextGraphId);
       if (subscription?.subscribed !== true || subscription.syncMode !== 'always-on') return false;
       if (await agent.isPrivateContextGraph(contextGraphId)) return false;

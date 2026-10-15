@@ -464,16 +464,16 @@ describe('priority admission queue pools', () => {
 
   it('never displaces an entry of another pool', async () => {
     const queue = queueWithoutCapacity();
-    const pooled = queue.acquire(options('pool-low', 'pool', 0));
+    // Were pools ignored, the newest lowest-priority entry (pool-low) would go.
     const shared = queue.acquire(options('shared-low', undefined, 0));
-    let pooledError: unknown;
-    pooled.release.catch((error: unknown) => { pooledError = error; });
-    const sharedOutcome = expect(shared.release).rejects.toThrow('displaced');
+    const pooled = queue.acquire(options('pool-low', 'pool', 0));
+    const errors = new Map<string, string>();
+    shared.release.catch((error: Error) => { errors.set('shared-low', error.message); });
+    pooled.release.catch((error: Error) => { errors.set('pool-low', error.message); });
 
     queue.acquire(options('shared-high', undefined, 10)).release.catch(() => {});
-    await sharedOutcome;
     await tick();
-    expect(pooledError).toBeUndefined();
+    expect([...errors]).toEqual([['shared-low', 'displaced']]);
     expect(queue.entries().map((entry) => entry.payload).sort()).toEqual(['pool-low', 'shared-high']);
   });
 

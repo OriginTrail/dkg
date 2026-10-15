@@ -404,6 +404,29 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     }
   });
 
+  it('takes an explicit subscribe as activity, also of a graph already subscribed, but not a restore', async () => {
+    const { agent, internals, sharedPulls } = await startedMember('Rfc3251Subscribe');
+    internals.recentSharedMemoryPulls.stop();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
+    try {
+      // What a restart does for a persisted subscription.
+      agent.subscribeToContextGraph(GRAPH, { syncMode: 'always-on', persist: false });
+      await runtime.tick();
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(0);
+
+      // An application that subscribes again, as the issue's client does.
+      agent.subscribeToContextGraph(GRAPH, { syncMode: 'always-on' });
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      expect(sharedPulls.map(({ peerId }) => peerId)).toEqual([OWNER]);
+    } finally {
+      runtime.stop();
+    }
+  });
+
   it('takes a local share as activity', async () => {
     const { internals } = await startedMember('Rfc3251LocalWrite');
     const noted: string[] = [];
@@ -429,6 +452,7 @@ describe('recent shared-memory pull runtime (#3251)', () => {
   it('skips graphs it may not pull and logs a pull that fails', async () => {
     const debug = vi.fn();
     const subscriptions = new Map<string, Record<string, unknown>>([
+      ['agents', { subscribed: true, synced: true, syncMode: 'always-on' }],
       ['urn:cg:on-demand', { subscribed: true, synced: true, syncMode: 'on-demand' }],
       ['urn:cg:private', { subscribed: true, synced: true, syncMode: 'always-on' }],
       ['urn:cg:unconfirmed', { subscribed: true, synced: true, syncMode: 'always-on' }],
@@ -457,7 +481,7 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     const runtime = startRecentSharedMemoryPulls(agentLike, { now: () => clock, tickMs: 3_600_000 });
     try {
       for (const id of [
-        'urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private', 'urn:cg:unconfirmed', 'urn:cg:failing',
+        'agents', 'urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private', 'urn:cg:unconfirmed', 'urn:cg:failing',
       ]) {
         runtime.noteActivity(id);
       }
