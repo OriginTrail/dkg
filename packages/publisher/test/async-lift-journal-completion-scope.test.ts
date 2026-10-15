@@ -5,12 +5,80 @@ import { AsyncLiftJournalCompletion } from '../src/async-lift-journal-completion
 import { completesWithin, fixture, gate, observe } from './_helpers/journal-completion.js';
 
 describe('journal completion ownership boundaries', () => {
+  it('registers synchronously and exposes settlement only after canonical release and journal completion', async () => {
+    const completion = new AsyncLiftJournalCompletion(fixture().store, 'urn:test:registration');
+    const canonical = gate();
+    const journal = gate();
+    let reserved = false;
+    let settled!: Promise<void>;
+    let joined!: Promise<void>;
+    const operation = completion.runPublicOperation(() => completion.runCriticalSection(async () => {
+      const ticket = completion.registerJournal('job', async (released) => {
+        reserved = true;
+        await released;
+        await journal.wait();
+      });
+      expect(reserved).toBe(true);
+      expect(ticket).not.toHaveProperty('then');
+      settled = ticket.settled;
+      joined = completion.registerJobJoin('job').settled;
+      await canonical.wait();
+      return 'result';
+    }));
+    try {
+      await canonical.reached;
+      expect(await completesWithin(journal.reached, 30)).toBe(false);
+      expect(await completesWithin(settled, 30)).toBe(false);
+      canonical.release();
+      await journal.reached;
+      expect(await completesWithin(settled, 30)).toBe(false);
+      expect(await completesWithin(joined, 30)).toBe(false);
+    } finally {
+      canonical.release(); journal.release(); await operation;
+    }
+    await expect(settled).resolves.toBeUndefined();
+    await expect(joined).resolves.toBeUndefined();
+    await expect(operation).resolves.toBe('result');
+  });
+
+  it('refuses out-of-scope registration and joins synchronously, including a missing job', async () => {
+    const completion = new AsyncLiftJournalCompletion(fixture().store, 'urn:test:required-scope');
+    const journal = gate();
+    let invoked = false;
+    const operation = completion.runPublicOperation(async () => {
+      completion.registerJournal('existing', () => journal.wait());
+    });
+    try {
+      await journal.reached;
+      expect(() => completion.registerJournal('new', async () => { invoked = true; }))
+        .toThrow('requires an open publisher completion scope');
+      for (const job of ['existing', 'missing']) {
+        expect(() => completion.registerJobJoin(job, () => { invoked = true; }))
+          .toThrow('requires an open publisher completion scope');
+      }
+      expect(invoked).toBe(false);
+    } finally { journal.release(); await operation; }
+    await completion.drain();
+  });
+
+  it('keeps join-miss callbacks synchronous and preserves their business error', async () => {
+    const completion = new AsyncLiftJournalCompletion(fixture().store, 'urn:test:join-miss');
+    const failure = new Error('join bookkeeping failed');
+    const order: string[] = [];
+    await expect(completion.runPublicOperation(async () => {
+      completion.registerJobJoin('missing', () => { order.push('callback'); throw failure; });
+      order.push('after');
+    })).rejects.toBe(failure);
+    expect(order).toEqual(['callback']);
+    await completion.drain();
+  });
+
   it('reports successful settlement only after journals and contains observer faults without reporting business errors as success', async () => {
     const completion = new AsyncLiftJournalCompletion(fixture().store, 'urn:test:observation');
     const journal = gate();
     const observed: string[] = [];
     const work = completion.runCriticalSection(async () => {
-      await completion.defer('job', async (released) => { await released; await journal.wait(); });
+      completion.registerJournal('job', async (released) => { await released; await journal.wait(); });
       completion.afterSuccessfulJobSettlement('job', () => { observed.push('success'); throw new Error('observer'); });
       return 'result';
     });
@@ -32,9 +100,9 @@ describe('journal completion ownership boundaries', () => {
     const completion = new AsyncLiftJournalCompletion(fixture().store, 'urn:test:per-job');
     const heldB = gate();
     const seen: string[] = [];
-    const operation = completion.runOperation(async () => {
+    const operation = completion.runPublicOperation(async () => {
       for (const jobId of ['A', 'B']) await completion.runCriticalSection(async () => {
-        await completion.defer(jobId, async (released) => { await released; if (jobId === 'B') await heldB.wait(); });
+        completion.registerJournal(jobId, async (released) => { await released; if (jobId === 'B') await heldB.wait(); });
         completion.afterSuccessfulJobSettlement(jobId, () => { seen.push(jobId); });
       });
     });
@@ -51,7 +119,7 @@ describe('journal completion ownership boundaries', () => {
     const dispatched = gate();
     const operation = completion.runCriticalSection(async () => {
       await completion.runCriticalSection(async () => {
-        await completion.defer('job', async (released) => { await released; await dispatched.wait(); });
+        completion.registerJournal('job', async (released) => { await released; await dispatched.wait(); });
       });
       await outer.wait();
     });
@@ -74,7 +142,7 @@ describe('journal completion ownership boundaries', () => {
       later = (async () => {
         await startLater.wait();
         await completion.runCriticalSection(async () => {
-          await completion.defer('late', async (released) => { await released; await journal.wait(); });
+          completion.registerJournal('late', async (released) => { await released; await journal.wait(); });
         });
       })();
     });
@@ -96,10 +164,10 @@ describe('journal completion ownership boundaries', () => {
     const first = new AsyncLiftJournalCompletion(f.store, 'urn:test:tail');
     const second = new AsyncLiftJournalCompletion(f.decoratedStore(), 'urn:test:tail');
     const bookkeeping = gate();
-    const initial = first.runOperation(() => first.defer('job', () => bookkeeping.wait()));
+    const initial = first.runPublicOperation(async () => { first.registerJournal('job', () => bookkeeping.wait()); });
     await bookkeeping.reached;
-    const later = observe(second.runOperation(() => second.defer('job', async () => {})));
-    const duplicate = observe(second.runOperation(() => second.joinJob('job')));
+    const later = observe(second.runPublicOperation(async () => { second.registerJournal('job', async () => {}); }));
+    const duplicate = observe(second.runPublicOperation(async () => { second.registerJobJoin('job'); }));
     try {
       expect(await completesWithin(later.promise, 30)).toBe(false);
       expect(duplicate.settled()).toBe(false);
@@ -112,13 +180,13 @@ describe('journal completion ownership boundaries', () => {
     const completion = new AsyncLiftJournalCompletion(fixture().store, 'urn:test:errors');
     const original = new Error('authoritative operation failed');
     const failed = completion.runCriticalSection(async () => {
-      await completion.defer('job', () => { throw new Error('reservation observer failed'); });
-      await completion.defer('job', async (released) => { await released; throw new Error('journal write failed'); });
+      completion.registerJournal('job', () => { throw new Error('reservation observer failed'); });
+      completion.registerJournal('job', async (released) => { await released; throw new Error('journal write failed'); });
       throw original;
     });
     await expect(failed).rejects.toBe(original);
     await expect(completion.runCriticalSection(async () => {
-      await completion.defer('job', async (released) => { await released; });
+      completion.registerJournal('job', async (released) => { await released; });
       return 'next';
     })).resolves.toBe('next');
     await completion.drain();
@@ -131,7 +199,7 @@ describe('journal completion ownership boundaries', () => {
     const seen: unknown[] = [];
     const operation = context.run('request', () => withDefaultStoreWorkPriority('background', () =>
       completion.runCriticalSection(async () => {
-        await completion.defer('job', async (released) => {
+        completion.registerJournal('job', async (released) => {
           await released;
           seen.push(context.getStore(), activeDefaultStoreWorkPriority());
         });

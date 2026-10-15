@@ -19,6 +19,11 @@ interface QueueCompletions {
   readonly jobs: Map<string, Promise<void>>;
 }
 
+/** Registration is synchronous; this promise describes the actual captured auxiliary tail. */
+interface JournalRegistration {
+  readonly settled: Promise<void>;
+}
+
 /** Await auxiliary journals at operation settlement, never while retaining canonical locks. */
 export class AsyncLiftJournalCompletion {
   private static readonly domains = new WeakMap<object, Map<string, QueueCompletions>>();
@@ -30,8 +35,8 @@ export class AsyncLiftJournalCompletion {
       typeof candidate === 'object' && candidate !== null && !('innerStore' in candidate)) ?? store;
   }
 
-  runOperation<T>(work: () => Promise<T>, fresh = false): Promise<T> {
-    if (!fresh && this.context.getStore()?.owner.open) return work();
+  /** An independently awaited API or worker lifecycle, including reentrant public calls. */
+  runPublicOperation<T>(work: () => Promise<T>): Promise<T> {
     const owner: CompletionOwner = { open: true, pending: new Set() };
     const queue = this.queue();
     let release!: () => void;
@@ -65,31 +70,29 @@ export class AsyncLiftJournalCompletion {
   }
 
   runCriticalSection<T>(work: () => Promise<T>): Promise<T> {
-    return this.runOperation(() => {
-      const context = this.context.getStore()!;
-      if (context.section?.open) return work();
-      let release!: () => void;
-      const section: CanonicalSection = {
-        open: true, succeeded: false, released: new Promise<void>((resolve) => { release = resolve; }),
-      };
-      return this.context.run({ ...context, section }, async () => {
-        try {
-          const result = await work();
-          section.succeeded = true;
-          return result;
-        } finally {
-          // The lock helper has already run its release finally, including all nested job locks.
-          section.open = false;
-          release();
-        }
-      });
+    const context = this.context.getStore();
+    if (!context?.owner.open) return this.runPublicOperation(() => this.runCriticalSection(work));
+    if (context.section?.open) return work();
+    let release!: () => void;
+    const section: CanonicalSection = {
+      open: true, succeeded: false, released: new Promise<void>((resolve) => { release = resolve; }),
+    };
+    return this.context.run({ ...context, section }, async () => {
+      try {
+        const result = await work();
+        section.succeeded = true;
+        return result;
+      } finally {
+        // The lock helper has already run its release finally, including all nested job locks.
+        section.open = false;
+        release();
+      }
     });
   }
 
   /** start must synchronously reserve its lineage FIFO; only its store body awaits released. */
-  defer(jobId: string, start: (released: Promise<void>) => Promise<void>): Promise<void> {
-    const context = this.context.getStore();
-    if (!context?.owner.open) return this.runOperation(() => this.defer(jobId, start));
+  registerJournal(jobId: string, start: (released: Promise<void>) => Promise<void>): JournalRegistration {
+    const context = this.registrationContext();
     let started: Promise<void>;
     try { started = start(context.section?.released ?? Promise.resolve()); }
     catch { started = Promise.resolve(); } // Auxiliary observers cannot poison operation settlement.
@@ -103,17 +106,23 @@ export class AsyncLiftJournalCompletion {
       if (queue.jobs.get(jobId) === completion) queue.jobs.delete(jobId);
       this.prune(queue);
     });
-    return Promise.resolve();
+    return { settled: completion };
   }
 
   /** Join only the captured predecessor, never another API's result or a changing future tail. */
-  joinJob(jobId: string, after?: () => void): Promise<void> {
+  registerJobJoin(jobId: string, after?: () => void): JournalRegistration {
+    const context = this.registrationContext();
     const predecessor = this.existingQueue()?.jobs.get(jobId);
-    if (!predecessor) { after?.(); return Promise.resolve(); }
+    if (!predecessor) { after?.(); return { settled: Promise.resolve() }; }
+    const settled = predecessor.then(() => { after?.(); }).catch(() => {});
+    context.owner.pending.add(settled);
+    return { settled };
+  }
+
+  private registrationContext(): CompletionContext {
     const context = this.context.getStore();
-    if (!context?.owner.open) return this.runOperation(() => this.joinJob(jobId, after));
-    context.owner.pending.add(predecessor.then(() => { after?.(); }).catch(() => {}));
-    return Promise.resolve();
+    if (!context?.owner.open) throw new Error('Journal registration requires an open publisher completion scope');
+    return context;
   }
 
   async drain(): Promise<void> {
