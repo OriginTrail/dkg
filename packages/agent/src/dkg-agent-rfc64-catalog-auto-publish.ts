@@ -69,6 +69,7 @@ import {
   type RemoveRfc64SwmAuthorInventoryResultV1,
 } from './rfc64/swm-author-inventory-producer-v1.js';
 import {
+  rfc64SwmInventoryAssetKeyV1,
   rfc64SwmInventoryShadowRuntimeV1,
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
@@ -84,7 +85,6 @@ import {
 import { loadExactAppliedCatalogRowsV1 } from
   './rfc64/applied-catalog-authority-transition-v1.js';
 import { catalogPlacementTimingV1, type CatalogPlacementAttemptV1 } from './internal/catalog-placement-timing.js';
-import { rfc64SwmInventoryAssetKeyV1, rfc64SwmInventoryAuthorKeyV1 } from './internal/swm-inventory-asset-key.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -760,17 +760,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): void {
-    const assetKey = rfc64SwmInventoryAssetKeyV1({
+    rfc64SwmInventoryShadowRuntimeV1(this).scheduleInventoryWrite({
       contextGraphId: params.contextGraphId,
       subGraphName: params.subGraphName,
       authorAddress: params.lifecycleAgentAddress,
       assertionCoordinate: params.assertionCoordinate,
-    });
-    rfc64SwmInventoryShadowRuntimeV1(this).schedule(
-      assetKey,
-      () => this.observeRfc64DurableSwmPromotionV1(params),
-      rfc64SwmInventoryAuthorKeyV1({ ...params, authorAddress: params.lifecycleAgentAddress }),
-    );
+    }, () => this.observeRfc64DurableSwmPromotionV1(params));
   }
 
   /**
@@ -867,7 +862,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         const request = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
         if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
       } else {
-        await shadowRuntime.runExclusive(assetKey, async () => {
+        const write = { contextGraphId, subGraphName, authorAddress: confirmedSeal.authorAddress, assertionCoordinate };
+        await shadowRuntime.runInventoryWriteExclusive(write, async () => {
           const result = await this.removeRfc64SwmAuthorInventoryShadowV1({ contextGraphId, subGraphName, seal: params.seal });
           if (result.status === 'applied' || result.status === 'absent') {
             this.requestRfc64SwmCatalogProjectionV1({
@@ -876,7 +872,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
               ctx: params.ctx,
             });
           }
-        }, rfc64SwmInventoryAuthorKeyV1({ contextGraphId, subGraphName, authorAddress: confirmedSeal.authorAddress }));
+        });
       }
     } catch (cause) {
       placementWait.observer.released(); // A request that threw has no waiter to release it later.

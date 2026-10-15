@@ -21,6 +21,7 @@ import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dk
 import { describe, expect, it } from 'vitest';
 
 import {
+  FINALIZED_ROW_RESWEEP_INTERVAL_MS_V1,
   finalizedRowHealCountsV1,
   healFinalizedSwmInventoryRowsV1,
 } from '../src/internal/finalized-row-heal.js';
@@ -74,6 +75,27 @@ describe('the sweep of rows of finalized assets (GH#3134)', () => {
     // Every head it left behind was examined, so the next failure on it has nothing to sweep.
     await expect(healFinalizedSwmInventoryRowsV1(inventory, sweep(store, inventory))).resolves.toBe(0);
     expect(finalizedRowHealCountsV1(inventory)).toEqual({ finalizedRowHealPasses: 1, finalizedRowsHealed: 2 });
+  });
+
+  it('sweeps an unchanged head again a minute later, once its asset has been finalized meanwhile', async () => {
+    const store = new OxigraphStore();
+    // The shared copy is gone, and the asset has no verified copy yet.
+    const waiting = row(1n, '1');
+    const inventory = fakeInventory([waiting]);
+    let clock = 1_000_000;
+    const at = { now: () => clock };
+
+    await expect(healFinalizedSwmInventoryRowsV1(inventory, { ...sweep(store, inventory), ...at })).resolves.toBe(0);
+    expect(inventory.current.rows).toEqual([waiting]);
+    // Its verified copy arrives; the inventory does not change.
+    await finalize(store, waiting, '1');
+    clock += FINALIZED_ROW_RESWEEP_INTERVAL_MS_V1 - 1;
+    await expect(healFinalizedSwmInventoryRowsV1(inventory, { ...sweep(store, inventory), ...at })).resolves.toBe(0);
+    expect(inventory.current.rows).toEqual([waiting]);
+    clock += 1;
+    await expect(healFinalizedSwmInventoryRowsV1(inventory, { ...sweep(store, inventory), ...at })).resolves.toBe(1);
+    expect(inventory.current.rows).toEqual([]);
+    expect(finalizedRowHealCountsV1(inventory)).toEqual({ finalizedRowHealPasses: 2, finalizedRowsHealed: 1 });
   });
 
   it('tries a removal that failed again at the next sweep of the same head', async () => {

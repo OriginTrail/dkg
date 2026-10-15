@@ -82,7 +82,6 @@ import {
   type CatalogPlacementAttemptV1,
 } from './internal/catalog-placement-timing.js';
 import { readOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
-import { rfc64SwmInventoryAuthorKeyV1 } from './internal/swm-inventory-asset-key.js';
 import { healFinalizedSwmInventoryRowsV1 } from './internal/finalized-row-heal.js';
 import { catalogRepairDiagnosticV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
@@ -193,13 +192,13 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       const scope = Object.freeze({ ...decision.lane.scopeBase, authorAddress }) as SwmAuthorInventoryScopeV1;
       const scopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
       const runtime = rfc64SwmInventoryShadowRuntimeV1(this);
-      const authorKey = rfc64SwmInventoryAuthorKeyV1({ contextGraphId, authorAddress });
+      const lane = { contextGraphId, authorAddress };
       // No inventory and no share of this author's on its way into one: no row to remove.
       if (
         persistence.swmAuthorInventory.readSwmAuthorInventoryHeadDigestV1(scopeDigest, authorAddress) === null
-        && !runtime.hasAuthorWork(authorKey)
+        && !runtime.hasInventoryWrites(lane)
       ) return;
-      runtime.scheduleAfterAuthorWork(authorKey, JSON.stringify(['finalized-twin', authorKey, input.kaUal]), async () => {
+      runtime.scheduleAfterInventoryWrites(lane, input.kaUal, async () => {
         try {
           const row = this.rfc64PersistenceV1?.swmAuthorInventory.readSwmAuthorInventoryRowV1(
             scopeDigest,

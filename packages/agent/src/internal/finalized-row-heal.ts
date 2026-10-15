@@ -31,11 +31,17 @@ export interface FinalizedRowHealCountsV1 {
 /** Rounds of one sweep: rows committed while it ran are examined in the next, up to this many. */
 const MAX_SWEEP_ROUNDS_V1 = 4;
 
+/**
+ * An unchanged inventory head is swept again after this long: whether a row may go also depends on
+ * its asset's verified copy and shared copy, which change without the inventory changing.
+ */
+export const FINALIZED_ROW_RESWEEP_INTERVAL_MS_V1 = 60_000;
+
 interface FinalizedRowHealStateV1 {
   passes: number;
   rows: number;
-  /** Per graph and author, the last inventory head whose every row a sweep examined. */
-  readonly sweptHeads: Map<string, string>;
+  /** Per graph and author, the last inventory head whose every row a sweep examined, and when. */
+  readonly sweptHeads: Map<string, Readonly<{ head: string; atMs: number }>>;
 }
 
 const STATES_V1 = new WeakMap<object, FinalizedRowHealStateV1>();
@@ -54,7 +60,8 @@ export function finalizedRowHealCountsV1(owner: object): FinalizedRowHealCountsV
  * finalized at or above the row's version and has no shared-memory head left. A head counts as
  * swept only once every row of it was examined and every eligible one removed: rows that other
  * work commits while the sweep awaits its reads and removals are examined in a further round, and
- * a removal that failed is tried again by the next sweep. Answers how many rows went.
+ * a removal that failed is tried again by the next sweep. A head counted as swept is swept again
+ * after `FINALIZED_ROW_RESWEEP_INTERVAL_MS_V1`. Answers how many rows went.
  */
 export async function healFinalizedSwmInventoryRowsV1(
   owner: object,
@@ -68,6 +75,7 @@ export async function healFinalizedSwmInventoryRowsV1(
     removeRow: (row: Readonly<SwmAuthorInventoryRowV1>) => Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1['status']>;
     /** The author's current inventory, read again after each round. */
     readSnapshot: () => SwmAuthorInventorySnapshotV1 | null;
+    now?: () => number;
   }>,
 ): Promise<number> {
   let state = STATES_V1.get(owner);
@@ -76,7 +84,12 @@ export async function healFinalizedSwmInventoryRowsV1(
     STATES_V1.set(owner, state);
   }
   const key = `${input.contextGraphId}\n${input.authorAddress}`;
-  if (state.sweptHeads.get(key) === input.snapshot.head.objectDigest) return 0;
+  const now = input.now ?? Date.now;
+  const swept = state.sweptHeads.get(key);
+  if (
+    swept?.head === input.snapshot.head.objectDigest
+    && now() - swept.atMs < FINALIZED_ROW_RESWEEP_INTERVAL_MS_V1
+  ) return 0;
   state.passes += 1;
   const graphManager = new GraphManager(input.store);
   const examined = new Set<string>();
@@ -97,7 +110,7 @@ export async function healFinalizedSwmInventoryRowsV1(
         else if (outcome === 'failed') failed = true;
       }
       // A head with an eligible row that could not be removed stays eligible for the next sweep.
-      if (!failed) state.sweptHeads.set(key, snapshot.head.objectDigest);
+      if (!failed) state.sweptHeads.set(key, Object.freeze({ head: snapshot.head.objectDigest, atMs: now() }));
       const current = input.readSnapshot();
       if (current?.head.objectDigest === snapshot.head.objectDigest) break;
       snapshot = current;

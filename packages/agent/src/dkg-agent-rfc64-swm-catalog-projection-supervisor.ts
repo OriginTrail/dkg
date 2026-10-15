@@ -82,8 +82,8 @@ export interface Rfc64SwmCatalogProjectionSupervisorStatusV1 {
   readonly repairs: readonly Rfc64PublicCatalogAuthorRepairStatusV1[];
   /** GH#3081 — aggregate finalized-private queue evidence; observation only. */
   readonly finalizedPrivatePlacement: Readonly<FinalizedPrivatePlacementQueueStatusV1>;
-  /** GH#3134 — aggregate: author catalogs at their row cap and the placements parked for them. */
-  readonly authorCatalogCapacity?: Readonly<AuthorCatalogCapacityStatusV1>;
+  /** GH#3134 — aggregate: catalogs at their row cap, placements parked for them, and once run, finalized-row sweeps. */
+  readonly authorCatalogCapacity?: Readonly<AuthorCatalogCapacityStatusV1 & Partial<FinalizedRowHealCountsV1>>;
 }
 
 interface MutableAuthorRepairStatusV1 {
@@ -355,9 +355,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         state.finalizedPrivateWaiters.summary(),
         state.finalizedPrivateRunner.running,
       ),
-      authorCatalogCapacity: Object.freeze({
-        ...this.#fullCatalogs.status(state.repairs), ...this.#dependencies.readFinalizedRowHealCounts?.(),
-      }),
+      authorCatalogCapacity: Object.freeze({ ...this.#fullCatalogs.status(state.repairs), ...this.#dependencies.readFinalizedRowHealCounts?.() }),
     });
   }
 
