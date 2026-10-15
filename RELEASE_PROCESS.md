@@ -257,3 +257,7 @@ Required progression:
 3. Publish a canary/prerelease to `testnet` and pass the testnet smoke test.
 4. Publish/promote the stable version to `mainnet` only after the testnet smoke test passes.
 5. Run the mainnet smoke test and final package/channel validation (`pnpm release:verify-published ...`).
+
+### Builder documentation release checks
+
+Run the [documentation checks and released-package smoke](scripts/docs/README.md) for the release candidate. Refresh `scripts/docs/capabilities.json`, including source-only features becoming available. Verify the representative builder and agent workflows and record any unexecuted checks explicitly. After the normal reviewed promotion, verify GitBook navigation and `llms.txt`; a repo merge alone is not proof that the site updated. Keep validation reports out of `docs/SUMMARY.md`.

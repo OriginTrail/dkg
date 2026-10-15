@@ -133,3 +133,7 @@ By participating in this project, you agree to abide by the [Code of Conduct](ht
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](https://github.com/OriginTrail/dkg/blob/main/LICENSE).
+
+## Public documentation
+
+For a feature or integration change, follow [Documentation maintenance](../scripts/docs/README.md). Update the public guide, relevant agent procedure, capability/release status, and operational contract together. Run `node scripts/docs/check.mjs` with Node.js 22.13+; record any runtime validation separately from source review.
