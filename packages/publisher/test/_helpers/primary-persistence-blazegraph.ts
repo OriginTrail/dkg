@@ -83,6 +83,7 @@ export function registerPrimaryPersistenceBlazegraphCases({
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: id }));
     await publisher.claimNext(`wallet-${id}`);
     const job = (await publisher.getStatus(jobId))!;
+    if (job.status !== 'claimed') throw new Error('Expected canonical claimed fixture');
     const request = serializeJobRecord(job, graph).requestQuads;
     const extra = { graph, subject: requestSubject(jobId), predicate: 'urn:test:extra', object: '"retained"' };
     await store!.insert([extra, { ...extra, subject: `urn:test:unrelated:${id}` }]);
@@ -159,6 +160,7 @@ export function registerPrimaryPersistenceBlazegraphCases({
     expect((await rows(store!, f.graph)).filter((row) => row.includes('urn:test:unrelated:'))).toEqual(unrelatedBefore);
     const job = (await f.publisher.getStatus(f.jobId))!;
     expect(job).toMatchObject({ status: 'validated', validation: KA_VM_VALIDATION });
+    if (job.status !== 'validated') throw new Error('Expected canonical validated result');
     const raw = await store!.query(`SELECT ?payload WHERE { GRAPH <${f.graph}> { <${jobSubject(f.jobId)}> <${CONTROL_PAYLOAD}> ?payload } }`);
     expect(raw.type === 'bindings' && raw.bindings[0]?.['payload']).toBe(
       serializeJobRecord(job, f.graph).jobQuads.find((q) => q.predicate === CONTROL_PAYLOAD)!.object,
@@ -200,6 +202,74 @@ export function registerPrimaryPersistenceBlazegraphCases({
     expect((await f.publisher.getStatus(f.jobId))?.status).toBe('claimed');
     expect(f.work).not.toHaveBeenCalled();
   });
+
+  it('claims independent work while a real journal response is held and duplicate admission waits', async () => {
+    const id = randomUUID();
+    let sequence = 0;
+    let now = 1_000;
+    const config = {
+      graphUri: `urn:test:journal-progress:${id}/_shared_memory`, journalWrites: true,
+      autoRetryEnabled: false, now: () => ++now, idGenerator: () => `${id}-${++sequence}`,
+    };
+    const publisher = new TripleStoreAsyncLiftPublisher(store!, config);
+    const peer = new TripleStoreAsyncLiftPublisher(store!, config);
+    const first = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: `${id}-first` }));
+    const request = kaVmPublishRequest({ name: `${id}-held` });
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const reached = new Promise<void>((resolve) => { entered = resolve; });
+    const query = store!.query.bind(store!);
+    let armed = true;
+    vi.spyOn(store!, 'query').mockImplementation(async (sparql, options) => {
+      const intercept = armed && options?.source === 'publisher.asyncLift.allocateJournalSeq';
+      if (intercept) armed = false;
+      const result = await query(sparql, options);
+      if (intercept) {
+        // Exercise the actual backend/decorator read, then hold only its completion.
+        expect(result.type).toBe('bindings');
+        entered();
+        await held;
+      }
+      return result;
+    });
+    let admissionSettled = false;
+    let duplicateSettled = false;
+    const admission = publisher.enqueueKnowledgeAssetVmPublish(request);
+    void admission.then(() => { admissionSettled = true; }, () => { admissionSettled = true; });
+    const pending: Promise<unknown>[] = [admission];
+    let duplicate: Promise<string> | undefined;
+    try {
+      await bounded(reached);
+      expect((await peer.getStatus(`${id}-2`))?.status).toBe('accepted');
+      duplicate = peer.enqueueKnowledgeAssetVmPublish(request);
+      pending.push(duplicate);
+      void duplicate.then(() => { duplicateSettled = true; }, () => { duplicateSettled = true; });
+      const claim = peer.claimNext(`wallet-${id}`);
+      pending.push(claim);
+      // Success requires actual canonical progress while the first journal is still held.
+      await expect(bounded(claim)).resolves.toMatchObject({ jobId: first });
+      expect((await peer.getStatus(first))?.status).toBe('claimed');
+      expect(admissionSettled).toBe(false);
+      expect(duplicateSettled).toBe(false);
+    } finally {
+      release();
+      await Promise.allSettled(pending);
+    }
+    expect(await duplicate!).toBe(await admission);
+    expect((await peer.readJournalByJob(await admission)).entries.map((entry) => [entry.seq, entry.kind])).toEqual([[0, 'admission']]);
+    expect((await peer.readJournalByJob(first)).entries.map((entry) => [entry.seq, entry.kind])).toEqual([[0, 'admission'], [1, 'claimed']]);
+    await peer.drainDetachedExecutions();
+  });
+}
+
+async function bounded<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('No independent progress while journal completion was held')), 10_000);
+    })]);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
 async function rows(store: TripleStore, graph: string, subject?: string) {
