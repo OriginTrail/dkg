@@ -1,4 +1,5 @@
 import type { ClaimLockQueue } from '../src/async-lift-claim-lock.js';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Logger, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -32,7 +33,8 @@ describe('async publisher native claim trace', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       now: () => 2, claimTokenGenerator: () => 'secret-claim-nonce',
     });
-    expect((await publisher.claimNext('private-wallet-id'))?.jobId).toBe('trace-job');
+    const claimed = await publisher.claimNext('private-wallet-id');
+    expect(claimed?.jobId).toBe('trace-job');
     expect(await publisher.claimNext('private-wallet-id')).toBeNull();
     expect(await publisher.processNext('other-wallet')).toBeNull();
     expect(events).toEqual(expect.arrayContaining([
@@ -49,7 +51,12 @@ describe('async publisher native claim trace', () => {
     expect(checks[1]!.walletHash).toBe(checks[0]!.walletHash);
     expect(JSON.stringify(events)).not.toContain('private-wallet-id');
     expect(JSON.stringify(events)).not.toContain('secret-claim-nonce');
-    expect(events.filter((e) => e.event === 'claim_lock_released')).toHaveLength(3);
+    expect(events.find((e) => e.event === 'claim_outcome' && e.result === 'claimed')?.claimEpochHash)
+      .toBe(createHash('sha256').update(claimed!.claim.claimToken).digest('hex'));
+    expect(events.filter((e) => e.event === 'claim_outcome' && e.result !== 'claimed').every((e) => e.claimEpochHash === undefined)).toBe(true);
+    expect(events.filter((e) => e.event === 'claim_lock_released' && e.kind === 'claim')).toHaveLength(3);
+    expect(events.filter((e) => e.event === 'claim_lock_released' && e.kind === 'transition')).toHaveLength(1);
+    expect(events.every((e) => typeof e.hrtimeNs === 'string' && /^\d+$/.test(e.hrtimeNs))).toBe(true);
   });
 
   it('does not emit diagnostic lines unless explicitly enabled', async () => {
@@ -94,7 +101,7 @@ describe('claim lock diagnostic isolation', () => {
     ]);
   });
 
-  it.each(['enabled', 'clock', 'wallClock', 'write'] as const)('survives a throwing %s observer and releases the next waiter', async (failing) => {
+  it.each(['enabled', 'clock', 'monotonicNs', 'wallClock', 'write'] as const)('survives a throwing %s observer and releases the next waiter', async (failing) => {
     const fail = () => { throw new Error('observer failure'); };
     const trace = new ClaimTrace({ enabled: () => true, clock: () => 0, wallClock: () => 0,
       write: () => undefined, [failing]: fail });

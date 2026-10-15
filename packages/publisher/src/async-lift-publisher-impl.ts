@@ -1,3 +1,5 @@
+import { AsyncLiftJournalCompletion } from './async-lift-journal-completion.js';
+import { completionTrace } from './async-lift-completion-trace.js';
 import { traceProcessNext } from './async-lift-claim-trace.js';
 import { LiftJobStoreSelectors } from './lift-job-store-selectors.js';
 import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
@@ -522,6 +524,7 @@ export class TripleStoreAsyncLiftPublisher
   private readonly graphUri: string;
   private readonly journalGraphUri: string;
   private readonly journalWrites: boolean;
+  private readonly journalCompletion: AsyncLiftJournalCompletion;
   private readonly maxRetries: number;
   private readonly retryBackoffBaseMs: number;
   private readonly retryBackoffMaxMs: number;
@@ -679,6 +682,7 @@ export class TripleStoreAsyncLiftPublisher
     this.jobSelectors = new LiftJobStoreSelectors(store, this.graphUri, (job) => this.chainObservations.project(job));
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
     this.journalWrites = config.journalWrites ?? false;
+    this.journalCompletion = new AsyncLiftJournalCompletion(store, this.graphUri);
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
     // ONE validation owner for the retry knobs (shared with the daemon config
     // boundary): ranges, the boolean kill-switch type, and the cross-field
@@ -727,6 +731,7 @@ export class TripleStoreAsyncLiftPublisher
         claimTokenGenerator: config.claimTokenGenerator ?? (() => crypto.randomUUID()),
       },
       {
+        journalCompletion: this.journalCompletion,
         ensureGraph: async () => await this.ensureGraph(),
         isPaused: () => this.paused,
         readStatus: async (jobId) => await this.readJobPayload(jobId),
@@ -763,7 +768,7 @@ export class TripleStoreAsyncLiftPublisher
     request: KnowledgeAssetVmPublishRequest,
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string> {
-    return this.claimCoordinator.runClaimTransaction(async () => {
+    return this.journalCompletion.runOperation(() => this.claimCoordinator.runClaimTransaction(async () => {
       await this.ensureGraph();
       if (!request.shareOperationId.trim()) {
         throw new Error('Knowledge asset VM publish requires a shareOperationId');
@@ -771,11 +776,13 @@ export class TripleStoreAsyncLiftPublisher
       assertGraphScopedLiftSnapshot(request);
       const existing = await this.findActiveKnowledgeAssetVmPublishJob(request);
       if (existing?.compatible) {
+        await this.journalCompletion.joinJob(existing.job.jobId, () => {
+          if (existing.job.status === 'accepted') this.notifyWorkAvailable();
+        });
         if (isFailedJob(existing.job)) {
           const reaccepted = await this.reacceptRetryableFailedKnowledgeAssetVmPublishJob(existing.job);
           return reaccepted.jobId;
         }
-        if (existing.job.status === 'accepted') this.notifyWorkAvailable();
         return existing.job.jobId;
       }
       if (existing?.job) {
@@ -799,7 +806,7 @@ export class TripleStoreAsyncLiftPublisher
       };
       await this.writeJob(job, 'admission');
       return jobId;
-    }, 'admission');
+    }, 'admission'), true);
   }
 
 
@@ -809,12 +816,12 @@ export class TripleStoreAsyncLiftPublisher
 
   readonly administrative: AsyncLiftAdministrativeMutations = {
     updateById: async (jobId, status, data = {}) => {
-      await this.transitionJob(jobId, status, data);
+      await this.journalCompletion.runOperation(() => this.transitionJob(jobId, status, data), true);
     },
     recordPublishResultById: async (jobId, publishResult, options = {}) =>
-      await this.recordPublishResultById(jobId, publishResult, options),
+      await this.journalCompletion.runOperation(() => this.recordPublishResultById(jobId, publishResult, options), true),
     recordPublishFailureById: async (jobId, failure) =>
-      await this.recordPublishFailureById(jobId, failure),
+      await this.journalCompletion.runOperation(() => this.recordPublishFailureById(jobId, failure), true),
   };
 
   openClaimSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession {
@@ -1416,7 +1423,7 @@ export class TripleStoreAsyncLiftPublisher
     // Keep canonical claim -> job lock order through terminal persistence and wallet deletion.
     // Otherwise a claimant can replace the wallet lock between its guarded read and deletion.
     // This short transaction does no lifecycle repair: the executor certified that work already.
-    return this.claimCoordinator.runClaimJobTransaction(claim.jobId, async (transaction) => {
+    return this.journalCompletion.runOperation(() => this.claimCoordinator.runClaimJobTransaction(claim.jobId, async (transaction) => {
       if (transaction.kind !== 'present') return false;
       const { current, scope } = transaction;
       if (current.status !== 'broadcast' && current.status !== 'included') return false;
@@ -1425,7 +1432,7 @@ export class TripleStoreAsyncLiftPublisher
       if (current.broadcast.txHash !== result.onChainResult.txHash) return false;
       const completed = await this.applyPublishResultTransition(current, scope, result, options);
       return completed.status === 'finalized';
-    });
+    }), true);
   }
 
   private trackDetachedExecution(
@@ -1625,9 +1632,10 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async drainDetachedExecutions(): Promise<void> {
-    while (this.detachedExecutions.size > 0) {
+    do {
       await Promise.all([...this.detachedExecutions.values()]);
-    }
+      await this.journalCompletion.drain();
+    } while (this.detachedExecutions.size > 0);
   }
 
   readonly reconciliationScheduling = {
@@ -1640,10 +1648,10 @@ export class TripleStoreAsyncLiftPublisher
       onWorkAvailable?(): void;
     }): (() => void) => this.queueScheduler.attach(scheduler),
     // The scheduling caller's per-tick operation: one pass, one atomic answer.
-    reconcile: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runReconciliationPass(),
+    reconcile: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.journalCompletion.runOperation(() => this.runReconciliationPass(), true),
     // Startup recovery with the outcome kept: the caller seeds its cadence from the pass it
     // already ran instead of paying a second boot-time inventory.
-    recover: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runRecovery(),
+    recover: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.journalCompletion.runOperation(() => this.runRecovery(), true),
   };
 
   /**
@@ -2181,7 +2189,7 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async recover(): Promise<number> {
-    return (await this.runRecovery()).reconciled;
+    return (await this.journalCompletion.runOperation(() => this.runRecovery(), true)).reconciled;
   }
 
   private async runRecovery(): Promise<{ reconciled: number; pendingWork: boolean }> {
@@ -2194,7 +2202,7 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async reconcileTransactions(): Promise<number> {
-    return (await this.runReconciliationPass()).reconciled;
+    return (await this.journalCompletion.runOperation(() => this.runReconciliationPass(), true)).reconciled;
   }
 
   /**
@@ -2789,6 +2797,10 @@ export class TripleStoreAsyncLiftPublisher
    * the reason shown per job are ONE partition rather than two orderings kept in step by hand.
    */
   async retryDetailed(filter: AsyncLiftRetryFilter = {}): Promise<AsyncLiftRetryOutcome> {
+    return this.journalCompletion.runOperation(() => this.retryFailedJobs(filter), true);
+  }
+
+  private async retryFailedJobs(filter: AsyncLiftRetryFilter): Promise<AsyncLiftRetryOutcome> {
     if (filter.status && filter.status !== 'failed') {
       return { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
     }
@@ -2930,9 +2942,18 @@ export class TripleStoreAsyncLiftPublisher
     if (validated.status === 'included') this.chainObservations.receipt(job.jobId, validated.broadcast.txHash, validated.timestamps.includedAt ?? this.now());
     const canonical = committedLiftJob(this.chainObservations.project(validated), job);
     await this.persistJobRecord(canonical);
-    await this.appendJournal(canonical, kind);
-    if (canonical.status === 'accepted') this.notifyWorkAvailable();
-    if (canonical.status === 'finalized') this.chainObservations.completion.terminal(job.jobId);
+    const { status, jobId } = canonical;
+    if (status === 'accepted') completionTrace.acceptedPrimaryCommitted(jobId);
+    if (status === 'finalized') {
+      completionTrace.terminalPrimaryCommitted(jobId);
+    }
+    await this.appendJournal(canonical, kind, () => {
+      if (status === 'accepted') this.notifyWorkAvailable();
+      if (status === 'finalized') this.chainObservations.completion.terminal(jobId);
+    });
+    if (status === 'finalized' && completionTrace.enabled) {
+      this.journalCompletion.afterSuccessfulJobSettlement(jobId, () => completionTrace.terminalOperationSettled(jobId));
+    }
     return canonical;
   }
 
@@ -2966,25 +2987,23 @@ export class TripleStoreAsyncLiftPublisher
    *    the authoritative write. A swallowed append is an invisible gap: "complete"
    *    means "no seq gap", not "every transition present".
    */
-  private async appendJournal(job: LiftJob, kind: JournalKind): Promise<void> {
-    if (!this.journalWrites) return;
-    if (kind === 'rollback-noop') return;
-    if (job.request.jobType !== 'knowledge-asset-vm-publish') return;
-    let lineageKey: string;
-    try {
-      lineageKey = knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
-    } catch {
-      return; // legacy delimiter-bearing job — skip, never propagate
+  private async appendJournal(job: LiftJob, kind: JournalKind, completed: () => void): Promise<void> {
+    if (!this.journalWrites || kind === 'rollback-noop' || job.request.jobType !== 'knowledge-asset-vm-publish') {
+      completed();
+      return;
     }
+    let facts: Omit<AdmissionJournalEntry, 'seq' | 'at'>;
     try {
-      await this.withJournalLock(lineageKey, async () => {
-        const seq = await this.allocateJournalSeq(lineageKey);
-        const entry = this.buildJournalEntry(job, kind, lineageKey, seq);
+      const lineageKey = knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
+      facts = this.captureJournalFacts(job, kind, lineageKey);
+    } catch { completed(); return; } // Legacy delimiter-bearing facts remain auxiliary.
+    await this.journalCompletion.defer(job.jobId, (released) =>
+      this.withJournalLock(facts.lineageKey, async () => {
+        await released;
+        const seq = await this.allocateJournalSeq(facts.lineageKey);
+        const entry = { ...facts, seq, at: this.now() };
         await this.store.insert(serializeJournalEntry(entry, this.journalGraphUri));
-      });
-    } catch {
-      // Auxiliary log — must never abort the authoritative state write.
-    }
+      }).catch(() => { /* Auxiliary log must not abort the authoritative state write. */ }).then(completed));
   }
 
   /** #1829 — next per-lineageKey seq: numeric MAX+1 over the journal graph, first = 0. */
@@ -2999,7 +3018,7 @@ export class TripleStoreAsyncLiftPublisher
     return parseIntegerLiteral(raw) + 1;
   }
 
-  private buildJournalEntry(job: LiftJob, kind: JournalKind, lineageKey: string, seq: number): AdmissionJournalEntry {
+  private captureJournalFacts(job: LiftJob, kind: JournalKind, lineageKey: string): Omit<AdmissionJournalEntry, 'seq' | 'at'> {
     const publish = (job.request as { knowledgeAssetVmPublish: { intentKey?: string } }).knowledgeAssetVmPublish;
     const txHash = 'broadcast' in job ? job.broadcast?.txHash : undefined;
     const blockNumber = 'inclusion' in job ? job.inclusion?.blockNumber : undefined;
@@ -3010,8 +3029,6 @@ export class TripleStoreAsyncLiftPublisher
       ? (job.recovery as { recoveredFromStatus?: string } | undefined)?.recoveredFromStatus
       : undefined;
     return {
-      seq,
-      at: this.now(),
       kind: kind as Exclude<JournalKind, 'rollback-noop'>,
       jobId: job.jobId,
       lineageKey,
@@ -3084,8 +3101,8 @@ export class TripleStoreAsyncLiftPublisher
 
   /**
    * #1829 — per-lineageKey mutex for the journal read-modify-write (seq allocation +
-   * insert). Distinct lineages append in parallel; the same lineage serializes. Never
-   * acquired while holding — or acquiring — the claim lock, so no reentrancy/deadlock.
+   * insert). Reserve synchronously in primary-commit order. The callback waits for canonical
+   * lock release and never acquires claim/job ownership; distinct lineages append in parallel.
    */
   private async withJournalLock<T>(lineageKey: string, fn: () => Promise<T>): Promise<T> {
     // journalGraphUri is a fixed constant, so the lineageKey alone keys the bucket.

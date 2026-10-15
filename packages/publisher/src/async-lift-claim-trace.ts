@@ -7,6 +7,7 @@ type TraceFields = Readonly<Record<string, string | number | boolean | undefined
 export interface ClaimTraceSources {
   enabled(): boolean;
   clock(): number;
+  monotonicNs?(): bigint;
   wallClock(): number;
   write(line: string): void;
 }
@@ -14,6 +15,7 @@ const logger = new Logger('AsyncLiftPublisher');
 const sources: ClaimTraceSources = {
   enabled: () => process.env.DKG_ASYNC_PUBLISH_TRACE === '1',
   clock: () => performance.now(),
+  monotonicNs: () => process.hrtime.bigint(),
   wallClock: () => Date.now(),
   write: (line) => logger.info(createOperationContext('publish', 'claim-trace'), line),
 };
@@ -23,17 +25,18 @@ let nextOperationId = 0;
 export class ClaimTrace {
   constructor(private readonly source: ClaimTraceSources = sources) {}
 
-  emit(event: string, fields: TraceFields = {}, walletId?: string): number | undefined {
+  emit(event: string, fields: TraceFields = {}, walletId?: string, claimToken?: string): number | undefined {
     try {
       if (!this.source.enabled()) return undefined;
       const monotonicMs = this.source.clock();
       this.source.write(`async_publish_claim_trace ${JSON.stringify({
         schemaVersion: 1, processId: process.pid, event,
-        wallTimeMs: this.source.wallClock(), monotonicMs, ...fields,
+        wallTimeMs: this.source.wallClock(), monotonicMs, hrtimeNs: this.source.monotonicNs?.().toString(), ...fields,
         ...(typeof fields.acquiredAtMs === 'number' ? { holdMs: monotonicMs - fields.acquiredAtMs } : {}),
         ...(walletId === undefined ? {} : {
           walletHash: createHash('sha256').update(walletId).digest('hex'),
         }),
+        ...(claimToken === undefined ? {} : { claimEpochHash: createHash('sha256').update(claimToken).digest('hex') }),
       })}`);
       return monotonicMs;
     } catch { return undefined; }
@@ -41,7 +44,7 @@ export class ClaimTrace {
 }
 export const claimTrace = new ClaimTrace();
 export interface ClaimLockTrace {
-  emit(event: string, fields?: TraceFields): void;
+  emit(event: string, fields?: TraceFields, claimToken?: string): void;
 }
 
 /** Observe canonical claim-domain scheduling and release with monotonic boundary observations. */
@@ -56,7 +59,7 @@ export async function withObservedClaimLock<T>(
   const operationId = ++nextOperationId;
   const fields = { operationId, kind };
   const trace: ClaimLockTrace = {
-    emit: (event, detail = {}) => { observer.emit(event, { ...fields, ...detail }, walletId); },
+    emit: (event, detail = {}, claimToken) => { observer.emit(event, { ...fields, ...detail }, walletId, claimToken); },
   };
   let waitingAt: number | undefined;
   let acquiredAt: number | undefined;
