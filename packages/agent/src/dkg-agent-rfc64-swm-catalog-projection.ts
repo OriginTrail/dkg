@@ -63,10 +63,8 @@ import {
 } from './rfc64/public-catalog-head-delivery-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from
   './rfc64/public-catalog-transport-v1.js';
-import {
-  prepareRfc64SwmInventoryCatalogTargetV1,
-  readCurrentAuthorCatalogScopeV1,
-} from './rfc64/swm-inventory-catalog-reconciler-v1.js';
+import { readCurrentAuthorCatalogScopeV1 } from './internal/author-catalog-current-scope.js';
+import { prepareRfc64SwmInventoryCatalogTargetV1 } from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 import {
   resolveRfc64ConfirmedVmRepairCatalogAssetV1,
   resolveRfc64InventoryWorkspaceCatalogAssetV1,

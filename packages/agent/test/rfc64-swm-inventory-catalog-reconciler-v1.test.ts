@@ -27,9 +27,9 @@ import {
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { readCurrentAuthorCatalogScopeV1 } from '../src/internal/author-catalog-current-scope.js';
 import {
   prepareRfc64SwmInventoryCatalogTargetV1,
-  readCurrentAuthorCatalogScopeV1,
 } from '../src/rfc64/swm-inventory-catalog-reconciler-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'41'.repeat(32)}`);

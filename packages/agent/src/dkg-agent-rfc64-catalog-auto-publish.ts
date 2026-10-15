@@ -50,7 +50,7 @@ import {
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { readCurrentAuthorCatalogScopeV1 } from './rfc64/swm-inventory-catalog-reconciler-v1.js';
+import { readCurrentAuthorCatalogScopeV1 } from './internal/author-catalog-current-scope.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
   rfc64CatalogLaneAcceptsWorkspaceHeadV1,
