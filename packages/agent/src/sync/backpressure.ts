@@ -865,7 +865,12 @@ export async function withGlobalSyncBackpressure<T>(
         + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queue.length}/${queueLimit}`
         + `${reservedSharedMemoryState(sharedMemoryReserve)})`,
     );
-    return await traceSyncAdmission(options.label, work, { reserved: admission.entry.payload.reserved === true });
+    return await traceSyncAdmission(options.label, work, {
+      reserved: admission.entry.payload.reserved === true,
+      limit,
+      queueLimit,
+      partitioned: options.policy.partitions !== undefined,
+    });
   } finally {
     release();
   }

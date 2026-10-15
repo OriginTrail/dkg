@@ -61,15 +61,16 @@
 //   6  member 2 while its only sync slot is busy with a large transfer of
 //      another graph (MEMBER_SHARING_BIG_ASSETS x MEMBER_SHARING_BIG_TRIPLES).
 //      Member 2's own evidence must show the transfer in the slot: its
-//      diagnostics (/api/diagnostics/backpressure) show its effective policy
-//      of one slot and no queue, and its admission trace
-//      (DKG_SYNC_ADMISSION_TRACE, written by the agent) names the admission
-//      of the large graph that took its slot and when it gave it up. A write
-//      counts only when it was received before then. Its daemon starts with
-//      the sync environment variables pinned to that policy (they override
-//      config). A write received after the transfer gave up the slot, or a
-//      transfer never admitted, fails the case as not exercised; a running
-//      catch-up job alone proves nothing
+//      admission trace (DKG_SYNC_ADMISSION_TRACE, written by the agent) names
+//      the admission of the large graph that took its general slot, under the
+//      effective policy of one general slot and no queue, and when it gave the
+//      slot up. A write counts only when it was received before then. A
+//      reserved shared-memory slot beside the general one is the fix under
+//      test (the diagnostics report it as part of one pool, so they are not
+//      read for this). Its daemon starts with the sync environment variables
+//      pinned to that policy (they override config). A write received after
+//      the transfer gave up the slot, or a transfer never admitted, fails the
+//      case as not exercised; a running catch-up job alone proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
 //      and 3 on a private graph whose members joined through the signed
 //      request flow. A member's write into a private graph sets up its sender

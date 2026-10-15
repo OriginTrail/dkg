@@ -6,7 +6,16 @@ import { createOperationContext } from '@origintrail-official/dkg-core';
 import { traceSyncAdmission } from '../src/sync/admission-trace.js';
 import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 
-interface TraceLine { event: 'start' | 'release'; id: string; label: string; reserved: boolean; at: number }
+interface TraceLine {
+  event: 'start' | 'release';
+  id: string;
+  label: string;
+  reserved: boolean;
+  limit: number | null;
+  queueLimit: number | null;
+  partitioned: boolean;
+  at: number;
+}
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const lines = (file: string): TraceLine[] => (existsSync(file)
@@ -28,6 +37,12 @@ describe('sync admission trace (DKG_SYNC_ADMISSION_TRACE)', () => {
   it('writes nothing unless the variable names a file', async () => {
     expect(await traceSyncAdmission('shared-memory:g:peer', async () => 'done')).toBe('done');
     expect(existsSync(file)).toBe(false);
+  });
+
+  it('records no policy it was not given', async () => {
+    process.env.DKG_SYNC_ADMISSION_TRACE = file;
+    await traceSyncAdmission('shared-memory:g:peer', async () => undefined);
+    expect(lines(file).map((line) => [line.reserved, line.limit, line.queueLimit, line.partitioned])).toEqual([[false, null, null, false], [false, null, null, false]]);
   });
 
   it('brackets each admission\'s work: its start once it holds the slot, its release before the next admission starts', async () => {
@@ -56,6 +71,8 @@ describe('sync admission trace (DKG_SYNC_ADMISSION_TRACE)', () => {
     expect(trace[2].id).not.toBe(trace[0].id);
     expect(trace[2].at).toBeGreaterThanOrEqual(trace[1].at);
     expect(trace.every((line) => line.reserved === false)).toBe(true);
+    // The general pool's effective policy, on every line.
+    expect(trace.map((line) => [line.limit, line.queueLimit, line.partitioned])).toEqual(Array(4).fill([1, 1, false]));
   });
 
   it('says which admission holds a reserved shared-memory slot beside a large transfer in the only global slot', async () => {
@@ -82,6 +99,8 @@ describe('sync admission trace (DKG_SYNC_ADMISSION_TRACE)', () => {
       ['release', 'shared-memory:urn:cg:small:peer', true],
       ['release', 'durable:urn:cg:large:peer', false],
     ]);
+    // The general pool stays one slot and no queue, whatever the reserved slot adds to the reported capacity.
+    expect(lines(file).every((line) => line.limit === 1 && line.queueLimit === 0 && line.partitioned === false)).toBe(true);
   });
 
   it('records the release of work that fails, and the failure still reaches the caller', async () => {
