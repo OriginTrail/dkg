@@ -89,9 +89,17 @@
 // issue's kind does; the script does not wait for the nodes to find each
 // other by themselves.
 //
+// Temporary node numbers. The suite takes the first three free of 7, 8, 9 and
+// 10 (no folder, nothing listening on the node's API or libp2p port). A node
+// folder of its own, left by a run that was killed, carries a mark: it is
+// stopped and removed at the start, so the suite's own debris never costs a
+// node number. Another suite's node is left alone. At the end the suite
+// removes a node's folder only once nothing listens on its ports.
+//
 // Exit codes: 0 every case passed; 1 a case failed or was not run; 3 the
-// devnet cannot host the scenario (the temporary node numbers are taken, node 1
-// is not a Core) and nothing was exercised.
+// devnet cannot host the scenario and nothing was exercised: no devnet, node 1
+// or node 2 not a Core, or fewer than three node numbers free of other
+// suites' nodes.
 //
 // Env knobs:
 //   DEVNET_DIR, API_PORT_BASE
@@ -108,8 +116,7 @@
 // Run against a running devnet: scripts/devnet-test-issue-3251-member-sharing.mjs
 
 import { spawn, spawnSync } from 'node:child_process';
-import { connect } from 'node:net';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { definitionState, readListing, subscriptionState } from './lib/qa/context-graph-listing.mjs';
@@ -284,9 +291,16 @@ const nodeEnv = node => (node === M2
   ? { DKG_SYNC_GLOBAL_MAX_INFLIGHT: '1', DKG_SYNC_GLOBAL_LIMIT: '1', DKG_SYNC_GLOBAL_QUEUE_LIMIT: '0' }
   : {});
 
+// Every node folder this suite creates carries this file, so that a later run
+// can tell a node of its own (left by a run that was killed) from another
+// suite's, and remove it.
+const OWN_MARK = '.issue-3251-member-sharing';
+const ownMark = node => join(DEVNET_DIR, `node${node}`, OWN_MARK);
+
 async function startEdge(node, extra) {
   STARTED_NODES.push(node);
   const added = await devnetSh(['addnode', String(node), 'edge'], { ...nodeEnv(node), DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(extra) });
+  if (existsSync(join(DEVNET_DIR, `node${node}`))) writeFileSync(ownMark(node), `${STAMP} ${role(node)}\n`);
   if (added.status !== 0) throw new Error(`temporary node ${node} could not be added: ${lastLines(added.output)}`);
   await identify(node);
 }
@@ -759,22 +773,46 @@ async function busyMember(pub, big) {
 // ── the run ──────────────────────────────────────────────────────────────────
 let EXIT = 0;
 
-/** Whether a connection to the port succeeds: something listens there. */
+/**
+ * Whether something listens on the port: a connection to it succeeds.
+ * Synchronous, because the cleanup also runs from a signal handler.
+ */
 function listening(port) {
-  return new Promise(resolve => {
-    const socket = connect({ host: '127.0.0.1', port });
-    const end = result => { socket.destroy(); resolve(result); };
-    socket.once('connect', () => end(true));
-    socket.once('error', () => end(false));
-    socket.setTimeout(1000, () => end(false));
-  });
+  const probe = spawnSync(process.execPath, ['-e', `const s = require('net').connect(${Number(port)}, '127.0.0.1');
+    s.on('connect', () => process.exit(0)); s.on('error', () => process.exit(1)); setTimeout(() => process.exit(1), 1000);`], { timeout: 5000 });
+  return probe.status === 0;
+}
+const nodePorts = node => [API_PORT_BASE + node - 1, LIBP2P_PORT_BASE + node - 1];
+
+/**
+ * Stops a node of this suite and removes its folder, but only once nothing
+ * listens on its ports any more: a worker that outlives its stop would write
+ * the folder again and stay beside every later suite. Returns the problem, or
+ * null.
+ */
+function removeOwnNode(node) {
+  devnetShSync(['stop-node', String(node)]);
+  const end = Date.now() + 30_000;
+  while (nodePorts(node).some(listening) && Date.now() < end) spawnSync('sleep', ['1']);
+  const busy = nodePorts(node).filter(listening);
+  if (busy.length) return `node${node} still listens on port(s) ${busy.join(', ')} after it was stopped; its folder is kept`;
+  rmSync(join(DEVNET_DIR, `node${node}`), { recursive: true, force: true });
+  return null;
+}
+
+/** Nodes an earlier run of this suite left behind (it was killed, say): stopped and removed, so they cost no node number. */
+function reclaimOwnLeftovers() {
+  for (const node of NODE_CANDIDATES) {
+    if (!existsSync(ownMark(node))) continue;
+    note(removeOwnNode(node) ?? `removed node${node}, left by an earlier run of this suite`);
+  }
 }
 
 /** Why a node number cannot be used: its folder exists, or its API or libp2p port is in use. */
 async function slotTaken(node) {
   if (existsSync(join(DEVNET_DIR, `node${node}`))) return 'its folder exists';
   for (const port of [API_PORT_BASE + node - 1, LIBP2P_PORT_BASE + node - 1]) {
-    if (await listening(port)) return `port ${port} is in use`;
+    if (listening(port)) return `port ${port} is in use`;
   }
   return null;
 }
@@ -808,6 +846,7 @@ async function run() {
   RELAY2 = multiaddrOf(2);
   if (!RELAY1 || !RELAY2) return skip(`no devnet: the multiaddr of node 1 or node 2 is missing under ${DEVNET_DIR}`);
   if (nodeConfig(1)?.nodeRole !== 'core' || nodeConfig(2)?.nodeRole !== 'core') return skip('node 1 and node 2 must be Cores, the relays of the members');
+  reclaimOwnLeftovers();
   const picked = await pickNodes();
   if (picked.problem) return skip(picked.problem);
   if (picked.taken.length) note(`node numbers in use, left alone: ${picked.taken.join('; ')}`);
@@ -968,7 +1007,8 @@ function cleanup() {
       mkdirSync(kept, { recursive: true });
       copyFileSync(logFile(node), join(kept, `node${node}-${role(node)}.daemon.log`));
     }
-    rmSync(join(DEVNET_DIR, `node${node}`), { recursive: true, force: true });
+    const problem = removeOwnNode(node);
+    if (problem) say(problem);
   }
   if (failed && existsSync(kept)) say(`kept the logs of the temporary nodes in ${kept}`);
 }
