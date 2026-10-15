@@ -1470,6 +1470,49 @@ describe('DKGAgent sync fetch coalescing', () => {
       async () => new Uint8Array(0),
       { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
     );
+    const policy = resolveSyncGlobalBackpressure((agent as any).config);
+    const occupied = deferred<void>();
+    const holder = withGlobalSyncBackpressure(
+      { policy, ctx: createOperationContext('sync'), label: 'occupied-slot' },
+      () => occupied.promise,
+    );
+    // #3251: shared-memory work has one reserved slot of its own; hold it too.
+    const occupiedReserve = deferred<void>();
+    const reserveHolder = withGlobalSyncBackpressure(
+      {
+        policy,
+        ctx: createOperationContext('sync'),
+        label: 'occupied-reserved-slot',
+        lane: 'swm_recovery',
+      },
+      () => occupiedReserve.promise,
+    );
+    await flushMicrotasks();
+
+    try {
+      let settled = false;
+      const recovery = agent.recoverContextGraphSwmFromPeer(PEER_A, 'private-cg')
+        .finally(() => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // It waits for a slot instead of running beside the two held ones.
+      expect(settled).toBe(false);
+      occupiedReserve.resolve();
+      await reserveHolder;
+      await expect(recovery).resolves.toMatchObject({ completed: true });
+    } finally {
+      occupied.resolve();
+      occupiedReserve.resolve();
+      await Promise.allSettled([holder, reserveHolder]);
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('refuses standalone shared-memory recovery at once with the reserve turned off', async () => {
+    process.env.DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT = '0';
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    );
     const occupied = deferred<void>();
     const holder = withGlobalSyncBackpressure(
       {
@@ -1486,6 +1529,7 @@ describe('DKGAgent sync fetch coalescing', () => {
         agent.recoverContextGraphSwmFromPeer(PEER_A, 'private-cg'),
       ).rejects.toThrow(SyncBackpressureBusyError);
     } finally {
+      delete process.env.DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT;
       occupied.resolve();
       await holder;
       await agent.stop().catch(() => {});

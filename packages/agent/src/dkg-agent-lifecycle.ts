@@ -1,4 +1,5 @@
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
+import { startRecentSharedMemoryPullsIfEnabled } from './recent-shared-memory-pull-runtime.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
@@ -4050,6 +4051,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } else {
       this.log.warn(ctx, `Skipping periodic sync reconciler startup (DKG_SYNC_RECONCILER_ENABLED=0)`);
     }
+    this.recentSharedMemoryPulls = startRecentSharedMemoryPullsIfEnabled(this); // #3251
 
     // A.4-lite+: keep a small set of Core nodes warm (connection pinned +
     // auto-redialed by libp2p) so catch-up / chain reconciliation never pays

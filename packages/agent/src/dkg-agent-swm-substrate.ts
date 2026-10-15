@@ -419,11 +419,7 @@ export interface ContextGraphSubscribeOptions {
 }
 
 export class SwmSubstrateMethods extends DKGAgentBase {
-  subscribeToContextGraph(
-    this: DKGAgent,
-    contextGraphId: string,
-    options?: ContextGraphSubscribeOptions,
-  ): ContextGraphSub {
+  subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: ContextGraphSubscribeOptions): ContextGraphSub {
     // A name hash this node already resolved (and holds no row for) is the
     // verified cleartext graph: never mint a second, empty identity for it.
     const adoptedCleartextId = this.resolveContextGraphIdAlias(contextGraphId);
@@ -432,6 +428,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // the subscription: nothing may keep running under the hash id.
     if (options?.deferWireAdoption !== true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     const subscription = this.installContextGraphSubscription(contextGraphId, options);
+    // An explicit subscribe, not a start-up restore: the graph is in use here (#3251).
+    if (options?.persist !== false) this.recentSharedMemoryPulls?.noteActivity(contextGraphId);
     // The row is installed, so the phonebook check sees the subscription it
     // qualifies against. An Edge keeps no durable `agents` phonebook, so the
     // curator tier of a public wallet-scoped graph cannot reach its owner's

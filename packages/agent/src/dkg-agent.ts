@@ -2800,6 +2800,8 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.syncReconcilerTimer);
       this.syncReconcilerTimer = null;
     }
+    const recentSharedMemoryPullDrain = this.recentSharedMemoryPulls?.close() ?? null;
+    this.recentSharedMemoryPulls = null;
     if (this.warmCoreTimer) {
       clearInterval(this.warmCoreTimer);
       this.warmCoreTimer = null;
@@ -2842,6 +2844,7 @@ export class DKGAgent extends DKGAgentBase {
     const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain, this.closeOwedLegacySwmRetirementsV1()];
     drains.push(authorityIndexSnapshotDrain);
     if (onDemandPhonebookDrain) drains.push(onDemandPhonebookDrain);
+    if (recentSharedMemoryPullDrain) drains.push(recentSharedMemoryPullDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (rehydrationPromotionDrain) drains.push(rehydrationPromotionDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);

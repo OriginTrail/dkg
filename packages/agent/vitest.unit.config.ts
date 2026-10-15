@@ -197,6 +197,10 @@ export default defineConfig({
       "test/sync-exact-asset-export-cache.test.ts",
       "test/sync-exact-gzip-export.test.ts",
       "test/sync-backpressure.test.ts",
+      // #3251 — the reserved shared-memory slot and its own bounded queue.
+      "test/sync-shared-memory-reserve.test.ts",
+      // #3251 — the safety-net pull of public graphs in use on an Edge.
+      "test/recent-shared-memory-pulls.test.ts",
       "test/sync-policy.test.ts",
       "test/catchup-policy.test.ts",
       "test/catchup-concurrency.test.ts",
