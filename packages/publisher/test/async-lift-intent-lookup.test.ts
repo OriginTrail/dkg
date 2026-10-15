@@ -9,6 +9,7 @@ import type { LiftJob } from '../src/lift-job.js';
 import {
   CONTROL_LIFECYCLE_KEY,
   CONTROL_PAYLOAD,
+  CONTROL_STATUS,
   DEFAULT_CONTROL_GRAPH_URI,
   jobSubject,
   knowledgeAssetVmPublishLifecycleKey,
@@ -515,6 +516,104 @@ describe('#1828 async lift intent lookup', () => {
     // not duplicate the index (still 'active', never 'conflict').
     expect(await publisher.ensureVmPublishIntentIndex()).toBe(0);
     expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('active');
+  });
+
+  it('admission does not transfer unrelated indexed history payloads', async () => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const targetId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    const target = await publisher.getStatus(targetId);
+    if (!target || target.request.jobType !== 'knowledge-asset-vm-publish') throw new Error('seed missing');
+    const publish = target.request.knowledgeAssetVmPublish;
+    const history = Array.from({ length: 1_000 }, (_, index): LiftJob => ({
+      jobId: `history-${index}`, jobSlug: `history-${index}`,
+      request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: {
+        ...publish, name: `historical-asset-${index}`,
+      } },
+      status: 'finalized',
+      timestamps: { acceptedAt: index, updatedAt: index },
+      retries: { retryCount: 0, maxRetries: 10 },
+      claim: { walletId: 'historical-wallet' }, validation: KA_VM_VALIDATION,
+      finalization: { mode: 'local' },
+      controlPlane: { jobRef: jobSubject(`history-${index}`) },
+    }));
+    await store.insert(history.flatMap((job) => serializeJob(job, DEFAULT_CONTROL_GRAPH_URI)));
+    const query = store.query.bind(store);
+    let transferredPayloads = 0;
+    store.query = async (...args) => {
+      const result = await query(...args);
+      if (result.type === 'bindings') {
+        transferredPayloads += result.bindings.filter((row) => row.payload !== undefined).length;
+      }
+      return result;
+    };
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(targetId);
+    expect(transferredPayloads).toBe(1);
+  });
+
+  it('deduplicates a legacy unindexed accepted job while ignoring malformed unindexed neighbors', async () => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await store.deleteByPattern({ subject: jobSubject(jobId), predicate: CONTROL_LIFECYCLE_KEY, graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert([
+      { subject: jobSubject('broken-legacy'), predicate: CONTROL_PAYLOAD, object: literal('{not-json'), graph: DEFAULT_CONTROL_GRAPH_URI },
+      { subject: jobSubject('broken-legacy'), predicate: CONTROL_STATUS, object: literal('accepted'), graph: DEFAULT_CONTROL_GRAPH_URI },
+    ]);
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(jobId);
+  });
+
+  it.each([false, true])('preserves indexed missing-status behavior with corrupt payload=%s', async (corrupt) => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    const subject = jobSubject(jobId);
+    await store.deleteByPattern({ subject, predicate: CONTROL_STATUS, graph: DEFAULT_CONTROL_GRAPH_URI });
+    if (corrupt) {
+      await store.deleteByPattern({ subject, predicate: CONTROL_PAYLOAD, graph: DEFAULT_CONTROL_GRAPH_URI });
+      await store.insert([{ subject, predicate: CONTROL_PAYLOAD, object: literal('{not-json'), graph: DEFAULT_CONTROL_GRAPH_URI }]);
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toThrow('Malformed persisted LiftJob payload');
+    } else {
+      // A valid payload alone was never a member of the status-bound admission inventory.
+      expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).not.toBe(jobId);
+    }
+  });
+
+  it.each([
+    ['older', false], ['newer', false], ['older', true], ['newer', true],
+  ] as const)('keeps all-status sibling semantics with %s unindexed and held=%s', async (unindexed, held) => {
+    const request = kaVmPublishRequest();
+    const failedId = await (held ? driveToFailed(request) : driveToRetryableFailed(request));
+    const publisher = createPublisher();
+    const failed = await publisher.getStatus(failedId);
+    if (!failed) throw new Error('failed seed missing');
+    const finished: LiftJob = {
+      jobId: 'newer-finalized', jobSlug: 'newer-finalized', request: failed.request,
+      status: 'finalized',
+      timestamps: { acceptedAt: now + 1_000, updatedAt: now + 1_000 },
+      retries: { retryCount: 0, maxRetries: 10 },
+      claim: { walletId: 'finalized-wallet' }, validation: KA_VM_VALIDATION,
+      finalization: { mode: 'local' },
+      controlPlane: { jobRef: jobSubject('newer-finalized') },
+    };
+    await store.insert(serializeJob(finished, DEFAULT_CONTROL_GRAPH_URI));
+    await store.deleteByPattern({
+      subject: jobSubject(unindexed === 'older' ? failedId : finished.jobId),
+      predicate: CONTROL_LIFECYCLE_KEY, graph: DEFAULT_CONTROL_GRAPH_URI,
+    });
+    now += 2_000;
+    if (held) {
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({
+        code: 'LIFT_JOB_PENDING_CHAIN_PROOF', existingJobId: failedId,
+      });
+    } else {
+      const admitted = await publisher.enqueueKnowledgeAssetVmPublish(request);
+      expect(admitted).not.toBe(failedId);
+      expect(admitted).not.toBe(finished.jobId);
+      expect((await publisher.getStatus(admitted))?.status).toBe('accepted');
+    }
+    expect((await publisher.getStatus(failedId))?.status).toBe('failed');
+    expect((await publisher.getStatus(finished.jobId))?.status).toBe('finalized');
   });
 
   it('is indexed: a lookup issues a single object-bound query, not a full scan (AC5)', async () => {

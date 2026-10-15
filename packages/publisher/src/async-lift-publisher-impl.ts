@@ -1966,21 +1966,8 @@ export class TripleStoreAsyncLiftPublisher
     // since a sibling is not chain proof), so the selector groups the queue by lifecycle key and
     // admission reads its own group. The first entry is the record admission must answer for: a
     // held job before anything else, then the lifecycle's newest.
-    //
-    // Decode indexed candidates STRICTLY before the tolerant inventory scan. A corrupt row for
-    // another lifecycle never enters this object-bound query and cannot poison this admission;
-    // a corrupt row indexed to this lifecycle fails closed before a duplicate can be admitted.
-    const indexed = await this.store.query(
-      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(requestKey)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
-      { source: 'publisher.asyncLift.findActiveVmPublish' },
-    );
-    for (const row of expectBindings(indexed)) {
-      const candidate = this.parseJobPayload(row['payload']);
-      if (candidate !== null && lifecycleKeyOfJob(candidate) !== requestKey) {
-        throw new Error(`Malformed persisted LiftJob payload: lifecycle index does not match ${requestKey}`);
-      }
-    }
-    const job = selectLifecycleBindingJobs(await this.list(), lifecycleKeyOfJob).get(requestKey)?.at(0);
+    const candidates = await this.jobSelectors.vmPublishAdmissionCandidates(requestKey, lifecycleKeyOfJob);
+    const job = selectLifecycleBindingJobs(candidates, lifecycleKeyOfJob).get(requestKey)?.at(0);
     if (!job || !isKnowledgeAssetVmPublishJobRequest(job.request)) return null;
     return {
       job,

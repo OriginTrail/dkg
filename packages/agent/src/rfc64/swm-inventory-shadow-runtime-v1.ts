@@ -1,3 +1,5 @@
+import { AsyncResource } from 'node:async_hooks';
+
 import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
 
 // A freshly-created private CG can durably accept its first shares before the
@@ -237,7 +239,8 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
 
   private runBounded<T>(observer: () => Promise<T>, priority: boolean): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      const start = (): void => {
+      // A queued observer must retain its caller's store/RPC context, not inherit the releaser's.
+      const start = AsyncResource.bind((): void => {
         this.#activeExecutions += 1;
         let execution: Promise<T>;
         try {
@@ -259,7 +262,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
             finish();
           },
         );
-      };
+      });
       if (priority) this.#pendingExecutions.unshift(start);
       else this.#pendingExecutions.push(start);
       this.pump();

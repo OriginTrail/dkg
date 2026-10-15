@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import {
+  activeDefaultStoreWorkPriority, StorePriorityScheduler, withDefaultStoreWorkPriority,
+  type StoreWorkPriority,
+} from '@origintrail-official/dkg-storage';
 
 import {
   RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1,
@@ -39,6 +43,56 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     await drain;
     expect(observerCalls).toBe(RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 + 1);
     expect(maximumActive).toBe(RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1);
+    expect(runtime.inFlightCount).toBe(0);
+  });
+
+  it.each([
+    ['runExclusive', 'normal', 'background'],
+    ['runExclusive', 'background', 'normal'],
+    ['schedule', 'normal', 'background'],
+    ['schedule', 'background', 'normal'],
+  ] as const)('%s preserves %s-to-%s queued caller priority at actual store admission', async (entrypoint, blockerPriority, queuedPriority) => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const scheduler = new StorePriorityScheduler();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const blockers = withDefaultStoreWorkPriority(blockerPriority, () => Array.from(
+      { length: RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 },
+      (_, index) => runtime.runExclusive(`blocker-${index}`, async () => { await gate; }),
+    ));
+    const admissions: Array<{
+      before: StoreWorkPriority | undefined;
+      after: StoreWorkPriority | undefined;
+      normalInflight: number;
+      backgroundInflight: number;
+    }> = [];
+    const work = async (): Promise<void> => {
+      const before = activeDefaultStoreWorkPriority();
+      await Promise.resolve();
+      const after = activeDefaultStoreWorkPriority();
+      await scheduler.run(undefined, 'queued-catalog-read', async () => {
+        const { normalInflight, backgroundInflight } = scheduler.snapshot;
+        admissions.push({ before, after, normalInflight, backgroundInflight });
+      });
+    };
+    const queued = withDefaultStoreWorkPriority(queuedPriority, () => entrypoint === 'runExclusive'
+      ? runtime.runExclusive('queued', work)
+      : runtime.schedule('queued', work));
+    try {
+      expect(runtime.inFlightCount).toBe(RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 + 1);
+      expect(admissions).toEqual([]);
+    } finally {
+      release();
+      await Promise.all(blockers);
+      await runtime.drain();
+      await queued;
+    }
+    expect(admissions).toEqual([{
+      before: queuedPriority,
+      after: queuedPriority,
+      normalInflight: queuedPriority === 'normal' ? 1 : 0,
+      backgroundInflight: queuedPriority === 'background' ? 1 : 0,
+    }]);
     expect(runtime.inFlightCount).toBe(0);
   });
 

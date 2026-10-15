@@ -2,6 +2,7 @@ import type { QueryResult, TripleStore } from '@origintrail-official/dkg-storage
 import type { LiftJobAccepted, LiftJobState, PersistedLiftJob } from './lift-job.js';
 import {
   CONTROL_ACCEPTED_AT,
+  CONTROL_LIFECYCLE_KEY,
   CONTROL_NEXT_RETRY_AT,
   CONTROL_PAYLOAD,
   CONTROL_STATUS,
@@ -13,7 +14,7 @@ import {
   expectBindings,
   projectListedLiftJobs,
 } from './async-lift-publisher-utils.js';
-import { decodeLiftJobPayload } from './lift-job-payload-codec.js';
+import { decodeLiftJobPayload, decodedLiftJobOrThrow } from './lift-job-payload-codec.js';
 
 /**
  * Read-only queue candidate selection. These snapshots never authorize a transition: callers
@@ -50,6 +51,42 @@ export class LiftJobStoreSelectors {
       { source: 'publisher.asyncLift.reconciliationInventory' },
     );
     return this.projectInventory(result);
+  }
+
+  /** Valid writers index every lifecycle; only pre-index rows need the tolerant fallback. */
+  async vmPublishAdmissionCandidates(
+    lifecycleKey: string,
+    keyOfJob: (job: PersistedLiftJob) => string | null,
+  ): Promise<PersistedLiftJob[]> {
+    const indexed = await this.store.query(
+      `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> {
+        ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(lifecycleKey)} ; <${CONTROL_PAYLOAD}> ?payload .
+        OPTIONAL { ?job <${CONTROL_STATUS}> ?status }
+      } }`,
+      { source: 'publisher.asyncLift.findActiveVmPublish' },
+    );
+    const jobs = new Map<string, PersistedLiftJob>();
+    for (const row of expectBindings(indexed)) {
+      const job = decodedLiftJobOrThrow(decodeLiftJobPayload(row['payload']));
+      if (job !== null && keyOfJob(job) !== lifecycleKey) {
+        throw new Error(`Malformed persisted LiftJob payload: lifecycle index does not match ${lifecycleKey}`);
+      }
+      // Preserve list membership while still checking every indexed payload strictly above.
+      if (job !== null && row['status'] !== undefined) jobs.set(job.jobId, job);
+    }
+    // Include all statuses: finalized siblings demote ordinary failed history, but never held jobs.
+    const unindexed = await this.store.query(
+      `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> {
+        ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_PAYLOAD}> ?payload .
+        FILTER NOT EXISTS { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey }
+      } }`,
+      { source: 'publisher.asyncLift.unindexedVmPublishAdmission' },
+    );
+    for (const row of expectBindings(unindexed)) {
+      const job = parseInventoryPayload(row['payload']);
+      if (job !== null) jobs.set(job.jobId, job);
+    }
+    return projectListedLiftJobs([...jobs.values()], undefined, this.project);
   }
 
   /** Select the oldest accepted payload, skipping malformed rows without starving later work. */
