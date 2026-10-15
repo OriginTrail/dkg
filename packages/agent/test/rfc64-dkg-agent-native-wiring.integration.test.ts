@@ -2614,18 +2614,30 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       markConfirmationProjectionEntered = resolve;
     });
     let blockCatalogRead = true;
+    // The pass has taken its inventory snapshot and waits, at the first of these, until released.
+    const blockOnce = async (): Promise<void> => {
+      if (!blockCatalogRead) return;
+      blockCatalogRead = false;
+      markConfirmationProjectionEntered();
+      await confirmationProjectionGate;
+    };
     const catalogReadSpy = vi.spyOn(restarted.store, 'query').mockImplementation(
       async (sparql: string, ...args: unknown[]) => {
         const options = args[0] as Readonly<{ source?: string }> | undefined;
-        if (
-          blockCatalogRead
-          && options?.source === 'agent.rfc64.swmInventory.catalogReconcile.seal'
-        ) {
-          blockCatalogRead = false;
-          markConfirmationProjectionEntered();
-          await confirmationProjectionGate;
-        }
+        if (options?.source === 'agent.rfc64.swmInventory.catalogReconcile.seal') await blockOnce();
         return originalQuery(sparql, ...args);
+      },
+    );
+    // GH#3134: a pass resolves only the rows its catalog does not hold, and reads the catalog for
+    // them first. Here the catalog holds the inventory's one row, so that read is where it waits.
+    const stateReads = restarted as unknown as {
+      readRfc64CatalogMutationStateV1: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalStateRead = stateReads.readRfc64CatalogMutationStateV1.bind(restarted);
+    const stateReadSpy = vi.spyOn(stateReads, 'readRfc64CatalogMutationStateV1').mockImplementation(
+      async (...args: unknown[]) => {
+        await blockOnce();
+        return originalStateRead(...args);
       },
     );
     expect(restarted.requestRfc64SwmCatalogProjectionV1({
@@ -2660,6 +2672,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     releaseConfirmationProjection();
     await restarted.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     catalogReadSpy.mockRestore();
+    stateReadSpy.mockRestore();
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,

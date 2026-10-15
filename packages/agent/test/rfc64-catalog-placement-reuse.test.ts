@@ -51,6 +51,12 @@ import { AUTHOR, NETWORK_ID } from './support/rfc64-local-catalog-repair-fixture
 /** A state served from memory: the applied head and its delegation are read again, no bundle is. */
 const SERVED_FROM_MEMORY = Object.freeze({ bundles: 0, controlObjects: 2 });
 
+/**
+ * GH#3134: a placement first finds the author's current catalog, one applied-head read for each
+ * bucket count from 65,536 down to two.
+ */
+const CURRENT_SCOPE_PROBES = 16;
+
 function upsert(agent: DKGAgent, placed: Parameters<typeof upsertPlacementV1>[1], author?: unknown) {
   return upsertPlacementV1(agent, placed, { author });
 }
@@ -92,8 +98,9 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
         // The successor's predecessor (head, directory root and bucket), and the applied head and
         // its delegation again before each of the two uses of the remembered state.
         controlObjects: 3 + 2 * 2,
-        // The authority for every use of the remembered state: coverage, then under the lock.
-        appliedHead: 2,
+        // The authority for every use of the remembered state: coverage, then under the lock; and
+        // the author's current catalog.
+        appliedHead: 2 + CURRENT_SCOPE_PROBES,
         inventorySnapshot: 0,
         inventoryRow: 1,
         cas: 1,
@@ -124,7 +131,7 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     // What the answer rests on is read from the durable store again, and nothing else: the applied
     // head record; the head and its delegation; the head, its directory root and its bucket as a
     // successor would read them; and the bundle of the row the marker is about.
-    expect(stores.reads).toEqual({ bundles: 1, controlObjects: 2 + 3, appliedHead: 1, inventorySnapshot: 0, inventoryRow: 0, cas: 0 });
+    expect(stores.reads).toEqual({ bundles: 1, controlObjects: 2 + 3, appliedHead: 1 + CURRENT_SCOPE_PROBES, inventorySnapshot: 0, inventoryRow: 0, cas: 0 });
     expect(verifications.transferredBundle).toBe(0);
     expect(appliedHead(agent)).toEqual(head);
     expect(persistenceOf(agent).finalizedPrivatePlacementRepairs.list()).toEqual([]);
@@ -154,7 +161,7 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     // the applied head, then head, directory root and bucket, and its delegation. Nothing of it
     // is read a second time before the marker is retired.
     expect(reads[1]).toEqual(reads[0]);
-    expect(reads[1]).toEqual({ bundles: 3, controlObjects: 1 + 3 + 1, appliedHead: 1, inventorySnapshot: 0, inventoryRow: 0, cas: 0 });
+    expect(reads[1]).toEqual({ bundles: 3, controlObjects: 1 + 3 + 1, appliedHead: 1 + CURRENT_SCOPE_PROBES, inventorySnapshot: 0, inventoryRow: 0, cas: 0 });
     expect(rfc64CatalogMutationMemoryV1(remembering).retained.states).toBe(1);
   }, 60_000);
 
@@ -388,7 +395,7 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     await observe(agent, 'reuse-4', seal);
 
     // Coverage, the locked read and the producer each read the three bundles; every row is verified.
-    expect(stores.reads).toMatchObject({ bundles: 9, appliedHead: 2, cas: 1 });
+    expect(stores.reads).toMatchObject({ bundles: 9, appliedHead: 2 + CURRENT_SCOPE_PROBES, cas: 1 });
     expect(verifications.transferredBundle).toBe(4);
   }, 60_000);
 });

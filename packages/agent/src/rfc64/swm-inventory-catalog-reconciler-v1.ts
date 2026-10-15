@@ -13,7 +13,9 @@
 import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   assertSwmAuthorInventorySnapshotBindingV1,
+  authorCatalogRowCapacityV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
+  computeAuthorCatalogScopeDigestV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -36,6 +38,24 @@ import {
   snapshotPlainDataRecordV1,
 } from './inventory-v1/exact-record.js';
 
+/**
+ * GH#3134 — the most rows an author catalog of `scope` may be planned to hold. The share-time
+ * projection's target and the exact-set planner are both bounded by it. While a catalog cannot
+ * move to more buckets it is the scope's own capacity; once a full bucket moves the catalog to
+ * more buckets, it becomes the node's maximum for one catalog, and both bounds follow.
+ */
+export function rfc64CatalogTargetRowCapacityV1(
+  scope: Readonly<Pick<AuthorCatalogScopeV1, 'bucketCount'>>,
+): bigint {
+  return authorCatalogRowCapacityV1(scope.bucketCount);
+}
+
+/**
+ * The target bound of a catalog of one bucket.
+ *
+ * @deprecated A target is bounded by its catalog's capacity, `authorCatalogRowCapacityV1` of the
+ * scope's bucket count (GH#3134); for one bucket that is this value.
+ */
 export const RFC64_SWM_INVENTORY_CATALOG_TARGET_MAX_ROWS_V1 =
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1;
 
@@ -81,7 +101,29 @@ export interface PrepareRfc64SwmInventoryCatalogTargetInputV1 {
     row: Readonly<SwmAuthorInventoryRowV1>,
     signal: AbortSignal,
   ) => Promise<Rfc64PublicCatalogSuccessorAssetInputV1>;
+  /**
+   * The assets already placed in the target's catalog, such as the applied catalog's (GH#3134),
+   * asked for once the inventory is authenticated and fits its catalog. A placed asset is used
+   * instead of a resolution only when it binds its signed row exactly, as a resolved asset must;
+   * every other row is resolved, and so is every row when the placed assets cannot be read.
+   */
+  readonly readPlacedAssets?: (
+    catalogScope: Readonly<AuthorCatalogScopeV1>,
+  ) => Promise<Rfc64PlacedCatalogAssetLookupV1>;
+  /**
+   * The author's current catalog scope for the inventory's lane (GH#3134), such as
+   * `readCurrentAuthorCatalogScopeV1` returns. It must be the lane's own; without it the catalog
+   * is one bucket.
+   */
+  readonly currentCatalogScope?: (
+    lane: Readonly<SwmAuthorInventoryScopeV1>,
+  ) => Readonly<AuthorCatalogScopeV1>;
 }
+
+/** The asset placed for a row's KA, if any. */
+export type Rfc64PlacedCatalogAssetLookupV1 = (
+  row: Readonly<SwmAuthorInventoryRowV1>,
+) => Readonly<Rfc64PublicCatalogSuccessorAssetInputV1> | undefined;
 
 export interface PreparedRfc64SwmInventoryCatalogTargetV1 {
   readonly inventoryHeadObjectDigest: string;
@@ -94,20 +136,21 @@ export interface PreparedRfc64SwmInventoryCatalogTargetV1 {
 /**
  * Authenticate and detach one signed exact SWM inventory before resolving any
  * payload. Every resolved asset is then rebound to its signed row. A resolver
- * cannot substitute a different version, projection, seal, author, or KA.
+ * cannot substitute a different version, projection, seal, author, or KA, and
+ * neither can a placed asset: one that does not bind its row is resolved.
  */
 export async function prepareRfc64SwmInventoryCatalogTargetV1(
   input: PrepareRfc64SwmInventoryCatalogTargetInputV1,
 ): Promise<PreparedRfc64SwmInventoryCatalogTargetV1> {
   const snapshot = snapshotInventory(input?.snapshot);
-  if (snapshot.rows.length > RFC64_SWM_INVENTORY_CATALOG_TARGET_MAX_ROWS_V1) {
-    fail(
-      'swm-catalog-reconcile-capacity',
-      `bounded R1.1 catalog target exceeds ${RFC64_SWM_INVENTORY_CATALOG_TARGET_MAX_ROWS_V1} rows`,
-    );
-  }
   if (typeof input?.resolveAsset !== 'function') {
     fail('swm-catalog-reconcile-input', 'resolveAsset must be a function');
+  }
+  if (input.readPlacedAssets !== undefined && typeof input.readPlacedAssets !== 'function') {
+    fail('swm-catalog-reconcile-input', 'readPlacedAssets must be a function');
+  }
+  if (input.currentCatalogScope !== undefined && typeof input.currentCatalogScope !== 'function') {
+    fail('swm-catalog-reconcile-input', 'currentCatalogScope must be a function');
   }
   try {
     await verifyControlEnvelopeIssuerSignatureV1(snapshot.head);
@@ -122,13 +165,22 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
   const inventoryScope = Object.freeze(
     deriveSwmAuthorInventoryScopeFromHeadV1(snapshot.head.payload),
   );
-  const catalogScope = Object.freeze({
-    ...inventoryScope,
-    bucketCount: '1',
-  }) as AuthorCatalogScopeV1;
+  const catalogScope = currentCatalogScopeV1(input, inventoryScope);
+  // Nothing past what the catalog may hold is resolved (GH#3134).
+  const capacity = rfc64CatalogTargetRowCapacityV1(catalogScope);
+  if (BigInt(snapshot.rows.length) > capacity) {
+    fail(
+      'swm-catalog-reconcile-capacity',
+      `bounded R1.1 catalog target of ${snapshot.rows.length} rows exceeds the ${capacity} rows`
+        + ` of a catalog of ${catalogScope.bucketCount} bucket(s)`,
+    );
+  }
+  const placedAsset = await readPlacedAssetsV1(input, catalogScope);
   const assets = await resolveCatalogAssetsWithDrainV1(
     snapshot.rows,
     async (row, signal): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> => {
+      const placed = placedAssetForRowV1(placedAsset, row);
+      if (placed !== undefined) return placed;
       let resolved: Rfc64PublicCatalogSuccessorAssetInputV1;
       try {
         signal.throwIfAborted();
@@ -249,6 +301,71 @@ function snapshotAsset(input: unknown): Rfc64PublicCatalogSuccessorAssetInputV1 
       'resolved catalog asset is not one canonical immutable snapshot',
       cause,
     );
+  }
+}
+
+/** The lane's catalog scope: the caller's current one, which must be of this very lane. */
+function currentCatalogScopeV1(
+  input: PrepareRfc64SwmInventoryCatalogTargetInputV1,
+  inventoryScope: Readonly<SwmAuthorInventoryScopeV1>,
+): Readonly<AuthorCatalogScopeV1> {
+  if (input.currentCatalogScope === undefined) {
+    return Object.freeze({ ...inventoryScope, bucketCount: '1' }) as AuthorCatalogScopeV1;
+  }
+  let scope: Readonly<AuthorCatalogScopeV1>;
+  try {
+    scope = input.currentCatalogScope(inventoryScope);
+    // The digest checks the bucket count and every other field of the scope.
+    const { bucketCount, ...lane } = scope;
+    const sameLane = Object.keys(inventoryScope).length === Object.keys(lane).length
+      && Object.entries(inventoryScope).every(([key, value]) => (
+        (lane as Record<string, unknown>)[key] === value
+      ));
+    if (!sameLane) throw new Error('the current catalog scope is of another lane');
+    computeAuthorCatalogScopeDigestV1(Object.freeze({ ...inventoryScope, bucketCount }) as AuthorCatalogScopeV1);
+    return Object.freeze({ ...inventoryScope, bucketCount }) as AuthorCatalogScopeV1;
+  } catch (cause) {
+    fail(
+      'swm-catalog-reconcile-input',
+      'the current catalog scope is not a scope of the inventory\'s lane',
+      cause,
+    );
+  }
+}
+
+/** The caller's placed assets, or none when there are none to read or they cannot be read. */
+async function readPlacedAssetsV1(
+  input: PrepareRfc64SwmInventoryCatalogTargetInputV1,
+  catalogScope: Readonly<AuthorCatalogScopeV1>,
+): Promise<Rfc64PlacedCatalogAssetLookupV1 | undefined> {
+  if (input.readPlacedAssets === undefined) return undefined;
+  input.signal?.throwIfAborted();
+  try {
+    const lookup = await input.readPlacedAssets(catalogScope);
+    return typeof lookup === 'function' ? lookup : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    input.signal?.throwIfAborted();
+  }
+}
+
+/**
+ * The placed asset's own snapshot when it binds `row` exactly, else undefined: the row is then
+ * resolved like any other.
+ */
+function placedAssetForRowV1(
+  placedAsset: Rfc64PlacedCatalogAssetLookupV1 | undefined,
+  row: Readonly<SwmAuthorInventoryRowV1>,
+): Rfc64PublicCatalogSuccessorAssetInputV1 | undefined {
+  const placed = placedAsset?.(row);
+  if (placed === undefined) return undefined;
+  try {
+    const asset = snapshotAsset(placed);
+    assertAssetBindsInventoryRow(asset, row);
+    return asset;
+  } catch {
+    return undefined;
   }
 }
 

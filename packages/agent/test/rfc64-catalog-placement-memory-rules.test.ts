@@ -37,6 +37,21 @@ vi.mock('../src/rfc64/legacy-swm-boundary-v1.js', async (importOriginal) => {
   };
 });
 
+/** The KA number of every inventory row a projection pass resolves from the durable workspace. */
+const resolutions = vi.hoisted(() => ({ kaNumbers: [] as string[] }));
+vi.mock('../src/rfc64/swm-catalog-durable-asset-resolver-v1.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/rfc64/swm-catalog-durable-asset-resolver-v1.js')>();
+  return {
+    ...actual,
+    resolveRfc64InventoryWorkspaceCatalogAssetV1: (
+      ...args: Parameters<typeof actual.resolveRfc64InventoryWorkspaceCatalogAssetV1>
+    ) => {
+      resolutions.kaNumbers.push(args[0].row.kaUal.split('/').at(-1)!);
+      return actual.resolveRfc64InventoryWorkspaceCatalogAssetV1(...args);
+    },
+  };
+});
+
 import type { DKGAgent } from '../src/index.js';
 import {
   Rfc64CatalogMutationMemoryV1,
@@ -213,14 +228,54 @@ describe('RFC-64 catalog mutation memory on a running agent', () => {
       expect(actualPass!.results).toEqual([{ status: 'existing', sourceCurrent: true, successorsApplied: 0 }]);
       expect(expectedPass!.results).toEqual(actualPass!.results);
       await expectSameCatalog(remembering, rereading);
-      // The agent that remembers read the applied head and its delegation, then head, directory
-      // root and bucket, and every row's bundle back: the pass retires the legacy markers of all
-      // four rows. The other read the whole catalog, the same four bundles among it.
-      expect(actualPass!.reads).toMatchObject({ bundles: 4, controlObjects: 2 + 3, cas: 0 });
+      // The agent that remembers read the applied head and its delegation twice (for the rows the
+      // pass need not resolve, then under the mutation lock), then head, directory root and
+      // bucket, and every row's bundle back: the pass retires the legacy markers of all four rows.
+      // The other read the whole catalog, the same four bundles among it.
+      expect(actualPass!.reads).toMatchObject({ bundles: 4, controlObjects: 2 + 2 + 3, cas: 0 });
       expect(expectedPass!.reads).toMatchObject({ bundles: 4, cas: 0 });
       expect(verifications.transferredBundle).toBe(0);
       expect(kaNumbers((await appliedCatalogObjects(remembering)).state.assets))
         .toEqual(['1@1', '2@1', '3@1', '4@1']);
+    }, 120_000);
+
+    it('resolves only the inventory rows that the applied catalog does not hold byte for byte (GH#3134)', async () => {
+      const remembering = await startPlacementAgent('projection-incremental-a', { shareTimeProjection: true });
+      const rereading = withoutMemory(
+        await startPlacementAgent('projection-incremental-b', { shareTimeProjection: true }),
+      );
+      const agents = [rereading, remembering];
+      let now = 1_773_900_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+      const resolvedPerShare: string[][] = [];
+      for (const kaNumber of [3, 1, 2]) {
+        now += 1_000;
+        await both(agents, async (agent) => {
+          resolutions.kaNumbers.length = 0;
+          await share(agent, kaNumber);
+          resolvedPerShare.push([...resolutions.kaNumbers]);
+        });
+        await expectSameCatalog(remembering, rereading);
+      }
+      // Without the memory every pass resolves the whole inventory, as it always did. With it a pass
+      // resolves the shared asset alone: the rows the catalog already holds come from the catalog.
+      // Both sign the same catalog after every share.
+      expect(resolvedPerShare).toEqual([['3'], ['3'], ['1', '3'], ['1'], ['1', '2', '3'], ['2']]);
+
+      // A pass with nothing to sign resolves nothing on the agent that remembers.
+      const [withoutMemoryPass, withMemoryPass] = await both(agents, async (agent) => {
+        resolutions.kaNumbers.length = 0;
+        expect(agent.requestRfc64SwmCatalogProjectionV1({
+          contextGraphId: CONTEXT_GRAPH_ID,
+          authorAddress: AUTHOR,
+        })).toBe(true);
+        await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+        return [...resolutions.kaNumbers];
+      });
+      expect(withoutMemoryPass).toEqual(['1', '2', '3']);
+      expect(withMemoryPass).toEqual([]);
+      expect(kaNumbers((await appliedCatalogObjects(remembering)).state.assets)).toEqual(['1@1', '2@1', '3@1']);
     }, 120_000);
 
     it('retires no legacy marker for a pass that finds nothing to sign while a row\'s bundle is not in the durable store', async () => {

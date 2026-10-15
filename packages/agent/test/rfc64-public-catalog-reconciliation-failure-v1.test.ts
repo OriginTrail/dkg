@@ -1,3 +1,7 @@
+import {
+  CurrentFinalizedEvmCallErrorV1,
+  FinalizedVmChainInventoryLimitErrorV1,
+} from '@origintrail-official/dkg-chain';
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 import { describe, expect, it } from 'vitest';
 
@@ -5,6 +9,7 @@ import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-cat
 import { FinalizedVmCompositionErrorV1 } from '../src/rfc64/finalized-vm-composer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+  Rfc64CatalogProviderFailureAggregateV1,
   Rfc64CatalogReconciliationTerminalErrorV1,
   Rfc64PublicCatalogReconciliationFailureRegistryV1,
   classifyRfc64CatalogReconciliationTerminalReasonV1,
@@ -97,6 +102,37 @@ describe('RFC-64 public catalog terminal failure registry v1', () => {
     });
   });
 
+
+  it('translates a graph past the pinned-scan limit into its own terminal reason (GH#3134)', () => {
+    const overLimit = new FinalizedVmChainInventoryLimitErrorV1('7' as never, 819n);
+    const wrapped = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-activation',
+      'precommit failed',
+      { cause: overLimit },
+    );
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(wrapped)).toBe('chain-inventory-limit');
+    // Another resource limit of a snapshot is not this one.
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
+      new Rfc64PublicCatalogNativeReceiverErrorV1(
+        'catalog-native-receiver-activation',
+        'precommit failed',
+        { cause: new CurrentFinalizedEvmCallErrorV1('resource-limit', 'scan budget') },
+      ),
+    )).toBeNull();
+    // Every provider must have ended in it, as for the other terminal reason.
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
+      new Rfc64CatalogProviderFailureAggregateV1(2, [
+        { providerPeerId: 'peer-a', error: wrapped },
+        { providerPeerId: 'peer-b', error: wrapped },
+      ]),
+    )).toBe('chain-inventory-limit');
+    expect(classifyRfc64CatalogReconciliationTerminalReasonV1(
+      new Rfc64CatalogProviderFailureAggregateV1(2, [
+        { providerPeerId: 'peer-a', error: wrapped },
+        { providerPeerId: 'peer-b', error: new Error('RPC unavailable') },
+      ]),
+    )).toBeNull();
+  });
 
   it('translates only the exact typed private VM incomplete failure', () => {
     const incomplete = new FinalizedVmCompositionErrorV1(

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { FinalizedVmChainInventoryLimitErrorV1 } from '@origintrail-official/dkg-chain';
 import { describe, expect, it } from 'vitest';
 
 import { classifyRfc64CatalogBootstrapFailureV1 } from '../src/dkg-agent-rfc64-catalog-bootstrap.js';
@@ -38,6 +39,27 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
     expect(classifyRfc64CatalogBootstrapFailureV1(true, knownIncomplete)).toEqual({
       outcome: 'known-incomplete',
       completionReason: 'no-authorized-provider',
+    });
+  });
+
+  it('reports a private graph past the pinned-scan limit as known-incomplete with its own reason (GH#3134)', () => {
+    const synchronizationFailure = new Rfc64CatalogReconciliationTerminalErrorV1({
+      outcome: 'failed',
+      error: new Rfc64PublicCatalogNativeReceiverErrorV1(
+        'catalog-native-receiver-activation',
+        'the exact precommit failed',
+        { cause: new FinalizedVmChainInventoryLimitErrorV1('7' as never, 819n) },
+      ),
+    });
+
+    expect(classifyRfc64CatalogBootstrapFailureV1(true, synchronizationFailure)).toEqual({
+      outcome: 'known-incomplete',
+      completionReason: 'chain-inventory-limit',
+    });
+    // A graph without private finalized VM never runs that scan: an ordinary failure.
+    expect(classifyRfc64CatalogBootstrapFailureV1(false, synchronizationFailure)).toEqual({
+      outcome: 'failed',
+      completionReason: null,
     });
   });
 

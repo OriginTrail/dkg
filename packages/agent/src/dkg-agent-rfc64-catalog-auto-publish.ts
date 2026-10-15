@@ -50,6 +50,7 @@ import {
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { readCurrentAuthorCatalogScopeV1 } from './internal/author-catalog-current-scope.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
   rfc64CatalogLaneAcceptsWorkspaceHeadV1,
@@ -1308,11 +1309,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
     }
     const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(params.publicQuads);
-    const scope: AuthorCatalogScopeV1 = Object.freeze({
-      ...lane.scopeBase,
-      authorAddress: seal.authorAddress,
-      bucketCount: '1' as CountV1,
-    });
+    const laneScope = Object.freeze({ ...lane.scopeBase, authorAddress: seal.authorAddress });
+    const scope: AuthorCatalogScopeV1 = this.rfc64PersistenceV1 === undefined
+      ? Object.freeze({ ...laneScope, bucketCount: '1' as CountV1 })
+      : readCurrentAuthorCatalogScopeV1(this.rfc64PersistenceV1.inventory, laneScope);
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     const asset: Rfc64CatalogSuccessorAssetInputV1 = Object.freeze({
       assertionCoordinate: params.assertionCoordinate,

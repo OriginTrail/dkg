@@ -17,7 +17,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
-  return { ...actual, MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1: 4 };
+  return {
+    ...actual,
+    MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1: 4,
+    // A whole catalog holds what its buckets hold: four rows a bucket here too.
+    authorCatalogRowCapacityV1: (bucketCount: unknown) => (
+      actual.authorCatalogRowCapacityV1(bucketCount) / BigInt(actual.MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) * 4n
+    ),
+  };
 });
 
 import {
@@ -357,8 +364,9 @@ describe('a full author catalog', () => {
     }
     expect(repair().attempts).toBe(attemptsBefore + 4);
     const reads = [...readsBefore.slice(1), author.seen.catalogReads].map((count, index) => count - readsBefore[index]!);
-    // Inventories of 2, 3 and 4 rows are compared with the catalog; the 5-row one is not.
-    expect(reads).toEqual([1, 1, 1, 0]);
+    // Inventories of 2, 3 and 4 rows are compared with the catalog: once for the rows the pass
+    // need not resolve, once under the mutation lock. The 5-row one is not.
+    expect(reads).toEqual([2, 2, 2, 0]);
     expect(author.head()).toEqual(before.head);
     expect(author.seen.successorAssets).toHaveLength(before.successors);
     expect(author.lines('catalog_full')).toHaveLength(1);
