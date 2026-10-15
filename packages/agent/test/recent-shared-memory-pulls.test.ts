@@ -404,7 +404,7 @@ describe('recent shared-memory pull runtime (#3251)', () => {
   });
 
   it('takes a local share as activity', async () => {
-    const { agent, internals } = await startedMember('Rfc3251LocalWrite');
+    const { internals } = await startedMember('Rfc3251LocalWrite');
     const noted: string[] = [];
     internals.recentSharedMemoryPulls.stop();
     internals.recentSharedMemoryPulls = { noteActivity: (id: string) => { noted.push(id); }, stop: () => {} };
