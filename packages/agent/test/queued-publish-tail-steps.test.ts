@@ -265,8 +265,9 @@ describe('the steps a queued executor reports after the confirmation', () => {
   });
 
   it.each([false, undefined])('requires an explicit cleanup completion, received %s', async (cleanupCompletion) => {
-    const { execute } = harness({ cleanupCompletion });
+    const { calls, execute } = harness({ cleanupCompletion });
     expect((await execute()).localFinalizationComplete).toBeUndefined();
+    expect(calls).toContain('retireLegacySwm()');
   });
 
   it.each(['clear', 'retire'])('retains recovery after a swallowed %s failure', async (step) => {
@@ -309,6 +310,42 @@ describe('the steps a queued executor reports after the confirmation', () => {
     await expect(execute()).resolves.toMatchObject({ status: 'tentative' });
     // The catalog tail is still called, and returns at once for a result that is not confirmed.
     expect(calls).toEqual(['readGraphId()', 'publish()', 'ended:publish', 'ended:catalogObserver']);
+  });
+
+  it.each(['tentative', 'confirmed'] as const)('does not access gossip for %s without a chain result', async (status) => {
+    const { calls, execute, host } = harness({ publish: async () => ({
+      ...publishResult(status), onChainResult: undefined,
+    }) });
+    Object.defineProperty(host, 'gossip', { get: () => { throw new Error('gossip not initialized'); } });
+    const result = await execute();
+    expect(result.status).toBe(status);
+    expect(result.localFinalizationComplete).toBeUndefined();
+    expect(calls).not.toContain('gossip()');
+    expect(calls).not.toContain('writeReceipt()');
+    expect(calls).toContain('ended:catalogObserver');
+    if (status === 'confirmed') expect(calls).toContain('clearShareMarker()');
+  });
+
+  it('propagates an update gossip graph-lookup failure before share and catalog work', async () => {
+    const { calls, execute, host } = harness();
+    host.getContextGraphOnChainId = async () => { throw new Error('graph lookup unavailable'); };
+    await expect(execute(request({ vmCurrentAssertion: `0x${'cd'.repeat(32)}` })))
+      .rejects.toThrow('graph lookup unavailable');
+    expect(calls).toContain('ended:lifecycleStamp');
+    expect(calls).not.toContain('ended:graphIdRead');
+    expect(calls).not.toContain('gossip()');
+    expect(calls).not.toContain('clearShareMarker()');
+    expect(calls).not.toContain('catalogObserver()');
+  });
+
+  it('keeps failed gossip transport best-effort and continues the certified tail', async () => {
+    const { calls, execute } = harness({ failStep: 'gossip()' });
+    expect((await execute()).localFinalizationComplete).toBe(true);
+    expect(calls.slice(calls.indexOf('gossip()'))).toEqual([
+      'gossip()', 'ended:finalizationGossip',
+      'clearShareMarker()', 'ended:shareMarkerClear',
+      'catalogObserver()', 'ended:catalogObserver',
+    ]);
   });
 
   it('runs the same tail to the same result when the observer throws or is absent', async () => {

@@ -1,10 +1,24 @@
-import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
-import type { LiftJobTailStep } from '@origintrail-official/dkg-publisher';
+// SPDX-License-Identifier: Apache-2.0
+
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION, contextGraphFinalizationTopic, encodeFinalizationMessage,
+  type AssertionSeal, type FinalizationMessageMsg, type Logger, type OperationContext,
+  type createGraphKnowledgeAssetScope,
+} from '@origintrail-official/dkg-core';
+import {
+  VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED,
+  type DKGPublisher, type LiftJobTailStep, type LiftJobTailStepObserver, type PublishResult,
+} from '@origintrail-official/dkg-publisher';
+import type { SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
+import { ethers } from 'ethers';
 import type { DKGAgent } from './dkg-agent.js';
+import type {
+  GraphScopedKnowledgeAssetVmPublishRequest, planKnowledgeAssetVmPublication,
+} from './internal/knowledge-asset-vm-publish-request.js';
 
 /** The local confirmed publisher has already written VM and drained this exact SWM root. */
 export async function retireLegacySwmAfterConfirmedLocalPublish(
-  agent: DKGAgent,
+  agent: Pick<FinalizationAgentCapabilities, 'retireLegacySwmAfterVerifiedVmTwin'>,
   log: Pick<Logger, 'warn'>,
   contextGraphId: string,
   kaUal: string,
@@ -30,30 +44,50 @@ export async function retireLegacySwmAfterConfirmedLocalPublish(
   }
 }
 
-type RequiredFinalizationStep =
-  | 'receiptWrite' | 'publishedGraphClear' | 'legacySwmRetire' | 'remainingSwmClear'
-  | 'updateProvenance' | 'lifecycleStamp' | 'shareMarkerClear';
-type StepOutcome = 'complete' | 'incomplete' | 'failed' | 'not-required';
-
-interface QueuedPublishFinalizationPhase {
-  confirmed: boolean;
-  hasChainResult: boolean;
-  receiptWrite(): Promise<void>;
-  publishedGraphClear(): Promise<boolean>;
-  legacySwmRetire(): Promise<boolean>;
-  remainingSwmClear?: () => Promise<void>;
-  updateProvenance?: () => Promise<void>;
-  lifecycleStamp(): Promise<void>;
-  /** Keeps its existing best-effort network handling; prerequisite failures still propagate. */
-  finalizationGossip(): Promise<void>;
-  shareMarkerClear(): Promise<void>;
-  /** Records the durable placement obligation; does not await catalog placement. */
-  catalogObserver(): Promise<boolean>;
-  ended(step: LiftJobTailStep): void;
-  failed(step: RequiredFinalizationStep, error: unknown): void;
+interface QueuedPublishFinalizationContext {
+  readonly request: GraphScopedKnowledgeAssetVmPublishRequest;
+  readonly seal: AssertionSeal;
+  readonly result: PublishResult;
+  readonly operationPlan: ReturnType<typeof planKnowledgeAssetVmPublication>;
+  readonly graphScope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  readonly sharedMemoryScope: SharedMemoryGraphScope;
+  readonly assertionUri: string;
+  readonly lifecycleUri: string;
+  readonly metaGraph: string;
+  readonly agentAddress: string;
+  readonly packedKaId: bigint;
+  readonly snapshotPrivateRoot?: Uint8Array;
+  readonly queuedOnChainContextGraphId?: string;
+  readonly onChainCapable: boolean;
+  readonly ctx: OperationContext;
 }
 
-/** A successful void write has completed; boolean cleanup callbacks keep their own verdict. */
+type FinalizationAgentMethod =
+  | '_writeQueuedKnowledgeAssetVmPublishReceipt' | '_stampQueuedKnowledgeAssetVmPublishedLifecycle'
+  | '_stampPointer' | '_stampPointerIfDivergedFromVm' | 'retireLegacySwmAfterVerifiedVmTwin'
+  | 'getContextGraphOnChainId';
+
+/** Keep the original receiver and lazy access to capabilities that some branches never use. */
+type FinalizationAgentCapabilities = {
+  readonly [Method in FinalizationAgentMethod]: OmitThisParameter<DKGAgent[Method]>;
+} & {
+  readonly store: Pick<TripleStore, 'insert'>;
+  readonly gossip: Pick<DKGAgent['gossip'], 'publish'>;
+};
+
+/** Existing capabilities only: the phase owns their arguments, order, and failure handling. */
+interface QueuedPublishFinalizationServices {
+  readonly agent: FinalizationAgentCapabilities;
+  readonly publisher: Pick<DKGPublisher,
+    'clearPublishedKnowledgeAssetSwm' | 'clearRemainingSharedMemory' | 'clearSwmShareComplete'>;
+  readonly log: Pick<Logger, 'warn' | 'info'>;
+  readonly observeConfirmedCatalog: OmitThisParameter<DKGAgent['afterConfirmedGraphScopedVmPublishV1']>;
+  readonly onPostConfirmationStep?: LiftJobTailStepObserver;
+}
+
+type StepOutcome = 'complete' | 'incomplete' | 'failed';
+
+/** A successful void write has completed; boolean cleanup keeps its own verdict. */
 function completedWrite(write: () => Promise<void>): () => Promise<boolean> {
   return async () => {
     await write();
@@ -62,47 +96,141 @@ function completedWrite(write: () => Promise<void>): () => Promise<boolean> {
 }
 
 /**
- * One ordered phase for both create and update. Required outcomes are collected locally,
- * rather than mutating a certificate across transaction preparation and two branch tails.
- * A caught local failure keeps running the remaining tail but leaves recovery responsible.
+ * Own the complete queued create/update tail. A caught local failure continues the remaining
+ * operations, but only complete required outcomes and a durable catalog obligation certify it.
  */
 export async function finalizeQueuedKnowledgeAssetVmPublish(
-  phase: QueuedPublishFinalizationPhase,
+  context: QueuedPublishFinalizationContext,
+  services: QueuedPublishFinalizationServices,
 ): Promise<true | undefined> {
+  const {
+    request, seal, result, operationPlan, graphScope, sharedMemoryScope,
+    assertionUri, lifecycleUri, metaGraph, agentAddress, packedKaId,
+    snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
+  } = context;
+  const { agent, publisher, log } = services;
+  const ended = (step: LiftJobTailStep): void => {
+    try { services.onPostConfirmationStep?.(step); } catch { /* observation only */ }
+  };
   const required = async (
-    step: RequiredFinalizationStep,
     run: () => Promise<boolean>,
+    failureLabel: string,
+    observation?: LiftJobTailStep,
   ): Promise<StepOutcome> => {
     try {
       return await run() === true ? 'complete' : 'incomplete';
     } catch (error) {
-      phase.failed(step, error);
+      log.warn(ctx, `${failureLabel}: ${error instanceof Error ? error.message : String(error)}`);
       return 'failed';
     } finally {
-      // Provenance has historically been part of the update tail without its own observation.
-      if (step !== 'updateProvenance') phase.ended(step);
+      if (observation) ended(observation);
     }
   };
 
+  ended('publish');
   const outcomes: StepOutcome[] = [];
-  if (phase.confirmed) {
-    outcomes.push(phase.hasChainResult
-      ? await required('receiptWrite', completedWrite(phase.receiptWrite)) : 'not-required');
-    const cleared = await required('publishedGraphClear', phase.publishedGraphClear);
+  if (result.status === 'confirmed') {
+    if (result.onChainResult) {
+      const chainResult = result.onChainResult;
+      outcomes.push(await required(completedWrite(() => agent._writeQueuedKnowledgeAssetVmPublishReceipt(
+        request,
+        chainResult.txHash ?? '',
+        chainResult.blockNumber ?? 0,
+        seal.reservedKaId ?? chainResult.kaId ?? chainResult.batchId ?? 0n,
+      )), `Failed to write publish receipt for <${assertionUri}>`, 'receiptWrite'));
+    }
+    const operationLabel = operationPlan.kind === 'update' ? 'update' : 'publish';
+    const cleared = await required(() => publisher.clearPublishedKnowledgeAssetSwm(
+      request.contextGraphId, sharedMemoryScope, request.subGraphName, ctx,
+      graphScope.ual, graphScope.assertionVersion,
+    ), `Failed to clear published SWM graph after confirmed queued ${operationLabel} of <${lifecycleUri}>`,
+    'publishedGraphClear');
     outcomes.push(cleared);
-    // A thrown clear skips retirement, but an incomplete clear still attempts it, as before.
-    if (cleared !== 'failed') outcomes.push(await required('legacySwmRetire', phase.legacySwmRetire));
-    outcomes.push(phase.remainingSwmClear
-      ? await required('remainingSwmClear', completedWrite(phase.remainingSwmClear)) : 'not-required');
-    outcomes.push(phase.updateProvenance
-      ? await required('updateProvenance', completedWrite(phase.updateProvenance)) : 'not-required');
-    outcomes.push(await required('lifecycleStamp', completedWrite(phase.lifecycleStamp)));
-    if (phase.hasChainResult) await phase.finalizationGossip();
-    outcomes.push(await required('shareMarkerClear', completedWrite(phase.shareMarkerClear)));
+    // A thrown clear skips retirement; an incomplete clear still attempts its best-effort admission.
+    if (cleared !== 'failed') {
+      outcomes.push(await required(() => retireLegacySwmAfterConfirmedLocalPublish(
+        agent, log, request.contextGraphId, graphScope.ual, graphScope.assertionVersion, request.subGraphName, ctx,
+      ), 'Failed to retire the legacy SWM boundary after confirmed local VM publish', 'legacySwmRetire'));
+    }
+    if (request.clearSharedMemoryAfter === true) {
+      outcomes.push(await required(completedWrite(() => publisher.clearRemainingSharedMemory(
+        request.contextGraphId, request.subGraphName, ctx,
+      )), `Failed to clear remaining SWM after confirmed queued publish of <${lifecycleUri}>`, 'remainingSwmClear'));
+    }
+    if (operationPlan.kind === 'update') {
+      // Provenance has historically been part of the update tail without its own observation.
+      outcomes.push(await required(completedWrite(async () => {
+        const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
+        const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
+          ? operationPlan.vmCurrentAssertion.slice(2)
+          : operationPlan.vmCurrentAssertion;
+        const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
+        await agent._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+        await agent._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+        await agent.store.insert([
+          { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
+          { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
+        ]);
+      }), `Failed to stamp queued update provenance for <${lifecycleUri}>`));
+    }
+    outcomes.push(await required(completedWrite(() => agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(
+      request, result.ual,
+      packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
+    )), `Failed to stamp queued VM lifecycle marker for <${lifecycleUri}>`, 'lifecycleStamp'));
+    if (result.onChainResult) {
+      // Graph lookup and message construction intentionally precede the best-effort gossip catch.
+      const broadcastCgId = queuedOnChainContextGraphId ?? (onChainCapable
+        ? (await agent.getContextGraphOnChainId(request.contextGraphId))?.trim() || undefined
+        : undefined);
+      if (queuedOnChainContextGraphId === undefined && onChainCapable) ended('graphIdRead');
+      const msg: FinalizationMessageMsg = {
+        ual: result.ual,
+        contextGraphId: request.contextGraphId,
+        kcMerkleRoot: result.merkleRoot,
+        txHash: result.onChainResult.txHash ?? '',
+        blockNumber: result.onChainResult.blockNumber ?? 0,
+        txIndex: result.onChainResult.txIndex ?? 0,
+        batchId: result.onChainResult.batchId ?? 0n,
+        startKAId: result.onChainResult.startKAId ?? 0n,
+        endKAId: result.onChainResult.endKAId ?? 0n,
+        publisherAddress: result.onChainResult.publisherAddress ?? '',
+        rootEntities: [],
+        timestampMs: Date.now(),
+        operationId: ctx.operationId,
+        targetContextGraphId: result.contextGraphError ? undefined : broadcastCgId,
+        subGraphName: request.subGraphName,
+        keepRootCopyOnLabel: true,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        assertionVersion: graphScope.assertionVersion,
+        publicTripleCount: seal.publicTripleCount,
+        ...(snapshotPrivateRoot ? { privateMerkleRoot: snapshotPrivateRoot } : {}),
+        privateTripleCount: seal.privateTripleCount,
+        accessPolicy: result.accessPolicy ?? 'ownerOnly',
+        allowedPeers: result.allowedPeers ?? [],
+      };
+      const topic = contextGraphFinalizationTopic(request.contextGraphId);
+      try {
+        await agent.gossip.publish(topic, encodeFinalizationMessage(msg));
+        log.info(ctx, `Broadcast queued finalization for ${result.ual} to ${topic}${broadcastCgId ? ` (contextGraph=${broadcastCgId})` : ''}`);
+      } catch {
+        log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      }
+      ended('finalizationGossip');
+    }
+    outcomes.push(await required(completedWrite(() => publisher.clearSwmShareComplete(
+      request.contextGraphId, request.name, agentAddress, request.subGraphName,
+    )), `Failed to clear swmShareComplete after queued publish of <${lifecycleUri}>`, 'shareMarkerClear'));
   }
-  const catalogCompletionRecorded = await phase.catalogObserver();
-  phase.ended('catalogObserver');
-  return phase.confirmed && phase.hasChainResult && catalogCompletionRecorded === true
-    && outcomes.every((outcome) => outcome === 'complete' || outcome === 'not-required')
-    ? true : undefined;
+  // Records the durable obligation without awaiting private catalog placement. Called for tentative results too.
+  const catalogCompletionRecorded = await services.observeConfirmedCatalog({
+    status: result.status,
+    contextGraphId: request.contextGraphId,
+    subGraphName: request.subGraphName,
+    assertionCoordinate: request.name,
+    shareOperationId: request.shareOperationId,
+    seal, assertionUri, ctx, publicationLabel: 'queued publish',
+  });
+  ended('catalogObserver');
+  return result.status === 'confirmed' && Boolean(result.onChainResult) && catalogCompletionRecorded === true
+    && outcomes.every((outcome) => outcome === 'complete') ? true : undefined;
 }
