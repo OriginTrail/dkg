@@ -1,5 +1,10 @@
 // The judgements of devnet-test-issue-3251-member-sharing.mjs, kept apart from
-// its devnet I/O so that each one is tested on its own.
+// its devnet I/O so that each one is tested on its own. A check returns an
+// ordinary result ({ check, outcome, text, evidence }); the known gaps
+// (known-gaps.mjs) are applied to it when it is reported. Case 6's evidence is
+// judged in busy-slot.mjs.
+
+import { definitionState, readListing } from './context-graph-listing.mjs';
 
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 
@@ -102,98 +107,6 @@ export function foldRead(progress, kind, { held, completedAt }, { from, boundMs 
 export const pairHeld = progress => progress.view !== null && progress.partitions !== null;
 
 /**
- * A missed check on a registered graph is the known gap #3264 (an expected
- * failure) only with evidence that this member lacks the graph's definition:
- * `definitionHeld` false, read in the same listing. A member that holds the
- * definition, or whose listing could not be read (undefined), fails.
- */
-export function registeredGapVerdict({ registered, definitionHeld }) {
-  return registered === true && definitionHeld === false ? 'xfail' : 'fail';
-}
-
-/**
- * When the node admitted sync work whose label contains `needle` to its
- * global slots (e.g. `:<graph id>:` for any operation on that graph): the
- * times (ms, local clock, second resolution) of its
- * `Sync backpressure running <label> …` log lines, oldest first.
- */
-export function admissionStarts(logText, needle) {
-  const marker = 'Sync backpressure running ';
-  const starts = [];
-  for (const line of String(logText ?? '').split('\n')) {
-    const at = line.indexOf(marker);
-    if (at === -1 || !line.slice(at + marker.length).split(' ', 1)[0].includes(needle)) continue;
-    const time = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) /.exec(line);
-    if (time) starts.push(new Date(`${time[1]}T${time[2]}`).getTime());
-  }
-  return starts;
-}
-
-/**
- * Whether a reading shows the policy of case 6's member: one sync slot and no
- * queue (`syncGlobalMaxInflight: 1`, `syncGlobalQueueLimit: 0`). The reading
- * reports the node's effective policy, so an environment override
- * (`DKG_SYNC_GLOBAL_MAX_INFLIGHT`, …) that gave it spare slots shows here.
- * Returns null when it does, else the reason.
- */
-export function singleSlotProblem(reading) {
-  if (!reading || reading.unreadable) return `the sync slots could not be read (${reading?.unreadable ?? 'no reading'})`;
-  if (reading.capacityModel !== 'shared') return `the sync slots are not one shared pool (${reading.capacityModel ?? 'no capacity model'})`;
-  if (reading.inflightLimit !== 1) return `the node runs ${reading.inflightLimit ?? 'an unknown number of'} sync slot(s), not one`;
-  if (reading.queueLimit !== 0) return `the node has a sync queue of ${reading.queueLimit ?? 'unknown size'}, not none`;
-  return null;
-}
-
-/**
- * Whether one admission held the node's only sync slot through [from, until],
- * the window of the writes and of their receipt checks. `admissionStartMs` is
- * when that admission started (from the log); `samples` are readings of the
- * node's `sync-global` scheduler ({ at, inflight, oldestActiveAgeMs,
- * inflightLimit, queueLimit, capacityModel }, or { at, unreadable }).
- *
- * Only readings inside the window are evidence: a reading taken before it (a
- * free slot before the transfer was admitted, say) neither proves nor
- * disproves anything about it. Each reading in the window must show the
- * single-slot policy, work in flight, and the oldest running admission
- * started when this one did; the window must hold at least one reading and no
- * gap longer than `maxGapMs` (from its start, between readings, to its end).
- * A catch-up job that is merely running proves nothing: without an admission
- * there is nothing that holds the slot.
- * Returns { held: true, provenUntil } or { held: false, reason, provenUntil }.
- */
-export function busySlotCovered({ admissionStartMs, samples, from, until, toleranceMs = 2500, maxGapMs = 5000 }) {
-  if (!Number.isFinite(admissionStartMs)) return { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null };
-  const inWindow = samples.filter(sample => sample.at >= from && sample.at <= until).sort((a, b) => a.at - b.at);
-  if (inWindow.length === 0) return { held: false, reason: 'no reading of the sync slot in the window', provenUntil: null };
-  let previous = from;
-  let provenUntil = null;
-  for (const sample of inWindow) {
-    if (sample.at - previous > maxGapMs) return { held: false, reason: `no reading of the sync slot for ${Math.round((sample.at - previous) / 1000)} s`, provenUntil };
-    if (sample.unreadable) return { held: false, reason: `the sync slot could not be read (${sample.unreadable})`, provenUntil };
-    const policy = singleSlotProblem(sample);
-    if (policy) return { held: false, reason: policy, provenUntil };
-    if (!(sample.inflight >= 1)) return { held: false, reason: 'the sync slot was free', provenUntil };
-    if (Math.abs(sample.at - sample.oldestActiveAgeMs - admissionStartMs) > toleranceMs) {
-      return { held: false, reason: 'the slot was held by other work', provenUntil };
-    }
-    previous = sample.at;
-    provenUntil = sample.at;
-  }
-  if (until - previous > maxGapMs) return { held: false, reason: `no reading of the sync slot for the last ${Math.round((until - previous) / 1000)} s`, provenUntil };
-  return { held: true, provenUntil };
-}
-
-/**
- * A write refused as a write to an unknown graph is the known gap #3264 only
- * on the registered graph and with evidence that the author lacked the
- * definition. The refusal is judged by its structured code, never by the
- * wording of the message.
- */
-export function refusedWriteVerdict({ errorCode, registered, definitionHeld }) {
-  return errorCode === 'CONTEXT_GRAPH_NOT_FOUND' ? registeredGapVerdict({ registered, definitionHeld }) : 'fail';
-}
-
-/**
  * One member's subscription, observed by one poller of its listing: when it
  * first held the graph's definition and when it first listed the graph as
  * synced (ages in ms from the subscribe), each against its own deadline, and
@@ -218,34 +131,119 @@ export function foldSubscription(observation, listed, age, { definitionMs, synce
 export const freshSubscription = () => ({ definedAt: null, syncedAt: null, atDefinitionDeadline: null, atSyncedDeadline: null, done: false });
 
 /**
- * The verdicts of an observed subscription, kept apart from the reporting:
- * `definition` (case 3, or 7 on the registered and private graphs) and
- * `synced` (case 8), each 'pass' | 'xpass' | 'xfail' | 'fail' | 'none'
- * with what was seen. On the registered graph a missing definition is #3264
- * (xfail), a held one is printed as XPASS, and a synced flag that stays false
- * is #3264 only when the deadline's listing shows no definition.
+ * The results of an observed subscription, as ordinary checks with their
+ * evidence (the known gaps of known-gaps.mjs are applied when they are
+ * reported): `definition` (case 3, or 7 on the registered and private graphs)
+ * and `synced` (case 8). A definition held in time is a quiet pass: a
+ * precondition of the member's own writes, not a delivery. The evidence is the
+ * graph's `registered` and `definitionHeld`: whether the listing read at the
+ * deadline showed the definition (undefined when it could not be read).
  */
-export function subscriptionVerdicts(observation, { registered, definitionMs, syncedMs }) {
+export function subscriptionResults(observation, { registered, definitionMs, syncedMs }) {
   const secs = ms => Math.round(ms / 1000);
   const definition = (() => {
     const { definedAt, atDefinitionDeadline: last } = observation;
-    if (definedAt !== null && definedAt < definitionMs) {
-      return registered ? { verdict: 'xpass', text: `holds the definition ${secs(definedAt)} s after it subscribed` } : { verdict: 'none', text: '' };
-    }
-    if (definedAt !== null) return { verdict: 'fail', text: `holds the definition only ${secs(definedAt)} s after it subscribed` };
-    if (!last?.readable) return { verdict: 'fail', text: `its listing could not be read ${secs(definitionMs)} s after it subscribed (${last?.why ?? 'no reading'})` };
-    const text = `holds no definition ${secs(definitionMs)} s after it subscribed: ${last.entry ? `its listing has no access policy for it (${JSON.stringify(last.entry).slice(0, 200)})` : 'its listing does not name it'}; a write it makes there is refused`;
-    return { verdict: registeredGapVerdict({ registered, definitionHeld: false }), text };
+    const result = (outcome, text, definitionHeld) => ({ check: 'definition', outcome, text, evidence: { registered, definitionHeld } });
+    if (definedAt !== null && definedAt < definitionMs) return { ...result('pass', `holds the definition ${secs(definedAt)} s after it subscribed`, true), quiet: true };
+    if (definedAt !== null) return result('fail', `holds the definition only ${secs(definedAt)} s after it subscribed`, true);
+    if (!last?.readable) return result('fail', `its listing could not be read ${secs(definitionMs)} s after it subscribed (${last?.why ?? 'no reading'})`, undefined);
+    const seen = last.entry ? `its listing has no access policy for it (${JSON.stringify(last.entry).slice(0, 200)})` : 'its listing does not name it';
+    return result('fail', `holds no definition ${secs(definitionMs)} s after it subscribed: ${seen}; a write it makes there is refused`, false);
   })();
   const synced = (() => {
     const { syncedAt, atSyncedDeadline: last } = observation;
-    if (syncedAt !== null && syncedAt < syncedMs) return { verdict: 'pass', text: `lists it as synced ${secs(syncedAt)} s after it subscribed` };
-    if (!last?.readable) return { verdict: 'fail', text: `its listing could not be read ${secs(syncedMs)} s after it subscribed (${last?.why ?? 'no reading'})` };
+    const result = (outcome, text, definitionHeld) => ({ check: 'synced', outcome, text, evidence: { registered, definitionHeld } });
+    if (syncedAt !== null && syncedAt < syncedMs) return result('pass', `lists it as synced ${secs(syncedAt)} s after it subscribed`, undefined);
+    if (!last?.readable) return result('fail', `its listing could not be read ${secs(syncedMs)} s after it subscribed (${last?.why ?? 'no reading'})`, undefined);
     const seen = syncedAt !== null
       ? `lists it as synced only ${secs(syncedAt)} s after it subscribed`
       : `lists it as ${last.entry ? `subscribed=${last.entry.subscribed} synced=${last.entry.synced}` : 'absent'} ${secs(syncedMs)} s after it subscribed`;
-    const verdict = registeredGapVerdict({ registered, definitionHeld: last.defined });
-    return { verdict, text: verdict === 'xfail' ? `${seen}; it holds no definition of the graph` : `${seen}${registered ? '; it holds the definition, so this is not #3264' : ''}` };
+    return result('fail', seen, last.defined);
   })();
   return { definition, synced };
+}
+
+/**
+ * What one answer of a node's own listing (GET /api/context-graph/list) says
+ * about one graph, through the shared listing parser: { readable: true, entry
+ * (null when the listing does not name it), defined (it holds the graph's
+ * definition) } or { readable: false, reason }.
+ */
+export function listingObservation(httpStatus, body, contextGraphId) {
+  const listing = readListing(httpStatus, body);
+  if (!listing.ok) return { readable: false, reason: listing.reason };
+  return {
+    readable: true,
+    entry: listing.graphs.find(entry => entry.id === contextGraphId) ?? null,
+    defined: definitionState(httpStatus, body, contextGraphId).state === 'defined',
+  };
+}
+
+/** One answer of a node's connections (GET /api/connections): { readable, connections }. */
+export function connectionsObservation(httpStatus, json) {
+  return httpStatus === 200 && Array.isArray(json?.connections) ? { readable: true, connections: json.connections } : { readable: false };
+}
+
+/**
+ * The topology every conclusion rests on, judged from one observation of each
+ * node's connections (`observations`: node number -> connectionsObservation).
+ * `links` are [from, to, 'relayed' | 'none'] between node records ({ number,
+ * label, peerId }); `members` must hold no connection to a peer outside the
+ * devnet (`known`: its peer ids), which could carry the graph. Returns the
+ * problems as sentences, those of the links first, or none. A node whose
+ * connections could not be read fails every link from it.
+ */
+export function topologyProblems({ observations, links, members, known }) {
+  const problems = [];
+  for (const [from, to, expect] of links) {
+    const seen = observations.get(from.number);
+    const mine = seen?.readable ? seen.connections.filter(c => c.peerId === to.peerId) : null;
+    const link = mine ? { readable: true, total: mine.length, relayed: mine.filter(c => c.transport === 'relayed').length } : { readable: false };
+    const problem = linkProblem(link, expect, from.label, to.label);
+    if (problem) problems.push(problem);
+  }
+  for (const member of members) {
+    const seen = observations.get(member.number);
+    if (!seen?.readable) continue; // reported by the link checks
+    const strangers = [...new Set(seen.connections.map(c => c.peerId).filter(id => typeof id === 'string' && !known.has(id)))];
+    if (strangers.length) problems.push(`${member.label} is connected to ${strangers.length} peer(s) that are no node of this devnet (${strangers.map(id => id.slice(-8)).join(', ')}): they could carry the graph`);
+  }
+  return problems;
+}
+
+/** Where a write went, and the write as the report names it. */
+export const where = record => `${record.graph.key}${record.sub ? `/${record.sub}` : ' root'}`;
+export const describe = record => `"${record.value}" by ${record.author.label} in ${where(record)}`;
+
+/**
+ * One pair's result (a write, and a node that must hold it), as an ordinary
+ * check with its evidence: held when both reads found the write within the
+ * bound; missing otherwise, with what each read last saw; or refused, with
+ * the refusal's structured code and whether the author held the graph's
+ * definition right after it.
+ */
+export function pairResult(pair, { boundMs }) {
+  const secs = ms => Math.round(ms / 1000);
+  const what = `${describe(pair.record)} at ${pair.node.label}`;
+  const { record } = pair;
+  if (record.error) {
+    return {
+      check: 'write-refused', outcome: 'fail', text: `${what}: not written, ${record.error}`,
+      evidence: { registered: record.graph.registered, definitionHeld: record.definitionHeld, errorCode: record.errorCode },
+    };
+  }
+  const { view, partitions } = pair.progress;
+  const after = pair.fromWhat ?? 'share';
+  if (pairHeld(pair.progress)) return { check: 'held', outcome: 'pass', text: `${what}: held ${secs(Math.max(view, partitions))} s after the ${after}` };
+  const missing = [];
+  if (view === null) missing.push(`the shared-working-memory view${readDetail(pair.last.view)}`);
+  if (partitions === null) missing.push(`the cross-partition read${readDetail(pair.last.partitions)}`);
+  const found = [view !== null && `view after ${secs(view)} s`, partitions !== null && `partitions after ${secs(partitions)} s`].filter(Boolean);
+  return { check: 'held', outcome: 'fail', text: `${what}: NOT in ${missing.join(' nor in ')} ${secs(boundMs)} s after the ${after}${found.length ? ` (found in ${found.join(', ')})` : ''}` };
+}
+function readDetail(read) {
+  if (!read) return '';
+  if (read.different) return ` (holds another value: ${read.different})`;
+  if (read.error) return ` (${read.error})`;
+  return '';
 }

@@ -60,14 +60,17 @@
 //      still receive new writes, both directions
 //   6  member 2 while its only sync slot is busy with a large transfer of
 //      another graph (MEMBER_SHARING_BIG_ASSETS x MEMBER_SHARING_BIG_TRIPLES).
-//      Member 2's own evidence must show the transfer in the slot: its log
-//      names the transfer's admission, and its sync-slot readings
-//      (/api/diagnostics/backpressure, every second) show its effective
-//      policy of one slot and no queue and that admission still running,
-//      until each write was received. Its daemon starts with the sync
-//      environment variables pinned to that policy (they override config). A write received after
-//      the transfer left the slot, or a transfer never admitted, fails the
-//      case as not exercised; a running catch-up job alone proves nothing
+//      Member 2's own evidence must show the transfer in the slot: its
+//      sync-slot readings (/api/diagnostics/backpressure, every second) show
+//      its effective policy of one slot and no queue and name when the oldest
+//      running admission started; its log ties that start to an admission of
+//      the large graph and no other; and every reading until each write was
+//      received names the same start (work admitted once the transfer ended
+//      names a later one). Its daemon starts with the sync environment
+//      variables pinned to that policy (they override config). A write
+//      received after the transfer left the slot, or a transfer never
+//      admitted, fails the case as not exercised; a running catch-up job
+//      alone proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
 //      and 3 on a private graph whose members joined through the signed
 //      request flow. A member's write into a private graph sets up its sender
@@ -75,15 +78,16 @@
 //      the owner cannot do, so case 2 does not apply there.
 //   8  the `synced` flag of every member, for every graph
 //
-// Known gaps (KNOWN_GAPS): a check that fails for the reason of an open issue,
-// with evidence of that reason, is printed as XFAIL with the issue and does not
+// Known gaps (scripts/lib/qa/known-gaps.mjs, applied to every check before it
+// is reported): a check that fails for the reason of an open issue, with
+// evidence of that reason, is printed as XFAIL with the issue and does not
 // fail its case. Today one: #3264, a member of the registered graph never
 // obtains its definition here. The definition check itself (case 7; printed as
 // XPASS when the member holds it); a member's write refused as a write to an
 // unknown graph while its listing shows no definition (case 7); and the synced
 // flag staying false while the same listing shows no definition (case 8). A
 // member that holds the definition and still cannot write or never syncs
-// fails. Once #3264 is fixed and these hold, remove the entry and its calls.
+// fails. Once #3264 is fixed and these hold, remove its entry there.
 //
 // After a restart each member dials the owner again, as a client of the
 // issue's kind does; the script does not wait for the nodes to find each
@@ -114,21 +118,27 @@
 //   MEMBER_SHARING_KEEP_NODES=1  leave the temporary nodes running (debugging)
 //
 // Run against a running devnet: scripts/devnet-test-issue-3251-member-sharing.mjs
+//
+// This file orders the cases. The rest is under scripts/lib/: the temporary
+// Edges (member-sharing/temporary-edges.mjs), the graphs and each graph's part
+// of the run (member-sharing/graphs.mjs, graph-scenario.mjs), the writes,
+// reads and watches (member-sharing/observation.mjs), case 6
+// (member-sharing/busy-member.mjs), the report (member-sharing/report.mjs),
+// and the judgements, which hold no I/O (qa/member-sharing.mjs,
+// qa/busy-slot.mjs, qa/known-gaps.mjs).
 
-import { spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { definitionState, readListing, subscriptionState } from './lib/qa/context-graph-listing.mjs';
-import {
-  admissionStarts, busySlotCovered, caseVerdicts, foldRead, foldSubscription, freshSubscription, inScope, judgeHeld,
-  linkProblem, pairHeld, refusedWriteVerdict, sharedMemoryScope, singleSlotProblem, subscriptionVerdicts,
-} from './lib/qa/member-sharing.mjs';
-import { parseObservation } from './lib/qa/query-observation.mjs';
+import { busyMember, fillBigGraph } from './lib/member-sharing/busy-member.mjs';
+import { openDevnet, sleep } from './lib/member-sharing/devnet.mjs';
+import { GraphScenario } from './lib/member-sharing/graph-scenario.mjs';
+import { createGraphs } from './lib/member-sharing/graphs.mjs';
+import { createObservation, watched } from './lib/member-sharing/observation.mjs';
+import { createReport } from './lib/member-sharing/report.mjs';
+import { TemporaryEdges } from './lib/member-sharing/temporary-edges.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEVNET_DIR = process.env.DEVNET_DIR || join(REPO_ROOT, '.devnet');
-const API_PORT_BASE = Number(process.env.API_PORT_BASE || 9201);
 const positive = (name, fallback) => {
   const value = Number(process.env[name] ?? fallback);
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -141,26 +151,13 @@ const DEFINITION_MS = 90_000;
 const LATER_MS = positive('MEMBER_SHARING_LATER_SECS', 300) * 1000;
 const BIG_ASSETS = Math.round(positive('MEMBER_SHARING_BIG_ASSETS', 32));
 const BIG_TRIPLES = Math.round(positive('MEMBER_SHARING_BIG_TRIPLES', 2000));
-const LIBP2P_PORT_BASE = Number(process.env.LIBP2P_PORT_BASE || 10001);
-// devnet.sh addnode takes node numbers up to 10 (one Hardhat key each).
-const NODE_CANDIDATES = [7, 8, 9, 10];
-// The temporary nodes; pickNodes() sets them before anything else runs.
-let [OWNER, M1, M2] = [7, 8, 9];
 const SUB = 's';
-const LABEL = 'urn:issue3251:label';
-// Nobody listens on the discard port: a dial of it is refused at once.
-const DEAD_DIRECT_ADDRESS = '/ip4/127.0.0.1/tcp/9';
 const STAMP = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${process.pid}`;
 const STARTED = Date.now();
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const seconds = ms => Math.round(ms / 1000);
 const elapsed = () => `t+${seconds(Date.now() - STARTED)}s`;
-const say = text => console.log(`[issue-3251] ${text}`);
-const role = node => ({ [OWNER]: 'owner', [M1]: 'member1', [M2]: 'member2' }[node] ?? `node${node}`);
-const label = node => `node${node} (${role(node)})`;
 
-// ── results ──────────────────────────────────────────────────────────────────
 const CASES = {
   1: 'owner -> members, root and sub-graph, live',
   2: 'member -> owner -> other member, root and sub-graph, live',
@@ -171,725 +168,76 @@ const CASES = {
   7: 'cases 1, 2, 3 on a registered graph; 1, 3 on a private graph',
   8: 'the synced flag of every member',
 };
-const findings = Object.fromEntries(Object.keys(CASES).map(id => [id, { pass: 0, fail: [], xfail: [], xpass: [] }]));
-const pass = (id, text) => { findings[id].pass += 1; console.log(`  [PASS] case ${id}: ${text}`); };
-const fail = (id, text) => { findings[id].fail.push(text); console.log(`  [FAIL] case ${id}: ${text}`); };
-const note = text => console.log(`  [NOTE] ${text}`);
+// The case each kind of check counts under: the public graph carries cases 1
+// to 6; on the registered and the private graph every check is case 7. The
+// synced flag is case 8 on every graph.
+const PUBLIC_CASES = { history: 3, owner: 1, member: 2, definition: 3 };
+const OTHER_CASES = { history: 7, owner: 7, member: 7, definition: 7 };
+const DEADLINES = { definitionMs: DEFINITION_MS, syncedMs: SYNCED_MS };
 
-// Known gaps. A check that fails for the reason an open issue describes is an
-// expected failure: printed as XFAIL with the issue, and it does not fail its
-// case. The same check holding is printed as XPASS (and counted as held). Once
-// the issue is fixed and its checks hold, remove its entry and the calls.
-const KNOWN_GAPS = {
-  registeredDefinition: {
-    issue: '#3264',
-    what: 'a member of a registered graph that reaches only the owner never obtains the graph\'s definition',
-  },
-};
-const xfail = (id, gap, text) => {
-  findings[id].xfail.push(text);
-  console.log(`  [XFAIL] case ${id}: ${text} (expected failure: ${KNOWN_GAPS[gap].issue}, ${KNOWN_GAPS[gap].what})`);
-};
-const xpass = (id, gap, text) => {
-  findings[id].pass += 1;
-  findings[id].xpass.push(text);
-  console.log(`  [XPASS] case ${id}: ${text} (held although ${KNOWN_GAPS[gap].issue} is expected to fail it; remove the expected failure once ${KNOWN_GAPS[gap].issue} is fixed)`);
-};
-
-// ── devnet access ────────────────────────────────────────────────────────────
-function readToken(file) {
-  try {
-    return readFileSync(file, 'utf8').split('\n').map(line => line.trim()).find(line => line && !line.startsWith('#')) ?? '';
-  } catch { return ''; }
-}
-const ADMIN_TOKEN = process.env.DKG_AUTH || readToken(join(DEVNET_DIR, 'node1', 'auth.token'));
-
-async function api(node, method, path, body, { token = ADMIN_TOKEN, timeoutMs = 60_000 } = {}) {
-  try {
-    const response = await fetch(`http://127.0.0.1:${API_PORT_BASE + node - 1}${path}`, {
-      method,
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const text = await response.text();
-    let json = null;
-    try { json = JSON.parse(text); } catch { /* not JSON */ }
-    return { status: response.status, json, text };
-  } catch (error) {
-    return { status: 0, json: null, text: String(error?.message ?? error) };
-  }
-}
-const brief = answer => `HTTP ${answer.status} ${answer.text.replace(/\s+/g, ' ').slice(0, 240)}`;
-
-/**
- * devnet.sh without blocking: the watches of the nodes that stay up keep
- * reading while another node stops, starts or restarts.
- */
-function devnetSh(args, env = {}, timeoutMs = 300_000) {
-  return new Promise(resolve => {
-    const child = spawn('bash', [join(REPO_ROOT, 'scripts/devnet.sh'), ...args], {
-      cwd: REPO_ROOT, env: { ...process.env, DEVNET_DIR, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let output = '';
-    child.stdout.on('data', chunk => { output += chunk; });
-    child.stderr.on('data', chunk => { output += chunk; });
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
-    child.on('error', error => { output += String(error?.message ?? error); });
-    child.on('close', status => { clearTimeout(timer); resolve({ status, output: output.trim() }); });
-  });
-}
-/** The same, for the cleanup, which must also work from a signal handler. */
-function devnetShSync(args, timeoutMs = 120_000) {
-  const result = spawnSync('bash', [join(REPO_ROOT, 'scripts/devnet.sh'), ...args], {
-    cwd: REPO_ROOT, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, DEVNET_DIR },
-  });
-  return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() };
-}
-const lastLines = text => text.split('\n').slice(-3).join(' | ').slice(0, 300);
-
-const nodeConfig = node => {
-  try { return JSON.parse(readFileSync(join(DEVNET_DIR, `node${node}`, 'config.json'), 'utf8')); } catch { return null; }
-};
-// The Cores come from the devnet's files, not from API answers: a Core that
-// does not answer must not drop out of the list.
-function coreNodes() {
-  return readdirSync(DEVNET_DIR)
-    .map(entry => /^node(\d+)$/.exec(entry)?.[1]).filter(Boolean).map(Number)
-    .filter(node => ![OWNER, M1, M2].includes(node))
-    .filter(node => nodeConfig(node)?.nodeRole === 'core')
-    .sort((a, b) => a - b);
-}
-
-/** Polls until `check` answers { ok: true } or the time is up; returns the last answer, never asks twice for it. */
-async function waitFor(check, ms, everyMs = 1000) {
-  const end = Date.now() + ms;
-  let last = { ok: false, why: 'not asked' };
-  for (;;) {
-    last = await check();
-    if (last.ok || Date.now() + everyMs > end) return last;
-    await sleep(everyMs);
-  }
-}
-
-// ── the temporary Edges ──────────────────────────────────────────────────────
-const PEER = {};
-const AGENT = {};
-const STARTED_NODES = [];
-let RELAY1 = '';
-let RELAY2 = '';
-// The relay a member dials the owner through; the owner reserves on both.
-const relayOf = node => (node === M2 ? RELAY2 : RELAY1);
-
-/**
- * The environment a temporary node's daemon starts with. Member 2's sync policy
- * comes from its config (one slot, no queue), but these variables override a
- * node's config; one inherited from the caller (DKG_SYNC_GLOBAL_MAX_INFLIGHT=8,
- * say) would give it spare slots. So they are pinned to its policy.
- */
-const nodeEnv = node => (node === M2
-  ? { DKG_SYNC_GLOBAL_MAX_INFLIGHT: '1', DKG_SYNC_GLOBAL_LIMIT: '1', DKG_SYNC_GLOBAL_QUEUE_LIMIT: '0' }
-  : {});
-
-// Every node folder this suite creates carries this file, so that a later run
-// can tell a node of its own (left by a run that was killed) from another
-// suite's, and remove it.
-const OWN_MARK = '.issue-3251-member-sharing';
-const ownMark = node => join(DEVNET_DIR, `node${node}`, OWN_MARK);
-
-async function startEdge(node, extra) {
-  STARTED_NODES.push(node);
-  const added = await devnetSh(['addnode', String(node), 'edge'], { ...nodeEnv(node), DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(extra) });
-  if (existsSync(join(DEVNET_DIR, `node${node}`))) writeFileSync(ownMark(node), `${STAMP} ${role(node)}\n`);
-  if (added.status !== 0) throw new Error(`temporary node ${node} could not be added: ${lastLines(added.output)}`);
-  await identify(node);
-}
-
-async function identify(node) {
-  const up = await waitFor(async () => {
-    const status = await api(node, 'GET', '/api/agent/identity', undefined, { timeoutMs: 10_000 });
-    return { ok: status.status === 200 && Boolean(status.json?.peerId) && Boolean(status.json?.agentAddress), status };
-  }, 120_000, 2000);
-  if (!up.ok) throw new Error(`node${node} did not report its identity: ${up.status ? brief(up.status) : 'no answer'}`);
-  PEER[node] = up.status.json.peerId;
-  AGENT[node] = up.status.json.agentAddress;
-}
-
-function agentToken(node) {
-  try {
-    const records = Object.values(JSON.parse(readFileSync(join(DEVNET_DIR, `node${node}`, 'agent-keystore.json'), 'utf8')));
-    return records.find(record => typeof record?.authToken === 'string')?.authToken ?? '';
-  } catch { return ''; }
-}
-
-/** A member dials the owner through the relay; the owner's reservation there may need a moment. */
-async function dialOwner(member) {
-  const multiaddr = `${relayOf(member)}/p2p-circuit/p2p/${PEER[OWNER]}`;
-  const dialed = await waitFor(async () => {
-    const answer = await api(member, 'POST', '/api/connect', { multiaddr }, { timeoutMs: 30_000 });
-    return { ok: answer.status === 200 && answer.json?.connected !== false, why: brief(answer) };
-  }, 120_000, 3000);
-  if (!dialed.ok) throw new Error(`${label(member)} could not dial the owner through the relay: ${dialed.why}`);
-}
-
-async function link(from, to) {
-  const answer = await api(from, 'GET', '/api/connections');
-  const all = answer.json?.connections;
-  if (answer.status !== 200 || !Array.isArray(all)) return { readable: false };
-  const mine = all.filter(c => c.peerId === PEER[to]);
-  return { readable: true, total: mine.length, relayed: mine.filter(c => c.transport === 'relayed').length };
-}
-
-/**
- * The peers of this devnet: every node folder's address (`multiaddr`), or
- * its status when that file is missing. A peer outside it (a node an earlier
- * suite left running, say) is nothing the topology accounts for.
- */
-async function devnetPeers() {
-  const peers = new Set(Object.values(PEER));
-  for (const node of readdirSync(DEVNET_DIR).map(entry => /^node(\d+)$/.exec(entry)?.[1]).filter(Boolean).map(Number)) {
-    let address = '';
-    try { address = readFileSync(join(DEVNET_DIR, `node${node}`, 'multiaddr'), 'utf8').trim(); } catch { /* none */ }
-    const id = address.split('/p2p/').at(-1) || (await api(node, 'GET', '/api/status', undefined, { timeoutMs: 5000 })).json?.peerId;
-    if (id) peers.add(id);
-  }
-  return peers;
-}
-
-/** The topology every conclusion rests on; the problems, or none. */
-async function topologyProblems() {
-  const expected = [[M1, OWNER, 'relayed'], [OWNER, M1, 'relayed'], [M2, OWNER, 'relayed'], [OWNER, M2, 'relayed'], [M1, M2, 'none'], [M2, M1, 'none']];
-  const problems = [];
-  for (const [a, b, expect] of expected) {
-    const problem = linkProblem(await link(a, b), expect, label(a), label(b));
-    if (problem) problems.push(problem);
-  }
-  // A member connected to a peer outside the devnet could get the graph from it.
-  const known = await devnetPeers();
-  for (const member of [M1, M2]) {
-    const answer = await api(member, 'GET', '/api/connections');
-    if (answer.status !== 200 || !Array.isArray(answer.json?.connections)) continue; // reported by the link checks
-    const strangers = [...new Set(answer.json.connections.map(c => c.peerId).filter(id => typeof id === 'string' && !known.has(id)))];
-    if (strangers.length) problems.push(`${label(member)} is connected to ${strangers.length} peer(s) that are no node of this devnet (${strangers.map(id => id.slice(-8)).join(', ')}): they could carry the graph`);
-  }
-  return problems;
-}
+const report = createReport(CASES);
+const { say, note, fail } = report;
+const devnet = openDevnet({
+  repoRoot: REPO_ROOT, dir: DEVNET_DIR, adminToken: process.env.DKG_AUTH,
+  apiPortBase: Number(process.env.API_PORT_BASE || 9201), libp2pPortBase: Number(process.env.LIBP2P_PORT_BASE || 10001),
+});
+const edges = new TemporaryEdges(devnet, { stamp: STAMP, log: report });
+const graphs = createGraphs(devnet, edges, { stamp: STAMP, sub: SUB, say });
+const io = createObservation(devnet, { boundMs: BOUND_MS, ...DEADLINES, stamp: STAMP, predicate: 'urn:issue3251:label' });
+const scenarioIo = { ...io, subscribe: graphs.subscribe };
+let EXIT = 0;
 
 /** Before a case's writes: a topology that does not hold fails the case, since nothing it shows is about #3251. */
 async function precondition(caseId, when) {
-  const problems = await topologyProblems();
+  const problems = await edges.topologyProblems();
   if (problems.length === 0) return true;
   fail(caseId, `${when}: the members do not reach the owner through the relay only, or reach each other: ${problems.join('; ')}`);
   return false;
 }
 
-// ── graphs ───────────────────────────────────────────────────────────────────
-async function createGraph(key, body) {
-  const id = `${AGENT[OWNER]}/issue-3251-${key}-${STAMP}`;
-  const created = await api(OWNER, 'POST', '/api/context-graph/create', { id, name: `issue 3251 ${key}`, ...body }, { timeoutMs: 180_000 });
-  if (created.json?.created !== id) throw new Error(`graph ${key} was not created: ${brief(created)}`);
-  if (body.register && created.json?.registered !== true) throw new Error(`graph ${key} was not registered: ${brief(created)}`);
-  const sub = await api(OWNER, 'POST', '/api/sub-graph/create', { contextGraphId: id, subGraphName: SUB }, { timeoutMs: 120_000 });
-  if (sub.json?.created !== SUB) throw new Error(`the sub-graph of ${key} was not created: ${brief(sub)}`);
-  // The graph names of its partitions are built from the id the node resolved.
-  const resolved = typeof sub.json?.contextGraphId === 'string' && sub.json.contextGraphId ? sub.json.contextGraphId : id;
-  say(`graph ${key}: ${id}${created.json?.onChainId ? ` (registered, id ${created.json.onChainId})` : ''}${resolved !== id ? ` resolved as ${resolved}` : ''}`);
-  return { key, id, resolved, private: body.accessPolicy === 1, registered: body.register === true && body.accessPolicy !== 1, subscribedAt: {} };
-}
-
-/** A Core subscribes and unsubscribes at once; discovery does not re-activate an ended subscription. */
-async function keepCoresOut(graph) {
-  for (const core of coreNodes()) {
-    const subscribed = await waitFor(async () => {
-      const answer = await api(core, 'POST', '/api/context-graph/subscribe', { contextGraphId: graph.id });
-      return { ok: answer.status === 200, why: brief(answer) };
-    }, 90_000, 2000);
-    if (!subscribed.ok) throw new Error(`Core node${core} could not be kept out of ${graph.key} (subscribe): ${subscribed.why}`);
-    const ended = await api(core, 'POST', '/api/context-graph/unsubscribe', { contextGraphId: graph.id });
-    if (ended.status !== 200) throw new Error(`Core node${core} could not be kept out of ${graph.key} (unsubscribe): ${brief(ended)}`);
-  }
-}
-
-/** Every Core must say it does not follow the graph; one that cannot be asked has said nothing. */
-async function coresFollowing(graph) {
-  const following = [];
-  const unknown = [];
-  for (const core of coreNodes()) {
-    const answer = await api(core, 'GET', '/api/context-graph/list');
-    const state = subscriptionState(answer.status, answer.text, graph.id);
-    if (state.state === 'following') following.push(`node${core}`);
-    else if (state.state !== 'not-following') unknown.push(`node${core} (${state.reason ?? state.state})`);
-  }
-  return { following, unknown };
-}
-
-/** A node's own listing entry for the graph, through the shared listing parser; `defined` = it holds the definition. */
-async function listingEntry(node, graph) {
-  const answer = await api(node, 'GET', '/api/context-graph/list');
-  const listing = readListing(answer.status, answer.text);
-  if (!listing.ok) return { readable: false, why: `${listing.reason}, ${brief(answer)}` };
-  return {
-    readable: true,
-    entry: listing.graphs.find(entry => entry.id === graph.id) ?? null,
-    defined: definitionState(answer.status, answer.text, graph.id).state === 'defined',
-  };
-}
-
-/** A public graph: subscribe. A private one: the signed request flow first, with the member's own agent token. */
-async function subscribe(node, graph) {
-  if (graph.private) {
-    const token = agentToken(node);
-    if (!token) throw new Error(`${label(node)} has no agent token for the private graph`);
-    const encoded = encodeURIComponent(graph.id);
-    const signed = await api(node, 'POST', `/api/context-graph/${encoded}/sign-join`, {}, { token });
-    if (signed.json?.ok !== true || !signed.json?.delegation) throw new Error(`${label(node)} could not sign its join: ${brief(signed)}`);
-    const body = { delegation: signed.json.delegation, curatorPeerId: PEER[OWNER], agentName: role(node) };
-    const joined = await waitFor(async () => {
-      const answer = await api(node, 'POST', `/api/context-graph/${encoded}/request-join`, body, { token });
-      const ok = ['approved', 'already-member'].includes(answer.json?.status) && ['1', 'local'].includes(String(answer.json?.delivered));
-      return { ok, why: brief(answer) };
-    }, 90_000, 15_000);
-    if (!joined.ok) throw new Error(`${label(node)} did not join the private graph: ${joined.why}`);
-    const ready = await waitFor(async () => {
-      const answer = await api(node, 'GET', `/api/context-graph/${encoded}/participants`, undefined, { token });
-      const agents = Array.isArray(answer.json?.allowedAgents) ? answer.json.allowedAgents : [];
-      return { ok: agents.some(a => typeof a === 'string' && a.toLowerCase() === AGENT[node].toLowerCase()), why: brief(answer) };
-    }, 120_000, 2000);
-    if (!ready.ok) throw new Error(`${label(node)} never saw itself among the participants: ${ready.why}`);
-    const answer = await api(node, 'POST', '/api/subscribe', { contextGraphId: graph.id, includeSharedMemory: true }, { token });
-    if (answer.status !== 200) throw new Error(`${label(node)} could not subscribe to ${graph.key}: ${brief(answer)}`);
-  } else {
-    const answer = await api(node, 'POST', '/api/context-graph/subscribe', { contextGraphId: graph.id, includeSharedMemory: true });
-    if (answer.status !== 200) throw new Error(`${label(node)} could not subscribe to ${graph.key}: ${brief(answer)}`);
-  }
-  graph.subscribedAt[node] = Date.now();
-}
-
-// ── writes, reads, and the bound ─────────────────────────────────────────────
-let sequence = 0;
-
-/**
- * Creates an asset and shares it through the asynchronous share job, as a
- * client does, and waits for the job to end. Resolves to { doneAt } (the time
- * a write's bound starts from) or { error, code } (the refusal's code, if any).
- */
-async function createAndShare(author, { contextGraphId, name, quads, subGraphName }, { createTimeoutMs, jobTimeoutMs, pollMs }) {
-  const scope = subGraphName ? { subGraphName } : {};
-  const created = await api(author, 'POST', '/api/knowledge-assets', {
-    contextGraphId, name, ...scope, quads, finalize: true, alsoShareSwm: false,
-  }, { timeoutMs: createTimeoutMs });
-  if (created.status !== 200 && created.status !== 201) return { error: `the author refused the asset: ${brief(created)}`, code: created.json?.code };
-  const queued = await api(author, 'POST', `/api/knowledge-assets/${name}/swm/share-async`, { contextGraphId, entities: 'all', ...scope });
-  const job = queued.json?.jobId;
-  if (queued.status !== 200 || !job) return { error: `the share was not accepted: ${brief(queued)}` };
-  const finished = await waitFor(async () => {
-    const view = await api(author, 'GET', `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(job)}`);
-    return { ok: ['succeeded', 'failed'].includes(view.json?.state), view };
-  }, jobTimeoutMs, pollMs);
-  const state = finished.view?.json?.state;
-  if (state !== 'succeeded') return { error: `the share job ended ${state ?? 'unfinished'}: ${JSON.stringify(finished.view?.json?.lastError ?? null).slice(0, 240)}` };
-  return { doneAt: Date.now() };
-}
-
-/** One asset with a subject of its own: the record the watches of the write use. */
-async function write(author, graph, sub, what) {
-  sequence += 1;
-  const record = {
-    author, graph, sub, what, sequence,
-    subject: `urn:issue3251:${STAMP}:${sequence}`,
-    value: `${what} (${sequence})`,
-    doneAt: null, error: null, errorCode: undefined, definitionHeld: undefined,
-  };
-  const outcome = await createAndShare(author, {
-    contextGraphId: graph.id, name: `i3251-${STAMP.toLowerCase()}-${sequence}`, subGraphName: sub,
-    quads: [{ subject: record.subject, predicate: LABEL, object: `"${record.value}"`, graph: '' }],
-  }, { createTimeoutMs: 120_000, jobTimeoutMs: 120_000, pollMs: 1000 });
-  if (!outcome.error) {
-    record.doneAt = outcome.doneAt;
-    return record;
-  }
-  record.error = outcome.error;
-  record.errorCode = outcome.code;
-  // Refused as a write to an unknown graph: whether the author held the
-  // graph's definition right then is the evidence that decides #3264.
-  if (outcome.code === 'CONTEXT_GRAPH_NOT_FOUND') {
-    const listed = await listingEntry(author, graph);
-    record.definitionHeld = listed.readable ? listed.defined : undefined;
-  }
-  return record;
-}
-const where = record => `${record.graph.key}${record.sub ? `/${record.sub}` : ' root'}`;
-const describe = record => `"${record.value}" by ${label(record.author)} in ${where(record)}`;
-const written = record => ({ predicate: LABEL, value: record.value });
-
-/** One query a client makes, through the shared parser of the query answer: its rows, or why there are none. */
-async function queryRows(node, body) {
-  const answer = await api(node, 'POST', '/api/query', body, { timeoutMs: 30_000 });
-  const observation = parseObservation({
-    transportExit: answer.status === 0 ? 1 : 0, httpStatus: answer.status, body: answer.text,
-    format: 'api', mode: 'bindings', binding: null, settling: true,
-  });
-  if (observation.outcome === 'PASS') return { rows: observation.rows };
-  return { error: observation.outcome === 'SETTLING' ? 'its read authority is still settling' : `${observation.reason}, ${brief(answer)}` };
-}
-
-/** The `shared-working-memory` view, with `subGraphName` for a sub-graph. */
-async function readView(node, record) {
-  const answer = await queryRows(node, {
-    contextGraphId: record.graph.id, view: 'shared-working-memory', ...(record.sub ? { subGraphName: record.sub } : {}),
-    sparql: `SELECT ?p ?o WHERE { <${record.subject}> ?p ?o }`,
-  });
-  return answer.rows ? judgeHeld(answer.rows, written(record)) : { held: false, error: answer.error };
-}
-
-/** The cross-partition read, in the shared memory of the root or of that sub-graph. */
-async function readPartitions(node, record) {
-  const answer = await queryRows(node, {
-    contextGraphId: record.graph.id, includeContextGraphPartitions: true,
-    sparql: `SELECT ?g ?p ?o WHERE { GRAPH ?g { <${record.subject}> ?p ?o } }`,
-  });
-  if (!answer.rows) return { held: false, error: answer.error };
-  const scope = sharedMemoryScope(record.graph.resolved, record.sub);
-  return judgeHeld(answer.rows.filter(row => inScope(row.g, scope)), written(record));
-}
-const READS = [['view', readView], ['partitions', readPartitions]];
-
-/**
- * Starts watching pairs (write, node that must hold it) at once: each is read
- * until it holds or its bound has passed. Call it when the bound starts (right
- * after the write, the subscribe, the return), so that no pair is judged
- * without having been read inside its bound. A pair's bound starts at `from`
- * (default: the end of the write's share job). Each read counts with the time
- * it completed itself, and a read that found the write is not made again, so
- * a slow or failed later read of one kind never discards a timely success of
- * the other. Returns a handle { pairs, done }, not a promise, so that whoever
- * starts a watch does not wait for it.
- */
-function watch(pairs) {
-  for (const pair of pairs) {
-    pair.from = pair.from ?? pair.record.doneAt;
-    pair.progress = { view: null, partitions: null };
-    pair.last = { view: null, partitions: null };
-  }
-  const open = () => pairs.filter(p => !p.record.error && !pairHeld(p.progress) && Date.now() - p.from < BOUND_MS);
-  const done = (async () => {
-    for (let pending = open(); pending.length > 0; pending = open()) {
-      await Promise.all(pending.map(async pair => {
-        for (const [kind, read] of READS) {
-          if (pair.progress[kind] !== null) continue;
-          const seen = await read(pair.node, pair.record);
-          pair.progress = foldRead(pair.progress, kind, { held: seen.held, completedAt: Date.now() }, { from: pair.from, boundMs: BOUND_MS });
-          pair.last[kind] = seen;
-        }
-      }));
-      await sleep(2000);
-    }
-  })();
-  return { pairs, done };
-}
-/** When a pair was held (both reads), or null. */
-const heldAt = pair => (pair.progress && pairHeld(pair.progress) ? pair.from + Math.max(pair.progress.view, pair.progress.partitions) : null);
-
-/** A write, and at once the watch of the nodes that must hold it (a handle, see watch). */
-async function writeAndWatch(caseId, author, graph, sub, what, nodes) {
-  return watch(at(caseId, await write(author, graph, sub, what), nodes));
-}
-
-/** Waits for the watches and returns their pairs. */
-async function watched(handles) {
-  await Promise.all(handles.map(handle => handle.done));
-  return handles.flatMap(handle => handle.pairs);
-}
-
 /** Waits for the watches, then reports each pair under its case. */
 async function settle(handles) {
-  for (const pair of await watched(handles)) report(pair);
-}
-
-/** One pair's verdict, under its case. */
-function report(pair) {
-  const what = `${describe(pair.record)} at ${label(pair.node)}`;
-  if (pair.record.error) {
-    const text = `${what}: not written, ${pair.record.error}`;
-    // A member without the registered graph's definition cannot write into
-    // it (#3264). The refusal is that gap only by its code and with evidence
-    // that the author lacked the definition; any other refusal fails.
-    const { errorCode, graph, definitionHeld } = pair.record;
-    const gap = refusedWriteVerdict({ errorCode, registered: graph.registered, definitionHeld }) === 'xfail';
-    return gap ? xfail(pair.caseId, 'registeredDefinition', `${text}; the author holds no definition of the graph`) : fail(pair.caseId, text);
-  }
-  const { view, partitions } = pair.progress;
-  if (pairHeld(pair.progress)) return pass(pair.caseId, `${what}: held ${seconds(Math.max(view, partitions))} s after the ${pair.fromWhat ?? 'share'}`);
-  const missing = [];
-  if (view === null) missing.push(`the shared-working-memory view${detail(pair.last.view)}`);
-  if (partitions === null) missing.push(`the cross-partition read${detail(pair.last.partitions)}`);
-  const found = [view !== null && `view after ${seconds(view)} s`, partitions !== null && `partitions after ${seconds(partitions)} s`].filter(Boolean);
-  return fail(pair.caseId, `${what}: NOT in ${missing.join(' nor in ')} ${seconds(BOUND_MS)} s after the ${pair.fromWhat ?? 'share'}${found.length ? ` (found in ${found.join(', ')})` : ''}`);
-}
-function detail(read) {
-  if (!read) return '';
-  if (read.different) return ` (holds another value: ${read.different})`;
-  if (read.error) return ` (${read.error})`;
-  return '';
-}
-const at = (caseId, record, nodes) => nodes.map(node => ({ caseId, record, node }));
-
-/**
- * Started right after a member subscribed: one poller of the member's listing
- * for the graph. It records when the member first held the graph's definition
- * (deadline DEFINITION_MS: without it the member's own writes are refused) and
- * when it first listed the graph as synced (deadline SYNCED_MS), and the
- * listing as read at each deadline, which is the evidence for #3264. Nothing
- * asks again: a definition lost on the way is a failure. The verdicts are
- * `subscriptionVerdicts`; reportSubscription prints them.
- */
-async function observeSubscription(node, graph) {
-  const from = graph.subscribedAt[node];
-  const deadlines = { definitionMs: DEFINITION_MS, syncedMs: SYNCED_MS };
-  let observation = freshSubscription();
-  for (;;) {
-    const listed = await listingEntry(node, graph);
-    observation = foldSubscription(observation, listed, Date.now() - from, deadlines);
-    if (observation.done) return { node, graph, observation };
-    // Read again in 2 s, or at the next deadline still open if that is sooner.
-    const open = [observation.atDefinitionDeadline === null && from + DEFINITION_MS, observation.atSyncedDeadline === null && from + SYNCED_MS]
-      .filter(Boolean).filter(at => at > Date.now());
-    await sleep(Math.max(0, Math.min(2000, ...open.map(at => at - Date.now()))));
-  }
-}
-
-/** Prints the verdicts of an observed subscription: the definition under `caseId`, the synced flag under case 8. */
-function reportSubscription(caseId, { node, graph, observation }) {
-  const verdicts = subscriptionVerdicts(observation, { registered: graph.registered, definitionMs: DEFINITION_MS, syncedMs: SYNCED_MS });
-  for (const [id, { verdict, text }] of [[caseId, verdicts.definition], [8, verdicts.synced]]) {
-    const line = `${label(node)}, ${graph.key}: ${text}`;
-    if (verdict === 'pass') pass(id, line);
-    else if (verdict === 'xpass') xpass(id, 'registeredDefinition', line);
-    else if (verdict === 'xfail') xfail(id, 'registeredDefinition', line);
-    else if (verdict === 'fail') fail(id, line);
-  }
-}
-
-// ── case 6: the large graph and member 2's busy slot ────────────────────────
-// Each asset: 50 subjects with an equal share of its triples, about 100 bytes a value.
-async function fillBigGraph(graph) {
-  const perSubject = Math.max(1, Math.ceil(BIG_TRIPLES / 50));
-  for (let i = 0; i < BIG_ASSETS; i++) {
-    const quads = Array.from({ length: BIG_TRIPLES }, (_, t) => ({
-      subject: `urn:issue3251:big:${STAMP}:${i}:${Math.floor(t / perSubject)}`, predicate: `urn:issue3251:payload:${t % perSubject}`,
-      object: `"row ${t} of asset ${i} ${'x'.repeat(80)}"`, graph: '',
-    }));
-    const outcome = await createAndShare(OWNER, { contextGraphId: graph.id, name: `i3251-big-${STAMP.toLowerCase()}-${i}`, quads },
-      { createTimeoutMs: 300_000, jobTimeoutMs: 300_000, pollMs: 2000 });
-    if (outcome.error) throw new Error(`asset ${i} of the large graph: ${outcome.error}`);
-  }
-}
-
-const logFile = node => join(DEVNET_DIR, `node${node}`, 'daemon.log');
-const logSize = node => { try { return statSync(logFile(node)).size; } catch { return 0; } };
-function logSince(node, offset) {
-  try {
-    const text = readFileSync(logFile(node));
-    return text.subarray(text.length >= offset ? offset : 0).toString('utf8');
-  } catch { return ''; }
-}
-const countOf = (text, needle) => text.split(needle).length - 1;
-
-/** One reading of a node's sync slots: its `sync-global` scheduler in the backpressure diagnostics. */
-async function slotReading(node) {
-  const answer = await api(node, 'GET', '/api/diagnostics/backpressure', undefined, { timeoutMs: 5000 });
-  const atMs = Date.now();
-  const scheduler = Array.isArray(answer.json?.schedulers) ? answer.json.schedulers.find(s => s?.scheduler === 'sync-global') : undefined;
-  if (answer.status !== 200 || !scheduler?.totals) return { at: atMs, unreadable: answer.status === 200 ? 'no sync-global scheduler in the diagnostics' : brief(answer) };
-  const { inflight, inflightLimit, queueLimit, oldestActiveAgeMs } = scheduler.totals;
-  return { at: atMs, inflight, inflightLimit, queueLimit, capacityModel: scheduler.capacityModel, oldestActiveAgeMs };
-}
-
-/** Reads a node's sync slots every second until stopped. */
-function readSlots(node) {
-  const readings = [];
-  let reading = true;
-  const done = (async () => {
-    while (reading) {
-      readings.push(await slotReading(node));
-      await sleep(1000);
-    }
-  })();
-  return { readings, stop: async () => { reading = false; await done; } };
-}
-
-/**
- * Case 6: member 2 subscribes to the large graph, and the writes are made while
- * that transfer holds member 2's only sync slot. The node's own evidence must
- * show it: its log names the admission of the transfer (`Sync backpressure
- * running shared-memory:<large graph>:…`), and its slot readings show that
- * admission still running, every second, until each write was received. A
- * running catch-up job proves nothing by itself. A write received only after
- * the transfer left the slot, or a transfer never admitted, means the case was
- * not exercised.
- */
-async function busyMember(pub, big) {
-  await precondition(6, 'before the large transfer');
-  const offset = logSize(M2);
-  const needle = `:${big.id}:`;
-  const slots = readSlots(M2);
-  await subscribe(M2, big);
-  const admitted = await waitFor(async () => {
-    const start = admissionStarts(logSince(M2, offset), needle).at(-1) ?? null;
-    const latest = slots.readings.at(-1);
-    const policy = latest === undefined ? 'no reading yet' : singleSlotProblem(latest);
-    const holds = start !== null && policy === null && latest.inflight >= 1
-      && Math.abs(latest.at - latest.oldestActiveAgeMs - start) <= 2500;
-    return { ok: holds, start, latest, policy };
-  }, 30_000, 500);
-  if (!admitted.ok) {
-    await slots.stop();
-    // Spare slots or a queue (an environment override, say) make a busy slot meaningless.
-    const why = admitted.policy ?? (admitted.start === null ? 'its log shows no admission of that transfer' : 'its slot was free or held by other work');
-    return fail(6, `not exercised: member2's transfer of the large graph did not hold its sync slot within 30 s of the subscribe (${why}); raise MEMBER_SHARING_BIG_ASSETS / MEMBER_SHARING_BIG_TRIPLES`);
-  }
-  const from = Date.now();
-  const handles = [
-    await writeAndWatch(6, OWNER, pub, null, 'owner while member2 is busy, root', [M2]),
-    await writeAndWatch(6, OWNER, pub, SUB, 'owner while member2 is busy, sub-graph', [M2]),
-    await writeAndWatch(6, M1, pub, null, 'member1 while member2 is busy, root', [M2]),
-  ];
-  const pairs = await watched(handles);
-  const until = Date.now();
-  await slots.stop();
-  const busy = busySlotCovered({ admissionStartMs: admitted.start, samples: slots.readings, from, until });
-  for (const pair of pairs) {
-    // Proven through the whole window, every receipt in it counts; otherwise a
-    // receipt must come before the last reading that still showed the transfer.
-    const received = heldAt(pair);
-    if (received !== null && !busy.held && (busy.provenUntil === null || received > busy.provenUntil + 1000)) {
-      fail(6, `${describe(pair.record)} at ${label(M2)}: held ${seconds(received - pair.from)} s after the share, but after the large transfer stopped holding the slot (${busy.reason ?? 'no reading'}): not exercised`);
-    } else report(pair);
-  }
-  const refused = countOf(logSince(M2, offset), `Sync backpressure rejected shared-memory:${pub.id}:`);
-  note(`case 6: member2's transfer of the large graph held its only sync slot ${busy.held ? `through every receipt check (${seconds(until - from)} s)` : `for ${busy.provenUntil === null ? 0 : seconds(busy.provenUntil - from)} s of ${seconds(until - from)} s (then ${busy.reason})`}; member2 refused ${refused} pull(s) of the public graph for a busy slot`);
-}
-
-// ── the run ──────────────────────────────────────────────────────────────────
-let EXIT = 0;
-
-/**
- * Whether something listens on the port: a connection to it succeeds.
- * Synchronous, because the cleanup also runs from a signal handler.
- */
-function listening(port) {
-  const probe = spawnSync(process.execPath, ['-e', `const s = require('net').connect(${Number(port)}, '127.0.0.1');
-    s.on('connect', () => process.exit(0)); s.on('error', () => process.exit(1)); setTimeout(() => process.exit(1), 1000);`], { timeout: 5000 });
-  return probe.status === 0;
-}
-const nodePorts = node => [API_PORT_BASE + node - 1, LIBP2P_PORT_BASE + node - 1];
-
-/**
- * Stops a node of this suite and removes its folder, but only once nothing
- * listens on its ports any more: a worker that outlives its stop would write
- * the folder again and stay beside every later suite. Returns the problem, or
- * null.
- */
-function removeOwnNode(node) {
-  devnetShSync(['stop-node', String(node)]);
-  const end = Date.now() + 30_000;
-  while (nodePorts(node).some(listening) && Date.now() < end) spawnSync('sleep', ['1']);
-  const busy = nodePorts(node).filter(listening);
-  if (busy.length) return `node${node} still listens on port(s) ${busy.join(', ')} after it was stopped; its folder is kept`;
-  rmSync(join(DEVNET_DIR, `node${node}`), { recursive: true, force: true });
-  return null;
-}
-
-/** Nodes an earlier run of this suite left behind (it was killed, say): stopped and removed, so they cost no node number. */
-function reclaimOwnLeftovers() {
-  for (const node of NODE_CANDIDATES) {
-    if (!existsSync(ownMark(node))) continue;
-    note(removeOwnNode(node) ?? `removed node${node}, left by an earlier run of this suite`);
-  }
-}
-
-/** Why a node number cannot be used: its folder exists, or its API or libp2p port is in use. */
-async function slotTaken(node) {
-  if (existsSync(join(DEVNET_DIR, `node${node}`))) return 'its folder exists';
-  for (const port of [API_PORT_BASE + node - 1, LIBP2P_PORT_BASE + node - 1]) {
-    if (listening(port)) return `port ${port} is in use`;
-  }
-  return null;
-}
-
-/**
- * The temporary nodes: the first three free numbers of 7, 8, 9, 10, or the
- * three of MEMBER_SHARING_NODES, which must all be free. An earlier suite can
- * leave a node folder or a running node behind; such a number is left alone.
- */
-async function pickNodes() {
-  const explicit = process.env.MEMBER_SHARING_NODES;
-  const candidates = explicit ? explicit.split(',').map(Number) : NODE_CANDIDATES;
-  const free = [];
-  const taken = [];
-  for (const node of candidates) {
-    const why = await slotTaken(node);
-    if (why) taken.push(`node${node}: ${why}`);
-    else free.push(node);
-  }
-  if (explicit ? taken.length > 0 || free.length !== 3 : free.length < 3) {
-    return { problem: `no three free node numbers among ${candidates.join(', ')} (${taken.join('; ') || 'MEMBER_SHARING_NODES must name three'})` };
-  }
-  [OWNER, M1, M2] = free.slice(0, 3);
-  return { taken };
+  for (const pair of await watched(handles)) report.reportPair(pair, { boundMs: BOUND_MS });
 }
 
 async function run() {
-  if (!ADMIN_TOKEN) return skip('no devnet: no auth token');
-  const multiaddrOf = node => { try { return readFileSync(join(DEVNET_DIR, `node${node}`, 'multiaddr'), 'utf8').trim(); } catch { return ''; } };
-  RELAY1 = multiaddrOf(1);
-  RELAY2 = multiaddrOf(2);
-  if (!RELAY1 || !RELAY2) return skip(`no devnet: the multiaddr of node 1 or node 2 is missing under ${DEVNET_DIR}`);
-  if (nodeConfig(1)?.nodeRole !== 'core' || nodeConfig(2)?.nodeRole !== 'core') return skip('node 1 and node 2 must be Cores, the relays of the members');
-  reclaimOwnLeftovers();
-  const picked = await pickNodes();
+  if (!devnet.adminToken) return skip('no devnet: no auth token');
+  const relay1 = devnet.multiaddrOf(1);
+  const relay2 = devnet.multiaddrOf(2);
+  if (!relay1 || !relay2) return skip(`no devnet: the multiaddr of node 1 or node 2 is missing under ${DEVNET_DIR}`);
+  if (devnet.nodeConfig(1)?.nodeRole !== 'core' || devnet.nodeConfig(2)?.nodeRole !== 'core') return skip('node 1 and node 2 must be Cores, the relays of the members');
+  edges.reclaimLeftovers();
+  const picked = edges.allocate({ explicit: process.env.MEMBER_SHARING_NODES, relay1, relay2 });
   if (picked.problem) return skip(picked.problem);
   if (picked.taken.length) note(`node numbers in use, left alone: ${picked.taken.join('; ')}`);
-  say(`bound ${seconds(BOUND_MS)} s per write, ${seconds(SYNCED_MS)} s for the synced flag; owner node${OWNER}, members node${M1} and node${M2} (member 2 with one sync slot and no queue); run ${STAMP}`);
+  const { owner, member1, member2, members } = edges;
+  say(`bound ${seconds(BOUND_MS)} s per write, ${seconds(SYNCED_MS)} s for the synced flag; owner node${owner.number}, members node${member1.number} and node${member2.number} (member 2 with one sync slot and no queue); run ${STAMP}`);
 
-  // Reachable through relays only: the owner through node 1 and node 2, member 1
-  // through node 1 (the devnet's relay for an Edge), member 2 through node 2.
-  await startEdge(OWNER, { preferredRelays: [RELAY2], announceAddresses: [DEAD_DIRECT_ADDRESS, `${RELAY1}/p2p-circuit`, `${RELAY2}/p2p-circuit`] });
-  await startEdge(M1, { relay: RELAY1, announceAddresses: [DEAD_DIRECT_ADDRESS, `${RELAY1}/p2p-circuit`] });
-  await startEdge(M2, { relay: RELAY2, announceAddresses: [DEAD_DIRECT_ADDRESS, `${RELAY2}/p2p-circuit`], syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 });
-  await dialOwner(M1);
-  await dialOwner(M2);
+  for (const node of edges.nodes) await edges.start(node);
+  for (const member of members) await edges.dialOwner(member);
   say(`temporary Edges up and dialed (${elapsed()})`);
 
   // The unregistered public graph carries cases 1 to 6; without it nothing runs.
   // A registered or a private graph that cannot be set up fails case 7 and
   // leaves the other cases to run.
-  const pub = await createGraph('public', { accessPolicy: 0, publishPolicy: 1, register: false });
-  await keepCoresOut(pub);
-  let graphs = [pub];
-  const caseOf = (graph, publicCase) => (graph === pub ? publicCase : 7);
-  const setUp = async (graph, step) => {
-    if (graph === pub) return step();
-    try { await step(); } catch (error) {
-      fail(7, `${graph.key}: ${error?.message ?? error}; no case runs on this graph`);
-      graphs = graphs.filter(g => g !== graph);
-    }
-  };
-  for (const [key, body] of [
-    ['registered', { accessPolicy: 0, publishPolicy: 1, register: true }],
-    ['private', { accessPolicy: 1, publishPolicy: 0, register: true, allowedAgents: [AGENT[OWNER], AGENT[M1], AGENT[M2]] }],
+  const pub = new GraphScenario(await graphs.createGraph('public', { accessPolicy: 0, publishPolicy: 1, register: false }),
+    { cases: PUBLIC_CASES, authors: members, required: true, sub: SUB });
+  await graphs.keepCoresOut(pub.graph);
+  const scenarios = [pub];
+  for (const [key, body, authors] of [
+    ['registered', { accessPolicy: 0, publishPolicy: 1, register: true }, [member1]],
+    ['private', { accessPolicy: 1, publishPolicy: 0, register: true, allowedAgents: edges.nodes.map(node => node.agentAddress) }, []],
   ]) {
     try {
-      const graph = await createGraph(key, body);
-      graphs.push(graph);
+      scenarios.push(new GraphScenario(await graphs.createGraph(key, body), { cases: OTHER_CASES, authors, sub: SUB }));
     } catch (error) { fail(7, `the ${key} graph could not be set up: ${error?.message ?? error}; no case runs on it`); }
   }
   // The large graph of case 6; a failure here fails case 6 only.
   let big = null;
   try {
-    big = await createGraph('large', { accessPolicy: 0, publishPolicy: 1, register: false });
-    await keepCoresOut(big);
-    await fillBigGraph(big);
+    big = await graphs.createGraph('large', { accessPolicy: 0, publishPolicy: 1, register: false });
+    await graphs.keepCoresOut(big);
+    await fillBigGraph(io, owner, big, { assets: BIG_ASSETS, triples: BIG_TRIPLES, stamp: STAMP });
     say(`large graph written: ${BIG_ASSETS} assets of ${BIG_TRIPLES} triples (${elapsed()})`);
   } catch (error) {
     fail(6, `the large graph could not be set up: ${error?.message ?? error}; case 6 did not run`);
@@ -898,95 +246,73 @@ async function run() {
 
   // Case 3 (7): history, written before the members subscribe. Each member's
   // bound starts at its own subscribe, and so does the watch of its synced flag
-  // (case 8).
+  // (case 8). A graph a member cannot join is dropped with what is pending on it.
   await precondition(3, 'before the history');
-  const history = [];
-  for (const graph of graphs) {
-    for (const sub of [null, SUB]) history.push(await write(OWNER, graph, sub, `history ${sub ? 'sub-graph' : 'root'}`));
+  for (const scenario of scenarios) await scenario.writeHistory(scenarioIo, owner);
+  for (const scenario of scenarios) {
+    const problem = await scenario.subscribeMembers(scenarioIo, members);
+    if (problem) fail(7, `${scenario.graph.key}: ${problem}; no case runs on this graph`);
   }
-  const historyWatches = [];
-  const subscriptions = [];
-  // setUp replaces `graphs` when a graph drops out; this loop keeps the list it started with.
-  for (const graph of graphs) {
-    await setUp(graph, async () => {
-      for (const member of [M1, M2]) {
-        await subscribe(member, graph);
-        historyWatches.push(watch(history.filter(record => record.graph === graph).map(record => ({
-          caseId: caseOf(graph, 3), record, node: member, from: graph.subscribedAt[member], fromWhat: 'member subscribed',
-        }))));
-        subscriptions.push(observeSubscription(member, graph));
-      }
-    });
-  }
+  const active = scenarios.filter(scenario => scenario.active);
   say(`members subscribed (${elapsed()})`);
-  for (const subscription of await Promise.all(subscriptions)) reportSubscription(caseOf(subscription.graph, 3), subscription);
-  await settle(historyWatches);
+  const observed = await Promise.all(active.map(scenario => scenario.observedSubscriptions()));
+  active.forEach((scenario, i) => {
+    for (const subscription of observed[i]) report.reportSubscription(scenario.cases.definition, subscription, DEADLINES);
+  });
+  await settle((await Promise.all(active.map(scenario => scenario.historyWatches()))).flat());
 
   // Case 1 (7): the owner writes, live. Case 2 (7): a member writes; the owner
   // and the other member must hold it.
   await precondition(1, 'before the owner writes');
   const live = [];
-  for (const graph of graphs) {
-    for (const sub of [null, SUB]) live.push(await writeAndWatch(caseOf(graph, 1), OWNER, graph, sub, `owner live ${sub ? 'sub-graph' : 'root'}`, [M1, M2]));
-  }
+  for (const scenario of active) live.push(...await scenario.ownerWrites(scenarioIo, owner, members));
   await precondition(2, 'before the members write');
-  for (const graph of graphs.filter(g => !g.private)) {
-    for (const sub of [null, SUB]) {
-      live.push(await writeAndWatch(caseOf(graph, 2), M1, graph, sub, `member1 live ${sub ? 'sub-graph' : 'root'}`, [OWNER, M2]));
-      if (graph === pub) live.push(await writeAndWatch(2, M2, graph, sub, `member2 live ${sub ? 'sub-graph' : 'root'}`, [OWNER, M1]));
-    }
-  }
+  for (const scenario of active) live.push(...await scenario.memberWrites(scenarioIo, owner, members));
   await settle(live);
 
   // Case 6: member 2's only sync slot busy with a large transfer of another graph.
-  if (big) await busyMember(pub, big);
+  if (big) await busyMember({ devnet, edges, graphs, io, report, precondition, boundMs: BOUND_MS, sub: SUB }, pub.graph, big);
 
   // Case 5: members that subscribed LATER_MS ago.
-  const since = Math.max(pub.subscribedAt[M1], pub.subscribedAt[M2]);
+  const since = Math.max(...members.map(member => pub.subscribedAt.get(member)));
   const rest = since + LATER_MS - Date.now();
   if (rest > 0) { say(`waiting ${seconds(rest)} s for case 5 (${elapsed()})`); await sleep(rest); }
   await precondition(5, `${seconds(Date.now() - since)} s after the members subscribed`);
   await settle([
-    await writeAndWatch(5, OWNER, pub, null, 'owner later, root', [M1, M2]),
-    await writeAndWatch(5, OWNER, pub, SUB, 'owner later, sub-graph', [M1, M2]),
-    await writeAndWatch(5, M1, pub, null, 'member1 later, root', [OWNER, M2]),
-    await writeAndWatch(5, M2, pub, SUB, 'member2 later, sub-graph', [OWNER, M1]),
+    await io.writeAndWatch(5, owner, pub.graph, null, 'owner later, root', members),
+    await io.writeAndWatch(5, owner, pub.graph, SUB, 'owner later, sub-graph', members),
+    await io.writeAndWatch(5, member1, pub.graph, null, 'member1 later, root', [owner, member2]),
+    await io.writeAndWatch(5, member2, pub.graph, SUB, 'member2 later, sub-graph', [owner, member1]),
   ]);
 
   // Case 4: a member restart. What was written while it was down must reach it
   // within the bound of its return; the nodes that stayed up get the usual bound.
-  const stopped = await devnetSh(['stop-node', String(M1)]);
-  if (stopped.status !== 0) throw new Error(`member1 could not be stopped: ${lastLines(stopped.output)}`);
+  await edges.stop(member1);
   const whileDown = [
-    await writeAndWatch(4, OWNER, pub, null, 'owner while member1 is down, root', [M2]),
-    await writeAndWatch(4, OWNER, pub, SUB, 'owner while member1 is down, sub-graph', [M2]),
-    await writeAndWatch(4, M2, pub, null, 'member2 while member1 is down, root', [OWNER]),
+    await io.writeAndWatch(4, owner, pub.graph, null, 'owner while member1 is down, root', [member2]),
+    await io.writeAndWatch(4, owner, pub.graph, SUB, 'owner while member1 is down, sub-graph', [member2]),
+    await io.writeAndWatch(4, member2, pub.graph, null, 'member2 while member1 is down, root', [owner]),
   ];
   const missed = whileDown.map(handle => handle.pairs[0].record);
-  const restarted = await devnetSh(['restart-node', String(M1)], nodeEnv(M1));
-  if (restarted.status !== 0) throw new Error(`member1 did not restart: ${lastLines(restarted.output)}`);
-  await identify(M1);
-  await dialOwner(M1);
+  await edges.restart(member1);
+  await edges.dialOwner(member1);
   const backAt = Date.now();
-  whileDown.push(watch(missed.map(record => ({ caseId: 4, record, node: M1, from: backAt, fromWhat: 'member restarted' }))));
+  whileDown.push(io.watch(missed.map(record => ({ caseId: 4, record, node: member1, from: backAt, fromWhat: 'member restarted' }))));
   await precondition(4, 'after the member restart');
-  whileDown.push(await writeAndWatch(4, OWNER, pub, SUB, 'owner after member1 restarted, sub-graph', [M1, M2]));
+  whileDown.push(await io.writeAndWatch(4, owner, pub.graph, SUB, 'owner after member1 restarted, sub-graph', members));
   await settle(whileDown);
 
   // Then an owner restart: live writes in both directions.
-  const ownerRestarted = await devnetSh(['restart-node', String(OWNER)], nodeEnv(OWNER));
-  if (ownerRestarted.status !== 0) throw new Error(`the owner did not restart: ${lastLines(ownerRestarted.output)}`);
-  await identify(OWNER);
-  await dialOwner(M1);
-  await dialOwner(M2);
+  await edges.restart(owner);
+  for (const member of members) await edges.dialOwner(member);
   await precondition(4, 'after the owner restart');
   await settle([
-    await writeAndWatch(4, OWNER, pub, null, 'owner after it restarted, root', [M1, M2]),
-    await writeAndWatch(4, M2, pub, SUB, 'member2 after the owner restarted, sub-graph', [OWNER, M1]),
+    await io.writeAndWatch(4, owner, pub.graph, null, 'owner after it restarted, root', members),
+    await io.writeAndWatch(4, member2, pub.graph, SUB, 'member2 after the owner restarted, sub-graph', [owner, member1]),
   ]);
 
   // No Core carried anything, and the members never reached each other.
-  const cores = await coresFollowing(pub);
+  const cores = await graphs.coresFollowing(pub.graph);
   if (cores.following.length) fail(2, `at the end Core(s) ${cores.following.join(', ')} follow the public graph: their gossip may have carried writes`);
   if (cores.unknown.length) fail(2, `at the end it is not known whether Core(s) ${cores.unknown.join(', ')} follow the public graph`);
   await precondition(2, 'at the end');
@@ -994,25 +320,7 @@ async function run() {
 
 function skip(reason) { say(`SKIP: ${reason}`); EXIT = 3; }
 
-function cleanup() {
-  if (process.env.MEMBER_SHARING_KEEP_NODES === '1') {
-    if (STARTED_NODES.length) say(`MEMBER_SHARING_KEEP_NODES=1: node(s) ${STARTED_NODES.join(', ')} left running`);
-    return;
-  }
-  const failed = Object.values(findings).some(f => f.fail.length) || EXIT === 1;
-  const kept = join(DEVNET_DIR, 'issue-3251-member-sharing', STAMP);
-  for (const node of STARTED_NODES) {
-    devnetShSync(['stop-node', String(node)]);
-    if (failed && existsSync(logFile(node))) {
-      mkdirSync(kept, { recursive: true });
-      copyFileSync(logFile(node), join(kept, `node${node}-${role(node)}.daemon.log`));
-    }
-    const problem = removeOwnNode(node);
-    if (problem) say(problem);
-  }
-  if (failed && existsSync(kept)) say(`kept the logs of the temporary nodes in ${kept}`);
-}
-
+const cleanup = () => edges.cleanup({ keep: process.env.MEMBER_SHARING_KEEP_NODES === '1', failed: report.anyFailed() || EXIT === 1 });
 const interrupted = (signal, code) => () => { say(`stopped by ${signal}`); cleanup(); process.exit(code); };
 process.once('SIGINT', interrupted('SIGINT', 130));
 process.once('SIGTERM', interrupted('SIGTERM', 143));
@@ -1025,19 +333,7 @@ try {
 }
 cleanup();
 if (EXIT !== 3) {
-  console.log('');
-  say(`Results (${elapsed()}; bound ${seconds(BOUND_MS)} s per write, ${seconds(SYNCED_MS)} s for the synced flag):`);
-  const { rows, failed } = caseVerdicts(CASES, findings);
-  for (const row of rows) {
-    const known = [row.expected && `${row.expected} expected failure(s)`, row.unexpected && `${row.unexpected} known-gap check(s) held`].filter(Boolean);
-    console.log(`  case ${row.id} ${row.verdict.padEnd(7)} ${row.title} (${row.held} held, ${row.failed} failed${known.length ? `, ${known.join(', ')}` : ''})`);
-  }
-  const expected = rows.reduce((n, row) => n + row.expected, 0);
-  const unexpected = rows.reduce((n, row) => n + row.unexpected, 0);
-  for (const gap of Object.values(KNOWN_GAPS)) {
-    if (expected || unexpected) say(`known gap ${gap.issue} (${gap.what}): ${expected} check(s) failed as expected${unexpected ? `, ${unexpected} held: remove the expected failure once ${gap.issue} is fixed` : ''}`);
-  }
+  const failed = report.summary(`Results (${elapsed()}; bound ${seconds(BOUND_MS)} s per write, ${seconds(SYNCED_MS)} s for the synced flag):`);
   if (failed.length) EXIT = 1;
-  say(failed.length ? `NOT PASSED: case(s) ${failed.join(', ')}` : expected ? 'every case passed, apart from the expected failures of known gaps' : 'every case passed');
 }
 process.exit(EXIT);

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { classify } from '../qa/known-gaps.mjs';
 import {
-  admissionStarts, busySlotCovered, caseVerdicts, foldRead, foldSubscription, freshSubscription, inScope, judgeHeld,
-  linkProblem, literalText, pairHeld, refusedWriteVerdict, registeredGapVerdict, sharedMemoryScope, singleSlotProblem,
-  subscriptionVerdicts,
+  caseVerdicts, connectionsObservation, describe, foldRead, foldSubscription, freshSubscription, inScope, judgeHeld,
+  linkProblem, literalText, pairHeld, pairResult, sharedMemoryScope, subscriptionResults, topologyProblems,
 } from '../qa/member-sharing.mjs';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -121,117 +121,16 @@ test('each read keeps its own completion time, so a slow later read cannot disca
   assert.equal(foldRead({ view: null, partitions: null }, 'view', { held: true, completedAt: 61_000 }, { from: 2_000, boundMs: 60_000 }).view, 59_000);
 });
 
-test('a missed check on a registered graph is the known gap only when the member is shown to lack the definition', () => {
-  assert.equal(registeredGapVerdict({ registered: true, definitionHeld: false }), 'xfail');
-  // A member that holds the definition and still never syncs, or cannot write, has another defect.
-  assert.equal(registeredGapVerdict({ registered: true, definitionHeld: true }), 'fail');
-  // No evidence either way (the listing could not be read) is no exemption.
-  assert.equal(registeredGapVerdict({ registered: true, definitionHeld: undefined }), 'fail');
-  // Not a registered graph: the gap does not apply.
-  assert.equal(registeredGapVerdict({ registered: false, definitionHeld: false }), 'fail');
-});
-
-test('admission starts are read from the node log, for that label only', () => {
-  const big = 'shared-memory:0xabc/issue-3251-large-1:YeJDmN71';
-  const log = [
-    '2026-10-15 09:49:10 sync 85005448 [DKGAgent] Sync backpressure running shared-memory:0xabc/issue-3251-public-1:YeJDmN71 (global inflight=1/1, queued=0/0)',
-    `2026-10-15 09:49:12 sync 9a [DKGAgent] Sync backpressure running ${big} (global inflight=1/1, queued=0/0)`,
-    `2026-10-15 09:49:13 sync 9b [DKGAgent] Sync backpressure rejected ${big} (global inflight=1/1, queued=0/0)`,
-    `[2026-10-15T07:49:14.000Z] not the agent log format: Sync backpressure running ${big}`,
-    `2026-10-15 09:50:02 sync 9c [DKGAgent] Sync backpressure running ${big} (global inflight=1/1, queued=0/0)`,
-  ].join('\n');
-  assert.deepEqual(admissionStarts(log, big), [new Date('2026-10-15T09:49:12').getTime(), new Date('2026-10-15T09:50:02').getTime()]);
-  // Any operation on the graph: the label holds the graph id between colons.
-  assert.deepEqual(admissionStarts(log, ':0xabc/issue-3251-large-1:'), admissionStarts(log, big));
-  assert.deepEqual(admissionStarts(log, ':0xabc/issue-3251-large-2:'), []);
-  // The needle must be in the admitted label, not elsewhere on the line.
-  assert.deepEqual(admissionStarts('2026-10-15 09:49:12 sync 9a [DKGAgent] Sync backpressure running shared-memory:other:Y (note :0xabc/issue-3251-large-1:)', ':0xabc/issue-3251-large-1:'), []);
-  assert.deepEqual(admissionStarts('', big), []);
-  assert.deepEqual(admissionStarts(undefined, big), []);
-});
-
-// A reading of member 2's sync slots with its intended policy: one slot, no queue.
-const POLICY = { capacityModel: 'shared', inflightLimit: 1, queueLimit: 0 };
-const every = (a, b) => Array.from({ length: (b - a) / 1000 + 1 }, (_, i) => a + i * 1000);
-
-test('a running catch-up job without an admitted transfer does not make member 2 busy', () => {
-  const window = { from: 100_000, until: 140_000 };
-  // The regression: the job is running, the slot sampler sees work in flight,
-  // but no transfer of the large graph was ever admitted.
-  const samples = every(100_000, 140_000).map(at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - 95_000 }));
-  assert.deepEqual(busySlotCovered({ admissionStartMs: null, samples, ...window }),
-    { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null });
-  assert.equal(busySlotCovered({ admissionStartMs: undefined, samples, ...window }).held, false);
-});
-
-test('the slot is busy only while the admitted transfer is the work that holds it, through the whole window', () => {
-  const start = 95_000;
-  const window = { from: 100_000, until: 140_000 };
-  const holding = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start });
-  const held = busySlotCovered({ admissionStartMs: start, samples: every(99_000, 141_000).map(holding), ...window });
-  assert.deepEqual(held, { held: true, provenUntil: 140_000 });
-  // A second admission beside it (the reserved shared-memory slot of a fix) is younger: still the same holder.
-  assert.equal(busySlotCovered({ admissionStartMs: start, samples: every(100_000, 140_000).map(at => ({ ...holding(at), inflight: 2 })), ...window }).held, true);
-  // The transfer ends at 120 s: from then on the slot is free.
-  const freed = every(100_000, 140_000).map(at => (at < 120_000 ? holding(at) : { at, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }));
-  assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: freed, ...window }), { held: false, reason: 'the sync slot was free', provenUntil: 119_000 });
-  // Other work holds the slot (its admission started at 118 s).
-  const other = every(100_000, 140_000).map(at => (at < 120_000 ? holding(at) : { ...holding(at), oldestActiveAgeMs: at - 118_000 }));
-  assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: other, ...window }), { held: false, reason: 'the slot was held by other work', provenUntil: 119_000 });
-  // A log second is truncated: the sampled start may lie up to the tolerance from it.
-  assert.equal(busySlotCovered({ admissionStartMs: start, samples: every(100_000, 140_000).map(at => ({ ...holding(at), oldestActiveAgeMs: at - start - 900 })), ...window }).held, true);
-  // No reading for 12 s, an unreadable reading, no reading at the end, and no reading at all prove nothing.
-  const gap = every(100_000, 140_000).filter(at => at < 110_000 || at > 120_000).map(holding);
-  assert.equal(busySlotCovered({ admissionStartMs: start, samples: gap, ...window }).reason, 'no reading of the sync slot for 12 s');
-  const unreadable = every(100_000, 140_000).map(at => (at === 125_000 ? { at, unreadable: 'HTTP 503' } : holding(at)));
-  assert.equal(busySlotCovered({ admissionStartMs: start, samples: unreadable, ...window }).reason, 'the sync slot could not be read (HTTP 503)');
-  const short = every(100_000, 130_000).map(holding);
-  assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: short, ...window }), { held: false, reason: 'no reading of the sync slot for the last 10 s', provenUntil: 130_000 });
-  assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: [], ...window }), { held: false, reason: 'no reading of the sync slot in the window', provenUntil: null });
-});
-
-test('a reading taken before the window is no evidence, not even a free slot before the admission', () => {
-  // The finding: a free reading at 99 s, busy readings from 100 s to 110 s, writes and receipts in [101 s, 110 s].
-  const start = 100_000;
-  const busy = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start });
-  const samples = [{ at: 99_000, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }, ...every(100_000, 110_000).map(busy)];
-  assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples, from: 101_000, until: 110_000 }), { held: true, provenUntil: 110_000 });
-  // The second example: admission at 98.5 s, a free reading at 98 s, busy readings from 99 s to 110 s, window [100 s, 110 s].
-  const later = [{ at: 98_000, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }, ...every(99_000, 110_000).map(at => ({ ...busy(at), oldestActiveAgeMs: at - 98_500 }))];
-  assert.equal(busySlotCovered({ admissionStartMs: 98_500, samples: later, from: 100_000, until: 110_000 }).held, true);
-  // Inside the window a free reading still fails it.
-  const inside = every(100_000, 110_000).map(at => (at === 105_000 ? { at, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 } : busy(at)));
-  assert.equal(busySlotCovered({ admissionStartMs: start, samples: inside, from: 101_000, until: 110_000 }).reason, 'the sync slot was free');
-});
-
-test('case 6 counts only on one sync slot and no queue, whatever the environment gave the node', () => {
-  assert.equal(singleSlotProblem({ at: 1, ...POLICY, inflight: 1 }), null);
-  // DKG_SYNC_GLOBAL_MAX_INFLIGHT=8 inherited by the node: spare slots, so a busy slot proves nothing.
-  assert.equal(singleSlotProblem({ ...POLICY, inflightLimit: 8 }), 'the node runs 8 sync slot(s), not one');
-  assert.equal(singleSlotProblem({ ...POLICY, queueLimit: 4 }), 'the node has a sync queue of 4, not none');
-  assert.equal(singleSlotProblem({ ...POLICY, capacityModel: 'partitioned' }), 'the sync slots are not one shared pool (partitioned)');
-  assert.equal(singleSlotProblem({ ...POLICY, inflightLimit: null }), 'the node runs an unknown number of sync slot(s), not one');
-  assert.equal(singleSlotProblem({ at: 1, unreadable: 'HTTP 401' }), 'the sync slots could not be read (HTTP 401)');
-  assert.equal(singleSlotProblem(undefined), 'the sync slots could not be read (no reading)');
-  // In the window, every reading must show it.
-  const start = 95_000;
-  const spare = every(100_000, 110_000).map(at => ({ at, ...POLICY, inflightLimit: 8, inflight: 1, oldestActiveAgeMs: at - start }));
-  assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: spare, from: 100_000, until: 110_000 }),
-    { held: false, reason: 'the node runs 8 sync slot(s), not one', provenUntil: null });
-  const queued = every(100_000, 110_000).map(at => ({ at, ...POLICY, queueLimit: 20, inflight: 1, oldestActiveAgeMs: at - start }));
-  assert.equal(busySlotCovered({ admissionStartMs: start, samples: queued, from: 100_000, until: 110_000 }).reason, 'the node has a sync queue of 20, not none');
-});
-
-test('a refused write is judged by its structured code, not by the wording of its message', () => {
-  const gap = { registered: true, definitionHeld: false };
-  assert.equal(refusedWriteVerdict({ errorCode: 'CONTEXT_GRAPH_NOT_FOUND', ...gap }), 'xfail');
-  // Another code fails, whatever its message says.
-  assert.equal(refusedWriteVerdict({ errorCode: 'WRITE_FORBIDDEN', ...gap }), 'fail');
-  assert.equal(refusedWriteVerdict({ errorCode: undefined, ...gap }), 'fail');
-  // The gap's code still needs the evidence and the registered graph.
-  assert.equal(refusedWriteVerdict({ errorCode: 'CONTEXT_GRAPH_NOT_FOUND', registered: true, definitionHeld: true }), 'fail');
-  assert.equal(refusedWriteVerdict({ errorCode: 'CONTEXT_GRAPH_NOT_FOUND', registered: false, definitionHeld: false }), 'fail');
-});
+// The verdicts of an observed subscription as the report prints them: each
+// result through the known gaps, a quiet pass printing nothing.
+function subscriptionVerdicts(observation, options) {
+  const results = subscriptionResults(observation, options);
+  const printed = result => {
+    const { verdict, text } = classify(result);
+    return verdict === 'quiet' ? { verdict: 'none', text: '' } : { verdict, text };
+  };
+  return { definition: printed(results.definition), synced: printed(results.synced) };
+}
 
 test('one poller observes the definition and the synced flag against their own deadlines', () => {
   const deadlines = { definitionMs: 90_000, syncedMs: 60_000 };
@@ -270,5 +169,60 @@ test('one poller observes the definition and the synced flag against their own d
   assert.deepEqual(subscriptionVerdicts(blind, { registered: true, ...deadlines }), {
     definition: { verdict: 'fail', text: 'its listing could not be read 90 s after it subscribed (HTTP 503)' },
     synced: { verdict: 'fail', text: 'its listing could not be read 60 s after it subscribed (HTTP 503)' },
+  });
+});
+
+test('the topology is judged from one reading of each node, with the diagnostics of each link and stranger', () => {
+  const owner = { number: 7, label: 'node7 (owner)', peerId: 'peer-owner' };
+  const member1 = { number: 8, label: 'node8 (member1)', peerId: 'peer-member1' };
+  const member2 = { number: 9, label: 'node9 (member2)', peerId: 'peer-member2' };
+  const links = [[member1, owner, 'relayed'], [owner, member1, 'relayed'], [member2, owner, 'relayed'], [owner, member2, 'relayed'], [member1, member2, 'none'], [member2, member1, 'none']];
+  const known = new Set(['peer-owner', 'peer-member1', 'peer-member2', 'peer-core1', 'peer-core2']);
+  const relayed = peerId => ({ peerId, transport: 'relayed' });
+  const direct = peerId => ({ peerId, transport: 'direct' });
+  const answers = {
+    7: [relayed('peer-member1'), relayed('peer-member2'), direct('peer-core1')],
+    8: [relayed('peer-owner'), direct('peer-core1')],
+    9: [relayed('peer-owner'), direct('peer-core2')],
+  };
+  const observe = overrides => new Map(Object.entries({ ...answers, ...overrides }).map(([number, connections]) => [Number(number),
+    connections === null ? connectionsObservation(503, { error: 'busy' }) : connectionsObservation(200, { connections })]));
+  const judge = overrides => topologyProblems({ observations: observe(overrides), links, members: [member1, member2], known });
+  assert.deepEqual(judge({}), []);
+  // A direct link to the owner, a link between the members, a stranger.
+  assert.deepEqual(judge({ 8: [relayed('peer-owner'), direct('peer-owner'), relayed('peer-member2'), direct('peer-elsewhere1')] }), [
+    'node8 (member1) holds 1 direct connection(s) to node7 (owner)',
+    'node8 (member1) holds 1 connection(s) to node9 (member2)',
+    'node8 (member1) is connected to 1 peer(s) that are no node of this devnet (sewhere1): they could carry the graph',
+  ]);
+  // A node whose connections could not be read fails each link from it, and says nothing about strangers.
+  assert.deepEqual(judge({ 9: null }), [
+    'the connections of node9 (member2) could not be read',
+    'the connections of node9 (member2) could not be read',
+  ]);
+  assert.deepEqual(connectionsObservation(200, { connections: 'none' }), { readable: false });
+  assert.deepEqual(connectionsObservation(200, null), { readable: false });
+});
+
+test('a pair is held, missing (with what each read last saw) or not written, as an ordinary result', () => {
+  const graph = { key: 'registered', registered: true };
+  const record = { author: { label: 'node8 (member1)' }, graph, sub: 's', value: 'member1 live sub-graph (9)' };
+  const node = { label: 'node9 (member2)' };
+  assert.equal(describe(record), '"member1 live sub-graph (9)" by node8 (member1) in registered/s');
+  const held = pairResult({ record, node, progress: { view: 3_000, partitions: 4_400 }, last: {} }, { boundMs: 60_000 });
+  assert.deepEqual(held, { check: 'held', outcome: 'pass', text: '"member1 live sub-graph (9)" by node8 (member1) in registered/s at node9 (member2): held 4 s after the share' });
+  const missing = pairResult({
+    record: { ...record, sub: null }, node, fromWhat: 'member subscribed',
+    progress: { view: 2_000, partitions: null }, last: { view: { held: true }, partitions: { held: false, different: '"other"' } },
+  }, { boundMs: 60_000 });
+  assert.deepEqual(missing, {
+    check: 'held', outcome: 'fail',
+    text: '"member1 live sub-graph (9)" by node8 (member1) in registered root at node9 (member2): NOT in the cross-partition read (holds another value: "other") 60 s after the member subscribed (found in view after 2 s)',
+  });
+  const refused = pairResult({ record: { ...record, error: 'the author refused the asset: HTTP 404', errorCode: 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: false }, node }, { boundMs: 60_000 });
+  assert.deepEqual(refused, {
+    check: 'write-refused', outcome: 'fail',
+    text: '"member1 live sub-graph (9)" by node8 (member1) in registered/s at node9 (member2): not written, the author refused the asset: HTTP 404',
+    evidence: { registered: true, definitionHeld: false, errorCode: 'CONTEXT_GRAPH_NOT_FOUND' },
   });
 });
