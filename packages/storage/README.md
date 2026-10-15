@@ -134,7 +134,7 @@ replace failed before mutation.
 
 | Environment variable | Default | Purpose |
 |---|---:|---|
-| `DKG_STORE_MAX_CONCURRENT` | `8` | Maximum external-store operations in flight. |
+| `DKG_STORE_MAX_CONCURRENT` | `4` | Maximum external-store operations in flight, capped to available CPUs while preserving the default ACK reserve on single-CPU hosts. |
 | `DKG_STORE_ACK_RESERVED_SLOTS` | `1` | In-flight capacity reserved for ACK work. |
 | `DKG_STORE_NORMAL_RESERVED_SLOTS` | `1` | Non-ACK capacity kept available for normal work while background operations are in flight. |
 | `DKG_STORE_BACKGROUND_RESERVED_SLOTS` | `1` | Non-ACK capacity reserved for background progress. |
@@ -149,6 +149,15 @@ Normal and background reserves are normalized against the available non-ACK
 capacity. At least one background slot remains available, and the background
 progress floor is capped to its admission ceiling so conflicting custom values
 cannot leave usable capacity idle.
+
+When only one ordinary slot remains after ACK and health reservations, a
+positive background reservation instead guarantees dispatch opportunities:
+at most eight normal operations start while background work waits before one
+background operation gets its turn. A fresh backlog starts with normal work;
+ACK and health retain priority. This does not bound elapsed waiting time,
+because admitted operations are not preempted. Setting
+`DKG_STORE_BACKGROUND_RESERVED_SLOTS=0` retains strict normal-before-background
+ordering. Schedulers with multiple ordinary slots retain their capacity reserves.
 
 Blazegraph's deadline can also be set per store, which takes precedence over
 the environment default:
