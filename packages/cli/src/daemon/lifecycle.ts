@@ -3690,7 +3690,9 @@ async function runDaemonInnerWithStartupOwnership(
     // must land before the first suspension point. Extracted so a test can
     // suspend inside `removeApiPort` and prove a subscribe crossing that
     // window is already refused — which is not observable from here.
-    await beginGracefulShutdown({ state: daemonState, removeApiPort, log });
+    await beginGracefulShutdown({
+      state: daemonState, removeApiPort, log, endShareAdmissionWaits: () => agent.endLegacySwmShareAdmissionWaits(),
+    });
     const cleanupStateFiles = async () => {
       await removeOwnedDaemonRuntimeState().catch((err: any) =>
         log(`Runtime state cleanup error: ${err?.message ?? String(err)}`),
