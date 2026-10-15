@@ -122,9 +122,10 @@ test('each read keeps its own completion time, so a slow later read cannot disca
 });
 
 // The verdicts of an observed subscription as the report prints them: each
-// result through the known gaps, a quiet pass printing nothing.
+// result through the known gaps, a quiet pass printing nothing. The graph is
+// public unless the options say otherwise.
 function subscriptionVerdicts(observation, options) {
-  const results = subscriptionResults(observation, options);
+  const results = subscriptionResults(observation, { private: false, ...options });
   const printed = result => {
     const { verdict, text } = classify(result);
     return verdict === 'quiet' ? { verdict: 'none', text: '' } : { verdict, text };
@@ -205,7 +206,7 @@ test('the topology is judged from one reading of each node, with the diagnostics
 });
 
 test('a pair is held, missing (with what each read last saw) or not written, as an ordinary result', () => {
-  const graph = { key: 'registered', registered: true };
+  const graph = { key: 'registered', registered: true, private: false };
   const record = { author: { label: 'node8 (member1)' }, graph, sub: 's', value: 'member1 live sub-graph (9)' };
   const node = { label: 'node9 (member2)' };
   assert.equal(describe(record), '"member1 live sub-graph (9)" by node8 (member1) in registered/s');
@@ -223,6 +224,6 @@ test('a pair is held, missing (with what each read last saw) or not written, as 
   assert.deepEqual(refused, {
     check: 'write-refused', outcome: 'fail',
     text: '"member1 live sub-graph (9)" by node8 (member1) in registered/s at node9 (member2): not written, the author refused the asset: HTTP 404',
-    evidence: { registered: true, definitionHeld: false, errorCode: 'CONTEXT_GRAPH_NOT_FOUND' },
+    evidence: { registered: true, private: false, definitionHeld: false, errorCode: 'CONTEXT_GRAPH_NOT_FOUND' },
   });
 });

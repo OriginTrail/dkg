@@ -6,12 +6,14 @@ import { foldSubscription, freshSubscription, listingObservation, subscriptionRe
 const GAP = KNOWN_GAPS.find(gap => gap.issue === '#3264');
 // A failed check of the kind the gap covers, with the evidence it was judged on.
 const failed = (check, evidence) => classify({ check, outcome: 'fail', text: 'seen', evidence });
-const registeredGapVerdict = ({ registered, definitionHeld }) => {
-  const verdicts = ['definition', 'synced'].map(check => failed(check, { registered, definitionHeld }).verdict);
+// On a public graph unless said otherwise: #3264 is about registered public graphs.
+const registeredGapVerdict = ({ registered, definitionHeld, private: isPrivate = false }) => {
+  const verdicts = ['definition', 'synced'].map(check => failed(check, { registered, private: isPrivate, definitionHeld }).verdict);
   assert.equal(verdicts[0], verdicts[1], 'the definition and the synced flag are judged alike');
   return verdicts[0];
 };
-const refusedWriteVerdict = ({ errorCode, registered, definitionHeld }) => failed('write-refused', { registered, definitionHeld, errorCode }).verdict;
+const refusedWriteVerdict = ({ errorCode, registered, definitionHeld, private: isPrivate = false }) =>
+  failed('write-refused', { registered, private: isPrivate, definitionHeld, errorCode }).verdict;
 
 test('a missed check on a registered graph is the known gap only when the member is shown to lack the definition', () => {
   assert.equal(registeredGapVerdict({ registered: true, definitionHeld: false }), 'xfail');
@@ -35,22 +37,22 @@ test('a refused write is judged by its structured code, not by the wording of it
 });
 
 test('the gap is applied once, to ordinary results, and says why in the line it prints', () => {
-  const registered = { registered: true, definitionHeld: false };
+  const registered = { registered: true, private: false, definitionHeld: false };
   // A check the gap does not cover is reported as it is.
   assert.deepEqual(classify({ check: 'held', outcome: 'pass', text: 'held 3 s after the share' }), { verdict: 'pass', text: 'held 3 s after the share', gap: null });
   assert.deepEqual(classify({ check: 'held', outcome: 'fail', text: 'NOT in the view', evidence: registered }), { verdict: 'fail', text: 'NOT in the view', gap: null });
   // A quiet pass (a precondition that held) prints nothing; on the registered graph the definition is the gap itself.
   const definition = { check: 'definition', outcome: 'pass', quiet: true, text: 'holds the definition 4 s after it subscribed' };
   assert.equal(classify({ ...definition, evidence: { registered: false, definitionHeld: true } }).verdict, 'quiet');
-  assert.deepEqual(classify({ ...definition, evidence: { registered: true, definitionHeld: true } }), { verdict: 'xpass', text: definition.text, gap: GAP });
+  assert.deepEqual(classify({ ...definition, evidence: { registered: true, private: false, definitionHeld: true } }), { verdict: 'xpass', text: definition.text, gap: GAP });
   // A synced flag that held on the registered graph is an ordinary pass: only the definition is the gap.
-  assert.equal(classify({ check: 'synced', outcome: 'pass', text: 'lists it as synced 8 s after it subscribed', evidence: { registered: true } }).verdict, 'pass');
+  assert.equal(classify({ check: 'synced', outcome: 'pass', text: 'lists it as synced 8 s after it subscribed', evidence: { registered: true, private: false } }).verdict, 'pass');
   // The reason travels with the line.
   assert.equal(failed('synced', registered).text, 'seen; it holds no definition of the graph');
   assert.equal(failed('write-refused', { ...registered, errorCode: 'CONTEXT_GRAPH_NOT_FOUND' }).text, 'seen; the author holds no definition of the graph');
   assert.equal(failed('definition', registered).text, 'seen');
-  assert.equal(failed('synced', { registered: true, definitionHeld: true }).text, 'seen; it holds the definition, so this is not #3264');
-  assert.equal(failed('synced', { registered: true, definitionHeld: undefined }).text, 'seen');
+  assert.equal(failed('synced', { registered: true, private: false, definitionHeld: true }).text, 'seen; it holds the definition, so this is not #3264');
+  assert.equal(failed('synced', { registered: true, private: false, definitionHeld: undefined }).text, 'seen');
   assert.equal(xfailLine(7, 'node8 (member1), registered: seen', GAP),
     `  [XFAIL] case 7: node8 (member1), registered: seen (expected failure: #3264, ${GAP.what})`);
   assert.equal(xpassLine(7, 'node8 (member1), registered: held', GAP),
@@ -73,13 +75,13 @@ test('retiring the gap is removing its entry: every check is then reported as it
 // the observation, the checks and the gap, as the suite composes them.
 const ID = '0xabc/issue-3251-registered-1';
 const DEADLINES = { definitionMs: 90_000, syncedMs: 90_000 };
-function printed(answers, { registered = true } = {}) {
+function printed(answers, { registered = true, isPrivate = false } = {}) {
   let observation = freshSubscription();
   for (const [age, httpStatus, body] of answers) {
     const seen = listingObservation(httpStatus, body, ID);
     observation = foldSubscription(observation, seen.readable ? seen : { readable: false, why: seen.reason }, age, DEADLINES);
   }
-  const results = subscriptionResults(observation, { registered, ...DEADLINES });
+  const results = subscriptionResults(observation, { registered, private: isPrivate, ...DEADLINES });
   return Object.fromEntries(Object.entries(results).map(([kind, result]) => [kind, classify(result).verdict]));
 }
 const listing = (...graphs) => JSON.stringify({ contextGraphs: graphs });
@@ -104,4 +106,22 @@ test('raw listing answers decide the gap: only a readable listing without the de
   assert.deepEqual(printed(at(listing(entry({}))), { registered: false }), { definition: 'fail', synced: 'fail' });
   // Held in time: the definition is a quiet precondition on such a graph, the synced flag a pass.
   assert.deepEqual(printed([[5_000, 200, listing(entry({ accessPolicy: 'public', synced: true }))]], { registered: false }), { definition: 'quiet', synced: 'pass' });
+});
+
+test('the gap covers registered public graphs only: on a registered private graph every check is ordinary', () => {
+  const lacking = { registered: true, private: true, definitionHeld: false };
+  assert.deepEqual(failed('synced', lacking), { verdict: 'fail', text: 'seen', gap: null });
+  assert.deepEqual(failed('definition', lacking), { verdict: 'fail', text: 'seen', gap: null });
+  assert.equal(failed('write-refused', { ...lacking, errorCode: 'CONTEXT_GRAPH_NOT_FOUND' }).verdict, 'fail');
+  assert.equal(classify({ check: 'definition', outcome: 'pass', quiet: true, text: 'held', evidence: { registered: true, private: true, definitionHeld: true } }).verdict, 'quiet');
+  // The same failures on a registered public graph are #3264.
+  assert.equal(failed('synced', { ...lacking, private: false }).verdict, 'xfail');
+  assert.equal(failed('write-refused', { ...lacking, private: false, errorCode: 'CONTEXT_GRAPH_NOT_FOUND' }).verdict, 'xfail');
+  // Evidence that does not say whether the graph is private is no exemption.
+  assert.equal(failed('synced', { registered: true, definitionHeld: false }).verdict, 'fail');
+  // Through the listing parser and the checks, as the report composes them.
+  const missing = [[30_000, 200, listing(entry({}))], [90_000, 200, listing(entry({}))]];
+  assert.deepEqual(printed(missing, { isPrivate: true }), { definition: 'fail', synced: 'fail' });
+  assert.deepEqual(printed(missing), { definition: 'xfail', synced: 'xfail' });
+  assert.deepEqual(printed([[5_000, 200, listing(entry({ accessPolicy: 'private', synced: true }))]], { isPrivate: true }), { definition: 'quiet', synced: 'pass' });
 });

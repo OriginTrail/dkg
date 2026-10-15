@@ -18,7 +18,10 @@ export function createGraphs(devnet, edges, { stamp, sub, say }) {
     .filter(number => devnet.nodeConfig(number)?.nodeRole === 'core')
     .sort((a, b) => a - b);
 
-  /** A graph of the owner's, with its sub-graph: { key, id, resolved, private, registered }. */
+  /**
+   * A graph of the owner's, with its sub-graph: { key, id, resolved, private
+   * (its access policy), registered (on chain, as the node answered) }.
+   */
   async function createGraph(key, body) {
     const { owner } = edges;
     const id = `${owner.agentAddress}/issue-3251-${key}-${stamp}`;
@@ -30,7 +33,7 @@ export function createGraphs(devnet, edges, { stamp, sub, say }) {
     // The graph names of its partitions are built from the id the node resolved.
     const resolved = typeof made.json?.contextGraphId === 'string' && made.json.contextGraphId ? made.json.contextGraphId : id;
     say(`graph ${key}: ${id}${created.json?.onChainId ? ` (registered, id ${created.json.onChainId})` : ''}${resolved !== id ? ` resolved as ${resolved}` : ''}`);
-    return { key, id, resolved, private: body.accessPolicy === 1, registered: body.register === true && body.accessPolicy !== 1 };
+    return { key, id, resolved, private: body.accessPolicy === 1, registered: created.json?.registered === true };
   }
 
   /** A Core subscribes and unsubscribes at once; discovery does not re-activate an ended subscription. */

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { admissionClass, admissionRecords, busySlotCovered, candidateAdmissions, heldTransfer, singleSlotProblem, startInterval } from '../qa/busy-slot.mjs';
+import {
+  admissionClass, admissionRecords, busySlotCovered, candidateAdmissions, heldTransfer, receivedWhileHeld, singleSlotProblem, startInterval,
+} from '../qa/busy-slot.mjs';
 
 // A reading of member 2's sync slots with its intended policy: one slot, no queue.
 const POLICY = { capacityModel: 'shared', inflightLimit: 1, queueLimit: 0 };
@@ -186,17 +188,49 @@ test('in the window, work of another class fails the transfer; a reading too slo
   const start = 95_000;
   const transfer = startedAt(start);
   const holding = at => ({ sentAt: at - 10, at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start, oldestOperations: ['shared-memory'] });
-  assert.deepEqual(busySlotCovered({ transfer, samples: every(100_000, 110_000).map(holding), from: 100_000, until: 110_000 }), { held: true, provenUntil: 110_000 });
+  // The evidence runs to the request of the last reading of the transfer: here one taken after the window.
+  assert.deepEqual(busySlotCovered({ transfer, samples: every(100_000, 111_000).map(holding), from: 100_000, until: 110_000 }), { held: true, provenUntil: 110_990 });
   // The oldest running work is of another class: it is not the transfer, whatever its age says.
   const durable = every(100_000, 110_000).map(at => (at >= 105_000 ? { ...holding(at), oldestOperations: ['durable'] } : holding(at)));
-  assert.deepEqual(busySlotCovered({ transfer, samples: durable, from: 100_000, until: 110_000 }), { held: false, reason: 'the slot was held by other work', provenUntil: 104_000 });
+  assert.deepEqual(busySlotCovered({ transfer, samples: durable, from: 100_000, until: 110_000 }), { held: false, reason: 'the slot was held by other work', provenUntil: 103_990 });
   // A reading that took 3 s cannot tell the transfer from work admitted just after it: no evidence either way,
-  assert.deepEqual(busySlotCovered({ transfer, samples: every(100_000, 110_000).map(at => (at === 106_000 ? { ...holding(at), sentAt: at - 3_000 } : holding(at))), from: 100_000, until: 110_000 }),
-    { held: true, provenUntil: 110_000 });
+  assert.deepEqual(busySlotCovered({ transfer, samples: every(100_000, 111_000).map(at => (at === 106_000 ? { ...holding(at), sentAt: at - 3_000 } : holding(at))), from: 100_000, until: 110_000 }),
+    { held: true, provenUntil: 110_990 });
   // so a stretch of them is a gap.
   const slow = every(100_000, 115_000).map(at => (at > 105_000 ? { ...holding(at), sentAt: at - 3_000 } : holding(at)));
   assert.deepEqual(busySlotCovered({ transfer, samples: slow, from: 100_000, until: 115_000 }),
-    { held: false, reason: 'no reading of the sync slot for 6 s (5 more came too slowly to tell which work held it)', provenUntil: 105_000 });
+    { held: false, reason: 'no reading of the sync slot for 6 s (5 more came too slowly to tell which work held it)', provenUntil: 104_990 });
   assert.deepEqual(busySlotCovered({ transfer, samples: slow.filter(sample => sample.at > 105_000 && sample.at <= 108_000), from: 105_500, until: 108_000 }),
     { held: false, reason: 'no reading of the sync slot for 3 s (3 more came too slowly to tell which work held it)', provenUntil: null });
+});
+
+test('a receipt counts only when a reading taken at or after it still showed the transfer (the examples of the review)', () => {
+  const start = 95_000;
+  const transfer = startedAt(start);
+  const holding = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start, oldestOperations: ['shared-memory'] });
+  // The last reading of the transfer is at 100.0 s; the transfer ends at 100.1 s, a pull of the public graph
+  // is admitted at 100.2 s and delivers the write at 100.9 s; the next reading shows the pull.
+  const pull = { at: 101_000, ...POLICY, inflight: 1, oldestActiveAgeMs: 800, oldestOperations: ['shared-memory'] };
+  const replaced = busySlotCovered({ transfer, samples: [...every(97_000, 100_000).map(holding), pull], from: 97_000, until: 102_000 });
+  assert.deepEqual(replaced, { held: false, reason: 'the slot was held by other work', provenUntil: 100_000 });
+  assert.equal(receivedWhileHeld(100_900, replaced), false);
+  // The second example: the last reading of the transfer at 10.0 s, the transfer ends at 10.1 s, both reads
+  // find the write at 10.5 s, and the next reading shows a free slot.
+  const short = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - 5_000, oldestOperations: ['shared-memory'] });
+  const freed = busySlotCovered({ transfer: startedAt(5_000), samples: [...every(7_000, 10_000).map(short), { at: 11_000, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }], from: 7_000, until: 12_000 });
+  assert.deepEqual(freed, { held: false, reason: 'the sync slot was free', provenUntil: 10_000 });
+  assert.equal(receivedWhileHeld(10_500, freed), false);
+  // The grace this replaces (one second past the last reading of the transfer) took both.
+  assert.ok(100_900 <= replaced.provenUntil + 1000 && 10_500 <= freed.provenUntil + 1000);
+  // Between two readings of the transfer the same admission held the slot throughout, also up to the last one.
+  const through = busySlotCovered({ transfer, samples: every(100_000, 111_000).map(holding), from: 100_000, until: 110_500 });
+  assert.deepEqual(through, { held: true, provenUntil: 111_000 });
+  for (const receivedAt of [100_000, 105_500, 110_500]) assert.equal(receivedWhileHeld(receivedAt, through), true);
+  assert.equal(receivedWhileHeld(105_500, { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null }), false);
+  // A reading counts from the moment its request went out: one answered after the receipt but asked before it proves nothing about it.
+  const asked = at => ({ ...holding(at), sentAt: at - 40 });
+  const ended = busySlotCovered({ transfer, samples: every(100_000, 105_000).map(asked), from: 100_000, until: 106_000 });
+  assert.deepEqual(ended, { held: false, reason: 'no reading of the sync slot was taken at or after the end of the window', provenUntil: 104_960 });
+  assert.equal(receivedWhileHeld(104_960, ended), true);
+  assert.equal(receivedWhileHeld(104_980, ended), false);
 });

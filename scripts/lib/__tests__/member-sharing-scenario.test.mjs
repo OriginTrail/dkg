@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { GraphScenario } from '../member-sharing/graph-scenario.mjs';
+import { createGraphs } from '../member-sharing/graphs.mjs';
 
 const owner = { number: 7, role: 'owner', label: 'node7 (owner)' };
 const member1 = { number: 8, role: 'member1', label: 'node8 (member1)' };
@@ -128,4 +129,24 @@ test('each graph routes its live writes to its own cases and authors', async () 
     'case 7: member1 live root by member1 in registered -> owner, member2',
     'case 7: member1 live sub-graph by member1 in registered/s -> owner, member2',
   ]);
+});
+
+test('a graph records as facts whether it is registered on chain and whether it is private', async () => {
+  const devnet = {
+    async api(node, method, path, body) {
+      const json = path === '/api/context-graph/create'
+        ? { created: body.id, registered: body.register === true, ...(body.register ? { onChainId: '7' } : {}) }
+        : { created: body.subGraphName, contextGraphId: body.contextGraphId };
+      return { status: 200, json, text: JSON.stringify(json) };
+    },
+  };
+  const graphs = createGraphs(devnet, { owner: { number: 7, agentAddress: '0xowner' }, isTemporary: () => false }, { stamp: 'S', sub: 's', say: () => {} });
+  const facts = async (key, body) => {
+    const graph = await graphs.createGraph(key, body);
+    return { private: graph.private, registered: graph.registered };
+  };
+  assert.deepEqual(await facts('public', { accessPolicy: 0, publishPolicy: 1, register: false }), { private: false, registered: false });
+  assert.deepEqual(await facts('registered', { accessPolicy: 0, publishPolicy: 1, register: true }), { private: false, registered: true });
+  // Whether a known gap applies to a registered private graph is the known gaps' decision, not this record's.
+  assert.deepEqual(await facts('private', { accessPolicy: 1, publishPolicy: 0, register: true }), { private: true, registered: true });
 });

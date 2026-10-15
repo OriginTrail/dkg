@@ -13,18 +13,19 @@
 
 /**
  * #3264: a member of a registered graph that reaches only the owner never
- * obtains the graph's definition. It covers, on a registered graph, the
- * member's definition (the gap itself), its `synced` flag, and its own writes
- * into the graph. A failure of one is the gap only with evidence that the
- * member lacked the definition: read in the same listing, or right after its
- * write was refused, which also takes the refusal's structured code (never the
- * wording of its message). A member that holds the definition, or whose
- * listing could not be read, fails.
+ * obtains the graph's definition. It covers, on a graph that is registered on
+ * chain and public, the member's definition (the gap itself), its `synced`
+ * flag, and its own writes into the graph; on a private graph the member
+ * joins through the signed request flow, which #3264 is not about. A failure
+ * of one is the gap only with evidence that the member lacked the definition:
+ * read in the same listing, or right after its write was refused, which also
+ * takes the refusal's structured code (never the wording of its message). A
+ * member that holds the definition, or whose listing could not be read, fails.
  */
 const REGISTERED_DEFINITION = {
   issue: '#3264',
   what: 'a member of a registered graph that reaches only the owner never obtains the graph\'s definition',
-  covers: ({ check, evidence }) => evidence?.registered === true && ['definition', 'synced', 'write-refused'].includes(check),
+  covers: ({ check, evidence }) => evidence?.registered === true && evidence?.private === false && ['definition', 'synced', 'write-refused'].includes(check),
   isTheGap: ({ check }) => check === 'definition',
   failure({ check, evidence }) {
     const lacked = evidence.definitionHeld === false && (check !== 'write-refused' || evidence.errorCode === 'CONTEXT_GRAPH_NOT_FOUND');

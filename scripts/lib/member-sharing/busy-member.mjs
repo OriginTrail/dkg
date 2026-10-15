@@ -5,7 +5,7 @@
 
 import { brief, sleep, waitFor } from './devnet.mjs';
 import { heldAt, watched } from './observation.mjs';
-import { admissionRecords, busySlotCovered, heldTransfer } from '../qa/busy-slot.mjs';
+import { admissionRecords, busySlotCovered, heldTransfer, receivedWhileHeld } from '../qa/busy-slot.mjs';
 import { describe } from '../qa/member-sharing.mjs';
 
 /** The large graph: `assets` assets of `triples` triples, each over 50 subjects with an equal share of them, about 100 bytes a value. */
@@ -59,9 +59,11 @@ function readSlots(devnet, node) {
  * names the admission of the large graph (`Sync backpressure running
  * shared-memory:<large graph>:…`), and its slot readings show the admission
  * that started then still running, every second, until each write was
- * received. A running catch-up job proves nothing by itself. A write received
- * only after the transfer left the slot (to other work, or to nothing), or a
- * transfer never admitted, means the case was not exercised.
+ * received. A receipt counts only when a reading taken at or after it still
+ * showed the transfer; nothing is assumed past the last such reading. A
+ * running catch-up job proves nothing by itself. A write received only after
+ * the transfer left the slot (to other work, or to nothing), or a transfer
+ * never admitted, means the case was not exercised.
  *
  * `ctx` is { devnet, edges, graphs, io, report, precondition, boundMs, sub }; `pub` and `big` are graphs.
  */
@@ -77,8 +79,9 @@ export async function busyMember(ctx, pub, big) {
   // The whole log: an admission just before the subscribe could have started in the same second as the transfer.
   const isTransfer = record => record.label.includes(needle);
   const admitted = await waitFor(async () => {
-    const held = heldTransfer(slots.readings.at(-1), admissionRecords(devnet.logSince(member2, 0)), isTransfer);
-    return { ok: Boolean(held.transfer), ...held };
+    const reading = slots.readings.at(-1);
+    const held = heldTransfer(reading, admissionRecords(devnet.logSince(member2, 0)), isTransfer);
+    return { ok: Boolean(held.transfer), reading, ...held };
   }, 30_000, 500);
   if (!admitted.ok) {
     await slots.stop();
@@ -92,14 +95,22 @@ export async function busyMember(ctx, pub, big) {
   ];
   const pairs = await watched(handles);
   const until = Date.now();
+  // One reading taken after the last receipt check, so that the evidence can reach the window's end.
+  await waitFor(() => ({ ok: slots.readings.some(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= until) }), 10_000, 200);
   await slots.stop();
-  const busy = busySlotCovered({ transfer: admitted.transfer, samples: slots.readings, from, until });
+  // The confirming reading again, against the whole log as it stands now: an
+  // admission whose line was written late cannot pass for the transfer.
+  const confirmed = heldTransfer(admitted.reading, admissionRecords(devnet.logSince(member2, 0)), isTransfer);
+  const busy = confirmed.transfer
+    ? busySlotCovered({ transfer: confirmed.transfer, samples: slots.readings, from, until })
+    : { held: false, reason: `the whole log no longer ties the work in the slot to the transfer (${confirmed.why})`, provenUntil: null };
   for (const pair of pairs) {
-    // Proven through the whole window, every receipt in it counts; otherwise a
-    // receipt must come before the last reading that still showed the transfer.
+    // A receipt counts only when a reading taken at or after it still showed
+    // the transfer in the slot; between two such readings the same admission
+    // held it throughout.
     const received = heldAt(pair);
-    if (received !== null && !busy.held && (busy.provenUntil === null || received > busy.provenUntil + 1000)) {
-      report.fail(6, `${describe(pair.record)} at ${member2.label}: held ${seconds(received - pair.from)} s after the share, but after the large transfer stopped holding the slot (${busy.reason ?? 'no reading'}): not exercised`);
+    if (received !== null && !receivedWhileHeld(received, busy)) {
+      report.fail(6, `${describe(pair.record)} at ${member2.label}: held ${seconds(received - pair.from)} s after the share, later than the last reading that showed the large transfer in the slot (${busy.reason ?? 'no reading'}): not exercised`);
     } else report.reportPair(pair, { boundMs });
   }
   const refused = devnet.logSince(member2, offset).split(`Sync backpressure rejected shared-memory:${pub.id}:`).length - 1;

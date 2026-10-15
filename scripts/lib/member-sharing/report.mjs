@@ -43,7 +43,7 @@ export function createReport(cases, { print = console.log } = {}) {
 
   /** An observed subscription: the definition under `caseId`, the synced flag under case 8. */
   function reportSubscription(caseId, { node, graph, observation }, deadlines) {
-    const { definition, synced } = subscriptionResults(observation, { registered: graph.registered, ...deadlines });
+    const { definition, synced } = subscriptionResults(observation, { registered: graph.registered, private: graph.private, ...deadlines });
     for (const [id, result] of [[caseId, definition], [8, synced]]) record(id, { ...result, text: `${node.label}, ${graph.key}: ${result.text}` });
   }
 

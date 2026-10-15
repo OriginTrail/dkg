@@ -136,14 +136,15 @@ export const freshSubscription = () => ({ definedAt: null, syncedAt: null, atDef
  * reported): `definition` (case 3, or 7 on the registered and private graphs)
  * and `synced` (case 8). A definition held in time is a quiet pass: a
  * precondition of the member's own writes, not a delivery. The evidence is the
- * graph's `registered` and `definitionHeld`: whether the listing read at the
- * deadline showed the definition (undefined when it could not be read).
+ * graph's `registered` (on chain) and `private`, and `definitionHeld`: whether
+ * the listing read at the deadline showed the definition (undefined when it
+ * could not be read).
  */
-export function subscriptionResults(observation, { registered, definitionMs, syncedMs }) {
+export function subscriptionResults(observation, { registered, private: isPrivate, definitionMs, syncedMs }) {
   const secs = ms => Math.round(ms / 1000);
   const definition = (() => {
     const { definedAt, atDefinitionDeadline: last } = observation;
-    const result = (outcome, text, definitionHeld) => ({ check: 'definition', outcome, text, evidence: { registered, definitionHeld } });
+    const result = (outcome, text, definitionHeld) => ({ check: 'definition', outcome, text, evidence: { registered, private: isPrivate, definitionHeld } });
     if (definedAt !== null && definedAt < definitionMs) return { ...result('pass', `holds the definition ${secs(definedAt)} s after it subscribed`, true), quiet: true };
     if (definedAt !== null) return result('fail', `holds the definition only ${secs(definedAt)} s after it subscribed`, true);
     if (!last?.readable) return result('fail', `its listing could not be read ${secs(definitionMs)} s after it subscribed (${last?.why ?? 'no reading'})`, undefined);
@@ -152,7 +153,7 @@ export function subscriptionResults(observation, { registered, definitionMs, syn
   })();
   const synced = (() => {
     const { syncedAt, atSyncedDeadline: last } = observation;
-    const result = (outcome, text, definitionHeld) => ({ check: 'synced', outcome, text, evidence: { registered, definitionHeld } });
+    const result = (outcome, text, definitionHeld) => ({ check: 'synced', outcome, text, evidence: { registered, private: isPrivate, definitionHeld } });
     if (syncedAt !== null && syncedAt < syncedMs) return result('pass', `lists it as synced ${secs(syncedAt)} s after it subscribed`, undefined);
     if (!last?.readable) return result('fail', `its listing could not be read ${secs(syncedMs)} s after it subscribed (${last?.why ?? 'no reading'})`, undefined);
     const seen = syncedAt !== null
@@ -229,7 +230,7 @@ export function pairResult(pair, { boundMs }) {
   if (record.error) {
     return {
       check: 'write-refused', outcome: 'fail', text: `${what}: not written, ${record.error}`,
-      evidence: { registered: record.graph.registered, definitionHeld: record.definitionHeld, errorCode: record.errorCode },
+      evidence: { registered: record.graph.registered, private: record.graph.private, definitionHeld: record.definitionHeld, errorCode: record.errorCode },
     };
   }
   const { view, partitions } = pair.progress;

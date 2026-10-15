@@ -127,54 +127,72 @@ export function heldTransfer(reading, records, isTransfer) {
 }
 
 /**
- * Whether the transfer held the node's only sync slot through [from, until],
- * the window of the writes and of their receipt checks. `transfer` is its
- * identity from heldTransfer; `samples` are readings of the node's
- * `sync-global` scheduler ({ sentAt, at, inflight, oldestActiveAgeMs,
- * oldestOperations, inflightLimit, queueLimit, capacityModel }, or
- * { at, unreadable }).
+ * How long the transfer held the node's only sync slot from `from`, the start
+ * of the window of the writes and of their receipt checks, and whether that
+ * reached `until`, the window's end. `transfer` is its identity from
+ * heldTransfer; `samples` are readings of the node's `sync-global` scheduler
+ * ({ sentAt, at, inflight, oldestActiveAgeMs, oldestOperations, inflightLimit,
+ * queueLimit, capacityModel }, or { at, unreadable }), also those taken after
+ * `until`.
  *
- * Only readings inside the window are evidence: a reading taken before it (a
- * free slot before the transfer was admitted, say) neither proves nor
- * disproves anything about it. Each reading in the window must show the
- * single-slot policy, work in flight, and that work being the transfer: of
- * its class, and started when the transfer did. A reading of other work fails
- * the window. A reading that came too slowly to name the start that closely
- * proves nothing either way, like a missing one. The window must hold at least
- * one reading of the transfer and no gap longer than `maxGapMs` between them
- * (from its start, between readings, to its end). A catch-up job that is
- * merely running proves nothing: without an admission there is nothing that
- * holds the slot.
- * Returns { held: true, provenUntil } or { held: false, reason, provenUntil }.
+ * A reading taken before the window (a free slot before the transfer was
+ * admitted, say) neither proves nor disproves anything about it. From the
+ * window's start, each reading must show the single-slot policy, work in
+ * flight, and that work being the transfer: of its class, and started when the
+ * transfer did. One admission holds the slot without a break, so between two
+ * such readings the transfer held it throughout; after the last one nothing is
+ * known. The evidence ends at the first reading of other work, of a free slot,
+ * of another policy, or that could not be read, and at a gap longer than
+ * `maxGapMs` between readings. A reading that came too slowly to name the
+ * start that closely proves nothing either way, like a missing one. A catch-up
+ * job that is merely running proves nothing: without an admission there is
+ * nothing that holds the slot.
+ *
+ * Returns { held, reason, provenUntil }. `provenUntil` is the earliest moment
+ * the last reading of the transfer can have been taken (when its request went
+ * out): the transfer held the slot from `from` to then. `held` is whether that
+ * reaches `until`; `reason` says why the evidence ended short of it.
  */
 export function busySlotCovered({ transfer, samples, from, until, maxGapMs = 5000 }) {
   if (!transfer) return { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null };
-  const inWindow = samples.filter(sample => sample.at >= from && sample.at <= until).sort((a, b) => a.at - b.at);
-  if (inWindow.length === 0) return { held: false, reason: 'no reading of the sync slot in the window', provenUntil: null };
+  const readings = samples.filter(sample => sample.at >= from).sort((a, b) => a.at - b.at);
+  if (readings.length === 0) return { held: false, reason: 'no reading of the sync slot in the window', provenUntil: null };
   const same = { from: transfer.from - SAME_START_MS, to: transfer.to + SAME_START_MS };
   let previous = from;
   let provenUntil = null;
   let slow = 0;
   const gap = (ms, last = '') => `no reading of the sync slot for ${last}${Math.round(ms / 1000)} s${slow ? ` (${slow} more came too slowly to tell which work held it)` : ''}`;
-  for (const sample of inWindow) {
-    if (sample.at - previous > maxGapMs) return { held: false, reason: gap(sample.at - previous), provenUntil };
-    if (sample.unreadable) return { held: false, reason: `the sync slot could not be read (${sample.unreadable})`, provenUntil };
+  const ended = reason => ({ held: false, reason, provenUntil });
+  for (const sample of readings) {
+    if (sample.at - previous > maxGapMs) return ended(gap(sample.at - previous));
+    if (sample.unreadable) return ended(`the sync slot could not be read (${sample.unreadable})`);
     const policy = singleSlotProblem(sample);
-    if (policy) return { held: false, reason: policy, provenUntil };
+    if (policy) return ended(policy);
     const start = startInterval(sample);
-    if (!start) return { held: false, reason: 'the sync slot was free', provenUntil };
+    if (!start) return ended('the sync slot was free');
     const classes = oldestClasses(sample);
     const otherClass = classes && transfer.operations?.length && !classes.some(operation => transfer.operations.includes(operation));
-    if (otherClass || !overlaps(start, same)) return { held: false, reason: 'the slot was held by other work', provenUntil };
+    if (otherClass || !overlaps(start, same)) return ended('the slot was held by other work');
     if (start.from < same.from || start.to > same.to) {
       slow += 1;
       continue;
     }
     previous = sample.at;
-    provenUntil = sample.at;
+    provenUntil = Number.isFinite(sample.sentAt) ? sample.sentAt : sample.at;
     slow = 0;
+    if (provenUntil >= until) return { held: true, provenUntil };
   }
-  if (until - previous > maxGapMs) return { held: false, reason: gap(until - previous, 'the last '), provenUntil };
-  if (provenUntil === null) return { held: false, reason: gap(until - from), provenUntil };
-  return { held: true, provenUntil };
+  if (until - previous > maxGapMs) return ended(gap(until - previous, 'the last '));
+  if (provenUntil === null) return ended(gap(until - from));
+  return ended('no reading of the sync slot was taken at or after the end of the window');
 }
+
+/**
+ * Whether a write that a read found at `receivedAt` (when that read completed)
+ * was received while the transfer held the slot: a reading taken at or after
+ * that moment still showed the transfer, with the evidence unbroken since the
+ * window began (`busy` from busySlotCovered). A receipt later than the last
+ * such reading is not: the slot may by then have gone to the pull that
+ * delivered the write.
+ */
+export const receivedWhileHeld = (receivedAt, busy) => busy.provenUntil !== null && receivedAt <= busy.provenUntil;
