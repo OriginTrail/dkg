@@ -207,6 +207,7 @@ import {
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
 import { registerJoinMetadataEmptyVmSettlement } from '../context-graph-empty-vm-readiness.js';
+import { startActivationCatchups } from './context-graph-activation-catchup.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -3401,6 +3402,9 @@ async function runDaemonInnerWithStartupOwnership(
 
   let corsAllowed: CorsAllowlist = "*";
   daemonState.catchupRunner = createCatchupRunner(agent);
+  // A persisted subscription the agent restores unsynced (at start, or later
+  // when its authority recovers) gets the subscribe route's catch-up job.
+  startActivationCatchups({ agent, store: dashDb, catchupTracker, log });
 
   const server = createServer(async (req, res) => {
     try {

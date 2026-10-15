@@ -8,11 +8,19 @@ import './helpers/catchup-runner-worker-test-harness.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { DKGAgent, emptySharedMemorySyncResult } from '@origintrail-official/dkg-agent';
-import { createIncompleteDurableSyncResult } from '@origintrail-official/dkg-agent/dist/sync/durable-progress.js';
-import { recordSharedMemoryPhaseFailure } from '@origintrail-official/dkg-agent/dist/sync/shared-memory-diagnostics.js';
 import type { CatchupJobResult, CatchupRunner } from '../src/catchup-runner.js';
-import { catchupReadinessResult, sharedMemoryDiagnostics } from './_helpers/catchup-readiness-fixtures.js';
+import {
+  CG,
+  PUBLIC_UNREGISTERED,
+  cleanEmptyRound,
+  deniedRound,
+  emptyAnswer,
+  lossyEmptyRound,
+  memberEdge,
+  revokedAnswer,
+  waitUntil,
+  type Authority,
+} from './_helpers/readiness-member-edge.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 await import('../src/catchup-runner-worker-impl.js');
@@ -26,206 +34,11 @@ const {
 } = await import('../src/daemon/context-graph-readiness-repeat.js');
 const { startContextGraphCatchupJob } = await import('../src/daemon/context-graph-catchup-job.js');
 
-const CG = '0x1111111111111111111111111111111111111111/issue-3207-empty-public';
-const PEERS = ['peer-1', 'peer-2', 'peer-3', 'peer-4', 'peer-5', 'peer-6', 'peer-7', 'peer-8'];
-
-/** Admission of a public graph that is not registered on chain: its accepted owner policy. */
-const PUBLIC_UNREGISTERED = Object.freeze({
-  outcome: 'allowed',
-  source: 'rfc64-public',
-  reason: 'accepted-public-policy',
-  metadataBootstrap: 'eligible',
-  grantScope: 'public',
-  registration: 'unregistered',
-} as const);
-
-/** A peer's answer for a graph with nothing in it: both phases complete and empty. */
-function emptyAnswer(peerId: string) {
-  return {
-    kind: 'selected-shared-memory',
-    shared: {
-      ...emptySharedMemorySyncResult(),
-      emptyResponses: 1,
-      completedPhases: 2,
-      swmCoverage: {
-        contextGraphId: CG,
-        peerIdSuffix: peerId,
-        snapshotsResolved: 0,
-        snapshotsTotal: 0,
-        manifestComplete: true,
-        descriptorsAuthoritative: true,
-        missingCount: 0,
-        missingSample: [],
-        materializationFailures: 0,
-      },
-    },
-    scopeComplete: false,
-  };
-}
-
-/**
- * What the requester returns for a sync this node aborted itself. A receiver
- * selection change of the graph revokes the graph's recovery lease; every
- * sync holding it throws "RFC-64 SWM recovery authority was revoked", and the
- * requester records that error, which carries no transport tag, as a failed
- * phase of a peer that did answer.
- */
-function revokedAnswer() {
-  const shared = emptySharedMemorySyncResult();
-  recordSharedMemoryPhaseFailure(shared, 'materialization');
-  return { kind: 'selected-shared-memory', shared, scopeComplete: false };
-}
-
-/** A round of eight peers: five answered empty, three were revoked mid-sync. */
-function lossyEmptyRound(): CatchupJobResult {
-  return catchupReadinessResult({
-    connectedPeers: 8, totalPeers: 8, selectedPeers: 8, syncCapablePeers: 8,
-    peersTried: 8, peersResponded: 8, peersSucceeded: 5,
-    cleanPlaneCompletions: {
-      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
-      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 5, incompleteResponders: 3 },
-    },
-    diagnostics: {
-      noProtocolPeers: 0,
-      durable: catchupReadinessResult().diagnostics.durable,
-      sharedMemory: sharedMemoryDiagnostics({ emptyResponses: 5, completedPhases: 10, failedPhases: 3 }),
-    },
-  });
-}
-
-/** The same graph a moment later: every peer answered empty. */
-function cleanEmptyRound(): CatchupJobResult {
-  return catchupReadinessResult({
-    connectedPeers: 8, totalPeers: 8, selectedPeers: 8, syncCapablePeers: 8,
-    peersTried: 8, peersResponded: 8, peersSucceeded: 8,
-    cleanPlaneCompletions: {
-      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
-      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 8 },
-    },
-    diagnostics: {
-      noProtocolPeers: 0,
-      durable: catchupReadinessResult().diagnostics.durable,
-      sharedMemory: sharedMemoryDiagnostics({ emptyResponses: 8, completedPhases: 16 }),
-    },
-  });
-}
-
-/** Every peer refused the graph: no clean answer outranks the denial. */
-function deniedRound(): CatchupJobResult {
-  return catchupReadinessResult({
-    connectedPeers: 8, totalPeers: 8, selectedPeers: 8, syncCapablePeers: 8,
-    peersTried: 8, peersResponded: 8, denied: true, deniedPeers: 8,
-    diagnostics: {
-      noProtocolPeers: 0,
-      durable: catchupReadinessResult().diagnostics.durable,
-      sharedMemory: sharedMemoryDiagnostics({ deniedPhases: 8 }),
-    },
-  });
-}
-
 interface ArmedTimer {
   readonly callback: () => void;
   readonly delayMs: number;
   cleared: boolean;
   fired: boolean;
-}
-
-type Authority = Record<string, unknown>;
-
-/**
- * A member Edge: the subscription, the readiness store, the production
- * readiness inspection, and the agent side of the catch-up bridge over eight
- * sync-capable peers on the graph's selected public lane.
- */
-function memberEdge() {
-  const subscriptions = new Map<string, Record<string, unknown>>();
-  let readiness: Record<string, unknown> | undefined;
-  const node = {
-    authority: PUBLIC_UNREGISTERED as Authority | (() => Authority),
-    answer: (peerId: string): unknown => emptyAnswer(peerId),
-  };
-  const agent = {
-    resolveContextGraphSubscriptionBootstrapAuthority: async () => (
-      typeof node.authority === 'function' ? node.authority() : node.authority
-    ),
-    subscribedContextGraphs: subscriptions,
-    getSubscribedContextGraphs: () => subscriptions,
-    subscribeToContextGraph: (id: string, options?: { syncMode?: string }) => {
-      const previous = subscriptions.get(id);
-      const applied = {
-        ...previous,
-        subscribed: true,
-        synced: previous?.synced ?? false,
-        syncMode: options?.syncMode ?? 'always-on',
-      };
-      subscriptions.set(id, applied);
-      return applied;
-    },
-    markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
-      subscriptions.set(id, { ...subscriptions.get(id), ...patch });
-    },
-    // The graph's definition is installed; the job's metadata pull is a no-op.
-    bootstrapRfc64CatalogContextGraphMetadataFromPeersV1: async () => 'already-confirmed',
-    hasConfirmedMetaState: async () => true,
-    isPrivateContextGraph: async () => false,
-    reconcileRfc64CatalogResponsibilityV1: async () => {},
-    contextGraphMetaProjection: { readContextGraphAuthorityFactsRevision: () => '0' },
-    inspectAndCommitContextGraphReadinessV1: DKGAgent.prototype.inspectAndCommitContextGraphReadinessV1,
-    prepareContextGraphReadinessWithPrivateEmptyVmV1:
-      DKGAgent.prototype.prepareContextGraphReadinessWithPrivateEmptyVmV1,
-    config: { chainConfig: undefined },
-    contextGraphAuthorityReaderCapability: { status: 'unsupported' },
-    resolveAgentByToken: () => undefined,
-    getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
-    // The catch-up bridge. No curator is resolvable for the walk, as for an
-    // unregistered graph whose owner is one Edge among the connected peers.
-    resolveSyncPeerWithProvenance: async () => ({ peerId: undefined, provenance: 'bootstrap-hint' }),
-    resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
-    resolveRfc64SwmRecoveryRuntimeAuthorityV1: (contextGraphId: string) => ({
-      kind: 'rfc64-swm-recovery-runtime-authority-v1',
-      contextGraphId,
-      lane: 'selected-public',
-      active: true,
-    }),
-    resolveRfc64CatalogReceiverAuthorityV1: (contextGraphId: string) => ({
-      contextGraphId,
-      legacySyncAllowed: false,
-    }),
-    ensurePeerConnected: async () => {},
-    primeCatchupConnections: async () => {},
-    listAdmittedConnectedPeers: async () => PEERS.map((peerId) => ({ toString: () => peerId })),
-    selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
-    waitForSyncProtocol: async () => true,
-    syncDurableRecoveryContextGraph: async () => ({ result: createIncompleteDurableSyncResult() }),
-    syncSelectedSharedMemoryFromPeerDetailed: async (peerId: string) => node.answer(peerId),
-    syncSharedMemoryFromPeerDetailed: async () => {
-      throw new Error('a catalog-authoritative graph has no ordinary shared-memory lane');
-    },
-    refreshMetaSyncedFlags: async () => {},
-    log: { info: () => {}, debug: () => {}, warn: () => {} },
-  };
-  return {
-    agent: agent as unknown as DKGAgent,
-    node,
-    subscription: () => subscriptions.get(CG),
-    unsubscribe: () => subscriptions.set(CG, { ...subscriptions.get(CG), subscribed: false }),
-    readiness: () => readiness,
-    store: {
-      getContextGraphReadinessProvenance: () => readiness ?? null,
-      setContextGraphReadinessProvenance: (_id: string, next: Record<string, unknown>) => {
-        readiness = { ...next, updatedAt: Date.now() };
-      },
-    },
-  };
-}
-
-async function waitUntil<T>(probe: () => T | undefined, what: string): Promise<T> {
-  for (let i = 0; i < 400; i += 1) {
-    const value = probe();
-    if (value !== undefined) return value;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error(`timed out waiting for ${what}`);
 }
 
 describe('a public graph that its subscribe job left unproven is caught up again', () => {
