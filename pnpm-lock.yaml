@@ -38,6 +38,9 @@ patchedDependencies:
   hardhat@2.28.6:
     hash: 0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9
     path: patches/hardhat@2.28.6.patch
+  libp2p@3.3.1:
+    hash: a84dc26625e7ea70a25cbc42eac5496751dd17e02fcc5c48e4b52d1ee8443f0b
+    path: patches/libp2p@3.3.1.patch
 
 importers:
 
@@ -928,7 +931,7 @@ importers:
         version: 4.1.1
       libp2p:
         specifier: ^3.3.1
-        version: 3.3.1
+        version: 3.3.1(patch_hash=a84dc26625e7ea70a25cbc42eac5496751dd17e02fcc5c48e4b52d1ee8443f0b)
       protobufjs:
         specifier: ^8.3.0
         version: 8.3.0
@@ -12852,7 +12855,7 @@ snapshots:
       prelude-ls: 1.1.2
       type-check: 0.3.2
 
-  libp2p@3.3.1:
+  libp2p@3.3.1(patch_hash=a84dc26625e7ea70a25cbc42eac5496751dd17e02fcc5c48e4b52d1ee8443f0b):
     dependencies:
       '@chainsafe/is-ip': 2.1.0
       '@chainsafe/netmask': 2.0.0
