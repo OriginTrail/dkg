@@ -4,7 +4,6 @@
 
 import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
-  authorCatalogRowCapacityV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeAuthorCatalogScopeDigestV1,
@@ -36,6 +35,7 @@ import {
 } from './rfc64/public-catalog-successor-asset-v1.js';
 import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './rfc64/catalog-peers-v1.js';
 import { computeRfc64AppliedInventoryDigestV1 } from './rfc64/public-catalog-inventory-completeness-v1.js';
+import { rfc64CatalogTargetRowCapacityV1 } from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 import type { AnnounceRfc64PublicCatalogHeadResultV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
@@ -371,13 +371,14 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
 
       let successorsApplied = 0;
       // Every row out and every row in, one row a successor (GH#3134: the whole catalog's rows).
-      const hardLimit = 2 * Number(authorCatalogRowCapacityV1(params.scope.bucketCount));
+      const rowCapacity = Number(rfc64CatalogTargetRowCapacityV1(params.scope));
+      const hardLimit = 2 * rowCapacity;
       while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
         throwIfAbortedV1(params.signal);
         if (successorsApplied >= hardLimit) {
           throw new Error('RFC-64 exact-set reconciliation exceeded its bounded successor limit');
         }
-        const nextAssets = planNextRfc64CatalogExactSetV1(state.assets, targetAssets);
+        const nextAssets = planNextRfc64CatalogExactSetV1(state.assets, targetAssets, rowCapacity);
         const committed = await this.applyRfc64CatalogSuccessorV1(
           persistence,
           state,
@@ -693,6 +694,8 @@ export function planRfc64CatalogProjectionTargetV1(
 export function planNextRfc64CatalogExactSetV1(
   current: readonly Rfc64CatalogSuccessorAssetInputV1[],
   target: readonly Rfc64CatalogSuccessorAssetInputV1[],
+  /** Rows the catalog may hold; past it a row not in the target makes room (GH#3134). */
+  rowCapacity: number = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
 ): Rfc64CatalogSuccessorAssetInputV1[] {
   let currentIndex = 0;
   let targetIndex = 0;
@@ -700,7 +703,7 @@ export function planNextRfc64CatalogExactSetV1(
     const currentAsset = current[currentIndex];
     const targetAsset = target[targetIndex];
     if (currentAsset === undefined) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset!);
+      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset!, rowCapacity);
     }
     if (targetAsset === undefined) {
       return current.filter((_, index) => index !== currentIndex);
@@ -708,7 +711,7 @@ export function planNextRfc64CatalogExactSetV1(
     const comparison = compareRfc64CatalogAssetsByKaIdV1(currentAsset, targetAsset);
     if (comparison < 0) return current.filter((_, index) => index !== currentIndex);
     if (comparison > 0) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset);
+      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset, rowCapacity);
     }
     if (!sameRfc64SuccessorAssetV1(currentAsset, targetAsset)) {
       if (
@@ -734,8 +737,9 @@ function insertOrFreeRfc64CatalogCapacityV1(
   current: readonly Rfc64CatalogSuccessorAssetInputV1[],
   target: readonly Rfc64CatalogSuccessorAssetInputV1[],
   asset: Rfc64CatalogSuccessorAssetInputV1,
+  rowCapacity: number,
 ): Rfc64CatalogSuccessorAssetInputV1[] {
-  if (current.length < MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
+  if (current.length < rowCapacity) {
     return insertRfc64CatalogAssetV1(current, asset);
   }
   const targetKaIds = new Set(target.map((targetAsset) => targetAsset.seal.reservedKaId));

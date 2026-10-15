@@ -115,6 +115,21 @@ describe('RFC-64 exact-set bounded planner v1', () => {
     expect(Math.max(freed.length, inserted.length)).toBe(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1);
   });
 
+  it('makes room at the capacity it is given, not at one bucket\'s rows (GH#3134)', async () => {
+    const current = [await plannerAsset(10n), await plannerAsset(11n)];
+    const target = [await plannerAsset(1n), await plannerAsset(11n)];
+
+    // A catalog that may hold three rows takes the new row as it is.
+    expect(planNextRfc64CatalogExactSetV1(current, target, 3).map(({ seal }) => seal.reservedKaId))
+      .toEqual([target[0], ...current].map(({ seal }) => seal.reservedKaId));
+    // At two it first gives up the row the target does not keep.
+    expect(planNextRfc64CatalogExactSetV1(current, target, 2).map(({ seal }) => seal.reservedKaId))
+      .toEqual([current[1]!.seal.reservedKaId]);
+    // And when every row it holds is still in the target, the catalog is full.
+    expect(() => planNextRfc64CatalogExactSetV1(current, [target[0]!, ...current], 2))
+      .toThrow(AuthorCatalogFullErrorV1);
+  });
+
   // GH#3134 — a full catalog and the share-time projection, at the real cap. Only the rows that
   // must pass the target snapshot are signed; a refusal is raised from the row counts before it.
   it('keeps a full catalog in union mode when the inventory only brings a newer version', async () => {

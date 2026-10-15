@@ -38,6 +38,18 @@ import {
 } from './inventory-v1/exact-record.js';
 
 /**
+ * GH#3134 — the most rows an author catalog of `scope` may be planned to hold. The share-time
+ * projection's target and the exact-set planner are both bounded by it. While a catalog cannot
+ * move to more buckets it is the scope's own capacity; once a full bucket moves the catalog to
+ * more buckets, it becomes the node's maximum for one catalog, and both bounds follow.
+ */
+export function rfc64CatalogTargetRowCapacityV1(
+  scope: Readonly<Pick<AuthorCatalogScopeV1, 'bucketCount'>>,
+): bigint {
+  return authorCatalogRowCapacityV1(scope.bucketCount);
+}
+
+/**
  * The target bound of a catalog of one bucket.
  *
  * @deprecated A target is bounded by its catalog's capacity, `authorCatalogRowCapacityV1` of the
@@ -145,8 +157,8 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
     ...inventoryScope,
     bucketCount: '1',
   }) as AuthorCatalogScopeV1;
-  // A whole catalog holds what its buckets hold (GH#3134), so nothing past that is resolved.
-  const capacity = authorCatalogRowCapacityV1(catalogScope.bucketCount);
+  // Nothing past what the catalog may hold is resolved (GH#3134).
+  const capacity = rfc64CatalogTargetRowCapacityV1(catalogScope);
   if (BigInt(snapshot.rows.length) > capacity) {
     fail(
       'swm-catalog-reconcile-capacity',
