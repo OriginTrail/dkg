@@ -46,7 +46,9 @@ export type Rfc64PublicCatalogBootstrapOutcomeV1 =
   | 'failed';
 
 export type Rfc64CatalogBootstrapCompletionReasonV1 =
-  | 'no-authorized-provider';
+  | 'no-authorized-provider'
+  /** GH#3134: the graph has more assets on chain than this node's pinned-snapshot scan reads. */
+  | 'chain-inventory-limit';
 
 export type Rfc64CatalogRecoveryQueueOutcomeV1 = Readonly<
   | { kind: 'not-authorized' }
@@ -86,41 +88,41 @@ export function classifyRfc64CatalogBootstrapFailureV1(
   outcome: Extract<Rfc64PublicCatalogBootstrapOutcomeV1, 'not-found' | 'known-incomplete' | 'failed'>;
   completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
 }> {
-  const knownIncomplete = requiresPrivateVm
-    && hasNoAuthorizedProviderTerminalReasonV1(error);
+  const completionReason = requiresPrivateVm ? terminalReasonOfV1(error) : null;
   return Object.freeze({
-    outcome: knownIncomplete
+    outcome: completionReason !== null
       ? 'known-incomplete'
       : error === null ? 'not-found' : 'failed',
-    completionReason: knownIncomplete ? 'no-authorized-provider' : null,
+    completionReason,
   });
 }
 
-function hasNoAuthorizedProviderTerminalReasonV1(error: unknown): boolean {
+/** The typed terminal reason a synchronization failure carries, if any. */
+function terminalReasonOfV1(error: unknown): Rfc64CatalogBootstrapCompletionReasonV1 | null {
   let current = error;
   const visited = new Set<object>();
   for (let depth = 0; depth < 8; depth += 1) {
     if (
       current instanceof Rfc64CatalogSynchronizationErrorV1
-      && current.terminalReason === 'no-authorized-provider'
+      && current.terminalReason !== null
     ) {
-      return true;
+      return current.terminalReason;
     }
     if (
       (typeof current !== 'object' && typeof current !== 'function')
       || current === null
       || visited.has(current)
     ) {
-      return false;
+      return null;
     }
     visited.add(current);
     try {
       current = (current as { readonly cause?: unknown }).cause;
     } catch {
-      return false;
+      return null;
     }
   }
-  return false;
+  return null;
 }
 
 interface MutableTargetStatusV1 {
