@@ -7,6 +7,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-full-catalog-parking.test.ts",
   "test/rfc64-full-author-catalog.test.ts",
   "test/rfc64-multi-bucket-placement.test.ts",
+  "test/rfc64-catalog-bucket-reconcile.test.ts",
   "test/rfc64-inventory-v1-scalars.test.ts",
   "test/rfc64-legacy-swm-boundary-v1.test.ts",
   "test/rfc64-legacy-swm-boundary-codec-v1.test.ts",

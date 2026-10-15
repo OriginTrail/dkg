@@ -27,6 +27,7 @@ import type {
 } from './dkg-agent-rfc64-catalog.js';
 import { readCurrentAuthorCatalogScopeV1 } from './internal/author-catalog-current-scope.js';
 import { moveAuthorCatalogToMoreBucketsV1 } from './internal/author-catalog-move.js';
+import { reconcileMovedCatalogV1 } from './internal/catalog-bucket-reconcile.js';
 import {
   rfc64CatalogMutationMemoryV1,
   type Rfc64CatalogMutationStateV1,
@@ -48,6 +49,7 @@ import {
 } from './rfc64/abort-v1.js';
 import {
   AuthorCatalogFullErrorV1,
+  MAX_AUTHOR_CATALOG_ROWS_V1,
   assertAuthorCatalogTakesNewRowsV1,
   assertAuthorCatalogUnderMaximumV1,
   authorCatalogBucketMovesEnabledV1,
@@ -154,9 +156,10 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   ): Promise<boolean> {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const { scope, state } = await this.readRfc64CatalogMutationStateV1(persistence, params.scope, () => {
+    const { scope, state } = await this.readRfc64CatalogMutationStateV1(persistence, params.scope, (current) => {
       const ual = parseDeterministicKnowledgeAssetUal(params.expectedRow.kaUal);
-      return ((BigInt(ual.agentAddress) << 96n) | BigInt(ual.kaNumber)).toString() as KaIdV1;
+      const kaId = ((BigInt(ual.agentAddress) << 96n) | BigInt(ual.kaNumber)).toString() as KaIdV1;
+      return catalogKeyToBucketIdV1(kaId, current.bucketCount);
     });
     const asset = state?.assets.find((candidate) => (
       candidate.seal.kaUal === params.expectedRow.kaUal
@@ -224,7 +227,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       const readState = () => this.readRfc64CatalogMutationStateV1(
         persistence,
         params.scope,
-        () => params.asset.seal.reservedKaId as KaIdV1,
+        (current) => catalogKeyToBucketIdV1(params.asset.seal.reservedKaId as KaIdV1, current.bucketCount),
       );
       // The state phase includes the wait for the mutation lock, so it starts before `run`.
       let { scope, state } = await observer.measure('state', async () => {
@@ -360,6 +363,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     const requestedAssets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
       params.assets,
       'RFC-64 exact-set target assets',
+      // GH#3134 — a whole target: where catalogs move to more buckets, up to the node's maximum.
+      authorCatalogBucketMovesEnabledV1() ? MAX_AUTHOR_CATALOG_ROWS_V1 : undefined,
     );
     for (const asset of requestedAssets) {
       if (asset.seal.authorAddress !== params.scope.authorAddress) {
@@ -384,7 +389,11 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       // cannot close until a non-cooperative read actually settles.
       const read = await this.readRfc64CatalogMutationStateV1(persistence, params.scope);
       if (read.scope.bucketCount !== '1') {
-        throw new Error('RFC-64 exact-set reconciliation of a catalog of more than one bucket is not available yet');
+        return this.reconcileRfc64CatalogBucketsV1(persistence, read.scope, params, requestedAssets, options, {
+          mutation,
+          peers,
+          stageOnly: authority.reconciliationLane === 'shadow-stage',
+        });
       }
       let state = read.state;
       throwIfAbortedV1(params.signal);
@@ -460,6 +469,37 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     }, params.signal);
   }
 
+  /** GH#3134 — the exact-set reconciliation of a moved catalog, bucket by bucket, under the lane's lock. */
+  private async reconcileRfc64CatalogBucketsV1(
+    this: DKGAgent,
+    persistence: Rfc64PersistenceV1,
+    scope: AuthorCatalogScopeV1,
+    params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
+    requested: readonly Rfc64CatalogSuccessorAssetInputV1[],
+    options: Readonly<Rfc64CatalogProjectionMutationOptionsV1>,
+    work: Readonly<{ mutation: Rfc64CatalogMutationV1; peers: readonly string[]; stageOnly: boolean }>,
+  ): Promise<ReconcileRfc64SwmInventoryCatalogResultV1> {
+    return reconcileMovedCatalogV1({
+      persistence,
+      scope,
+      requested,
+      policy: options.targetPolicy,
+      readBucketState: async (bucketId) => (
+        await this.readRfc64CatalogMutationStateV1(persistence, params.scope, () => bucketId)
+      ).state!,
+      applySuccessor: async (state, assets) => this.applyRfc64CatalogSuccessorV1(
+        persistence,
+        state,
+        { ...params, scope },
+        assets,
+        work.peers,
+        work.stageOnly,
+        { signal: params.signal, commitAppliedHead: options.commitAppliedHead, mutation: work.mutation },
+      ),
+      throwIfAborted: () => throwIfAbortedV1(params.signal),
+    });
+  }
+
   private assertRfc64CatalogAuthoringModeV1(
     this: DKGAgent,
     contextGraphId: string,
@@ -478,14 +518,14 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
    * The verified state of the lane's current catalog: from memory while the durable applied head
    * and the scope's accepted policy are the ones it was read under, else from the durable store.
    * GH#3134 — the current catalog is the lane's one-bucket catalog until its bucket is full; then
-   * it is the scope of the lane's newest applied head, and the state is that of the bucket of the
-   * KA `kaId` names.
+   * it is the scope of the lane's newest applied head, and the state is that of the bucket
+   * `bucketOf` names in it.
    */
   private async readRfc64CatalogMutationStateV1(
     this: DKGAgent,
     persistence: Rfc64PersistenceV1,
     lane: AuthorCatalogScopeV1,
-    kaId?: () => KaIdV1,
+    bucketOf?: (current: AuthorCatalogScopeV1) => DecimalU64V1,
   ): Promise<Readonly<{ scope: AuthorCatalogScopeV1; state: Rfc64CatalogMutationStateV1 | null }>> {
     const oneBucket = lane.bucketCount === '1' ? lane : { ...lane, bucketCount: '1' as CountV1 };
     const applied = persistence.inventory.readAppliedCatalogHeadV1(
@@ -499,9 +539,9 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     try {
       authority = this.rfc64PublicCatalogServiceV1?.acceptedPolicyDigestForCatalogScope(scope);
     } catch { /* No accepted policy for this exact scope: nothing is served from memory. */ }
-    const bucketId = scope.bucketCount === '1' || kaId === undefined
+    const bucketId = scope.bucketCount === '1' || bucketOf === undefined
       ? '0' as DecimalU64V1
-      : catalogKeyToBucketIdV1(kaId(), scope.bucketCount);
+      : bucketOf(scope);
     const state = await rfc64CatalogMutationMemoryV1(this).read(
       persistence,
       computeAuthorCatalogScopeDigestV1(scope),

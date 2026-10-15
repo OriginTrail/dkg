@@ -28,6 +28,7 @@ import { readAppliedCatalogRowIdentitiesV1 } from '../src/rfc64/applied-catalog-
 import { computeRfc64CatalogAppliedInventoryDigestV1 } from '../src/rfc64/applied-catalog-inventory-digest-v1.js';
 import { produceAuthorCatalogCapacityTransitionV1 } from '../src/rfc64/author-catalog-capacity-transition-v1.js';
 import {
+  PLACEMENT_MUTATION,
   PLACEMENT_SCOPE,
   appliedCatalogObjectsV1,
   appliedPlacementHeadV1,
@@ -107,6 +108,34 @@ describe('placing an asset in a catalog of more than one bucket (GH#3134)', () =
     expect(buckets!.flatMap((bucket) => bucket.rows)).toHaveLength(5);
     // No bucket of the moved catalog is fuller than half a bucket was when it moved.
     expect(Math.max(...buckets!.map((bucket) => bucket.rows.length))).toBeLessThanOrEqual(3);
+  });
+
+  it('reconciles a moved catalog bucket by bucket, leaving alone a bucket that holds its part', async () => {
+    vi.stubEnv('DKG_RFC64_CATALOG_BUCKET_MOVES', '1');
+    const agent = await startPlacementAgentV1('multi-bucket-reconcile');
+    const held = await Promise.all([1, 2, 3, 4].map((kaNumber) => placementAssetV1(kaNumber)));
+    for (const asset of held) await upsertPlacementV1(agent, asset);
+    await moveToFourBuckets(agent);
+    const added = await Promise.all([5, 6].map((kaNumber) => placementAssetV1(kaNumber)));
+    const reconcile = (assets: typeof held) => agent.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...PLACEMENT_MUTATION,
+      assets,
+    });
+
+    await expect(reconcile([...held, ...added])).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 2,
+      targetAssetCount: 6,
+      appliedHead: { catalogScopeDigest: computeAuthorCatalogScopeDigestV1(MOVED), inventoryRowCount: '6' },
+    });
+    // Every bucket already holds its part of the same target: nothing is signed.
+    await expect(reconcile([...held, ...added])).resolves.toMatchObject({ status: 'existing', successorsApplied: 0 });
+    // An exact replacement without the first asset removes its row, in its bucket only.
+    await expect(reconcile([...held.slice(1), ...added])).resolves.toMatchObject({
+      status: 'advanced',
+      successorsApplied: 1,
+      appliedHead: { inventoryRowCount: '5' },
+    });
   });
 
   it('refuses a new asset in a full bucket, as before, while moves are off', async () => {

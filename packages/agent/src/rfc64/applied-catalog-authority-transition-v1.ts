@@ -319,20 +319,7 @@ export async function readAppliedCatalogBucketsV1(
     head,
     trustedCatalogScope,
   );
-  const nodes = new Map<string, StoredDirectoryNodeV1>();
-  const readNode = async (objectDigest: Digest32V1): Promise<StoredDirectoryNodeV1> => {
-    const known = nodes.get(objectDigest);
-    if (known !== undefined) return known;
-    const stored = await controlObjects.getVerifiedObjectByDigest({ objectDigest, verifyIssuerSignature });
-    if (stored === null) throw new Error('catalog directory node is not staged');
-    assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(stored.envelope, head.payload.bucketCount);
-    assertAuthorCatalogDirectoryNodeScopeBindingV1(stored.envelope.payload, trustedCatalogScope);
-    if (stored.envelope.objectDigest !== objectDigest || stored.envelope.issuer !== head.issuer) {
-      throw new Error('catalog directory identity or issuer differs from its head');
-    }
-    nodes.set(objectDigest, stored as StoredDirectoryNodeV1);
-    return stored as StoredDirectoryNodeV1;
-  };
+  const readNode = directoryNodeReaderV1(controlObjects, head, trustedCatalogScope, verifyIssuerSignature);
   const selected = bucketIds ?? await nonEmptyBucketIdsV1(head.payload.directoryRootDigest, readNode);
   const buckets: VerifiedAppliedCatalogBucketV1[] = [];
   let totalRows = 0n;
@@ -399,6 +386,45 @@ export async function readAppliedCatalogBucketsV1(
 type StoredDirectoryNodeV1 = StoredVerifiedControlObjectV1 & {
   readonly envelope: SignedAuthorCatalogDirectoryNodeEnvelopeV1;
 };
+
+/**
+ * GH#3134 — the buckets of a staged head that hold rows, in bucket order, read from its directory
+ * nodes alone: each node is read by the digest its parent names, from the root the head names.
+ */
+export async function readAppliedCatalogBucketIdsWithRowsV1(
+  controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'getVerifiedObjectByDigest'>,
+  head: SignedAuthorCatalogHeadEnvelopeV1,
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+  verifyIssuerSignature: VerifyCatalogIssuerSignatureV1,
+): Promise<readonly DecimalU64V1[]> {
+  assertAuthorCatalogHeadScopeBindingV1(head.payload, trustedCatalogScope);
+  if (head.payload.totalRows === '0') return Object.freeze([]);
+  const readNode = directoryNodeReaderV1(controlObjects, head, trustedCatalogScope, verifyIssuerSignature);
+  return Object.freeze(await nonEmptyBucketIdsV1(head.payload.directoryRootDigest, readNode));
+}
+
+/** Directory nodes of `head` by digest, each verified once and checked against the head. */
+function directoryNodeReaderV1(
+  controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'getVerifiedObjectByDigest'>,
+  head: SignedAuthorCatalogHeadEnvelopeV1,
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+  verifyIssuerSignature: VerifyCatalogIssuerSignatureV1,
+): (objectDigest: Digest32V1) => Promise<StoredDirectoryNodeV1> {
+  const nodes = new Map<string, StoredDirectoryNodeV1>();
+  return async (objectDigest) => {
+    const known = nodes.get(objectDigest);
+    if (known !== undefined) return known;
+    const stored = await controlObjects.getVerifiedObjectByDigest({ objectDigest, verifyIssuerSignature });
+    if (stored === null) throw new Error('catalog directory node is not staged');
+    assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(stored.envelope, head.payload.bucketCount);
+    assertAuthorCatalogDirectoryNodeScopeBindingV1(stored.envelope.payload, trustedCatalogScope);
+    if (stored.envelope.objectDigest !== objectDigest || stored.envelope.issuer !== head.issuer) {
+      throw new Error('catalog directory identity or issuer differs from its head');
+    }
+    nodes.set(objectDigest, stored as StoredDirectoryNodeV1);
+    return stored as StoredDirectoryNodeV1;
+  };
+}
 
 /** Every bucket with rows, in bucket order; bucket 0 of an empty catalog, so its root is checked. */
 async function nonEmptyBucketIdsV1(
