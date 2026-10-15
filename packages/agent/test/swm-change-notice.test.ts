@@ -125,6 +125,22 @@ describe('the owner\'s notifier', () => {
     );
   });
 
+  it('records the sources of a change as followers of a graph it owns, and only then', async () => {
+    vi.useFakeTimers();
+    const noted: Array<[string, string]> = [];
+    const owned = notifier({ noteFollower: (contextGraphId, peerId) => noted.push([contextGraphId, peerId]) });
+    owned.owner.afterRemoteChange(change(MEMBER_1, 'op-1'));
+    owned.owner.afterRemoteChange(change(MEMBER_2, 'op-2'));
+    owned.owner.afterRemoteChange(change(MEMBER_3, 'op-3'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await owned.owner.settled();
+    const notOwned = notifier({ ownsPublicGraph: async () => false, noteFollower: () => noted.push(['x', 'y']) });
+    notOwned.owner.afterRemoteChange(change(MEMBER_1, 'op-1'));
+    await notOwned.owner.settled();
+
+    expect(noted).toEqual([[CG, MEMBER_1], [CG, MEMBER_2], [CG, MEMBER_3]]);
+  });
+
   it('sends nothing for a graph it does not own, or without anyone to tell', async () => {
     const notOwner = notifier({ ownsPublicGraph: async () => false });
     notOwner.owner.afterRemoteChange(change(MEMBER_1, 'op-1'));
@@ -231,13 +247,25 @@ describe('the owner\'s notifier', () => {
 
 describe('the follower\'s receiver', () => {
   function receiver(overrides: Partial<SwmChangeNoticeReceiverPorts> = {}) {
-    const pulls: Array<{ peerId: string; notice: SwmChangeNoticeV1; finish: () => void; fail: (error: Error) => void }> = [];
+    const pulls: Array<{
+      peerId: string;
+      notice: SwmChangeNoticeV1;
+      finish: () => void;
+      defer: () => void;
+      fail: (error: Error) => void;
+    }> = [];
     const log = vi.fn();
     const ports: SwmChangeNoticeReceiverPorts = {
       follows: async (contextGraphId) => contextGraphId === CG,
       acceptsSender: async (_contextGraphId, peerId) => peerId !== MEMBER_3,
-      pull: (peerId, pulled) => new Promise<void>((resolve, reject) => {
-        pulls.push({ peerId, notice: pulled, finish: resolve, fail: reject });
+      pull: (peerId, pulled) => new Promise<'pulled' | 'deferred'>((resolve, reject) => {
+        pulls.push({
+          peerId,
+          notice: pulled,
+          finish: () => resolve('pulled'),
+          defer: () => resolve('deferred'),
+          fail: reject,
+        });
       }),
       log,
       ...overrides,
@@ -283,6 +311,54 @@ describe('the follower\'s receiver', () => {
     await follower.settled();
     expect(await follower.handle(bytes('notes', 'op-4'), OWNER)).toBe('pulling');
     expect(pulls).toHaveLength(4);
+  });
+
+  it('pulls again after a pause when local admission deferred the pull, with the latest notice', async () => {
+    const pauses: Array<{ ms: number; resume: () => void }> = [];
+    const { follower, pulls } = receiver({
+      deferredRetryDelaysMs: [2_000, 5_000],
+      sleep: (ms) => new Promise<void>((resume) => { pauses.push({ ms, resume }); }),
+    });
+
+    await follower.handle(bytes('notes', 'op-1'), OWNER);
+    pulls[0]!.defer();
+    await tick();
+    expect(pauses.map(({ ms }) => ms)).toEqual([2_000]);
+    expect(await follower.handle(bytes('notes', 'op-2'), MEMBER_1)).toBe('coalesced');
+    pauses[0]!.resume();
+    await tick();
+    pulls[1]!.defer();
+    await tick();
+    pauses[1]!.resume();
+    await tick();
+    pulls[2]!.finish();
+    await follower.settled();
+
+    expect(pulls.map(({ peerId, notice: { hint } }) => [peerId, hint])).toEqual([
+      [OWNER, 'op-1'],
+      [MEMBER_1, 'op-2'],
+      [MEMBER_1, 'op-2'],
+    ]);
+    expect(pauses.map(({ ms }) => ms)).toEqual([2_000, 5_000]);
+  });
+
+  it('leaves a pull that stays deferred to the periodic sync after the last pause', async () => {
+    const pauses: number[] = [];
+    const { follower, pulls } = receiver({
+      deferredRetryDelaysMs: [1, 2],
+      sleep: async (ms) => { pauses.push(ms); },
+    });
+
+    await follower.handle(bytes(), OWNER);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await tick();
+      pulls[attempt]!.defer();
+    }
+    await follower.settled();
+
+    expect(pulls).toHaveLength(3);
+    expect(pauses).toEqual([1, 2]);
+    expect(await follower.handle(bytes(), OWNER)).toBe('pulling');
   });
 
   it('logs a failed pull and frees its scope', async () => {

@@ -116,6 +116,8 @@ export interface SwmChangeNotifierPorts<TDetail> {
   readonly ownsPublicGraph: (contextGraphId: string) => Promise<boolean>;
   /** The graph's followers that a direct send reaches (see `shared-memory-followers.ts`). */
   readonly followers: (contextGraphId: string) => Promise<readonly string[]>;
+  /** Record a change's source as a follower: a peer whose share this owner applied follows the graph. */
+  readonly noteFollower?: (contextGraphId: string, peerId: string) => void;
   /** One attempt per recipient, no retries; resolves with how many it reached. */
   readonly deliver: (change: SwmRemoteChange<TDetail>, recipients: readonly string[]) => Promise<number>;
   readonly selfPeerId: () => string;
@@ -200,6 +202,7 @@ export class SwmChangeNotifier<TDetail> {
 
   async #fanOut(change: SwmRemoteChange<TDetail>, sources: ReadonlySet<string>): Promise<void> {
     if (!await this.#ports.ownsPublicGraph(change.contextGraphId)) return;
+    for (const source of sources) this.#ports.noteFollower?.(change.contextGraphId, source);
     const self = this.#ports.selfPeerId();
     // A lone source holds the change. With several (changes of several peers
     // shared one delivery), each of them lacks the others' changes.
@@ -234,8 +237,15 @@ export interface SwmChangeNoticeReceiverPorts {
   readonly follows: (contextGraphId: string) => boolean | Promise<boolean>;
   /** True when a notice about the graph from this peer is one to pull on. */
   readonly acceptsSender: (contextGraphId: string, peerId: string) => boolean | Promise<boolean>;
-  /** Pull the scope from the peer through the existing validated sync. */
-  readonly pull: (peerId: string, notice: SwmChangeNoticeV1) => Promise<void>;
+  /**
+   * Pull the scope from the peer through the existing validated sync.
+   * `deferred` when local admission turned the pull away (a busy sync slot):
+   * the receiver tries again after a pause.
+   */
+  readonly pull: (peerId: string, notice: SwmChangeNoticeV1) => Promise<'pulled' | 'deferred'>;
+  /** Pauses before the next attempts of a deferred pull; after the last, periodic sync takes over. */
+  readonly deferredRetryDelaysMs?: readonly number[];
+  readonly sleep?: (ms: number) => Promise<void>;
   readonly log?: (message: string) => void;
   /** Notices accepted from one peer in one window; the rest are dropped. */
   readonly perPeerLimit?: number;
@@ -252,7 +262,8 @@ export type SwmChangeNoticeDisposition =
   | 'busy'
   | 'invalid';
 
-export const SWM_CHANGE_NOTICE_PER_PEER_LIMIT = 30;
+export const SWM_CHANGE_NOTICE_PER_PEER_LIMIT = 60;
+export const SWM_CHANGE_NOTICE_DEFERRED_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 15_000];
 export const SWM_CHANGE_NOTICE_PER_PEER_WINDOW_MS = 60_000;
 /** Scopes pulled at once; notices for more are dropped and periodic sync covers them. */
 const MAX_PULLING_SCOPES = 64;
@@ -264,6 +275,8 @@ export class SwmChangeNoticeReceiver {
   readonly #perPeerLimit: number;
   readonly #perPeerWindowMs: number;
   readonly #now: () => number;
+  readonly #retryDelaysMs: readonly number[];
+  readonly #sleep: (ms: number) => Promise<void>;
   readonly #recent = new Map<string, number[]>();
   /** Scopes with a pull running, each with the latest notice that arrived meanwhile. */
   readonly #pulling = new Map<string, { next: { peerId: string; notice: SwmChangeNoticeV1 } | null }>();
@@ -274,6 +287,8 @@ export class SwmChangeNoticeReceiver {
     this.#perPeerLimit = ports.perPeerLimit ?? SWM_CHANGE_NOTICE_PER_PEER_LIMIT;
     this.#perPeerWindowMs = ports.perPeerWindowMs ?? SWM_CHANGE_NOTICE_PER_PEER_WINDOW_MS;
     this.#now = ports.now ?? Date.now;
+    this.#retryDelaysMs = ports.deferredRetryDelaysMs ?? SWM_CHANGE_NOTICE_DEFERRED_RETRY_DELAYS_MS;
+    this.#sleep = ports.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms).unref?.()));
   }
 
   /** Handle one notice from `fromPeerId`. Starts the pull and returns without waiting for it. */
@@ -314,15 +329,26 @@ export class SwmChangeNoticeReceiver {
     notice: SwmChangeNoticeV1,
   ): Promise<void> {
     let current: { peerId: string; notice: SwmChangeNoticeV1 } | null = { peerId, notice };
+    let deferrals = 0;
     try {
       while (current !== null) {
+        let outcome: 'pulled' | 'deferred' | 'failed' = 'failed';
         try {
-          await this.#ports.pull(current.peerId, current.notice);
+          outcome = await this.#ports.pull(current.peerId, current.notice);
         } catch (error) {
           this.#ports.log?.(
             `SWM change notice pull of "${current.notice.contextGraphId}" from ${current.peerId.slice(-8)} failed: ${errorText(error)}`,
           );
         }
+        if (outcome === 'deferred' && deferrals < this.#retryDelaysMs.length) {
+          // Still in flight while it waits: notices that arrive meanwhile join it, and the latest one is pulled.
+          await this.#sleep(this.#retryDelaysMs[deferrals]!);
+          deferrals += 1;
+          current = state.next ?? current;
+          state.next = null;
+          continue;
+        }
+        deferrals = 0;
         current = state.next;
         state.next = null;
       }

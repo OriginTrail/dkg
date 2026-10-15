@@ -7363,6 +7363,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ownsPublicGraph: async (contextGraphId) => (
         await this.isCuratorOf(contextGraphId) && !await this.isPrivateContextGraph(contextGraphId)
       ),
+      noteFollower: (contextGraphId, peerId) => sharedMemoryFollowersOf(this).note(contextGraphId, peerId),
       followers: async (contextGraphId) => {
         const followers = sharedMemoryFollowersOf(this).followers(contextGraphId);
         const reachable = await Promise.all(followers.map((peerId) => this.isPeerDialable(peerId).catch(() => false)));
@@ -7411,7 +7412,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return peerIds.includes(peerId);
       },
       pull: async (peerId, notice) => {
-        await this.syncSharedMemoryFromPeerDetailed(peerId, [notice.contextGraphId], { source: 'change-notice' });
+        const result = await this.syncSharedMemoryFromPeerDetailed(peerId, [notice.contextGraphId], { source: 'change-notice' });
+        return (result.deferredBackpressure ?? 0) > 0 ? 'deferred' : 'pulled';
       },
       log: (message) => this.log.info(ctx, message),
     });
