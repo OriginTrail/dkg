@@ -3,13 +3,16 @@
  * diagnostics and the retry class treat it. The rows here are synthetic (a UAL each), so the rule
  * is exercised at the real 1,024-row cap without building a catalog.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 } from '@origintrail-official/dkg-core';
 
 import {
   AUTHOR_CATALOG_FULL_CODE_V1,
   AuthorCatalogFullErrorV1,
+  MAX_AUTHOR_CATALOG_ROWS_V1,
   assertAuthorCatalogTakesNewRowsV1,
+  assertAuthorCatalogUnderMaximumV1,
+  authorCatalogBucketMovesEnabledV1,
   findAuthorCatalogFullErrorV1,
 } from '../src/internal/author-catalog-capacity.js';
 import { FULL_CATALOG_RECHECK_INTERVAL_MS_V1 } from '../src/internal/full-catalog-parking.js';
@@ -31,6 +34,40 @@ const rows = (count: number) => Array.from(
 );
 
 describe('author catalog capacity', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('refuses a catalog of more than one bucket only at the node maximum, naming that maximum (GH#3134)', () => {
+    expect(MAX_AUTHOR_CATALOG_ROWS_V1).toBe(131_072);
+    expect(() => assertAuthorCatalogUnderMaximumV1(MAX_AUTHOR_CATALOG_ROWS_V1 - 1, rows(CAP), 1)).not.toThrow();
+    const refusal = (() => {
+      try {
+        assertAuthorCatalogUnderMaximumV1(MAX_AUTHOR_CATALOG_ROWS_V1, rows(2), 1);
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    })();
+    expect(refusal).toBeInstanceOf(AuthorCatalogFullErrorV1);
+    expect(refusal).toMatchObject({
+      code: AUTHOR_CATALOG_FULL_CODE_V1,
+      rowCount: MAX_AUTHOR_CATALOG_ROWS_V1,
+      rowCap: MAX_AUTHOR_CATALOG_ROWS_V1,
+      newRows: 1,
+      message: `RFC-64 author catalog holds ${MAX_AUTHOR_CATALOG_ROWS_V1} of ${MAX_AUTHOR_CATALOG_ROWS_V1} rows and cannot take 1 more`,
+    });
+    // The assets of the bucket the row would go to.
+    expect((refusal as AuthorCatalogFullErrorV1).heldKaUals.size).toBe(2);
+  });
+
+  it('moves a full bucket to more buckets only when switched on (GH#3134)', () => {
+    vi.stubEnv('DKG_RFC64_CATALOG_BUCKET_MOVES', '');
+    expect(authorCatalogBucketMovesEnabledV1()).toBe(false);
+    vi.stubEnv('DKG_RFC64_CATALOG_BUCKET_MOVES', '1');
+    expect(authorCatalogBucketMovesEnabledV1()).toBe(true);
+  });
+
   it('takes new rows up to the cap and refuses the row past it', () => {
     expect(CAP).toBe(1_024);
     expect(() => assertAuthorCatalogTakesNewRowsV1(rows(0), CAP)).not.toThrow();
