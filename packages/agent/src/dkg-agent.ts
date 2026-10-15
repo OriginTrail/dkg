@@ -117,8 +117,9 @@ import {
   type NormalizedContextGraphDiscoveryScan,
 } from './context-graph-discovery-options.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
-import { awaitRfc64LateLegacySwmBoundaryAdmissionV1, prepareRfc64LateLegacySwmBoundaryV1 } from
-  './rfc64/legacy-swm-boundary-v1.js';
+import {
+  awaitRfc64LegacySwmPromoteAdmissionV1, endRfc64LegacySwmBoundaryAdmissionWaitsV1, prepareRfc64LateLegacySwmBoundaryV1,
+} from './rfc64/legacy-swm-boundary-v1.js';
 import { enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -544,6 +545,7 @@ import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';
 import { AgentsPhonebookMethods } from './dkg-agent-agents-phonebook.js';
+import { SwmChangeNoticeMethods } from './dkg-agent-swm-change-notice.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ContextGraphNameResolutionMethods } from './dkg-agent-cg-name-resolution.js';
 import { ContextGraphOnChainIdMethods } from './dkg-agent-cg-on-chain-id.js';
@@ -1571,8 +1573,8 @@ export class DKGAgent extends DKGAgentBase {
         if (owner === undefined) {
           throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
         }
-        // A promote that meets a retirement's fence (its asset's, or the graph's) is
-        // retried by the queue; every other refusal here stays a hard failure.
+        // A promote that still meets a retirement's fence (its asset's, or the graph's) after
+        // its admission wait is retried by the queue; every other refusal stays a hard failure.
         return translateLegacySwmRetirementFence(() => prepareRfc64LateLegacySwmBoundaryV1(
           owner,
           input.contextGraphId,
@@ -1581,10 +1583,10 @@ export class DKGAgent extends DKGAgentBase {
           input.assertionVersion,
         ));
       }, {
-        // The promote gives a fence a short time to drop before it prepares.
+        // The promote waits for a fence in front of it to drop, within the promote's bounds (GH#3052).
         awaitAdmission: async (input: Readonly<{ contextGraphId: string; kaUal: string }>) => {
           if (resolvedConfig.dataDir === undefined || agentRef === undefined) return;
-          await awaitRfc64LateLegacySwmBoundaryAdmissionV1(agentRef, input.contextGraphId, input.kaUal);
+          await awaitRfc64LegacySwmPromoteAdmissionV1(agentRef, input.contextGraphId, input.kaUal);
         },
       }),
       resolveDurableRootMaterializationAtomicCompanion: (input) => {
@@ -2713,12 +2715,24 @@ export class DKGAgent extends DKGAgentBase {
     await this.chainPoller?.waitForCurrentPoll();
   }
 
+  /**
+   * The node begins to stop (GH#3052): a share held back by a legacy SWM fence is refused at once
+   * from now on, so its queued job is recorded and retried after the restart instead of being cut
+   * off by the shutdown deadline. The daemon calls it first thing; `stop()` calls it too.
+   */
+  endLegacySwmShareAdmissionWaits(): void {
+    endRfc64LegacySwmBoundaryAdmissionWaitsV1(this);
+  }
+
   async stop(): Promise<void> {
     if (!this.started) return;
+    this.endLegacySwmShareAdmissionWaits();
     // Fence ACK routes, retries, and self sends before shutdown awaits.
     const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
     void storageACKDrain.catch(() => {});
     this.peerSyncSession.close();
+    // No change notice, forwarded catalog head or notice pull starts after this.
+    this.stopSwmChangeNoticesV1();
     // Cancelling a waiter alone does not retire the shared physical scan.
     // Detached cold authority flights are aborted here too: after stop() no
     // request can consume their result, and the chain reader closes below.
@@ -2790,6 +2804,8 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.syncReconcilerTimer);
       this.syncReconcilerTimer = null;
     }
+    const recentSharedMemoryPullDrain = this.recentSharedMemoryPulls?.close() ?? null;
+    this.recentSharedMemoryPulls = null;
     if (this.warmCoreTimer) {
       clearInterval(this.warmCoreTimer);
       this.warmCoreTimer = null;
@@ -2821,6 +2837,7 @@ export class DKGAgent extends DKGAgentBase {
     ];
     drains.push(authorityIndexSnapshotDrain);
     if (onDemandPhonebookDrain) drains.push(onDemandPhonebookDrain);
+    if (recentSharedMemoryPullDrain) drains.push(recentSharedMemoryPullDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (rehydrationPromotionDrain) drains.push(rehydrationPromotionDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
@@ -4541,5 +4558,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends PublicSnapshotMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods {}
-applyMixins(DKGAgent, [PublicSnapshotMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods]);
+export interface DKGAgent extends PublicSnapshotMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods {}
+applyMixins(DKGAgent, [PublicSnapshotMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods]);
