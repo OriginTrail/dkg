@@ -391,7 +391,6 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   for (const [target, requirement, why] of [
     ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
-    ['packages/agent/src/internal/context-graph-cache-invalidating-store.ts', 'tornado_publisher', 'publisher persistence integration tests import the Agent store wrapper'],
     ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],
     ['packages/agent/src/dkg-agent-join.ts', 'tornado_core', 'the chain RPC-site census reads agent sources'],
     ['packages/agent/src/sync/exact-assets.ts', 'tornado_agent', 'the Agent stream receiver loads exact asset parsing'],
@@ -524,16 +523,21 @@ test('the Blazegraph lane follows the agent lane, whose live suites its job runs
   assert.equal(pullRequestPlan([change('packages/network-sim/src/index.ts')]).lanes.tornado_blazegraph, false);
 });
 
-test('the Agent store wrapper selects the publisher integration lane without broadening adjacent files', () => {
-  const wrapper = pullRequestPlan([change('packages/agent/src/internal/context-graph-cache-invalidating-store.ts')]);
-  assert.equal(wrapper.mode, 'delta');
-  assert.equal(wrapper.lanes.tornado_publisher, true);
-  assert.equal(wrapper.lanes.tornado_agent, true);
-  assert.equal(wrapper.lanes.tornado_blazegraph, true);
-  assert.match(wrapper.reasons.join('\n'), /publisher persistence integration tests/);
-  const adjacent = pullRequestPlan([change('packages/agent/src/internal/store-mutation.ts')]);
-  assert.equal(adjacent.lanes.tornado_publisher, false);
-  assert.equal(adjacent.lanes.tornado_agent, true);
+test('primary persistence integration keeps the Agent wrapper in the Agent layer', () => {
+  const wrapper = 'packages/agent/src/internal/context-graph-cache-invalidating-store.ts';
+  const traceTest = (file, lane) => traceLaneLoads(new Map([
+    [file, new Map([[lane, 'primary persistence integration']])],
+  ]));
+  const publisher = traceTest('packages/publisher/test/async-lift-primary-persistence.blazegraph.integration.test.ts', 'tornado_publisher');
+  assert.deepEqual([...publisher.loaded.keys()].filter(file => file.startsWith('packages/agent/')), []);
+  const agent = traceTest('packages/agent/test-live/primary-persistence-cache-wrapper.blazegraph.test.ts', 'tornado_agent');
+  assert.equal(agent.loaded.get(wrapper)?.has('tornado_agent'), true);
+  assert.equal(agent.loaded.get('packages/publisher/test/_helpers/primary-persistence-blazegraph.ts')?.has('tornado_agent'), true);
+  const plan = pullRequestPlan([change(wrapper)]);
+  assert.equal(plan.mode, 'delta');
+  assert.equal(plan.lanes.tornado_agent, true);
+  assert.equal(plan.lanes.tornado_blazegraph, true);
+  assert.equal(plan.lanes.tornado_publisher, false);
 });
 
 test('identity-wallet browser actions select the real-EVM chain scope', () => {
