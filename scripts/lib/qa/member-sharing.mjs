@@ -85,3 +85,77 @@ export function caseVerdicts(cases, findings) {
   });
   return { rows, failed: rows.filter(row => row.verdict !== 'PASS').map(row => row.id) };
 }
+
+/**
+ * One read folded into a pair's progress ({ view, partitions }: the age at
+ * which each read first found the write, or null). Each read keeps the time it
+ * completed itself; a read that completed after the bound does not count, and
+ * a read already satisfied is never undone, so a slow or failed later read of
+ * one kind cannot discard a timely success of the other.
+ */
+export function foldRead(progress, kind, { held, completedAt }, { from, boundMs }) {
+  if (progress[kind] !== null) return progress;
+  const age = completedAt - from;
+  if (!held || age >= boundMs) return progress;
+  return { ...progress, [kind]: age };
+}
+export const pairHeld = progress => progress.view !== null && progress.partitions !== null;
+
+/**
+ * A missed check on a registered graph is the known gap #3264 (an expected
+ * failure) only with evidence that this member lacks the graph's definition:
+ * `definitionHeld` false, read in the same listing. A member that holds the
+ * definition, or whose listing could not be read (undefined), fails.
+ */
+export function registeredGapVerdict({ registered, definitionHeld }) {
+  return registered === true && definitionHeld === false ? 'xfail' : 'fail';
+}
+
+/**
+ * When the node admitted sync work whose label contains `needle` to its
+ * global slots (e.g. `:<graph id>:` for any operation on that graph): the
+ * times (ms, local clock, second resolution) of its
+ * `Sync backpressure running <label> …` log lines, oldest first.
+ */
+export function admissionStarts(logText, needle) {
+  const marker = 'Sync backpressure running ';
+  const starts = [];
+  for (const line of String(logText ?? '').split('\n')) {
+    const at = line.indexOf(marker);
+    if (at === -1 || !line.slice(at + marker.length).split(' ', 1)[0].includes(needle)) continue;
+    const time = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) /.exec(line);
+    if (time) starts.push(new Date(`${time[1]}T${time[2]}`).getTime());
+  }
+  return starts;
+}
+
+/**
+ * Whether one admission held the node's sync slot through [from, until].
+ * `admissionStartMs` is when that admission started (from the log); `samples`
+ * are { at, inflight, oldestActiveAgeMs } of the node's `sync-global`
+ * scheduler (or { at, unreadable }). A sample proves the admission still runs
+ * when some work is in flight and the oldest running admission started when
+ * this one did. The samples must cover the window without a gap longer than
+ * `maxGapMs`. A catch-up job that is merely running proves nothing: without an
+ * admission there is nothing that holds the slot.
+ * Returns { held: true, provenUntil } or { held: false, reason, provenUntil }.
+ */
+export function busySlotCovered({ admissionStartMs, samples, from, until, toleranceMs = 2500, maxGapMs = 5000 }) {
+  if (!Number.isFinite(admissionStartMs)) return { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null };
+  const inWindow = samples.filter(sample => sample.at >= from - maxGapMs && sample.at <= until + maxGapMs).sort((a, b) => a.at - b.at);
+  let previous = from;
+  let provenUntil = null;
+  for (const sample of inWindow) {
+    if (sample.at > until) break;
+    if (sample.at - previous > maxGapMs) return { held: false, reason: `no reading of the sync slot for ${Math.round((sample.at - previous) / 1000)} s`, provenUntil };
+    if (sample.unreadable) return { held: false, reason: `the sync slot could not be read (${sample.unreadable})`, provenUntil };
+    if (!(sample.inflight >= 1)) return { held: false, reason: 'the sync slot was free', provenUntil };
+    if (Math.abs(sample.at - sample.oldestActiveAgeMs - admissionStartMs) > toleranceMs) {
+      return { held: false, reason: 'the slot was held by other work', provenUntil };
+    }
+    previous = Math.max(previous, sample.at);
+    provenUntil = sample.at;
+  }
+  if (until - previous > maxGapMs) return { held: false, reason: `no reading of the sync slot for the last ${Math.round((until - previous) / 1000)} s`, provenUntil };
+  return { held: true, provenUntil };
+}

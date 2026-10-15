@@ -10,50 +10,76 @@ const DEVNET = fileURLToPath(new URL('../../devnet.sh', import.meta.url));
 const NODE1 = '/ip4/127.0.0.1/tcp/10001/p2p/12D3KooWnode1';
 const NODE2 = '/ip4/127.0.0.1/tcp/10002/p2p/12D3KooWnode2';
 
-/** Runs `script` with devnet.sh sourced, on a devnet folder that holds node 1's address only. */
+/**
+ * Runs `script` with devnet.sh sourced on a devnet folder that holds Cores 1
+ * and 2. Everything of devnet.sh runs for real (addnode, start_node with its
+ * config patch, restart-node) except the daemon boundary: the CLI a node is
+ * launched with is a stub that records the relay its config.json holds at
+ * that launch, and `curl` answers for the node so start_node finds it ready.
+ */
 function devnet(t, script, env = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-relay-pin-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  mkdirSync(join(dir, 'node1'), { recursive: true });
-  writeFileSync(join(dir, 'node1', 'multiaddr'), `${NODE1}\n`);
-  const result = spawnSync('bash', ['-c', `source "$1"\n${script}`, 'bash', DEVNET], {
-    encoding: 'utf8',
-    env: { ...process.env, DEVNET_SOURCE_ONLY: '1', DEVNET_DIR: dir, DEVNET_ADDNODE_CONFIG_OVERRIDES: '', ...env },
-  });
-  return { dir, status: result.status, stdout: result.stdout, output: result.stdout + result.stderr };
-}
-
-// `devnet.sh addnode 7 edge` with the chain and the daemon stubbed out; the
-// stubbed start records the relay the node would have started with.
-const ADDNODE = `
-  refresh_hardhat_pidfile() { echo 1; }
-  create_node_config() { mkdir -p "$DEVNET_DIR/node$1"; printf '{}' > "$DEVNET_DIR/node$1/config.json"; }
-  start_node() { node_relay_arg "$1" > "$DEVNET_DIR/started-relay"; }
-  cmd_addnode addnode 7 edge
-`;
-const read = (dir, file) => readFileSync(join(dir, file), 'utf8').trim();
-
-test('a node starts with node 1 as its relay, and node 1 with none', t => {
-  const { status, stdout, output } = devnet(t, 'printf "[%s][%s]" "$(node_relay_arg 1)" "$(node_relay_arg 7)"');
-  assert.equal(status, 0, output);
-  assert.equal(stdout, `[][${NODE1}]`);
-});
-
-test('a relay among the addnode overrides is the node\'s relay on its first start and on every later one', t => {
-  const overrides = JSON.stringify({ relay: NODE2, announceAddresses: ['/ip4/127.0.0.1/tcp/9', `${NODE2}/p2p-circuit`] });
-  const { dir, status, output } = devnet(t, `${ADDNODE}\nnode_relay_arg 7 > "$DEVNET_DIR/restarted-relay"`, { DEVNET_ADDNODE_CONFIG_OVERRIDES: overrides });
-  assert.equal(status, 0, output);
-  assert.equal(read(dir, 'started-relay'), NODE2);
-  // restart-node starts the node through start_node again.
-  assert.equal(read(dir, 'restarted-relay'), NODE2);
-  assert.equal(read(dir, 'node7/relay.pinned'), NODE2);
-});
-
-test('overrides without a usable relay pin nothing, and the node keeps node 1', t => {
-  for (const overrides of ['', JSON.stringify({ announceAddresses: [] }), JSON.stringify({ relay: '' }), JSON.stringify({ relay: 7 })]) {
-    const { dir, status, output } = devnet(t, ADDNODE, { DEVNET_ADDNODE_CONFIG_OVERRIDES: overrides });
-    assert.equal(status, 0, `${overrides}: ${output}`);
-    assert.equal(existsSync(join(dir, 'node7', 'relay.pinned')), false, overrides);
-    assert.equal(read(dir, 'started-relay'), NODE1, overrides);
+  for (const [node, address] of [[1, NODE1], [2, NODE2]]) {
+    mkdirSync(join(dir, `node${node}`), { recursive: true });
+    writeFileSync(join(dir, `node${node}`, 'multiaddr'), `${address}\n`);
+    writeFileSync(join(dir, `node${node}`, 'config.json'), JSON.stringify({ nodeRole: 'core' }));
   }
+  writeFileSync(join(dir, 'node1', 'auth.token'), '# devnet\nfixture-token\n');
+  mkdirSync(join(dir, 'bin'));
+  writeFileSync(join(dir, 'bin', 'curl'), '#!/bin/bash\nprintf \'{"peerId":"12D3KooWstub"}\'\n', { mode: 0o755 });
+  writeFileSync(join(dir, 'stub-cli.mjs'), [
+    "import { appendFileSync, readFileSync } from 'node:fs';",
+    "const home = process.env.DKG_HOME;",
+    "appendFileSync(`${home}/launched-with-relay`, `${JSON.parse(readFileSync(`${home}/config.json`, 'utf8')).relay}\\n`);",
+  ].join('\n'));
+  const result = spawnSync('bash', ['-c', `source "$1"
+    refresh_hardhat_pidfile() { echo 1; }
+    create_node_config() { mkdir -p "$DEVNET_DIR/node$1"; printf '{"nodeRole":"edge","relay":"none"}' > "$DEVNET_DIR/node$1/config.json"; }
+    node_cli_entry() { echo "$STUB_CLI"; }
+    refresh_node_pidfile() { :; }
+    stop_devnet_node_processes() { :; }
+    ${script}`, 'bash', DEVNET], {
+    encoding: 'utf8',
+    timeout: 120_000,
+    env: {
+      ...process.env,
+      PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+      DEVNET_SOURCE_ONLY: '1',
+      DEVNET_DIR: dir,
+      STUB_CLI: join(dir, 'stub-cli.mjs'),
+      DEVNET_NODE_READY_TIMEOUT: '2',
+      DEVNET_ADDNODE_CONFIG_OVERRIDES: '',
+      ...env,
+    },
+  });
+  return { dir, status: result.status, output: `${result.stdout}${result.stderr}` };
+}
+const launches = (dir, node) => readFileSync(join(dir, `node${node}`, 'launched-with-relay'), 'utf8').trim().split('\n');
+const configRelay = (dir, node) => JSON.parse(readFileSync(join(dir, `node${node}`, 'config.json'), 'utf8')).relay;
+const ADD_AND_RESTART = node => `cmd_addnode addnode ${node} edge && cmd_restart_node restart-node ${node}`;
+
+test('a node pinned to node 2 is launched with node 2 as its relay on its first start and after a restart', t => {
+  const overrides = JSON.stringify({ relay: NODE2, announceAddresses: ['/ip4/127.0.0.1/tcp/9', `${NODE2}/p2p-circuit`] });
+  const { dir, status, output } = devnet(t, ADD_AND_RESTART(7), { DEVNET_ADDNODE_CONFIG_OVERRIDES: overrides });
+  assert.equal(status, 0, output);
+  // What the daemon read from its config.json at each launch, after start_node's own config patch.
+  assert.deepEqual(launches(dir, 7), [NODE2, NODE2], output);
+  assert.equal(configRelay(dir, 7), NODE2);
+  assert.match(output, /Node 7 restarted\./);
+});
+
+test('a node without a pinned relay is launched with node 1 on its first start and after a restart', t => {
+  for (const overrides of ['', JSON.stringify({ announceAddresses: [] }), JSON.stringify({ relay: '' }), JSON.stringify({ relay: 7 })]) {
+    const { dir, status, output } = devnet(t, ADD_AND_RESTART(8), { DEVNET_ADDNODE_CONFIG_OVERRIDES: overrides });
+    assert.equal(status, 0, `${overrides}: ${output}`);
+    assert.deepEqual(launches(dir, 8), [NODE1, NODE1], overrides);
+    assert.equal(existsSync(join(dir, 'node8', 'relay.pinned')), false, overrides);
+  }
+});
+
+test('node 1 starts without a relay; every other node falls back to node 1', t => {
+  const { status, output } = devnet(t, 'printf "[%s][%s][%s]" "$(node_relay_arg 1)" "$(node_relay_arg 2)" "$(node_relay_arg 9)"');
+  assert.equal(status, 0, output);
+  assert.equal(output, `[][${NODE1}][${NODE1}]`);
 });

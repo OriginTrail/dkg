@@ -59,9 +59,13 @@
 //   5  members MEMBER_SHARING_LATER_SECS (default 300) after they subscribed
 //      still receive new writes, both directions
 //   6  member 2 while its only sync slot is busy with a large transfer of
-//      another graph (MEMBER_SHARING_BIG_ASSETS x MEMBER_SHARING_BIG_TRIPLES);
-//      the case fails as not exercised if that transfer was not running
-//      before the first write and after the last one
+//      another graph (MEMBER_SHARING_BIG_ASSETS x MEMBER_SHARING_BIG_TRIPLES).
+//      Member 2's own evidence must show the transfer in the slot: its log
+//      names the transfer's admission, and its sync-slot readings
+//      (/api/diagnostics/backpressure, every second) show that admission
+//      still running until each write was received. A write received after
+//      the transfer left the slot, or a transfer never admitted, fails the
+//      case as not exercised; a running catch-up job alone proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
 //      and 3 on a private graph whose members joined through the signed
 //      request flow. A member's write into a private graph sets up its sender
@@ -69,13 +73,15 @@
 //      the owner cannot do, so case 2 does not apply there.
 //   8  the `synced` flag of every member, for every graph
 //
-// Known gaps (KNOWN_GAPS): a check that fails for the reason of an open issue
-// is printed as XFAIL with the issue and does not fail its case; the same
-// check holding is printed as XPASS. Today one: #3264, a member of the
-// registered graph never obtains its definition here. Its checks: the
-// definition (case 7), the members' writes into that graph, refused as writes
-// to an unknown graph (case 7), and its synced flag (case 8). Once #3264 is
-// fixed and these hold, remove the entry and its calls.
+// Known gaps (KNOWN_GAPS): a check that fails for the reason of an open issue,
+// with evidence of that reason, is printed as XFAIL with the issue and does not
+// fail its case. Today one: #3264, a member of the registered graph never
+// obtains its definition here. The definition check itself (case 7; printed as
+// XPASS when the member holds it); a member's write refused as a write to an
+// unknown graph while its listing shows no definition (case 7); and the synced
+// flag staying false while the same listing shows no definition (case 8). A
+// member that holds the definition and still cannot write or never syncs
+// fails. Once #3264 is fixed and these hold, remove the entry and its calls.
 //
 // After a restart each member dials the owner again, as a client of the
 // issue's kind does; the script does not wait for the nodes to find each
@@ -101,8 +107,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { subscriptionState } from './lib/qa/context-graph-listing.mjs';
-import { caseVerdicts, inScope, judgeHeld, linkProblem, sharedMemoryScope } from './lib/qa/member-sharing.mjs';
+import { definitionState, readListing, subscriptionState } from './lib/qa/context-graph-listing.mjs';
+import {
+  admissionStarts, busySlotCovered, caseVerdicts, foldRead, inScope, judgeHeld, linkProblem, pairHeld, registeredGapVerdict,
+  sharedMemoryScope,
+} from './lib/qa/member-sharing.mjs';
+import { parseObservation } from './lib/qa/query-observation.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEVNET_DIR = process.env.DEVNET_DIR || join(REPO_ROOT, '.devnet');
@@ -356,10 +366,16 @@ async function coresFollowing(graph) {
   return { following, unknown };
 }
 
+/** A node's own listing entry for the graph, through the shared listing parser; `defined` = it holds the definition. */
 async function listingEntry(node, graph) {
   const answer = await api(node, 'GET', '/api/context-graph/list');
-  if (answer.status !== 200 || !Array.isArray(answer.json?.contextGraphs)) return { readable: false, why: brief(answer) };
-  return { readable: true, entry: answer.json.contextGraphs.find(entry => entry.id === graph.id) ?? null };
+  const listing = readListing(answer.status, answer.text);
+  if (!listing.ok) return { readable: false, why: `${listing.reason}, ${brief(answer)}` };
+  return {
+    readable: true,
+    entry: listing.graphs.find(entry => entry.id === graph.id) ?? null,
+    defined: definitionState(answer.status, answer.text, graph.id).state === 'defined',
+  };
 }
 
 /** A public graph: subscribe. A private one: the signed request flow first, with the member's own agent token. */
@@ -395,119 +411,162 @@ async function subscribe(node, graph) {
 // ── writes, reads, and the bound ─────────────────────────────────────────────
 let sequence = 0;
 
-/** One asset with a subject of its own, created and shared through the asynchronous share job, as a client does. */
+/**
+ * Creates an asset and shares it through the asynchronous share job, as a
+ * client does, and waits for the job to end. Resolves to { doneAt } (the time
+ * a write's bound starts from) or { error, code } (the refusal's code, if any).
+ */
+async function createAndShare(author, { contextGraphId, name, quads, subGraphName }, { createTimeoutMs, jobTimeoutMs, pollMs }) {
+  const scope = subGraphName ? { subGraphName } : {};
+  const created = await api(author, 'POST', '/api/knowledge-assets', {
+    contextGraphId, name, ...scope, quads, finalize: true, alsoShareSwm: false,
+  }, { timeoutMs: createTimeoutMs });
+  if (created.status !== 200 && created.status !== 201) return { error: `the author refused the asset: ${brief(created)}`, code: created.json?.code };
+  const queued = await api(author, 'POST', `/api/knowledge-assets/${name}/swm/share-async`, { contextGraphId, entities: 'all', ...scope });
+  const job = queued.json?.jobId;
+  if (queued.status !== 200 || !job) return { error: `the share was not accepted: ${brief(queued)}` };
+  const finished = await waitFor(async () => {
+    const view = await api(author, 'GET', `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(job)}`);
+    return { ok: ['succeeded', 'failed'].includes(view.json?.state), view };
+  }, jobTimeoutMs, pollMs);
+  const state = finished.view?.json?.state;
+  if (state !== 'succeeded') return { error: `the share job ended ${state ?? 'unfinished'}: ${JSON.stringify(finished.view?.json?.lastError ?? null).slice(0, 240)}` };
+  return { doneAt: Date.now() };
+}
+
+/** One asset with a subject of its own: the record the watches of the write use. */
 async function write(author, graph, sub, what) {
   sequence += 1;
   const record = {
     author, graph, sub, what, sequence,
     subject: `urn:issue3251:${STAMP}:${sequence}`,
     value: `${what} (${sequence})`,
-    doneAt: null, error: null,
+    doneAt: null, error: null, definitionHeld: undefined,
   };
-  const name = `i3251-${STAMP.toLowerCase()}-${sequence}`;
-  const created = await api(author, 'POST', '/api/knowledge-assets', {
-    contextGraphId: graph.id, name, ...(sub ? { subGraphName: sub } : {}),
+  const outcome = await createAndShare(author, {
+    contextGraphId: graph.id, name: `i3251-${STAMP.toLowerCase()}-${sequence}`, subGraphName: sub,
     quads: [{ subject: record.subject, predicate: LABEL, object: `"${record.value}"`, graph: '' }],
-    finalize: true, alsoShareSwm: false,
-  }, { timeoutMs: 120_000 });
-  if (created.status !== 200 && created.status !== 201) { record.error = `the author refused the asset: ${brief(created)}`; return record; }
-  const queued = await api(author, 'POST', `/api/knowledge-assets/${name}/swm/share-async`,
-    { contextGraphId: graph.id, entities: 'all', ...(sub ? { subGraphName: sub } : {}) });
-  const job = queued.json?.jobId;
-  if (queued.status !== 200 || !job) { record.error = `the share was not accepted: ${brief(queued)}`; return record; }
-  const finished = await waitFor(async () => {
-    const view = await api(author, 'GET', `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(job)}`);
-    return { ok: ['succeeded', 'failed'].includes(view.json?.state), view };
-  }, 120_000, 1000);
-  if (finished.view?.json?.state !== 'succeeded') {
-    record.error = `the share job ended ${finished.view?.json?.state ?? 'unfinished'}: ${JSON.stringify(finished.view?.json?.lastError ?? null).slice(0, 240)}`;
+  }, { createTimeoutMs: 120_000, jobTimeoutMs: 120_000, pollMs: 1000 });
+  if (!outcome.error) {
+    record.doneAt = outcome.doneAt;
     return record;
   }
-  record.doneAt = Date.now();
+  record.error = outcome.error;
+  // Refused as a write to an unknown graph: whether the author held the
+  // graph's definition right then is the evidence that decides #3264.
+  if (outcome.code === 'CONTEXT_GRAPH_NOT_FOUND') {
+    const listed = await listingEntry(author, graph);
+    record.definitionHeld = listed.readable ? listed.defined : undefined;
+  }
   return record;
 }
 const where = record => `${record.graph.key}${record.sub ? `/${record.sub}` : ' root'}`;
 const describe = record => `"${record.value}" by ${label(record.author)} in ${where(record)}`;
+const written = record => ({ predicate: LABEL, value: record.value });
 
-async function reads(node, record) {
-  const view = await api(node, 'POST', '/api/query', {
+/** One query a client makes, through the shared parser of the query answer: its rows, or why there are none. */
+async function queryRows(node, body) {
+  const answer = await api(node, 'POST', '/api/query', body, { timeoutMs: 30_000 });
+  const observation = parseObservation({
+    transportExit: answer.status === 0 ? 1 : 0, httpStatus: answer.status, body: answer.text,
+    format: 'api', mode: 'bindings', binding: null, settling: true,
+  });
+  if (observation.outcome === 'PASS') return { rows: observation.rows };
+  return { error: observation.outcome === 'SETTLING' ? 'its read authority is still settling' : `${observation.reason}, ${brief(answer)}` };
+}
+
+/** The `shared-working-memory` view, with `subGraphName` for a sub-graph. */
+async function readView(node, record) {
+  const answer = await queryRows(node, {
     contextGraphId: record.graph.id, view: 'shared-working-memory', ...(record.sub ? { subGraphName: record.sub } : {}),
     sparql: `SELECT ?p ?o WHERE { <${record.subject}> ?p ?o }`,
-  }, { timeoutMs: 30_000 });
-  const partitions = await api(node, 'POST', '/api/query', {
+  });
+  return answer.rows ? judgeHeld(answer.rows, written(record)) : { held: false, error: answer.error };
+}
+
+/** The cross-partition read, in the shared memory of the root or of that sub-graph. */
+async function readPartitions(node, record) {
+  const answer = await queryRows(node, {
     contextGraphId: record.graph.id, includeContextGraphPartitions: true,
     sparql: `SELECT ?g ?p ?o WHERE { GRAPH ?g { <${record.subject}> ?p ?o } }`,
-  }, { timeoutMs: 30_000 });
+  });
+  if (!answer.rows) return { held: false, error: answer.error };
   const scope = sharedMemoryScope(record.graph.resolved, record.sub);
-  const rowsOf = answer => (answer.status === 200 && Array.isArray(answer.json?.result?.bindings) ? answer.json.result.bindings : null);
-  const viewRows = rowsOf(view);
-  const partitionRows = rowsOf(partitions)?.filter(row => inScope(row.g, scope)) ?? null;
-  const written = { predicate: LABEL, value: record.value };
-  return {
-    view: viewRows ? judgeHeld(viewRows, written) : { held: false, error: brief(view) },
-    partitions: partitionRows ? judgeHeld(partitionRows, written) : { held: false, error: brief(partitions) },
-  };
+  return judgeHeld(answer.rows.filter(row => inScope(row.g, scope)), written(record));
 }
+const READS = [['view', readView], ['partitions', readPartitions]];
 
 /**
  * Starts watching pairs (write, node that must hold it) at once: each is read
  * until it holds or its bound has passed. Call it when the bound starts (right
  * after the write, the subscribe, the return), so that no pair is judged
  * without having been read inside its bound. A pair's bound starts at `from`
- * (default: the end of the write's share job). Returns a handle { pairs, done },
- * not a promise, so that whoever starts a watch does not wait for it.
+ * (default: the end of the write's share job). Each read counts with the time
+ * it completed itself, and a read that found the write is not made again, so
+ * a slow or failed later read of one kind never discards a timely success of
+ * the other. Returns a handle { pairs, done }, not a promise, so that whoever
+ * starts a watch does not wait for it.
  */
 function watch(pairs) {
   for (const pair of pairs) {
     pair.from = pair.from ?? pair.record.doneAt;
-    pair.viewAt = null; pair.partitionsAt = null; pair.last = null;
+    pair.progress = { view: null, partitions: null };
+    pair.last = { view: null, partitions: null };
   }
-  const open = () => pairs.filter(p => !p.record.error && (p.viewAt === null || p.partitionsAt === null) && Date.now() - p.from < BOUND_MS);
+  const open = () => pairs.filter(p => !p.record.error && !pairHeld(p.progress) && Date.now() - p.from < BOUND_MS);
   const done = (async () => {
     for (let pending = open(); pending.length > 0; pending = open()) {
       await Promise.all(pending.map(async pair => {
-        const seen = await reads(pair.node, pair.record);
-        const age = Date.now() - pair.from;
-        if (age >= BOUND_MS) return; // the answer came after the bound
-        if (seen.view.held && pair.viewAt === null) pair.viewAt = age;
-        if (seen.partitions.held && pair.partitionsAt === null) pair.partitionsAt = age;
-        pair.last = seen;
+        for (const [kind, read] of READS) {
+          if (pair.progress[kind] !== null) continue;
+          const seen = await read(pair.node, pair.record);
+          pair.progress = foldRead(pair.progress, kind, { held: seen.held, completedAt: Date.now() }, { from: pair.from, boundMs: BOUND_MS });
+          pair.last[kind] = seen;
+        }
       }));
       await sleep(2000);
     }
   })();
   return { pairs, done };
 }
+/** When a pair was held (both reads), or null. */
+const heldAt = pair => (pair.progress && pairHeld(pair.progress) ? pair.from + Math.max(pair.progress.view, pair.progress.partitions) : null);
 
 /** A write, and at once the watch of the nodes that must hold it (a handle, see watch). */
 async function writeAndWatch(caseId, author, graph, sub, what, nodes) {
   return watch(at(caseId, await write(author, graph, sub, what), nodes));
 }
 
+/** Waits for the watches and returns their pairs. */
+async function watched(handles) {
+  await Promise.all(handles.map(handle => handle.done));
+  return handles.flatMap(handle => handle.pairs);
+}
+
 /** Waits for the watches, then reports each pair under its case. */
 async function settle(handles) {
-  await Promise.all(handles.map(handle => handle.done));
-  const pairs = handles.flatMap(handle => handle.pairs);
-  for (const pair of pairs) {
-    const what = `${describe(pair.record)} at ${label(pair.node)}`;
-    if (pair.record.error) {
-      const text = `${what}: not written, ${pair.record.error}`;
-      // A member without the registered graph's definition cannot write into it (#3264).
-      const knownGap = pair.record.graph.registered && pair.record.author !== OWNER && pair.record.error.includes('CONTEXT_GRAPH_NOT_FOUND');
-      if (knownGap) xfail(pair.caseId, 'registeredDefinition', text);
-      else fail(pair.caseId, text);
-      continue;
-    }
-    if (pair.viewAt !== null && pair.partitionsAt !== null) {
-      pass(pair.caseId, `${what}: held ${seconds(Math.max(pair.viewAt, pair.partitionsAt))} s after the ${pair.fromWhat ?? 'share'}`);
-      continue;
-    }
-    const missing = [];
-    if (pair.viewAt === null) missing.push(`the shared-working-memory view${detail(pair.last?.view)}`);
-    if (pair.partitionsAt === null) missing.push(`the cross-partition read${detail(pair.last?.partitions)}`);
-    const found = [pair.viewAt !== null && `view after ${seconds(pair.viewAt)} s`, pair.partitionsAt !== null && `partitions after ${seconds(pair.partitionsAt)} s`].filter(Boolean);
-    fail(pair.caseId, `${what}: NOT in ${missing.join(' nor in ')} ${seconds(BOUND_MS)} s after the ${pair.fromWhat ?? 'share'}${found.length ? ` (found in ${found.join(', ')})` : ''}`);
+  for (const pair of await watched(handles)) report(pair);
+}
+
+/** One pair's verdict, under its case. */
+function report(pair) {
+  const what = `${describe(pair.record)} at ${label(pair.node)}`;
+  if (pair.record.error) {
+    const text = `${what}: not written, ${pair.record.error}`;
+    // A member without the registered graph's definition cannot write into
+    // it (#3264). The refusal is that gap only when the author was shown to
+    // lack the definition; any other refusal fails.
+    const gap = pair.record.error.includes('CONTEXT_GRAPH_NOT_FOUND')
+      && registeredGapVerdict({ registered: pair.record.graph.registered, definitionHeld: pair.record.definitionHeld }) === 'xfail';
+    return gap ? xfail(pair.caseId, 'registeredDefinition', `${text}; the author holds no definition of the graph`) : fail(pair.caseId, text);
   }
+  const { view, partitions } = pair.progress;
+  if (pairHeld(pair.progress)) return pass(pair.caseId, `${what}: held ${seconds(Math.max(view, partitions))} s after the ${pair.fromWhat ?? 'share'}`);
+  const missing = [];
+  if (view === null) missing.push(`the shared-working-memory view${detail(pair.last.view)}`);
+  if (partitions === null) missing.push(`the cross-partition read${detail(pair.last.partitions)}`);
+  const found = [view !== null && `view after ${seconds(view)} s`, partitions !== null && `partitions after ${seconds(partitions)} s`].filter(Boolean);
+  return fail(pair.caseId, `${what}: NOT in ${missing.join(' nor in ')} ${seconds(BOUND_MS)} s after the ${pair.fromWhat ?? 'share'}${found.length ? ` (found in ${found.join(', ')})` : ''}`);
 }
 function detail(read) {
   if (!read) return '';
@@ -521,40 +580,49 @@ const at = (caseId, record, nodes) => nodes.map(node => ({ caseId, record, node 
  * Started right after a member subscribed: it must hold the graph's definition
  * (its listing names the access policy) within DEFINITION_MS. Nothing asks
  * again: a definition lost on the way is a failure, not something to retry.
+ * On the registered graph a missing definition is #3264 itself.
  */
 async function watchDefinition(caseId, node, graph) {
   const from = graph.subscribedAt[node];
   for (;;) {
     const last = await listingEntry(node, graph);
     const age = Date.now() - from;
-    if (typeof last.entry?.accessPolicy === 'string' && last.entry.accessPolicy !== '' && age < DEFINITION_MS) {
+    if (last.readable && last.defined) {
+      if (age >= DEFINITION_MS) return fail(caseId, `${label(node)} holds the definition of ${graph.key} only ${seconds(age)} s after it subscribed`);
       if (graph.registered) xpass(caseId, 'registeredDefinition', `${label(node)} holds the definition of ${graph.key} ${seconds(age)} s after it subscribed`);
       return;
     }
     if (age >= DEFINITION_MS) {
       if (!last.readable) return fail(caseId, `${label(node)}: its listing could not be read ${seconds(age)} s after it subscribed to ${graph.key} (${last.why})`);
       const text = `${label(node)} holds no definition of ${graph.key} ${seconds(age)} s after it subscribed: ${last.entry ? `its listing has no access policy for it (${JSON.stringify(last.entry).slice(0, 200)})` : 'its listing does not name it'}; a write it makes there is refused`;
-      return graph.registered ? xfail(caseId, 'registeredDefinition', text) : fail(caseId, text);
+      return registeredGapVerdict({ registered: graph.registered, definitionHeld: false }) === 'xfail' ? xfail(caseId, 'registeredDefinition', text) : fail(caseId, text);
     }
     await sleep(Math.min(2000, DEFINITION_MS - age));
   }
 }
 
-/** Started right after a member subscribed: its `synced` flag for the graph must be true within the bound. */
+/**
+ * Started right after a member subscribed: its `synced` flag for the graph must
+ * be true within the bound. On the registered graph a flag that stays false is
+ * #3264 only when the same listing shows the member without the definition; a
+ * member that holds it and never syncs fails.
+ */
 async function watchSynced(node, graph) {
   const from = graph.subscribedAt[node];
-  // A registered graph's flag is a known gap (#3264); every other graph's must hold.
-  const held = text => (graph.registered ? xpass(8, 'registeredDefinition', text) : pass(8, text));
-  const missed = text => (graph.registered ? xfail(8, 'registeredDefinition', text) : fail(8, text));
   for (;;) {
     const last = await listingEntry(node, graph);
     const age = Date.now() - from;
     const synced = last.entry?.synced === true;
-    if (synced && age < SYNCED_MS) return held(`${label(node)} lists ${graph.key} as synced ${seconds(age)} s after it subscribed`);
+    if (synced && age < SYNCED_MS) return pass(8, `${label(node)} lists ${graph.key} as synced ${seconds(age)} s after it subscribed`);
     if (age >= SYNCED_MS) {
-      if (synced) return missed(`${label(node)} lists ${graph.key} as synced only ${seconds(age)} s after it subscribed`);
       if (!last.readable) return fail(8, `${label(node)}: its listing could not be read ${seconds(age)} s after it subscribed to ${graph.key} (${last.why})`);
-      return missed(`${label(node)} lists ${graph.key} as ${last.entry ? `subscribed=${last.entry.subscribed} synced=${last.entry.synced}` : 'absent'} ${seconds(age)} s after it subscribed`);
+      const text = synced
+        ? `${label(node)} lists ${graph.key} as synced only ${seconds(age)} s after it subscribed`
+        : `${label(node)} lists ${graph.key} as ${last.entry ? `subscribed=${last.entry.subscribed} synced=${last.entry.synced}` : 'absent'} ${seconds(age)} s after it subscribed`;
+      if (registeredGapVerdict({ registered: graph.registered, definitionHeld: last.defined }) === 'xfail') {
+        return xfail(8, 'registeredDefinition', `${text}; it holds no definition of the graph`);
+      }
+      return fail(8, `${text}${graph.registered ? '; it holds the definition, so this is not #3264' : ''}`);
     }
     await sleep(Math.min(2000, SYNCED_MS - age));
   }
@@ -569,22 +637,10 @@ async function fillBigGraph(graph) {
       subject: `urn:issue3251:big:${STAMP}:${i}:${Math.floor(t / perSubject)}`, predicate: `urn:issue3251:payload:${t % perSubject}`,
       object: `"row ${t} of asset ${i} ${'x'.repeat(80)}"`, graph: '',
     }));
-    const name = `i3251-big-${STAMP.toLowerCase()}-${i}`;
-    const created = await api(OWNER, 'POST', '/api/knowledge-assets', { contextGraphId: graph.id, name, quads, finalize: true, alsoShareSwm: false }, { timeoutMs: 300_000 });
-    if (created.status !== 200 && created.status !== 201) throw new Error(`asset ${i} of the large graph was refused: ${brief(created)}`);
-    const queued = await api(OWNER, 'POST', `/api/knowledge-assets/${name}/swm/share-async`, { contextGraphId: graph.id, entities: 'all' });
-    if (!queued.json?.jobId) throw new Error(`asset ${i} of the large graph was not shared: ${brief(queued)}`);
-    const finished = await waitFor(async () => {
-      const view = await api(OWNER, 'GET', `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(queued.json.jobId)}`);
-      return { ok: ['succeeded', 'failed'].includes(view.json?.state), state: view.json?.state };
-    }, 300_000, 2000);
-    if (finished.state !== 'succeeded') throw new Error(`asset ${i} of the large graph was not shared (${finished.state ?? 'unfinished'})`);
+    const outcome = await createAndShare(OWNER, { contextGraphId: graph.id, name: `i3251-big-${STAMP.toLowerCase()}-${i}`, quads },
+      { createTimeoutMs: 300_000, jobTimeoutMs: 300_000, pollMs: 2000 });
+    if (outcome.error) throw new Error(`asset ${i} of the large graph: ${outcome.error}`);
   }
-}
-
-async function catchupState(node, graph) {
-  const answer = await api(node, 'GET', `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(graph.id)}`);
-  return answer.json?.status ?? (answer.status === 404 ? 'none' : `unreadable (${brief(answer)})`);
 }
 
 const logFile = node => join(DEVNET_DIR, `node${node}`, 'daemon.log');
@@ -597,28 +653,77 @@ function logSince(node, offset) {
 }
 const countOf = (text, needle) => text.split(needle).length - 1;
 
-/** Case 6: member 2 subscribes to the large graph; writes are made while its transfer runs. */
+/** One reading of a node's sync slots: its `sync-global` scheduler in the backpressure diagnostics. */
+async function slotReading(node) {
+  const answer = await api(node, 'GET', '/api/diagnostics/backpressure', undefined, { timeoutMs: 5000 });
+  const atMs = Date.now();
+  const scheduler = Array.isArray(answer.json?.schedulers) ? answer.json.schedulers.find(s => s?.scheduler === 'sync-global') : undefined;
+  if (answer.status !== 200 || !scheduler?.totals) return { at: atMs, unreadable: answer.status === 200 ? 'no sync-global scheduler in the diagnostics' : brief(answer) };
+  const { inflight, inflightLimit, oldestActiveAgeMs } = scheduler.totals;
+  return { at: atMs, inflight, inflightLimit, oldestActiveAgeMs };
+}
+
+/** Reads a node's sync slots every second until stopped. */
+function readSlots(node) {
+  const readings = [];
+  let reading = true;
+  const done = (async () => {
+    while (reading) {
+      readings.push(await slotReading(node));
+      await sleep(1000);
+    }
+  })();
+  return { readings, stop: async () => { reading = false; await done; } };
+}
+
+/**
+ * Case 6: member 2 subscribes to the large graph, and the writes are made while
+ * that transfer holds member 2's only sync slot. The node's own evidence must
+ * show it: its log names the admission of the transfer (`Sync backpressure
+ * running shared-memory:<large graph>:…`), and its slot readings show that
+ * admission still running, every second, until each write was received. A
+ * running catch-up job proves nothing by itself. A write received only after
+ * the transfer left the slot, or a transfer never admitted, means the case was
+ * not exercised.
+ */
 async function busyMember(pub, big) {
   await precondition(6, 'before the large transfer');
   const offset = logSize(M2);
+  const needle = `:${big.id}:`;
+  const slots = readSlots(M2);
   await subscribe(M2, big);
-  const before = await waitFor(async () => {
-    const state = await catchupState(M2, big);
-    return { ok: state === 'running', state };
-  }, 20_000, 300);
-  const busy = [
+  const admitted = await waitFor(async () => {
+    const start = admissionStarts(logSince(M2, offset), needle).at(-1) ?? null;
+    const latest = slots.readings.at(-1);
+    const holds = start !== null && latest !== undefined && !latest.unreadable && latest.inflight >= 1
+      && Math.abs(latest.at - latest.oldestActiveAgeMs - start) <= 2500;
+    return { ok: holds, start, latest };
+  }, 30_000, 500);
+  if (!admitted.ok) {
+    await slots.stop();
+    const why = admitted.start === null ? 'its log shows no admission of that transfer' : `its slot was ${admitted.latest?.unreadable ? `unreadable (${admitted.latest.unreadable})` : 'free or held by other work'}`;
+    return fail(6, `not exercised: member2's transfer of the large graph did not hold its sync slot within 30 s of the subscribe (${why}); raise MEMBER_SHARING_BIG_ASSETS / MEMBER_SHARING_BIG_TRIPLES`);
+  }
+  const from = Date.now();
+  const handles = [
     await writeAndWatch(6, OWNER, pub, null, 'owner while member2 is busy, root', [M2]),
     await writeAndWatch(6, OWNER, pub, SUB, 'owner while member2 is busy, sub-graph', [M2]),
     await writeAndWatch(6, M1, pub, null, 'member1 while member2 is busy, root', [M2]),
   ];
-  const after = await catchupState(M2, big);
-  await settle(busy);
-  const refused = countOf(logSince(M2, offset), `Sync backpressure rejected shared-memory:${pub.id}`);
-  if (before.state === 'running' && after === 'running') {
-    note(`case 6: member2's catch-up of the large graph was running before the first write and after the last; member2 refused ${refused} pull(s) of the public graph for a busy slot`);
-  } else {
-    fail(6, `not exercised: member2's catch-up of the large graph was ${before.state} before the first write and ${after} after the last (raise MEMBER_SHARING_BIG_ASSETS / MEMBER_SHARING_BIG_TRIPLES)`);
+  const pairs = await watched(handles);
+  const until = Date.now();
+  await slots.stop();
+  const busy = busySlotCovered({ admissionStartMs: admitted.start, samples: slots.readings, from, until });
+  for (const pair of pairs) {
+    // Proven through the whole window, every receipt in it counts; otherwise a
+    // receipt must come before the last reading that still showed the transfer.
+    const received = heldAt(pair);
+    if (received !== null && !busy.held && (busy.provenUntil === null || received > busy.provenUntil + 1000)) {
+      fail(6, `${describe(pair.record)} at ${label(M2)}: held ${seconds(received - pair.from)} s after the share, but after the large transfer stopped holding the slot (${busy.reason ?? 'no reading'}): not exercised`);
+    } else report(pair);
   }
+  const refused = countOf(logSince(M2, offset), `Sync backpressure rejected shared-memory:${pub.id}:`);
+  note(`case 6: member2's transfer of the large graph held its only sync slot ${busy.held ? `through every receipt check (${seconds(until - from)} s)` : `for ${busy.provenUntil === null ? 0 : seconds(busy.provenUntil - from)} s of ${seconds(until - from)} s (then ${busy.reason})`}; member2 refused ${refused} pull(s) of the public graph for a busy slot`);
 }
 
 // ── the run ──────────────────────────────────────────────────────────────────
