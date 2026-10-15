@@ -35,9 +35,9 @@ export interface DurableRootAtomicCompanionResolver {
 /**
  * Optional companion of a resolver that can refuse a root write for a reason
  * that passes on its own. It resolves once the resolver would admit this
- * asset, or when its own short bound ends; it never rejects and reserves
- * nothing, so the resolver may still refuse afterwards. A seam that can wait
- * calls it right before the synchronous resolve.
+ * asset, or when its own bound ends; it never rejects and reserves nothing,
+ * so the resolver may still refuse afterwards. A seam that can wait calls it
+ * right before the synchronous resolve.
  */
 export type DurableRootCompanionAdmissionWait = (
   input: Readonly<Pick<DurableRootMaterializationIdentity, 'contextGraphId' | 'kaUal'>>,

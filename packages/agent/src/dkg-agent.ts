@@ -118,8 +118,9 @@ import {
   type NormalizedContextGraphDiscoveryScan,
 } from './context-graph-discovery-options.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
-import { awaitRfc64LateLegacySwmBoundaryAdmissionV1, prepareRfc64LateLegacySwmBoundaryV1 } from
-  './rfc64/legacy-swm-boundary-v1.js';
+import {
+  awaitRfc64LegacySwmPromoteAdmissionV1, endRfc64LegacySwmBoundaryAdmissionWaitsV1, prepareRfc64LateLegacySwmBoundaryV1,
+} from './rfc64/legacy-swm-boundary-v1.js';
 import { enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -1571,8 +1572,8 @@ export class DKGAgent extends DKGAgentBase {
         if (owner === undefined) {
           throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
         }
-        // A promote that meets a retirement's fence (its asset's, or the graph's) is
-        // retried by the queue; every other refusal here stays a hard failure.
+        // A promote that still meets a retirement's fence (its asset's, or the graph's) after
+        // its admission wait is retried by the queue; every other refusal stays a hard failure.
         return translateLegacySwmRetirementFence(() => prepareRfc64LateLegacySwmBoundaryV1(
           owner,
           input.contextGraphId,
@@ -1581,10 +1582,10 @@ export class DKGAgent extends DKGAgentBase {
           input.assertionVersion,
         ));
       }, {
-        // The promote gives a fence a short time to drop before it prepares.
+        // The promote waits for a fence in front of it to drop, within the promote's bounds (GH#3052).
         awaitAdmission: async (input: Readonly<{ contextGraphId: string; kaUal: string }>) => {
           if (resolvedConfig.dataDir === undefined || agentRef === undefined) return;
-          await awaitRfc64LateLegacySwmBoundaryAdmissionV1(agentRef, input.contextGraphId, input.kaUal);
+          await awaitRfc64LegacySwmPromoteAdmissionV1(agentRef, input.contextGraphId, input.kaUal);
         },
       }),
       resolveDurableRootMaterializationAtomicCompanion: (input) => {
@@ -2713,8 +2714,18 @@ export class DKGAgent extends DKGAgentBase {
     await this.chainPoller?.waitForCurrentPoll();
   }
 
+  /**
+   * The node begins to stop (GH#3052): a share held back by a legacy SWM fence is refused at once
+   * from now on, so its queued job is recorded and retried after the restart instead of being cut
+   * off by the shutdown deadline. The daemon calls it first thing; `stop()` calls it too.
+   */
+  endLegacySwmShareAdmissionWaits(): void {
+    endRfc64LegacySwmBoundaryAdmissionWaitsV1(this);
+  }
+
   async stop(): Promise<void> {
     if (!this.started) return;
+    this.endLegacySwmShareAdmissionWaits();
     // Fence ACK routes, retries, and self sends before shutdown awaits.
     const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
     void storageACKDrain.catch(() => {});

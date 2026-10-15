@@ -22,7 +22,6 @@ import {
   assertSafeIri,
   assertSafeRdfTerm,
   validateSubGraphName,
-  contextGraphSubGraphUri,
   GOSSIP_ENVELOPE_FRESHNESS_MS,
   GOSSIP_ENVELOPE_VERSION,
   ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
@@ -37,9 +36,9 @@ import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.
 import { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import {
-  generateSubGraphRegistration,
   replaceLocallyTrustedKnowledgeAssetControlEnvelope,
 } from './metadata.js';
+import { ensureSubGraphRegistration } from './sub-graph-registration.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
   storeKnowledgeAssetOperationPublicQuads,
@@ -1462,25 +1461,14 @@ export class SharedMemoryHandler {
 
       if (subGraphName) {
         await this.graphManager.ensureSubGraph(contextGraphId, subGraphName);
-
-        const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
-        const metaGraph = `did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta`;
-        const alreadyRegistered = await this.store.query(
-          `ASK { GRAPH <${metaGraph}> {
-            <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
-              <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
-              <http://dkg.io/ontology/createdBy> ?createdBy .
-          } }`,
-        );
-        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
-          const regQuads = generateSubGraphRegistration({
-            contextGraphId,
-            subGraphName,
-            createdBy: publisherPeerId || 'swm-discovery',
-            timestamp: new Date(),
-          });
-          await this.store.insert(regQuads);
-          this.markContextGraphMetaDirtyFromQuads?.(regQuads);
+        const registration = await ensureSubGraphRegistration(this.store, {
+          contextGraphId,
+          subGraphName,
+          createdBy: publisherPeerId || 'swm-discovery',
+          timestamp: new Date(),
+        });
+        if (registration.registered) {
+          this.markContextGraphMetaDirtyFromQuads?.(registration.quads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}" from SWM`);
         }
       }
