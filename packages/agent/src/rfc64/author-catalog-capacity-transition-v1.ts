@@ -42,8 +42,8 @@ import {
   snapshotRows,
   snapshotSigner,
   verifyExistingSignature,
-  type Rfc64AuthorCatalogEip191SignerV1,
-} from './author-catalog-producer.js';
+} from './author-catalog-production-steps-v1.js';
+import type { Rfc64AuthorCatalogEip191SignerV1 } from './author-catalog-producer.js';
 
 /**
  * GH#3134 — an author catalog that has outgrown its bucket count moves to a larger one.
