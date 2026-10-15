@@ -36,7 +36,7 @@ import {
   type SwmAuthorInventorySnapshotV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, withDefaultStoreWorkPriority, type Quad } from '@origintrail-official/dkg-storage';
 import {
   verifyControlEnvelopeIssuerSignatureV1,
   withOwnedRpcRequestContext,
@@ -636,7 +636,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<void> {
     const observerRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
     const observerSignal = observerRuntime.shutdownSignal;
-    return withOwnedRpcRequestContext({
+    return withDefaultStoreWorkPriority('background', () => withOwnedRpcRequestContext({
       requestClass: 'background',
       signal: observerSignal,
     }, async () => {
@@ -731,7 +731,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           `RFC-64 SWM inventory/catalog lifecycle escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
         );
       }
-    });
+    }));
   }
 
   /** Await a point-in-time observer snapshot for tests and controlled drains. */
