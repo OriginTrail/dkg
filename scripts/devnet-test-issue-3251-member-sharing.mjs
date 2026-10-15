@@ -200,9 +200,11 @@ async function precondition(caseId, when) {
   return false;
 }
 
-/** Waits for the watches, then reports each pair under its case. */
+/** Waits for the watches, then reports each pair under its case, with its author's history with the definition as it stands now. */
 async function settle(handles) {
-  for (const pair of await watched(handles)) report.reportPair(pair, { boundMs: BOUND_MS });
+  for (const pair of await watched(handles)) {
+    report.reportPair(pair, { boundMs: BOUND_MS, definitionSeen: io.definitionSeen(pair.record.author, pair.record.graph) });
+  }
 }
 
 async function run() {

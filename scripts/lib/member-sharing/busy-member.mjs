@@ -112,7 +112,7 @@ export async function busyMember(ctx, pub, big) {
     const received = heldAt(pair);
     if (received !== null && !receivedWhileHeld(received, busy)) {
       report.fail(6, `${describe(pair.record)} at ${member2.label}: held ${seconds(received - pair.from)} s after the share, later than the last reading that showed the large transfer in the slot (${busy.reason ?? 'no reading'}): not exercised`);
-    } else report.reportPair(pair, { boundMs });
+    } else report.reportPair(pair, { boundMs, definitionSeen: io.definitionSeen(pair.record.author, pair.record.graph) });
   }
   const refused = devnet.logSince(member2, offset).split(`Sync backpressure rejected shared-memory:${pub.id}:`).length - 1;
   report.note(`case 6: member2's transfer of the large graph held its only sync slot ${busy.held ? `through every receipt check (${seconds(until - from)} s)` : `for ${busy.provenUntil === null ? 0 : seconds(busy.provenUntil - from)} s of ${seconds(until - from)} s (then ${busy.reason})`}; member2 refused ${refused} pull(s) of the public graph for a busy slot`);
