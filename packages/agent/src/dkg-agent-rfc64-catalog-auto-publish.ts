@@ -84,6 +84,7 @@ import {
 import { loadExactAppliedCatalogRowsV1 } from
   './rfc64/applied-catalog-authority-transition-v1.js';
 import { catalogPlacementTimingV1, type CatalogPlacementAttemptV1 } from './internal/catalog-placement-timing.js';
+import { rfc64SwmInventoryAssetKeyV1 } from './internal/swm-inventory-asset-key.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -135,20 +136,6 @@ export type {
   ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
   ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
 } from './dkg-agent-rfc64-swm-catalog-projection.js';
-
-function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
-  contextGraphId: string;
-  subGraphName?: string | null;
-  authorAddress: string;
-  assertionCoordinate: string;
-}>): string {
-  return JSON.stringify([
-    input.contextGraphId,
-    input.subGraphName ?? null,
-    input.authorAddress.toLowerCase(),
-    input.assertionCoordinate,
-  ]);
-}
 
 /** Explicit catalog-authoring input; ordinary VM confirmation never calls it. */
 export interface RecordRfc64PublicCatalogAssetParamsV1 {

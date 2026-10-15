@@ -3,9 +3,11 @@
 /** Selected-CG durable SWM-inventory to signed-catalog projection owner. */
 
 import {
+  assertCanonicalDeterministicUalV1,
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   computeSwmAuthorInventoryScopeDigestV1,
+  createOperationContext,
   type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
@@ -79,6 +81,7 @@ import {
   type CatalogPlacementAttemptV1,
 } from './internal/catalog-placement-timing.js';
 import { readOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
+import { rfc64SwmInventoryAssetKeyV1 } from './internal/swm-inventory-asset-key.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   './rfc64/finalized-private-placement-repair-store-v1.js';
 
@@ -147,6 +150,82 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
     if (lane === null) return null;
     return this.reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(lane, params);
+  }
+
+  /**
+   * GH#3134 — this node retired its shared-memory copy of an asset because the asset is finalized,
+   * which happens on an author's node when a curator publishes the author's shared asset under the
+   * author's seal. The asset's row in the author's SWM inventory has no shared-memory head left to
+   * resolve, and on a lane that drops confirmed rows it fails every later projection of the
+   * author's catalog. When this node holds that row, the row is removed and the projection
+   * requested, as the publishing node does at the confirmation; a finalized private lane keeps
+   * its rows. The removal runs detached, in turn with the asset's other inventory work. Never throws.
+   */
+  scheduleRfc64SwmInventoryRowRemovalAfterFinalizedTwinV1(
+    this: DKGAgent,
+    input: Readonly<{
+      contextGraphId: string;
+      kaUal: string;
+      assertionVersion: string;
+      subGraphName?: string;
+    }>,
+  ): void {
+    const ctx = createOperationContext('system');
+    const failed = (cause: unknown) => this.log.warn(
+      ctx,
+      `RFC-64 SWM inventory row of finalized ${input.kaUal} was not removed: `
+        + (cause instanceof Error ? cause.message : String(cause)),
+    );
+    try {
+      const persistence = this.rfc64PersistenceV1;
+      if (persistence === undefined) return;
+      // Without an active authoring lane this node keeps no inventory to project for the graph.
+      const decision = this.resolveRfc64CatalogAuthoringLaneDecisionV1(
+        input.contextGraphId,
+        input.subGraphName ?? null,
+      );
+      if (decision.status !== 'active' || decision.lane.acceptsFinalizedVmRepair) return;
+      const contextGraphId = input.contextGraphId as ContextGraphIdV1;
+      const authorAddress = assertCanonicalDeterministicUalV1(input.kaUal).agentAddress;
+      const scope = Object.freeze({
+        ...decision.lane.scopeBase,
+        authorAddress,
+      }) as SwmAuthorInventoryScopeV1;
+      const row = persistence.swmAuthorInventory.readSwmAuthorInventoryRowV1(
+        computeSwmAuthorInventoryScopeDigestV1(scope),
+        authorAddress,
+        input.kaUal as CanonicalDeterministicUalV1,
+      );
+      // A newer share's row has its own shared-memory head.
+      if (row === null || BigInt(row.assertionVersion) > BigInt(input.assertionVersion)) return;
+      rfc64SwmInventoryShadowRuntimeV1(this).schedule(
+        rfc64SwmInventoryAssetKeyV1({
+          contextGraphId,
+          authorAddress,
+          assertionCoordinate: row.assertionCoordinate,
+        }),
+        async () => {
+          try {
+            const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
+              scope,
+              expectedRow: Object.freeze({
+                assertionVersion: row.assertionVersion,
+                kaUal: row.kaUal,
+                sealDigest: row.sealDigest,
+              }),
+            });
+            this.requestRfc64SwmCatalogProjectionV1({ contextGraphId, authorAddress, ctx });
+            if (removed.status === 'applied') {
+              this.log.info(ctx, `Removed the RFC-64 SWM inventory row of finalized ${row.kaUal}`);
+            }
+          } catch (cause) {
+            failed(cause);
+          }
+        },
+      );
+    } catch (cause) {
+      failed(cause);
+    }
   }
 
   /**
