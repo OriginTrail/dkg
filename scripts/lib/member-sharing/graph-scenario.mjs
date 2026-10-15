@@ -31,6 +31,9 @@ export class GraphScenario {
     this.subscribedAt = new Map();
     this.watches = [];
     this.observers = [];
+    // Whether each member was seen holding the graph's definition while its
+    // subscription was observed: the state that preceded its own writes.
+    this.definitionSeen = new Map();
     this.dropped = false;
   }
 
@@ -77,6 +80,7 @@ export class GraphScenario {
   async observedSubscriptions() {
     const observations = await Promise.all(this.observers.map(handle => handle.done));
     if (this.dropped) return [];
+    this.observers.forEach((handle, i) => this.definitionSeen.set(handle.node, observations[i] ? observations[i].definedAt !== null : undefined));
     return this.observers.map((handle, i) => ({ node: handle.node, graph: this.graph, observation: observations[i] }));
   }
 
@@ -93,13 +97,17 @@ export class GraphScenario {
     return handles;
   }
 
-  /** Case 2 (7): each author writes, live; the owner and every other member must hold each write. */
+  /**
+   * Case 2 (7): each author writes, live; the owner and every other member
+   * must hold each write. Each write carries whether its author was seen
+   * holding the definition before (unknown until the subscriptions settled).
+   */
   async memberWrites(io, owner, members) {
     const handles = [];
     for (const sub of SUBS(this.sub)) {
       for (const author of this.authors) {
         handles.push(await io.writeAndWatch(this.cases.member, author, this.graph, sub, `${author.role} live ${scopeName(sub)}`,
-          [owner, ...members.filter(member => member !== author)]));
+          [owner, ...members.filter(member => member !== author)], { definitionSeen: this.definitionSeen.get(author) }));
       }
     }
     return handles;

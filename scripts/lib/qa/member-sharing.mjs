@@ -136,15 +136,19 @@ export const freshSubscription = () => ({ definedAt: null, syncedAt: null, atDef
  * reported): `definition` (case 3, or 7 on the registered and private graphs)
  * and `synced` (case 8). A definition held in time is a quiet pass: a
  * precondition of the member's own writes, not a delivery. The evidence is the
- * graph's `registered` (on chain) and `private`, and `definitionHeld`: whether
- * the listing read at the deadline showed the definition (undefined when it
- * could not be read).
+ * graph's `registered` (on chain) and `private`; `member` (the subscriber is
+ * a member, not the owner); `definitionHeld`, whether the listing read at the
+ * deadline showed the definition (undefined when it could not be read); and
+ * `definitionSeen`, whether the member was seen holding it before that
+ * listing, so that a definition lost is told from one never obtained.
  */
-export function subscriptionResults(observation, { registered, private: isPrivate, definitionMs, syncedMs }) {
+export function subscriptionResults(observation, { registered, private: isPrivate, member, definitionMs, syncedMs }) {
   const secs = ms => Math.round(ms / 1000);
+  const { definedAt } = observation;
+  const evidence = (definitionHeld, definitionSeen) => ({ registered, private: isPrivate, member, definitionHeld, definitionSeen });
   const definition = (() => {
-    const { definedAt, atDefinitionDeadline: last } = observation;
-    const result = (outcome, text, definitionHeld) => ({ check: 'definition', outcome, text, evidence: { registered, private: isPrivate, definitionHeld } });
+    const { atDefinitionDeadline: last } = observation;
+    const result = (outcome, text, definitionHeld) => ({ check: 'definition', outcome, text, evidence: evidence(definitionHeld, definedAt !== null) });
     if (definedAt !== null && definedAt < definitionMs) return { ...result('pass', `holds the definition ${secs(definedAt)} s after it subscribed`, true), quiet: true };
     if (definedAt !== null) return result('fail', `holds the definition only ${secs(definedAt)} s after it subscribed`, true);
     if (!last?.readable) return result('fail', `its listing could not be read ${secs(definitionMs)} s after it subscribed (${last?.why ?? 'no reading'})`, undefined);
@@ -153,7 +157,8 @@ export function subscriptionResults(observation, { registered, private: isPrivat
   })();
   const synced = (() => {
     const { syncedAt, atSyncedDeadline: last } = observation;
-    const result = (outcome, text, definitionHeld) => ({ check: 'synced', outcome, text, evidence: { registered, private: isPrivate, definitionHeld } });
+    // Seen before the deadline's listing: a poll earlier than the deadline found it.
+    const result = (outcome, text, definitionHeld) => ({ check: 'synced', outcome, text, evidence: evidence(definitionHeld, definedAt !== null && definedAt < syncedMs) });
     if (syncedAt !== null && syncedAt < syncedMs) return result('pass', `lists it as synced ${secs(syncedAt)} s after it subscribed`, undefined);
     if (!last?.readable) return result('fail', `its listing could not be read ${secs(syncedMs)} s after it subscribed (${last?.why ?? 'no reading'})`, undefined);
     const seen = syncedAt !== null
@@ -220,8 +225,9 @@ export const describe = record => `"${record.value}" by ${record.author.label} i
  * One pair's result (a write, and a node that must hold it), as an ordinary
  * check with its evidence: held when both reads found the write within the
  * bound; missing otherwise, with what each read last saw; or refused, with
- * the refusal's structured code and whether the author held the graph's
- * definition right after it.
+ * whether its author is a member, the refusal's structured code, whether the
+ * author held the graph's definition right after it, and whether the author
+ * was seen holding it before (the write record's `definitionSeen`).
  */
 export function pairResult(pair, { boundMs }) {
   const secs = ms => Math.round(ms / 1000);
@@ -230,7 +236,10 @@ export function pairResult(pair, { boundMs }) {
   if (record.error) {
     return {
       check: 'write-refused', outcome: 'fail', text: `${what}: not written, ${record.error}`,
-      evidence: { registered: record.graph.registered, private: record.graph.private, definitionHeld: record.definitionHeld, errorCode: record.errorCode },
+      evidence: {
+        registered: record.graph.registered, private: record.graph.private, member: record.author.member === true,
+        definitionHeld: record.definitionHeld, definitionSeen: record.definitionSeen, errorCode: record.errorCode,
+      },
     };
   }
   const { view, partitions } = pair.progress;

@@ -27,6 +27,7 @@ function fakeIo({ refuse = () => null } = {}) {
   const io = {
     events,
     handles: [],
+    evidence: [],
     async write(author, graph, sub, what) {
       events.push(`write ${graph.key} ${what} by ${author.role}`);
       return { author, graph, sub, what };
@@ -50,8 +51,9 @@ function fakeIo({ refuse = () => null } = {}) {
       io.handles.push(handle);
       return handle;
     },
-    async writeAndWatch(caseId, author, graph, sub, what, nodes) {
+    async writeAndWatch(caseId, author, graph, sub, what, nodes, evidence) {
       events.push(`case ${caseId}: ${what} by ${author.role} in ${graph.key}${sub ? `/${sub}` : ''} -> ${nodes.map(node => node.role).join(', ')}`);
+      io.evidence.push([author.role, sub, evidence]);
       return { caseId, author, nodes };
     },
   };
@@ -149,4 +151,23 @@ test('a graph records as facts whether it is registered on chain and whether it 
   assert.deepEqual(await facts('registered', { accessPolicy: 0, publishPolicy: 1, register: true }), { private: false, registered: true });
   // Whether a known gap applies to a registered private graph is the known gaps' decision, not this record's.
   assert.deepEqual(await facts('private', { accessPolicy: 1, publishPolicy: 0, register: true }), { private: true, registered: true });
+});
+
+test('a member\'s own writes carry whether it was seen holding the definition while it subscribed', async () => {
+  const io = fakeIo();
+  const registered = new GraphScenario({ key: 'registered' }, { cases: OTHER_CASES, authors: members, sub: 's' });
+  await registered.writeHistory(io, owner);
+  assert.equal(await registered.subscribeMembers(io, members), null);
+  // Not known before the subscriptions settled.
+  await registered.memberWrites(io, owner, members);
+  assert.deepEqual(io.evidence.map(([role, , evidence]) => [role, evidence.definitionSeen]),
+    [['member1', undefined], ['member2', undefined], ['member1', undefined], ['member2', undefined]]);
+  // Member 1 held the definition 4 s after it subscribed; member 2 never did.
+  registered.observers[0].finish({ definedAt: 4_000 });
+  registered.observers[1].finish({ definedAt: null });
+  await registered.observedSubscriptions();
+  io.evidence.length = 0;
+  await registered.memberWrites(io, owner, members);
+  assert.deepEqual(io.evidence.map(([role, sub, evidence]) => [role, sub, evidence.definitionSeen]),
+    [['member1', null, true], ['member2', null, false], ['member1', 's', true], ['member2', 's', false]]);
 });

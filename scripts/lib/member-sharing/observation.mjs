@@ -51,15 +51,17 @@ export function createObservation(devnet, config) {
   /**
    * One asset with a subject of its own: the record the watches of the write
    * use. A refused write keeps the refusal's code and whether its author held
-   * the graph's definition right after it.
+   * the graph's definition right after it; `definitionSeen` is whether the
+   * author was seen holding it before (from its subscription; undefined when
+   * that is not known).
    */
-  async function write(author, graph, sub, what) {
+  async function write(author, graph, sub, what, { definitionSeen } = {}) {
     sequence += 1;
     const record = {
       author, graph, sub, what, sequence,
       subject: `urn:issue3251:${stamp}:${sequence}`,
       value: `${what} (${sequence})`,
-      doneAt: null, error: null, errorCode: undefined, definitionHeld: undefined,
+      doneAt: null, error: null, errorCode: undefined, definitionHeld: undefined, definitionSeen,
     };
     const outcome = await createAndShare(author, {
       contextGraphId: graph.id, name: `i3251-${stamp.toLowerCase()}-${sequence}`, subGraphName: sub,
@@ -114,11 +116,12 @@ export function createObservation(devnet, config) {
    * until it holds or its bound has passed. Call it when the bound starts (right
    * after the write, the subscribe, the return), so that no pair is judged
    * without having been read inside its bound. A pair's bound starts at `from`
-   * (default: the end of the write's share job). Each read counts with the time
-   * it completed itself, and a read that found the write is not made again, so
-   * a slow or failed later read of one kind never discards a timely success of
-   * the other. Returns a handle { pairs, done, cancel }, not a promise, so that
-   * whoever starts a watch does not wait for it; `cancel` stops its reads.
+   * (default: the end of the write's share job). The two reads of a pair are
+   * made at once, independently: each counts with the time it completed
+   * itself, and a read that found the write is not made again, so a slow or
+   * failed read of one kind never delays or discards the other. Returns a
+   * handle { pairs, done, cancel }, not a promise, so that whoever starts a
+   * watch does not wait for it; `cancel` stops its reads.
    */
   function watch(pairs) {
     for (const pair of pairs) {
@@ -130,14 +133,11 @@ export function createObservation(devnet, config) {
     const open = () => (cancelled ? [] : pairs.filter(p => !p.record.error && !pairHeld(p.progress) && Date.now() - p.from < boundMs));
     const done = (async () => {
       for (let pending = open(); pending.length > 0; pending = open()) {
-        await Promise.all(pending.map(async pair => {
-          for (const [kind, read] of READS) {
-            if (pair.progress[kind] !== null) continue;
-            const seen = await read(pair.node, pair.record);
-            pair.progress = foldRead(pair.progress, kind, { held: seen.held, completedAt: Date.now() }, { from: pair.from, boundMs });
-            pair.last[kind] = seen;
-          }
-        }));
+        await Promise.all(pending.flatMap(pair => READS.filter(([kind]) => pair.progress[kind] === null).map(async ([kind, read]) => {
+          const seen = await read(pair.node, pair.record);
+          pair.progress = foldRead(pair.progress, kind, { held: seen.held, completedAt: Date.now() }, { from: pair.from, boundMs });
+          pair.last[kind] = seen;
+        })));
         await sleep(2000);
       }
     })();
@@ -145,8 +145,8 @@ export function createObservation(devnet, config) {
   }
 
   /** A write, and at once the watch of the nodes that must hold it (a handle, see watch). */
-  async function writeAndWatch(caseId, author, graph, sub, what, nodes) {
-    const record = await write(author, graph, sub, what);
+  async function writeAndWatch(caseId, author, graph, sub, what, nodes, evidence = {}) {
+    const record = await write(author, graph, sub, what, evidence);
     return watch(nodes.map(node => ({ caseId, record, node })));
   }
 

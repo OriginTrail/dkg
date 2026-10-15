@@ -4,10 +4,10 @@
 // the topology between them is, and the cleanup after them.
 //
 // Each node is an explicit record: { number, role ('owner' | 'member1' |
-// 'member2'), subject (how a sentence names it), label (`node<N> (<role>)`),
-// relay (the relay a member dials the owner through), overrides (its config
-// from the first start), env (its daemon's environment), peerId,
-// agentAddress }.
+// 'member2'), member (not the owner), subject (how a sentence names it),
+// label (`node<N> (<role>)`), relay (the relay a member dials the owner
+// through), overrides (its config from the first start), env (its daemon's
+// environment), peerId, agentAddress }.
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -99,7 +99,7 @@ export class TemporaryEdges {
     }
     const [owner, member1, member2] = free;
     const record = (number, role, subject, relay, overrides, env = {}) => ({
-      number, role, subject, label: `node${number} (${role})`, relay, overrides, env, peerId: null, agentAddress: null,
+      number, role, member: role !== 'owner', subject, label: `node${number} (${role})`, relay, overrides, env, peerId: null, agentAddress: null,
     });
     // Reachable through relays only: the owner through node 1 and node 2, member 1
     // through node 1 (the devnet's relay for an Edge), member 2 through node 2.

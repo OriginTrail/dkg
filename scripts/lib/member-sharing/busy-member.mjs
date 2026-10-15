@@ -5,7 +5,8 @@
 
 import { brief, sleep, waitFor } from './devnet.mjs';
 import { heldAt, watched } from './observation.mjs';
-import { admissionRecords, busySlotCovered, heldTransfer, receivedWhileHeld } from '../qa/busy-slot.mjs';
+import { admissionRecords } from '../qa/admission-identity.mjs';
+import { busySlotCovered, heldTransfer, receivedWhileHeld } from '../qa/busy-slot.mjs';
 import { describe } from '../qa/member-sharing.mjs';
 
 /** The large graph: `assets` assets of `triples` triples, each over 50 subjects with an equal share of them, about 100 bytes a value. */

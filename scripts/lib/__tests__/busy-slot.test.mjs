@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
-  admissionClass, admissionRecords, busySlotCovered, candidateAdmissions, heldTransfer, receivedWhileHeld, singleSlotProblem, startInterval,
-} from '../qa/busy-slot.mjs';
+import { admissionClass, admissionRecords, candidateAdmissions, startInterval } from '../qa/admission-identity.mjs';
+import { busySlotCovered, heldTransfer, receivedWhileHeld, singleSlotProblem } from '../qa/busy-slot.mjs';
 
 // A reading of member 2's sync slots with its intended policy: one slot, no queue.
 const POLICY = { capacityModel: 'shared', inflightLimit: 1, queueLimit: 0 };

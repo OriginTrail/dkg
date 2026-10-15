@@ -13,23 +13,31 @@
 
 /**
  * #3264: a member of a registered graph that reaches only the owner never
- * obtains the graph's definition. It covers, on a graph that is registered on
- * chain and public, the member's definition (the gap itself), its `synced`
- * flag, and its own writes into the graph; on a private graph the member
- * joins through the signed request flow, which #3264 is not about. A failure
- * of one is the gap only with evidence that the member lacked the definition:
- * read in the same listing, or right after its write was refused, which also
- * takes the refusal's structured code (never the wording of its message). A
- * member that holds the definition, or whose listing could not be read, fails.
+ * obtains the graph's definition. It covers checks of a member, never of the
+ * owner, on a graph that is registered on chain and public: the member's
+ * definition (the gap itself), its `synced` flag, and its own writes into the
+ * graph. On a private graph the member joins through the signed request flow,
+ * which #3264 is not about. A failure of one is the gap only with evidence of
+ * the gap's state and of what preceded it: the member lacked the definition
+ * (in the same listing, or right after its write was refused, which also
+ * takes the refusal's structured code, never the wording of its message), and
+ * it was never seen holding it before. A member that holds the definition,
+ * that held it and lost it, or whose state is not known, fails.
  */
 const REGISTERED_DEFINITION = {
   issue: '#3264',
   what: 'a member of a registered graph that reaches only the owner never obtains the graph\'s definition',
-  covers: ({ check, evidence }) => evidence?.registered === true && evidence?.private === false && ['definition', 'synced', 'write-refused'].includes(check),
+  covers: ({ check, evidence }) => evidence?.registered === true && evidence?.private === false && evidence?.member === true
+    && ['definition', 'synced', 'write-refused'].includes(check),
   isTheGap: ({ check }) => check === 'definition',
   failure({ check, evidence }) {
-    const lacked = evidence.definitionHeld === false && (check !== 'write-refused' || evidence.errorCode === 'CONTEXT_GRAPH_NOT_FOUND');
-    if (lacked) return { expected: true, because: { synced: 'it holds no definition of the graph', 'write-refused': 'the author holds no definition of the graph' }[check] };
+    const refusedAsUnknown = check !== 'write-refused' || evidence.errorCode === 'CONTEXT_GRAPH_NOT_FOUND';
+    if (evidence.definitionHeld === false && evidence.definitionSeen === false && refusedAsUnknown) {
+      return { expected: true, because: { synced: 'it holds no definition of the graph', 'write-refused': 'the author holds no definition of the graph' }[check] };
+    }
+    if (evidence.definitionHeld === false && evidence.definitionSeen === true) {
+      return { expected: false, because: `${check === 'write-refused' ? 'the author' : 'it'} held the definition before and lost it, so this is not #3264` };
+    }
     return { expected: false, because: check === 'synced' && evidence.definitionHeld === true ? 'it holds the definition, so this is not #3264' : undefined };
   },
 };

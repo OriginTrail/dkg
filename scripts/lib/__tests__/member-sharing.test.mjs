@@ -125,7 +125,7 @@ test('each read keeps its own completion time, so a slow later read cannot disca
 // result through the known gaps, a quiet pass printing nothing. The graph is
 // public unless the options say otherwise.
 function subscriptionVerdicts(observation, options) {
-  const results = subscriptionResults(observation, { private: false, ...options });
+  const results = subscriptionResults(observation, { private: false, member: true, ...options });
   const printed = result => {
     const { verdict, text } = classify(result);
     return verdict === 'quiet' ? { verdict: 'none', text: '' } : { verdict, text };
@@ -207,7 +207,7 @@ test('the topology is judged from one reading of each node, with the diagnostics
 
 test('a pair is held, missing (with what each read last saw) or not written, as an ordinary result', () => {
   const graph = { key: 'registered', registered: true, private: false };
-  const record = { author: { label: 'node8 (member1)' }, graph, sub: 's', value: 'member1 live sub-graph (9)' };
+  const record = { author: { label: 'node8 (member1)', member: true }, graph, sub: 's', value: 'member1 live sub-graph (9)' };
   const node = { label: 'node9 (member2)' };
   assert.equal(describe(record), '"member1 live sub-graph (9)" by node8 (member1) in registered/s');
   const held = pairResult({ record, node, progress: { view: 3_000, partitions: 4_400 }, last: {} }, { boundMs: 60_000 });
@@ -220,10 +220,10 @@ test('a pair is held, missing (with what each read last saw) or not written, as 
     check: 'held', outcome: 'fail',
     text: '"member1 live sub-graph (9)" by node8 (member1) in registered root at node9 (member2): NOT in the cross-partition read (holds another value: "other") 60 s after the member subscribed (found in view after 2 s)',
   });
-  const refused = pairResult({ record: { ...record, error: 'the author refused the asset: HTTP 404', errorCode: 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: false }, node }, { boundMs: 60_000 });
+  const refused = pairResult({ record: { ...record, error: 'the author refused the asset: HTTP 404', errorCode: 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: false, definitionSeen: false }, node }, { boundMs: 60_000 });
   assert.deepEqual(refused, {
     check: 'write-refused', outcome: 'fail',
     text: '"member1 live sub-graph (9)" by node8 (member1) in registered/s at node9 (member2): not written, the author refused the asset: HTTP 404',
-    evidence: { registered: true, private: false, definitionHeld: false, errorCode: 'CONTEXT_GRAPH_NOT_FOUND' },
+    evidence: { registered: true, private: false, member: true, definitionHeld: false, definitionSeen: false, errorCode: 'CONTEXT_GRAPH_NOT_FOUND' },
   });
 });
