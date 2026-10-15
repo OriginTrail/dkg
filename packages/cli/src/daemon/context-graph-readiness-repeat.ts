@@ -15,13 +15,22 @@
 // catalog-authoritative graph come on the catalog lane, and neither that lane
 // nor gossip writes readiness.
 //
-// So a job that ends with such a graph still unsynced arms one repeat for it.
-// The repeat runs the same job, with a fresh admission read and the same proof
-// rules, after a growing delay, and arms the next one while the graph stays
-// unproven, up to a fixed number of repeats. Each subscribe call's job starts
-// a chain of its own: a newer call ends the older chain, wherever it is.
+// So the subscribe route hands every job it starts to one repeat sequence.
+// While the job, and each repeat after it, leaves such a graph unsynced, the
+// sequence runs the same job again after a growing delay, with a fresh
+// admission read and the same proof rules, up to a fixed number of repeats.
+// The sequence alone owns the count, the timer, the caller's context and the
+// cancellation; each attempt is one ordinary job. A newer subscribe call's
+// sequence replaces the graph's older one, wherever that one is.
 
 import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
+import {
+  startContextGraphCatchupJob,
+  type ContextGraphCatchupJobInput,
+  type StartedContextGraphCatchupJob,
+} from './context-graph-catchup-job.js';
+import { readContextGraphSubscriptionAdmission } from './context-graph-subscription-admission.js';
+import { daemonState } from './state.js';
 import type { CatchupJob } from './types.js';
 
 /**
@@ -33,11 +42,6 @@ import type { CatchupJob } from './types.js';
 export const CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS: readonly number[] = Object.freeze([
   15_000, 30_000, 60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000,
 ]);
-
-/** The repeats that follow one subscribe call's job for one graph. */
-export interface ContextGraphReadinessRepeatChain {
-  readonly contextGraphId: string;
-}
 
 /** Test seam: the timers repeats are armed with. They never hold the process open. */
 export const readinessRepeatTimers = {
@@ -51,101 +55,174 @@ export const readinessRepeatTimers = {
   },
 };
 
-/** The current chain of each graph that has one; a superseded chain arms and starts nothing. */
-const chains = new Map<string, ContextGraphReadinessRepeatChain>();
-/** At most one armed repeat per graph; the token tells a replaced timer apart. */
-const armed = new Map<string, { readonly token: object; readonly handle: unknown }>();
+/** A subscribe call's job input, and the request's agent, whose admission a repeat reads again. */
+export type ContextGraphReadinessRepeatCaller = ContextGraphCatchupJobInput & {
+  readonly requestAgentAddress: string | undefined;
+};
+
+/** The current sequence of each graph that has one. */
+const sequences = new Map<string, ReadinessRepeatSequence>();
 
 /**
- * Whether a settled catch-up job left an actively subscribed public graph that
- * is not registered on chain unsynced, with shared memory requested. Only those
- * repeat: a registered graph has its durable plane and its curator's word, a
- * private graph has proofs of its own (the member catalog, the empty-VM proof),
- * a denial is not cleared by asking again, and without shared memory nothing
- * could prove an unregistered graph.
+ * Follow the job a subscribe call started: repeat it while it leaves the
+ * graph unproven. Call it right after the mint, without an await in between,
+ * so the graph's older sequence ends before anything else can run.
  */
-export function needsContextGraphReadinessRepeat(input: {
-  readonly job: Pick<CatchupJob, 'status'>;
-  readonly includeSharedMemory: boolean;
-  readonly admissionAuthority: ContextGraphReadAuthorityDecision;
-  readonly subscription: { readonly subscribed?: boolean; readonly synced?: boolean } | undefined;
-}): boolean {
-  return input.includeSharedMemory
-    && admitsContextGraphReadinessRepeat(input.admissionAuthority)
-    && input.job.status !== 'denied'
-    && input.subscription?.subscribed === true
-    && input.subscription.synced !== true;
+export function followContextGraphCatchupJob(
+  caller: ContextGraphReadinessRepeatCaller,
+  started: StartedContextGraphCatchupJob,
+): void {
+  sequences.get(caller.contextGraphId)?.cancel();
+  const sequence = new ReadinessRepeatSequence(caller);
+  sequences.set(caller.contextGraphId, sequence);
+  sequence.follow(started, caller.admissionAuthority);
 }
 
-/** Admission of a public graph that is not registered on chain, the only kind that repeats. */
-export function admitsContextGraphReadinessRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
+/** Test seam: end every sequence. */
+export function resetContextGraphReadinessRepeats(): void {
+  for (const sequence of sequences.values()) sequence.cancel();
+  sequences.clear();
+}
+
+/**
+ * Admission of a public graph that is not registered on chain, the only kind
+ * that repeats: a registered graph has its durable plane and its curator's
+ * word, and a private graph has proofs of its own (the member catalog, the
+ * empty-VM proof).
+ */
+function admitsRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
   return authority.outcome === 'allowed'
     && authority.grantScope === 'public'
     && authority.registration === 'unregistered';
 }
 
-/** Start the chain of a subscribe call's job, ending any older chain of the graph. */
-export function startContextGraphReadinessRepeatChain(
-  contextGraphId: string,
-): ContextGraphReadinessRepeatChain {
-  disarm(contextGraphId);
-  const chain: ContextGraphReadinessRepeatChain = Object.freeze({ contextGraphId });
-  chains.set(contextGraphId, chain);
-  return chain;
-}
+/** The repeats that follow one subscribe call's job for one graph. */
+class ReadinessRepeatSequence {
+  readonly #caller: ContextGraphReadinessRepeatCaller;
+  /** The runner that ran the first job: a daemon that has replaced it is not the one this belongs to. */
+  readonly #runner = daemonState.catchupRunner;
+  #repeatsRun = 0;
+  #timer: unknown;
+  #ended = false;
 
-export function isCurrentContextGraphReadinessRepeatChain(
-  chain: ContextGraphReadinessRepeatChain,
-): boolean {
-  return chains.get(chain.contextGraphId) === chain;
-}
-
-/** End `chain` if it is still the graph's current one. */
-export function endContextGraphReadinessRepeatChain(chain: ContextGraphReadinessRepeatChain): void {
-  if (!isCurrentContextGraphReadinessRepeatChain(chain)) return;
-  disarm(chain.contextGraphId);
-  chains.delete(chain.contextGraphId);
-}
-
-/**
- * Arm the next repeat of `chain`, which has had `repeatsRun` repeats (0 after
- * the subscribe call's job). The timer calls `repeat` with the number of the
- * repeat it starts. A superseded chain arms nothing; a chain whose repeats
- * have all run ends.
- */
-export function armContextGraphReadinessRepeat(
-  chain: ContextGraphReadinessRepeatChain,
-  repeatsRun: number,
-  repeat: (repeatNumber: number) => void,
-): 'armed' | 'spent' | 'superseded' {
-  if (!isCurrentContextGraphReadinessRepeatChain(chain)) return 'superseded';
-  const { contextGraphId } = chain;
-  disarm(contextGraphId);
-  const delayMs = CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS[repeatsRun];
-  if (delayMs === undefined) {
-    chains.delete(contextGraphId);
-    return 'spent';
+  constructor(caller: ContextGraphReadinessRepeatCaller) {
+    this.#caller = caller;
   }
-  const token = {};
-  const handle = readinessRepeatTimers.set(() => {
-    if (armed.get(contextGraphId)?.token !== token) return;
-    armed.delete(contextGraphId);
-    repeat(repeatsRun + 1);
-  }, delayMs);
-  armed.set(contextGraphId, { token, handle });
-  return 'armed';
-}
 
-function disarm(contextGraphId: string): void {
-  const current = armed.get(contextGraphId);
-  if (current === undefined) return;
-  armed.delete(contextGraphId);
-  readinessRepeatTimers.clear(current.handle);
-}
+  follow(started: StartedContextGraphCatchupJob, authority: ContextGraphReadAuthorityDecision): void {
+    void started.settled.then(() => this.#afterAttempt(started.job, authority));
+  }
 
-/** Test seam: drop every chain and armed repeat. */
-export function resetContextGraphReadinessRepeats(): void {
-  for (const { handle } of armed.values()) readinessRepeatTimers.clear(handle);
-  armed.clear();
-  chains.clear();
+  cancel(): void {
+    this.#ended = true;
+    if (this.#timer !== undefined) readinessRepeatTimers.clear(this.#timer);
+    this.#timer = undefined;
+    if (sequences.get(this.#caller.contextGraphId) === this) sequences.delete(this.#caller.contextGraphId);
+  }
+
+  /**
+   * After an attempt settles: arm the next repeat while the graph is still
+   * actively subscribed and unsynced, with shared memory requested and no
+   * denial; else end. A denial is not cleared by asking again, and without
+   * shared memory nothing could prove an unregistered graph.
+   */
+  #afterAttempt(job: CatchupJob, authority: ContextGraphReadAuthorityDecision): void {
+    if (this.#ended) return;
+    try {
+      const subscription = this.#caller.agent.getSubscribedContextGraphs().get(this.#caller.contextGraphId);
+      const unproven = this.#caller.includeSharedMemory
+        && admitsRepeat(authority)
+        && job.status !== 'denied'
+        // A job that continued under another id (a resolved name) left this graph.
+        && job.resolvedContextGraphId === undefined
+        && subscription?.subscribed === true
+        && subscription.synced !== true;
+      if (unproven) this.#armNext();
+      else this.cancel();
+    } catch {
+      // A repeat is a convenience on top of a settled job; it must not turn
+      // the job's terminal path into a failure.
+      this.cancel();
+    }
+  }
+
+  #armNext(): void {
+    const delayMs = CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS[this.#repeatsRun];
+    if (delayMs === undefined) {
+      console.log(
+        `[catchup] "${this.#caller.contextGraphId}" is still not proven synced after ${this.#repeatsRun} `
+          + 'repeated catch-up job(s); subscribe again to start over',
+      );
+      this.cancel();
+      return;
+    }
+    this.#timer = readinessRepeatTimers.set(() => {
+      this.#timer = undefined;
+      void this.#repeat();
+    }, delayMs);
+  }
+
+  /**
+   * Whether a repeat may still start a job: the daemon accepts jobs with the
+   * runner that ran the first one, and the graph is still subscribed and
+   * unsynced with no job in flight.
+   */
+  #wanted(): boolean {
+    if (!daemonState.catchupAcceptingJobs || !this.#runner || daemonState.catchupRunner !== this.#runner) {
+      return false;
+    }
+    const { agent, catchupTracker, contextGraphId } = this.#caller;
+    const subscription = agent.getSubscribedContextGraphs().get(contextGraphId);
+    if (subscription?.subscribed !== true || subscription.synced === true) return false;
+    const latestJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
+    const latest = latestJobId === undefined ? undefined : catchupTracker.jobs.get(latestJobId);
+    return latest?.status !== 'queued' && latest?.status !== 'running';
+  }
+
+  /** One repeat: fresh admission, then the same job. */
+  async #repeat(): Promise<void> {
+    if (this.#ended) return;
+    this.#repeatsRun += 1;
+    const caller = this.#caller;
+    try {
+      if (!this.#wanted()) {
+        this.cancel();
+        return;
+      }
+      const admission = await readContextGraphSubscriptionAdmission(
+        caller.agent, caller.contextGraphId, caller.requestAgentAddress,
+      ).catch(() => undefined);
+      // A newer subscribe call may have replaced this sequence meanwhile.
+      if (this.#ended) return;
+      // Admission could not be read now: count the repeat and wait for the next.
+      if (admission === undefined || admission.authority.outcome === 'unavailable') {
+        this.#armNext();
+        return;
+      }
+      // No await from here to the mint, as on the subscribe route.
+      if (!this.#wanted() || !admitsRepeat(admission.authority)) {
+        this.cancel();
+        return;
+      }
+      console.log(
+        `[catchup] repeating the catch-up of "${caller.contextGraphId}" (${this.#repeatsRun} of `
+          + `${CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS.length}): the graph is not proven synced yet`,
+      );
+      const started = startContextGraphCatchupJob({
+        agent: caller.agent,
+        store: caller.store,
+        catchupTracker: caller.catchupTracker,
+        contextGraphId: caller.contextGraphId,
+        includeSharedMemory: caller.includeSharedMemory,
+        callerAgentAddress: admission.callerAgentAddress,
+        admissionAuthority: admission.authority,
+      });
+      this.follow(started, admission.authority);
+    } catch (err) {
+      this.cancel();
+      console.error(
+        `[catchup] readiness repeat for "${caller.contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 }

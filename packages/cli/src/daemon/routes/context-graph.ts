@@ -188,6 +188,7 @@ import {
   recordSyntheticCatchupJob,
 } from '../catchup-telemetry.js';
 import { startContextGraphCatchupJob } from '../context-graph-catchup-job.js';
+import { followContextGraphCatchupJob } from '../context-graph-readiness-repeat.js';
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
 import {
@@ -2155,16 +2156,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode} forceCatchup=${forceCatchup}`,
     );
 
-    const { jobId } = startContextGraphCatchupJob({
+    const subscribeJob = {
       agent,
       store: dashDb,
       catchupTracker,
       contextGraphId,
       includeSharedMemory: shouldSyncSharedMemory,
-      requestAgentAddress,
       callerAgentAddress: callerAddr,
       admissionAuthority: readAuthority,
-    });
+    };
+    const started = startContextGraphCatchupJob(subscribeJob);
+    // Same synchronous run: this call's repeat sequence replaces any older one.
+    followContextGraphCatchupJob({ ...subscribeJob, requestAgentAddress }, started);
+    const { jobId } = started.job;
 
     try {
       await settlePrivateEmptyVmAtSubscribe(agent, dashDb, contextGraphId, readAuthority, callerAddr);

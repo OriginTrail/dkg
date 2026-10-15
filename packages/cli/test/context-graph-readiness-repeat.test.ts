@@ -536,6 +536,43 @@ describe('a public graph that its subscribe job left unproven is caught up again
     expect(armed()).toEqual([]);
   });
 
+  it('starts nothing while another job for the graph is in flight', async () => {
+    const member = memberEdge();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const runs: string[] = [];
+    daemonState.catchupRunner = {
+      run: async (request) => {
+        runs.push(request.contextGraphId);
+        if (runs.length === 2) await held;
+        return lossyEmptyRound();
+      },
+      close: async () => {},
+    };
+    const api = await startRoutes(member);
+    await api.finished(await api.subscribe());
+
+    // A job started on its own, without a subscribe call, is in flight when
+    // the repeat comes due; the repeat leaves it alone.
+    const { settled } = startContextGraphCatchupJob({
+      agent: member.agent,
+      store: member.store,
+      catchupTracker: api.catchupTracker,
+      contextGraphId: CG,
+      includeSharedMemory: true,
+      callerAgentAddress: undefined,
+      admissionAuthority: PUBLIC_UNREGISTERED,
+    });
+    await waitUntil(() => (runs.length === 2 ? true : undefined), 'the other job to run');
+    fire(armed()[0]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runs).toHaveLength(2);
+
+    release();
+    await settled;
+    expect(armed()).toEqual([]);
+  });
+
   it('counts a repeat whose admission read failed and stops when the graph is no longer public', async () => {
     const member = memberEdge();
     const { runs } = stubRunner([lossyEmptyRound]);
@@ -634,13 +671,12 @@ describe('a public graph that its subscribe job left unproven is caught up again
       catchupTracker.latestByContextGraph.set(`old-graph-${i}`, `old-${i}`);
     }
 
-    const job = startContextGraphCatchupJob({
+    const { job, settled } = startContextGraphCatchupJob({
       agent: member.agent,
       store: member.store,
       catchupTracker,
       contextGraphId: CG,
       includeSharedMemory: true,
-      requestAgentAddress: undefined,
       callerAgentAddress: undefined,
       admissionAuthority: PUBLIC_UNREGISTERED,
     });
@@ -649,7 +685,10 @@ describe('a public graph that its subscribe job left unproven is caught up again
     expect(catchupTracker.jobs.has('old-0')).toBe(false);
     expect(catchupTracker.latestByContextGraph.has('old-graph-0')).toBe(false);
     expect(catchupTracker.latestByContextGraph.get(CG)).toBe(job.jobId);
-    await waitUntil(() => (job.finishedAt ? job : undefined), 'the job');
+    await settled;
+    expect(job.finishedAt).toEqual(expect.any(Number));
     expect(job.status).toBe('done');
+    // A job started on its own is followed by nothing.
+    expect(armed()).toEqual([]);
   });
 });
