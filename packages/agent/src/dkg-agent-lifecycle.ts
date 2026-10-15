@@ -938,6 +938,8 @@ interface SharedMemorySyncFromPeerOptions {
   priority?: number;
   /** Bounded admission origin for node-wide scheduler diagnostics. */
   source?: SyncAdmissionSource;
+  /** Read the peer's state at the call: never join a sync of the same scope already running. */
+  freshSnapshot?: boolean;
 }
 
 interface OrdinarySharedMemorySyncFromPeerOptions extends SharedMemorySyncFromPeerOptions {
@@ -1243,12 +1245,16 @@ function syncPageSizeProfileCacheFor(agent: DKGAgent): SyncPageSizeProfileCache 
  *   the factory — so there is no ambient source to read yet. Reading the
  *   ambient one here instead would label every join `unspecified` and quietly
  *   make I6's cross-family check unable to fire.
+ * @param meta.fresh The caller needs the peer's state at the call: it does not
+ *   join a flight already running, which may have read the peer before a
+ *   change the caller was told of. It runs after that flight instead, joining
+ *   only a flight that started later.
  */
 function runSyncSingleFlight<T>(
   agent: DKGAgent,
   key: string,
   factory: () => Promise<T>,
-  meta: { scope: SyncSingleFlightScope; source?: SyncAdmissionSource },
+  meta: { scope: SyncSingleFlightScope; source?: SyncAdmissionSource; fresh?: boolean },
 ): Promise<T> {
   let inFlight = inFlightSyncSingleFlightsByAgent.get(agent);
   if (!inFlight) {
@@ -1258,6 +1264,10 @@ function runSyncSingleFlight<T>(
   const { scope } = meta;
   const joinerSource = normalizeSyncAdmissionSource(meta.source ?? activeSyncAdmissionSource());
   const existing = inFlight.get(key);
+  if (existing && meta.fresh === true) {
+    const after = () => runSyncSingleFlight(agent, key, factory, { ...meta, fresh: false });
+    return existing.promise.then(after, after);
+  }
   if (existing) {
     // Recorded at MAP-HIT time, before any bytes move: a join is a decision to
     // share work, and by the time the shared promise settles there is nothing
@@ -2802,6 +2812,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // which is structurally identical and avoids a second
     // round-trip per peer).
     this.messenger.register(PROTOCOL_SWM_SHARE_ACK, (data, fromPeerId) => this.handleSwmShareAck(data, fromPeerId));
+    // A public graph's owner tells its followers that the graph's shared
+    // memory changed (`swm/shared-memory-change-notice.ts`).
+    this.registerSwmChangeNoticeProtocolV1();
 
     // OT-RFC-38 LU-6: cores expose stored ciphertext envelopes to
     // members via /dkg/10.0.1/swm-host-catchup. Registered
@@ -7704,6 +7717,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             || this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId),
           stopOnBackoffWorthyFailure,
           mode,
+          freshSnapshot: options?.freshSnapshot,
         });
       };
 
@@ -7961,6 +7975,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ), {
       scope: 'shared-memory',
       source: options?.source,
+      fresh: options?.freshSnapshot,
     });
   }
 

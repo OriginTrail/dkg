@@ -1013,6 +1013,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       // requirement.
       if (!outcome.applied) return;
       this.maybeEmitSwmShareAck(outcome).catch(() => { /* swallowed; logged inside */ });
+      this.noticeSwmFollowersAfterApplyV1(outcome, from);
     });
   }
 
