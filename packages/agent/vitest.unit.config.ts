@@ -91,6 +91,8 @@ export default defineConfig({
       "test/unanswered-authority-read.test.ts",
       "test/unanswered-authority-recheck.test.ts",
       "test/swm-gossip-unanswered-authority.test.ts",
+      "test/shared-memory-authority-wait.test.ts",
+      "test/swm-gossip-authority-wait.test.ts",
       "test/rfc64-responsibility-unanswered-roster.test.ts",
       "test/exact-asset-responder.test.ts",
       "test/responder-asset-metadata.test.ts",

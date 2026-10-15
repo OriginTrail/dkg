@@ -876,7 +876,13 @@ import {
   type OwedLegacySwmRetirementsV1,
 } from './internal/owed-legacy-swm-retirements.js';
 import {
-  describeRfc64LegacySwmFenceEventV1,
+  rfc64SharedMemoryAuthorityWaitV1,
+  sharedMemoryAuthorityWaitsOf,
+  SharedMemorySyncAuthorityCheck,
+  type SharedMemoryAuthorityWaitSink,
+} from './internal/shared-memory-authority-wait.js';
+import {
+  rfc64LegacySwmFenceEventLoggerV1,
   initializeRfc64LegacySwmBoundaryV1,
   rfc64LateLegacySwmCompanionResolverV1,
   retireRfc64LegacySwmAfterFinalizedVmV1,
@@ -2333,7 +2339,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this,
           this.rfc64PersistenceV1.rootPath,
           this.store,
-          { onFenceEvent: (event) => this.log.warn(ctx, describeRfc64LegacySwmFenceEventV1(event)) },
+          { onFenceEvent: rfc64LegacySwmFenceEventLoggerV1(this.log, ctx) },
         );
         await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,
@@ -5130,13 +5136,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         continue;
       }
+      const syncAuthority = new SharedMemorySyncAuthorityCheck(contextGraphId, sharedMemoryAuthorityWaitsOf(this));
       if (
         completeSwmProviders.length === 0
-        && !(await this.canUseSharedMemoryForContextGraph(contextGraphId))
-      ) {
-        this.log.warn(ctx, `Skipping SWM sync for unauthorized or unconfirmed context graph "${contextGraphId}"`);
-        continue;
-      }
+        && !syncAuthority.answer(
+          await this.canUseSharedMemoryForContextGraph(contextGraphId, { onAuthorityWait: syncAuthority.onAuthorityWait }),
+          this.log,
+          ctx,
+        )
+      ) continue;
       if (
         acceptedRecoveryLane === 'ordinary-private'
         || await this.isPrivateContextGraph(contextGraphId)
@@ -10343,7 +10351,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions = {},
   ): Promise<ContextGraphSub> {
-    return activatePersistedContextGraphSubscriptionTransaction(row, {
+    const activated = await activatePersistedContextGraphSubscriptionTransaction(row, {
       install: (record, input) => this.setContextGraphSubscription(record.id, {
         name: record.name,
         syncMode: 'always-on',
@@ -10381,6 +10389,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return committed;
       },
     }, options);
+    // Activation restores the persisted flags and starts no catch-up: the
+    // daemon decides whether this subscription still needs one.
+    this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: row.id });
+    return activated;
   }
 
   /**
@@ -11259,6 +11271,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       readAuthority?: ContextGraphReadAuthorityDecision;
+      /**
+       * Receives what the "no" waits for when no accepted RFC-64 policy
+       * governs the graph yet, for a caller that has to tell that wait from a
+       * refusal. Not called for a refusal or a "yes".
+       */
+      onAuthorityWait?: SharedMemoryAuthorityWaitSink;
     } = {},
   ): Promise<boolean> {
     const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
@@ -11271,10 +11289,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (acceptedRfc64Authority === true) return true;
     // A private graph whose RFC-64 authority is not active keeps the legacy
     // member checks below (#2858); a refusal by an active authority stands.
+    // Without an accepted policy governing the graph, the "no" only waits for
+    // one. That is read in the turn the "no" was given: the policy can be
+    // accepted at the next await.
+    const rfc64Wait = acceptedRfc64Authority === false && opts.onAuthorityWait !== undefined
+      ? rfc64SharedMemoryAuthorityWaitV1(this, contextGraphId)
+      : undefined;
     if (
       acceptedRfc64Authority === false
       && !(await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId))
-    ) return false;
+    ) {
+      if (rfc64Wait !== undefined) opts.onAuthorityWait?.(rfc64Wait);
+      return false;
+    }
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }
