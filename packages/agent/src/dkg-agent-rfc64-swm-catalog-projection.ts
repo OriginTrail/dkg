@@ -37,6 +37,8 @@ import type {
   Rfc64CatalogProjectionTargetPolicyV1,
 } from './dkg-agent-rfc64-catalog-upsert.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
+import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
+import { rfc64CatalogMutationMemoryV1 } from './internal/catalog-mutation-memory.js';
 import {
   raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
@@ -371,6 +373,11 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
         snapshot,
         signal: params.signal,
+        // GH#3134: a row the applied catalog already holds, byte for byte, is not resolved again.
+        readPlacedAssets: async (catalogScope) => {
+          const placed = await this.readRfc64PlacedCatalogAssetsV1(persistence, catalogScope);
+          return (row) => placed.get(row.kaUal);
+        },
         // As wide as the store lane these reads run in, and no wider.
         resolveConcurrency: storeLaneInflightLimit(this.store),
         resolveAsset: (row, signal) => resolveRfc64InventoryWorkspaceCatalogAssetV1({
@@ -441,6 +448,25 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         ...result,
         inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
       });
+    }
+  }
+
+  /**
+   * The applied catalog's assets by KA UAL, as the catalog mutation memory serves them. Nothing
+   * when the memory is switched off, so the pass resolves every row as it did before it existed,
+   * and nothing when the catalog cannot be read: the pass then fails where it did.
+   */
+  private async readRfc64PlacedCatalogAssetsV1(
+    this: DKGAgent,
+    persistence: Rfc64PersistenceV1,
+    scope: AuthorCatalogScopeV1,
+  ): Promise<ReadonlyMap<string, Rfc64CatalogSuccessorAssetInputV1>> {
+    if (!rfc64CatalogMutationMemoryV1(this).enabled) return new Map();
+    try {
+      const state = await this.readRfc64CatalogMutationStateV1(persistence, scope);
+      return new Map((state?.assets ?? []).map((asset) => [asset.seal.kaUal, asset] as const));
+    } catch {
+      return new Map();
     }
   }
 

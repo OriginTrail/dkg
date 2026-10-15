@@ -4,6 +4,7 @@
 
 import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+  authorCatalogRowCapacityV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeAuthorCatalogScopeDigestV1,
@@ -369,7 +370,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       }
 
       let successorsApplied = 0;
-      const hardLimit = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
+      // Every row out and every row in, one row a successor (GH#3134: the whole catalog's rows).
+      const hardLimit = 2 * Number(authorCatalogRowCapacityV1(params.scope.bucketCount));
       while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
         throwIfAbortedV1(params.signal);
         if (successorsApplied >= hardLimit) {
@@ -425,7 +427,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
    * The verified state of the scope's applied head: from memory while the durable applied head
    * and the scope's accepted policy are the ones it was read under, else from the durable store.
    */
-  private readRfc64CatalogMutationStateV1(
+  protected readRfc64CatalogMutationStateV1(
     this: DKGAgent,
     persistence: Rfc64PersistenceV1,
     scope: AuthorCatalogScopeV1,

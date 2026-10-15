@@ -58,6 +58,15 @@ export const MAX_AUTHOR_CATALOG_DIRECTORY_HEIGHT_V1 = 7n;
 export const AUTHOR_CATALOG_DIRECTORY_FANOUT_V1 = 256n;
 export const ZERO_DIGEST32_V1 = `0x${'00'.repeat(32)}` as Digest32V1;
 
+/**
+ * GH#3134 — rows an author catalog with `bucketCount` buckets can hold: every bucket full. A bound
+ * on a whole catalog is this one; {@link MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} bounds one bucket.
+ */
+export function authorCatalogRowCapacityV1(bucketCount: unknown): bigint {
+  assertAuthorCatalogBucketCountV1(bucketCount);
+  return BigInt(bucketCount) * BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1);
+}
+
 const UTF8 = new TextEncoder();
 
 /** Exact five-key immutable non-empty bucket payload. */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  authorCatalogRowCapacityV1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   MAX_AUTHOR_CATALOG_BUCKET_PAYLOAD_BYTES_V1,
@@ -95,6 +96,28 @@ const HEAD_SIGNED = {
   objectDigest: HEAD_DIGEST,
   signature: EIP191_SIGNATURE,
 } as SignedControlEnvelopeV1;
+
+describe('author catalog row capacity (GH#3134)', () => {
+  it('is every bucket full: a whole catalog holds what its buckets hold', () => {
+    expect(authorCatalogRowCapacityV1('1')).toBe(BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1));
+    expect(authorCatalogRowCapacityV1('2')).toBe(2048n);
+    expect(authorCatalogRowCapacityV1('128')).toBe(131_072n);
+    expect(authorCatalogRowCapacityV1('9223372036854775808')).toBe(9_223_372_036_854_775_808n * 1024n);
+  });
+
+  it.each([
+    ['zero buckets', '0'],
+    ['three buckets', '3'],
+    ['a non-canonical decimal', '01'],
+    ['more than the codec allows', '9223372036854775809'],
+    ['a number', 1],
+    ['a bigint', 2n],
+    ['an empty string', ''],
+    ['null', null],
+  ] as const)('refuses %s, which is not the bucket count of a catalog', (_label, bucketCount) => {
+    expect(() => authorCatalogRowCapacityV1(bucketCount)).toThrow(/bucketCount/u);
+  });
+});
 
 describe('AuthorCatalogBucketV1 structural codec', () => {
   it('pins the exact author-bound SQL-1 payload, envelope, key, row, and object vectors', () => {

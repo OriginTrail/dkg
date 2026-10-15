@@ -264,6 +264,11 @@ export class Rfc64CatalogMutationMemoryV1 {
     this.#readVerified = readVerified;
   }
 
+  /** False when it is switched off: every use then reads the durable catalog, as before it existed. */
+  get enabled(): boolean {
+    return this.#limits.maxScopes > 0;
+  }
+
   /** Scopes and bytes held now. */
   get retained(): Readonly<{ scopes: number; states: number; bytes: number }> {
     let states = 0;
