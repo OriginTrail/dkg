@@ -4,7 +4,7 @@ import { authenticatedAgentAddress } from '../../auth.js';
 import {
   jsonResponse, readBody, safeParseJson, SMALL_BODY_BYTES,
   validateRequiredContextGraphId, respondIfStoreUnavailable,
-  respondIfContextGraphReadAuthorityUnavailable,
+  respondIfContextGraphReadAuthorityUnavailable, serializeJsonResponse, sendSerializedJsonResponse,
 } from '../http-utils.js';
 import { createStoreQueryRequestLifecycle, isApiQueryCallerDisconnected } from '../store-query-lifecycle.js';
 import {
@@ -59,10 +59,14 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
       jsonResponse(res, 422, { code: bounded.code, error: 'Query result exceeds the requested bound; narrow the selection' });
       return;
     }
-    jsonResponse(res, 200, {
+    // Validating and serializing the result is synchronous, so the deadline
+    // timer cannot interrupt it: the deadline is judged once the answer is ready.
+    const body = serializeJsonResponse(200, {
       version: BOUNDED_QUERY_VERSION, queryId: randomUUID(), observedAt: new Date().toISOString(),
       contextGraphId: parsed.contextGraphId, coverage: 'local-only', ...bounded.response,
     });
+    if (performance.now() >= deadlineAt) throw new DOMException("Query deadline exceeded", "TimeoutError");
+    sendSerializedJsonResponse(res, 200, body);
   } catch (error) {
     if (isApiQueryCallerDisconnected(error) || lifecycle.signal.aborted) return;
     if (deadline.aborted || performance.now() >= deadlineAt) {
