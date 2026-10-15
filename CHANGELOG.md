@@ -2,7 +2,7 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10.0.25] - 2026-10-15
+## [10.0.25] - 2026-10-16
 
 A patch for shared memory between the members of a public Context Graph,
 after a community report on 10.0.24 (#3251) and to finish #3198. A
@@ -207,9 +207,9 @@ accepts. Other message formats are unchanged.
   relays may get none of its root writes to them** (#3282): a write into
   the root of a private graph travels only with the member's catalog head.
   When the relayed links to the curator and the other members fail to
-  dial, the head is not delivered and nothing retries it in time. In our
-  tests such a member's root writes had not arrived after five minutes, on
-  10.0.24 as well. Its writes into named sub-graphs arrived.
+  dial, the head is not delivered and nothing retries it. In our tests such
+  a member's root writes had still not arrived two hours later, on 10.0.24
+  as well. Its writes into named sub-graphs arrived.
 - **A member that restarted before its empty private graph was proven ready
   stays not ready** (#3109): the readiness proof of an empty registered
   private graph now runs again when the member's copy of the metadata
