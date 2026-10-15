@@ -41,6 +41,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-author-catalog-capacity-transition.test.ts",
   "test/rfc64-multi-bucket-successor-production.test.ts",
   "test/rfc64-applied-catalog-buckets.test.ts",
+  "test/rfc64-applied-catalog-inventory-digest.test.ts",
+  "test/rfc64-author-catalog-current-scope.test.ts",
   "test/rfc64-control-object-store-v1.test.ts",
   "test/rfc64-control-object-store-lifecycle-v1.test.ts",
   "test/rfc64-durable-file-store-v1.test.ts",
