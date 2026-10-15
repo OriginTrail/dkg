@@ -5,10 +5,10 @@
 // admission trace is read through ../qa/admission-trace.mjs.
 
 import { readFileSync } from 'node:fs';
-import { brief, waitFor } from './devnet.mjs';
+import { waitFor } from './devnet.mjs';
 import { heldAt, watched } from './observation.mjs';
 import { traceAdmissions } from '../qa/admission-trace.mjs';
-import { busySlotCovered, heldTransfer, receivedWhileHeld, singleSlotProblem } from '../qa/busy-slot.mjs';
+import { busySlotCovered, heldTransfer, receivedWhileHeld } from '../qa/busy-slot.mjs';
 import { describe } from '../qa/member-sharing.mjs';
 
 /** The large graph: `assets` assets of `triples` triples, each over 50 subjects with an equal share of them, about 100 bytes a value. */
@@ -25,15 +25,6 @@ export async function fillBigGraph(io, owner, graph, { assets, triples, stamp })
   }
 }
 
-/** One reading of a node's sync policy: its `sync-global` scheduler in the backpressure diagnostics. */
-async function slotReading(devnet, node) {
-  const answer = await devnet.api(node, 'GET', '/api/diagnostics/backpressure', undefined, { timeoutMs: 5000 });
-  const scheduler = Array.isArray(answer.json?.schedulers) ? answer.json.schedulers.find(s => s?.scheduler === 'sync-global') : undefined;
-  if (answer.status !== 200 || !scheduler?.totals) return { unreadable: answer.status === 200 ? 'no sync-global scheduler in the diagnostics' : brief(answer) };
-  const { inflight, inflightLimit, queueLimit } = scheduler.totals;
-  return { inflight, inflightLimit, queueLimit, capacityModel: scheduler.capacityModel };
-}
-
 /** The admissions member 2's trace holds now (null when it wrote none). */
 function readTrace(file) {
   try { return traceAdmissions(readFileSync(file, 'utf8')); } catch { return null; }
@@ -42,11 +33,13 @@ function readTrace(file) {
 /**
  * Case 6. The node's own evidence must show the transfer in the slot: its
  * admission trace (DKG_SYNC_ADMISSION_TRACE, `member2.trace`) names the
- * admission of the large graph that holds its only slot (one slot and no
- * queue, as its diagnostics report), and a write counts only when it was
- * received before that admission gave up the slot. A running catch-up job
- * proves nothing by itself. A write received only after the transfer gave up
- * the slot, or a transfer never admitted, means the case was not exercised.
+ * admission of the large graph that holds its only general slot (its general
+ * pool one slot and no queue, as the trace records the effective policy; a
+ * reserved shared-memory slot beside it is the fix under test), and a write
+ * counts only when it was received before that admission gave up the slot. A
+ * running catch-up job proves nothing by itself. A write received only after
+ * the transfer gave up the slot, or a transfer never admitted, means the case
+ * was not exercised.
  *
  * `ctx` is { devnet, edges, graphs, io, report, precondition, boundMs, sub }; `pub` and `big` are graphs.
  */
@@ -58,8 +51,8 @@ export async function busyMember(ctx, pub, big) {
   const offset = devnet.logSize(member2);
   const isTransfer = admission => admission.label.includes(`:${big.id}:`);
   await graphs.subscribe(member2, big);
-  const admitted = await waitFor(async () => {
-    const held = heldTransfer(await slotReading(devnet, member2), readTrace(member2.trace), isTransfer);
+  const admitted = await waitFor(() => {
+    const held = heldTransfer(readTrace(member2.trace), isTransfer);
     return { ok: Boolean(held.transfer), ...held };
   }, 30_000, 500);
   if (!admitted.ok) {
@@ -73,9 +66,8 @@ export async function busyMember(ctx, pub, big) {
   ];
   const pairs = await watched(handles);
   const until = Date.now();
-  const policy = singleSlotProblem(await slotReading(devnet, member2));
   const readAt = Date.now();
-  const busy = busySlotCovered({ transfer: admitted.transfer, admissions: readTrace(member2.trace), policy, readAt, until });
+  const busy = busySlotCovered({ transfer: admitted.transfer, admissions: readTrace(member2.trace), readAt, until });
   for (const pair of pairs) {
     // A receipt counts only when the transfer had not given up the slot by then.
     const received = heldAt(pair);

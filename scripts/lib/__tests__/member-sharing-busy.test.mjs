@@ -10,10 +10,10 @@ import { busyMember } from '../member-sharing/busy-member.mjs';
  * large graph its transfer takes the only slot, as its admission trace says,
  * and gives it up `runsMs` later; with `afterwards: 'pull'` a pull of the
  * public graph takes the slot then. Each write is found by its reads at
- * `receivedAt` (given the transfer). `policy` is what member 2's diagnostics
- * report. Returns the lines case 6 reported.
+ * `receivedAt` (given the transfer). `policy` is the general pool's policy
+ * its trace records. Returns the lines case 6 reported.
  */
-async function runCase6(t, { runsMs, afterwards = 'nothing', receivedAt, policy = { inflightLimit: 1, queueLimit: 0 }, writesTrace = true }) {
+async function runCase6(t, { runsMs, afterwards = 'nothing', receivedAt, policy = { limit: 1, queueLimit: 0, partitioned: false }, writesTrace = true }) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-case6-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const owner = { number: 7, role: 'owner', label: 'node7 (owner)', member: false };
@@ -21,20 +21,17 @@ async function runCase6(t, { runsMs, afterwards = 'nothing', receivedAt, policy 
   const member2 = { number: 9, role: 'member2', label: 'node9 (member2)', member: true, trace: join(dir, 'sync-admissions.jsonl') };
   const pub = { key: 'public', id: '0xabc/issue-3251-public-1', registered: false, private: false };
   const big = { key: 'large', id: '0xabc/issue-3251-large-1', registered: false, private: false };
-  const traced = (event, id, label) => {
-    if (writesTrace) appendFileSync(member2.trace, `${JSON.stringify({ event, id, label, at: Date.now() })}\n`);
+  const traced = (event, id, label, reserved = false) => {
+    if (writesTrace) appendFileSync(member2.trace, `${JSON.stringify({ event, id, label, reserved, ...policy, at: Date.now() })}\n`);
   };
   let transfer = null;
   const timers = [];
   t.after(() => timers.forEach(clearTimeout));
+  // Case 6 reads no diagnostics: they report one pool, grown by the reserved slot (#3258).
   const devnet = {
     logSize: () => 0,
     logSince: () => '',
-    async api(node, method, path) {
-      assert.equal(path, '/api/diagnostics/backpressure');
-      const json = { schedulers: [{ scheduler: 'sync-global', capacityModel: 'shared', totals: { inflight: 1, ...policy } }] };
-      return { status: 200, json, text: JSON.stringify(json) };
-    },
+    async api(node, method, path) { throw new Error(`case 6 asked ${path}`); },
   };
   const graphs = {
     async subscribe(node, graph) {
