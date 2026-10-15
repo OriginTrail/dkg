@@ -53,6 +53,14 @@ interface QueuedPublishFinalizationPhase {
   failed(step: RequiredFinalizationStep, error: unknown): void;
 }
 
+/** A successful void write has completed; boolean cleanup callbacks keep their own verdict. */
+function completedWrite(write: () => Promise<void>): () => Promise<boolean> {
+  return async () => {
+    await write();
+    return true;
+  };
+}
+
 /**
  * One ordered phase for both create and update. Required outcomes are collected locally,
  * rather than mutating a certificate across transaction preparation and two branch tails.
@@ -63,12 +71,10 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
 ): Promise<true | undefined> {
   const required = async (
     step: RequiredFinalizationStep,
-    run: () => Promise<void | boolean>,
+    run: () => Promise<boolean>,
   ): Promise<StepOutcome> => {
     try {
-      const result = await run();
-      const requiresTrue = step === 'publishedGraphClear' || step === 'legacySwmRetire';
-      return (requiresTrue ? result === true : result !== false) ? 'complete' : 'incomplete';
+      return await run() === true ? 'complete' : 'incomplete';
     } catch (error) {
       phase.failed(step, error);
       return 'failed';
@@ -81,18 +87,18 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   const outcomes: StepOutcome[] = [];
   if (phase.confirmed) {
     outcomes.push(phase.hasChainResult
-      ? await required('receiptWrite', phase.receiptWrite) : 'not-required');
+      ? await required('receiptWrite', completedWrite(phase.receiptWrite)) : 'not-required');
     const cleared = await required('publishedGraphClear', phase.publishedGraphClear);
     outcomes.push(cleared);
     // A thrown clear skips retirement, but an incomplete clear still attempts it, as before.
     if (cleared !== 'failed') outcomes.push(await required('legacySwmRetire', phase.legacySwmRetire));
     outcomes.push(phase.remainingSwmClear
-      ? await required('remainingSwmClear', phase.remainingSwmClear) : 'not-required');
+      ? await required('remainingSwmClear', completedWrite(phase.remainingSwmClear)) : 'not-required');
     outcomes.push(phase.updateProvenance
-      ? await required('updateProvenance', phase.updateProvenance) : 'not-required');
-    outcomes.push(await required('lifecycleStamp', phase.lifecycleStamp));
+      ? await required('updateProvenance', completedWrite(phase.updateProvenance)) : 'not-required');
+    outcomes.push(await required('lifecycleStamp', completedWrite(phase.lifecycleStamp)));
     if (phase.hasChainResult) await phase.finalizationGossip();
-    outcomes.push(await required('shareMarkerClear', phase.shareMarkerClear));
+    outcomes.push(await required('shareMarkerClear', completedWrite(phase.shareMarkerClear)));
   }
   const catalogCompletionRecorded = await phase.catalogObserver();
   phase.ended('catalogObserver');
