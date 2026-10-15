@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { withKeyedLocks } from './keyed-lock.js';
 
 export type ClaimLockKind = 'claim' | 'admission' | 'transition' | 'recovery' | 'sweep' | 'admin';
 type TraceFields = Readonly<Record<string, string | number | boolean | undefined>>;
@@ -57,27 +58,24 @@ export async function withObservedClaimLock<T>(
   const trace: ClaimLockTrace = {
     emit: (event, detail = {}) => { observer.emit(event, { ...fields, ...detail }, walletId); },
   };
-  const previous = queues.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const next = new Promise<void>((resolve) => { release = resolve; });
-  queues.set(key, next);
-  const waitingAt = observer.emit('claim_lock_wait', fields, walletId);
-  await previous;
-  const acquiredAt = observer.emit('claim_lock_acquired', fields, walletId);
+  let waitingAt: number | undefined;
+  let acquiredAt: number | undefined;
   let result = 'error';
-  try {
+  return await withKeyedLocks(queues, [key], async () => {
     const value = await fn(trace);
     result = 'success';
     return value;
-  } finally {
-    release();
-    if (queues.get(key) === next) queues.delete(key);
-    observer.emit('claim_lock_released', {
-      ...fields, result,
-      waitMs: waitingAt === undefined || acquiredAt === undefined ? undefined : acquiredAt - waitingAt,
-      acquiredAtMs: acquiredAt,
-    }, walletId);
-  }
+  }, {
+    queued: () => { waitingAt = observer.emit('claim_lock_wait', fields, walletId); },
+    acquired: () => { acquiredAt = observer.emit('claim_lock_acquired', fields, walletId); },
+    released: () => {
+      observer.emit('claim_lock_released', {
+        ...fields, result,
+        waitMs: waitingAt === undefined || acquiredAt === undefined ? undefined : acquiredAt - waitingAt,
+        acquiredAtMs: acquiredAt,
+      }, walletId);
+    },
+  });
 }
 
 export async function traceProcessNext<T extends { readonly jobId: string }>(

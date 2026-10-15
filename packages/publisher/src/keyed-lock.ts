@@ -1,3 +1,10 @@
+/** Synchronous, best-effort boundary observations; hooks never control lock ownership. */
+export interface KeyedLockObservation {
+  queued?: () => void;
+  acquired?: () => void;
+  released?: () => void;
+}
+
 /**
  * Gate-based multi-key lock — the single canonical implementation of this concurrency
  * idiom in the publisher package. The `withWriteLocks` methods in `dkg-publisher.ts`
@@ -21,13 +28,16 @@ export async function withKeyedLocks<T>(
   lockMap: Map<string, Promise<void>>,
   keys: string[],
   fn: () => Promise<T>,
+  observation?: KeyedLockObservation,
 ): Promise<T> {
   const uniqueKeys = [...new Set(keys)].sort();
   const predecessor = Promise.all(uniqueKeys.map((k) => lockMap.get(k) ?? Promise.resolve()));
   let release!: () => void;
   const gate = new Promise<void>((r) => { release = r; });
   for (const k of uniqueKeys) lockMap.set(k, gate);
+  observeLock(observation, 'queued');
   await predecessor;
+  observeLock(observation, 'acquired');
   try {
     return await fn();
   } finally {
@@ -35,7 +45,14 @@ export async function withKeyedLocks<T>(
     for (const k of uniqueKeys) {
       if (lockMap.get(k) === gate) lockMap.delete(k);
     }
+    observeLock(observation, 'released');
   }
+}
+
+function observeLock(observation: KeyedLockObservation | undefined, phase: keyof KeyedLockObservation): void {
+  try {
+    observation?.[phase]?.();
+  } catch { /* Observation cannot change registration, execution, or release. */ }
 }
 
 /**
