@@ -1,5 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import { exactExportStorePriority } from './public-snapshot-store-admission.js';
 
 export const EXACT_EXPORT_METADATA_OPERATION = 'sync.responder.exactAssetExport.metadata';
 
@@ -17,7 +18,7 @@ export async function retryExactMetadataAdmission<T>(
     catch (error) {
       signal?.throwIfAborted();
       if (attempt >= 2 || !isStoreSchedulerBusyError(error)
-        || error.priority !== 'background' || error.operation !== EXACT_EXPORT_METADATA_OPERATION) throw error;
+        || error.priority !== exactExportStorePriority() || error.operation !== EXACT_EXPORT_METADATA_OPERATION) throw error;
       const started = performance.now();
       try { await delay(250 * (attempt + 1), undefined, { signal }); }
       catch (error) { signal?.throwIfAborted(); throw error; }

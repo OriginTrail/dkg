@@ -1,6 +1,7 @@
 import { createEncodedResponseLease } from './encoded-response-lease.js';
 import type { PreparedContentCache } from './prepared-content-cache.js';
 import { EXACT_EXPORT_METADATA_OPERATION, retryExactMetadataAdmission } from './exact-metadata-admission.js';
+import { exactExportStorePriority } from './public-snapshot-store-admission.js';
 import { assertSafeIri, compareCodePoint } from '@origintrail-official/dkg-core';
 import {
   StoreResponseTooLargeError,
@@ -294,7 +295,7 @@ export function createBoundedExactAssetExportCache(params: {
         GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(request.assetUal)}> ?predicate ?object }
       } LIMIT ${METADATA_MAX_ROWS + 1}
     `, {
-      source: EXACT_EXPORT_METADATA_OPERATION, priority: 'background',
+      source: EXACT_EXPORT_METADATA_OPERATION, priority: exactExportStorePriority(),
       signal: request.signal, maxResponseBytes: METADATA_MAX_BYTES,
     }), request.signal, waitMs => observeExactBatch(() => request.onStage?.('export-metadata-admission-retry', waitMs))); } catch (error) {
       if (error instanceof StoreResponseTooLargeError) {
@@ -425,7 +426,7 @@ export function createBoundedExactAssetExportCache(params: {
             rowOverheadBytes: 160, heapAccounting: 'output-graph',
           },
           queryOptions: {
-            source: 'sync.responder.exactAssetExport.payload', priority: 'background', signal: request.signal,
+            source: 'sync.responder.exactAssetExport.payload', priority: exactExportStorePriority(), signal: request.signal,
           },
           onQuerySettled: () => {
             // Includes scheduler wait, HTTP/body settlement and JSON decoding.

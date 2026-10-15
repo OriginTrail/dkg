@@ -5,6 +5,7 @@ import { BULK_GRAPH_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
 import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson, encodeBulkRefusal, encodeBulkChunkEnd,
   validateBulkGraphRequest, type BulkGraphRequest } from '../bulk-graph-contract.js';
 import type { PublicAssetResponderOptions, PublicAssetServingOptions } from './public-asset-responder.js';
+import { withPublicSnapshotStoreReads } from './public-snapshot-store-admission.js';
 
 import { observeExactBatch as observe } from '../exact-batch-observation.js';
 const EMPTY = new Uint8Array();
@@ -23,7 +24,7 @@ export function registerPublicBulkGraph(router: ProtocolRouter, options: PublicA
       signal.throwIfAborted(); return request;
     });
   }, (request, session, peer) => options.admission.withAuthorizedResponseAdmission(peer, request.contextGraphId,
-    session.signal, () => servePublicBulkChunk(request, session, options)));
+    session.signal, () => withPublicSnapshotStoreReads(() => servePublicBulkChunk(request, session, options))));
 }
 
 export async function servePublicBulkChunk(request: BulkGraphRequest, session: Pick<BulkGraphSession, 'signal' | 'next' | 'send'>, options: PublicAssetServingOptions): Promise<void> {
