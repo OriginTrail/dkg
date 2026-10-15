@@ -591,6 +591,7 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
 
       const shutdownStarted = beginGracefulShutdown({
         state: daemonState,
+        stopCatchupTriggers: () => {},
         log: () => {},
         removeApiPort: async () => { enteredWindow(); await held; },
       });
@@ -617,6 +618,42 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
     // Nothing minted: a job created here would be queued against a runner whose
     // worker is about to be terminated.
     expect(metrics.jobs()).toHaveLength(0);
+  });
+
+  it('stops the triggers of later catch-up jobs after closing admission and ending the share waits, before that first await', async () => {
+    const order: string[] = [];
+    await beginGracefulShutdown({
+      state: daemonState,
+      endShareAdmissionWaits: () => {
+        order.push(`end share waits (accepting jobs: ${daemonState.catchupAcceptingJobs})`);
+      },
+      stopCatchupTriggers: () => {
+        order.push(`stop catch-up triggers (accepting jobs: ${daemonState.catchupAcceptingJobs})`);
+      },
+      log: (message) => order.push(`log: ${message}`),
+      removeApiPort: async () => { order.push('remove api.port'); },
+    });
+
+    expect(order).toEqual([
+      'end share waits (accepting jobs: false)',
+      'stop catch-up triggers (accepting jobs: false)',
+      'log: Shutting down...',
+      'remove api.port',
+    ]);
+  });
+
+  it('goes on when stopping the catch-up triggers throws', async () => {
+    const logs: string[] = [];
+    let removed = false;
+    await beginGracefulShutdown({
+      state: daemonState,
+      stopCatchupTriggers: () => { throw new Error('listener already detached'); },
+      log: (line) => logs.push(line),
+      removeApiPort: async () => { removed = true; },
+    });
+
+    expect(removed).toBe(true);
+    expect(logs).toEqual(['Catch-up trigger stop error: listener already detached', 'Shutting down...']);
   });
 
   it('…and that same subscribe SUCCEEDS when no shutdown is in flight', async () => {
