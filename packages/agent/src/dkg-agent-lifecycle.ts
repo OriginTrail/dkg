@@ -10344,7 +10344,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions = {},
   ): Promise<ContextGraphSub> {
-    return activatePersistedContextGraphSubscriptionTransaction(row, {
+    const activated = await activatePersistedContextGraphSubscriptionTransaction(row, {
       install: (record, input) => this.setContextGraphSubscription(record.id, {
         name: record.name,
         syncMode: 'always-on',
@@ -10382,6 +10382,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return committed;
       },
     }, options);
+    // Activation restores the persisted flags and starts no catch-up: the
+    // daemon decides whether this subscription still needs one.
+    this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: row.id });
+    return activated;
   }
 
   /**

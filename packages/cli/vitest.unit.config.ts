@@ -90,6 +90,12 @@ export default defineConfig({
           // Private-CG bootstrap readiness: clean-empty responses are only
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
+          // A public graph its subscribe job left unproven gets the job again
+          // (#3207). The real catch-up worker behind a fake thread; no hardhat.
+          'test/context-graph-readiness-repeat.test.ts',
+          // A persisted subscription restored unsynced gets a catch-up job
+          // (#3251). Agent double and stub runner; no hardhat.
+          'test/context-graph-activation-catchup.test.ts',
           'test/context-graph-authority-attribution.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
           // Subscribing by an on-chain name hash (Base #33): route, catch-up
