@@ -34,7 +34,7 @@ function scheduler(options: RecentSharedMemoryPullOptions = {}) {
   const pulls: Array<[string, string]> = [];
   const errors: Array<[string, string]> = [];
   const state = {
-    subscribed: new Set<string>(),
+    eligibleGate: undefined as undefined | Promise<void>,
     eligible: new Set<string>(),
     owners: new Map<string, string[]>(),
     others: [] as string[],
@@ -42,8 +42,10 @@ function scheduler(options: RecentSharedMemoryPullOptions = {}) {
     pull: undefined as undefined | ((contextGraphId: string, peerId: string) => Promise<number>),
   };
   const ports: RecentSharedMemoryPullPorts = {
-    subscribedGraphs: () => state.subscribed,
-    eligible: async (contextGraphId) => state.eligible.has(contextGraphId),
+    eligible: async (contextGraphId) => {
+      await state.eligibleGate;
+      return state.eligible.has(contextGraphId);
+    },
     sources: async (contextGraphId) => ({
       owners: state.owners.get(contextGraphId) ?? [],
       others: state.others,
@@ -105,26 +107,66 @@ describe('recent shared-memory pulls (#3251)', () => {
     expect(h.pulls.length).toBeGreaterThan(RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS / INTERVAL);
   });
 
-  it('counts a subscription made after the first tick, not the ones a restart restores', async () => {
+  it('starts no pull once closed, and its drain waits for the running tick to return', async () => {
     const h = scheduler();
-    h.state.subscribed.add('urn:cg:restored');
-    h.state.eligible.add('urn:cg:restored');
-    h.state.eligible.add('urn:cg:new');
-    await h.pulls$.tick();
-    expect(h.pulls$.trackedGraphCount).toBe(0);
+    h.state.others = ['peer'];
+    for (const id of ['urn:cg:a', 'urn:cg:b']) {
+      h.state.eligible.add(id);
+      h.pulls$.noteActivity(id);
+    }
+    let open!: () => void;
+    h.state.eligibleGate = new Promise<void>((resolve) => { open = resolve; });
+    h.advance(INTERVAL);
+    const tick = h.pulls$.tick();
+    let drained = false;
+    const drain = h.pulls$.close().then(() => { drained = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(drained).toBe(false);
+    open();
+    await drain;
+    expect(await tick).toBe(0);
+    expect(h.pulls).toEqual([]);
+    expect(await h.pulls$.tick()).toBe(0);
+    h.pulls$.noteActivity('urn:cg:c');
+    expect(h.pulls$.trackedGraphCount).toBe(2);
+  });
 
-    h.state.subscribed.add('urn:cg:new');
-    await h.pulls$.tick();
-    expect(h.pulls$.trackedGraphCount).toBe(1);
+  it('ends a tick that waits for a slow pull at once when closed', async () => {
+    const h = scheduler();
+    h.state.eligible.add('urn:cg:slow');
+    h.state.others = ['peer'];
+    h.state.pull = () => new Promise<number>(() => {});
+    h.pulls$.noteActivity('urn:cg:slow');
+    h.advance(INTERVAL);
+    const tick = h.pulls$.tick();
+    await vi.waitFor(() => expect(h.pulls).toHaveLength(1));
+    await h.pulls$.close();
+    expect(await tick).toBe(1);
+  });
 
-    // Unsubscribed and subscribed again: a new subscription again.
-    h.advance(RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS);
-    h.state.subscribed.delete('urn:cg:new');
-    await h.pulls$.tick();
-    expect(h.pulls$.trackedGraphCount).toBe(0);
-    h.state.subscribed.add('urn:cg:new');
-    await h.pulls$.tick();
-    expect(h.pulls$.trackedGraphCount).toBe(1);
+  it('never forgets a graph whose pull runs, so it is never pulled twice at once', async () => {
+    const h = scheduler({ maxGraphs: 1, pullWaitMs: 1 });
+    h.state.others = ['peer'];
+    let finish!: (stored: number) => void;
+    h.state.pull = () => new Promise<number>((resolve) => { finish = resolve; });
+    h.state.eligible.add('urn:cg:a');
+    h.state.eligible.add('urn:cg:b');
+    h.pulls$.noteActivity('urn:cg:a');
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(1);
+
+    // Over the limit while a's pull runs: a stays, and noting it again keeps its state.
+    h.pulls$.noteActivity('urn:cg:b');
+    h.pulls$.noteActivity('urn:cg:a');
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(0);
+    expect(h.pulls.map(([id]) => id)).toEqual(['urn:cg:a']);
+
+    finish(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(1);
+    expect(h.pulls.map(([id]) => id)).toEqual(['urn:cg:a', 'urn:cg:a']);
   });
 
   it('takes the other connected peers in turn while no owner is connected', async () => {
@@ -237,7 +279,6 @@ describe('recent shared-memory pulls (#3251)', () => {
     expect(h.errors).toEqual([['urn:cg:failing-pull', 'stream reset']]);
 
     const failingSources = new RecentSharedMemoryPulls({
-      subscribedGraphs: () => [],
       eligible: async () => true,
       sources: async () => { throw new Error('meta read failed'); },
       pull: async () => 0,
@@ -255,6 +296,8 @@ describe('recent shared-memory pull runtime (#3251)', () => {
   const OWNER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
   const OTHER = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
   const GRAPH = '0x1111111111111111111111111111111111111111/public-unregistered';
+  const OWNER_WALLET = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const OWNED = `${OWNER_WALLET}/owned-here`;
   const agents: DKGAgent[] = [];
 
   afterEach(async () => {
@@ -292,7 +335,7 @@ describe('recent shared-memory pull runtime (#3251)', () => {
       options?: { source?: string },
     ) => {
       sharedPulls.push({ peerId, contextGraphIds, source: options?.source });
-      return { ...emptySharedMemorySyncResult(), insertedTriples: 3 };
+      return { ...emptySharedMemorySyncResult(), insertedTriples: 3, insertedDataTriples: 3 };
     };
     const rootReplays: string[] = [];
     internals.requestRfc64CatalogHeadReplaysFromConnectedPeersV1 = async (contextGraphId: string) => {
@@ -306,19 +349,15 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     const { agent, internals, sharedPulls, rootReplays } = await startedMember('Rfc3251MemberC');
     // The agent starts one on an Edge; this test drives its own on a test clock.
     expect(internals.recentSharedMemoryPulls).not.toBeNull();
-    internals.recentSharedMemoryPulls.stop();
+    await internals.recentSharedMemoryPulls.close();
     let clock = Date.now();
     const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
     try {
-      await runtime.tick();
-      internals.subscribedContextGraphs.set(GRAPH, {
-        subscribed: true,
-        synced: true,
-        sharedMemorySynced: true,
-        syncMode: 'always-on',
-      });
       // Root scope owned by the catalog, as on a persistent 10.0.24 member.
       vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(false);
+      // Subscribed the way the daemon's subscribe route does it.
+      agent.subscribeToContextGraph(GRAPH, { syncMode: 'always-on' });
 
       // Already synced from the owner 30 s ago: the reconciler skips it.
       peerSyncSessionDriver(asSyncOnConnectTestAgent(agent))
@@ -329,12 +368,12 @@ describe('recent shared-memory pull runtime (#3251)', () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(reconciled).not.toContain(OWNER);
 
-      // The subscription is noticed at the next tick; the write that reaches
-      // the owner right after that is pulled within one interval and one tick.
+      // A write that reaches the owner right after the subscribe is pulled
+      // within one interval and one tick.
       clock += TICK;
-      await runtime.tick();
+      expect(await runtime.tick()).toBe(0);
       expect(sharedPulls).toEqual([]);
-      clock += INTERVAL + TICK;
+      clock += INTERVAL;
       expect(await runtime.tick()).toBe(1);
       expect(sharedPulls).toEqual([{ peerId: OWNER, contextGraphIds: [GRAPH], source: 'reconcile' }]);
       expect(rootReplays).toEqual([GRAPH]);
@@ -343,42 +382,33 @@ describe('recent shared-memory pull runtime (#3251)', () => {
       expect(await runtime.tick()).toBe(1);
       expect(sharedPulls.map(({ peerId }) => peerId)).toEqual([OWNER, OWNER]);
     } finally {
-      runtime.stop();
+      await runtime.close();
     }
   });
 
-  it('pulls nothing on the owner, and no root replay while the graph is on the legacy lane', async () => {
-    const { agent, internals, sharedPulls, rootReplays } = await startedMember('Rfc3251Owner');
-    internals.recentSharedMemoryPulls.stop();
+  it('keeps pulling when a routing hint names this node, and replays no root on the legacy lane', async () => {
+    const { agent, internals, sharedPulls, rootReplays } = await startedMember('Rfc3251SelfHint');
+    await internals.recentSharedMemoryPulls.close();
     let clock = Date.now();
     const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
     try {
       internals.subscribedContextGraphs.set(GRAPH, { subscribed: true, synced: true, syncMode: 'always-on' });
       vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(true);
+      // A hint is no proof of ownership: the graph id names another wallet.
       internals.preferredSyncPeers.set(GRAPH, agent.peerId);
       runtime.noteActivity(GRAPH);
       clock += INTERVAL;
-      expect(await runtime.tick()).toBe(0);
-
-      internals.preferredSyncPeers.set(GRAPH, OWNER);
-      const member = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
-      try {
-        member.noteActivity(GRAPH);
-        clock += INTERVAL;
-        expect(await member.tick()).toBe(1);
-      } finally {
-        member.stop();
-      }
-      expect(sharedPulls.map(({ peerId }) => peerId)).toEqual([OWNER]);
+      expect(await runtime.tick()).toBe(1);
+      expect(sharedPulls.map(({ peerId }) => peerId)).toEqual([OTHER]);
       expect(rootReplays).toEqual([]);
     } finally {
-      runtime.stop();
+      await runtime.close();
     }
   });
 
   it('takes a received shared-memory write as activity, and a Verified Memory change as none', async () => {
     const { agent, internals, sharedPulls } = await startedMember('Rfc3251Received');
-    internals.recentSharedMemoryPulls.stop();
+    await internals.recentSharedMemoryPulls.close();
     let clock = Date.now();
     const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
     try {
@@ -394,19 +424,19 @@ describe('recent shared-memory pull runtime (#3251)', () => {
       expect(await runtime.tick()).toBe(1);
       expect(sharedPulls).toHaveLength(1);
 
-      runtime.stop();
+      await runtime.close();
       agent.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, { contextGraphId: 'urn:cg:later', layers: ['swm'] });
       clock += INTERVAL;
-      expect(await runtime.tick()).toBe(1);
-      expect(sharedPulls.map(({ contextGraphIds }) => contextGraphIds[0])).toEqual([GRAPH, GRAPH]);
+      expect(await runtime.tick()).toBe(0);
+      expect(sharedPulls).toHaveLength(1);
     } finally {
-      runtime.stop();
+      await runtime.close();
     }
   });
 
   it('takes an explicit subscribe as activity, also of a graph already subscribed, but not a restore', async () => {
     const { agent, internals, sharedPulls } = await startedMember('Rfc3251Subscribe');
-    internals.recentSharedMemoryPulls.stop();
+    await internals.recentSharedMemoryPulls.close();
     let clock = Date.now();
     const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
     internals.recentSharedMemoryPulls = runtime;
@@ -423,15 +453,41 @@ describe('recent shared-memory pull runtime (#3251)', () => {
       expect(await runtime.tick()).toBe(1);
       expect(sharedPulls.map(({ peerId }) => peerId)).toEqual([OWNER]);
     } finally {
-      runtime.stop();
+      await runtime.close();
     }
+  });
+
+  it('makes agent shutdown wait for a running tick, and starts no pull after it', async () => {
+    const { agent, internals, sharedPulls } = await startedMember('Rfc3251Shutdown');
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
+    internals.subscribedContextGraphs.set(GRAPH, { subscribed: true, synced: true, syncMode: 'always-on' });
+    let release!: () => void;
+    const lookup = new Promise<void>((resolve) => { release = resolve; });
+    internals.isPrivateContextGraph = async () => {
+      await lookup;
+      return false;
+    };
+    runtime.noteActivity(GRAPH);
+    clock += INTERVAL;
+    const tick = runtime.tick();
+    let stopped = false;
+    const stop = agent.stop().then(() => { stopped = true; });
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(stopped).toBe(false);
+    release();
+    await stop;
+    expect(await tick).toBe(0);
+    expect(sharedPulls).toEqual([]);
   });
 
   it('takes a local share as activity', async () => {
     const { internals } = await startedMember('Rfc3251LocalWrite');
     const noted: string[] = [];
-    internals.recentSharedMemoryPulls.stop();
-    internals.recentSharedMemoryPulls = { noteActivity: (id: string) => { noted.push(id); }, stop: () => {} };
+    await internals.recentSharedMemoryPulls.close();
+    internals.recentSharedMemoryPulls = { noteActivity: (id: string) => { noted.push(id); }, close: async () => {} };
     await internals.publishWorkspaceGossip(GRAPH, new Uint8Array(), createOperationContext('sync'))
       .catch(() => undefined);
     expect(noted).toEqual([GRAPH]);
@@ -453,6 +509,8 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     const debug = vi.fn();
     const subscriptions = new Map<string, Record<string, unknown>>([
       ['agents', { subscribed: true, synced: true, syncMode: 'always-on' }],
+      [OWNED, { subscribed: true, synced: true, syncMode: 'always-on' }],
+      ['urn:cg:curated-here', { subscribed: true, synced: true, syncMode: 'always-on' }],
       ['urn:cg:on-demand', { subscribed: true, synced: true, syncMode: 'on-demand' }],
       ['urn:cg:private', { subscribed: true, synced: true, syncMode: 'always-on' }],
       ['urn:cg:unconfirmed', { subscribed: true, synced: true, syncMode: 'always-on' }],
@@ -463,6 +521,8 @@ describe('recent shared-memory pull runtime (#3251)', () => {
       peerId: 'local-peer',
       node: { libp2p: { getPeers: () => [{ toString: () => OTHER }] } },
       subscribedContextGraphs: subscriptions,
+      localAgents: new Map([[OWNER_WALLET.toUpperCase().replace('0X', '0x'), {}]]),
+      isCuratorOf: async (contextGraphId: string) => contextGraphId === 'urn:cg:curated-here',
       preferredSyncPeers: new Map<string, string>(),
       networkAdmissionCoordinator: { isAcceptedPeer: () => true },
       eventBus: { on: () => {}, off: () => {} },
@@ -481,7 +541,8 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     const runtime = startRecentSharedMemoryPulls(agentLike, { now: () => clock, tickMs: 3_600_000 });
     try {
       for (const id of [
-        'agents', 'urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private', 'urn:cg:unconfirmed', 'urn:cg:failing',
+        'agents', OWNED, 'urn:cg:curated-here', 'urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private',
+        'urn:cg:unconfirmed', 'urn:cg:failing',
       ]) {
         runtime.noteActivity(id);
       }
@@ -497,11 +558,50 @@ describe('recent shared-memory pull runtime (#3251)', () => {
         'Safety-net shared-memory pull of "urn:cg:failing" did not run: stream reset',
       ));
     } finally {
-      runtime.stop();
+      await runtime.close();
     }
   });
 
-  it('logs a failed tick, keeps its timer, and lets go of the event bus when stopped', async () => {
+  it('lets a graph go when its pulls only store metadata again', async () => {
+    const subscriptions = new Map<string, Record<string, unknown>>([
+      ['urn:cg:quiet', { subscribed: true, synced: true, syncMode: 'always-on' }],
+    ]);
+    let pulls = 0;
+    const agentLike = {
+      peerId: 'local-peer',
+      node: { libp2p: { getPeers: () => [{ toString: () => OTHER }] } },
+      subscribedContextGraphs: subscriptions,
+      localAgents: new Map(),
+      isCuratorOf: async () => false,
+      preferredSyncPeers: new Map<string, string>(),
+      networkAdmissionCoordinator: { isAcceptedPeer: () => true },
+      eventBus: { on: () => {}, off: () => {} },
+      log: { debug: () => {} },
+      getCgMeta: async () => ({ curators: [], creators: [] }),
+      isPrivateContextGraph: async () => false,
+      canUseSharedMemoryForContextGraph: async () => true,
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
+      syncSharedMemoryFromPeerDetailed: async () => {
+        pulls += 1;
+        return { ...emptySharedMemorySyncResult(), insertedTriples: 19, insertedMetaTriples: 19 };
+      },
+    };
+    let clock = 0;
+    const runtime = startRecentSharedMemoryPulls(agentLike, { now: () => clock, tickMs: 3_600_000 });
+    try {
+      runtime.noteActivity('urn:cg:quiet');
+      for (let elapsed = 0; elapsed < RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS * 2; elapsed += INTERVAL) {
+        clock += INTERVAL;
+        await runtime.tick();
+      }
+      expect(pulls).toBe(RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS / INTERVAL - 1);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('logs a failed tick, keeps its timer, and lets go of the event bus when closed', async () => {
     const debug = vi.fn();
     const listeners = new Map<string, unknown>();
     const agentLike = {
@@ -510,20 +610,20 @@ describe('recent shared-memory pull runtime (#3251)', () => {
         off: (event: string) => { listeners.delete(event); },
       },
       log: { debug },
-      subscribedContextGraphs: {
-        [Symbol.iterator]: () => { throw new Error('subscriptions unavailable'); },
-      },
     };
-    const runtime = startRecentSharedMemoryPulls(agentLike, { tickMs: 5 });
+    const runtime = startRecentSharedMemoryPulls(agentLike, {
+      tickMs: 5,
+      now: () => { throw new Error('clock unavailable'); },
+    });
     try {
       expect(listeners.has(DKGEvent.MEMORY_GRAPH_CHANGED)).toBe(true);
       await vi.waitFor(() => expect(debug.mock.calls.length).toBeGreaterThanOrEqual(2));
       expect(debug).toHaveBeenCalledWith(
         expect.anything(),
-        'Safety-net shared-memory pull tick failed: subscriptions unavailable',
+        'Safety-net shared-memory pull tick failed: clock unavailable',
       );
     } finally {
-      runtime.stop();
+      await runtime.close();
     }
     expect(listeners.size).toBe(0);
   });

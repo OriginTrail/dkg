@@ -13,6 +13,7 @@
 
 import {
   createOperationContext,
+  deriveCuratorDidFromCgId,
   DKGEvent,
   SYSTEM_CONTEXT_GRAPHS,
   type OperationContext,
@@ -47,6 +48,7 @@ interface RecentSharedMemoryPullAgent {
     readonly libp2p: { getPeers(): ReadonlyArray<{ toString(): string }> };
   };
   readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
+  readonly localAgents: ReadonlyMap<string, unknown>;
   readonly preferredSyncPeers: Map<string, string>;
   readonly networkAdmissionCoordinator: { isAcceptedPeer(peerId: string): boolean };
   readonly eventBus: {
@@ -55,6 +57,7 @@ interface RecentSharedMemoryPullAgent {
   };
   readonly log: { debug(ctx: OperationContext, message: string): void };
   isPrivateContextGraph(contextGraphId: string): Promise<boolean>;
+  isCuratorOf(contextGraphId: string): Promise<boolean>;
   canUseSharedMemoryForContextGraph(contextGraphId: string): Promise<boolean>;
   selectCatchupPeers(peers: Array<{ toString(): string }>): Array<{ toString(): string }>;
   rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId: string): boolean;
@@ -70,11 +73,12 @@ interface RecentSharedMemoryPullAgent {
 }
 
 export interface RecentSharedMemoryPullRuntime {
-  /** The graph is in use here (a local write): keep pulling it for a while. */
+  /** The graph is in use here (a subscribe, a local write): keep pulling it for a while. */
   noteActivity(contextGraphId: string): void;
   /** One tick now; the timer runs them otherwise. */
   tick(): Promise<number>;
-  stop(): void;
+  /** Fence new pulls before shutdown; resolves once the running tick returned. */
+  close(): Promise<void>;
 }
 
 /**
@@ -125,6 +129,17 @@ export function startRecentSharedMemoryPulls(
   const ownerTtlMs = options.ownerTtlMs ?? RECENT_SHARED_MEMORY_OWNER_TTL_MS;
   const owners = new Map<string, { readonly peerId?: string; readonly at: number }>();
 
+  // Who owns the graph decides whether to pull it at all, so only what the
+  // graph id says (its owner wallet is a local agent) or, for an id without
+  // one, the curator the graph's metadata names counts. Where to pull from is
+  // a routing preference and may come from weaker hints (`ownerPeerOf`).
+  const ownedHere = async (contextGraphId: string): Promise<boolean> => {
+    const ownerDid = deriveCuratorDidFromCgId(contextGraphId);
+    if (ownerDid === null) return agent.isCuratorOf(contextGraphId);
+    const owner = ownerDid.slice('did:dkg:agent:'.length).toLowerCase();
+    return [...agent.localAgents.keys()].some((address) => address.toLowerCase() === owner);
+  };
+
   const ownerPeerOf = async (contextGraphId: string): Promise<string | undefined> => {
     const cached = owners.get(contextGraphId);
     if (cached !== undefined && now() - cached.at < ownerTtlMs) return cached.peerId;
@@ -139,16 +154,13 @@ export function startRecentSharedMemoryPulls(
   };
 
   const pulls = new RecentSharedMemoryPulls({
-    subscribedGraphs: () => [...agent.subscribedContextGraphs]
-      .filter(([, subscription]) => subscription.subscribed && subscription.syncMode === 'always-on')
-      .map(([contextGraphId]) => contextGraphId),
     eligible: async (contextGraphId) => {
       if (SYSTEM_CONTEXT_GRAPH_IDS.has(contextGraphId)) return false;
       const subscription = agent.subscribedContextGraphs.get(contextGraphId);
       if (subscription?.subscribed !== true || subscription.syncMode !== 'always-on') return false;
       if (await agent.isPrivateContextGraph(contextGraphId)) return false;
       // The owner holds every write its members send it.
-      return (await ownerPeerOf(contextGraphId)) !== agent.peerId;
+      return !(await ownedHere(contextGraphId));
     },
     sources: async (contextGraphId) => {
       // Authority not confirmed yet: the sync would only be refused. Next interval.
@@ -170,11 +182,12 @@ export function startRecentSharedMemoryPulls(
         // The catalog owns this graph's root scope: replay its heads.
         await agent.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId, options.signal);
       }
-      return shared.insertedTriples;
+      // New data keeps the graph in use; metadata a sync stores again does not.
+      return shared.insertedDataTriples;
     },
     onPulled: (contextGraphId, peerId, stored) => agent.log.debug(
       ctx,
-      `Safety-net shared-memory pull of "${contextGraphId}" from ${peerId.slice(-8)}: ${stored} triple(s) stored`,
+      `Safety-net shared-memory pull of "${contextGraphId}" from ${peerId.slice(-8)}: ${stored} data triple(s) stored`,
     ),
     onError: (contextGraphId, error) => agent.log.debug(
       ctx,
@@ -200,9 +213,10 @@ export function startRecentSharedMemoryPulls(
   return {
     noteActivity: (contextGraphId) => pulls.noteActivity(contextGraphId),
     tick,
-    stop: () => {
+    close: () => {
       clearInterval(timer);
       agent.eventBus.off(DKGEvent.MEMORY_GRAPH_CHANGED, onMemoryGraphChanged);
+      return pulls.close();
     },
   };
 }

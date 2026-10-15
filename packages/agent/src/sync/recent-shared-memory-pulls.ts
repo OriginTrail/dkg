@@ -13,8 +13,9 @@
  *
  * While a graph is in use here, this scheduler pulls it from one connected
  * holder, the owner first, at a bounded interval. A graph is in use for
- * `activityWindowMs` after it was subscribed, written here, received a
- * shared-memory write, or a pull of it stored data.
+ * `activityWindowMs` after the caller says so ({@link noteActivity}: a
+ * subscribe, a local write, a received write) or after a pull of it stored
+ * new data.
  *
  * Bounds: one pull of a graph per `intervalMs` and never two at once,
  * `pullsPerTick` pulls per tick, one tick at a time, a tick waits at most
@@ -40,12 +41,10 @@ export interface RecentSharedMemoryPullSources {
 }
 
 export interface RecentSharedMemoryPullPorts {
-  /** Every subscribed graph this node could pull, read once per tick. */
-  subscribedGraphs(): Iterable<string>;
   /** Still a subscription this node should pull: public, always-on, not owned here. */
   eligible(contextGraphId: string): Promise<boolean>;
   sources(contextGraphId: string): Promise<RecentSharedMemoryPullSources>;
-  /** Pull the graph from one peer; resolves to the number of triples it stored. */
+  /** Pull the graph from one peer; resolves to the number of new data triples it stored. */
   pull(contextGraphId: string, peerId: string): Promise<number>;
   onPulled?(contextGraphId: string, peerId: string, stored: number): void;
   onError?(contextGraphId: string, error: unknown): void;
@@ -67,13 +66,13 @@ interface GraphState {
   turn: number;
 }
 
-function waitAtMost(work: Promise<unknown>, ms: number): Promise<void> {
+function waitAtMost(work: Promise<unknown>, ms: number, closed: Promise<void>): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const elapsed = new Promise<void>((resolve) => {
     timer = setTimeout(resolve, ms);
     timer.unref?.();
   });
-  return Promise.race([work.then(() => undefined), elapsed]).finally(() => clearTimeout(timer));
+  return Promise.race([work.then(() => undefined), elapsed, closed]).finally(() => clearTimeout(timer));
 }
 
 export class RecentSharedMemoryPulls {
@@ -86,9 +85,10 @@ export class RecentSharedMemoryPulls {
   readonly #maxGraphs: number;
   /** In order of last activity, oldest first. */
   readonly #graphs = new Map<string, GraphState>();
-  /** Subscriptions seen at the previous tick; undefined before the first. */
-  #subscribed: Set<string> | undefined;
-  #ticking = false;
+  readonly #closedSignal: Promise<void>;
+  #markClosed!: () => void;
+  #closed = false;
+  #tickRun: Promise<number> | undefined;
 
   constructor(ports: RecentSharedMemoryPullPorts, options: RecentSharedMemoryPullOptions = {}) {
     this.#ports = ports;
@@ -98,6 +98,7 @@ export class RecentSharedMemoryPulls {
     this.#pullsPerTick = options.pullsPerTick ?? RECENT_SHARED_MEMORY_PULLS_PER_TICK;
     this.#pullWaitMs = options.pullWaitMs ?? RECENT_SHARED_MEMORY_PULL_WAIT_MS;
     this.#maxGraphs = options.maxGraphs ?? RECENT_SHARED_MEMORY_MAX_GRAPHS;
+    this.#closedSignal = new Promise<void>((resolve) => { this.#markClosed = resolve; });
   }
 
   get trackedGraphCount(): number {
@@ -110,6 +111,7 @@ export class RecentSharedMemoryPulls {
    * subscribe's catch-up, a write that just arrived) is that fresh already.
    */
   noteActivity(contextGraphId: string): void {
+    if (this.#closed) return;
     const now = this.#now();
     const state = this.#graphs.get(contextGraphId);
     this.#graphs.delete(contextGraphId);
@@ -119,53 +121,54 @@ export class RecentSharedMemoryPulls {
       return;
     }
     this.#graphs.set(contextGraphId, { activeAt: now, pulledAt: now, inFlight: false, turn: 0 });
-    for (const [oldest] of this.#graphs) {
+    // Never forget a graph whose pull runs: a new state for it would let a
+    // second pull of the same graph start beside the first.
+    for (const [oldest, oldestState] of this.#graphs) {
       if (this.#graphs.size <= this.#maxGraphs) break;
-      this.#graphs.delete(oldest);
+      if (!oldestState.inFlight) this.#graphs.delete(oldest);
     }
   }
 
   /** One round: pull every due graph, the longest unpulled first, within the bounds. */
-  async tick(): Promise<number> {
-    if (this.#ticking) return 0;
-    this.#ticking = true;
-    try {
-      this.#noteNewSubscriptions();
-      const now = this.#now();
-      for (const [contextGraphId, state] of this.#graphs) {
-        if (!state.inFlight && now - state.activeAt >= this.#activityWindowMs) {
-          this.#graphs.delete(contextGraphId);
-        }
-      }
-      const due = [...this.#graphs]
-        .filter(([, state]) => !state.inFlight && now - state.pulledAt >= this.#intervalMs)
-        .sort(([, left], [, right]) => left.pulledAt - right.pulledAt)
-        .slice(0, this.#pullsPerTick);
-      let pulls = 0;
-      for (const [contextGraphId, state] of due) {
-        if (this.#graphs.get(contextGraphId) !== state) continue;
-        state.pulledAt = this.#now();
-        if (await this.#pull(contextGraphId, state)) pulls += 1;
-      }
-      return pulls;
-    } finally {
-      this.#ticking = false;
-    }
+  tick(): Promise<number> {
+    if (this.#closed || this.#tickRun !== undefined) return Promise.resolve(0);
+    const run = this.#tick().finally(() => {
+      this.#tickRun = undefined;
+    });
+    this.#tickRun = run;
+    return run;
   }
 
   /**
-   * A subscription made since the previous tick marks its graph active. The
-   * first tick only records what is subscribed, so the subscriptions a
-   * restart restores do not all start pulling at once.
+   * No pull starts after this. Resolves once the running tick has returned,
+   * which it does at its next step: a pull it waits for keeps running on its
+   * own and ends with the node's shutdown like any other sync.
    */
-  #noteNewSubscriptions(): void {
-    const subscribed = new Set(this.#ports.subscribedGraphs());
-    const previous = this.#subscribed;
-    this.#subscribed = subscribed;
-    if (previous === undefined) return;
-    for (const contextGraphId of subscribed) {
-      if (!previous.has(contextGraphId)) this.noteActivity(contextGraphId);
+  close(): Promise<void> {
+    this.#closed = true;
+    this.#markClosed();
+    return (this.#tickRun ?? Promise.resolve(0)).then(() => undefined);
+  }
+
+  async #tick(): Promise<number> {
+    const now = this.#now();
+    for (const [contextGraphId, state] of this.#graphs) {
+      if (!state.inFlight && now - state.activeAt >= this.#activityWindowMs) {
+        this.#graphs.delete(contextGraphId);
+      }
     }
+    const due = [...this.#graphs]
+      .filter(([, state]) => !state.inFlight && now - state.pulledAt >= this.#intervalMs)
+      .sort(([, left], [, right]) => left.pulledAt - right.pulledAt)
+      .slice(0, this.#pullsPerTick);
+    let pulls = 0;
+    for (const [contextGraphId, state] of due) {
+      if (this.#closed) break;
+      if (this.#graphs.get(contextGraphId) !== state) continue;
+      state.pulledAt = this.#now();
+      if (await this.#pull(contextGraphId, state)) pulls += 1;
+    }
+    return pulls;
   }
 
   async #pull(contextGraphId: string, state: GraphState): Promise<boolean> {
@@ -175,9 +178,10 @@ export class RecentSharedMemoryPulls {
         if (this.#graphs.get(contextGraphId) === state) this.#graphs.delete(contextGraphId);
         return false;
       }
+      if (this.#closed) return false;
       const { owners, others } = await this.#ports.sources(contextGraphId);
       const candidates = owners.length > 0 ? owners : others;
-      if (candidates.length === 0) return false;
+      if (this.#closed || candidates.length === 0) return false;
       peerId = candidates[state.turn % candidates.length]!;
       state.turn += 1;
     } catch (error) {
@@ -195,7 +199,7 @@ export class RecentSharedMemoryPulls {
       state.inFlight = false;
     });
     // A slow pull keeps its own graph busy but does not hold up the others.
-    await waitAtMost(pull, this.#pullWaitMs);
+    await waitAtMost(pull, this.#pullWaitMs, this.#closedSignal);
     return true;
   }
 }
