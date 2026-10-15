@@ -33,8 +33,10 @@ function scheduler(options: RecentSharedMemoryPullOptions = {}) {
   let clock = 1_000_000;
   const pulls: Array<[string, string]> = [];
   const errors: Array<[string, string]> = [];
+  const calls = { eligible: 0, sources: 0 };
   const state = {
     eligibleGate: undefined as undefined | Promise<void>,
+    sourcesGate: undefined as undefined | Promise<void>,
     eligible: new Set<string>(),
     owners: new Map<string, string[]>(),
     others: [] as string[],
@@ -43,13 +45,15 @@ function scheduler(options: RecentSharedMemoryPullOptions = {}) {
   };
   const ports: RecentSharedMemoryPullPorts = {
     eligible: async (contextGraphId) => {
+      calls.eligible += 1;
       await state.eligibleGate;
       return state.eligible.has(contextGraphId);
     },
-    sources: async (contextGraphId) => ({
-      owners: state.owners.get(contextGraphId) ?? [],
-      others: state.others,
-    }),
+    sources: async (contextGraphId) => {
+      calls.sources += 1;
+      await state.sourcesGate;
+      return { owners: state.owners.get(contextGraphId) ?? [], others: state.others };
+    },
     pull: async (contextGraphId, peerId) => {
       pulls.push([contextGraphId, peerId]);
       return state.pull ? state.pull(contextGraphId, peerId) : state.stored;
@@ -63,6 +67,7 @@ function scheduler(options: RecentSharedMemoryPullOptions = {}) {
     pulls$,
     pulls,
     errors,
+    calls,
     state,
     advance: (ms: number) => { clock += ms; },
   };
@@ -125,10 +130,29 @@ describe('recent shared-memory pulls (#3251)', () => {
     open();
     await drain;
     expect(await tick).toBe(0);
+    // No lookup for the next graph, no source lookup, no pull.
+    expect(h.calls).toEqual({ eligible: 1, sources: 0 });
     expect(h.pulls).toEqual([]);
     expect(await h.pulls$.tick()).toBe(0);
     h.pulls$.noteActivity('urn:cg:c');
     expect(h.pulls$.trackedGraphCount).toBe(2);
+  });
+
+  it('starts no pull when closed during the source lookup', async () => {
+    const h = scheduler();
+    h.state.eligible.add('urn:cg:a');
+    h.state.others = ['peer'];
+    h.pulls$.noteActivity('urn:cg:a');
+    let open!: () => void;
+    h.state.sourcesGate = new Promise<void>((resolve) => { open = resolve; });
+    h.advance(INTERVAL);
+    const tick = h.pulls$.tick();
+    await vi.waitFor(() => expect(h.calls.sources).toBe(1));
+    const drain = h.pulls$.close();
+    open();
+    await drain;
+    expect(await tick).toBe(0);
+    expect(h.pulls).toEqual([]);
   });
 
   it('ends a tick that waits for a slow pull at once when closed', async () => {

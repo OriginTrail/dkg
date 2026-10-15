@@ -131,7 +131,7 @@ export class RecentSharedMemoryPulls {
 
   /** One round: pull every due graph, the longest unpulled first, within the bounds. */
   tick(): Promise<number> {
-    if (this.#closed || this.#tickRun !== undefined) return Promise.resolve(0);
+    if (this.#tickRun !== undefined) return Promise.resolve(0);
     const run = this.#tick().finally(() => {
       this.#tickRun = undefined;
     });
