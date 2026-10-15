@@ -230,6 +230,9 @@ describe('runDaemonInner publisher startup cancellation', () => {
     expect(aborted).toHaveBeenCalledTimes(1);
     expect(mocks.beginGracefulShutdown).toHaveBeenCalledTimes(1);
     expect(aborted.mock.invocationCallOrder[0]).toBeLessThan(mocks.beginGracefulShutdown.mock.invocationCallOrder[0]);
+    // GH#3052: the daemon hands graceful shutdown the agent's end of the share admission waits,
+    // which runs before the first teardown await.
+    expect(agent.endLegacySwmShareAdmissionWaits).toHaveBeenCalledTimes(1);
     await publisherStopEntered.promise;
     await vi.advanceTimersByTimeAsync(0);
     expect(mocks.publisherStopFinished).not.toHaveBeenCalled();

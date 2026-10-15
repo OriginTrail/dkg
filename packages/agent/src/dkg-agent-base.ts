@@ -5,6 +5,7 @@ import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core
 import { VmRecoveryTransportBudgetPolicy } from './vm-recovery-transport-budget-policy.js';
 import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
+import type { RecentSharedMemoryPullRuntime } from './recent-shared-memory-pull-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -1881,6 +1882,8 @@ export class DKGAgentBase {
   /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
   protected readonly selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
+  /** Safety-net pull of public graphs in use here (#3251); Edge only. */
+  protected recentSharedMemoryPulls: RecentSharedMemoryPullRuntime | null = null;
   /** A.4-lite+: periodic warm/pinned Core-connection reconcile (opt-in). */
   protected warmCoreTimer: ReturnType<typeof setInterval> | null = null;
   protected authorityIndexSnapshotRuntime?: { close(): Promise<void> };

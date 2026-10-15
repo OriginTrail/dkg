@@ -15,7 +15,9 @@
  * This pull is deliberately narrow and fail-closed:
  *  - it runs only for a live subscription whose accepted RFC-64 policy is
  *    PUBLIC (the owner-signed seed or finalized chain evidence this node has
- *    already authenticated), never on unsigned local metadata;
+ *    already authenticated), never on unsigned local metadata; a registered
+ *    public graph needs it as much as an unregistered one, because the chain
+ *    proves the policy and not the declaration;
  *  - it asks only currently connected peers, bounded fan-out, first verified
  *    snapshot wins, and it never dials;
  *  - it installs only an unambiguous public root definition
@@ -37,6 +39,7 @@ import {
 
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { holdsAuthoritativePublicDefinitionV1 } from './context-graph-meta-confirmation.js';
 import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
 import { rfc64UnregisteredAuthorityOwnerV1 } from
   './rfc64/unregistered-authority-transport-v1.js';
@@ -143,7 +146,13 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
       ? accepted.policy.source.ownerAddress
       : rfc64UnregisteredAuthorityOwnerV1(contextGraphId) ?? undefined;
     if (expectedCuratorAddress === undefined) return 'no-accepted-public-policy';
-    if (await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
+    // "Confirmed" here means the declaration is HELD locally. The readiness
+    // confirmation (`hasConfirmedMetaState`) is the wrong predicate for that:
+    // an active public chain proof confirms a registered public graph on its
+    // own, so a replica with no `_meta` at all would skip this pull and never
+    // learn the declaration; its listing then shows no access policy and its
+    // writes are refused (#3264).
+    if (await holdsAuthoritativePublicDefinitionV1(this.store, contextGraphId).catch(() => false)) {
       return 'already-confirmed';
     }
     signal?.throwIfAborted();
