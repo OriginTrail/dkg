@@ -130,32 +130,122 @@ export function admissionStarts(logText, needle) {
 }
 
 /**
- * Whether one admission held the node's sync slot through [from, until].
- * `admissionStartMs` is when that admission started (from the log); `samples`
- * are { at, inflight, oldestActiveAgeMs } of the node's `sync-global`
- * scheduler (or { at, unreadable }). A sample proves the admission still runs
- * when some work is in flight and the oldest running admission started when
- * this one did. The samples must cover the window without a gap longer than
- * `maxGapMs`. A catch-up job that is merely running proves nothing: without an
- * admission there is nothing that holds the slot.
+ * Whether a reading shows the policy of case 6's member: one sync slot and no
+ * queue (`syncGlobalMaxInflight: 1`, `syncGlobalQueueLimit: 0`). The reading
+ * reports the node's effective policy, so an environment override
+ * (`DKG_SYNC_GLOBAL_MAX_INFLIGHT`, …) that gave it spare slots shows here.
+ * Returns null when it does, else the reason.
+ */
+export function singleSlotProblem(reading) {
+  if (!reading || reading.unreadable) return `the sync slots could not be read (${reading?.unreadable ?? 'no reading'})`;
+  if (reading.capacityModel !== 'shared') return `the sync slots are not one shared pool (${reading.capacityModel ?? 'no capacity model'})`;
+  if (reading.inflightLimit !== 1) return `the node runs ${reading.inflightLimit ?? 'an unknown number of'} sync slot(s), not one`;
+  if (reading.queueLimit !== 0) return `the node has a sync queue of ${reading.queueLimit ?? 'unknown size'}, not none`;
+  return null;
+}
+
+/**
+ * Whether one admission held the node's only sync slot through [from, until],
+ * the window of the writes and of their receipt checks. `admissionStartMs` is
+ * when that admission started (from the log); `samples` are readings of the
+ * node's `sync-global` scheduler ({ at, inflight, oldestActiveAgeMs,
+ * inflightLimit, queueLimit, capacityModel }, or { at, unreadable }).
+ *
+ * Only readings inside the window are evidence: a reading taken before it (a
+ * free slot before the transfer was admitted, say) neither proves nor
+ * disproves anything about it. Each reading in the window must show the
+ * single-slot policy, work in flight, and the oldest running admission
+ * started when this one did; the window must hold at least one reading and no
+ * gap longer than `maxGapMs` (from its start, between readings, to its end).
+ * A catch-up job that is merely running proves nothing: without an admission
+ * there is nothing that holds the slot.
  * Returns { held: true, provenUntil } or { held: false, reason, provenUntil }.
  */
 export function busySlotCovered({ admissionStartMs, samples, from, until, toleranceMs = 2500, maxGapMs = 5000 }) {
   if (!Number.isFinite(admissionStartMs)) return { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null };
-  const inWindow = samples.filter(sample => sample.at >= from - maxGapMs && sample.at <= until + maxGapMs).sort((a, b) => a.at - b.at);
+  const inWindow = samples.filter(sample => sample.at >= from && sample.at <= until).sort((a, b) => a.at - b.at);
+  if (inWindow.length === 0) return { held: false, reason: 'no reading of the sync slot in the window', provenUntil: null };
   let previous = from;
   let provenUntil = null;
   for (const sample of inWindow) {
-    if (sample.at > until) break;
     if (sample.at - previous > maxGapMs) return { held: false, reason: `no reading of the sync slot for ${Math.round((sample.at - previous) / 1000)} s`, provenUntil };
     if (sample.unreadable) return { held: false, reason: `the sync slot could not be read (${sample.unreadable})`, provenUntil };
+    const policy = singleSlotProblem(sample);
+    if (policy) return { held: false, reason: policy, provenUntil };
     if (!(sample.inflight >= 1)) return { held: false, reason: 'the sync slot was free', provenUntil };
     if (Math.abs(sample.at - sample.oldestActiveAgeMs - admissionStartMs) > toleranceMs) {
       return { held: false, reason: 'the slot was held by other work', provenUntil };
     }
-    previous = Math.max(previous, sample.at);
+    previous = sample.at;
     provenUntil = sample.at;
   }
   if (until - previous > maxGapMs) return { held: false, reason: `no reading of the sync slot for the last ${Math.round((until - previous) / 1000)} s`, provenUntil };
   return { held: true, provenUntil };
+}
+
+/**
+ * A write refused as a write to an unknown graph is the known gap #3264 only
+ * on the registered graph and with evidence that the author lacked the
+ * definition. The refusal is judged by its structured code, never by the
+ * wording of the message.
+ */
+export function refusedWriteVerdict({ errorCode, registered, definitionHeld }) {
+  return errorCode === 'CONTEXT_GRAPH_NOT_FOUND' ? registeredGapVerdict({ registered, definitionHeld }) : 'fail';
+}
+
+/**
+ * One member's subscription, observed by one poller of its listing: when it
+ * first held the graph's definition and when it first listed the graph as
+ * synced (ages in ms from the subscribe), each against its own deadline, and
+ * the listing as read at each deadline. `listed` is { readable, defined,
+ * entry, why }. Returns the next observation; `done` once both deadlines are
+ * settled (a success before its deadline, or the deadline's listing).
+ */
+export function foldSubscription(observation, listed, age, { definitionMs, syncedMs }) {
+  const next = { ...observation };
+  if (next.atDefinitionDeadline === null) {
+    if (listed.readable && listed.defined && next.definedAt === null) next.definedAt = age;
+    if (age >= definitionMs) next.atDefinitionDeadline = listed;
+  }
+  if (next.atSyncedDeadline === null) {
+    if (listed.readable && listed.entry?.synced === true && next.syncedAt === null) next.syncedAt = age;
+    if (age >= syncedMs) next.atSyncedDeadline = listed;
+  }
+  const settled = (at, deadlineListing, ms) => (at !== null && at < ms) || deadlineListing !== null;
+  next.done = settled(next.definedAt, next.atDefinitionDeadline, definitionMs) && settled(next.syncedAt, next.atSyncedDeadline, syncedMs);
+  return next;
+}
+export const freshSubscription = () => ({ definedAt: null, syncedAt: null, atDefinitionDeadline: null, atSyncedDeadline: null, done: false });
+
+/**
+ * The verdicts of an observed subscription, kept apart from the reporting:
+ * `definition` (case 3, or 7 on the registered and private graphs) and
+ * `synced` (case 8), each 'pass' | 'xpass' | 'xfail' | 'fail' | 'none'
+ * with what was seen. On the registered graph a missing definition is #3264
+ * (xfail), a held one is printed as XPASS, and a synced flag that stays false
+ * is #3264 only when the deadline's listing shows no definition.
+ */
+export function subscriptionVerdicts(observation, { registered, definitionMs, syncedMs }) {
+  const secs = ms => Math.round(ms / 1000);
+  const definition = (() => {
+    const { definedAt, atDefinitionDeadline: last } = observation;
+    if (definedAt !== null && definedAt < definitionMs) {
+      return registered ? { verdict: 'xpass', text: `holds the definition ${secs(definedAt)} s after it subscribed` } : { verdict: 'none', text: '' };
+    }
+    if (definedAt !== null) return { verdict: 'fail', text: `holds the definition only ${secs(definedAt)} s after it subscribed` };
+    if (!last?.readable) return { verdict: 'fail', text: `its listing could not be read ${secs(definitionMs)} s after it subscribed (${last?.why ?? 'no reading'})` };
+    const text = `holds no definition ${secs(definitionMs)} s after it subscribed: ${last.entry ? `its listing has no access policy for it (${JSON.stringify(last.entry).slice(0, 200)})` : 'its listing does not name it'}; a write it makes there is refused`;
+    return { verdict: registeredGapVerdict({ registered, definitionHeld: false }), text };
+  })();
+  const synced = (() => {
+    const { syncedAt, atSyncedDeadline: last } = observation;
+    if (syncedAt !== null && syncedAt < syncedMs) return { verdict: 'pass', text: `lists it as synced ${secs(syncedAt)} s after it subscribed` };
+    if (!last?.readable) return { verdict: 'fail', text: `its listing could not be read ${secs(syncedMs)} s after it subscribed (${last?.why ?? 'no reading'})` };
+    const seen = syncedAt !== null
+      ? `lists it as synced only ${secs(syncedAt)} s after it subscribed`
+      : `lists it as ${last.entry ? `subscribed=${last.entry.subscribed} synced=${last.entry.synced}` : 'absent'} ${secs(syncedMs)} s after it subscribed`;
+    const verdict = registeredGapVerdict({ registered, definitionHeld: last.defined });
+    return { verdict, text: verdict === 'xfail' ? `${seen}; it holds no definition of the graph` : `${seen}${registered ? '; it holds the definition, so this is not #3264' : ''}` };
+  })();
+  return { definition, synced };
 }

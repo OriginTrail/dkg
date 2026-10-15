@@ -43,8 +43,6 @@ export const UNFOLLOWED_LOADS = new Map([
     "the agent's built dist/sync/attempt-telemetry.js, built from agent source the agent rule routes"],
   ['scripts/devnet.sh: $cli_entry',
     "the CLI entry a devnet node starts from (node_cli_entry): packages/cli/dist/cli.js, built from CLI source whose rule selects both lanes that reach devnet.sh (the CLI lane and the browser suite), or a released version's under .devnet-versions/, outside the repository's files"],
-  ['scripts/devnet.sh: $DEVNET_DIR/node${node_num}/relay.pinned',
-    "a node's pinned relay address, which addnode writes under the devnet's data directory; a run-time file, not a repository file"],
   // Files a child-process or worker call runs that no reading resolves.
   ['scripts/lib/regressions/subprocess.mjs: invocation.command',
     'the installed pnpm CLI or recorded Node executable, not a repository script; repository-owned profiles name the tests replayed in disposable checkouts'],

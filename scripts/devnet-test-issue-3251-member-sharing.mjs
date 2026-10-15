@@ -62,8 +62,10 @@
 //      another graph (MEMBER_SHARING_BIG_ASSETS x MEMBER_SHARING_BIG_TRIPLES).
 //      Member 2's own evidence must show the transfer in the slot: its log
 //      names the transfer's admission, and its sync-slot readings
-//      (/api/diagnostics/backpressure, every second) show that admission
-//      still running until each write was received. A write received after
+//      (/api/diagnostics/backpressure, every second) show its effective
+//      policy of one slot and no queue and that admission still running,
+//      until each write was received. Its daemon starts with the sync
+//      environment variables pinned to that policy (they override config). A write received after
 //      the transfer left the slot, or a transfer never admitted, fails the
 //      case as not exercised; a running catch-up job alone proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
@@ -109,8 +111,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { definitionState, readListing, subscriptionState } from './lib/qa/context-graph-listing.mjs';
 import {
-  admissionStarts, busySlotCovered, caseVerdicts, foldRead, inScope, judgeHeld, linkProblem, pairHeld, registeredGapVerdict,
-  sharedMemoryScope,
+  admissionStarts, busySlotCovered, caseVerdicts, foldRead, foldSubscription, freshSubscription, inScope, judgeHeld,
+  linkProblem, pairHeld, refusedWriteVerdict, sharedMemoryScope, singleSlotProblem, subscriptionVerdicts,
 } from './lib/qa/member-sharing.mjs';
 import { parseObservation } from './lib/qa/query-observation.mjs';
 
@@ -265,9 +267,19 @@ let RELAY2 = '';
 // The relay a member dials the owner through; the owner reserves on both.
 const relayOf = node => (node === M2 ? RELAY2 : RELAY1);
 
+/**
+ * The environment a temporary node's daemon starts with. Member 2's sync policy
+ * comes from its config (one slot, no queue), but these variables override a
+ * node's config; one inherited from the caller (DKG_SYNC_GLOBAL_MAX_INFLIGHT=8,
+ * say) would give it spare slots. So they are pinned to its policy.
+ */
+const nodeEnv = node => (node === M2
+  ? { DKG_SYNC_GLOBAL_MAX_INFLIGHT: '1', DKG_SYNC_GLOBAL_LIMIT: '1', DKG_SYNC_GLOBAL_QUEUE_LIMIT: '0' }
+  : {});
+
 async function startEdge(node, extra) {
   STARTED_NODES.push(node);
-  const added = await devnetSh(['addnode', String(node), 'edge'], { DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(extra) });
+  const added = await devnetSh(['addnode', String(node), 'edge'], { ...nodeEnv(node), DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(extra) });
   if (added.status !== 0) throw new Error(`temporary node ${node} could not be added: ${lastLines(added.output)}`);
   await identify(node);
 }
@@ -441,7 +453,7 @@ async function write(author, graph, sub, what) {
     author, graph, sub, what, sequence,
     subject: `urn:issue3251:${STAMP}:${sequence}`,
     value: `${what} (${sequence})`,
-    doneAt: null, error: null, definitionHeld: undefined,
+    doneAt: null, error: null, errorCode: undefined, definitionHeld: undefined,
   };
   const outcome = await createAndShare(author, {
     contextGraphId: graph.id, name: `i3251-${STAMP.toLowerCase()}-${sequence}`, subGraphName: sub,
@@ -452,6 +464,7 @@ async function write(author, graph, sub, what) {
     return record;
   }
   record.error = outcome.error;
+  record.errorCode = outcome.code;
   // Refused as a write to an unknown graph: whether the author held the
   // graph's definition right then is the evidence that decides #3264.
   if (outcome.code === 'CONTEXT_GRAPH_NOT_FOUND') {
@@ -554,10 +567,10 @@ function report(pair) {
   if (pair.record.error) {
     const text = `${what}: not written, ${pair.record.error}`;
     // A member without the registered graph's definition cannot write into
-    // it (#3264). The refusal is that gap only when the author was shown to
-    // lack the definition; any other refusal fails.
-    const gap = pair.record.error.includes('CONTEXT_GRAPH_NOT_FOUND')
-      && registeredGapVerdict({ registered: pair.record.graph.registered, definitionHeld: pair.record.definitionHeld }) === 'xfail';
+    // it (#3264). The refusal is that gap only by its code and with evidence
+    // that the author lacked the definition; any other refusal fails.
+    const { errorCode, graph, definitionHeld } = pair.record;
+    const gap = refusedWriteVerdict({ errorCode, registered: graph.registered, definitionHeld }) === 'xfail';
     return gap ? xfail(pair.caseId, 'registeredDefinition', `${text}; the author holds no definition of the graph`) : fail(pair.caseId, text);
   }
   const { view, partitions } = pair.progress;
@@ -577,54 +590,38 @@ function detail(read) {
 const at = (caseId, record, nodes) => nodes.map(node => ({ caseId, record, node }));
 
 /**
- * Started right after a member subscribed: it must hold the graph's definition
- * (its listing names the access policy) within DEFINITION_MS. Nothing asks
- * again: a definition lost on the way is a failure, not something to retry.
- * On the registered graph a missing definition is #3264 itself.
+ * Started right after a member subscribed: one poller of the member's listing
+ * for the graph. It records when the member first held the graph's definition
+ * (deadline DEFINITION_MS: without it the member's own writes are refused) and
+ * when it first listed the graph as synced (deadline SYNCED_MS), and the
+ * listing as read at each deadline, which is the evidence for #3264. Nothing
+ * asks again: a definition lost on the way is a failure. The verdicts are
+ * `subscriptionVerdicts`; reportSubscription prints them.
  */
-async function watchDefinition(caseId, node, graph) {
+async function observeSubscription(node, graph) {
   const from = graph.subscribedAt[node];
+  const deadlines = { definitionMs: DEFINITION_MS, syncedMs: SYNCED_MS };
+  let observation = freshSubscription();
   for (;;) {
-    const last = await listingEntry(node, graph);
-    const age = Date.now() - from;
-    if (last.readable && last.defined) {
-      if (age >= DEFINITION_MS) return fail(caseId, `${label(node)} holds the definition of ${graph.key} only ${seconds(age)} s after it subscribed`);
-      if (graph.registered) xpass(caseId, 'registeredDefinition', `${label(node)} holds the definition of ${graph.key} ${seconds(age)} s after it subscribed`);
-      return;
-    }
-    if (age >= DEFINITION_MS) {
-      if (!last.readable) return fail(caseId, `${label(node)}: its listing could not be read ${seconds(age)} s after it subscribed to ${graph.key} (${last.why})`);
-      const text = `${label(node)} holds no definition of ${graph.key} ${seconds(age)} s after it subscribed: ${last.entry ? `its listing has no access policy for it (${JSON.stringify(last.entry).slice(0, 200)})` : 'its listing does not name it'}; a write it makes there is refused`;
-      return registeredGapVerdict({ registered: graph.registered, definitionHeld: false }) === 'xfail' ? xfail(caseId, 'registeredDefinition', text) : fail(caseId, text);
-    }
-    await sleep(Math.min(2000, DEFINITION_MS - age));
+    const listed = await listingEntry(node, graph);
+    observation = foldSubscription(observation, listed, Date.now() - from, deadlines);
+    if (observation.done) return { node, graph, observation };
+    // Read again in 2 s, or at the next deadline still open if that is sooner.
+    const open = [observation.atDefinitionDeadline === null && from + DEFINITION_MS, observation.atSyncedDeadline === null && from + SYNCED_MS]
+      .filter(Boolean).filter(at => at > Date.now());
+    await sleep(Math.max(0, Math.min(2000, ...open.map(at => at - Date.now()))));
   }
 }
 
-/**
- * Started right after a member subscribed: its `synced` flag for the graph must
- * be true within the bound. On the registered graph a flag that stays false is
- * #3264 only when the same listing shows the member without the definition; a
- * member that holds it and never syncs fails.
- */
-async function watchSynced(node, graph) {
-  const from = graph.subscribedAt[node];
-  for (;;) {
-    const last = await listingEntry(node, graph);
-    const age = Date.now() - from;
-    const synced = last.entry?.synced === true;
-    if (synced && age < SYNCED_MS) return pass(8, `${label(node)} lists ${graph.key} as synced ${seconds(age)} s after it subscribed`);
-    if (age >= SYNCED_MS) {
-      if (!last.readable) return fail(8, `${label(node)}: its listing could not be read ${seconds(age)} s after it subscribed to ${graph.key} (${last.why})`);
-      const text = synced
-        ? `${label(node)} lists ${graph.key} as synced only ${seconds(age)} s after it subscribed`
-        : `${label(node)} lists ${graph.key} as ${last.entry ? `subscribed=${last.entry.subscribed} synced=${last.entry.synced}` : 'absent'} ${seconds(age)} s after it subscribed`;
-      if (registeredGapVerdict({ registered: graph.registered, definitionHeld: last.defined }) === 'xfail') {
-        return xfail(8, 'registeredDefinition', `${text}; it holds no definition of the graph`);
-      }
-      return fail(8, `${text}${graph.registered ? '; it holds the definition, so this is not #3264' : ''}`);
-    }
-    await sleep(Math.min(2000, SYNCED_MS - age));
+/** Prints the verdicts of an observed subscription: the definition under `caseId`, the synced flag under case 8. */
+function reportSubscription(caseId, { node, graph, observation }) {
+  const verdicts = subscriptionVerdicts(observation, { registered: graph.registered, definitionMs: DEFINITION_MS, syncedMs: SYNCED_MS });
+  for (const [id, { verdict, text }] of [[caseId, verdicts.definition], [8, verdicts.synced]]) {
+    const line = `${label(node)}, ${graph.key}: ${text}`;
+    if (verdict === 'pass') pass(id, line);
+    else if (verdict === 'xpass') xpass(id, 'registeredDefinition', line);
+    else if (verdict === 'xfail') xfail(id, 'registeredDefinition', line);
+    else if (verdict === 'fail') fail(id, line);
   }
 }
 
@@ -659,8 +656,8 @@ async function slotReading(node) {
   const atMs = Date.now();
   const scheduler = Array.isArray(answer.json?.schedulers) ? answer.json.schedulers.find(s => s?.scheduler === 'sync-global') : undefined;
   if (answer.status !== 200 || !scheduler?.totals) return { at: atMs, unreadable: answer.status === 200 ? 'no sync-global scheduler in the diagnostics' : brief(answer) };
-  const { inflight, inflightLimit, oldestActiveAgeMs } = scheduler.totals;
-  return { at: atMs, inflight, inflightLimit, oldestActiveAgeMs };
+  const { inflight, inflightLimit, queueLimit, oldestActiveAgeMs } = scheduler.totals;
+  return { at: atMs, inflight, inflightLimit, queueLimit, capacityModel: scheduler.capacityModel, oldestActiveAgeMs };
 }
 
 /** Reads a node's sync slots every second until stopped. */
@@ -695,13 +692,15 @@ async function busyMember(pub, big) {
   const admitted = await waitFor(async () => {
     const start = admissionStarts(logSince(M2, offset), needle).at(-1) ?? null;
     const latest = slots.readings.at(-1);
-    const holds = start !== null && latest !== undefined && !latest.unreadable && latest.inflight >= 1
+    const policy = latest === undefined ? 'no reading yet' : singleSlotProblem(latest);
+    const holds = start !== null && policy === null && latest.inflight >= 1
       && Math.abs(latest.at - latest.oldestActiveAgeMs - start) <= 2500;
-    return { ok: holds, start, latest };
+    return { ok: holds, start, latest, policy };
   }, 30_000, 500);
   if (!admitted.ok) {
     await slots.stop();
-    const why = admitted.start === null ? 'its log shows no admission of that transfer' : `its slot was ${admitted.latest?.unreadable ? `unreadable (${admitted.latest.unreadable})` : 'free or held by other work'}`;
+    // Spare slots or a queue (an environment override, say) make a busy slot meaningless.
+    const why = admitted.policy ?? (admitted.start === null ? 'its log shows no admission of that transfer' : 'its slot was free or held by other work');
     return fail(6, `not exercised: member2's transfer of the large graph did not hold its sync slot within 30 s of the subscribe (${why}); raise MEMBER_SHARING_BIG_ASSETS / MEMBER_SHARING_BIG_TRIPLES`);
   }
   const from = Date.now();
@@ -794,8 +793,7 @@ async function run() {
     for (const sub of [null, SUB]) history.push(await write(OWNER, graph, sub, `history ${sub ? 'sub-graph' : 'root'}`));
   }
   const historyWatches = [];
-  const syncedWatches = [];
-  const definitionWatches = [];
+  const subscriptions = [];
   // setUp replaces `graphs` when a graph drops out; this loop keeps the list it started with.
   for (const graph of graphs) {
     await setUp(graph, async () => {
@@ -804,13 +802,12 @@ async function run() {
         historyWatches.push(watch(history.filter(record => record.graph === graph).map(record => ({
           caseId: caseOf(graph, 3), record, node: member, from: graph.subscribedAt[member], fromWhat: 'member subscribed',
         }))));
-        syncedWatches.push(watchSynced(member, graph));
-        definitionWatches.push(watchDefinition(caseOf(graph, 3), member, graph));
+        subscriptions.push(observeSubscription(member, graph));
       }
     });
   }
   say(`members subscribed (${elapsed()})`);
-  await Promise.all([...syncedWatches, ...definitionWatches]);
+  for (const subscription of await Promise.all(subscriptions)) reportSubscription(caseOf(subscription.graph, 3), subscription);
   await settle(historyWatches);
 
   // Case 1 (7): the owner writes, live. Case 2 (7): a member writes; the owner
@@ -854,7 +851,7 @@ async function run() {
     await writeAndWatch(4, M2, pub, null, 'member2 while member1 is down, root', [OWNER]),
   ];
   const missed = whileDown.map(handle => handle.pairs[0].record);
-  const restarted = await devnetSh(['restart-node', String(M1)]);
+  const restarted = await devnetSh(['restart-node', String(M1)], nodeEnv(M1));
   if (restarted.status !== 0) throw new Error(`member1 did not restart: ${lastLines(restarted.output)}`);
   await identify(M1);
   await dialOwner(M1);
@@ -865,7 +862,7 @@ async function run() {
   await settle(whileDown);
 
   // Then an owner restart: live writes in both directions.
-  const ownerRestarted = await devnetSh(['restart-node', String(OWNER)]);
+  const ownerRestarted = await devnetSh(['restart-node', String(OWNER)], nodeEnv(OWNER));
   if (ownerRestarted.status !== 0) throw new Error(`the owner did not restart: ${lastLines(ownerRestarted.output)}`);
   await identify(OWNER);
   await dialOwner(M1);

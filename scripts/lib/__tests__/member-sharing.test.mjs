@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  admissionStarts, busySlotCovered, caseVerdicts, foldRead, inScope, judgeHeld, linkProblem, literalText, pairHeld,
-  registeredGapVerdict, sharedMemoryScope,
+  admissionStarts, busySlotCovered, caseVerdicts, foldRead, foldSubscription, freshSubscription, inScope, judgeHeld,
+  linkProblem, literalText, pairHeld, refusedWriteVerdict, registeredGapVerdict, sharedMemoryScope, singleSlotProblem,
+  subscriptionVerdicts,
 } from '../qa/member-sharing.mjs';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -149,11 +150,15 @@ test('admission starts are read from the node log, for that label only', () => {
   assert.deepEqual(admissionStarts(undefined, big), []);
 });
 
+// A reading of member 2's sync slots with its intended policy: one slot, no queue.
+const POLICY = { capacityModel: 'shared', inflightLimit: 1, queueLimit: 0 };
+const every = (a, b) => Array.from({ length: (b - a) / 1000 + 1 }, (_, i) => a + i * 1000);
+
 test('a running catch-up job without an admitted transfer does not make member 2 busy', () => {
   const window = { from: 100_000, until: 140_000 };
   // The regression: the job is running, the slot sampler sees work in flight,
   // but no transfer of the large graph was ever admitted.
-  const samples = Array.from({ length: 41 }, (_, i) => ({ at: 100_000 + i * 1000, inflight: 1, oldestActiveAgeMs: 5000 + i * 1000 }));
+  const samples = every(100_000, 140_000).map(at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - 95_000 }));
   assert.deepEqual(busySlotCovered({ admissionStartMs: null, samples, ...window }),
     { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null });
   assert.equal(busySlotCovered({ admissionStartMs: undefined, samples, ...window }).held, false);
@@ -162,26 +167,108 @@ test('a running catch-up job without an admitted transfer does not make member 2
 test('the slot is busy only while the admitted transfer is the work that holds it, through the whole window', () => {
   const start = 95_000;
   const window = { from: 100_000, until: 140_000 };
-  const holding = at => ({ at, inflight: 1, oldestActiveAgeMs: at - start });
-  const every = (a, b) => Array.from({ length: (b - a) / 1000 + 1 }, (_, i) => a + i * 1000);
+  const holding = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start });
   const held = busySlotCovered({ admissionStartMs: start, samples: every(99_000, 141_000).map(holding), ...window });
   assert.deepEqual(held, { held: true, provenUntil: 140_000 });
   // A second admission beside it (the reserved shared-memory slot of a fix) is younger: still the same holder.
   assert.equal(busySlotCovered({ admissionStartMs: start, samples: every(100_000, 140_000).map(at => ({ ...holding(at), inflight: 2 })), ...window }).held, true);
   // The transfer ends at 120 s: from then on the slot is free.
-  const freed = every(100_000, 140_000).map(at => (at < 120_000 ? holding(at) : { at, inflight: 0, oldestActiveAgeMs: 0 }));
+  const freed = every(100_000, 140_000).map(at => (at < 120_000 ? holding(at) : { at, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }));
   assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: freed, ...window }), { held: false, reason: 'the sync slot was free', provenUntil: 119_000 });
   // Other work holds the slot (its admission started at 118 s).
-  const other = every(100_000, 140_000).map(at => (at < 120_000 ? holding(at) : { at, inflight: 1, oldestActiveAgeMs: at - 118_000 }));
+  const other = every(100_000, 140_000).map(at => (at < 120_000 ? holding(at) : { ...holding(at), oldestActiveAgeMs: at - 118_000 }));
   assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: other, ...window }), { held: false, reason: 'the slot was held by other work', provenUntil: 119_000 });
   // A log second is truncated: the sampled start may lie up to the tolerance from it.
-  assert.equal(busySlotCovered({ admissionStartMs: start, samples: every(100_000, 140_000).map(at => ({ at, inflight: 1, oldestActiveAgeMs: at - start - 900 })), ...window }).held, true);
-  // No reading for 12 s, an unreadable reading, and no reading at the end prove nothing.
+  assert.equal(busySlotCovered({ admissionStartMs: start, samples: every(100_000, 140_000).map(at => ({ ...holding(at), oldestActiveAgeMs: at - start - 900 })), ...window }).held, true);
+  // No reading for 12 s, an unreadable reading, no reading at the end, and no reading at all prove nothing.
   const gap = every(100_000, 140_000).filter(at => at < 110_000 || at > 120_000).map(holding);
   assert.equal(busySlotCovered({ admissionStartMs: start, samples: gap, ...window }).reason, 'no reading of the sync slot for 12 s');
   const unreadable = every(100_000, 140_000).map(at => (at === 125_000 ? { at, unreadable: 'HTTP 503' } : holding(at)));
   assert.equal(busySlotCovered({ admissionStartMs: start, samples: unreadable, ...window }).reason, 'the sync slot could not be read (HTTP 503)');
   const short = every(100_000, 130_000).map(holding);
   assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: short, ...window }), { held: false, reason: 'no reading of the sync slot for the last 10 s', provenUntil: 130_000 });
-  assert.equal(busySlotCovered({ admissionStartMs: start, samples: [], ...window }).held, false);
+  assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: [], ...window }), { held: false, reason: 'no reading of the sync slot in the window', provenUntil: null });
+});
+
+test('a reading taken before the window is no evidence, not even a free slot before the admission', () => {
+  // The finding: a free reading at 99 s, busy readings from 100 s to 110 s, writes and receipts in [101 s, 110 s].
+  const start = 100_000;
+  const busy = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start });
+  const samples = [{ at: 99_000, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }, ...every(100_000, 110_000).map(busy)];
+  assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples, from: 101_000, until: 110_000 }), { held: true, provenUntil: 110_000 });
+  // The second example: admission at 98.5 s, a free reading at 98 s, busy readings from 99 s to 110 s, window [100 s, 110 s].
+  const later = [{ at: 98_000, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }, ...every(99_000, 110_000).map(at => ({ ...busy(at), oldestActiveAgeMs: at - 98_500 }))];
+  assert.equal(busySlotCovered({ admissionStartMs: 98_500, samples: later, from: 100_000, until: 110_000 }).held, true);
+  // Inside the window a free reading still fails it.
+  const inside = every(100_000, 110_000).map(at => (at === 105_000 ? { at, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 } : busy(at)));
+  assert.equal(busySlotCovered({ admissionStartMs: start, samples: inside, from: 101_000, until: 110_000 }).reason, 'the sync slot was free');
+});
+
+test('case 6 counts only on one sync slot and no queue, whatever the environment gave the node', () => {
+  assert.equal(singleSlotProblem({ at: 1, ...POLICY, inflight: 1 }), null);
+  // DKG_SYNC_GLOBAL_MAX_INFLIGHT=8 inherited by the node: spare slots, so a busy slot proves nothing.
+  assert.equal(singleSlotProblem({ ...POLICY, inflightLimit: 8 }), 'the node runs 8 sync slot(s), not one');
+  assert.equal(singleSlotProblem({ ...POLICY, queueLimit: 4 }), 'the node has a sync queue of 4, not none');
+  assert.equal(singleSlotProblem({ ...POLICY, capacityModel: 'partitioned' }), 'the sync slots are not one shared pool (partitioned)');
+  assert.equal(singleSlotProblem({ ...POLICY, inflightLimit: null }), 'the node runs an unknown number of sync slot(s), not one');
+  assert.equal(singleSlotProblem({ at: 1, unreadable: 'HTTP 401' }), 'the sync slots could not be read (HTTP 401)');
+  assert.equal(singleSlotProblem(undefined), 'the sync slots could not be read (no reading)');
+  // In the window, every reading must show it.
+  const start = 95_000;
+  const spare = every(100_000, 110_000).map(at => ({ at, ...POLICY, inflightLimit: 8, inflight: 1, oldestActiveAgeMs: at - start }));
+  assert.deepEqual(busySlotCovered({ admissionStartMs: start, samples: spare, from: 100_000, until: 110_000 }),
+    { held: false, reason: 'the node runs 8 sync slot(s), not one', provenUntil: null });
+  const queued = every(100_000, 110_000).map(at => ({ at, ...POLICY, queueLimit: 20, inflight: 1, oldestActiveAgeMs: at - start }));
+  assert.equal(busySlotCovered({ admissionStartMs: start, samples: queued, from: 100_000, until: 110_000 }).reason, 'the node has a sync queue of 20, not none');
+});
+
+test('a refused write is judged by its structured code, not by the wording of its message', () => {
+  const gap = { registered: true, definitionHeld: false };
+  assert.equal(refusedWriteVerdict({ errorCode: 'CONTEXT_GRAPH_NOT_FOUND', ...gap }), 'xfail');
+  // Another code fails, whatever its message says.
+  assert.equal(refusedWriteVerdict({ errorCode: 'WRITE_FORBIDDEN', ...gap }), 'fail');
+  assert.equal(refusedWriteVerdict({ errorCode: undefined, ...gap }), 'fail');
+  // The gap's code still needs the evidence and the registered graph.
+  assert.equal(refusedWriteVerdict({ errorCode: 'CONTEXT_GRAPH_NOT_FOUND', registered: true, definitionHeld: true }), 'fail');
+  assert.equal(refusedWriteVerdict({ errorCode: 'CONTEXT_GRAPH_NOT_FOUND', registered: false, definitionHeld: false }), 'fail');
+});
+
+test('one poller observes the definition and the synced flag against their own deadlines', () => {
+  const deadlines = { definitionMs: 90_000, syncedMs: 60_000 };
+  const listing = (defined, synced) => ({ readable: true, defined, entry: { id: 'g', subscribed: true, synced, ...(defined ? { accessPolicy: 'public' } : {}) } });
+  const fold = (steps) => steps.reduce((o, [age, listed]) => foldSubscription(o, listed, age, deadlines), freshSubscription());
+  // Synced at 20 s, the definition at 75 s: both in time although the synced deadline came first.
+  const both = fold([[2_000, listing(false, false)], [20_000, listing(false, true)], [62_000, listing(false, true)], [75_000, listing(true, true)]]);
+  assert.equal(both.done, true);
+  assert.deepEqual([both.syncedAt, both.definedAt], [20_000, 75_000]);
+  assert.deepEqual(subscriptionVerdicts(both, { registered: false, ...deadlines }), {
+    definition: { verdict: 'none', text: '' }, synced: { verdict: 'pass', text: 'lists it as synced 20 s after it subscribed' },
+  });
+  // Not done before the later deadline is settled.
+  assert.equal(fold([[20_000, listing(false, true)], [62_000, listing(false, true)]]).done, false);
+  // The registered graph, no definition and never synced: both are #3264, with the deadlines' listings as evidence.
+  const gap = fold([[30_000, listing(false, false)], [60_000, listing(false, false)], [90_000, listing(false, false)]]);
+  const gapVerdicts = subscriptionVerdicts(gap, { registered: true, ...deadlines });
+  assert.equal(gapVerdicts.definition.verdict, 'xfail');
+  assert.match(gapVerdicts.definition.text, /^holds no definition 90 s after it subscribed: its listing has no access policy/);
+  assert.deepEqual(gapVerdicts.synced, { verdict: 'xfail', text: 'lists it as subscribed=true synced=false 60 s after it subscribed; it holds no definition of the graph' });
+  // The definition held but the graph never synced: a failure, not #3264, and the definition shows as XPASS.
+  const held = fold([[5_000, listing(true, false)], [60_000, listing(true, false)], [90_000, listing(true, false)]]);
+  assert.deepEqual(subscriptionVerdicts(held, { registered: true, ...deadlines }), {
+    definition: { verdict: 'xpass', text: 'holds the definition 5 s after it subscribed' },
+    synced: { verdict: 'fail', text: 'lists it as subscribed=true synced=false 60 s after it subscribed; it holds the definition, so this is not #3264' },
+  });
+  // A success seen only at the deadline is late.
+  const late = fold([[61_000, listing(false, true)], [91_000, listing(true, true)]]);
+  const lateVerdicts = subscriptionVerdicts(late, { registered: false, ...deadlines });
+  assert.deepEqual([lateVerdicts.synced.verdict, lateVerdicts.definition.verdict], ['fail', 'fail']);
+  assert.equal(lateVerdicts.synced.text, 'lists it as synced only 61 s after it subscribed');
+  assert.equal(lateVerdicts.definition.text, 'holds the definition only 91 s after it subscribed');
+  // An unreadable listing at a deadline is a failure, also on the registered graph: no evidence, no exemption.
+  const unreadable = { readable: false, why: 'HTTP 503' };
+  const blind = fold([[60_000, unreadable], [90_000, unreadable]]);
+  assert.deepEqual(subscriptionVerdicts(blind, { registered: true, ...deadlines }), {
+    definition: { verdict: 'fail', text: 'its listing could not be read 90 s after it subscribed (HTTP 503)' },
+    synced: { verdict: 'fail', text: 'its listing could not be read 60 s after it subscribed (HTTP 503)' },
+  });
 });

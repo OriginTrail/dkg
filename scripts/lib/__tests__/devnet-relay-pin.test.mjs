@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -69,17 +69,25 @@ test('a node pinned to node 2 is launched with node 2 as its relay on its first 
   assert.match(output, /Node 7 restarted\./);
 });
 
-test('a node without a pinned relay is launched with node 1 on its first start and after a restart', t => {
-  for (const overrides of ['', JSON.stringify({ announceAddresses: [] }), JSON.stringify({ relay: '' }), JSON.stringify({ relay: 7 })]) {
+test('a node without a relay among its overrides is launched with node 1 on its first start and after a restart', t => {
+  for (const overrides of ['', JSON.stringify({ announceAddresses: ['/ip4/127.0.0.1/tcp/9'] })]) {
     const { dir, status, output } = devnet(t, ADD_AND_RESTART(8), { DEVNET_ADDNODE_CONFIG_OVERRIDES: overrides });
     assert.equal(status, 0, `${overrides}: ${output}`);
     assert.deepEqual(launches(dir, 8), [NODE1, NODE1], overrides);
-    assert.equal(existsSync(join(dir, 'node8', 'relay.pinned')), false, overrides);
   }
 });
 
-test('node 1 starts without a relay; every other node falls back to node 1', t => {
-  const { status, output } = devnet(t, 'printf "[%s][%s][%s]" "$(node_relay_arg 1)" "$(node_relay_arg 2)" "$(node_relay_arg 9)"');
+test('every override wins over what start_node generates, on every start', t => {
+  // start_node rewrites bootstrapPeers from the Cores on each start, as it does the relay.
+  const pinned = ['/ip4/127.0.0.1/tcp/10002/p2p/12D3KooWnode2'];
+  const overrides = JSON.stringify({ bootstrapPeers: pinned, relay: NODE2 });
+  const { dir, status, output } = devnet(t, ADD_AND_RESTART(9), { DEVNET_ADDNODE_CONFIG_OVERRIDES: overrides });
   assert.equal(status, 0, output);
-  assert.equal(output, `[][${NODE1}][${NODE1}]`);
+  const config = JSON.parse(readFileSync(join(dir, 'node9', 'config.json'), 'utf8'));
+  assert.deepEqual(config.bootstrapPeers, pinned);
+  assert.equal(config.relay, NODE2);
+  // Without overrides the generated value stands: both Cores.
+  const plain = devnet(t, ADD_AND_RESTART(9));
+  assert.equal(plain.status, 0, plain.output);
+  assert.deepEqual(JSON.parse(readFileSync(join(plain.dir, 'node9', 'config.json'), 'utf8')).bootstrapPeers, [NODE1, NODE2]);
 });

@@ -1015,17 +1015,6 @@ cmd_prepare_version() {
   prepare_version "${2:-prev}"
 }
 
-# The relay a node starts with: the one pinned for it when it was added
-# (`relay` in DEVNET_ADDNODE_CONFIG_OVERRIDES), else node 1; none for node 1.
-node_relay_arg() {
-  local node_num="$1"
-  if [ -s "$DEVNET_DIR/node${node_num}/relay.pinned" ]; then
-    cat "$DEVNET_DIR/node${node_num}/relay.pinned"
-  elif [ "$node_num" -gt 1 ] && [ -f "$DEVNET_DIR/node1/multiaddr" ]; then
-    cat "$DEVNET_DIR/node1/multiaddr"
-  fi
-}
-
 start_node() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -1036,8 +1025,10 @@ start_node() {
     return 0
   fi
 
-  local relay_arg
-  relay_arg=$(node_relay_arg "$node_num")
+  local relay_arg=""
+  if [ "$node_num" -gt 1 ] && [ -f "$DEVNET_DIR/node1/multiaddr" ]; then
+    relay_arg=$(cat "$DEVNET_DIR/node1/multiaddr")
+  fi
 
   # Core mesh (default topology): a CORE node directly dials every EARLIER core
   # via `bootstrapPeers`, instead of every node hubbing through node 1. libp2p
@@ -1087,6 +1078,10 @@ start_node() {
         maxTailBlocks: 2000,
       };
     }
+    // The members a test set when it added this node (addnode's
+    // DEVNET_ADDNODE_CONFIG_OVERRIDES) win over the defaults above, on every start.
+    const overridesPath = process.env.NODE_DIR + '/addnode-overrides.json';
+    if (fs.existsSync(overridesPath)) Object.assign(cfg, JSON.parse(fs.readFileSync(overridesPath, 'utf8')));
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   "
 
@@ -2276,15 +2271,11 @@ cmd_addnode() {
     fi
   fi
 
-  # start_node makes node 1 the relay of every other node on each start. A
-  # `relay` among the overrides stays this node's relay on its later starts
-  # (restart-node) too.
+  # start_node writes its own defaults into config.json on every start (the
+  # relay among them). The overrides are kept beside the config, and start_node
+  # applies them after its defaults, so they hold on every later start too.
   if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
-    DEVNET_ADDNODE_CONFIG_OVERRIDES="$DEVNET_ADDNODE_CONFIG_OVERRIDES" node -e '
-      const relay = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES).relay;
-      if (typeof relay === "string" && relay !== "") process.stdout.write(relay + "\n");
-    ' > "$DEVNET_DIR/node${node_num}/relay.pinned"
-    [ -s "$DEVNET_DIR/node${node_num}/relay.pinned" ] || rm -f "$DEVNET_DIR/node${node_num}/relay.pinned"
+    printf '%s\n' "$DEVNET_ADDNODE_CONFIG_OVERRIDES" > "$DEVNET_DIR/node${node_num}/addnode-overrides.json"
   fi
 
   cd "$REPO_ROOT" || exit 1
