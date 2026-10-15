@@ -1310,7 +1310,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     }
     const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(params.publicQuads);
     const laneScope = Object.freeze({ ...lane.scopeBase, authorAddress: seal.authorAddress });
-    // GH#3134: the author's current catalog, which may have moved to more buckets.
     const scope: AuthorCatalogScopeV1 = this.rfc64PersistenceV1 === undefined
       ? Object.freeze({ ...laneScope, bucketCount: '1' as CountV1 })
       : readCurrentAuthorCatalogScopeV1(this.rfc64PersistenceV1.inventory, laneScope);
