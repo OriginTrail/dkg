@@ -58,7 +58,8 @@ export async function exchangeBulkGraph<T>(router: Pick<ProtocolRouter, 'withDup
 }
 export function registerBulkGraphResponder<T>(router: ProtocolRouter,
   authorize: (bytes: Uint8Array, peer: string, signal: AbortSignal) => Promise<T>,
-  respond: (request: T, session: BulkGraphSession, peer: string) => Promise<void>): void {
+  respond: (request: T, session: BulkGraphSession, peer: string) => Promise<void>,
+  diagnostics: Pick<DuplexStreamOptions, 'onInboundFailure'> = {}): void {
   router.registerDuplexStream(BULK_GRAPH_PROTOCOL, async (stream, signal) => {
     const session = new BulkGraphSession(stream, signal);
     try {
@@ -72,5 +73,6 @@ export function registerBulkGraphResponder<T>(router: ProtocolRouter,
   }, async ({ requestData, continuation, peerId, signal }) => {
     const authorized = await authorize(requestData, peerId, signal);
     await respond(authorized, continuation, peerId);
-  }, bulkGraphTransportOptions(3_600_000));
+  }, { ...bulkGraphTransportOptions(3_600_000),
+    ...(diagnostics.onInboundFailure ? { onInboundFailure: diagnostics.onInboundFailure } : {}) });
 }

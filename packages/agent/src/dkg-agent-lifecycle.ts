@@ -3175,6 +3175,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               onExport: (index, count, ctx) => this.log.info(ctx, `Bulk responder export asset=${index} wholePayloadExports=${count}`),
               onPayload: (index, plain, encoded, ctx) => this.log.info(ctx, `Bulk responder payload asset=${index} plainBytes=${plain} encodedBytes=${encoded}`),
               onStage: (stage, index, ms, ctx) => this.log.info(ctx, `Bulk responder stage=${stage} asset=${index} durationMs=${ms.toFixed(3)}`),
+              onInboundFailure: ({ stage, errorName, errorCode, signalAborted }) => this.log.warn(createOperationContext('sync'),
+                `Bulk inbound failed stage=${stage} error=${errorName} code=${errorCode ?? 'none'} aborted=${signalAborted}`),
             });
             registerExperimentalExactBatchResponder(this.router,
               exactBatchResponderTransportOptions(120_000, (level, message) => this.log[level](createOperationContext('sync'), message)), binding.authorizeRequest, binding.respond);

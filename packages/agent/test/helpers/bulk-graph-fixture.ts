@@ -4,8 +4,8 @@ import { startOxigraphSparqlEndpoint } from '../../../storage/test/helpers/oxigr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGNode, LibP2PNetwork, ProtocolRouter, PeerResolver, createOperationContext, BULK_GRAPH_KIND as K, type BulkGraphFrame, type BulkGraphSession,
-  bulkGraphTransportOptions, MemoryLayer, knowledgeAssetLayerGraphUri, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
-import { BlazegraphStore, OxigraphStore, quadsToNQuads } from '@origintrail-official/dkg-storage';
+  bulkGraphTransportOptions, MemoryLayer, knowledgeAssetLayerGraphUri, createGraphKnowledgeAssetScope, type DuplexStreamOptions } from '@origintrail-official/dkg-core';
+import { BlazegraphStore, OxigraphStore, quadsToNQuads, type StorePriorityScheduler } from '@origintrail-official/dkg-storage';
 import { generateGraphKnowledgeAssetMetadata, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { registerPublicBulkGraph } from '../../src/sync/responder/bulk-graph-stream.js';
 import { exchangeBulkGraphVerified } from '../../src/sync/requester/bulk-graph-stream.js';
@@ -27,6 +27,8 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
   beforePublish?: () => Promise<void>; onControl?: (frame: BulkGraphFrame) => void;
   beforeSend?: (frame: BulkGraphFrame) => Promise<void>; afterSend?: (frame: BulkGraphFrame) => Promise<void>; observe?: () => unknown;
   payloadBytes?: readonly number[]; expandedLengthMismatch?: boolean; tamperDigest?: 'asset' | 'chunk';
+  storeScheduler?: StorePriorityScheduler;
+  onInboundFailure?: DuplexStreamOptions['onInboundFailure'];
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(),'dkg-bulk-test-')); cleanups.push(() => rm(directory,{recursive:true,force:true}));
   const endpoint = await startOxigraphSparqlEndpoint({ maxRequestBytes: 1_048_576 });
@@ -53,7 +55,7 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
       prepared.set(ual, { body, metadata: Buffer.from(quadsToNQuads(metadata)), plainBytes: plain.length });
     }
   }
-  const source = new BlazegraphStore(endpoint.queryEndpoint);
+  const source = new BlazegraphStore(endpoint.queryEndpoint, { scheduler: hooks.storeScheduler });
   cleanups.push(() => source.close());
   const chain = {chainId:'base:84532',getLatestMerkleRoot:async(id:bigint)=>byId.get(id)!,
     getMerkleRootCount:async()=>1n,getKAContextGraphId:async()=>14n} as unknown as ChainAdapter;
@@ -91,6 +93,7 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
     }, options);
   }
   registerPublicBulkGraph(server,{admission:resources,
+    onInboundFailure: hooks.onInboundFailure,
     exportCache:{ acquireEncoded:async request=>{
       // Byte-boundary cases isolate receiver parsing/verification from exporter budgets.
       const payload = prepared.get(request.assetUal);

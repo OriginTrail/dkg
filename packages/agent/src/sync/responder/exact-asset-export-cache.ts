@@ -1,6 +1,7 @@
 import { createEncodedResponseLease } from './encoded-response-lease.js';
 import type { PreparedContentCache } from './prepared-content-cache.js';
-import { EXACT_EXPORT_METADATA_OPERATION, retryExactMetadataAdmission } from './exact-metadata-admission.js';
+import { EXACT_EXPORT_METADATA_OPERATION, EXACT_EXPORT_PAYLOAD_OPERATION,
+  retryExactMetadataAdmission, retryExactPayloadAdmission } from './exact-metadata-admission.js';
 import { exactExportStorePriority } from './public-snapshot-store-admission.js';
 import { assertSafeIri, compareCodePoint } from '@origintrail-official/dkg-core';
 import {
@@ -77,7 +78,7 @@ export interface ExactAssetEncodedExportLease {
 }
 
 export type ExactAssetExportStage = 'export-metadata-before' | 'export-metadata-admission-retry' | 'export-store-payload-query'
-  | 'export-canonical-preparation-root' | 'export-metadata-after';
+  | 'export-payload-admission-retry' | 'export-canonical-preparation-root' | 'export-metadata-after';
 
 export interface ExactAssetExportRequest {
   readonly contextGraphId: string;
@@ -418,7 +419,7 @@ export function createBoundedExactAssetExportCache(params: {
       let retained = false;
       try {
         stageStarted = performance.now();
-        const payload = await readBoundedGraphPayload(store, request.graph, {
+        const payload = await retryExactPayloadAdmission(() => readBoundedGraphPayload(store, request.graph, {
           expectedQuadCount: request.expectedRows, outputGraph: request.graph, canonicalGraph: '',
           profile: {
             maxRows: EXACT_ASSET_EXPORT_MAX_ROWS, maxResponseBytes: EXACT_ASSET_EXPORT_MAX_STORE_BYTES,
@@ -426,14 +427,14 @@ export function createBoundedExactAssetExportCache(params: {
             rowOverheadBytes: 160, heapAccounting: 'output-graph',
           },
           queryOptions: {
-            source: 'sync.responder.exactAssetExport.payload', priority: exactExportStorePriority(), signal: request.signal,
+            source: EXACT_EXPORT_PAYLOAD_OPERATION, priority: exactExportStorePriority(), signal: request.signal,
           },
           onQuerySettled: () => {
             // Includes scheduler wait, HTTP/body settlement and JSON decoding.
             observeStage('export-store-payload-query', stageStarted);
             stageStarted = performance.now();
           },
-        });
+        }), request.signal, ms => observeExactBatch(() => request.onStage?.('export-payload-admission-retry', ms)));
         throwIfAborted(request.signal);
         if (payload.status === 'refused') return refuse(payload.reason, request);
         const { heapBytes } = payload;

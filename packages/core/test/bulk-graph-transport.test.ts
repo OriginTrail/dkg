@@ -143,6 +143,13 @@ describe('bulk graph read-idle and original total deadlines', () => {
 });
 
 describe('bulk graph responder registration', () => {
+  it('forwards failure diagnostics without accepting transport-limit overrides', () => {
+    const registerDuplexStream = vi.fn(), onInboundFailure = vi.fn();
+    const diagnostics = { onInboundFailure, timeoutMs: 9_000_000, maxRequestBytes: 9_000_000 };
+    registerBulkGraphResponder({ registerDuplexStream } as unknown as ProtocolRouter,
+      async () => undefined, async () => undefined, diagnostics);
+    expect(registerDuplexStream.mock.calls[0]![3]).toEqual({ ...bulkGraphTransportOptions(3_600_000), onInboundFailure });
+  });
   /** What the responder hands the router; the router's own stream lifecycle has its own tests. */
   function registered() {
     const registerDuplexStream = vi.fn();
