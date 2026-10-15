@@ -92,6 +92,7 @@ import {
   type KAMetadata,
   type OnChainProvenance,
 } from './metadata.js';
+import { hasSubGraphRegistration } from './sub-graph-registration.js';
 import {
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
@@ -6850,15 +6851,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async isSubGraphRegistered(contextGraphId: string, subGraphName: string): Promise<boolean> {
-    const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
-    const registered = await this.store.query(
-      `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta> {
-        <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
-          <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
-          <http://dkg.io/ontology/createdBy> ?createdBy .
-      } }`,
-    );
-    return registered.type === 'boolean' && registered.value;
+    return hasSubGraphRegistration(this.store, contextGraphId, subGraphName);
   }
 
   /**
@@ -9114,7 +9107,7 @@ export class DKGPublisher implements Publisher {
     // failed promotion cannot strand a durable false-incomplete witness. The
     // resolver itself may conservatively hydrate process-local state and must be
     // idempotent because retries reuse operationId. A resolver that can refuse
-    // for a passing reason is first given its short wait.
+    // for a passing reason is first given its wait.
     if (opts?.subGraphName === undefined) {
       await this.resolveDurableRootPromotionAtomicCompanion?.awaitAdmission?.({
         contextGraphId, kaUal: contentScope.ual,

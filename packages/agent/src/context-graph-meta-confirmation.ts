@@ -171,6 +171,28 @@ export async function confirmContextGraphMetadataV1(
   return ontologyResult.type === 'boolean' && ontologyResult.value === true;
 }
 
+/**
+ * Whether the local root `_meta` itself declares the graph public: the
+ * canonical facts (`rdf:type dkg:ContextGraph`, `dkg:accessPolicy "public"`)
+ * with no contradicting policy beside them. This is what a replica must HOLD
+ * before it can list, read or write the graph by its definition.
+ *
+ * `confirmContextGraphMetadataV1` answers a different question: whether the
+ * graph is readable now. There an active public chain proof confirms on its
+ * own, so a registered public graph is "confirmed" on a replica that holds no
+ * declaration at all. A pull that asks whether the declaration is still
+ * missing must therefore not take that answer (#3264).
+ */
+export async function holdsAuthoritativePublicDefinitionV1(
+  store: TripleStore,
+  contextGraphId: string,
+): Promise<boolean> {
+  const result = await store.query(buildAuthoritativePublicMetaAskQuery(contextGraphId), {
+    source: 'agent.contextGraph.publicDefinition.held',
+  });
+  return result.type === 'boolean' && result.value === true;
+}
+
 /** This node's approved-member proof for the graph, when it holds an approval. */
 async function resolveApprovedMemberProof(
   dependencies: ContextGraphMetadataConfirmationDependencies,

@@ -98,7 +98,9 @@ async function publishedAsset(options: { started?: boolean } = {}) {
   if (options.started === true) await agent.start();
   const fenceLines: string[] = [];
   await initializeRfc64LegacySwmBoundaryV1(agent, await secureDir(), store, {
-    onFenceEvent: (event) => fenceLines.push(`${event.kind}:${event.source}:${event.waitingOn ?? '-'}`),
+    onFenceEvent: (event) => fenceLines.push(
+      `${event.kind}:${event.source}:${event.kind === 'wait-exceeded' ? event.waitingOn : '-'}`,
+    ),
   });
   const share = prepareRfc64LateLegacySwmBoundaryV1(agent, GRAPH, UAL, 'the-share', '1');
   await store.insert([...share.quads]);

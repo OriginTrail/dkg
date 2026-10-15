@@ -8,7 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '../dkg-agent.js';
 import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
-import { rfc64SwmInventoryShadowRuntimeV1 } from '../rfc64/swm-inventory-shadow-runtime-v1.js';
+import { rfc64SwmInventoryAssetKeyV1, rfc64SwmInventoryShadowRuntimeV1 } from '../rfc64/swm-inventory-shadow-runtime-v1.js';
 import {
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
@@ -115,7 +115,9 @@ export async function observeConfirmedVmCatalogV1(
       return true;
     }
     try {
-      return await shadowRuntime.runExclusive(assetKey, async () => {
+      return await shadowRuntime.runInventoryWriteExclusive({
+        contextGraphId, subGraphName, authorAddress: confirmedSeal.authorAddress, assertionCoordinate,
+      }, async () => {
         const result = await deps.removeShadow({ contextGraphId, subGraphName, seal: params.seal });
         switch (result.status) {
           case 'applied':
@@ -148,16 +150,5 @@ export async function observeConfirmedVmCatalogV1(
   }
 }
 
-export function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
-  contextGraphId: string;
-  subGraphName?: string | null;
-  authorAddress: string;
-  assertionCoordinate: string;
-}>): string {
-  return JSON.stringify([
-    input.contextGraphId,
-    input.subGraphName ?? null,
-    input.authorAddress.toLowerCase(),
-    input.assertionCoordinate,
-  ]);
-}
+// Preserve the helper's existing dist-subpath export while sharing the canonical inventory key.
+export { rfc64SwmInventoryAssetKeyV1 } from '../rfc64/swm-inventory-shadow-runtime-v1.js';

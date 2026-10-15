@@ -1,8 +1,10 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import { Logger, createOperationContext, type SwmAuthorInventoryScopeV1 } from '@origintrail-official/dkg-core';
 import { observeConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
 import { CatalogPlacementTimingV1, installCatalogPlacementTimingV1 } from '../src/internal/catalog-placement-timing.js';
 import { AUTHOR, CONTEXT_GRAPH_ID, NETWORK_ID, assertionSealV1, authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
+import { rfc64SwmInventoryAssetKeyV1, rfc64SwmInventoryShadowRuntimeV1 } from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
 
 type Dependencies = { -readonly [Key in keyof Parameters<typeof observeConfirmedVmCatalogV1>[0]]: Parameters<typeof observeConfirmedVmCatalogV1>[0][Key] };
 
@@ -34,6 +36,56 @@ async function fixture() {
 }
 
 describe('confirmed VM catalog completion certificate', () => {
+  it.each(['applied', 'failed', 'throws'] as const)('fences author retirement behind queued public confirmation (%s)', async (outcome) => {
+    const { deps, params } = await fixture();
+    const runtime = rfc64SwmInventoryShadowRuntimeV1(deps.owner);
+    const lane = { contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR };
+    const assetKey = rfc64SwmInventoryAssetKeyV1({ ...lane, assertionCoordinate: params.assertionCoordinate });
+    const context = new AsyncLocalStorage<string>();
+    const events: string[] = [];
+    let releaseAsset!: () => void;
+    let releaseRemoval!: () => void;
+    let removalEntered!: () => void;
+    const assetGate = new Promise<void>((resolve) => { releaseAsset = resolve; });
+    const removalGate = new Promise<void>((resolve) => { releaseRemoval = resolve; });
+    const entered = new Promise<void>((resolve) => { removalEntered = resolve; });
+    const predecessor = runtime.runExclusive(assetKey, () => assetGate);
+    deps.removeShadow = vi.fn(async () => {
+      events.push(`remove:${context.getStore()}`);
+      removalEntered();
+      await removalGate;
+      events.push('removal-settled');
+      if (outcome === 'throws') throw new Error('removal unavailable');
+      return { status: outcome, action: 'remove', attempts: 1, headObjectDigest: null, error: null };
+    });
+    const pending = context.run('confirmation', () => observeConfirmedVmCatalogV1(deps, params));
+    try {
+      // Registration is synchronous, including while this asset's previous work still runs.
+      expect(runtime.hasInventoryWrites(lane)).toBe(true);
+      expect(context.run('retirement', () => runtime.scheduleAfterInventoryWrites(lane, 'retired-twin', async () => {
+        events.push(`retire:${context.getStore()}`);
+      }))).toBe(true);
+      await Promise.resolve();
+      expect(events).toEqual([]);
+      context.run('predecessor-release', releaseAsset);
+      await entered;
+      expect(events).toEqual(['remove:confirmation']);
+      expect(runtime.hasInventoryWrites(lane)).toBe(true);
+      context.run('removal-release', releaseRemoval);
+      await expect(pending).resolves.toBe(outcome === 'applied');
+      await runtime.drain();
+      expect(events).toEqual(['remove:confirmation', 'removal-settled', 'retire:retirement']);
+      expect(runtime.hasInventoryWrites(lane)).toBe(false);
+      expect(runtime.inFlightCount).toBe(0);
+    } finally {
+      releaseAsset();
+      releaseRemoval();
+      await predecessor;
+      await pending;
+      await runtime.closeAndDrain();
+    }
+  });
+
   it.each(['applied', 'absent', 'dormant', 'failed'] as const)('reports public removal %s honestly', async (status) => {
     const { deps, params } = await fixture();
     deps.removeShadow = vi.fn(async () => ({ status, action: 'remove', attempts: 0, headObjectDigest: null, error: null }));
