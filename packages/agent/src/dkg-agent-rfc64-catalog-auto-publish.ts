@@ -69,6 +69,7 @@ import {
   type RemoveRfc64SwmAuthorInventoryResultV1,
 } from './rfc64/swm-author-inventory-producer-v1.js';
 import {
+  rfc64SwmInventoryAssetKeyV1,
   rfc64SwmInventoryShadowRuntimeV1,
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
@@ -135,20 +136,6 @@ export type {
   ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
   ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
 } from './dkg-agent-rfc64-swm-catalog-projection.js';
-
-function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
-  contextGraphId: string;
-  subGraphName?: string | null;
-  authorAddress: string;
-  assertionCoordinate: string;
-}>): string {
-  return JSON.stringify([
-    input.contextGraphId,
-    input.subGraphName ?? null,
-    input.authorAddress.toLowerCase(),
-    input.assertionCoordinate,
-  ]);
-}
 
 /** Explicit catalog-authoring input; ordinary VM confirmation never calls it. */
 export interface RecordRfc64PublicCatalogAssetParamsV1 {
@@ -773,16 +760,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): void {
-    const assetKey = rfc64SwmInventoryAssetKeyV1({
+    rfc64SwmInventoryShadowRuntimeV1(this).scheduleInventoryWrite({
       contextGraphId: params.contextGraphId,
       subGraphName: params.subGraphName,
       authorAddress: params.lifecycleAgentAddress,
       assertionCoordinate: params.assertionCoordinate,
-    });
-    rfc64SwmInventoryShadowRuntimeV1(this).schedule(
-      assetKey,
-      () => this.observeRfc64DurableSwmPromotionV1(params),
-    );
+    }, () => this.observeRfc64DurableSwmPromotionV1(params));
   }
 
   /**
@@ -879,12 +862,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         const request = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
         if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
       } else {
-        await shadowRuntime.runExclusive(assetKey, async () => {
-          const result = await this.removeRfc64SwmAuthorInventoryShadowV1({
-            contextGraphId,
-            subGraphName,
-            seal: params.seal,
-          });
+        const write = { contextGraphId, subGraphName, authorAddress: confirmedSeal.authorAddress, assertionCoordinate };
+        await shadowRuntime.runInventoryWriteExclusive(write, async () => {
+          const result = await this.removeRfc64SwmAuthorInventoryShadowV1({ contextGraphId, subGraphName, seal: params.seal });
           if (result.status === 'applied' || result.status === 'absent') {
             this.requestRfc64SwmCatalogProjectionV1({
               contextGraphId: contextGraphId as ContextGraphIdV1,
@@ -1185,7 +1165,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: RemoveRfc64SwmAuthorInventoryShadowParamsV1,
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
-    let kaUal: string | null = null;
+    let row: Readonly<{ scope: SwmAuthorInventoryScopeV1; expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 }>;
     try {
       const lane = this.resolveRfc64CatalogAuthoringLaneV1(
         params.contextGraphId,
@@ -1200,37 +1180,47 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       }
       assertContextGraphIdV1(params.contextGraphId, 'SWM inventory contextGraphId');
       const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
-      kaUal = seal.kaUal;
-      const scope: SwmAuthorInventoryScopeV1 = Object.freeze({
-        ...lane.scopeBase,
-        authorAddress: seal.authorAddress,
-      });
-      const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
-        scope,
+      row = Object.freeze({
+        scope: Object.freeze({ ...lane.scopeBase, authorAddress: seal.authorAddress }) as SwmAuthorInventoryScopeV1,
         expectedRow: Object.freeze({
           assertionVersion: seal.assertionVersion,
           kaUal: seal.kaUal,
           sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
         }),
       });
-      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-        shadowResult(
-          removed.status,
-          'remove',
-          removed.attempts,
-          removed.snapshot?.head.objectDigest ?? null,
-          null,
-        ),
-        params.contextGraphId,
-        kaUal,
-      );
     } catch (cause) {
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
         this.failRfc64SwmAuthorInventoryShadowV1('remove', cause),
         params.contextGraphId,
-        kaUal,
+        null,
       );
     }
+    return this.removeRfc64SwmAuthorInventoryRowV1({ contextGraphId: params.contextGraphId, ...row });
+  }
+
+  /**
+   * GH#3134 — the one way a confirmed asset's row leaves its author's SWM inventory: the exact
+   * removal, a failure turned into its result, and its outcome counted. Callers pick the row,
+   * whether to wait, and whether the author's catalog projection follows.
+   */
+  async removeRfc64SwmAuthorInventoryRowV1(
+    this: DKGAgent,
+    params: Readonly<{
+      contextGraphId: string;
+      scope: SwmAuthorInventoryScopeV1;
+      expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
+      /** A removal that its caller's cancellation ended rejects with it, uncounted. */
+      signal?: AbortSignal;
+    }>,
+  ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+    const result = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1(params).then(
+      (removed) => shadowResult(removed.status, 'remove', removed.attempts, removed.snapshot?.head.objectDigest ?? null, null),
+      (cause: unknown) => {
+        if (params.signal?.aborted === true) throw cause;
+        return this.failRfc64SwmAuthorInventoryShadowV1('remove', cause);
+      },
+    );
+    return this.recordRfc64SwmAuthorInventoryShadowStatsV1(result, params.contextGraphId, params.expectedRow.kaUal);
   }
 
   /** Remove the exact confirmed row without requiring its transient AssertionSeal object. */
@@ -1239,11 +1229,13 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     params: Readonly<{
       readonly scope: SwmAuthorInventoryScopeV1;
       readonly expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
+      /** The caller's cancellation: it ends the wait for the scope and the signer, and no successor commits after it. */
+      readonly signal?: AbortSignal;
     }>,
   ): Promise<RemoveRfc64SwmAuthorInventoryResultV1> {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const signer = this.createRfc64CatalogAuthorSignerV1(params.scope.authorAddress);
+    const signer = this.createRfc64CatalogAuthorSignerV1(params.scope.authorAddress, params.signal);
     const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(params.scope);
     return rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
       `${inventoryScopeDigest}\n${params.scope.authorAddress}`,
@@ -1273,11 +1265,16 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
             issuedAt: Date.now().toString() as TimestampMsV1,
             signer: Object.freeze({
               issuer: signer.address as EvmAddressV1,
-              signDigest: signer.signMessage,
+              signDigest: async (digest: Uint8Array) => {
+                const signature = await signer.signMessage(digest);
+                throwIfAbortedV1(params.signal);
+                return signature;
+              },
             }),
           },
         );
       },
+      params.signal,
     );
   }
 

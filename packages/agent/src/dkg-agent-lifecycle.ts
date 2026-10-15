@@ -2057,6 +2057,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // retirement, which then goes on without it and is repeated if it did not get its turn. The
     // retirement stays this node's until it ended: stop() ends its wait and drains its work.
     const assertionVersion = String(input.assertionVersion);
+    // GH#3134 — the asset's row in its author's SWM inventory goes with the twin, detached.
+    this.scheduleRfc64SwmInventoryRowRemovalAfterFinalizedTwinV1({ ...input, assertionVersion });
     await this.owedLegacySwmRetirementsV1().retire(
       JSON.stringify([input.contextGraphId, input.subGraphName ?? null, input.kaUal, assertionVersion]),
       (signal) => retireRfc64LegacySwmAfterFinalizedVmV1(
