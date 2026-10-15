@@ -188,6 +188,21 @@ accepts. Other message formats are unchanged.
   retried minutes apart: on a graph of a few hundred assets that was being
   published to, single assets took up to 15 minutes. Nothing is lost, and
   this is not new in this release.
+- **A node with one sync slot and no sync queue can list a graph as
+  unsynced while it holds the graph's data** (#3280): with
+  `DKG_SYNC_GLOBAL_MAX_INFLIGHT=1` and no global sync queue, a setting used
+  for soak tests, shared-memory pulls get through on their reserved slot
+  (#3258). While another transfer holds the node's one slot, the metadata
+  refresh that a catch-up needs and the pull of a private graph's history
+  are refused. The node then keeps a graph unsynced although it holds its
+  shared memory, and the history of a private graph can arrive late. The
+  default setting, 10 slots and a queue of 20, is not affected.
+- **A member of a registered public graph can stay unsynced after it
+  subscribes** (#3281): when the member's first catch-up runs before the
+  node has accepted the graph's authority, the catch-up stops, and the
+  repeats of #3249 cover only graphs that are not registered. The member
+  receives and holds the graph's writes; only its `synced` flag stays
+  false.
 - **A member that restarted before its empty private graph was proven ready
   stays not ready** (#3109): the readiness proof of an empty registered
   private graph now runs again when the member's copy of the metadata
