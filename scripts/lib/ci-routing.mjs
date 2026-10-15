@@ -117,6 +117,7 @@ export const WORKSPACE_RULES = Object.freeze({
   'packages/publisher': {
     lanes: [
       'tornado_publisher',
+      'tornado_blazegraph',
       'tornado_agent',
       'bura_cli',
       'kosava_supporting',

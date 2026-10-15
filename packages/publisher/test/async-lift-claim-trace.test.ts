@@ -4,7 +4,7 @@ import { Logger, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dk
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { ClaimTrace, withObservedClaimLock } from '../src/async-lift-claim-trace.js';
-import { withKeyedLocks, type KeyedLockObservation } from '../src/keyed-lock.js';
+import { withKeyedLocks } from '../src/keyed-lock.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 
 const prefix = 'async_publish_claim_trace ';
@@ -114,59 +114,41 @@ describe('claim lock diagnostic isolation', () => {
 });
 
 
-describe('canonical keyed-lock observation boundaries', () => {
-  it('registers synchronously, keeps shared-key FIFO, and lets disjoint keys progress', async () => {
+describe('canonical keyed-lock ownership', () => {
+  it('registers all keys synchronously, preserves FIFO after rejection, and retains successor ownership', async () => {
     const queues = new Map<string, Promise<void>>();
     const events: string[] = [];
-    let registeredTogether = false;
-    let releasedPredecessorOnly = false;
     let release!: () => void;
+    let releaseSecond!: () => void;
+    let enteredSecond!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const secondEntered = new Promise<void>((resolve) => { enteredSecond = resolve; });
     const failure = new Error('first failed');
     const first = withKeyedLocks(queues, ['b', 'a', 'a'], async () => {
       events.push('first'); await gate; throw failure;
-    }, {
-      queued: () => {
-        registeredTogether = queues.has('a') && queues.get('a') === queues.get('b');
-        events.push('queued');
-      },
-      acquired: () => { events.push('acquired'); },
-      released: () => {
-        // Successors own b now, so the releasing predecessor must not evict it.
-        releasedPredecessorOnly = !queues.has('a') && queues.has('b');
-        events.push('released');
-      },
     });
     const rejected = expect(first).rejects.toBe(failure);
-    expect(events).toEqual(['queued']);
-    expect(registeredTogether).toBe(true);
-    const second = withKeyedLocks(queues, ['b'], async () => { events.push('second'); return 2; });
+    expect(queues.has('a')).toBe(true);
+    expect(queues.get('a')).toBe(queues.get('b'));
+    expect(events).toEqual([]);
+    const second = withKeyedLocks(queues, ['b'], async () => {
+      events.push('second'); enteredSecond(); await secondGate; return 2;
+    });
     const third = withKeyedLocks(queues, ['b'], async () => { events.push('third'); return 3; });
     const unrelated = withKeyedLocks(queues, ['z'], async () => { events.push('unrelated'); return 4; });
     await expect(unrelated).resolves.toBe(4);
-    expect(events).toEqual(['queued', 'acquired', 'first', 'unrelated']);
+    expect(events).toEqual(['first', 'unrelated']);
     release();
     await rejected;
+    await secondEntered;
+    // The failed predecessor releases a, but cannot evict the successors owning b.
+    expect(queues.has('a')).toBe(false);
+    expect(queues.has('b')).toBe(true);
+    expect(events).toEqual(['first', 'unrelated', 'second']);
+    releaseSecond();
     await expect(Promise.all([second, third])).resolves.toEqual([2, 3]);
-    expect(events).toEqual(['queued', 'acquired', 'first', 'unrelated', 'released', 'second', 'third']);
-    expect(releasedPredecessorOnly).toBe(true);
+    expect(events).toEqual(['first', 'unrelated', 'second', 'third']);
     expect(queues.size).toBe(0);
-  });
-
-  it.each(['queued', 'acquired', 'released'] as const)('ignores a throwing %s hook or getter without changing results or progress', async (phase) => {
-    for (const getter of [false, true]) {
-      const queues = new Map<string, Promise<void>>();
-      const observation: KeyedLockObservation = {};
-      const fail = () => { throw new Error('observer failed'); };
-      if (getter) Object.defineProperty(observation, phase, { get: fail });
-      else observation[phase] = fail;
-      const failure = new Error('business failure');
-      const first = withKeyedLocks(queues, ['shared'], async () => { throw failure; }, observation);
-      const rejected = expect(first).rejects.toBe(failure);
-      const second = withKeyedLocks(queues, ['shared'], async () => 42, observation);
-      await rejected;
-      await expect(second).resolves.toBe(42);
-      expect(queues.size).toBe(0);
-    }
   });
 });

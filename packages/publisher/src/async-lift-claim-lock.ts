@@ -1,4 +1,9 @@
-import type { KeyedLockObservation } from './keyed-lock.js';
+/** Synchronous, best-effort boundary observations; hooks never control lock ownership. */
+export interface ClaimLockObservation {
+  queued?: () => void;
+  acquired?: () => void;
+  released?: () => void;
+}
 
 export type ClaimLockKind = 'claim' | 'admission' | 'transition' | 'recovery' | 'sweep' | 'admin';
 
@@ -24,7 +29,7 @@ export async function withClaimDomainLock<T>(
   key: string,
   kind: ClaimLockKind,
   work: () => Promise<T>,
-  observation?: KeyedLockObservation,
+  observation?: ClaimLockObservation,
 ): Promise<T> {
   let grant!: () => void;
   const granted = new Promise<void>((resolve) => { grant = resolve; });
@@ -72,7 +77,7 @@ function selectNext(waiting: ClaimWaiter[]): ClaimWaiter | undefined {
   return waiting.shift();
 }
 
-function observe(observation: KeyedLockObservation | undefined, phase: keyof KeyedLockObservation): void {
+function observe(observation: ClaimLockObservation | undefined, phase: keyof ClaimLockObservation): void {
   try {
     observation?.[phase]?.();
   } catch { /* Observers cannot control ownership or settlement. */ }

@@ -123,6 +123,19 @@ describe('detached local completion', () => {
     expect(await s.publisher.getStatus(s.jobId)).toEqual(failed);
   });
 
+  it('does not rewrite a job finalized before its late executor result', async () => {
+    const s = await scenario();
+    await s.publisher.recordPublishResult(s.jobId, completeResult());
+    const finalized = await s.publisher.getStatus(s.jobId);
+    expect(finalized?.status).toBe('finalized');
+    const write = vi.spyOn(s.store, 'replaceSubject');
+    s.finish(completeResult());
+    await s.publisher.drainDetachedExecutions();
+    expect(await s.publisher.getStatus(s.jobId)).toEqual(finalized);
+    expect(write).not.toHaveBeenCalled();
+    expect(s.repair).not.toHaveBeenCalled();
+  });
+
   it('uses recovery when the detached executor rejects', async () => {
     const s = await scenario();
     s.reject(new Error('receipt polling failed'));

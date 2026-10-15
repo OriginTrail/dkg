@@ -48,6 +48,7 @@ import {
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishExecutionResult,
+  AsyncKnowledgeAssetVmPublishCertifiedResult,
   ActiveLiftJobClaim,
   ActiveLiftJobClaimSession,
   AsyncLiftAdministrativeMutations,
@@ -1408,6 +1409,26 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
+  /** Complete only the original claim and transaction, including after proof releases its wallet. */
+  private async recordDetachedPublishResult(
+    claim: ActiveLiftJobClaim, result: AsyncKnowledgeAssetVmPublishCertifiedResult, options: { publicByteSize?: number },
+  ): Promise<boolean> {
+    if (result.localFinalizationComplete !== true || result.status !== 'confirmed' || !result.onChainResult) return false;
+    // Keep canonical claim -> job lock order through terminal persistence and wallet deletion.
+    // Otherwise a claimant can replace the wallet lock between its guarded read and deletion.
+    // This short transaction does no lifecycle repair: the executor certified that work already.
+    return this.claimCoordinator.runClaimJobTransaction(claim.jobId, async (transaction) => {
+      if (transaction.kind !== 'present') return false;
+      const { current, scope } = transaction;
+      if (current.status !== 'broadcast' && current.status !== 'included') return false;
+      if (current.claim?.claimToken !== claim.claim.claimToken
+        || current.claim?.walletId !== claim.claim.walletId) return false;
+      if (current.broadcast.txHash !== result.onChainResult.txHash) return false;
+      const completed = await this.applyPublishResultTransition(current, scope, result, options);
+      return completed.status === 'finalized';
+    });
+  }
+
   private trackDetachedExecution(
     claim: ActiveLiftJobClaim,
     execution: Promise<AsyncKnowledgeAssetVmPublishExecutionResult>,
@@ -1420,7 +1441,7 @@ export class TripleStoreAsyncLiftPublisher
       async (result) => {
         this.chainObservations.completion.executorSettled(jobId);
         if (result?.localFinalizationComplete !== true) return;
-        completed = await this.claimCoordinator.recordDetachedPublishResult(claim, result, options);
+        completed = await this.recordDetachedPublishResult(claim, result, options);
         if (completed) this.executorProofHints.delete(jobId);
       },
       () => { this.chainObservations.completion.executorSettled(jobId); },

@@ -4,7 +4,7 @@ import {
   OxigraphStore, activeDefaultStoreWorkPriority, withDefaultStoreWorkPriority,
 } from '@origintrail-official/dkg-storage';
 import { withClaimDomainLock, type ClaimLockKind, type ClaimLockQueue } from '../src/async-lift-claim-lock.js';
-import type { KeyedLockObservation } from '../src/keyed-lock.js';
+import type { ClaimLockObservation } from '../src/async-lift-claim-lock.js';
 import { ClaimTrace, withObservedClaimLock } from '../src/async-lift-claim-trace.js';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
@@ -207,7 +207,7 @@ describe('claim-domain observer boundaries', () => {
   it.each(['queued', 'acquired', 'released'] as const)('isolates throwing %s hooks and getters', async (phase) => {
     for (const getter of [false, true]) {
       const queues = new Map<string, ClaimLockQueue>();
-      const observation: KeyedLockObservation = {};
+      const observation: ClaimLockObservation = {};
       const fail = () => { throw new Error('observer failure'); };
       if (getter) Object.defineProperty(observation, phase, { get: fail });
       else observation[phase] = fail;
