@@ -92,6 +92,7 @@ import {
   type KAMetadata,
   type OnChainProvenance,
 } from './metadata.js';
+import { hasSubGraphRegistration } from './sub-graph-registration.js';
 import {
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
@@ -6850,15 +6851,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async isSubGraphRegistered(contextGraphId: string, subGraphName: string): Promise<boolean> {
-    const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
-    const registered = await this.store.query(
-      `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta> {
-        <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
-          <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
-          <http://dkg.io/ontology/createdBy> ?createdBy .
-      } }`,
-    );
-    return registered.type === 'boolean' && registered.value;
+    return hasSubGraphRegistration(this.store, contextGraphId, subGraphName);
   }
 
   /**

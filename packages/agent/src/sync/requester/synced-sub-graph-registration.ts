@@ -19,11 +19,13 @@
  * and the other members sync it from the owner.
  *
  * Rows that a sync round stores in a named sub-graph's shared memory now
- * register that sub-graph, with the check and the triples the live paths use.
+ * register that sub-graph, through the operation the live paths use
+ * (`ensureSubGraphRegistration` in the publisher package). What is particular
+ * to sync stays here: which sub-graphs a round's rows belong to, the session's
+ * memory of settled names, the child context graph exclusion and the lock.
  */
 
-import { assertSafeIri, contextGraphSubGraphUri } from '@origintrail-official/dkg-core';
-import { generateSubGraphRegistration, withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import { ensureSubGraphRegistration, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { sharedMemoryGraphSubGraphName } from '../shared-memory-graphs.js';
 
@@ -88,16 +90,14 @@ export class SyncedSubGraphRegistration {
   async #registerOnce(contextGraphId: string, subGraphName: string, createdBy: string): Promise<boolean> {
     const { store, writeLocks, isKnownChildContextGraph } = this.#ports;
     return withKeyedLocks(writeLocks, [`${contextGraphId}\0${subGraphName}\0sub-graph-registration`], async () => {
-      if (await isSubGraphRegistered(store, contextGraphId, subGraphName)) return false;
       if (await isKnownChildContextGraph(contextGraphId, subGraphName)) return false;
       await new GraphManager(store).ensureSubGraph(contextGraphId, subGraphName);
-      await store.insert(generateSubGraphRegistration({
-        contextGraphId,
-        subGraphName,
-        createdBy,
-        timestamp: new Date(),
-      }));
-      return true;
+      const { registered } = await ensureSubGraphRegistration(
+        store,
+        { contextGraphId, subGraphName, createdBy, timestamp: new Date() },
+        { source: 'agent.sharedMemorySync.subGraphRegistration' },
+      );
+      return registered;
     });
   }
 }
@@ -125,22 +125,4 @@ export function subGraphsOfStoredRows(
     if (publisher !== undefined) publishers.add(publisher);
   }
   return subGraphs;
-}
-
-/** The check the live paths make before they register a sub-graph. */
-async function isSubGraphRegistered(
-  store: TripleStore,
-  contextGraphId: string,
-  subGraphName: string,
-): Promise<boolean> {
-  const metaGraph = `did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta`;
-  const result = await store.query(
-    `ASK { GRAPH <${metaGraph}> {
-      <${assertSafeIri(contextGraphSubGraphUri(contextGraphId, subGraphName))}> a <http://dkg.io/ontology/SubGraph> ;
-        <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
-        <http://dkg.io/ontology/createdBy> ?createdBy .
-    } }`,
-    { source: 'agent.sharedMemorySync.subGraphRegistration' },
-  );
-  return result.type === 'boolean' && result.value;
 }
