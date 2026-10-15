@@ -15,6 +15,15 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from './priority-admission-queue.js';
+import {
+  ReservedSharedMemorySlots,
+  SHARED_MEMORY_QUEUE_POOL,
+  recordSharedMemoryReserve,
+  sharedMemoryReserveFor,
+  withSharedMemoryReserveCapacity,
+  type SharedMemoryReserve,
+} from './shared-memory-reserve.js';
+import { nonNegativeInteger, parseIntegerEnv } from './sync-switches.js';
 
 export interface SyncBackpressureSnapshot {
   inflight: number;
@@ -70,6 +79,10 @@ interface GlobalQueuePayload {
   admissionClass: SyncAdmissionClass;
   limit: number;
   automaticBackgroundLimit: number;
+  /** Set for a shared-memory pull, which may hold a reserved slot instead. */
+  sharedMemoryReserve?: SharedMemoryReserve;
+  /** Set at start: the admission holds a reserved slot, not a general one. */
+  reserved?: boolean;
   label: string;
   contextGraphId?: string;
   source: SyncAdmissionSource;
@@ -308,17 +321,27 @@ const capacityTracker = new SyncCapacityTracker();
 let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
 
+const reservedSlots = new ReservedSharedMemorySlots();
+const generalCapacityAvailable = (payload: GlobalQueuePayload): boolean => capacityTracker.canRun(
+  payload.capacityClaim,
+  payload.admissionClass,
+  payload.policy,
+  payload.automaticBackgroundLimit,
+);
+
 const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   now: () => performance.now(),
-  canRun: (entry) => capacityTracker.canRun(
-    entry.payload.capacityClaim,
-    entry.payload.admissionClass,
-    entry.payload.policy,
-    entry.payload.automaticBackgroundLimit,
-  ),
+  canRun: (entry) => generalCapacityAvailable(entry.payload)
+    || reservedSlots.canTake(entry.payload.sharedMemoryReserve),
   onStart: (entry) => {
     const { capacityClaim, admissionClass } = entry.payload;
-    const releaseCapacity = capacityTracker.start(capacityClaim, admissionClass);
+    // Started right after `canRun` said yes: a general slot whenever one is
+    // free, so a reserved slot never narrows what other work may admit.
+    entry.payload.reserved = !generalCapacityAvailable(entry.payload);
+    if (entry.payload.reserved) reservedSlots.take();
+    const releaseCapacity = entry.payload.reserved
+      ? () => reservedSlots.give()
+      : capacityTracker.start(capacityClaim, admissionClass);
     lastLimit = entry.payload.limit;
     getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
     return () => {
@@ -327,7 +350,8 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     };
   },
   onStartFailureRollback: (entry) => {
-    capacityTracker.rollback(entry.payload.capacityClaim, entry.payload.admissionClass);
+    if (entry.payload.reserved) reservedSlots.give();
+    else capacityTracker.rollback(entry.payload.capacityClaim, entry.payload.admissionClass);
     getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
   },
   onDepthChange: (depth) => getMetrics().syncBackgroundQueueDepth.record(depth),
@@ -391,7 +415,7 @@ function syncGlobalPressureCapacity(
 function configureResolvedSyncGlobalPolicy(
   policy: SyncGlobalBackpressurePolicy,
 ): SyncGlobalBackpressurePolicy {
-  queue.configureObservabilityCapacity(syncGlobalPressureCapacity(policy));
+  queue.configureObservabilityCapacity(withSharedMemoryReserveCapacity(syncGlobalPressureCapacity(policy), policy));
   return policy;
 }
 const automaticBackgroundLimits = new WeakMap<object, number>();
@@ -481,28 +505,37 @@ function syncAdmissionTerms(
   const queueTimeoutMs = isPartitionedPolicy(policy) && admissionClass === 'fast'
     ? policy.partitions.fast.queueTimeoutMs
     : undefined;
+  // A shared-memory pull that cannot start waits in its own bounded queue for
+  // a general or reserved slot, and is deferred after that queue's timeout.
+  const reserve = sharedMemoryReserveFor(policy, lane, admissionClass === 'fast');
   return {
-    queueTimeoutMs,
+    queueTimeoutMs: reserve?.queueTimeoutMs ?? queueTimeoutMs,
     queued: {
       payload: {
         policy,
         admissionClass,
         limit,
         automaticBackgroundLimit: automaticBackgroundLimits.get(policy) ?? limit,
+        sharedMemoryReserve: reserve,
         label: options.label,
         contextGraphId: options.contextGraphId,
         source: normalizedSource,
         capacityClaim,
       } satisfies GlobalQueuePayload,
-      ownerKey,
-      ownerQueueLimit,
+      ownerKey: reserve ? SHARED_MEMORY_QUEUE_POOL : ownerKey,
+      ownerQueueLimit: reserve ? undefined : ownerQueueLimit,
+      queuePool: reserve ? SHARED_MEMORY_QUEUE_POOL : undefined,
       lane: schedulerLane,
       priority: options.priority ?? 0,
       priorityClass: options.priorityClass ?? 'default',
       agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
-      queueLimit,
+      queueLimit: reserve?.queueLimit ?? queueLimit,
     },
   };
+}
+
+function reservedSharedMemoryState(reserve: SharedMemoryReserve | undefined): string {
+  return reservedSlots.describe(reserve, queue.countOwner(SHARED_MEMORY_QUEUE_POOL));
 }
 
 function acquire(
@@ -515,110 +548,40 @@ function acquire(
   lastLimit = limit;
   lastQueueLimit = queueLimit;
   const queuedBefore = queue.length;
+  const reserve = terms.queued.payload.sharedMemoryReserve;
   return queue.acquire({
     ...terms.queued,
     signal: options.signal,
     timeoutMs: terms.queueTimeoutMs,
     createBusyError: () => new SyncBackpressureBusyError(
       `Sync backpressure rejected ${options.label} `
-        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queuedBefore}/${queueLimit})`,
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queuedBefore}/${queueLimit}`
+        + `${reservedSharedMemoryState(reserve)})`,
     ),
     createDisplacedError: (victim) => new SyncBackpressureBusyError(
         `Sync backpressure displaced ${victim.payload.contextGraphId ?? 'queued work'} for higher-priority ${options.label}`,
         'displaced',
       ),
     createTimeoutError: () => new SyncBackpressureBusyError(
-      `Sync backpressure timed out ${options.label} waiting for the fast partition`,
+      reserve === undefined
+        ? `Sync backpressure timed out ${options.label} waiting for the fast partition`
+        : `Sync backpressure timed out ${options.label} after ${reserve.queueTimeoutMs} ms waiting for a `
+          + `shared-memory slot (global inflight=${capacityTracker.inflightCount}/${limit}`
+          + `${reservedSharedMemoryState(reserve)})`,
       'queue_timeout',
     ),
   });
 }
 
-export function parseBooleanEnv(name: string): boolean | undefined {
-  const raw = process.env[name]?.trim().toLowerCase();
-  if (!raw) return undefined;
-  if (raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on' || raw === 'enabled') return true;
-  if (raw === '0' || raw === 'false' || raw === 'no' || raw === 'off' || raw === 'disabled') return false;
-  return undefined;
-}
-
-export function resolveBooleanSwitch(
-  configValue: boolean | undefined,
-  envName: string,
-  defaultValue: boolean,
-): boolean {
-  return parseBooleanEnv(envName) ?? configValue ?? defaultValue;
-}
-
-/** Effective activation of the periodic peer-sync reconciler (the timer that
- * re-syncs stale connected peers). Kept as one public resolver so runtime
- * gates and operator-facing status cannot disagree about
- * config/default/environment precedence. It does not gate chain-driven VM
- * reconciliation; see {@link resolveVmReconcilerEnabled}. */
-export function resolveSyncReconcilerEnabled(configValue?: boolean): boolean {
-  return resolveBooleanSwitch(
-    configValue,
-    'DKG_SYNC_RECONCILER_ENABLED',
-    true,
-  );
-}
-
-/** Effective activation of chain-driven VM reconciliation: core-hosted
- * recording, the KA-registered nudge, and the VM reconcile sweep. A core's
- * StorageACK finality gate keys off this switch, so a core with it off
- * declines every StorageACK. Same precedence as every other switch here:
- * environment, then config, then the default (on). */
-export function resolveVmReconcilerEnabled(configValue?: boolean): boolean {
-  return resolveBooleanSwitch(
-    configValue,
-    'DKG_VM_RECONCILER_ENABLED',
-    true,
-  );
-}
-
-/** Effective activation of the exact-batch stream wire: the requester on any
- * node and, on a core, the responder. Environment only; default off.
- * `DKG_EXPERIMENTAL_EXACT_BATCH_STREAM` is the name this switch was first
- * deployed under. It is read only when the current name is not set, so a node
- * configured before the rename keeps its setting. */
-export function resolveExactBatchStreamEnabled(): boolean {
-  return parseBooleanEnv('DKG_EXACT_BATCH_STREAM_ENABLED')
-    ?? parseBooleanEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM')
-    ?? false;
-}
-
-function parseIntegerEnv(name: string): number | undefined {
-  const raw = process.env[name]?.trim();
-  if (!raw) return undefined;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) ? parsed : undefined;
-}
-
-function positiveInteger(value: number | undefined): number | undefined {
-  return Number.isInteger(value) && typeof value === 'number' && value > 0 ? value : undefined;
-}
-
-function nonNegativeInteger(value: number | undefined): number | undefined {
-  return Number.isInteger(value) && typeof value === 'number' && value >= 0 ? value : undefined;
-}
-
-export function resolvePositiveIntegerSwitch(
-  configValue: number | undefined,
-  envName: string,
-): number | undefined {
-  const value = parseIntegerEnv(envName) ?? configValue;
-  if (value == null) return undefined;
-  return positiveInteger(value);
-}
-
-export function resolveNonNegativeIntegerSwitch(
-  configValue: number | undefined,
-  envName: string,
-): number | undefined {
-  const value = parseIntegerEnv(envName) ?? configValue;
-  if (value == null) return undefined;
-  return nonNegativeInteger(value);
-}
+export {
+  parseBooleanEnv,
+  resolveBooleanSwitch,
+  resolveExactBatchStreamEnabled,
+  resolveNonNegativeIntegerSwitch,
+  resolvePositiveIntegerSwitch,
+  resolveSyncReconcilerEnabled,
+  resolveVmReconcilerEnabled,
+} from './sync-switches.js';
 
 export function resolveSyncGlobalBackpressure(
   config: SyncGlobalBackpressureConfig,
@@ -663,6 +626,7 @@ export function resolveSyncGlobalBackpressure(
   // consuming that slot before exact VM or selected-SWM recovery arrives.
   automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
   selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
+  recordSharedMemoryReserve(policy);
   return configureResolvedSyncGlobalPolicy(policy);
 }
 
@@ -811,6 +775,7 @@ function resolvePartitionedSyncGlobalBackpressure(
   }) as SyncGlobalBackpressurePolicy;
   automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
   selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
+  recordSharedMemoryReserve(policy);
   return policy;
 }
 
@@ -881,19 +846,23 @@ export async function withGlobalSyncBackpressure<T>(
     throw error;
   }
 
+  const { sharedMemoryReserve } = admission.entry.payload;
   if (admission.status === 'queued') {
     options.logInfo?.(
       options.ctx,
       `Sync backpressure queued ${options.label} `
-        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${admission.queuedBefore}/${queueLimit})`,
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${admission.queuedBefore}/${queueLimit}`
+        + `${reservedSharedMemoryState(sharedMemoryReserve)})`,
     );
   }
   const release = await admission.release;
   try {
     options.logInfo?.(
       options.ctx,
-      `Sync backpressure running ${options.label} `
-        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queue.length}/${queueLimit})`,
+      `Sync backpressure running ${options.label}`
+        + `${admission.entry.payload.reserved ? ' in a reserved shared-memory slot' : ''} `
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queue.length}/${queueLimit}`
+        + `${reservedSharedMemoryState(sharedMemoryReserve)})`,
     );
     return await work();
   } finally {

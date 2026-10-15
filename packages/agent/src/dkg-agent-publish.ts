@@ -942,6 +942,8 @@ export class PublishMethods extends DKGAgentBase {
      */
     shareScope?: WorkspaceShareScope,
   ): Promise<void> {
+    // A graph written here is in use: keep it pulled from its owner (#3251).
+    this.recentSharedMemoryPulls?.noteActivity(contextGraphId);
     const payload = normalizeWorkspaceGossipPublishInput(payloadOrMessage);
     const message = payload.message;
     // OT-RFC-38 / LU-6 Phase B — derive the wire-form id ONCE at the

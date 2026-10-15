@@ -10,6 +10,9 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-legacy-swm-boundary-v1.test.ts",
   "test/rfc64-legacy-swm-boundary-codec-v1.test.ts",
   "test/rfc64-legacy-swm-boundary-fence-v1.test.ts",
+  // #3052 — a promote waits for the legacy SWM fence in front of it to drop, within two bounds.
+  "test/rfc64-legacy-swm-promote-admission.test.ts",
+  "test/rfc64-legacy-swm-promote-admission-schedules.test.ts",
   "test/rfc64-inventory-v1-lifecycle.test.ts",
   "test/rfc64-inventory-v1-candidates.test.ts",
   "test/rfc64-inventory-v1-applied-head.test.ts",
@@ -100,6 +103,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-unregistered-replica-authority.integration.test.ts",
   "test/rfc64-replay-worklist.integration.test.ts",
   "test/rfc64-catalog-replay-connection-runtime-v1.test.ts",
+  "test/rfc64-catalog-head-replay-peers.test.ts",
   "test/rfc64-catalog-replay-recovery-runtime-v1.test.ts",
   "test/rfc64-catalog-operational-applied-heads-v1.test.ts",
   "test/private-catalog-subscription-readiness-v1.test.ts",

@@ -20,6 +20,8 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64CatalogWorkloadOwnerV1 } from './rfc64/catalog-runtime-v1.js';
 import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
+import type { Rfc64CatalogReconciliationTerminalReasonV1 } from
+  './rfc64/public-catalog-reconciliation-outcome-v1.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import type { Rfc64ActivePeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
@@ -45,8 +47,8 @@ export type Rfc64PublicCatalogBootstrapOutcomeV1 =
   | 'known-incomplete'
   | 'failed';
 
-export type Rfc64CatalogBootstrapCompletionReasonV1 =
-  | 'no-authorized-provider';
+/** Why a private finalized-VM target is known-incomplete: the reconciliation's terminal reason. */
+export type Rfc64CatalogBootstrapCompletionReasonV1 = Rfc64CatalogReconciliationTerminalReasonV1;
 
 export type Rfc64CatalogRecoveryQueueOutcomeV1 = Readonly<
   | { kind: 'not-authorized' }
@@ -86,41 +88,41 @@ export function classifyRfc64CatalogBootstrapFailureV1(
   outcome: Extract<Rfc64PublicCatalogBootstrapOutcomeV1, 'not-found' | 'known-incomplete' | 'failed'>;
   completionReason: Rfc64CatalogBootstrapCompletionReasonV1 | null;
 }> {
-  const knownIncomplete = requiresPrivateVm
-    && hasNoAuthorizedProviderTerminalReasonV1(error);
+  const completionReason = requiresPrivateVm ? terminalReasonOfV1(error) : null;
   return Object.freeze({
-    outcome: knownIncomplete
+    outcome: completionReason !== null
       ? 'known-incomplete'
       : error === null ? 'not-found' : 'failed',
-    completionReason: knownIncomplete ? 'no-authorized-provider' : null,
+    completionReason,
   });
 }
 
-function hasNoAuthorizedProviderTerminalReasonV1(error: unknown): boolean {
+/** The typed terminal reason a synchronization failure carries, if any. */
+function terminalReasonOfV1(error: unknown): Rfc64CatalogBootstrapCompletionReasonV1 | null {
   let current = error;
   const visited = new Set<object>();
   for (let depth = 0; depth < 8; depth += 1) {
     if (
       current instanceof Rfc64CatalogSynchronizationErrorV1
-      && current.terminalReason === 'no-authorized-provider'
+      && current.terminalReason !== null
     ) {
-      return true;
+      return current.terminalReason;
     }
     if (
       (typeof current !== 'object' && typeof current !== 'function')
       || current === null
       || visited.has(current)
     ) {
-      return false;
+      return null;
     }
     visited.add(current);
     try {
       current = (current as { readonly cause?: unknown }).cause;
     } catch {
-      return false;
+      return null;
     }
   }
-  return false;
+  return null;
 }
 
 interface MutableTargetStatusV1 {
