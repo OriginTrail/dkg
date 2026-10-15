@@ -53,6 +53,11 @@ function refusalOf(action: () => void): Error & Record<string, unknown> {
 
 const tick = () => new Promise<void>((resolve) => { setImmediate(resolve); });
 
+/** What a fence that gave up was still waiting on; other kinds carry no such field. */
+const waitingOn = (event: Rfc64LegacySwmFenceEventV1) => (
+  event.kind === 'wait-exceeded' ? event.waitingOn : undefined
+);
+
 describe('RFC-64 legacy SWM fence coordinator', () => {
   it('names the caller, the scope and the age of the fence in a refusal', async () => {
     let now = 1_000;
@@ -171,7 +176,7 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
     );
 
     await expect(waiting).resolves.toEqual({ ran: false });
-    expect(events.map((event) => [event.kind, event.source, event.waitingOn])).toEqual([
+    expect(events.map((event) => [event.kind, event.source, waitingOn(event)])).toEqual([
       ['wait-exceeded', 'finalized-vm-retirement', 'mutation-chain'],
     ]);
     // The asset's own fence is gone. The lease's fence over the graph is what still refuses.
@@ -370,7 +375,7 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
       await expect(runRfc64LegacySwmRetirementV1(
         fence, { source: 'republish-retirement', contextGraphId: CG }, async () => { ran = true; },
       )).resolves.toEqual({ ran: false });
-      expect(events.map((event) => [event.kind, event.source, event.waitingOn])).toEqual([
+      expect(events.map((event) => [event.kind, event.source, waitingOn(event)])).toEqual([
         ['wait-exceeded', 'republish-retirement', 'mutation-chain'],
       ]);
 
@@ -556,7 +561,7 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
       .rejects.toThrow('RFC-64 legacy SWM boundary lease was not acquired in time');
 
     expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(1);
-    expect(events.map((event) => [event.kind, event.source, event.scope, event.waitingOn])).toEqual([
+    expect(events.map((event) => [event.kind, event.source, event.scope, waitingOn(event)])).toEqual([
       ['wait-exceeded', 'finalized-vm-retirement', 'asset', 'preparations'],
       ['wait-exceeded', 'republish-retirement', 'graph', 'preparations'],
       ['wait-exceeded', 'receiver-lease', 'graph', 'preparations'],
@@ -604,7 +609,7 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
     // The share is still in flight: the retirement waits for it and gives up at the bound.
     await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
       .resolves.toBe('not-run');
-    expect(events.map((event) => [event.kind, event.waitingOn])).toEqual([['wait-exceeded', 'preparations']]);
+    expect(events.map((event) => [event.kind, waitingOn(event)])).toEqual([['wait-exceeded', 'preparations']]);
     expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(1);
 
     share.settle(true);

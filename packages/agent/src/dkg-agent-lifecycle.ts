@@ -1,6 +1,7 @@
 import { observedReadAuthorityDecision } from './internal/context-graph-authority/unanswered-authority-read.js';
 import { resolveSharedMemoryAdmission, sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed, type SwmReadAdmission } from './swm-read-admission.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
+import { startRecentSharedMemoryPullsIfEnabled } from './recent-shared-memory-pull-runtime.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
@@ -880,7 +881,13 @@ import {
   type OwedLegacySwmRetirementsV1,
 } from './internal/owed-legacy-swm-retirements.js';
 import {
-  describeRfc64LegacySwmFenceEventV1,
+  rfc64SharedMemoryAuthorityWaitV1,
+  sharedMemoryAuthorityWaitsOf,
+  SharedMemorySyncAuthorityCheck,
+  type SharedMemoryAuthorityWaitSink,
+} from './internal/shared-memory-authority-wait.js';
+import {
+  rfc64LegacySwmFenceEventLoggerV1,
   initializeRfc64LegacySwmBoundaryV1,
   rfc64LateLegacySwmCompanionResolverV1,
   retireRfc64LegacySwmAfterFinalizedVmV1,
@@ -935,6 +942,8 @@ interface SharedMemorySyncFromPeerOptions {
   priority?: number;
   /** Bounded admission origin for node-wide scheduler diagnostics. */
   source?: SyncAdmissionSource;
+  /** Read the peer's state at the call: never join a sync of the same scope already running. */
+  freshSnapshot?: boolean;
 }
 
 interface OrdinarySharedMemorySyncFromPeerOptions extends SharedMemorySyncFromPeerOptions {
@@ -1240,12 +1249,16 @@ function syncPageSizeProfileCacheFor(agent: DKGAgent): SyncPageSizeProfileCache 
  *   the factory — so there is no ambient source to read yet. Reading the
  *   ambient one here instead would label every join `unspecified` and quietly
  *   make I6's cross-family check unable to fire.
+ * @param meta.fresh The caller needs the peer's state at the call: it does not
+ *   join a flight already running, which may have read the peer before a
+ *   change the caller was told of. It runs after that flight instead, joining
+ *   only a flight that started later.
  */
 function runSyncSingleFlight<T>(
   agent: DKGAgent,
   key: string,
   factory: () => Promise<T>,
-  meta: { scope: SyncSingleFlightScope; source?: SyncAdmissionSource },
+  meta: { scope: SyncSingleFlightScope; source?: SyncAdmissionSource; fresh?: boolean },
 ): Promise<T> {
   let inFlight = inFlightSyncSingleFlightsByAgent.get(agent);
   if (!inFlight) {
@@ -1255,6 +1268,10 @@ function runSyncSingleFlight<T>(
   const { scope } = meta;
   const joinerSource = normalizeSyncAdmissionSource(meta.source ?? activeSyncAdmissionSource());
   const existing = inFlight.get(key);
+  if (existing && meta.fresh === true) {
+    const after = () => runSyncSingleFlight(agent, key, factory, { ...meta, fresh: false });
+    return existing.promise.then(after, after);
+  }
   if (existing) {
     // Recorded at MAP-HIT time, before any bytes move: a join is a decision to
     // share work, and by the time the shared promise settles there is nothing
@@ -2337,7 +2354,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this,
           this.rfc64PersistenceV1.rootPath,
           this.store,
-          { onFenceEvent: (event) => this.log.warn(ctx, describeRfc64LegacySwmFenceEventV1(event)) },
+          { onFenceEvent: rfc64LegacySwmFenceEventLoggerV1(this.log, ctx) },
         );
         await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,
@@ -2799,6 +2816,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // which is structurally identical and avoids a second
     // round-trip per peer).
     this.messenger.register(PROTOCOL_SWM_SHARE_ACK, (data, fromPeerId) => this.handleSwmShareAck(data, fromPeerId));
+    // A public graph's owner tells its followers that the graph's shared
+    // memory changed (`swm/shared-memory-change-notice.ts`).
+    this.registerSwmChangeNoticeProtocolV1();
 
     // OT-RFC-38 LU-6: cores expose stored ciphertext envelopes to
     // members via /dkg/10.0.1/swm-host-catchup. Registered
@@ -4048,6 +4068,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } else {
       this.log.warn(ctx, `Skipping periodic sync reconciler startup (DKG_SYNC_RECONCILER_ENABLED=0)`);
     }
+    this.recentSharedMemoryPulls = startRecentSharedMemoryPullsIfEnabled(this); // #3251
 
     // A.4-lite+: keep a small set of Core nodes warm (connection pinned +
     // auto-redialed by libp2p) so catch-up / chain reconciliation never pays
@@ -5127,13 +5148,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         continue;
       }
+      const syncAuthority = new SharedMemorySyncAuthorityCheck(contextGraphId, sharedMemoryAuthorityWaitsOf(this));
       if (
         completeSwmProviders.length === 0
-        && !(await this.canUseSharedMemoryForContextGraph(contextGraphId))
-      ) {
-        this.log.warn(ctx, `Skipping SWM sync for unauthorized or unconfirmed context graph "${contextGraphId}"`);
-        continue;
-      }
+        && !syncAuthority.answer(
+          await this.canUseSharedMemoryForContextGraph(contextGraphId, { onAuthorityWait: syncAuthority.onAuthorityWait }),
+          this.log,
+          ctx,
+        )
+      ) continue;
       if (
         acceptedRecoveryLane === 'ordinary-private'
         || await this.isPrivateContextGraph(contextGraphId)
@@ -7698,6 +7721,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             || this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId),
           stopOnBackoffWorthyFailure,
           mode,
+          freshSnapshot: options?.freshSnapshot,
         });
       };
 
@@ -7955,6 +7979,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ), {
       scope: 'shared-memory',
       source: options?.source,
+      fresh: options?.freshSnapshot,
     });
   }
 
@@ -10340,7 +10365,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions = {},
   ): Promise<ContextGraphSub> {
-    return activatePersistedContextGraphSubscriptionTransaction(row, {
+    const activated = await activatePersistedContextGraphSubscriptionTransaction(row, {
       install: (record, input) => this.setContextGraphSubscription(record.id, {
         name: record.name,
         syncMode: 'always-on',
@@ -10378,6 +10403,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return committed;
       },
     }, options);
+    // Activation restores the persisted flags and starts no catch-up: the
+    // daemon decides whether this subscription still needs one.
+    this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: row.id });
+    return activated;
   }
 
   /**
@@ -11252,8 +11281,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
+  async hasConfirmedSharedMemoryMetaState(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    return this.hasConfirmedMetaState(contextGraphId);
+  }
+
   async canUseSharedMemoryForContextGraph(this: DKGAgent, contextGraphId: string,
-    opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision } = {},
+    opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision;
+      onAuthorityWait?: SharedMemoryAuthorityWaitSink } = {},
   ): Promise<boolean> {
     const admission = await this.resolveSharedMemoryReadAdmission(contextGraphId, opts);
     opts.signal?.throwIfAborted();
@@ -11267,12 +11301,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   async resolveSharedMemoryReadAdmission(this: DKGAgent, contextGraphId: string,
-    opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision } = {},
+    opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision;
+      onAuthorityWait?: SharedMemoryAuthorityWaitSink } = {},
   ): Promise<SwmReadAdmission> {
+    let authorityWait: ReturnType<typeof rfc64SharedMemoryAuthorityWaitV1>;
     return resolveSharedMemoryAdmission({
       signal: opts.signal,
-      acceptedAuthority: () => { opts.signal?.throwIfAborted(); return this.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId, opts); },
-      legacyLane: () => this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, opts),
+      acceptedAuthority: () => {
+        opts.signal?.throwIfAborted();
+        const accepted = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId, opts);
+        // Capture the wait before an await can accept a policy for this graph.
+        authorityWait = accepted === false && opts.onAuthorityWait !== undefined
+          ? rfc64SharedMemoryAuthorityWaitV1(this, contextGraphId) : undefined;
+        return accepted;
+      },
+      legacyLane: async () => {
+        const admission = await this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, opts);
+        opts.signal?.throwIfAborted();
+        if (admission.outcome !== 'allowed' && authorityWait !== undefined) opts.onAuthorityWait?.(authorityWait);
+        return admission;
+      },
       confirmedMetadata: () => this.resolveMetadataConfirmation(contextGraphId, opts),
       // Reuse the caller's fresh authority, or retain the finalized-index/live policy.
       readAuthority: async () => opts.readAuthority !== undefined ? opts.readAuthority

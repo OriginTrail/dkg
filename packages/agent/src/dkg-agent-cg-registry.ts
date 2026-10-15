@@ -2278,7 +2278,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
    *   sub-graphs on gossip publish, SWM write, and finalization replay paths:
    *   `gossip-publish-handler.ts`, `workspace-handler.ts`, and
    *   `finalization-handler.ts` call `ensureSubGraph()` and backfill the full
-   *   `_meta` registration when it is missing.
+   *   `_meta` registration when it is missing. Shared-memory sync does the same
+   *   when it stores a sub-graph's rows (`synced-sub-graph-registration.ts`).
    * - Because `subGraphName` is carried on the wire (in the workspace publish request
    *   and the N-Quads' named-graph field), replicated data is routed into the correct
    *   sub-graph named graph on receiving nodes — not into the root data graph.
