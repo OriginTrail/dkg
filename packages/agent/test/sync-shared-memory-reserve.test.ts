@@ -7,6 +7,8 @@ import {
 import {
   DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT,
   DEFAULT_SYNC_SHARED_MEMORY_QUEUE_TIMEOUT_MS,
+} from '../src/sync/shared-memory-reserve.js';
+import {
   getSyncBackpressureSnapshot,
   resolveSyncGlobalBackpressure,
   SyncBackpressureBusyError,
