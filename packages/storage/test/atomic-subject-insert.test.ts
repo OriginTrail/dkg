@@ -62,6 +62,7 @@ describe('atomic subject replacement with additive companions', () => {
     ['replacement graph', [quad(JOB, '"bad"', 'urn:test:foreign')], []],
     ['companion graph', [], [quad(REQUEST, '"bad"', 'urn:test:foreign')]],
     ['companion overlaps replacement', [], [quad(JOB, '"bad"')]],
+    ['bracketed companion overlaps replacement', [], [quad(`<${JOB}>`, '"bad"')]],
     ['companion blank subject', [], [quad('_:b', '"bad"')]],
     ['replacement blank object', [quad(JOB, '_:b')], []],
     ['companion blank object', [], [quad(REQUEST, '_:b')]],
@@ -76,6 +77,19 @@ describe('atomic subject replacement with additive companions', () => {
     expect(mutate).not.toHaveBeenCalled();
     await expect(tryReplaceSubjectAndInsertAtomically({} as TripleStore, GRAPH, JOB, [...replacement], [...inserts]))
       .rejects.toThrow();
+  });
+
+  it('preserves a distinct bracketed companion IRI while replacing only the target', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([quad(JOB, '"old"')]);
+      await store.replaceSubjectAndInsert(
+        GRAPH, JOB, [quad(JOB, '"new"')], [quad(`<${REQUEST}>`, '"companion"')],
+      );
+      expect(await rows(store)).toEqual([
+        { s: JOB, o: '"new"' }, { s: REQUEST, o: '"companion"' },
+      ]);
+    } finally { await store.close(); }
   });
 
   it('rejects unsafe graph and blank replacement subject even for empty groups', () => {

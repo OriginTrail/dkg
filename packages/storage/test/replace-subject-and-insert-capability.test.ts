@@ -112,11 +112,16 @@ describe('replaceSubjectAndInsert capability and decorators', () => {
     const inner = new OxigraphStore();
     const store = new SharedMemoryLiteralBlobStore(inner, { blobDir: dir, thresholdBytes: 1 });
     try {
-      await expect(store.replaceSubjectAndInsert(GRAPH, JOB,
-        [quad(JOB, JSON.stringify('large '.repeat(50)))], [quad(REQUEST, '"unterminated')],
-      )).rejects.toThrow();
-      expect(await readdir(dir)).toEqual([]);
-      expect(await inner.countQuads()).toBe(0);
+      for (const companion of [
+        quad(REQUEST, '"unterminated'),
+        quad(`<${JOB}>`, JSON.stringify('large companion '.repeat(50))),
+      ]) {
+        await expect(store.replaceSubjectAndInsert(GRAPH, JOB,
+          [quad(JOB, JSON.stringify('large '.repeat(50)))], [companion],
+        )).rejects.toThrow();
+        expect(await readdir(dir)).toEqual([]);
+        expect(await inner.countQuads()).toBe(0);
+      }
     } finally { await store.close(); }
   });
 

@@ -1,4 +1,4 @@
-import { assertSafeIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, unwrapIri } from '@origintrail-official/dkg-core';
 import {
   assertReplacementPayload,
   assertSubjectReplacementPayload,
@@ -19,7 +19,7 @@ export function assertSubjectAndInsertPayload(
   assertSubjectReplacementPayload(graphUri, subject, replacementQuads);
   assertReplacementPayload(graphUri, insertQuads);
   for (const quad of insertQuads) {
-    if (quad.subject === subject) {
+    if (unwrapIri(quad.subject) === subject) {
       throw new Error('Atomic subject replacement companion quads must use a different subject');
     }
   }
