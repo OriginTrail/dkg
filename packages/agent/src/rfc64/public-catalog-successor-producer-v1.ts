@@ -21,6 +21,7 @@ import {
   calculateOpaqueKaBundleByteLengthV1,
   canonicalizeAuthorCatalogRowV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
+  catalogKeyToBucketIdV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaChunkTreeRootV1,
   encodeOpaqueKaBundleV1,
@@ -168,8 +169,13 @@ export interface ProduceAndStagePublicOpenExactSetSuccessorInputV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
   readonly previousDirectoryPath: readonly SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
   readonly previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null;
-  /** Complete 0..1024-row live set; zero rows is the canonical final removal. */
+  /** Complete 0..1024-row live set of the selected bucket; zero rows empties it. */
   readonly assets: readonly Rfc64PublicCatalogSuccessorAssetInputV1[];
+  /**
+   * GH#3134 — the bucket `assets` replace, in a catalog of more than one bucket. Omitted: bucket 0
+   * of a one-bucket catalog, whose live set is the whole catalog.
+   */
+  readonly selectedBucketId?: DecimalU64V1;
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt: TimestampMsV1;
   readonly catalogSigner: Rfc64AuthorCatalogEip191SignerV1;
@@ -294,6 +300,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
   ): Promise<ProducedAndStagedPublicOpenExactSetSuccessorV1> {
     // The caller's input is read once, here, before the first row boundary.
     const exactSet = snapshotExactSet(input);
+    const selectedBucketId = input.selectedBucketId ?? ('0' as DecimalU64V1);
     const { previousHead, previousDirectoryPath, previousBucket, issuedAt } = input;
     const { catalogSigner, catalogIssuerAuthorization, signal } = input;
     // The whole set is verified on the main thread: its per-row loops give
@@ -304,7 +311,12 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       throwIfRfc64AbortedV1(signal, RFC64_SUCCESSOR_PRODUCTION_ABORT_MESSAGE_V1);
     };
     const preparedAssets = await prepareExactSet(exactSet, rowBoundary);
-    assertSupportedPreviousSlice(previousHead, previousBucket);
+    assertSupportedPreviousSlice(previousHead, previousBucket, selectedBucketId);
+    for (const { row } of preparedAssets) {
+      if (catalogKeyToBucketIdV1(row.kaId, previousHead.payload.bucketCount) !== selectedBucketId) {
+        fail('catalog-successor-producer-binding', `row ${row.kaId} belongs to another bucket than ${selectedBucketId}`);
+      }
+    }
 
     // Strict typed-row reconstruction, exact deployment binding, and the
     // recoverable EOA author proof all run for the complete set before signing
@@ -340,7 +352,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
         previousHead,
         previousDirectoryPath,
         previousBucket,
-        selectedBucketId: '0' as DecimalU64V1,
+        selectedBucketId,
         nextRows: preparedAssets.map(({ row }) => row),
         issuedAt,
         // The canonical producer reads the whole bucket before and after it
@@ -360,10 +372,12 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
 
     const producedBucket = publication.bucket;
     const producedRows = producedBucket?.payload.rows ?? [];
+    // The successor changes the selected bucket only: every other bucket keeps its rows.
+    const otherRows = BigInt(previousHead.payload.totalRows) - BigInt(previousBucket?.payload.rows.length ?? 0);
     if (
-      publication.head.payload.bucketCount !== '1'
-      || publication.head.payload.directoryHeight !== '0'
-      || publication.head.payload.totalRows !== String(preparedAssets.length)
+      publication.head.payload.bucketCount !== previousHead.payload.bucketCount
+      || publication.head.payload.directoryHeight !== previousHead.payload.directoryHeight
+      || publication.head.payload.totalRows !== String(otherRows + BigInt(preparedAssets.length))
       || publication.head.payload.version === '0'
       || publication.head.payload.previousHeadDigest === null
       || (preparedAssets.length === 0 && producedBucket !== null)
@@ -424,7 +438,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       const directoryPathProof = verifyAuthorCatalogDirectoryPathV1(
         publication.head,
         publication.directoryPath,
-        '0' as DecimalU64V1,
+        selectedBucketId,
       );
       const headSignature = requiredSignature(
         signaturesByDigest,
@@ -731,14 +745,20 @@ function assertExactDurableBundleReceipt(
 function assertSupportedPreviousSlice(
   head: SignedAuthorCatalogHeadEnvelopeV1,
   bucket: SignedAuthorCatalogBucketEnvelopeV1 | null,
+  selectedBucketId: DecimalU64V1,
 ): void {
+  // GH#3134 — in a catalog of more than one bucket the selected bucket is checked against its
+  // directory path by the canonical producer; the head bounds nothing more here.
+  const oneBucket = head.payload.bucketCount === '1';
   if (
-    head.payload.bucketCount !== '1'
-    || head.payload.directoryHeight !== '0'
-    || BigInt(head.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
-    || (head.payload.totalRows === '0' && bucket !== null)
-    || (head.payload.totalRows !== '0'
-      && bucket?.payload.rows.length !== Number(head.payload.totalRows))
+    (oneBucket && (
+      head.payload.directoryHeight !== '0'
+      || selectedBucketId !== '0'
+      || BigInt(head.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
+      || (head.payload.totalRows === '0' && bucket !== null)
+      || (head.payload.totalRows !== '0' && bucket?.payload.rows.length !== Number(head.payload.totalRows))))
+    || (!oneBucket && BigInt(selectedBucketId) >= BigInt(head.payload.bucketCount))
+    || (bucket !== null && bucket.payload.bucketId !== selectedBucketId)
     || head.payload.directoryRootDigest === ZERO_DIGEST32_V1
   ) {
     fail(
