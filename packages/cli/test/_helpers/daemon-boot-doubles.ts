@@ -105,6 +105,8 @@ export function createFakeDaemonAgent<Libp2pExtras extends object = object>(
     setSkillAcl: vi.fn(),
     onChat: vi.fn(),
     start: vi.fn(async () => undefined),
+    // A graceful shutdown ends the share admission waits first (GH#3052).
+    endLegacySwmShareAdmissionWaits: vi.fn(),
     stop: vi.fn(async () => {
       onStop?.();
       await store.close();
