@@ -1,12 +1,14 @@
 // Case 6 of the issue-3251 member-sharing suite
 // (scripts/devnet-test-issue-3251-member-sharing.mjs): member 2 subscribes to
 // a large graph, and the writes are made while that transfer holds member 2's
-// only sync slot. The judgements are in ../qa/busy-slot.mjs.
+// only sync slot. The judgements are in ../qa/busy-slot.mjs; the node's
+// admission trace is read through ../qa/admission-trace.mjs.
 
-import { brief, sleep, waitFor } from './devnet.mjs';
+import { readFileSync } from 'node:fs';
+import { brief, waitFor } from './devnet.mjs';
 import { heldAt, watched } from './observation.mjs';
-import { admissionRecords } from '../qa/admission-identity.mjs';
-import { busySlotCovered, heldTransfer, receivedWhileHeld } from '../qa/busy-slot.mjs';
+import { traceAdmissions } from '../qa/admission-trace.mjs';
+import { busySlotCovered, heldTransfer, receivedWhileHeld, singleSlotProblem } from '../qa/busy-slot.mjs';
 import { describe } from '../qa/member-sharing.mjs';
 
 /** The large graph: `assets` assets of `triples` triples, each over 50 subjects with an equal share of them, about 100 bytes a value. */
@@ -23,48 +25,28 @@ export async function fillBigGraph(io, owner, graph, { assets, triples, stamp })
   }
 }
 
-/**
- * One reading of a node's sync slots: its `sync-global` scheduler in the
- * backpressure diagnostics, with the moments the request was sent and the
- * answer came, and the class of its oldest running operation.
- */
+/** One reading of a node's sync policy: its `sync-global` scheduler in the backpressure diagnostics. */
 async function slotReading(devnet, node) {
-  const sentAt = Date.now();
   const answer = await devnet.api(node, 'GET', '/api/diagnostics/backpressure', undefined, { timeoutMs: 5000 });
-  const at = Date.now();
   const scheduler = Array.isArray(answer.json?.schedulers) ? answer.json.schedulers.find(s => s?.scheduler === 'sync-global') : undefined;
-  if (answer.status !== 200 || !scheduler?.totals) return { at, unreadable: answer.status === 200 ? 'no sync-global scheduler in the diagnostics' : brief(answer) };
-  const { inflight, inflightLimit, queueLimit, oldestActiveAgeMs } = scheduler.totals;
-  const running = (Array.isArray(scheduler.lanes) ? scheduler.lanes : []).flatMap(lane => (Array.isArray(lane?.activeOperations) ? lane.activeOperations : []));
-  const oldestOperations = [...new Set(running
-    .filter(operation => typeof operation?.operation === 'string' && operation.oldestAgeMs === oldestActiveAgeMs)
-    .map(operation => operation.operation.split(':', 1)[0]))];
-  return { sentAt, at, inflight, inflightLimit, queueLimit, capacityModel: scheduler.capacityModel, oldestActiveAgeMs, ...(oldestOperations.length ? { oldestOperations } : {}) };
+  if (answer.status !== 200 || !scheduler?.totals) return { unreadable: answer.status === 200 ? 'no sync-global scheduler in the diagnostics' : brief(answer) };
+  const { inflight, inflightLimit, queueLimit } = scheduler.totals;
+  return { inflight, inflightLimit, queueLimit, capacityModel: scheduler.capacityModel };
 }
 
-/** Reads a node's sync slots every second until stopped. */
-function readSlots(devnet, node) {
-  const readings = [];
-  let reading = true;
-  const done = (async () => {
-    while (reading) {
-      readings.push(await slotReading(devnet, node));
-      await sleep(1000);
-    }
-  })();
-  return { readings, stop: async () => { reading = false; await done; } };
+/** The admissions member 2's trace holds now (null when it wrote none). */
+function readTrace(file) {
+  try { return traceAdmissions(readFileSync(file, 'utf8')); } catch { return null; }
 }
 
 /**
- * Case 6. The node's own evidence must show the transfer in the slot: its log
- * names the admission of the large graph (`Sync backpressure running
- * shared-memory:<large graph>:…`), and its slot readings show the admission
- * that started then still running, every second, until each write was
- * received. A receipt counts only when a reading taken at or after it still
- * showed the transfer; nothing is assumed past the last such reading. A
- * running catch-up job proves nothing by itself. A write received only after
- * the transfer left the slot (to other work, or to nothing), or a transfer
- * never admitted, means the case was not exercised.
+ * Case 6. The node's own evidence must show the transfer in the slot: its
+ * admission trace (DKG_SYNC_ADMISSION_TRACE, `member2.trace`) names the
+ * admission of the large graph that holds its only slot (one slot and no
+ * queue, as its diagnostics report), and a write counts only when it was
+ * received before that admission gave up the slot. A running catch-up job
+ * proves nothing by itself. A write received only after the transfer gave up
+ * the slot, or a transfer never admitted, means the case was not exercised.
  *
  * `ctx` is { devnet, edges, graphs, io, report, precondition, boundMs, sub }; `pub` and `big` are graphs.
  */
@@ -74,18 +56,13 @@ export async function busyMember(ctx, pub, big) {
   const seconds = ms => Math.round(ms / 1000);
   await precondition(6, 'before the large transfer');
   const offset = devnet.logSize(member2);
-  const needle = `:${big.id}:`;
-  const slots = readSlots(devnet, member2);
+  const isTransfer = admission => admission.label.includes(`:${big.id}:`);
   await graphs.subscribe(member2, big);
-  // The whole log: an admission just before the subscribe could have started in the same second as the transfer.
-  const isTransfer = record => record.label.includes(needle);
   const admitted = await waitFor(async () => {
-    const reading = slots.readings.at(-1);
-    const held = heldTransfer(reading, admissionRecords(devnet.logSince(member2, 0)), isTransfer);
-    return { ok: Boolean(held.transfer), reading, ...held };
+    const held = heldTransfer(await slotReading(devnet, member2), readTrace(member2.trace), isTransfer);
+    return { ok: Boolean(held.transfer), ...held };
   }, 30_000, 500);
   if (!admitted.ok) {
-    await slots.stop();
     return report.fail(6, `not exercised: member2's transfer of the large graph did not hold its sync slot within 30 s of the subscribe (${admitted.why}); raise MEMBER_SHARING_BIG_ASSETS / MEMBER_SHARING_BIG_TRIPLES`);
   }
   const from = Date.now();
@@ -96,25 +73,17 @@ export async function busyMember(ctx, pub, big) {
   ];
   const pairs = await watched(handles);
   const until = Date.now();
-  // One reading taken after the last receipt check, so that the evidence can reach the window's end.
-  await waitFor(() => ({ ok: slots.readings.some(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= until) }), 10_000, 200);
-  await slots.stop();
-  // The confirming reading again, against the whole log as it stands now: an
-  // admission whose line was written late cannot pass for the transfer.
-  const confirmed = heldTransfer(admitted.reading, admissionRecords(devnet.logSince(member2, 0)), isTransfer);
-  const busy = confirmed.transfer
-    ? busySlotCovered({ transfer: confirmed.transfer, samples: slots.readings, from, until })
-    : { held: false, reason: `the whole log no longer ties the work in the slot to the transfer (${confirmed.why})`, provenUntil: null };
+  const policy = singleSlotProblem(await slotReading(devnet, member2));
+  const readAt = Date.now();
+  const busy = busySlotCovered({ transfer: admitted.transfer, admissions: readTrace(member2.trace), policy, readAt, until });
   for (const pair of pairs) {
-    // A receipt counts only when a reading taken at or after it still showed
-    // the transfer in the slot; between two such readings the same admission
-    // held it throughout.
+    // A receipt counts only when the transfer had not given up the slot by then.
     const received = heldAt(pair);
     if (received !== null && !receivedWhileHeld(received, busy)) {
-      report.fail(6, `${describe(pair.record)} at ${member2.label}: held ${seconds(received - pair.from)} s after the share, later than the last reading that showed the large transfer in the slot (${busy.reason ?? 'no reading'}): not exercised`);
+      report.fail(6, `${describe(pair.record)} at ${member2.label}: held ${seconds(received - pair.from)} s after the share, after the large transfer gave up the slot (${busy.reason ?? 'no trace'}): not exercised`);
     } else report.reportPair(pair, { boundMs, definitionSeen: io.definitionSeen(pair.record.author, pair.record.graph) });
   }
   const refused = devnet.logSince(member2, offset).split(`Sync backpressure rejected shared-memory:${pub.id}:`).length - 1;
-  report.note(`case 6: member2's transfer of the large graph held its only sync slot ${busy.held ? `through every receipt check (${seconds(until - from)} s)` : `for ${busy.provenUntil === null ? 0 : seconds(busy.provenUntil - from)} s of ${seconds(until - from)} s (then ${busy.reason})`}; member2 refused ${refused} pull(s) of the public graph for a busy slot`);
+  report.note(`case 6: member2's transfer of the large graph held its only sync slot ${busy.held ? `through every receipt check (${seconds(until - from)} s)` : `for ${busy.provenUntil === null ? 0 : Math.max(0, seconds(busy.provenUntil - from))} s of ${seconds(until - from)} s (then ${busy.reason})`}; member2 refused ${refused} pull(s) of the public graph for a busy slot`);
   return undefined;
 }

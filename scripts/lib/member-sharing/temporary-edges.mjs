@@ -7,7 +7,8 @@
 // 'member2'), member (not the owner), subject (how a sentence names it),
 // label (`node<N> (<role>)`), relay (the relay a member dials the owner
 // through), overrides (its config from the first start), env (its daemon's
-// environment), peerId, agentAddress }.
+// environment), peerId, agentAddress }; member 2's also `trace`, the file its
+// node writes its sync admission trace to (DKG_SYNC_ADMISSION_TRACE).
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -120,9 +121,15 @@ export class TemporaryEdges {
     // sync environment variables override a node's config; one inherited from
     // the caller (DKG_SYNC_GLOBAL_MAX_INFLIGHT=8, say) would give it spare
     // slots. So they are pinned to its policy.
-    this.member2 = record(member2, 'member2', 'member2', relay2,
-      { relay: relay2, announceAddresses: [DEAD_DIRECT_ADDRESS, `${relay2}/p2p-circuit`], syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
-      { DKG_SYNC_GLOBAL_MAX_INFLIGHT: '1', DKG_SYNC_GLOBAL_LIMIT: '1', DKG_SYNC_GLOBAL_QUEUE_LIMIT: '0' });
+    // Case 6 needs to know which admission holds its slot, and when: the node
+    // writes its admission trace into its folder.
+    const trace = join(this.devnet.nodeDir(member2), 'sync-admissions.jsonl');
+    this.member2 = {
+      ...record(member2, 'member2', 'member2', relay2,
+        { relay: relay2, announceAddresses: [DEAD_DIRECT_ADDRESS, `${relay2}/p2p-circuit`], syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+        { DKG_SYNC_GLOBAL_MAX_INFLIGHT: '1', DKG_SYNC_GLOBAL_LIMIT: '1', DKG_SYNC_GLOBAL_QUEUE_LIMIT: '0', DKG_SYNC_ADMISSION_TRACE: trace }),
+      trace,
+    };
     return { taken };
   }
 
@@ -255,6 +262,7 @@ export class TemporaryEdges {
       if (failed && existsSync(this.devnet.logFile(node))) {
         mkdirSync(kept, { recursive: true });
         copyFileSync(this.devnet.logFile(node), join(kept, `node${node.number}-${node.role}.daemon.log`));
+        if (node.trace && existsSync(node.trace)) copyFileSync(node.trace, join(kept, `node${node.number}-${node.role}.sync-admissions.jsonl`));
       }
       const problem = this.removeOwnNode(node.number);
       if (problem) this.log.say(problem);
