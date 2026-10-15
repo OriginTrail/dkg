@@ -1,4 +1,5 @@
 import { LiftJobStoreSelectors } from './lift-job-store-selectors.js';
+import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
 import { LiftJobChainObservations } from './lift-job-chain-observations.js';
 import { committedLiftJob, type CommittedLiftJob } from './lift-job-committed.js';
 import type { PreBroadcastRecord } from './publisher.js';
@@ -597,12 +598,7 @@ export class TripleStoreAsyncLiftPublisher
   /** r15 (3878098525) — which lane leads the next pass; alternates so an overrun in one lane
    * cannot repeatedly consume the other lane's opportunity. Hints lead first for latency. */
   private hintLaneLeads = true;
-  /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
-  /** The one atomically-attached scheduling owner; see attachScheduler. */
-  private schedulerListener?: {
-    onReconciliationDemand(): void;
-    onWalletRelease(walletId: string): void;
-  };
+  private readonly queueScheduler: AsyncLiftQueueScheduler;
   /**
    * Rotates the live-lane iteration start across passes. The pass deadline may truncate the walk,
    * and `list()` order is stable, so without rotation the same head jobs would be re-asked every
@@ -677,6 +673,7 @@ export class TripleStoreAsyncLiftPublisher
     config: AsyncLiftPublisherConfig = {},
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
+    this.queueScheduler = new AsyncLiftQueueScheduler(store, this.graphUri);
     this.chainObservations = LiftJobChainObservations.shared(store, this.graphUri);
     this.jobSelectors = new LiftJobStoreSelectors(store, this.graphUri, (job) => this.chainObservations.project(job));
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
@@ -778,6 +775,7 @@ export class TripleStoreAsyncLiftPublisher
           const reaccepted = await this.reacceptRetryableFailedKnowledgeAssetVmPublishJob(existing.job);
           return reaccepted.jobId;
         }
+        if (existing.job.status === 'accepted') this.notifyWorkAvailable();
         return existing.job.jobId;
       }
       if (existing?.job) {
@@ -1608,20 +1606,13 @@ export class TripleStoreAsyncLiftPublisher
 
   readonly reconciliationScheduling = {
     // Exclusive, ATOMIC attachment: scheduling has exactly one owner (the runner); attaching
-    // takes over BOTH callbacks together, so ownership can never be split between runner
+    // takes over every callback together, so ownership can never be split between runner
     // incarnations. See the interface doc for the ownership/handover contract.
     attachScheduler: (scheduler: {
       onReconciliationDemand(): void;
       onWalletRelease(walletId: string): void;
-    }): (() => void) => {
-      this.schedulerListener = scheduler;
-      return () => {
-        // Detaches only THIS attachment — a stale detach from a superseded owner is a no-op.
-        if (this.schedulerListener === scheduler) {
-          this.schedulerListener = undefined;
-        }
-      };
-    },
+      onWorkAvailable?(): void;
+    }): (() => void) => this.queueScheduler.attach(scheduler),
     // The scheduling caller's per-tick operation: one pass, one atomic answer.
     reconcile: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runReconciliationPass(),
     // Startup recovery with the outcome kept: the caller seeds its cadence from the pass it
@@ -1669,11 +1660,7 @@ export class TripleStoreAsyncLiftPublisher
    * of what is actionable.
    */
   private notifyReconciliationDemand(): void {
-    try {
-      this.schedulerListener?.onReconciliationDemand();
-    } catch {
-      // The listener belongs to the caller's scheduler; its failure must not touch job state.
-    }
+    this.queueScheduler.reconciliationDemand();
   }
 
   private async recoverRawLiftInterrupted(
@@ -2755,6 +2742,7 @@ export class TripleStoreAsyncLiftPublisher
 
   async resume(): Promise<void> {
     this.paused = false;
+    this.notifyWorkAvailable();
   }
 
   async cancel(jobId: string): Promise<void> {
@@ -2930,6 +2918,7 @@ export class TripleStoreAsyncLiftPublisher
     const canonical = committedLiftJob(this.chainObservations.project(validated), job);
     await this.persistJobRecord(canonical);
     await this.appendJournal(canonical, kind);
+    if (canonical.status === 'accepted') this.notifyWorkAvailable();
     if (canonical.status === 'finalized') this.chainObservations.completion.terminal(job.jobId);
     return canonical;
   }
@@ -3156,11 +3145,12 @@ export class TripleStoreAsyncLiftPublisher
   // the release path: the listener belongs to the caller's scheduler, and its failure must not
   // touch lock state.
   private notifyWalletRelease(walletId: string): void {
-    try {
-      this.schedulerListener?.onWalletRelease(walletId);
-    } catch {
-      // See above: scheduler failures stay the scheduler's problem.
-    }
+    this.queueScheduler.walletRelease(walletId);
+  }
+
+  /** Scheduling hint only; a failed observer cannot undo durable accepted work. */
+  private notifyWorkAvailable(): void {
+    this.queueScheduler.workAvailable();
   }
 
   private async getRequiredJob(jobId: string): Promise<LiftJob> {

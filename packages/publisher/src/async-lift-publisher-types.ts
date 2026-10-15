@@ -251,14 +251,15 @@ export interface AsyncLiftPublisher {
   readonly reconciliationScheduling?: {
     /**
      * EXCLUSIVE, ATOMIC attachment of the scheduling listeners — deliberately not pub/sub.
-     * Scheduling has exactly one owner (the runner driving this publisher), so attaching TAKES
-     * OVER both callbacks together: a later attachment supersedes the earlier one wholesale —
+     * Scheduling has one owner per in-process store/queue, so attaching TAKES
+     * OVER all callbacks together: a later attachment supersedes the earlier one wholesale —
      * the safe handover when a new runner incarnation starts while its predecessor is still
      * stopping — and ownership can never be split between incarnations. The returned detach
      * releases only the caller's OWN attachment (a stale detach from a superseded owner is a
-     * no-op).
+     * no-op). Publisher instances sharing the documented store/decorator identity and graph
+     * share this attachment; independent connections and processes retain polling fallback.
      *
-     * Both pokes are scheduling-only and establish nothing — the invited operation re-checks
+     * All pokes are scheduling-only and establish nothing — the invited operation re-checks
      * its own guards. `onReconciliationDemand` fires when a tx-bearing job stops being
      * executor-owned (a detached receipt settles, or `processNext` hands back a live broadcast
      * after an ambiguous send) — only once the work is visible to a
@@ -270,6 +271,8 @@ export interface AsyncLiftPublisher {
     attachScheduler(scheduler: {
       onReconciliationDemand(): void;
       onWalletRelease(walletId: string): void;
+      /** Accepted work is durable (or processing resumed); wake claim loops, preserving their guards. */
+      onWorkAvailable?(): void;
     }): () => void;
     /**
      * Run one reconcile pass and report BOTH what it settled and whether actionable live work

@@ -112,7 +112,10 @@ stage was not observed, rather than a zero-duration stage.
 
 Wallet count alone does not determine throughput. Claims serialize durable
 job and wallet ownership writes, and those writes share store capacity with
-other node work. Automatic retry selection uses the persisted retry deadline
+other node work. Durable admission and resume wake parked wallet loops; repeated
+notifications coalesce, and ownership checks and error backoff still apply.
+The polling interval remains a fallback, rather than a required delay for new work.
+Automatic retry selection uses the persisted retry deadline
 index, and recovery inventories exclude accepted and finalized history.
 Recovery still retains every failed job needed to preserve its proof backoff.
 

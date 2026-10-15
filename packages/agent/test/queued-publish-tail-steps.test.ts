@@ -100,7 +100,7 @@ function harness(options: {
     clearPublishedKnowledgeAssetSwm: async () => {
       calls.push('clearPublishedGraph()');
       await options.clearPublishedGraph?.();
-      return options.cleanupCompletion ?? true;
+      return Object.hasOwn(options, 'cleanupCompletion') ? options.cleanupCompletion : true;
     },
     clearRemainingSharedMemory: call('clearRemainingSharedMemory()'),
     clearSwmShareComplete: call('clearShareMarker()'),
@@ -116,7 +116,7 @@ function harness(options: {
     },
     store: {
       query: async () => ({ type: 'bindings', bindings: [] }),
-      insert: async () => {},
+      insert: call('stampProvenance()'),
     },
     gossip: { publish: call('gossip()') },
     getContextGraphOnChainId: async () => {
@@ -128,10 +128,10 @@ function harness(options: {
     update: async (...passed: unknown[]) => {
       calls.push('update()');
       passedOn.push(passed.at(-1) as Record<string, unknown>);
-      return publishResult();
+      return options.publish?.() ?? publishResult();
     },
-    _stampPointer: async () => {},
-    _stampPointerIfDivergedFromVm: async () => {},
+    _stampPointer: call('stampVmPointer()'),
+    _stampPointerIfDivergedFromVm: call('stampWmPointer()'),
     _writeQueuedKnowledgeAssetVmPublishReceipt: call('writeReceipt()'),
     _stampQueuedKnowledgeAssetVmPublishedLifecycle: call('stampLifecycle()'),
     retireLegacySwmAfterVerifiedVmTwin: async () => {
@@ -202,6 +202,7 @@ describe('the steps a queued executor reports after the confirmation', () => {
       'writeReceipt()', 'ended:receiptWrite',
       'clearPublishedGraph()', 'ended:publishedGraphClear',
       'retireLegacySwm()', 'ended:legacySwmRetire',
+      'stampVmPointer()', 'stampWmPointer()', 'stampProvenance()',
       'stampLifecycle()', 'ended:lifecycleStamp',
       'readGraphId()', 'ended:graphIdRead',
       'gossip()', 'ended:finalizationGossip',
@@ -229,13 +230,42 @@ describe('the steps a queued executor reports after the confirmation', () => {
     },
   );
 
+  it.each(['stampVmPointer()', 'stampWmPointer()', 'stampProvenance()'])(
+    'keeps an update confirmed but uncertified after %s fails, and continues the remaining tail', async (failStep) => {
+      const { calls, execute } = harness({ failStep, publish: async () => ({
+        ...publishResult(), localFinalizationComplete: true,
+      }) });
+      const result = await execute(request({
+        vmCurrentAssertion: `0x${'cd'.repeat(32)}`,
+        assertionVersion: '2',
+        clearSharedMemoryAfter: true,
+      }));
+      expect(result.status).toBe('confirmed');
+      expect(result.localFinalizationComplete).toBeUndefined();
+      const provenanceSteps = ['stampVmPointer()', 'stampWmPointer()', 'stampProvenance()'];
+      expect(calls).toEqual([
+        'update()', 'ended:publish',
+        'writeReceipt()', 'ended:receiptWrite',
+        'clearPublishedGraph()', 'ended:publishedGraphClear',
+        'retireLegacySwm()', 'ended:legacySwmRetire',
+        'clearRemainingSharedMemory()', 'ended:remainingSwmClear',
+        ...provenanceSteps.slice(0, provenanceSteps.indexOf(failStep) + 1),
+        'stampLifecycle()', 'ended:lifecycleStamp',
+        'readGraphId()', 'ended:graphIdRead',
+        'gossip()', 'ended:finalizationGossip',
+        'clearShareMarker()', 'ended:shareMarkerClear',
+        'catalogObserver()', 'ended:catalogObserver',
+      ]);
+    },
+  );
+
   it('does not certify a publication whose catalog completion was not recorded', async () => {
     const { execute } = harness({ catalogCompletion: false });
     expect((await execute()).localFinalizationComplete).toBeUndefined();
   });
 
-  it('leaves recovery responsible when cleanup retained a corrupt unresolved head', async () => {
-    const { execute } = harness({ cleanupCompletion: false });
+  it.each([false, undefined])('requires an explicit cleanup completion, received %s', async (cleanupCompletion) => {
+    const { execute } = harness({ cleanupCompletion });
     expect((await execute()).localFinalizationComplete).toBeUndefined();
   });
 
