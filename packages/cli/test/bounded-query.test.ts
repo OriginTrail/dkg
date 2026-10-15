@@ -191,6 +191,22 @@ it('rejects synchronous store results completed after the absolute deadline', as
   } finally { await store.close(); }
 });
 
+// The route serializes a result twice: to measure it against the byte bound,
+// then to send it. Either can outlast the deadline while timers cannot run.
+it.each([1, 2])('rejects a valid result whose serialization %i ends after the deadline', async late => {
+  let now = 0;
+  let serializations = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  const value = { toJSON: () => { serializations += 1; if (serializations === late) now = 10_000; return 'urn:s'; } };
+  try {
+    const read = context({ query: async () => ({ bindings: [{ s: value }] }) }, { timeoutMs: 50 });
+    await handleBoundedQueryRoutes(read.ctx);
+    expect(serializations).toBeGreaterThanOrEqual(late);
+    expect(read.res.statusCode).toBe(503);
+    expect(JSON.parse(read.res.body).code).toBe('QUERY_DEADLINE_EXCEEDED');
+  } finally { vi.restoreAllMocks(); }
+});
+
 it('forwards explicit core trust, labels the result and refuses unknown modes', async () => {
   const agent = { query: vi.fn(async () => ({bindings:[]})) };
   const read = context(agent, {chainEvidenceMode:'core-cache'});
