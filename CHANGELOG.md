@@ -203,6 +203,13 @@ accepts. Other message formats are unchanged.
   repeats of #3249 cover only graphs that are not registered. The member
   receives and holds the graph's writes; only its `synced` flag stays
   false.
+- **In a private graph, a member that reaches the others only through
+  relays may get none of its root writes to them** (#3282): a write into
+  the root of a private graph travels only with the member's catalog head.
+  When the relayed links to the curator and the other members fail to
+  dial, the head is not delivered and nothing retries it in time. In our
+  tests such a member's root writes had not arrived after five minutes, on
+  10.0.24 as well. Its writes into named sub-graphs arrived.
 - **A member that restarted before its empty private graph was proven ready
   stays not ready** (#3109): the readiness proof of an empty registered
   private graph now runs again when the member's copy of the metadata
