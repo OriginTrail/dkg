@@ -103,6 +103,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-unregistered-replica-authority.integration.test.ts",
   "test/rfc64-replay-worklist.integration.test.ts",
   "test/rfc64-catalog-replay-connection-runtime-v1.test.ts",
+  "test/rfc64-catalog-head-replay-peers.test.ts",
   "test/rfc64-catalog-replay-recovery-runtime-v1.test.ts",
   "test/rfc64-catalog-operational-applied-heads-v1.test.ts",
   "test/private-catalog-subscription-readiness-v1.test.ts",
