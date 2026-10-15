@@ -61,16 +61,15 @@
 //   6  member 2 while its only sync slot is busy with a large transfer of
 //      another graph (MEMBER_SHARING_BIG_ASSETS x MEMBER_SHARING_BIG_TRIPLES).
 //      Member 2's own evidence must show the transfer in the slot: its
-//      sync-slot readings (/api/diagnostics/backpressure, every second) show
-//      its effective policy of one slot and no queue and name when the oldest
-//      running admission started; its log ties that start to an admission of
-//      the large graph and no other; and every reading until each write was
-//      received names the same start (work admitted once the transfer ended
-//      names a later one). Its daemon starts with the sync environment
-//      variables pinned to that policy (they override config). A write
-//      received after the transfer left the slot, or a transfer never
-//      admitted, fails the case as not exercised; a running catch-up job
-//      alone proves nothing
+//      diagnostics (/api/diagnostics/backpressure) show its effective policy
+//      of one slot and no queue, and its admission trace
+//      (DKG_SYNC_ADMISSION_TRACE, written by the agent) names the admission
+//      of the large graph that took its slot and when it gave it up. A write
+//      counts only when it was received before then. Its daemon starts with
+//      the sync environment variables pinned to that policy (they override
+//      config). A write received after the transfer gave up the slot, or a
+//      transfer never admitted, fails the case as not exercised; a running
+//      catch-up job alone proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
 //      and 3 on a private graph whose members joined through the signed
 //      request flow. A member's write into a private graph sets up its sender
@@ -127,10 +126,11 @@
 // This file orders the cases. The rest is under scripts/lib/: the temporary
 // Edges (member-sharing/temporary-edges.mjs), the graphs and each graph's part
 // of the run (member-sharing/graphs.mjs, graph-scenario.mjs), the writes,
-// reads and watches (member-sharing/observation.mjs), case 6
-// (member-sharing/busy-member.mjs), the report (member-sharing/report.mjs),
-// and the judgements, which hold no I/O (qa/member-sharing.mjs,
-// qa/busy-slot.mjs, qa/known-gaps.mjs).
+// reads and watches, and each member's history with a graph's definition
+// (member-sharing/observation.mjs), case 6 (member-sharing/busy-member.mjs),
+// the report (member-sharing/report.mjs), and the judgements, which hold no
+// I/O (qa/member-sharing.mjs, qa/busy-slot.mjs, qa/admission-trace.mjs,
+// qa/known-gaps.mjs).
 
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
