@@ -1015,6 +1015,17 @@ cmd_prepare_version() {
   prepare_version "${2:-prev}"
 }
 
+# The relay a node starts with: the one pinned for it when it was added
+# (`relay` in DEVNET_ADDNODE_CONFIG_OVERRIDES), else node 1; none for node 1.
+node_relay_arg() {
+  local node_num="$1"
+  if [ -s "$DEVNET_DIR/node${node_num}/relay.pinned" ]; then
+    cat "$DEVNET_DIR/node${node_num}/relay.pinned"
+  elif [ "$node_num" -gt 1 ] && [ -f "$DEVNET_DIR/node1/multiaddr" ]; then
+    cat "$DEVNET_DIR/node1/multiaddr"
+  fi
+}
+
 start_node() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -1025,10 +1036,8 @@ start_node() {
     return 0
   fi
 
-  local relay_arg=""
-  if [ "$node_num" -gt 1 ] && [ -f "$DEVNET_DIR/node1/multiaddr" ]; then
-    relay_arg=$(cat "$DEVNET_DIR/node1/multiaddr")
-  fi
+  local relay_arg
+  relay_arg=$(node_relay_arg "$node_num")
 
   # Core mesh (default topology): a CORE node directly dials every EARLIER core
   # via `bootstrapPeers`, instead of every node hubbing through node 1. libp2p
@@ -2205,6 +2214,8 @@ cmd_clean() {
 # itself so it can assert on every step.
 #
 # Usage: devnet.sh addnode <num> [core|edge]
+#   DEVNET_ADDNODE_CONFIG_OVERRIDES='{"key": value, ...}'  config.json members
+#                                   to set before the node's first start
 cmd_addnode() {
   local node_num="${2:-}"
   local role="${3:-core}"
@@ -2234,6 +2245,25 @@ cmd_addnode() {
   log "Adding node $node_num (role=$role)..."
   DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
 
+  # A test that needs the new node to differ from the first second it runs
+  # (the addresses it announces, for one: what a peer has once learnt about a
+  # node it keeps) passes a JSON object here. Its members replace the members
+  # of the same name in the node's config.json before the daemon starts.
+  if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
+    if ! CONFIG_PATH="$DEVNET_DIR/node${node_num}/config.json" node -e '
+      const fs = require("fs");
+      const overrides = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES);
+      if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) throw new Error("not a JSON object");
+      const config = JSON.parse(fs.readFileSync(process.env.CONFIG_PATH, "utf8"));
+      fs.writeFileSync(process.env.CONFIG_PATH, JSON.stringify({ ...config, ...overrides }, null, 2));
+    '; then
+      echo "[devnet] DEVNET_ADDNODE_CONFIG_OVERRIDES must be a JSON object; node${node_num} was not started"
+      rm -rf "$DEVNET_DIR/node${node_num}"
+      exit 1
+    fi
+    log "Node $node_num config: applied DEVNET_ADDNODE_CONFIG_OVERRIDES"
+  fi
+
   # Reuse the cluster's shared auth token so the test can talk to the new
   # node with the same bearer used everywhere else.
   if [ -f "$DEVNET_DIR/node1/auth.token" ]; then
@@ -2244,6 +2274,17 @@ cmd_addnode() {
         > "$DEVNET_DIR/node${node_num}/auth.token"
       chmod 600 "$DEVNET_DIR/node${node_num}/auth.token"
     fi
+  fi
+
+  # start_node makes node 1 the relay of every other node on each start. A
+  # `relay` among the overrides stays this node's relay on its later starts
+  # (restart-node) too.
+  if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
+    DEVNET_ADDNODE_CONFIG_OVERRIDES="$DEVNET_ADDNODE_CONFIG_OVERRIDES" node -e '
+      const relay = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES).relay;
+      if (typeof relay === "string" && relay !== "") process.stdout.write(relay + "\n");
+    ' > "$DEVNET_DIR/node${node_num}/relay.pinned"
+    [ -s "$DEVNET_DIR/node${node_num}/relay.pinned" ] || rm -f "$DEVNET_DIR/node${node_num}/relay.pinned"
   fi
 
   cd "$REPO_ROOT" || exit 1

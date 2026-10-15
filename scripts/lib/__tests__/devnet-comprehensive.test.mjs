@@ -47,6 +47,30 @@ function matchingReports(dir) {
   return receipt;
 }
 
+// A Node script with a shebang; the orchestrator runs it by its path, so a bash stub stands in for it.
+suiteFiles.push('devnet-test-issue-3251-member-sharing.mjs');
+
+test('the issue-3251 suite has one entry, after the rc.12 probes and before the node-ui smoke', async t => {
+  // A run that stops at its first suite lists every later suite as NOT_RUN, with its command.
+  const dir = setup(t, { first: 'exit 1' });
+  assert.equal((await launch(dir, { FAIL_FAST: '1' }).done).status, 1);
+  const suites = matchingReports(dir).suites;
+  const entries = suites.filter(s => s.group === 'issue-3251');
+  assert.deepEqual(entries.map(s => [s.id, s.command]),
+    [['issue-3251-member-sharing', join(dir, 'scripts', 'devnet-test-issue-3251-member-sharing.mjs')]]);
+  const at = suites.indexOf(entries[0]);
+  assert.equal(suites[at - 1].group, 'rc12-probes');
+  assert.equal(suites[at + 1].group, 'node-ui');
+  // Not optional: no SKIP_* switch removes it from a run that reaches it.
+  const partial = setup(t, { first: 'exit 1' });
+  await launch(partial, { FAIL_FAST: '1', SKIP_UI: '1', SKIP_PROBES: '1', SKIP_RFC38_EXTRAS: '1', SKIP_RFC49: '1' }).done;
+  assert.deepEqual(matchingReports(partial).suites.filter(s => s.group === 'issue-3251').map(s => s.id), ['issue-3251-member-sharing']);
+  // Its result is its exit status, like any other suite's.
+  const failing = setup(t, { fail: { 'devnet-test-issue-3251-member-sharing.mjs': 1 } });
+  assert.equal((await launch(failing, { SKIP_SOAK: '1' }).done).status, 1);
+  assert.equal(matchingReports(failing).suites.find(s => s.group === 'issue-3251').result, 'FAIL:1');
+});
+
 test('complete valid run succeeds and snapshots every registered suite before execution', async t => {
   const dir = setup(t);
   const result = await launch(dir).done;

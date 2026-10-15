@@ -220,6 +220,14 @@ if [ "${SKIP_PROBES:-0}" != "1" ]; then
   done
 fi
 
+# Group: issue-3251 — in a context graph whose members reach only its owner
+# (through a relay; no link between the members, no Core carrying the graph),
+# every subscribed member must hold every write within a bound, whoever wrote
+# it: live, at subscribe, after restarts, minutes later, with a member's only
+# sync slot busy, on unregistered, registered and private graphs. It adds three
+# temporary nodes and removes them again, so it runs before the soak.
+register "issue-3251-member-sharing" "issue-3251" "$REPO_ROOT/scripts/devnet-test-issue-3251-member-sharing.mjs"
+
 # Group: node-ui smoke
 if [ "${SKIP_UI:-0}" != "1" ]; then
   register "node-ui-smoke" "node-ui" "$REPO_ROOT/scripts/devnet-test-node-ui-smoke.sh"
