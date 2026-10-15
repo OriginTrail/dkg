@@ -1,5 +1,5 @@
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
-import { recentSharedMemoryPullsEnabled, startRecentSharedMemoryPulls } from './recent-shared-memory-pull-runtime.js';
+import { startRecentSharedMemoryPullsIfEnabled } from './recent-shared-memory-pull-runtime.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
@@ -4045,11 +4045,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } else {
       this.log.warn(ctx, `Skipping periodic sync reconciler startup (DKG_SYNC_RECONCILER_ENABLED=0)`);
     }
-    // The reconciler re-pulls a synced peer every 10 to 15 min: keep public
-    // graphs in use here pulled within about two minutes (#3251).
-    if (recentSharedMemoryPullsEnabled(this.config)) {
-      this.recentSharedMemoryPulls = startRecentSharedMemoryPulls(this, { signal: this.node.stopSignal ?? undefined });
-    }
+    this.recentSharedMemoryPulls = startRecentSharedMemoryPullsIfEnabled(this); // #3251
 
     // A.4-lite+: keep a small set of Core nodes warm (connection pinned +
     // auto-redialed by libp2p) so catch-up / chain reconciliation never pays

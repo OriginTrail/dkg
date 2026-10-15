@@ -284,6 +284,7 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     ];
     // The member learned its owner from the join; nothing resolves it otherwise.
     internals.preferredSyncPeers.set(GRAPH, OWNER);
+    internals.canUseSharedMemoryForContextGraph = async () => true;
     const sharedPulls: Array<{ peerId: string; contextGraphIds: string[]; source?: string }> = [];
     internals.syncSharedMemoryFromPeerDetailed = async (
       peerId: string,
@@ -430,6 +431,7 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     const subscriptions = new Map<string, Record<string, unknown>>([
       ['urn:cg:on-demand', { subscribed: true, synced: true, syncMode: 'on-demand' }],
       ['urn:cg:private', { subscribed: true, synced: true, syncMode: 'always-on' }],
+      ['urn:cg:unconfirmed', { subscribed: true, synced: true, syncMode: 'always-on' }],
       ['urn:cg:failing', { subscribed: true, synced: true, syncMode: 'always-on' }],
     ]);
     const attempted: string[] = [];
@@ -443,6 +445,7 @@ describe('recent shared-memory pull runtime (#3251)', () => {
       log: { debug },
       getCgMeta: async () => ({ curators: [], creators: [] }),
       isPrivateContextGraph: async (contextGraphId: string) => contextGraphId === 'urn:cg:private',
+      canUseSharedMemoryForContextGraph: async (contextGraphId: string) => contextGraphId !== 'urn:cg:unconfirmed',
       selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
       rfc64LegacySwmGossipAllowedForContextGraph: () => true,
       syncSharedMemoryFromPeerDetailed: async (peerId: string, [contextGraphId]: string[]) => {
@@ -453,13 +456,18 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     let clock = 0;
     const runtime = startRecentSharedMemoryPulls(agentLike, { now: () => clock, tickMs: 3_600_000 });
     try {
-      for (const id of ['urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private', 'urn:cg:failing']) {
+      for (const id of [
+        'urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private', 'urn:cg:unconfirmed', 'urn:cg:failing',
+      ]) {
         runtime.noteActivity(id);
       }
       clock += INTERVAL;
       expect(await runtime.tick()).toBe(1);
+      // Not authorized yet: skipped this round and asked again the next one.
+      clock += INTERVAL;
+      await runtime.tick();
       // No owner is known, so the one connected peer is asked.
-      expect(attempted).toEqual([`urn:cg:failing@${OTHER}`]);
+      expect(attempted).toEqual([`urn:cg:failing@${OTHER}`, `urn:cg:failing@${OTHER}`]);
       await vi.waitFor(() => expect(debug).toHaveBeenCalledWith(
         expect.anything(),
         'Safety-net shared-memory pull of "urn:cg:failing" did not run: stream reset',

@@ -47,6 +47,7 @@ interface RecentSharedMemoryPullAgent {
   };
   readonly log: { debug(ctx: OperationContext, message: string): void };
   isPrivateContextGraph(contextGraphId: string): Promise<boolean>;
+  canUseSharedMemoryForContextGraph(contextGraphId: string): Promise<boolean>;
   selectCatchupPeers(peers: Array<{ toString(): string }>): Array<{ toString(): string }>;
   rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId: string): boolean;
   syncSharedMemoryFromPeerDetailed(
@@ -85,6 +86,21 @@ export function recentSharedMemoryPullsEnabled(config: DKGAgentConfig): boolean 
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Start the safety net next to the peer reconciler when
+ * {@link recentSharedMemoryPullsEnabled}: the reconciler re-pulls a synced
+ * peer only every 10 to 15 min. Returns null when it does not run.
+ */
+export function startRecentSharedMemoryPullsIfEnabled(
+  agentObject: DKGAgent | object,
+): RecentSharedMemoryPullRuntime | null {
+  const agent = agentObject as RecentSharedMemoryPullAgent & {
+    readonly node: { readonly stopSignal?: AbortSignal | null };
+  };
+  if (!recentSharedMemoryPullsEnabled(agent.config)) return null;
+  return startRecentSharedMemoryPulls(agentObject, { signal: agent.node.stopSignal ?? undefined });
 }
 
 export function startRecentSharedMemoryPulls(
@@ -126,6 +142,8 @@ export function startRecentSharedMemoryPulls(
       return (await ownerPeerOf(contextGraphId)) !== agent.peerId;
     },
     sources: async (contextGraphId) => {
+      // Authority not confirmed yet: the sync would only be refused. Next interval.
+      if (!(await agent.canUseSharedMemoryForContextGraph(contextGraphId))) return { owners: [], others: [] };
       const owner = await ownerPeerOf(contextGraphId);
       const connected = agent.selectCatchupPeers([...agent.node.libp2p.getPeers()])
         .map((peer) => peer.toString())
