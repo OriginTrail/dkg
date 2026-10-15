@@ -33,7 +33,7 @@ export class TemporaryEdges {
     this.owner = null;
     this.member1 = null;
     this.member2 = null;
-    // Every node this run added, also one whose addnode failed half-way.
+    // Every node this run added: the cleanup stops and removes these only.
     this.started = [];
   }
 
@@ -117,12 +117,22 @@ export class TemporaryEdges {
     return { taken };
   }
 
-  /** Adds a node with its overrides in place from the first start, marks its folder as this suite's, and learns who it is. */
+  /**
+   * Adds a node with its overrides in place from the first start, and learns
+   * who it is. The node is this suite's only when this call created it: its
+   * folder did not exist just before, and addnode, which refuses a folder that
+   * exists, succeeded. Only then is the folder marked as this suite's and the
+   * node kept for the cleanup. A number another suite took after it was
+   * picked, or an addnode that failed, leaves the folder as it is.
+   */
   async start(node) {
-    this.started.push(node);
+    if (existsSync(this.devnet.nodeDir(node))) {
+      throw new Error(`node${node.number} was taken after it was picked: its folder exists, and it is left as it is`);
+    }
     const added = await this.devnet.devnetSh(['addnode', String(node.number), 'edge'], { ...node.env, DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(node.overrides) });
-    if (existsSync(this.devnet.nodeDir(node))) writeFileSync(this.ownMark(node.number), `${this.stamp} ${node.role}\n`);
-    if (added.status !== 0) throw new Error(`temporary node ${node.number} could not be added: ${lastLines(added.output)}`);
+    if (added.status !== 0) throw new Error(`temporary node ${node.number} could not be added (its folder, if any, is left as it is): ${lastLines(added.output)}`);
+    writeFileSync(this.ownMark(node.number), `${this.stamp} ${node.role}\n`);
+    this.started.push(node);
     await this.identify(node);
   }
 

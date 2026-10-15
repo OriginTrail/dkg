@@ -51,17 +51,18 @@ export function createObservation(devnet, config) {
   /**
    * One asset with a subject of its own: the record the watches of the write
    * use. A refused write keeps the refusal's code and whether its author held
-   * the graph's definition right after it; `definitionSeen` is whether the
-   * author was seen holding it before (from its subscription; undefined when
-   * that is not known).
+   * the graph's definition right after it. `definitionHistory` is the author's
+   * history with the graph's definition ({ seen }: whether anything ever showed
+   * the author holding it), kept by the graph's scenario and read when the
+   * write is judged; undefined when it is not kept.
    */
-  async function write(author, graph, sub, what, { definitionSeen } = {}) {
+  async function write(author, graph, sub, what, { definitionHistory } = {}) {
     sequence += 1;
     const record = {
       author, graph, sub, what, sequence,
       subject: `urn:issue3251:${stamp}:${sequence}`,
       value: `${what} (${sequence})`,
-      doneAt: null, error: null, errorCode: undefined, definitionHeld: undefined, definitionSeen,
+      doneAt: null, error: null, errorCode: undefined, definitionHeld: undefined, definitionHistory,
     };
     const outcome = await createAndShare(author, {
       contextGraphId: graph.id, name: `i3251-${stamp.toLowerCase()}-${sequence}`, subGraphName: sub,
@@ -112,16 +113,17 @@ export function createObservation(devnet, config) {
   const READS = [['view', readView], ['partitions', readPartitions]];
 
   /**
-   * Starts watching pairs (write, node that must hold it) at once: each is read
-   * until it holds or its bound has passed. Call it when the bound starts (right
-   * after the write, the subscribe, the return), so that no pair is judged
-   * without having been read inside its bound. A pair's bound starts at `from`
-   * (default: the end of the write's share job). The two reads of a pair are
-   * made at once, independently: each counts with the time it completed
-   * itself, and a read that found the write is not made again, so a slow or
-   * failed read of one kind never delays or discards the other. Returns a
-   * handle { pairs, done, cancel }, not a promise, so that whoever starts a
-   * watch does not wait for it; `cancel` stops its reads.
+   * Starts watching pairs (write, node that must hold it) at once: each read
+   * of each pair polls on its own until it finds the write, the pair's bound
+   * has passed, or the watch is cancelled. Call it when the bound starts
+   * (right after the write, the subscribe, the return), so that no pair is
+   * judged without having been read inside its bound. A pair's bound starts at
+   * `from` (default: the end of the write's share job). Each read counts with
+   * the time it completed itself and is not made again once it found the
+   * write; a slow read of one kind, or of another pair, never delays the
+   * retries of another. Returns a handle { pairs, done, cancel }, not a
+   * promise, so that whoever starts a watch does not wait for it; `cancel`
+   * stops its reads.
    */
   function watch(pairs) {
     for (const pair of pairs) {
@@ -130,17 +132,17 @@ export function createObservation(devnet, config) {
       pair.last = { view: null, partitions: null };
     }
     let cancelled = false;
-    const open = () => (cancelled ? [] : pairs.filter(p => !p.record.error && !pairHeld(p.progress) && Date.now() - p.from < boundMs));
-    const done = (async () => {
-      for (let pending = open(); pending.length > 0; pending = open()) {
-        await Promise.all(pending.flatMap(pair => READS.filter(([kind]) => pair.progress[kind] === null).map(async ([kind, read]) => {
-          const seen = await read(pair.node, pair.record);
-          pair.progress = foldRead(pair.progress, kind, { held: seen.held, completedAt: Date.now() }, { from: pair.from, boundMs });
-          pair.last[kind] = seen;
-        })));
-        await sleep(2000);
+    const open = (pair, kind) => !cancelled && !pair.record.error && pair.progress[kind] === null && Date.now() - pair.from < boundMs;
+    const poll = async (pair, kind, read) => {
+      while (open(pair, kind)) {
+        const seen = await read(pair.node, pair.record);
+        pair.progress = foldRead(pair.progress, kind, { held: seen.held, completedAt: Date.now() }, { from: pair.from, boundMs });
+        pair.last[kind] = seen;
+        if (!open(pair, kind)) break;
+        await sleep(Math.min(2000, Math.max(0, pair.from + boundMs - Date.now())));
       }
-    })();
+    };
+    const done = Promise.all(pairs.flatMap(pair => READS.map(([kind, read]) => poll(pair, kind, read)))).then(() => undefined);
     return { pairs, done, cancel: () => { cancelled = true; } };
   }
 

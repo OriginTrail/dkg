@@ -31,13 +31,20 @@ export class GraphScenario {
     this.subscribedAt = new Map();
     this.watches = [];
     this.observers = [];
-    // Whether each member was seen holding the graph's definition while its
-    // subscription was observed: the state that preceded its own writes.
-    this.definitionSeen = new Map();
+    // Each member's history with the graph's definition ({ seen }): whether
+    // anything ever showed it holding the definition (its subscription's
+    // observation, its own writes). Its writes keep a reference to it, so
+    // that they are judged on everything seen by then.
+    this.definitionHistory = new Map();
     this.dropped = false;
   }
 
   get active() { return !this.dropped; }
+
+  historyOf(member) {
+    if (!this.definitionHistory.has(member)) this.definitionHistory.set(member, { seen: undefined });
+    return this.definitionHistory.get(member);
+  }
 
   /** Stops what is pending on the graph; nothing more runs on it. */
   drop() {
@@ -80,7 +87,10 @@ export class GraphScenario {
   async observedSubscriptions() {
     const observations = await Promise.all(this.observers.map(handle => handle.done));
     if (this.dropped) return [];
-    this.observers.forEach((handle, i) => this.definitionSeen.set(handle.node, observations[i] ? observations[i].definedAt !== null : undefined));
+    this.observers.forEach((handle, i) => {
+      const history = this.historyOf(handle.node);
+      if (observations[i]) history.seen = history.seen === true || observations[i].definedAt !== null;
+    });
     return this.observers.map((handle, i) => ({ node: handle.node, graph: this.graph, observation: observations[i] }));
   }
 
@@ -99,15 +109,21 @@ export class GraphScenario {
 
   /**
    * Case 2 (7): each author writes, live; the owner and every other member
-   * must hold each write. Each write carries whether its author was seen
-   * holding the definition before (unknown until the subscriptions settled).
+   * must hold each write. Each write carries its author's history with the
+   * definition, and adds to it: a write the node accepted was made while the
+   * author held the definition, and so was a refused one whose listing still
+   * showed it.
    */
   async memberWrites(io, owner, members) {
     const handles = [];
     for (const sub of SUBS(this.sub)) {
       for (const author of this.authors) {
-        handles.push(await io.writeAndWatch(this.cases.member, author, this.graph, sub, `${author.role} live ${scopeName(sub)}`,
-          [owner, ...members.filter(member => member !== author)], { definitionSeen: this.definitionSeen.get(author) }));
+        const history = this.historyOf(author);
+        const handle = await io.writeAndWatch(this.cases.member, author, this.graph, sub, `${author.role} live ${scopeName(sub)}`,
+          [owner, ...members.filter(member => member !== author)], { definitionHistory: history });
+        const record = handle.pairs?.[0]?.record;
+        if (record && (!record.error || record.definitionHeld === true)) history.seen = true;
+        handles.push(handle);
       }
     }
     return handles;

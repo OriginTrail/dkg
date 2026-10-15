@@ -137,7 +137,7 @@ test('only a member\'s refused write is #3264: the owner\'s refusal with the sam
     caseId, node: { label: 'node9 (member2)' },
     record: {
       author, graph, sub: null, value: `${author.role} live root (1)`,
-      error: 'the author refused the asset: HTTP 404', errorCode: 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: false, definitionSeen: false,
+      error: 'the author refused the asset: HTTP 404', errorCode: 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: false, definitionHistory: { seen: false },
     },
   });
   // Through pairResult, the known gaps and the case verdicts, as the suite reports them.

@@ -31,7 +31,9 @@ function devnet(t, script, env = {}) {
   writeFileSync(join(dir, 'stub-cli.mjs'), [
     "import { appendFileSync, readFileSync } from 'node:fs';",
     "const home = process.env.DKG_HOME;",
-    "appendFileSync(`${home}/launched-with-relay`, `${JSON.parse(readFileSync(`${home}/config.json`, 'utf8')).relay}\\n`);",
+    "const config = readFileSync(`${home}/config.json`, 'utf8');",
+    "appendFileSync(`${home}/launched-with-relay`, `${JSON.parse(config).relay}\\n`);",
+    "appendFileSync(`${home}/launched-with-config`, `${JSON.stringify(JSON.parse(config))}\\n`);",
   ].join('\n'));
   const result = spawnSync('bash', ['-c', `source "$1"
     refresh_hardhat_pidfile() { echo 1; }
@@ -56,6 +58,7 @@ function devnet(t, script, env = {}) {
   return { dir, status: result.status, output: `${result.stdout}${result.stderr}` };
 }
 const launches = (dir, node) => readFileSync(join(dir, `node${node}`, 'launched-with-relay'), 'utf8').trim().split('\n');
+const launchedConfigs = (dir, node) => readFileSync(join(dir, `node${node}`, 'launched-with-config'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
 const configRelay = (dir, node) => JSON.parse(readFileSync(join(dir, `node${node}`, 'config.json'), 'utf8')).relay;
 const ADD_AND_RESTART = node => `cmd_addnode addnode ${node} edge && cmd_restart_node restart-node ${node}`;
 
@@ -90,4 +93,27 @@ test('every override wins over what start_node generates, on every start', t => 
   const plain = devnet(t, ADD_AND_RESTART(9));
   assert.equal(plain.status, 0, plain.output);
   assert.deepEqual(JSON.parse(readFileSync(join(plain.dir, 'node9', 'config.json'), 'utf8')).bootstrapPeers, [NODE1, NODE2]);
+});
+
+test('the overrides shape the defaults start_node derives, and the first start and a restart launch the same config', t => {
+  // An overridden nodeRole: no Edge snapshot trust is derived for a node that is a Core.
+  const core = devnet(t, ADD_AND_RESTART(7), { DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify({ nodeRole: 'core' }) });
+  assert.equal(core.status, 0, core.output);
+  const coreLaunches = launchedConfigs(core.dir, 7);
+  assert.equal(coreLaunches.length, 2, core.output);
+  assert.equal(coreLaunches[0].nodeRole, 'core');
+  assert.equal(coreLaunches[0].authorityIndex, undefined);
+  assert.deepEqual(coreLaunches[1], coreLaunches[0]);
+  // An overridden authorityIndex is the one the node starts with; without it an Edge gets the derived one.
+  const pinned = { mode: 'core-snapshot', trustedCorePeers: [NODE2], maxTailBlocks: 10 };
+  const custom = devnet(t, ADD_AND_RESTART(8), { DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify({ authorityIndex: pinned, relay: NODE2 }) });
+  assert.equal(custom.status, 0, custom.output);
+  const customLaunches = launchedConfigs(custom.dir, 8);
+  assert.deepEqual(customLaunches.map(config => [config.authorityIndex, config.relay]), [[pinned, NODE2], [pinned, NODE2]]);
+  assert.deepEqual(customLaunches[1], customLaunches[0]);
+  const plain = devnet(t, ADD_AND_RESTART(9));
+  assert.equal(plain.status, 0, plain.output);
+  const plainLaunches = launchedConfigs(plain.dir, 9);
+  assert.deepEqual(plainLaunches[0].authorityIndex, { mode: 'core-snapshot', trustedCorePeers: [NODE1, NODE2], maxTailBlocks: 2000 });
+  assert.deepEqual(plainLaunches[1], plainLaunches[0]);
 });

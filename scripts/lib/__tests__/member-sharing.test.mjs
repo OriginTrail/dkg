@@ -220,7 +220,7 @@ test('a pair is held, missing (with what each read last saw) or not written, as 
     check: 'held', outcome: 'fail',
     text: '"member1 live sub-graph (9)" by node8 (member1) in registered root at node9 (member2): NOT in the cross-partition read (holds another value: "other") 60 s after the member subscribed (found in view after 2 s)',
   });
-  const refused = pairResult({ record: { ...record, error: 'the author refused the asset: HTTP 404', errorCode: 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: false, definitionSeen: false }, node }, { boundMs: 60_000 });
+  const refused = pairResult({ record: { ...record, error: 'the author refused the asset: HTTP 404', errorCode: 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: false, definitionHistory: { seen: false } }, node }, { boundMs: 60_000 });
   assert.deepEqual(refused, {
     check: 'write-refused', outcome: 'fail',
     text: '"member1 live sub-graph (9)" by node8 (member1) in registered/s at node9 (member2): not written, the author refused the asset: HTTP 404',

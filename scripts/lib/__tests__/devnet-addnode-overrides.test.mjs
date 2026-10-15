@@ -36,29 +36,32 @@ function addnode(t, overrides) {
     },
   });
   const startedWith = join(dir, 'started-with.json');
+  const kept = join(dir, 'node7', 'addnode-overrides.json');
   return {
     status: result.status,
     output: result.stdout + result.stderr,
     startedWith: existsSync(startedWith) ? JSON.parse(readFileSync(startedWith, 'utf8')) : undefined,
+    kept: existsSync(kept) ? JSON.parse(readFileSync(kept, 'utf8')) : undefined,
     nodeDirectoryLeft: existsSync(join(dir, 'node7')),
   };
 }
 
 test('addnode starts the node with the generated config when no override is given', t => {
-  const { status, output, startedWith } = addnode(t, undefined);
+  const { status, output, startedWith, kept } = addnode(t, undefined);
   assert.equal(status, 0, output);
   assert.deepEqual(startedWith, { name: 'devnet-node-7', nodeRole: 'edge', relay: 'none', listenPort: 10007 });
+  assert.equal(kept, undefined);
 });
 
-test('DEVNET_ADDNODE_CONFIG_OVERRIDES is in the config before the first start', t => {
+test('DEVNET_ADDNODE_CONFIG_OVERRIDES is checked and kept for start_node, which alone applies it', t => {
   const announce = ['/ip4/127.0.0.1/tcp/9', '/ip4/127.0.0.1/tcp/10001/p2p/relay/p2p-circuit'];
-  const { status, output, startedWith } = addnode(t, JSON.stringify({ announceAddresses: announce, listenPort: 20007 }));
+  const overrides = { announceAddresses: announce, listenPort: 20007 };
+  const { status, output, startedWith, kept } = addnode(t, JSON.stringify(overrides));
   assert.equal(status, 0, output);
-  // New members are added, members of the same name are replaced, the rest is kept.
-  assert.deepEqual(startedWith, {
-    name: 'devnet-node-7', nodeRole: 'edge', relay: 'none', listenPort: 20007, announceAddresses: announce,
-  });
-  assert.match(output, /Node 7 config: applied DEVNET_ADDNODE_CONFIG_OVERRIDES/);
+  // addnode leaves the generated config as it is; start_node (devnet-relay-pin.test.mjs runs it) applies the kept overrides.
+  assert.deepEqual(startedWith, { name: 'devnet-node-7', nodeRole: 'edge', relay: 'none', listenPort: 10007 });
+  assert.deepEqual(kept, overrides);
+  assert.match(output, /Node 7 config: DEVNET_ADDNODE_CONFIG_OVERRIDES kept for every start/);
 });
 
 test('an override that is not a JSON object stops addnode before the node starts and leaves nothing behind', t => {

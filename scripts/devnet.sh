@@ -1046,7 +1046,13 @@ start_node() {
     const fs = require('fs');
     const dir = process.env.DEVNET_DIR;
     const cfgPath = process.env.NODE_DIR + '/config.json';
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    // The members a test set when it added this node (addnode's
+    // DEVNET_ADDNODE_CONFIG_OVERRIDES), applied here only, on every start: the
+    // defaults below are derived from them (an overridden nodeRole or
+    // authorityIndex), and they win over the values generated below.
+    const overridesPath = process.env.NODE_DIR + '/addnode-overrides.json';
+    const overrides = fs.existsSync(overridesPath) ? JSON.parse(fs.readFileSync(overridesPath, 'utf8')) : {};
+    const cfg = { ...JSON.parse(fs.readFileSync(cfgPath, 'utf8')), ...overrides };
     if (process.env.RELAY_ARG) cfg.relay = process.env.RELAY_ARG;
     const n = Number(process.env.NODE_NUM);
     // Bootstrap targets are the CORE nodes among 1..n-1, read from each node's
@@ -1078,10 +1084,7 @@ start_node() {
         maxTailBlocks: 2000,
       };
     }
-    // The members a test set when it added this node (addnode's
-    // DEVNET_ADDNODE_CONFIG_OVERRIDES) win over the defaults above, on every start.
-    const overridesPath = process.env.NODE_DIR + '/addnode-overrides.json';
-    if (fs.existsSync(overridesPath)) Object.assign(cfg, JSON.parse(fs.readFileSync(overridesPath, 'utf8')));
+    Object.assign(cfg, overrides);
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   "
 
@@ -2242,21 +2245,20 @@ cmd_addnode() {
 
   # A test that needs the new node to differ from the first second it runs
   # (the addresses it announces, for one: what a peer has once learnt about a
-  # node it keeps) passes a JSON object here. Its members replace the members
-  # of the same name in the node's config.json before the daemon starts.
+  # node it keeps) passes a JSON object here. addnode checks it and keeps it
+  # beside the node's config; start_node applies it, on the first start and on
+  # every later one (see there).
   if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
-    if ! CONFIG_PATH="$DEVNET_DIR/node${node_num}/config.json" node -e '
-      const fs = require("fs");
+    if ! node -e '
       const overrides = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES);
       if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) throw new Error("not a JSON object");
-      const config = JSON.parse(fs.readFileSync(process.env.CONFIG_PATH, "utf8"));
-      fs.writeFileSync(process.env.CONFIG_PATH, JSON.stringify({ ...config, ...overrides }, null, 2));
     '; then
       echo "[devnet] DEVNET_ADDNODE_CONFIG_OVERRIDES must be a JSON object; node${node_num} was not started"
       rm -rf "$DEVNET_DIR/node${node_num}"
       exit 1
     fi
-    log "Node $node_num config: applied DEVNET_ADDNODE_CONFIG_OVERRIDES"
+    printf '%s\n' "$DEVNET_ADDNODE_CONFIG_OVERRIDES" > "$DEVNET_DIR/node${node_num}/addnode-overrides.json"
+    log "Node $node_num config: DEVNET_ADDNODE_CONFIG_OVERRIDES kept for every start"
   fi
 
   # Reuse the cluster's shared auth token so the test can talk to the new
@@ -2269,13 +2271,6 @@ cmd_addnode() {
         > "$DEVNET_DIR/node${node_num}/auth.token"
       chmod 600 "$DEVNET_DIR/node${node_num}/auth.token"
     fi
-  fi
-
-  # start_node writes its own defaults into config.json on every start (the
-  # relay among them). The overrides are kept beside the config, and start_node
-  # applies them after its defaults, so they hold on every later start too.
-  if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
-    printf '%s\n' "$DEVNET_ADDNODE_CONFIG_OVERRIDES" > "$DEVNET_DIR/node${node_num}/addnode-overrides.json"
   fi
 
   cd "$REPO_ROOT" || exit 1
