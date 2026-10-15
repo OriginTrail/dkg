@@ -18,7 +18,7 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
-import { AuthorCatalogFullErrorV1 } from '../src/internal/author-catalog-capacity.js';
+import { AuthorCatalogFullErrorV1, MAX_AUTHOR_CATALOG_ROWS_V1 } from '../src/internal/author-catalog-capacity.js';
 import {
   FULL_CATALOG_NAMED_SCOPES_SWEEP_V1,
   FULL_CATALOG_RECHECK_INTERVAL_MS_V1,
@@ -734,6 +734,34 @@ describe('full catalog parking', () => {
   }
   const refusal = () => new AuthorCatalogFullErrorV1(fullRows(), 1);
   const atCap = () => ({ inventoryRowCount: String(CAP) });
+
+  it('attempts a placement parked at a full bucket again once moves are on, but not one at the node maximum (GH#3134)', () => {
+    vi.stubEnv('DKG_RFC64_CATALOG_BUCKET_MOVES', '1');
+    try {
+      const moved = computeAuthorCatalogScopeDigestV1({ ...NEW_A.inventoryScope, bucketCount: '256' } as AuthorCatalogScopeV1);
+      const heads = new Map<string, { inventoryRowCount: string }>([[scopeDigest(NEW_A), atCap()]]);
+      const { parking: p } = parking(((digest: string) => heads.get(digest) ?? null) as never);
+      expect(p.placementRefused('a', NEW_A, refusal())).toBe(true);
+      // A full bucket holds nothing back: the next attempt moves the catalog to more buckets.
+      p.passStarted(new Set(['a']));
+      expect(p.park('a', NEW_A)).toBe(false);
+      p.passEnded();
+
+      // A moved catalog at the node's maximum keeps the placement parked; the lane's current
+      // head is the one read, not the one-bucket head it moved from.
+      heads.set(moved, { inventoryRowCount: String(MAX_AUTHOR_CATALOG_ROWS_V1) });
+      const atMaximum = new AuthorCatalogFullErrorV1(fullRows(), 1, {
+        rowCount: MAX_AUTHOR_CATALOG_ROWS_V1,
+        rowCap: MAX_AUTHOR_CATALOG_ROWS_V1,
+      });
+      expect(p.placementRefused('a', NEW_A, atMaximum)).toBe(true);
+      p.passStarted(new Set(['a']));
+      expect(p.park('a', NEW_A)).toBe(true);
+      expect(p.status([])).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it('leaves any other failure to the ordinary handling', () => {
     const { parking: p } = parking(atCap);
