@@ -104,15 +104,20 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   };
   let complete = true;
   const required = async (
-    run: () => Promise<void>,
+    run: () => Promise<void | boolean>,
     failureLabel: string,
     observation?: LiftJobTailStep,
-  ): Promise<void> => {
+  ): Promise<'completed' | 'incomplete' | 'failed'> => {
     try {
-      await run();
+      if (await run() === false) {
+        complete = false;
+        return 'incomplete';
+      }
+      return 'completed';
     } catch (error) {
       log.warn(ctx, `${failureLabel}: ${error instanceof Error ? error.message : String(error)}`);
       complete = false;
+      return 'failed';
     } finally {
       if (observation) ended(observation);
     }
@@ -130,23 +135,19 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
       ), `Failed to write publish receipt for <${assertionUri}>`, 'receiptWrite');
     }
     const operationLabel = operationPlan.kind === 'update' ? 'update' : 'publish';
-    let clearReturned = false;
-    await required(async () => {
+    const cleanup = await required(async () => {
       const cleared = await publisher.clearPublishedKnowledgeAssetSwm(
         request.contextGraphId, sharedMemoryScope, request.subGraphName, ctx,
         graphScope.ual, graphScope.assertionVersion,
       );
-      clearReturned = true;
-      if (cleared !== true) complete = false;
+      return cleared === true;
     }, `Failed to clear published SWM graph after confirmed queued ${operationLabel} of <${lifecycleUri}>`,
     'publishedGraphClear');
     // A thrown clear skips retirement; an incomplete clear still attempts its best-effort admission.
-    if (clearReturned) {
-      await required(async () => {
-        if (await retireLegacySwmAfterConfirmedLocalPublish(
-          agent, log, request.contextGraphId, graphScope.ual, graphScope.assertionVersion, request.subGraphName, ctx,
-        ) !== true) complete = false;
-      }, 'Failed to retire the legacy SWM boundary after confirmed local VM publish', 'legacySwmRetire');
+    if (cleanup !== 'failed') {
+      await required(() => retireLegacySwmAfterConfirmedLocalPublish(
+        agent, log, request.contextGraphId, graphScope.ual, graphScope.assertionVersion, request.subGraphName, ctx,
+      ), 'Failed to retire the legacy SWM boundary after confirmed local VM publish', 'legacySwmRetire');
     }
     if (request.clearSharedMemoryAfter === true) {
       await required(() => publisher.clearRemainingSharedMemory(
