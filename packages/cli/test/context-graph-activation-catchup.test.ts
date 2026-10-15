@@ -2,14 +2,21 @@
 // job (issue #3251: a member's subscription to an older public graph came back
 // unsynced after a restart and stayed so, because restoring a subscription
 // installs its persisted flags and starts no job).
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DKGEvent } from '@origintrail-official/dkg-core';
 import type { CatchupJobResult, CatchupRunner } from '../src/catchup-runner.js';
-import { startActivationCatchups } from '../src/daemon/context-graph-activation-catchup.js';
-import { resetContextGraphReadinessRepeats } from '../src/daemon/context-graph-readiness-repeat.js';
+import {
+  ACTIVATION_ADMISSION_RETRY_DELAYS_MS,
+  startActivationCatchups,
+} from '../src/daemon/context-graph-activation-catchup.js';
+import {
+  cancelContextGraphReadinessRepeats,
+  readinessRepeatTimers,
+} from '../src/daemon/context-graph-readiness-repeat.js';
 import { daemonState } from '../src/daemon/state.js';
 import {
   CG,
+  DEFAULT_AGENT,
   PUBLIC_UNREGISTERED,
   cleanEmptyRound,
   lossyEmptyRound,
@@ -22,16 +29,58 @@ const RESTORED_UNSYNCED = Object.freeze({
   subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: true, syncMode: 'always-on',
 });
 
+/** A second local agent of the member Edge, the only member of a private graph. */
+const MEMBER_AGENT = '0x2222222222222222222222222222222222222222';
+const PRIVATE_MEMBER = Object.freeze({
+  outcome: 'allowed', source: 'rfc64-private', reason: 'rfc64-participant',
+  metadataBootstrap: 'eligible', grantScope: 'caller',
+});
+const PRIVATE_REFUSED = Object.freeze({
+  outcome: 'denied', source: 'rfc64-private', reason: 'agent-not-in-rfc64-roster',
+});
+
+interface ArmedTimer {
+  readonly callback: () => void;
+  readonly delayMs: number;
+  cleared: boolean;
+  fired: boolean;
+}
+
 describe('a subscription restored unsynced is caught up', () => {
   const previousRunner = daemonState.catchupRunner;
+  const originalTimers = { set: readinessRepeatTimers.set, clear: readinessRepeatTimers.clear };
+  const timers: ArmedTimer[] = [];
   const stops: Array<() => void> = [];
+
+  beforeEach(() => {
+    readinessRepeatTimers.set = (callback: () => void, delayMs: number) => {
+      const timer: ArmedTimer = { callback, delayMs, cleared: false, fired: false };
+      timers.push(timer);
+      return timer;
+    };
+    readinessRepeatTimers.clear = (handle: unknown) => {
+      (handle as ArmedTimer).cleared = true;
+    };
+  });
 
   afterEach(() => {
     for (const stop of stops.splice(0)) stop();
-    resetContextGraphReadinessRepeats();
+    cancelContextGraphReadinessRepeats();
+    readinessRepeatTimers.set = originalTimers.set;
+    readinessRepeatTimers.clear = originalTimers.clear;
+    timers.length = 0;
     daemonState.catchupRunner = previousRunner;
     daemonState.catchupAcceptingJobs = true;
   });
+
+  /** Timers armed and not yet fired or cleared. */
+  const armed = () => timers.filter((timer) => !timer.cleared && !timer.fired);
+
+  function fire(timer: ArmedTimer | undefined): void {
+    if (!timer) throw new Error('nothing armed');
+    timer.fired = true;
+    timer.callback();
+  }
 
   function runner(rounds: Array<() => CatchupJobResult>, hold?: Promise<void>) {
     const runs: string[] = [];
@@ -50,10 +99,11 @@ describe('a subscription restored unsynced is caught up', () => {
   function start(member: ReturnType<typeof memberEdge>) {
     const catchupTracker = { jobs: new Map<string, any>(), latestByContextGraph: new Map<string, string>() };
     const logs: string[] = [];
-    stops.push(startActivationCatchups({
+    const stop = startActivationCatchups({
       agent: member.agent, store: member.store, catchupTracker, log: (line) => logs.push(line),
-    }));
-    return { catchupTracker, logs };
+    });
+    stops.push(stop);
+    return { catchupTracker, logs, stop };
   }
 
   it('runs the subscribe job for a subscription the agent restored unsynced before the daemon was ready', async () => {
@@ -88,6 +138,73 @@ describe('a subscription restored unsynced is caught up', () => {
     expect(runs).toEqual([CG]);
   });
 
+  it('reads the graph as its own local agent, not as the node default agent', async () => {
+    // Two local agents; only the second is a member of the private graph.
+    const privateGraph = (callerAgentAddress: string | undefined) => (
+      callerAgentAddress === MEMBER_AGENT ? PRIVATE_MEMBER : PRIVATE_REFUSED
+    );
+
+    // The graph names no local agent here: the default is read first, then
+    // the other local agent, which is admitted.
+    const unnamed = memberEdge();
+    unnamed.node.localAgents = [DEFAULT_AGENT, MEMBER_AGENT];
+    unnamed.node.authority = privateGraph;
+    unnamed.restore({ ...RESTORED_UNSYNCED });
+    let runs = runner([cleanEmptyRound]);
+    let { catchupTracker } = start(unnamed);
+    await waitUntil(() => (runs.length === 1 ? true : undefined), 'the job of the unnamed graph');
+    await waitUntil(
+      () => catchupTracker.jobs.get(catchupTracker.latestByContextGraph.get(CG)!)?.finishedAt,
+      'the job of the unnamed graph to end',
+    );
+    // The default refused, the member admitted, and the job's readiness check
+    // read as the member too.
+    expect(unnamed.node.admissionCallers).toEqual([DEFAULT_AGENT, MEMBER_AGENT, MEMBER_AGENT]);
+
+    // The graph names its agent: that one alone is read.
+    const named = memberEdge();
+    named.node.localAgents = [DEFAULT_AGENT, MEMBER_AGENT];
+    named.node.namedAgent = MEMBER_AGENT;
+    named.node.authority = privateGraph;
+    named.restore({ ...RESTORED_UNSYNCED });
+    runs = runner([cleanEmptyRound]);
+    ({ catchupTracker } = start(named));
+    await waitUntil(() => (runs.length === 1 ? true : undefined), 'the job of the named graph');
+    await waitUntil(
+      () => catchupTracker.jobs.get(catchupTracker.latestByContextGraph.get(CG)!)?.finishedAt,
+      'the job of the named graph to end',
+    );
+    // The admission, then the job's readiness check.
+    expect(named.node.admissionCallers).toEqual([MEMBER_AGENT, MEMBER_AGENT]);
+
+    // No local agent is a member: nothing starts, and a refusal is not asked again.
+    const outsider = memberEdge();
+    outsider.node.localAgents = [DEFAULT_AGENT, MEMBER_AGENT];
+    outsider.node.authority = PRIVATE_REFUSED;
+    outsider.restore({ ...RESTORED_UNSYNCED });
+    runs = runner([cleanEmptyRound]);
+    start(outsider);
+    await waitUntil(() => (outsider.node.admissionCallers.length === 2 ? true : undefined), 'both reads');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect({ runs, armed: armed().length }).toEqual({ runs: [], armed: 0 });
+  });
+
+  it('a repeat reads the admission as the local agent that was admitted', async () => {
+    const member = memberEdge();
+    member.node.localAgents = [DEFAULT_AGENT, MEMBER_AGENT];
+    member.node.namedAgent = MEMBER_AGENT;
+    member.restore({ ...RESTORED_UNSYNCED });
+    const runs = runner([lossyEmptyRound, cleanEmptyRound]);
+    start(member);
+    await waitUntil(() => (armed().length === 1 ? true : undefined), 'the first repeat');
+
+    fire(armed()[0]);
+    await waitUntil(() => (member.subscription()?.synced === true ? true : undefined), 'the graph to be proven');
+    expect(runs).toEqual([CG, CG]);
+    // Each attempt's admission and its job's readiness check.
+    expect(member.node.admissionCallers).toEqual([MEMBER_AGENT, MEMBER_AGENT, MEMBER_AGENT, MEMBER_AGENT]);
+  });
+
   it('leaves a synced, unsubscribed or system graph alone, and a graph whose job is in flight', async () => {
     const member = memberEdge();
     member.restore({ ...RESTORED_UNSYNCED, synced: true, sharedMemorySynced: true });
@@ -107,23 +224,89 @@ describe('a subscription restored unsynced is caught up', () => {
     expect(runs).toEqual([]);
   });
 
-  it('starts nothing without admission or while the daemon stops taking jobs', async () => {
-    for (const blocked of ['denied', 'unavailable', 'shutdown'] as const) {
+  it('starts nothing without admission or while the daemon stops taking jobs; only an unread admission is asked again', async () => {
+    for (const blocked of ['denied', 'unavailable', 'unanswered', 'shutdown'] as const) {
       const member = memberEdge();
       member.restore({ ...RESTORED_UNSYNCED });
       if (blocked === 'denied') {
         member.node.authority = { ...PUBLIC_UNREGISTERED, outcome: 'denied', grantScope: 'none' };
       } else if (blocked === 'unavailable') {
+        member.node.authority = { outcome: 'unavailable', source: 'registered-chain', reason: 'chain-name-binding-unavailable' };
+      } else if (blocked === 'unanswered') {
         member.node.authority = () => { throw new Error('authority read timed out'); };
       } else {
         daemonState.catchupAcceptingJobs = false;
       }
       const runs = runner([cleanEmptyRound]);
-      start(member);
+      const { stop } = start(member);
       await new Promise((resolve) => setTimeout(resolve, 30));
-      expect({ blocked, runs }).toEqual({ blocked, runs: [] });
+      const retries = armed().map((timer) => timer.delayMs);
+      expect({ blocked, runs, retries }).toEqual({
+        blocked,
+        runs: [],
+        retries: blocked === 'unavailable' || blocked === 'unanswered' ? [ACTIVATION_ADMISSION_RETRY_DELAYS_MS[0]] : [],
+      });
+      stop();
       daemonState.catchupAcceptingJobs = true;
     }
+  });
+
+  it('asks again when the admission could not be read, and starts the job once it is', async () => {
+    const member = memberEdge();
+    member.restore({ ...RESTORED_UNSYNCED });
+    let reads = 0;
+    member.node.authority = () => {
+      reads += 1;
+      if (reads <= 2) throw new Error('authority read timed out');
+      return PUBLIC_UNREGISTERED;
+    };
+    const runs = runner([cleanEmptyRound]);
+    const { logs } = start(member);
+
+    for (const delayMs of ACTIVATION_ADMISSION_RETRY_DELAYS_MS.slice(0, 2)) {
+      await waitUntil(() => (armed().length === 1 ? true : undefined), `the read after ${delayMs} ms`);
+      expect(armed()[0].delayMs).toBe(delayMs);
+      expect(runs).toEqual([]);
+      fire(armed()[0]);
+    }
+    await waitUntil(() => (member.subscription()?.synced === true ? true : undefined), 'the graph to be proven');
+
+    expect(runs).toEqual([CG]);
+    expect(armed()).toEqual([]);
+    expect(logs.filter((line) => line.includes('could not be read'))).toEqual([
+      `[catchup] the admission of "${CG}" could not be read after its activation; asking again in 15 s (1 of 8)`,
+      `[catchup] the admission of "${CG}" could not be read after its activation; asking again in 30 s (2 of 8)`,
+    ]);
+  });
+
+  it('stops asking after the last delay; a new activation starts the count over', async () => {
+    const member = memberEdge();
+    member.restore({ ...RESTORED_UNSYNCED });
+    member.node.authority = () => { throw new Error('authority read timed out'); };
+    const runs = runner([cleanEmptyRound]);
+    const { logs } = start(member);
+
+    for (const delayMs of ACTIVATION_ADMISSION_RETRY_DELAYS_MS) {
+      await waitUntil(() => (armed().length === 1 ? true : undefined), `the read after ${delayMs} ms`);
+      expect(armed()[0].delayMs).toBe(delayMs);
+      fire(armed()[0]);
+    }
+    const last = `[catchup] the admission of "${CG}" could not be read after its activation, `
+      + `${ACTIVATION_ADMISSION_RETRY_DELAYS_MS.length + 1} times; subscribe again to catch it up`;
+    await waitUntil(() => (logs.includes(last) ? true : undefined), 'the last read');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect({ runs, armed: armed().length }).toEqual({ runs: [], armed: 0 });
+
+    // The agent activates the subscription again: asked anew, from the first delay.
+    member.agent.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: CG });
+    await waitUntil(() => (armed().length === 1 ? true : undefined), 'a new first read');
+    expect(armed()[0].delayMs).toBe(ACTIVATION_ADMISSION_RETRY_DELAYS_MS[0]);
+    // And again while that read waits: its timer is replaced, not added to.
+    const waiting = armed()[0];
+    member.agent.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: CG });
+    await waitUntil(() => (armed().length === 1 && armed()[0] !== waiting ? true : undefined), 'the replaced read');
+    expect(waiting.cleared).toBe(true);
+    expect(armed()[0].delayMs).toBe(ACTIVATION_ADMISSION_RETRY_DELAYS_MS[0]);
   });
 
   it('runs one job at a time', async () => {
@@ -149,18 +332,47 @@ describe('a subscription restored unsynced is caught up', () => {
     expect(runs).toEqual([CG, second]);
   });
 
-  it('stops listening when stopped', async () => {
+  it('stops listening and asking again when stopped', async () => {
     const member = memberEdge();
-    const runs = runner([cleanEmptyRound]);
-    const catchupTracker = { jobs: new Map<string, any>(), latestByContextGraph: new Map<string, string>() };
-    const stop = startActivationCatchups({ agent: member.agent, store: member.store, catchupTracker, log: () => {} });
-    stop();
-
     member.restore({ ...RESTORED_UNSYNCED });
+    member.node.authority = () => { throw new Error('authority read timed out'); };
+    const runs = runner([cleanEmptyRound]);
+    const { stop } = start(member);
+    await waitUntil(() => (armed().length === 1 ? true : undefined), 'a read to wait');
+    const waiting = armed()[0];
+
+    stop();
+    expect(waiting.cleared).toBe(true);
+    // A timer that fires anyway, or a later activation, starts nothing.
+    member.node.authority = PUBLIC_UNREGISTERED;
+    fire(waiting);
     member.agent.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: CG });
     await new Promise((resolve) => setTimeout(resolve, 30));
 
-    expect(runs).toEqual([]);
+    expect({ runs, armed: armed().length }).toEqual({ runs: [], armed: 0 });
+  });
+
+  it('starts no job when stopped while it reads the admission', async () => {
+    const member = memberEdge();
+    member.restore({ ...RESTORED_UNSYNCED });
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => { answer = resolve; });
+    let asked = false;
+    member.node.authority = () => PUBLIC_UNREGISTERED;
+    const read = member.agent.resolveContextGraphSubscriptionBootstrapAuthority.bind(member.agent);
+    member.agent.resolveContextGraphSubscriptionBootstrapAuthority = (async (...args: Parameters<typeof read>) => {
+      asked = true;
+      await answered;
+      return read(...args);
+    }) as typeof read;
+    const runs = runner([cleanEmptyRound]);
+    const { stop } = start(member);
+    await waitUntil(() => (asked ? true : undefined), 'the admission read');
+
+    stop();
+    answer();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect({ runs, armed: armed().length }).toEqual({ runs: [], armed: 0 });
   });
 
   it('logs a catch-up that fails and goes on with the next one', async () => {
@@ -182,6 +394,7 @@ describe('a subscription restored unsynced is caught up', () => {
 
     expect(logs).toContain(`[catchup] could not catch up "${CG}" after its activation: readiness store busy`);
     expect(runs).toEqual([second]);
+    expect(armed()).toEqual([]);
   });
 
   it('migrates a row that was dormant during the startup migration before judging it', async () => {

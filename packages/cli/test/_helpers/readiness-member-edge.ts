@@ -11,6 +11,8 @@ import { catchupReadinessResult, sharedMemoryDiagnostics } from './catchup-readi
 
 export const CG = '0x1111111111111111111111111111111111111111/issue-3207-empty-public';
 export const PEERS = ['peer-1', 'peer-2', 'peer-3', 'peer-4', 'peer-5', 'peer-6', 'peer-7', 'peer-8'];
+/** The member Edge's default agent. */
+export const DEFAULT_AGENT = '0x0000000000000000000000000000000000000001';
 
 /** Admission of a public graph that is not registered on chain: its accepted owner policy. */
 export const PUBLIC_UNREGISTERED = Object.freeze({
@@ -108,6 +110,9 @@ export function deniedRound(): CatchupJobResult {
 
 export type Authority = Record<string, unknown>;
 
+/** Answers an admission read; it may depend on the agent asking. */
+export type AuthorityAnswer = Authority | ((callerAgentAddress: string | undefined) => Authority);
+
 /**
  * A member Edge: the subscription, the readiness store, the production
  * readiness inspection, and the agent side of the catch-up bridge over eight
@@ -117,15 +122,27 @@ export function memberEdge() {
   const subscriptions = new Map<string, Record<string, unknown>>();
   let readiness: Record<string, unknown> | undefined;
   const node = {
-    authority: PUBLIC_UNREGISTERED as Authority | (() => Authority),
+    authority: PUBLIC_UNREGISTERED as AuthorityAnswer,
     answer: (peerId: string): unknown => emptyAnswer(peerId),
     /** Whether the graph's definition is installed. */
     confirmedMeta: true,
+    /** This node's local agents. */
+    localAgents: [DEFAULT_AGENT],
+    /** The local agent the graph names (its allowlist, a join); else the lookup gives the default agent. */
+    namedAgent: undefined as string | undefined,
+    /** The agent each admission read asked as, in order. */
+    admissionCallers: [] as Array<string | undefined>,
   };
   const agent = {
-    resolveContextGraphSubscriptionBootstrapAuthority: async () => (
-      typeof node.authority === 'function' ? node.authority() : node.authority
-    ),
+    resolveContextGraphSubscriptionBootstrapAuthority: async (
+      _contextGraphId: string,
+      options?: { callerAgentAddress?: string },
+    ) => {
+      node.admissionCallers.push(options?.callerAgentAddress);
+      return typeof node.authority === 'function' ? node.authority(options?.callerAgentAddress) : node.authority;
+    },
+    findLocalAgentForContextGraph: async () => node.namedAgent ?? DEFAULT_AGENT,
+    listLocalAgents: () => node.localAgents.map((agentAddress) => ({ agentAddress })),
     subscribedContextGraphs: subscriptions,
     getSubscribedContextGraphs: () => subscriptions,
     subscribeToContextGraph: (id: string, options?: { syncMode?: string }) => {
@@ -154,7 +171,7 @@ export function memberEdge() {
     config: { chainConfig: undefined },
     contextGraphAuthorityReaderCapability: { status: 'unsupported' },
     resolveAgentByToken: () => undefined,
-    getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
+    getDefaultAgentAddress: () => DEFAULT_AGENT,
     // The catch-up bridge. No curator is resolvable for the walk, as for an
     // unregistered graph whose owner is one Edge among the connected peers.
     resolveSyncPeerWithProvenance: async () => ({ peerId: undefined, provenance: 'bootstrap-hint' }),

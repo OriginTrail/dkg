@@ -44,8 +44,9 @@ import {
 import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
 
 /**
- * The FIRST thing graceful shutdown does: close catch-up admission, announce,
- * and give the supervisor's liveness watcher its signal.
+ * The FIRST thing graceful shutdown does: close catch-up admission, stop what
+ * would start catch-up jobs later (activation catch-ups, readiness repeats),
+ * announce, and give the supervisor's liveness watcher its signal.
  *
  * ## Why the flag write and the first await live in the SAME function
  *
@@ -74,10 +75,17 @@ import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
  */
 export async function beginGracefulShutdown(deps: {
   state: { catchupAcceptingJobs: boolean };
+  /** Stops the triggers of later catch-up jobs; their jobs would only be refused now. */
+  stopCatchupTriggers: () => void;
   removeApiPort: () => Promise<void>;
   log: (message: string) => void;
 }): Promise<void> {
   deps.state.catchupAcceptingJobs = false;
+  try {
+    deps.stopCatchupTriggers();
+  } catch (err: any) {
+    deps.log(`Catch-up trigger stop error: ${err?.message ?? String(err)}`);
+  }
   deps.log('Shutting down...');
   await deps.removeApiPort().catch((err: any) =>
     deps.log(`Early api.port cleanup error: ${err?.message ?? String(err)}`),

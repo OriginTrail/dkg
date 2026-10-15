@@ -30,7 +30,7 @@ const { daemonState } = await import('../src/daemon/state.js');
 const {
   CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS,
   readinessRepeatTimers,
-  resetContextGraphReadinessRepeats,
+  cancelContextGraphReadinessRepeats,
 } = await import('../src/daemon/context-graph-readiness-repeat.js');
 const { startContextGraphCatchupJob } = await import('../src/daemon/context-graph-catchup-job.js');
 
@@ -60,7 +60,7 @@ describe('a public graph that its subscribe job left unproven is caught up again
   });
 
   afterEach(async () => {
-    resetContextGraphReadinessRepeats();
+    cancelContextGraphReadinessRepeats();
     readinessRepeatTimers.set = originalTimers.set;
     readinessRepeatTimers.clear = originalTimers.clear;
     timers.length = 0;
@@ -222,13 +222,15 @@ describe('a public graph that its subscribe job left unproven is caught up again
     }
   });
 
-  it('stops when the graph is unsubscribed, the daemon stops taking jobs, or its runner was replaced', async () => {
+  it('stops when the graph is unsubscribed, the daemon stops taking jobs or ends every repeat, or its runner was replaced', async () => {
     const stops: Array<{
       name: string;
       stop: (member: ReturnType<typeof memberEdge>) => string[] | undefined;
     }> = [
       { name: 'unsubscribed', stop: (member) => { member.unsubscribe(); return undefined; } },
       { name: 'shutting down', stop: () => { daemonState.catchupAcceptingJobs = false; return undefined; } },
+      // What the daemon does when its shutdown begins.
+      { name: 'every repeat ended', stop: () => { cancelContextGraphReadinessRepeats(); return undefined; } },
       { name: 'runner replaced', stop: () => stubRunner([cleanEmptyRound]).runs },
     ];
     for (const { name, stop } of stops) {
@@ -327,7 +329,7 @@ describe('a public graph that its subscribe job left unproven is caught up again
       expect({ answer, runs: runs.length, cleared: newerTimer?.cleared, armed: armed().length })
         .toEqual({ answer, runs: 2, cleared: false, armed: 1 });
       expect(armed()[0]).toBe(newerTimer);
-      resetContextGraphReadinessRepeats();
+      cancelContextGraphReadinessRepeats();
       timers.length = 0;
     }
   });

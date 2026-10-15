@@ -78,8 +78,8 @@ export function followContextGraphCatchupJob(
   sequence.follow(started, caller.admissionAuthority);
 }
 
-/** Test seam: end every sequence. */
-export function resetContextGraphReadinessRepeats(): void {
+/** End every sequence and its pending repeat: when the daemon shuts down, and between tests. */
+export function cancelContextGraphReadinessRepeats(): void {
   for (const sequence of sequences.values()) sequence.cancel();
   sequences.clear();
 }
