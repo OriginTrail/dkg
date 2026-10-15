@@ -113,6 +113,22 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     return this.enqueue(assetKey, observer, true);
   }
 
+  /** GH#3134 — whether work is queued for an asset whose key `matches`. */
+  hasQueued(matches: (assetKey: string) => boolean): boolean {
+    return [...this.#assetTails.keys()].some(matches);
+  }
+
+  /**
+   * GH#3134 — `schedule`, after the work already queued for every other asset whose key `after`
+   * matches has ended: what the observer then reads includes those assets' commits.
+   */
+  scheduleAfter(after: (assetKey: string) => boolean, assetKey: string, observer: () => Promise<void>): boolean {
+    if (this.#closed) return false;
+    const queued = [...this.#assetTails].filter(([key]) => key !== assetKey && after(key)).map(([, tail]) => tail);
+    this.enqueue(assetKey, observer, false, queued);
+    return true;
+  }
+
   /** Serialize inventory mutations and catalog reads for one author/scope. */
   runScopeExclusive<T>(
     scopeKey: string,
@@ -215,8 +231,12 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     assetKey: string,
     observer: () => Promise<void>,
     priority: boolean,
+    after: readonly Promise<void>[] = [],
   ): Promise<void> {
-    const predecessor = this.#assetTails.get(assetKey);
+    const tail = this.#assetTails.get(assetKey);
+    const predecessor = after.length === 0
+      ? tail
+      : Promise.all([...after, ...(tail === undefined ? [] : [tail])].map((work) => work.catch(() => undefined)));
     const pending = predecessor === undefined
       ? this.runBounded(observer, priority)
       : predecessor.catch(() => undefined).then(

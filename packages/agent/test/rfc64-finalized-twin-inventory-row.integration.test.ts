@@ -187,6 +187,46 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
     expect(healCounts(member)).toMatchObject({ finalizedRowHealPasses: 1, finalizedRowsHealed: 0 });
   }, 120_000);
 
+  it('removes the row a pending share observer commits after the twin of its version was retired', async () => {
+    const member = await startAgent('finalized-twin-pending-v2');
+    await share(member, 1n, 'member-asset-a');
+    const removals = vi.spyOn(member, 'removeRfc64SwmAuthorInventoryConfirmedRowV1');
+
+    // Version 2's observer has prepared its row and waits for its signature.
+    const held = holdNextInventorySignature(member);
+    const a2 = await share(member, 1n, 'member-asset-a', '2', false);
+    await held.entered;
+    expect(inventoryRows(member)).toEqual([a2.kaUal]);
+    await writeCuratorPublication(member, a2);
+    await finalizationRetiresTwin(member, a2);
+    held.release();
+    await member.awaitInFlightRfc64SwmInventoryObserversV1();
+
+    expect(inventoryRows(member)).toEqual([]);
+    expect(removals.mock.calls.map(([call]) => call.expectedRow.assertionVersion)).not.toContain('1');
+    const b = await share(member, 2n, 'member-asset-b');
+    expect(inventoryRows(member)).toEqual([b.kaUal]);
+    expect(projectionRepair(member)).toMatchObject({ outcome: 'reconciled', inventoryRowCount: '1' });
+  }, 120_000);
+
+  it('removes a first share\'s row that its observer commits after the twin was retired', async () => {
+    const member = await startAgent('finalized-twin-pending-first');
+    const held = holdNextInventorySignature(member);
+    const a = await share(member, 1n, 'member-asset-a', '1', false);
+    await held.entered;
+    // Nothing is in the inventory yet: the row is still on its way.
+    expect(inventoryRows(member)).toEqual([]);
+    await writeCuratorPublication(member, a);
+    await finalizationRetiresTwin(member, a);
+    held.release();
+    await member.awaitInFlightRfc64SwmInventoryObserversV1();
+
+    expect(inventoryRows(member)).toEqual([]);
+    const b = await share(member, 2n, 'member-asset-b');
+    expect(inventoryRows(member)).toEqual([b.kaUal]);
+    expect(projectionRepair(member)).toMatchObject({ outcome: 'reconciled', inventoryRowCount: '1' });
+  }, 120_000);
+
   it('keeps the row on a lane whose catalog places finalized assets', async () => {
     const member = await startAgent('finalized-twin-private-lane');
     const a = await share(member, 1n, 'member-asset-a');
@@ -245,7 +285,7 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
     await member.awaitInFlightRfc64SwmInventoryObserversV1();
     expect(inventoryRows(member)).toEqual([a.kaUal]);
     expect(warnings).toEqual(expect.arrayContaining([
-      expect.stringMatching(/not removed: inventory write refused/u),
+      expect.stringMatching(/remove failed after the user operation committed: inventory write refused/u),
       expect.stringMatching(/not removed: lane unreadable/u),
     ]));
 
@@ -332,6 +372,7 @@ async function share(
   kaNumber: bigint,
   assertionCoordinate: string,
   assertionVersion = '1',
+  settle = true,
 ): Promise<SharedAssetV1> {
   const quads: readonly Quad[] = [{
     subject: `https://example.org/member-asset-${kaNumber}`,
@@ -341,9 +382,12 @@ async function share(
   }];
   const seal = await memberSeal(kaNumber, quads, assertionVersion);
   const assertionSeal = assertionSealFromCanonical(seal);
-  const shareOperationId = `${assertionCoordinate}-share`;
+  const shareOperationId = `${assertionCoordinate}-share-${assertionVersion}`;
+  const assertionUri = contextGraphAssertionUri(CONTEXT_GRAPH_ID, MEMBER, assertionCoordinate);
+  // A new version's seal replaces the assertion's previous one.
+  await agent.store.deleteByPattern({ graph: contextGraphMetaUri(CONTEXT_GRAPH_ID), subject: assertionUri });
   await agent.store.insert(buildAssertionSealQuads({
-    assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, MEMBER, assertionCoordinate),
+    assertionUri,
     metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
     merkleRoot: assertionSeal.merkleRoot,
     authorAddress: assertionSeal.authorAddress,
@@ -390,7 +434,7 @@ async function share(
     shareOperationId,
     ctx: createOperationContext('share'),
   });
-  await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+  if (settle) await agent.awaitInFlightRfc64SwmInventoryObserversV1();
   return Object.freeze({ kaUal: seal.kaUal, assertionVersion: seal.assertionVersion, seal, quads });
 }
 
@@ -481,6 +525,27 @@ function projectionRepair(agent: DKGAgent) {
   return agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs.find(
     (repair) => repair.contextGraphId === CONTEXT_GRAPH_ID && repair.authorAddress === MEMBER,
   );
+}
+
+/** Holds the next signature the agent's author signer makes until released. */
+function holdNextInventorySignature(agent: DKGAgent) {
+  let release!: () => void;
+  let markEntered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+  const createSigner = agent.createRfc64CatalogAuthorSignerV1.bind(agent);
+  vi.spyOn(agent, 'createRfc64CatalogAuthorSignerV1').mockImplementationOnce((authorAddress, signal) => {
+    const signer = createSigner(authorAddress, signal);
+    return Object.freeze({
+      ...signer,
+      signMessage: async (message: Uint8Array) => {
+        markEntered();
+        await gate;
+        return signer.signMessage(message);
+      },
+    });
+  });
+  return { entered, release };
 }
 
 function healCounts(agent: DKGAgent) {

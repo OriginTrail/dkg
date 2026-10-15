@@ -82,7 +82,7 @@ import {
   type CatalogPlacementAttemptV1,
 } from './internal/catalog-placement-timing.js';
 import { readOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
-import { rfc64SwmInventoryAssetKeyV1 } from './internal/swm-inventory-asset-key.js';
+import { rfc64SwmInventoryAssetKeyIsAuthorsV1 } from './internal/swm-inventory-asset-key.js';
 import { healFinalizedSwmInventoryRowsV1 } from './internal/finalized-row-heal.js';
 import { catalogRepairDiagnosticV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
@@ -160,9 +160,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
    * which happens on an author's node when a curator publishes the author's shared asset under the
    * author's seal. The asset's row in the author's SWM inventory has no shared-memory head left to
    * resolve, and on a lane that drops confirmed rows it fails every later projection of the
-   * author's catalog. When this node holds that row, the row is removed and the projection
-   * requested, as the publishing node does at the confirmation; a finalized private lane keeps
-   * its rows. The removal runs detached, in turn with the asset's other inventory work. Never throws.
+   * author's catalog. So the row goes, as at the publishing node's confirmation; a finalized
+   * private lane keeps its rows. Detached, and read only after the author's queued inventory work:
+   * a share observer that already prepared the asset's row commits first. Never throws.
    */
   scheduleRfc64SwmInventoryRowRemovalAfterFinalizedTwinV1(
     this: DKGAgent,
@@ -190,42 +190,35 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       if (decision.status !== 'active' || decision.lane.acceptsFinalizedVmRepair) return;
       const contextGraphId = input.contextGraphId as ContextGraphIdV1;
       const authorAddress = assertCanonicalDeterministicUalV1(input.kaUal).agentAddress;
-      const scope = Object.freeze({
-        ...decision.lane.scopeBase,
-        authorAddress,
-      }) as SwmAuthorInventoryScopeV1;
-      const row = persistence.swmAuthorInventory.readSwmAuthorInventoryRowV1(
-        computeSwmAuthorInventoryScopeDigestV1(scope),
-        authorAddress,
-        input.kaUal as CanonicalDeterministicUalV1,
-      );
-      // A newer share's row has its own shared-memory head.
-      if (row === null || BigInt(row.assertionVersion) > BigInt(input.assertionVersion)) return;
-      rfc64SwmInventoryShadowRuntimeV1(this).schedule(
-        rfc64SwmInventoryAssetKeyV1({
-          contextGraphId,
-          authorAddress,
-          assertionCoordinate: row.assertionCoordinate,
-        }),
-        async () => {
-          try {
-            const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
-              scope,
-              expectedRow: Object.freeze({
-                assertionVersion: row.assertionVersion,
-                kaUal: row.kaUal,
-                sealDigest: row.sealDigest,
-              }),
-            });
-            this.requestRfc64SwmCatalogProjectionV1({ contextGraphId, authorAddress, ctx });
-            if (removed.status === 'applied') {
-              this.log.info(ctx, `Removed the RFC-64 SWM inventory row of finalized ${row.kaUal}`);
-            }
-          } catch (cause) {
-            failed(cause);
-          }
-        },
-      );
+      const scope = Object.freeze({ ...decision.lane.scopeBase, authorAddress }) as SwmAuthorInventoryScopeV1;
+      const scopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
+      const runtime = rfc64SwmInventoryShadowRuntimeV1(this);
+      const authorsAssets = (key: string) => rfc64SwmInventoryAssetKeyIsAuthorsV1(key, { contextGraphId, authorAddress });
+      // No inventory and no share of this author's on its way into one: no row to remove.
+      if (
+        persistence.swmAuthorInventory.readSwmAuthorInventoryHeadDigestV1(scopeDigest, authorAddress) === null
+        && !runtime.hasQueued(authorsAssets)
+      ) return;
+      runtime.scheduleAfter(authorsAssets, JSON.stringify(['finalized-twin', contextGraphId, authorAddress, input.kaUal]), async () => {
+        try {
+          const row = this.rfc64PersistenceV1?.swmAuthorInventory.readSwmAuthorInventoryRowV1(
+            scopeDigest,
+            authorAddress,
+            input.kaUal as CanonicalDeterministicUalV1,
+          ) ?? null;
+          // A newer share's row has its own shared-memory head.
+          if (row === null || BigInt(row.assertionVersion) > BigInt(input.assertionVersion)) return;
+          const removed = await this.removeRfc64SwmAuthorInventoryRowV1({
+            contextGraphId,
+            scope,
+            expectedRow: { assertionVersion: row.assertionVersion, kaUal: row.kaUal, sealDigest: row.sealDigest },
+            ctx,
+          });
+          if (removed.status === 'applied') this.log.info(ctx, `Removed the RFC-64 SWM inventory row of finalized ${row.kaUal}`);
+        } catch (cause) {
+          failed(cause);
+        }
+      });
     } catch (cause) {
       failed(cause);
     }
@@ -554,18 +547,21 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         authorAddress: params.authorAddress,
         snapshot,
         ...(params.signal === undefined ? {} : { signal: params.signal }),
-        removeRow: async (row) => (await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
+        removeRow: async (row) => (await this.removeRfc64SwmAuthorInventoryRowV1({
+          contextGraphId: params.contextGraphId,
           scope,
           expectedRow: { assertionVersion: row.assertionVersion, kaUal: row.kaUal, sealDigest: row.sealDigest },
         })).status,
-        readHeadDigest: () => this.rfc64PersistenceV1?.swmAuthorInventory
-          .readSwmAuthorInventoryHeadDigestV1(scopeDigest, params.authorAddress) ?? null,
+        readSnapshot: () => this.rfc64PersistenceV1?.swmAuthorInventory
+          .readSwmAuthorInventorySnapshotV1(scopeDigest, params.authorAddress) ?? null,
       });
       if (healed > 0) {
         this.log.info(ctx, `RFC-64 SWM inventory of ${params.authorAddress} in ${params.contextGraphId}: `
           + `removed ${healed} row(s) of finalized assets whose shared-memory copy was retired`);
       }
-      return healed > 0;
+      // A row that other work removed or replaced since the failed read may have been its cause.
+      return healed > 0 || this.rfc64PersistenceV1?.swmAuthorInventory
+        .readSwmAuthorInventoryHeadDigestV1(scopeDigest, params.authorAddress) !== snapshot.head.objectDigest;
     } catch (cause) {
       if (params.signal?.aborted !== true) {
         this.log.warn(ctx, `RFC-64 SWM inventory rows of finalized assets were not swept: `

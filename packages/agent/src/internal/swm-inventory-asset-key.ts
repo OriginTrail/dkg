@@ -17,3 +17,12 @@ export function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
     input.assertionCoordinate,
   ]);
 }
+
+/** Whether `assetKey` is the key of one of this author's assets in the graph's root lane. */
+export function rfc64SwmInventoryAssetKeyIsAuthorsV1(
+  assetKey: string,
+  author: Readonly<{ contextGraphId: string; authorAddress: string }>,
+): boolean {
+  const lane = JSON.stringify([author.contextGraphId, null, author.authorAddress.toLowerCase()]);
+  return assetKey.startsWith(`${lane.slice(0, -1)},`);
+}

@@ -191,6 +191,8 @@ export interface RemoveRfc64SwmAuthorInventoryShadowParamsV1 {
   readonly contextGraphId: string;
   readonly subGraphName?: string | null;
   readonly seal: AssertionSeal;
+  /** GH#3134 — with it, the author's catalog projection is requested once the row is gone. */
+  readonly ctx?: OperationContext;
 }
 
 export interface ObserveRfc64DurableSwmPromotionParamsV1
@@ -867,18 +869,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
       } else {
         await shadowRuntime.runExclusive(assetKey, async () => {
-          const result = await this.removeRfc64SwmAuthorInventoryShadowV1({
-            contextGraphId,
-            subGraphName,
-            seal: params.seal,
-          });
-          if (result.status === 'applied' || result.status === 'absent') {
-            this.requestRfc64SwmCatalogProjectionV1({
-              contextGraphId: contextGraphId as ContextGraphIdV1,
-              authorAddress: confirmedSeal.authorAddress,
-              ctx: params.ctx,
-            });
-          }
+          await this.removeRfc64SwmAuthorInventoryShadowV1({ contextGraphId, subGraphName, seal: params.seal, ctx: params.ctx });
         });
       }
     } catch (cause) {
@@ -1172,7 +1163,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: RemoveRfc64SwmAuthorInventoryShadowParamsV1,
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
-    let kaUal: string | null = null;
+    let row: Readonly<{ scope: SwmAuthorInventoryScopeV1; expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 }>;
     try {
       const lane = this.resolveRfc64CatalogAuthoringLaneV1(
         params.contextGraphId,
@@ -1187,37 +1178,53 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       }
       assertContextGraphIdV1(params.contextGraphId, 'SWM inventory contextGraphId');
       const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
-      kaUal = seal.kaUal;
-      const scope: SwmAuthorInventoryScopeV1 = Object.freeze({
-        ...lane.scopeBase,
-        authorAddress: seal.authorAddress,
-      });
-      const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
-        scope,
+      row = Object.freeze({
+        scope: Object.freeze({ ...lane.scopeBase, authorAddress: seal.authorAddress }) as SwmAuthorInventoryScopeV1,
         expectedRow: Object.freeze({
           assertionVersion: seal.assertionVersion,
           kaUal: seal.kaUal,
           sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
         }),
       });
-      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-        shadowResult(
-          removed.status,
-          'remove',
-          removed.attempts,
-          removed.snapshot?.head.objectDigest ?? null,
-          null,
-        ),
-        params.contextGraphId,
-        kaUal,
-      );
     } catch (cause) {
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
         this.failRfc64SwmAuthorInventoryShadowV1('remove', cause),
         params.contextGraphId,
-        kaUal,
+        null,
       );
     }
+    return this.removeRfc64SwmAuthorInventoryRowV1({
+      contextGraphId: params.contextGraphId, ...row, ...(params.ctx === undefined ? {} : { ctx: params.ctx }),
+    });
+  }
+
+  /**
+   * GH#3134 — the one way a confirmed asset's row leaves its author's SWM inventory: the exact
+   * removal, its outcome counted, and with `ctx` the author's catalog projection once the row is
+   * gone. Callers pick the row and whether to wait.
+   */
+  async removeRfc64SwmAuthorInventoryRowV1(
+    this: DKGAgent,
+    params: Readonly<{
+      contextGraphId: string;
+      scope: SwmAuthorInventoryScopeV1;
+      expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
+      ctx?: OperationContext;
+    }>,
+  ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+    const result = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1(params).then(
+      (removed) => shadowResult(removed.status, 'remove', removed.attempts, removed.snapshot?.head.objectDigest ?? null, null),
+      (cause: unknown) => this.failRfc64SwmAuthorInventoryShadowV1('remove', cause),
+    );
+    this.recordRfc64SwmAuthorInventoryShadowStatsV1(result, params.contextGraphId, params.expectedRow.kaUal);
+    if (params.ctx !== undefined && result.status !== 'failed') {
+      this.requestRfc64SwmCatalogProjectionV1({
+        contextGraphId: params.contextGraphId as ContextGraphIdV1,
+        authorAddress: params.scope.authorAddress,
+        ctx: params.ctx,
+      });
+    }
+    return result;
   }
 
   /** Remove the exact confirmed row without requiring its transient AssertionSeal object. */

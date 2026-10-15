@@ -8,6 +8,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-full-author-catalog.test.ts",
   // #3134 — an author's row leaves its SWM inventory when the node retires the asset's finalized twin.
   "test/rfc64-finalized-twin-inventory-row.integration.test.ts",
+  "test/rfc64-finalized-row-heal.test.ts",
   "test/rfc64-inventory-v1-scalars.test.ts",
   "test/rfc64-legacy-swm-boundary-v1.test.ts",
   "test/rfc64-legacy-swm-boundary-codec-v1.test.ts",

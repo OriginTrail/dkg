@@ -46,7 +46,7 @@ import {
 import { FinalizedPrivatePlacementWaitersV1 } from './internal/finalized-private-placement-waiters.js';
 import { NextTurnRecurringTaskV1 } from './internal/next-turn-recurring-task.js';
 import { retainOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
-import { withFinalizedRowHealCountsV1 } from './internal/finalized-row-heal.js';
+import type { FinalizedRowHealCountsV1 } from './internal/finalized-row-heal.js';
 
 // Match the default background store lane; repair fanout must not flood its queue.
 const MAX_CONCURRENT_REPAIRS_V1 = 1;
@@ -135,6 +135,8 @@ interface ProjectionOwnerDependenciesV1 {
   readonly listLocalAuthorAddresses: () => readonly EvmAddressV1[];
   readonly acceptsPublicRootLane: (contextGraphId: ContextGraphIdV1) => boolean;
   readonly acceptsFinalizedPrivateLane: (contextGraphId: ContextGraphIdV1) => boolean;
+  /** GH#3134 — the sweep counts of finalized assets' inventory rows, once the node has run a sweep. */
+  readonly readFinalizedRowHealCounts?: () => FinalizedRowHealCountsV1 | undefined;
   readonly readRepairRevision: (
     contextGraphId: ContextGraphIdV1, authorAddress: EvmAddressV1,
   ) => CatalogRepairRevisionHintV1 | null;
@@ -353,7 +355,9 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         state.finalizedPrivateWaiters.summary(),
         state.finalizedPrivateRunner.running,
       ),
-      authorCatalogCapacity: this.#fullCatalogs.status(state.repairs),
+      authorCatalogCapacity: Object.freeze({
+        ...this.#fullCatalogs.status(state.repairs), ...this.#dependencies.readFinalizedRowHealCounts?.(),
+      }),
     });
   }
 
@@ -781,7 +785,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   readRfc64SwmCatalogProjectionSupervisorStatusV1(
     this: DKGAgent,
   ): Readonly<Rfc64SwmCatalogProjectionSupervisorStatusV1> | null {
-    return withFinalizedRowHealCountsV1(this, projectionOwnerV1(this).status());
+    return projectionOwnerV1(this).status();
   }
 
   async whenRfc64SwmCatalogProjectionSupervisorIdleV1(this: DKGAgent): Promise<void> {
