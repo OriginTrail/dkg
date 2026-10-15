@@ -34,7 +34,7 @@ import {
   snapshotRfc64PublicCatalogSuccessorAssetV1,
 } from './rfc64/public-catalog-successor-asset-v1.js';
 import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './rfc64/catalog-peers-v1.js';
-import { computeRfc64AppliedInventoryDigestV1 } from './rfc64/public-catalog-inventory-completeness-v1.js';
+import { computeRfc64CatalogAppliedInventoryDigestV1 } from './rfc64/applied-catalog-inventory-digest-v1.js';
 import type { AnnounceRfc64PublicCatalogHeadResultV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
@@ -582,9 +582,14 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       throwIfAbortedV1(signal);
       return {
         successor: produced,
-        appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+        appliedInventoryDigest: computeRfc64CatalogAppliedInventoryDigestV1({
           catalogScopeDigest: produced.catalogScopeDigest,
           rows: produced.assets,
+          directory: {
+            bucketCount: produced.catalogScope.bucketCount,
+            directoryRootDigest: produced.directoryRootDigest,
+            totalRows: produced.inventoryRowCount,
+          },
         }),
       };
     });
@@ -595,7 +600,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         currentCatalogHeadDigest: successor.headObjectDigest,
         appliedInventoryDigest,
         catalogVersion: successor.announcement.catalogVersion,
-        inventoryRowCount: successor.signedBucketRowCount,
+        inventoryRowCount: successor.inventoryRowCount,
         expectedCurrentCatalogHeadDigest: state.expectedCurrentCatalogHeadDigest,
         stageOnly,
       }).snapshot

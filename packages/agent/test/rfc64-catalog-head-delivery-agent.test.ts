@@ -145,10 +145,13 @@ describe('RFC-64 catalog head delivery: agent hand-off', () => {
       const agent = Object.assign(Object.create(Rfc64CatalogUpsertMethods.prototype), {
         log: { debug: vi.fn(), info, warn: vi.fn() },
         publishAuthorCatalogExactSetSuccessorV1: async () => ({
+          catalogScope: { bucketCount: '1' },
           catalogScopeDigest: `0x${'cc'.repeat(32)}`,
           headObjectDigest: ANNOUNCEMENT.catalogHeadObjectDigest,
           announcement: ANNOUNCEMENT,
           signedBucketRowCount: '0',
+          directoryRootDigest: `0x${'dd'.repeat(32)}`,
+          inventoryRowCount: '0',
           assets: [],
         }),
         deliverRfc64CatalogHeadV1: (input: unknown) => {

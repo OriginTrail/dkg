@@ -49,7 +49,6 @@ import {
   type DecimalU64V1,
   type AuthorCatalogScopeV1,
   type CountV1,
-  type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
   assertContextGraphAuthorityIndexId,
@@ -344,8 +343,13 @@ export interface PublishAuthorCatalogExactSetSuccessorParamsV1 {
   readonly previousHead: Rfc64StagedAuthorCatalogHeadRefV1;
   readonly author: Rfc64CatalogAuthorSignerV1;
   readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
-  /** Complete 0..1024-row live set; input order does not affect the signed head. */
+  /**
+   * Complete 0..1024-row live set of the selected bucket; input order does not affect the signed
+   * head. For a one-bucket catalog that is the whole catalog.
+   */
   readonly assets: readonly Rfc64CatalogSuccessorAssetInputV1[];
+  /** The bucket the changed asset belongs to (GH#3134); bucket 0 when omitted. */
+  readonly selectedBucketId?: DecimalU64V1;
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt?: TimestampMsV1;
   readonly peers: readonly string[];
@@ -397,6 +401,8 @@ export interface PublishAuthorCatalogExactSetSuccessorResultV1 {
   readonly catalogScopeDigest: Digest32V1;
   /** Exact signed bucket row count, sourced independently of head `totalRows`. */
   readonly signedBucketRowCount: CountV1;
+  /** The signed head's directory root: what a catalog of more than one bucket commits rows by. */
+  readonly directoryRootDigest: Digest32V1;
   /** Strictly increasing by mathematical KA ID. */
   readonly assets: readonly Readonly<PublishAuthorCatalogSuccessorAssetResultV1>[];
   readonly inventoryRowCount: CountV1;
@@ -4886,7 +4892,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (persistence === undefined) {
       throw new Error('RFC-64 persistence is not available');
     }
-    const history = await loadBoundedAuthorCatalogHistoryV1(persistence, params.previousHead);
+    const history = await loadBoundedAuthorCatalogHistoryV1(
+      persistence,
+      params.previousHead,
+      params.selectedBucketId,
+    );
     return this.publishAuthorCatalogExactSetSuccessorFromHistoryV1(params, history);
   }
 
@@ -4947,6 +4957,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       previousDirectoryPath: history.previousDirectoryPath,
       previousBucket: history.previousBucket,
       assets: params.assets,
+      ...(params.selectedBucketId === undefined ? {} : { selectedBucketId: params.selectedBucketId }),
       deployment: params.deployment,
       issuedAt: params.issuedAt ?? (Date.now().toString() as TimestampMsV1),
       catalogSigner: {
@@ -4992,10 +5003,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
     const predecessorScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
     const signedBucketRowCount = produced.publication.bucket?.payload.rows.length.toString() ?? '0';
+    // The signed bucket holds exactly the produced set; in a one-bucket catalog that is every row.
     if (
-      signedBucketRowCount !== head.payload.totalRows
-      || (head.payload.totalRows === '0' && produced.publication.bucket !== null)
-      || (head.payload.totalRows !== '0' && produced.publication.bucket === null)
+      signedBucketRowCount !== produced.assets.length.toString()
+      || (head.payload.bucketCount === '1' && signedBucketRowCount !== head.payload.totalRows)
+      || (produced.publication.bucket === null) !== (signedBucketRowCount === '0')
       || catalogScopeDigest !== predecessorScopeDigest
       || produced.assets.some(
         (asset) => asset.projection.catalogScopeDigest !== catalogScopeDigest,
@@ -5024,6 +5036,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       catalogScope,
       catalogScopeDigest,
       signedBucketRowCount: signedBucketRowCount as CountV1,
+      directoryRootDigest: head.payload.directoryRootDigest,
       assets: Object.freeze(assets),
       inventoryRowCount: head.payload.totalRows,
       announcedPeers: delivery.announcedPeers,
