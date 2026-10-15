@@ -85,16 +85,6 @@ interface QueuedPublishFinalizationServices {
   readonly onPostConfirmationStep?: LiftJobTailStepObserver;
 }
 
-type StepOutcome = 'complete' | 'incomplete' | 'failed';
-
-/** A successful void write has completed; boolean cleanup keeps its own verdict. */
-function completedWrite(write: () => Promise<void>): () => Promise<boolean> {
-  return async () => {
-    await write();
-    return true;
-  };
-}
-
 /**
  * Own the complete queued create/update tail. A caught local failure continues the remaining
  * operations, but only complete required outcomes and a durable catalog obligation certify it.
@@ -112,54 +102,60 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   const ended = (step: LiftJobTailStep): void => {
     try { services.onPostConfirmationStep?.(step); } catch { /* observation only */ }
   };
+  let complete = true;
   const required = async (
-    run: () => Promise<boolean>,
+    run: () => Promise<void>,
     failureLabel: string,
     observation?: LiftJobTailStep,
-  ): Promise<StepOutcome> => {
+  ): Promise<void> => {
     try {
-      return await run() === true ? 'complete' : 'incomplete';
+      await run();
     } catch (error) {
       log.warn(ctx, `${failureLabel}: ${error instanceof Error ? error.message : String(error)}`);
-      return 'failed';
+      complete = false;
     } finally {
       if (observation) ended(observation);
     }
   };
 
   ended('publish');
-  const outcomes: StepOutcome[] = [];
   if (result.status === 'confirmed') {
     if (result.onChainResult) {
       const chainResult = result.onChainResult;
-      outcomes.push(await required(completedWrite(() => agent._writeQueuedKnowledgeAssetVmPublishReceipt(
+      await required(() => agent._writeQueuedKnowledgeAssetVmPublishReceipt(
         request,
         chainResult.txHash ?? '',
         chainResult.blockNumber ?? 0,
         seal.reservedKaId ?? chainResult.kaId ?? chainResult.batchId ?? 0n,
-      )), `Failed to write publish receipt for <${assertionUri}>`, 'receiptWrite'));
+      ), `Failed to write publish receipt for <${assertionUri}>`, 'receiptWrite');
     }
     const operationLabel = operationPlan.kind === 'update' ? 'update' : 'publish';
-    const cleared = await required(() => publisher.clearPublishedKnowledgeAssetSwm(
-      request.contextGraphId, sharedMemoryScope, request.subGraphName, ctx,
-      graphScope.ual, graphScope.assertionVersion,
-    ), `Failed to clear published SWM graph after confirmed queued ${operationLabel} of <${lifecycleUri}>`,
+    let clearReturned = false;
+    await required(async () => {
+      const cleared = await publisher.clearPublishedKnowledgeAssetSwm(
+        request.contextGraphId, sharedMemoryScope, request.subGraphName, ctx,
+        graphScope.ual, graphScope.assertionVersion,
+      );
+      clearReturned = true;
+      if (cleared !== true) complete = false;
+    }, `Failed to clear published SWM graph after confirmed queued ${operationLabel} of <${lifecycleUri}>`,
     'publishedGraphClear');
-    outcomes.push(cleared);
     // A thrown clear skips retirement; an incomplete clear still attempts its best-effort admission.
-    if (cleared !== 'failed') {
-      outcomes.push(await required(() => retireLegacySwmAfterConfirmedLocalPublish(
-        agent, log, request.contextGraphId, graphScope.ual, graphScope.assertionVersion, request.subGraphName, ctx,
-      ), 'Failed to retire the legacy SWM boundary after confirmed local VM publish', 'legacySwmRetire'));
+    if (clearReturned) {
+      await required(async () => {
+        if (await retireLegacySwmAfterConfirmedLocalPublish(
+          agent, log, request.contextGraphId, graphScope.ual, graphScope.assertionVersion, request.subGraphName, ctx,
+        ) !== true) complete = false;
+      }, 'Failed to retire the legacy SWM boundary after confirmed local VM publish', 'legacySwmRetire');
     }
     if (request.clearSharedMemoryAfter === true) {
-      outcomes.push(await required(completedWrite(() => publisher.clearRemainingSharedMemory(
+      await required(() => publisher.clearRemainingSharedMemory(
         request.contextGraphId, request.subGraphName, ctx,
-      )), `Failed to clear remaining SWM after confirmed queued publish of <${lifecycleUri}>`, 'remainingSwmClear'));
+      ), `Failed to clear remaining SWM after confirmed queued publish of <${lifecycleUri}>`, 'remainingSwmClear');
     }
     if (operationPlan.kind === 'update') {
       // Provenance has historically been part of the update tail without its own observation.
-      outcomes.push(await required(completedWrite(async () => {
+      await required(async () => {
         const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
         const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
           ? operationPlan.vmCurrentAssertion.slice(2)
@@ -171,12 +167,12 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
           { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
           { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
         ]);
-      }), `Failed to stamp queued update provenance for <${lifecycleUri}>`));
+      }, `Failed to stamp queued update provenance for <${lifecycleUri}>`);
     }
-    outcomes.push(await required(completedWrite(() => agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(
+    await required(() => agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(
       request, result.ual,
       packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
-    )), `Failed to stamp queued VM lifecycle marker for <${lifecycleUri}>`, 'lifecycleStamp'));
+    ), `Failed to stamp queued VM lifecycle marker for <${lifecycleUri}>`, 'lifecycleStamp');
     if (result.onChainResult) {
       // Graph lookup and message construction intentionally precede the best-effort gossip catch.
       const broadcastCgId = queuedOnChainContextGraphId ?? (onChainCapable
@@ -217,9 +213,9 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
       }
       ended('finalizationGossip');
     }
-    outcomes.push(await required(completedWrite(() => publisher.clearSwmShareComplete(
+    await required(() => publisher.clearSwmShareComplete(
       request.contextGraphId, request.name, agentAddress, request.subGraphName,
-    )), `Failed to clear swmShareComplete after queued publish of <${lifecycleUri}>`, 'shareMarkerClear'));
+    ), `Failed to clear swmShareComplete after queued publish of <${lifecycleUri}>`, 'shareMarkerClear');
   }
   // Records the durable obligation without awaiting private catalog placement. Called for tentative results too.
   const catalogCompletionRecorded = await services.observeConfirmedCatalog({
@@ -232,5 +228,5 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   });
   ended('catalogObserver');
   return result.status === 'confirmed' && Boolean(result.onChainResult) && catalogCompletionRecorded === true
-    && outcomes.every((outcome) => outcome === 'complete') ? true : undefined;
+    && complete ? true : undefined;
 }

@@ -223,12 +223,14 @@ describe('the steps a queued executor reports after the confirmation', () => {
 
   it.each(['writeReceipt()', 'stampLifecycle()', 'clearShareMarker()', 'clearRemainingSharedMemory()'])(
     'leaves recovery responsible when %s fails, even if an upstream result claims completeness', async (failStep) => {
-      const { execute } = harness({ failStep, publish: async () => ({
+      const { calls, execute } = harness({ failStep, publish: async () => ({
         ...publishResult(), localFinalizationComplete: true,
       }) });
       const result = await execute(request({ clearSharedMemoryAfter: true }));
       expect(result.status).toBe('confirmed');
       expect(result.localFinalizationComplete).toBeUndefined();
+      expect(calls).toContain('ended:shareMarkerClear');
+      expect(calls.slice(-2)).toEqual(['catalogObserver()', 'ended:catalogObserver']);
     },
   );
 
@@ -274,8 +276,16 @@ describe('the steps a queued executor reports after the confirmation', () => {
 
   it.each(['clear', 'retire'])('retains recovery after a swallowed %s failure', async (step) => {
     const fail = async () => { throw new Error('store refused cleanup'); };
-    const { execute } = harness(step === 'clear' ? { clearPublishedGraph: fail } : { retireLegacySwm: fail });
+    const { calls, execute } = harness(step === 'clear' ? { clearPublishedGraph: fail } : { retireLegacySwm: fail });
     expect((await execute()).localFinalizationComplete).toBeUndefined();
+    expect(calls.includes('retireLegacySwm()')).toBe(step === 'retire');
+    expect(calls).toContain('ended:publishedGraphClear');
+    expect(calls.includes('ended:legacySwmRetire')).toBe(step === 'retire');
+    expect(calls.slice(-6)).toEqual([
+      'gossip()', 'ended:finalizationGossip',
+      'clearShareMarker()', 'ended:shareMarkerClear',
+      'catalogObserver()', 'ended:catalogObserver',
+    ]);
   });
 
   it('keeps the observer to itself: the publish and the update are called without it', async () => {
