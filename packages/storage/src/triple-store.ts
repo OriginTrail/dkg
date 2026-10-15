@@ -270,6 +270,19 @@ export interface TripleStore {
     options?: QueryOptions,
   ): Promise<void>;
   /**
+   * Replace one subject and add disjoint companion subjects in the same graph
+   * in ONE transaction. Companion rows are additive, never replaced. Both groups
+   * must be blank-node free and validated before mutation. Unsupported backends
+   * refuse before dispatch; execution failures propagate without fallback.
+   */
+  replaceSubjectAndInsert?(
+    graphUri: string,
+    subject: string,
+    replacementQuads: Quad[],
+    insertQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
+  /**
    * RFC-64 `SYNC_AUTHOR_COMMIT_CAS_V1`: atomically replace one complete shared
    * projection, its author-seal subject, the guarded author current-head
    * pointer, and bounded mutation/applied-set subjects.

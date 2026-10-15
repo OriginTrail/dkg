@@ -1450,8 +1450,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
     const writtenStatuses: string[] = [];
-    const originalReplaceSubject = store.replaceSubject.bind(store);
-    store.replaceSubject = async (...args) => {
+    const originalReplaceSubject = store.replaceSubjectAndInsert.bind(store);
+    store.replaceSubjectAndInsert = async (...args) => {
       if (args[0] === DEFAULT_CONTROL_GRAPH_URI && args[1] === jobSubject(jobId)) {
         const status = args[2].find((entry) => entry.predicate === CONTROL_STATUS)?.object;
         if (status) writtenStatuses.push(status);

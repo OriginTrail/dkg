@@ -14,6 +14,7 @@ import type {
 } from './triple-store.js';
 import { deleteByPatternWithoutCount } from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
@@ -173,6 +174,21 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     // inline, keeping the atomic path byte-consistent with the fallback.
     await this.withExternalizedQuads(quads, (externalized) =>
       this.inner.replaceSubject!(graphUri, subject, externalized, options));
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
+    if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'SharedMemoryLiteralBlobStore');
+    }
+    await this.withExternalizedQuads([...replacementQuads, ...insertQuads], externalized =>
+      this.inner.replaceSubjectAndInsert!(
+        graphUri, subject, externalized.slice(0, replacementQuads.length),
+        externalized.slice(replacementQuads.length), options,
+      ));
   }
 
   async rfc64AuthorCommitCasV1(

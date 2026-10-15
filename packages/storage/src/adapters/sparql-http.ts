@@ -1,3 +1,4 @@
+import { prepareAtomicGraphReplace, prepareAtomicGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
 import { SparqlHttpResponseError, isDefinitiveSparqlUpdateRejectionV1 } from './sparql-http-response-error.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
@@ -46,9 +47,6 @@ import {
 } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import {
-  buildAtomicGraphAndSubjectReplaceUpdate,
-  buildAtomicGraphReplaceUpdate,
-  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
@@ -844,12 +842,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       // closed (before any request) so callers take their non-atomic fallback.
       throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'SparqlHttpStore');
     }
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'SparqlHttpStore.replaceGraph',
-    });
-    const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
-    statements.checkIris.replaceGraph(graphUri, quads);
+    const plan = prepareAtomicGraphReplace('sparql-http', graphUri, quads);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update: plan.update,
@@ -879,23 +872,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         'SparqlHttpStore',
       );
     }
-    assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'SparqlHttpStore.replaceGraphAndSubject',
-    });
-    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
-      graphUri,
-      graphQuads,
-      metaGraphUri,
-      metadataSubject,
-      metadataQuads,
-    );
-    statements.checkIris.replaceGraphAndSubject(
-      graphUri,
-      graphQuads,
-      metaGraphUri,
-      metadataSubject,
-      metadataQuads,
+    const plan = prepareAtomicGraphAndSubjectReplace(
+      'sparql-http', graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
     );
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri, metaGraphUri] },
@@ -922,17 +900,33 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       // any request so callers take their non-atomic delete-then-insert fallback.
       throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');
     }
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'SparqlHttpStore.replaceSubject',
-    });
-    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    statements.checkIris.replaceSubject(graphUri, subject, quads);
+    const update = prepareAtomicSubjectReplace('sparql-http', graphUri, subject, quads);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,
       options: { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
       operation: 'replaceSubject',
+    });
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string,
+    subject: string,
+    replacementQuads: DKGQuad[],
+    insertQuads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.supportsConsistency('atomic-update')) {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'SparqlHttpStore');
+    }
+    const update = prepareAtomicSubjectAndInsert(
+      'sparql-http', graphUri, subject, replacementQuads, insertQuads,
+    );
+    await this.runRemoteGraphMutation({
+      scope: { kind: 'graphs', graphs: [graphUri] },
+      update,
+      options: { ...options, source: options?.source ?? 'sparql-http.replaceSubjectAndInsert' },
+      operation: 'replaceSubjectAndInsert',
     });
   }
 

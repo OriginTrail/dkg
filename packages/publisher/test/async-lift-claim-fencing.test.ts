@@ -645,8 +645,8 @@ describe('async-lift claim fencing', () => {
   it('always releases the processing marker when claim execution escapes with a persistence fault', async () => {
     let failNextJobWrite = false;
     let jobId = '';
-    const originalReplaceSubject = store.replaceSubject.bind(store);
-    store.replaceSubject = async (...args) => {
+    const originalReplaceSubject = store.replaceSubjectAndInsert.bind(store);
+    store.replaceSubjectAndInsert = async (...args) => {
       if (failNextJobWrite && args[1].includes(jobId)) {
         failNextJobWrite = false;
         throw new Error('injected job persistence fault');
@@ -680,8 +680,8 @@ describe('async-lift claim fencing', () => {
   it('preserves the durable broadcast when publish-result persistence faults after send', async () => {
     let failNextJobWrite = false;
     let jobId = '';
-    const originalReplaceSubject = store.replaceSubject.bind(store);
-    store.replaceSubject = async (...args) => {
+    const originalReplaceSubject = store.replaceSubjectAndInsert.bind(store);
+    store.replaceSubjectAndInsert = async (...args) => {
       if (failNextJobWrite && args[1].includes(jobId)) {
         failNextJobWrite = false;
         throw new Error('injected post-send result persistence fault');

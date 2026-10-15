@@ -40,6 +40,7 @@ export default defineConfig({
       'test/async-lift-intent-lookup.test.ts',
       'test/async-lift-list-context-graph.test.ts',
       'test/async-lift-writejob-atomicity.test.ts',
+      'test/async-lift-primary-persistence.test.ts',
       'test/async-lift-publish-options.test.ts',
       'test/async-lift-auto-retry-2270.test.ts',
       'test/async-lift-retry-disposition-2270.test.ts',

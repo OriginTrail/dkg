@@ -12,6 +12,7 @@ export type TripleStoreCapability =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'replaceSubjectAndInsert'
   | 'rfc64AuthorCommitCasV1';
 
 /**

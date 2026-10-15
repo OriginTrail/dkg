@@ -44,8 +44,8 @@ describe('accepted work scheduling notifications', () => {
     const atWrite = new Promise<void>((resolve) => { entered = resolve; });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    const replace = store.replaceSubject.bind(store);
-    store.replaceSubject = async (...args) => {
+    const replace = store.replaceSubjectAndInsert.bind(store);
+    store.replaceSubjectAndInsert = async (...args) => {
       if (args[2].some((q) => q.predicate === CONTROL_STATUS && q.object === '"accepted"')) {
         entered();
         await gate;
@@ -63,7 +63,7 @@ describe('accepted work scheduling notifications', () => {
 
   it('does not notify when authoritative accepted persistence fails', async () => {
     const { store, publisher, work } = fixture();
-    vi.spyOn(store, 'replaceSubject').mockRejectedValue(new Error('store unavailable'));
+    vi.spyOn(store, 'replaceSubjectAndInsert').mockRejectedValue(new Error('store unavailable'));
     await expect(publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest())).rejects.toThrow('store unavailable');
     expect(work).not.toHaveBeenCalled();
   });

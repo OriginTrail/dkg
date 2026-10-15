@@ -1,3 +1,6 @@
+import type { GraphSetMutationSource, TouchedGraphMutationSource, GraphSetRefreshSource, PendingFullRefreshSource, GraphSetMutationEvent, GraphSetDiagnosticEvent } from './graph-set-index-types.js';
+export type { GraphSetMutationSource, GraphSetMutationEvent } from './graph-set-index-types.js';
+import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
 import { performance } from 'node:perf_hooks';
 import {
   codePointLowerBound,
@@ -39,63 +42,6 @@ const MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS = 1_000;
 // Max times a bounded hasGraph probe is repeated when a concurrent write bumps
 // the mutation generation, before falling back to one O(store) rebuild.
 const MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4;
-
-export type GraphSetMutationSource =
-  | 'seed'
-  | 'revalidate'
-  | 'insert'
-  | 'delete'
-  | 'deleteByPattern'
-  | 'deleteBySubjectPrefix'
-  | 'dropGraph'
-  | 'replaceGraph'
-  | 'replaceGraphAndSubject'
-  | 'replaceSubject'
-  | 'rfc64AuthorCommitCasV1'
-  | 'query'
-  | 'update';
-
-type TouchedGraphMutationSource =
-  | 'delete'
-  | 'deleteByPattern'
-  | 'deleteBySubjectPrefix'
-  | 'replaceGraph'
-  | 'replaceGraphAndSubject'
-  | 'replaceSubject'
-  | 'rfc64AuthorCommitCasV1'
-  | 'update';
-type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
-type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
-
-export type GraphSetMutationEvent =
-  | {
-      type: 'graph-added';
-      graph: string;
-      source: GraphSetMutationSource;
-    }
-  | {
-      type: 'graph-removed';
-      graph: string;
-      source: GraphSetMutationSource;
-    }
-  | {
-      type: 'graph-set-revalidated';
-      added: string[];
-      removed: string[];
-      source: GraphSetRefreshSource;
-    };
-
-type GraphSetDiagnosticEvent =
-  | {
-      type: 'dirty-rebuild';
-      source: PendingFullRefreshSource;
-      graphCount: number;
-    }
-  | {
-      type: 'probe-retry-exhausted';
-      source: TouchedGraphMutationSource;
-      probeCount: number;
-    };
 
 export interface GraphSetIndexStoreOptions {
   enabled?: boolean;
@@ -465,6 +411,32 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       }
       this.bumpMutation();
       await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
+    });
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
+    return runLogicalStoreMutation(this.inner, 'replaceSubjectAndInsert', options, async options => {
+      if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'GraphSetIndexStore');
+      }
+      if (!this.enabled) {
+        await this.inner.replaceSubjectAndInsert(graphUri, subject, replacementQuads, insertQuads, options);
+        return;
+      }
+      try {
+        await this.inner.replaceSubjectAndInsert(graphUri, subject, replacementQuads, insertQuads, options);
+      } catch (error) {
+        if (!isStoreOperationNotStarted(error, 'replaceSubjectAndInsert')) {
+          this.scheduleFullRefresh('replaceSubjectAndInsert');
+        }
+        throw error;
+      }
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([graphUri], 'replaceSubjectAndInsert', options);
     });
   }
 

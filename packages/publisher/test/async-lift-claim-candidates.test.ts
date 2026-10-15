@@ -102,8 +102,8 @@ describe('combined retry and accepted claim candidates', () => {
     const next = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'later', shareOperationId: 'later' }));
     h.advance(20_000);
     const error = new Error('reaccept store failure');
-    const original = h.store.replaceSubject.bind(h.store);
-    const replace = vi.spyOn(h.store, 'replaceSubject').mockImplementation(async (...args) => {
+    const original = h.store.replaceSubjectAndInsert.bind(h.store);
+    const replace = vi.spyOn(h.store, 'replaceSubjectAndInsert').mockImplementation(async (...args) => {
       if (args[1] === jobSubject(id)) throw error;
       return original(...args);
     });

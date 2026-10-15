@@ -197,6 +197,16 @@ export function createListContextGraphsCacheInvalidatingStore(
             'replaceSubject',
           )
       : undefined,
+    // Async publication reasserts the request and replaces its job in one commit.
+    // Describe both inserts, but fence deletions only for the mutable job subject.
+    replaceSubjectAndInsert: innerStore.replaceSubjectAndInsert
+      ? (graphUri, subject, replacement, inserts, options) => invalidateAfterMutation(
+          () => innerStore.replaceSubjectAndInsert!(graphUri, subject, replacement, inserts, options),
+          () => true,
+          { removals: [{ graph: graphUri, subject }], quads: [...replacement, ...inserts] },
+          'replaceSubjectAndInsert',
+        )
+      : undefined,
     // RFC-64 author publication moves a complete public-SWM projection and
     // its bounded semantic control state through one backend CAS. Preserve the
     // capability through this cache-invalidation decorator and invalidate only

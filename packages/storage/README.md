@@ -175,3 +175,20 @@ the environment default:
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-core` — configuration types, logging, constants
+
+## Atomic subject replacement with additive rows
+
+`replaceSubjectAndInsert(graphUri, subject, replacementQuads, insertQuads, options)`
+replaces exactly one subject and adds companion rows for other subjects in the
+same named graph in one backend transaction. Both groups must be blank-node free;
+validation runs before mutation or external literal storage. Companion subjects
+are never deleted, so missing immutable request rows can be reasserted while
+preserving existing extra rows. The existing `replaceSubject` remains strictly
+single-subject.
+
+The optional `tryReplaceSubjectAndInsertAtomically` returns `false` only when the
+capability is absent or gives its matching typed preflight refusal. Generic
+SPARQL endpoints need a certified `atomic-update` consistency profile. Execution,
+timeout and postcommit decorator failures propagate: callers must not replay
+through a compatibility fallback after these errors. One HTTP request alone is
+not evidence that an arbitrary endpoint is transactional.

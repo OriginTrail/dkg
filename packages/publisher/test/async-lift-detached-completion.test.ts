@@ -128,7 +128,7 @@ describe('detached local completion', () => {
     await s.publisher.recordPublishResult(s.jobId, completeResult());
     const finalized = await s.publisher.getStatus(s.jobId);
     expect(finalized?.status).toBe('finalized');
-    const write = vi.spyOn(s.store, 'replaceSubject');
+    const write = vi.spyOn(s.store, 'replaceSubjectAndInsert');
     s.finish(completeResult());
     await s.publisher.drainDetachedExecutions();
     expect(await s.publisher.getStatus(s.jobId)).toEqual(finalized);
@@ -151,8 +151,8 @@ describe('detached local completion', () => {
     const atWrite = new Promise<void>((resolve) => { entered = resolve; });
     let release!: () => void;
     const writeGate = new Promise<void>((resolve) => { release = resolve; });
-    const replace = s.store.replaceSubject.bind(s.store);
-    s.store.replaceSubject = async (...args) => {
+    const replace = s.store.replaceSubjectAndInsert.bind(s.store);
+    s.store.replaceSubjectAndInsert = async (...args) => {
       if (args[2].some((q) => q.predicate === CONTROL_STATUS && q.object === '"finalized"')) {
         entered();
         await writeGate;
@@ -177,9 +177,9 @@ describe('detached local completion', () => {
 
   it('preserves chain recovery when the terminal store write fails', async () => {
     const s = await scenario();
-    const replace = s.store.replaceSubject.bind(s.store);
+    const replace = s.store.replaceSubjectAndInsert.bind(s.store);
     let fail = true;
-    s.store.replaceSubject = async (...args) => {
+    s.store.replaceSubjectAndInsert = async (...args) => {
       if (fail && args[2].some((q) => q.predicate === CONTROL_STATUS && q.object === '"finalized"')) {
         fail = false;
         throw new Error('terminal store unavailable');
