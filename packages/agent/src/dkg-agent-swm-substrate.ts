@@ -420,11 +420,7 @@ export interface ContextGraphSubscribeOptions {
 }
 
 export class SwmSubstrateMethods extends DKGAgentBase {
-  subscribeToContextGraph(
-    this: DKGAgent,
-    contextGraphId: string,
-    options?: ContextGraphSubscribeOptions,
-  ): ContextGraphSub {
+  subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: ContextGraphSubscribeOptions): ContextGraphSub {
     // A name hash this node already resolved (and holds no row for) is the
     // verified cleartext graph: never mint a second, empty identity for it.
     const adoptedCleartextId = this.resolveContextGraphIdAlias(contextGraphId);
@@ -433,6 +429,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // the subscription: nothing may keep running under the hash id.
     if (options?.deferWireAdoption !== true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     const subscription = this.installContextGraphSubscription(contextGraphId, options);
+    // An explicit subscribe, not a start-up restore: the graph is in use here (#3251).
+    if (options?.persist !== false) this.recentSharedMemoryPulls?.noteActivity(contextGraphId);
     // The row is installed, so the phonebook check sees the subscription it
     // qualifies against. An Edge keeps no durable `agents` phonebook, so the
     // curator tier of a public wallet-scoped graph cannot reach its owner's
@@ -904,7 +902,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       contextGraphId,
       () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
     );
-    const canUseSharedMemory = await authorityRead.run(() => this.canUseSharedMemoryForContextGraph(contextGraphId));
+    const canUseSharedMemory = await authorityRead.run(() => this.canUseSharedMemoryForContextGraph(contextGraphId, { onAuthorityWait: authorityRead.onAuthorityWait }));
     if (!session.active || this.gossipSession !== session) return;
     if (authorityRead.deferIfUnanswered({
       session, canUseSharedMemory, isRegistered, log: this.log, ctx,
@@ -915,6 +913,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (!isRegistered) await this.reconcileSwmHostModeSubscription(contextGraphId);
       return;
     }
+    authorityRead.logAnswer({ session, canUseSharedMemory, isRegistered, log: this.log, ctx });
     if (!canUseSharedMemory) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
@@ -959,9 +958,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         session.swmHostModeCurated.delete(hostKey);
         session.swmHostModeHandlers.delete(hostKey);
         this.enqueueHostModePersistence(contextGraphId, false);
-        this.log.warn(ctx, `SWM gossip unsubscribed for "${contextGraphId}": local node is no longer authorized`);
-      } else {
-        this.log.warn(ctx, `SWM gossip subscription denied for "${contextGraphId}": local node is not authorized`);
       }
       // OT-RFC-38 LU-6: even if the local node is not a CG member,
       // a CORE node may still serve as a ciphertext host for the
@@ -1006,6 +1002,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       // requirement.
       if (!outcome.applied) return;
       this.maybeEmitSwmShareAck(outcome).catch(() => { /* swallowed; logged inside */ });
+      this.noticeSwmFollowersAfterApplyV1(outcome, from);
     });
   }
 
