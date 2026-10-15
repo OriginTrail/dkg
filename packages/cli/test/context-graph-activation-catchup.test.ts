@@ -352,27 +352,31 @@ describe('a subscription restored unsynced is caught up', () => {
     expect({ runs, armed: armed().length }).toEqual({ runs: [], armed: 0 });
   });
 
-  it('starts no job when stopped while it reads the admission', async () => {
-    const member = memberEdge();
-    member.restore({ ...RESTORED_UNSYNCED });
-    let answer!: () => void;
-    const answered = new Promise<void>((resolve) => { answer = resolve; });
-    let asked = false;
-    member.node.authority = () => PUBLIC_UNREGISTERED;
-    const read = member.agent.resolveContextGraphSubscriptionBootstrapAuthority.bind(member.agent);
-    member.agent.resolveContextGraphSubscriptionBootstrapAuthority = (async (...args: Parameters<typeof read>) => {
-      asked = true;
-      await answered;
-      return read(...args);
-    }) as typeof read;
-    const runs = runner([cleanEmptyRound]);
-    const { stop } = start(member);
-    await waitUntil(() => (asked ? true : undefined), 'the admission read');
+  it('starts no job and asks nothing again when stopped while it reads the admission', async () => {
+    const unavailable = { outcome: 'unavailable', source: 'registered-chain', reason: 'chain-name-binding-unavailable' };
+    for (const answerWith of [PUBLIC_UNREGISTERED, unavailable]) {
+      const member = memberEdge();
+      member.restore({ ...RESTORED_UNSYNCED });
+      let answer!: () => void;
+      const answered = new Promise<void>((resolve) => { answer = resolve; });
+      let asked = false;
+      member.node.authority = () => answerWith;
+      const read = member.agent.resolveContextGraphSubscriptionBootstrapAuthority.bind(member.agent);
+      member.agent.resolveContextGraphSubscriptionBootstrapAuthority = (async (...args: Parameters<typeof read>) => {
+        asked = true;
+        await answered;
+        return read(...args);
+      }) as typeof read;
+      const runs = runner([cleanEmptyRound]);
+      const { stop } = start(member);
+      await waitUntil(() => (asked ? true : undefined), 'the admission read');
 
-    stop();
-    answer();
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect({ runs, armed: armed().length }).toEqual({ runs: [], armed: 0 });
+      stop();
+      answer();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect({ outcome: answerWith.outcome, runs, armed: armed().length })
+        .toEqual({ outcome: answerWith.outcome, runs: [], armed: 0 });
+    }
   });
 
   it('logs a catch-up that fails and goes on with the next one', async () => {
