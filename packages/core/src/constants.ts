@@ -107,6 +107,12 @@ export const PROTOCOL_SWM_UPDATE = '/dkg/10.0.1/swm-update';
 // up at the deadline, falling back to runSyncOnConnect for offline
 // peers. See RFC-003 §4.2 + §5.2 for the full ack-quorum policy.
 export const PROTOCOL_SWM_SHARE_ACK = '/dkg/10.0.1/swm-share-ack';
+// A public graph's owner tells its followers that the graph's shared memory
+// changed (a share it applied from another peer); a follower then pulls that
+// scope from it through its ordinary sync. The notice carries no data, and a
+// node without this protocol refuses the stream. See the agent's
+// `swm/shared-memory-change-notice.ts`.
+export const PROTOCOL_SWM_CHANGE_NOTICE = '/dkg/10.0.1/swm-change-notice';
 
 // OT-RFC-38 LU-6 (cores host curated SWM substrate): NEW protocol.
 // Members fetch opaque ciphertext envelopes from a core that has

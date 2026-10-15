@@ -5,16 +5,18 @@
 //
 // Lives in its own module — rather than on `CatchupTracker` — because two
 // modules that never import each other need the SAME object: the subscribe
-// route in `routes/context-graph.ts` mints jobs, and `lifecycle.ts` drains
-// them during shutdown. That is the same reason `state.ts` exists, and it
+// route in `routes/context-graph.ts` mints jobs (through
+// `context-graph-catchup-job.ts`), and `lifecycle.ts` drains them during
+// shutdown. That is the same reason `state.ts` exists, and it
 // keeps `CatchupTracker` a plain data bag that route tests can build by hand.
 //
 // Two invariants govern everything here:
 //
 //   1. **Requests are not jobs.** They are N:1 — a dedupe returns a running
 //      job, an already-ready replay returns a completed one, and `400`/`403`
-//      plus authority/shutdown `503`s mint nothing at all. I7 counts route returns;
-//      I8 counts job identities.
+//      plus authority/shutdown `503`s mint nothing at all. A readiness repeat
+//      (`context-graph-readiness-repeat.ts`) mints a walk job with no request
+//      at all. I7 counts route returns; I8 counts job identities.
 //   2. **Instrumentation never throws.** Every record site is synchronous and
 //      swallowed. The walk job's terminal point is emitted from a detached,
 //      `void`ed continuation, where an escaping throw would become an
@@ -33,7 +35,10 @@ import { isTerminalCatchupJobState } from '../catchup-status.js';
  */
 export const CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS = 5_000;
 
-/** Which of the two mint sites produced a job. */
+/**
+ * Which kind of mint produced a job: a walk (a subscribe call's catch-up job,
+ * or a readiness repeat of it) or the already-ready synthetic job.
+ */
 export type CatchupAdmission = 'walk' | 'synthetic';
 
 /**

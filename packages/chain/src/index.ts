@@ -99,6 +99,7 @@ export {
 } from './finalized-vm-chain-inventory.js';
 export {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+  FinalizedVmChainInventoryLimitErrorV1,
   createFinalizedVmChainScannerV1,
   scanFinalizedVmChainInventoryInSnapshotV1,
   type FinalizedVmChainScanRequestV1,
