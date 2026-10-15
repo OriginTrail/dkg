@@ -105,6 +105,30 @@ describe('RFC-64 catalog bootstrap terminal outcome v1', () => {
     }
   });
 
+  it('stops looking for a terminal reason at an unreadable cause or eight causes deep', () => {
+    const unreadable = new Error('catalog synchronization failed');
+    Object.defineProperty(unreadable, 'cause', {
+      get() {
+        throw new Error('cause is unreadable');
+      },
+    });
+    // The typed reason sits one level below the eight the search walks.
+    let tooDeep: unknown = new Rfc64CatalogSynchronizationErrorV1(
+      'no-authorized-provider',
+      'legacy-code',
+    );
+    for (let depth = 0; depth < 8; depth += 1) {
+      tooDeep = new Error(`catalog synchronization wrapper ${depth}`, { cause: tooDeep });
+    }
+
+    for (const failure of [unreadable, tooDeep]) {
+      expect(classifyRfc64CatalogBootstrapFailureV1(true, failure)).toEqual({
+        outcome: 'failed',
+        completionReason: null,
+      });
+    }
+  });
+
   it('classifies a signed catalog row with unavailable bytes as known-incomplete for private VM', () => {
     const receiverFailure = new Rfc64PublicCatalogNativeReceiverErrorV1(
       'catalog-native-receiver-incomplete',
