@@ -21,7 +21,9 @@ export const NODE_CANDIDATES = [7, 8, 9, 10];
 const DEAD_DIRECT_ADDRESS = '/ip4/127.0.0.1/tcp/9';
 // Every node folder this suite creates carries this file, so that a later run
 // can tell a node of its own (left by a run that was killed) from another
-// suite's, and remove it.
+// suite's, and remove it. addnode writes it right after it created the folder,
+// before the daemon starts, as `<run> <role> starting`; once the node is up it
+// reads `<run> <role> started`.
 const OWN_MARK = '.issue-3251-member-sharing';
 
 export class TemporaryEdges {
@@ -35,6 +37,8 @@ export class TemporaryEdges {
     this.member2 = null;
     // Every node this run added: the cleanup stops and removes these only.
     this.started = [];
+    // The starts still running, each with what cancels it.
+    this.pending = new Map();
   }
 
   get nodes() { return [this.owner, this.member1, this.member2]; }
@@ -43,6 +47,11 @@ export class TemporaryEdges {
   isTemporary(number) { return this.nodes.some(node => node?.number === number); }
 
   ownMark(number) { return join(this.devnet.nodeDir(number), OWN_MARK); }
+
+  /** Whether a node's folder carries this run's claim: addnode wrote it there, so this run created the folder. */
+  claims(node) {
+    try { return readFileSync(this.ownMark(node.number), 'utf8').startsWith(`${this.stamp} `); } catch { return false; }
+  }
 
   /**
    * Stops a node of this suite and removes its folder, but only once nothing
@@ -119,20 +128,35 @@ export class TemporaryEdges {
 
   /**
    * Adds a node with its overrides in place from the first start, and learns
-   * who it is. The node is this suite's only when this call created it: its
-   * folder did not exist just before, and addnode, which refuses a folder that
-   * exists, succeeded. Only then is the folder marked as this suite's and the
-   * node kept for the cleanup. A number another suite took after it was
-   * picked, or an addnode that failed, leaves the folder as it is.
+   * who it is. The node is this run's only when this run's addnode created its
+   * folder: addnode claims the folder with one mkdir and writes this run's
+   * mark into it before the daemon starts, and it never touches a folder that
+   * exists. A node whose folder carries the mark is kept for the cleanup, also
+   * when its start failed or is interrupted; any other folder (a number
+   * another suite took after it was picked) is left as it is.
    */
   async start(node) {
     if (existsSync(this.devnet.nodeDir(node))) {
       throw new Error(`node${node.number} was taken after it was picked: its folder exists, and it is left as it is`);
     }
-    const added = await this.devnet.devnetSh(['addnode', String(node.number), 'edge'], { ...node.env, DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(node.overrides) });
-    if (added.status !== 0) throw new Error(`temporary node ${node.number} could not be added (its folder, if any, is left as it is): ${lastLines(added.output)}`);
-    writeFileSync(this.ownMark(node.number), `${this.stamp} ${node.role}\n`);
-    this.started.push(node);
+    const pending = new AbortController();
+    this.pending.set(node, pending);
+    let added;
+    try {
+      added = await this.devnet.devnetSh(['addnode', String(node.number), 'edge'], {
+        ...node.env,
+        DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(node.overrides),
+        DEVNET_ADDNODE_MARK_NAME: OWN_MARK,
+        DEVNET_ADDNODE_MARK_TEXT: `${this.stamp} ${node.role} starting`,
+      }, undefined, { signal: pending.signal });
+    } finally {
+      this.pending.delete(node);
+    }
+    if (this.claims(node) && !this.started.includes(node)) this.started.push(node);
+    if (added.status !== 0) {
+      throw new Error(`temporary node ${node.number} could not be added (${this.started.includes(node) ? 'it is removed at the cleanup' : 'its folder, if any, is left as it is'}): ${lastLines(added.output)}`);
+    }
+    writeFileSync(this.ownMark(node.number), `${this.stamp} ${node.role} started\n`);
     await this.identify(node);
   }
 
@@ -214,6 +238,13 @@ export class TemporaryEdges {
    * are kept first. With `keep`, the nodes are left running.
    */
   cleanup({ keep, failed }) {
+    // A start still running (the run is being interrupted): it is cancelled,
+    // and its node is this run's when addnode got as far as marking its folder.
+    for (const [node, pending] of this.pending) {
+      pending.abort();
+      if (this.claims(node) && !this.started.includes(node)) this.started.push(node);
+    }
+    this.pending.clear();
     if (keep) {
       if (this.started.length) this.log.say(`MEMBER_SHARING_KEEP_NODES=1: node(s) ${this.started.map(node => node.number).join(', ')} left running`);
       return;

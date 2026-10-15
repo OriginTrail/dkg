@@ -95,13 +95,15 @@
 //
 // Temporary node numbers. The suite takes the first three free of 7, 8, 9 and
 // 10 (no folder, nothing listening on the node's API or libp2p port). A node
-// folder of its own carries a mark, written only once this run's addnode
-// created the folder (it did not exist just before, and addnode succeeded); a
-// marked folder left by a run that was killed is stopped and removed at the
-// start, so the suite's own debris never costs a node number. Another suite's
-// node, also one that took a number after it was picked, is left alone. At the
-// end the suite removes a node's folder only once nothing listens on its
-// ports.
+// folder of its own carries a mark that addnode writes right after it created
+// the folder (with one mkdir, which fails on a folder that exists), before the
+// daemon starts: a start that fails or is interrupted (a signal while the node
+// comes up) is cancelled and its node removed at the cleanup, and a marked
+// folder left by a run that was killed is stopped and removed at the start of
+// the next, so the suite's own debris never costs a node number. Another
+// suite's node, also one that took a number after it was picked, is left
+// alone. At the end the suite removes a node's folder only once nothing
+// listens on its ports.
 //
 // Exit codes: 0 every case passed; 1 a case failed or was not run; 3 the
 // devnet cannot host the scenario and nothing was exercised: no devnet, node 1
