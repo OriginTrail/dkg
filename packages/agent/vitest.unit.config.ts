@@ -25,6 +25,8 @@ export default defineConfig({
       "test/authority-index-config.test.ts",
       "test/warm-core-sharding-gate.test.ts",
       "test/context-graph-discovery-options.test.ts",
+      "test/context-graph-meta-projection.test.ts",
+      "test/context-graph-meta-projection-priority.test.ts",
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",
       "test/swm-target-executor.test.ts",
