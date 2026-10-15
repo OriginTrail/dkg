@@ -1041,6 +1041,19 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       expect(response.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
     });
 
+    it('adds the sweep counts of finalized assets\' inventory rows only as a pair of counts', async () => {
+      const swept = await requestCapacity({ authorCatalogCapacity: {
+        scopesAtCap: 0, parkedPlacements: 0, finalizedRowHealPasses: 1, finalizedRowsHealed: 2,
+      } });
+      expect(swept.body.rfc64Catalog.authorCatalogCapacity).toEqual({
+        scopesAtCap: 0, parkedPlacements: 0, finalizedRowHealPasses: 1, finalizedRowsHealed: 2,
+      });
+      const half = await requestCapacity({ authorCatalogCapacity: {
+        scopesAtCap: 0, parkedPlacements: 0, finalizedRowHealPasses: 1, finalizedRowsHealed: -1,
+      } });
+      expect(half.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
+    });
+
     it.each([
       ['an agent from before the aggregate', {}],
       ['a negative count', { authorCatalogCapacity: { scopesAtCap: -1, parkedPlacements: 0 } }],

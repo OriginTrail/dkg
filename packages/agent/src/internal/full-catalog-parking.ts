@@ -94,6 +94,13 @@ export interface AuthorCatalogCapacityStatusV1 {
    * nothing since is not counted.
    */
   readonly scopesAtCap: number;
+  /**
+   * GH#3134 — since the node started, present once it ran one: sweeps of finalized assets' rows
+   * out of author inventories.
+   */
+  readonly finalizedRowHealPasses?: number;
+  /** GH#3134 — the rows those sweeps removed. */
+  readonly finalizedRowsHealed?: number;
 }
 
 /** A share-time projection repair, as far as its capacity state goes. */

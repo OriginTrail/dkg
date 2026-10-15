@@ -19,6 +19,7 @@ import {
   type NetworkIdV1,
   type PositiveDecimalU64V1,
   type SwmAuthorInventoryScopeV1,
+  type SwmAuthorInventorySnapshotV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
@@ -82,6 +83,8 @@ import {
 } from './internal/catalog-placement-timing.js';
 import { readOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
 import { rfc64SwmInventoryAssetKeyV1 } from './internal/swm-inventory-asset-key.js';
+import { healFinalizedSwmInventoryRowsV1 } from './internal/finalized-row-heal.js';
+import { catalogRepairDiagnosticV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   './rfc64/finalized-private-placement-repair-store-v1.js';
 
@@ -461,7 +464,11 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           row,
           signal,
         }),
+      }).catch(async (failure: unknown) => {
+        if (!await this.healRfc64SwmInventoryAfterProjectionFailureV1(lane, snapshot, failure, params)) throw failure;
+        return null;
       });
+      if (prepared === null) continue;
       throwIfAbortedV1(params.signal);
       lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
       const deployment = await this.resolveRfc64AutoPublishDeploymentProfileV1(
@@ -520,6 +527,51 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         ...result,
         inventoryHeadObjectDigest: prepared.inventoryHeadObjectDigest as Digest32V1,
       });
+    }
+  }
+
+  /**
+   * GH#3134 — a projection that failed on its inventory's integrity sweeps rows of finalized
+   * assets whose shared-memory copy is already retired out of the author's inventory, once per
+   * inventory head (`healFinalizedSwmInventoryRowsV1`). True when rows went and the projection
+   * runs again. A finalized private lane keeps its rows.
+   */
+  private async healRfc64SwmInventoryAfterProjectionFailureV1(
+    this: DKGAgent,
+    lane: ResolvedRfc64CatalogAuthoringLaneV1,
+    snapshot: SwmAuthorInventorySnapshotV1,
+    failure: unknown,
+    params: ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
+  ): Promise<boolean> {
+    if (lane.acceptsFinalizedVmRepair || catalogRepairDiagnosticV1(failure).kind !== 'integrity') return false;
+    const ctx = createOperationContext('system');
+    const scope = Object.freeze({ ...lane.scopeBase, authorAddress: params.authorAddress }) as SwmAuthorInventoryScopeV1;
+    const scopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
+    try {
+      const healed = await healFinalizedSwmInventoryRowsV1(this, {
+        store: this.store,
+        contextGraphId: params.contextGraphId,
+        authorAddress: params.authorAddress,
+        snapshot,
+        ...(params.signal === undefined ? {} : { signal: params.signal }),
+        removeRow: async (row) => (await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
+          scope,
+          expectedRow: { assertionVersion: row.assertionVersion, kaUal: row.kaUal, sealDigest: row.sealDigest },
+        })).status,
+        readHeadDigest: () => this.rfc64PersistenceV1?.swmAuthorInventory
+          .readSwmAuthorInventoryHeadDigestV1(scopeDigest, params.authorAddress) ?? null,
+      });
+      if (healed > 0) {
+        this.log.info(ctx, `RFC-64 SWM inventory of ${params.authorAddress} in ${params.contextGraphId}: `
+          + `removed ${healed} row(s) of finalized assets whose shared-memory copy was retired`);
+      }
+      return healed > 0;
+    } catch (cause) {
+      if (params.signal?.aborted !== true) {
+        this.log.warn(ctx, `RFC-64 SWM inventory rows of finalized assets were not swept: `
+          + (cause instanceof Error ? cause.message : String(cause)));
+      }
+      return false;
     }
   }
 

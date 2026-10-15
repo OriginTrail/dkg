@@ -126,6 +126,8 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
     expect(inventoryRows(member)).toEqual([b.kaUal]);
     expect(memberCatalog(member)).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
     expect(projectionRepair(member)).toMatchObject({ outcome: 'reconciled', consecutiveFailures: 0 });
+    // No projection failed, so nothing was swept and the capacity counts stand alone.
+    expect(healCounts(member)).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
     await whenDelivered(member, receiver);
     expect(memberCatalog(receiver)).toMatchObject({
       currentCatalogHeadDigest: memberCatalog(member)!.currentCatalogHeadDigest,
@@ -133,51 +135,56 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
     });
   }, 120_000);
 
-  it('stalls the member catalog while the row outlives its twin, until the retirement removes it', async () => {
-    const member = await startAgent('finalized-twin-stall');
+  it('sweeps a row left behind with its retired twin out at the next projection, so later shares place', async () => {
+    const member = await startAgent('finalized-twin-heal');
     const a = await share(member, 1n, 'member-asset-a');
     const catalogWithA = memberCatalog(member);
     expect(catalogWithA).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
 
-    // The twin's shared-memory copy goes, but nothing has removed A's inventory row yet.
+    // A node before this change retired the twin and kept A's row.
     await writeCuratorPublication(member, a);
     await expect(retireTwinOnly(member, a)).resolves.toBe('retired');
     expect(inventoryRows(member)).toEqual([a.kaUal]);
+    const infos = captured(member, 'info');
+
+    // The next projection fails on A's row, sweeps it out and runs again: B is placed.
+    const b = await share(member, 2n, 'member-asset-b');
+    expect(inventoryRows(member)).toEqual([b.kaUal]);
+    expect(memberCatalog(member)).toMatchObject({ inventoryRowCount: '1' });
+    expect(memberCatalog(member)?.currentCatalogHeadDigest).not.toBe(catalogWithA?.currentCatalogHeadDigest);
+    expect(projectionRepair(member)).toMatchObject({ outcome: 'reconciled', consecutiveFailures: 0 });
+    expect(healCounts(member)).toMatchObject({ finalizedRowHealPasses: 1, finalizedRowsHealed: 1 });
+    expect(infos.filter((line) => /removed 1 row\(s\) of finalized assets/u.test(line))).toHaveLength(1);
+  }, 120_000);
+
+  it('stalls on a row with no shared-memory copy and no finalized asset, which the sweep keeps, once per head', async () => {
+    const member = await startAgent('finalized-twin-heal-unfinalized');
+    const a = await share(member, 1n, 'member-asset-a');
+    const catalogWithA = memberCatalog(member);
+    // A's shared copy goes, and nothing finalized A.
+    await member.retireFinalizedSwmTwinCandidate({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: a.kaUal,
+      swmGraph: '',
+      agentAddress: MEMBER,
+      kaNumber: 1n,
+    }, createOperationContext('share'));
+
+    // A later share is never placed: every projection of the whole catalog fails on A's row.
+    const b = await share(member, 2n, 'member-asset-b');
+    expect(memberCatalog(member)).toEqual(catalogWithA);
+    expect(projectionRepair(member)).toMatchObject({ outcome: 'failed', diagnostic: { kind: 'integrity' } });
+    expect(projectionRepair(member)!.nextAttemptAtMs).not.toBeNull();
     const failure = await member.reconcileRfc64PublicCatalogFromSwmInventoryV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       authorAddress: MEMBER,
     }).then(() => null, (error: unknown) => error);
-    expect(failure).toBeInstanceOf(Error);
     expect(causes(failure).some((cause) => cause instanceof CatalogRepairIntegrityErrorV1
       && /workspace head differs/u.test(cause.message))).toBe(true);
 
-    // A later share is never placed: every projection of the whole catalog fails on A's row.
-    const b = await share(member, 2n, 'member-asset-b');
+    // The sweep kept both rows, and did not run again on the same inventory head.
     expect(inventoryRows(member)).toEqual([a.kaUal, b.kaUal].sort());
-    expect(memberCatalog(member)).toEqual(catalogWithA);
-    expect(projectionRepair(member)).toMatchObject({
-      outcome: 'failed',
-      diagnostic: { kind: 'integrity' },
-    });
-    expect(projectionRepair(member)!.consecutiveFailures).toBeGreaterThanOrEqual(1);
-    expect(projectionRepair(member)!.nextAttemptAtMs).not.toBeNull();
-
-    // The step every finalized-twin retirement ends in removes the row.
-    await member.retireLegacySwmAfterVerifiedVmTwin({
-      contextGraphId: CONTEXT_GRAPH_ID,
-      kaUal: a.kaUal,
-      assertionVersion: a.assertionVersion,
-    });
-    await member.awaitInFlightRfc64SwmInventoryObserversV1();
-    expect(inventoryRows(member)).toEqual([b.kaUal]);
-    // The failure's cooldown still holds the supervisor's own retry; the projection itself places B.
-    const placed = await member.reconcileRfc64PublicCatalogFromSwmInventoryV1({
-      contextGraphId: CONTEXT_GRAPH_ID,
-      authorAddress: MEMBER,
-    });
-    expect(placed?.appliedHead).toMatchObject({ inventoryRowCount: '1' });
-    expect(memberCatalog(member)?.currentCatalogHeadDigest)
-      .not.toBe(catalogWithA?.currentCatalogHeadDigest);
+    expect(healCounts(member)).toMatchObject({ finalizedRowHealPasses: 1, finalizedRowsHealed: 0 });
   }, 120_000);
 
   it('keeps the row on a lane whose catalog places finalized assets', async () => {
@@ -474,6 +481,21 @@ function projectionRepair(agent: DKGAgent) {
   return agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs.find(
     (repair) => repair.contextGraphId === CONTEXT_GRAPH_ID && repair.authorAddress === MEMBER,
   );
+}
+
+function healCounts(agent: DKGAgent) {
+  return agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.authorCatalogCapacity;
+}
+
+function captured(agent: DKGAgent, level: 'info' | 'warn'): string[] {
+  const lines: string[] = [];
+  const log = (agent as unknown as { log: Record<'info' | 'warn', (ctx: unknown, message: string) => void> }).log;
+  const original = log[level].bind(log);
+  vi.spyOn(log, level).mockImplementation((ctx, message) => {
+    lines.push(message);
+    original(ctx, message);
+  });
+  return lines;
 }
 
 function causes(error: unknown): unknown[] {

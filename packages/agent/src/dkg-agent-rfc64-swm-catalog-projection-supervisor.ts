@@ -46,6 +46,7 @@ import {
 import { FinalizedPrivatePlacementWaitersV1 } from './internal/finalized-private-placement-waiters.js';
 import { NextTurnRecurringTaskV1 } from './internal/next-turn-recurring-task.js';
 import { retainOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
+import { withFinalizedRowHealCountsV1 } from './internal/finalized-row-heal.js';
 
 // Match the default background store lane; repair fanout must not flood its queue.
 const MAX_CONCURRENT_REPAIRS_V1 = 1;
@@ -780,7 +781,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   readRfc64SwmCatalogProjectionSupervisorStatusV1(
     this: DKGAgent,
   ): Readonly<Rfc64SwmCatalogProjectionSupervisorStatusV1> | null {
-    return projectionOwnerV1(this).status();
+    return withFinalizedRowHealCountsV1(this, projectionOwnerV1(this).status());
   }
 
   async whenRfc64SwmCatalogProjectionSupervisorIdleV1(this: DKGAgent): Promise<void> {

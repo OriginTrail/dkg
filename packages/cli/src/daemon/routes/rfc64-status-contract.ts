@@ -193,14 +193,25 @@ export function sanitizeRfc64FinalizedPrivatePlacementQueueV1(
  */
 export function sanitizeRfc64AuthorCatalogCapacityV1(
   input: unknown,
-): Readonly<{ scopesAtCap: number; parkedPlacements: number }> | null {
+): Readonly<{
+  scopesAtCap: number;
+  parkedPlacements: number;
+  finalizedRowHealPasses?: number;
+  finalizedRowsHealed?: number;
+}> | null {
   if (
     !isRecordV1(input)
     || !hasNonNegativeSafeIntegersV1(input, ['scopesAtCap', 'parkedPlacements'])
   ) return null;
+  // GH#3134 — the sweep counts of finalized assets' inventory rows, as a pair when both are counts.
+  const healed = hasNonNegativeSafeIntegersV1(input, ['finalizedRowHealPasses', 'finalizedRowsHealed']);
   return Object.freeze({
     scopesAtCap: input.scopesAtCap as number,
     parkedPlacements: input.parkedPlacements as number,
+    ...(healed ? {
+      finalizedRowHealPasses: input.finalizedRowHealPasses as number,
+      finalizedRowsHealed: input.finalizedRowsHealed as number,
+    } : {}),
   });
 }
 
