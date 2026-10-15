@@ -14,6 +14,7 @@ import {
 
 const endpoint = process.env.BLAZEGRAPH_TEST_URL;
 
+// test-disable-allow: D1 #3274 -- owner=Jurij89 lane=tornado-blazegraph expires=2026-11-14 Requires BLAZEGRAPH_TEST_URL; the required Blazegraph CI lane supplies it.
 describe.skipIf(!endpoint)('async publisher wallet ownership (live Blazegraph)', () => {
   const id = randomUUID();
   const namespace = `publisher-wallet-ownership-${id}`;
