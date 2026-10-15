@@ -98,28 +98,33 @@ export class LiftJobStoreSelectors {
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_STATUS}> ${literal('accepted')} ; <${CONTROL_ACCEPTED_AT}> ?acceptedAt ; <${CONTROL_PAYLOAD}> ?payload } }`,
       { source: 'publisher.asyncLift.nextAccepted' },
     );
-    return expectBindings(result)
-      .map((row) => parseInventoryPayload(row['payload']))
-      .filter((job): job is LiftJobAccepted => job?.status === 'accepted')
-      .sort(compareAcceptedJobs)
-      .at(0);
+    return selectAccepted(expectBindings(result));
   }
 
-  /**
-   * nextRetryAt has been persisted alongside the payload since the original control-plane
-   * schema. Bound the candidate read in the store so each claim avoids parsing terminal failure
-   * history. The caller still checks the canonical payload's timestamp and retry eligibility.
-   */
-  async dueRetries(now: number): Promise<PersistedLiftJob[]> {
+  /** One claim snapshot; a sweep with any decoded due candidates requires a fresh accepted read. */
+  async claimCandidates(now: number): Promise<{
+    dueRetries: PersistedLiftJob[];
+    nextAccepted: LiftJobAccepted | undefined;
+  }> {
     const result = await this.store.query(
-      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> {
-        ?job <${CONTROL_STATUS}> ${literal('failed')} ;
-          <${CONTROL_NEXT_RETRY_AT}> ?nextRetryAt ; <${CONTROL_PAYLOAD}> ?payload .
-        FILTER (?nextRetryAt <= ${integer(now)})
+      `SELECT ?payload ?retry WHERE { GRAPH <${this.graphUri}> {
+        {
+          ?job <${CONTROL_STATUS}> ${literal('failed')} ;
+            <${CONTROL_NEXT_RETRY_AT}> ?nextRetryAt ; <${CONTROL_PAYLOAD}> ?payload .
+          FILTER (?nextRetryAt <= ${integer(now)})
+          BIND(true AS ?retry)
+        } UNION {
+          ?job <${CONTROL_STATUS}> ${literal('accepted')} ;
+            <${CONTROL_ACCEPTED_AT}> ?acceptedAt ; <${CONTROL_PAYLOAD}> ?payload .
+        }
       } }`,
-      { source: 'publisher.asyncLift.dueRetries' },
+      { source: 'publisher.asyncLift.claimCandidates' },
     );
-    return this.projectInventory(result);
+    const rows = expectBindings(result);
+    return {
+      dueRetries: this.projectInventory({ type: 'bindings', bindings: rows.filter((row) => row['retry'] !== undefined) }),
+      nextAccepted: selectAccepted(rows.filter((row) => row['retry'] === undefined)),
+    };
   }
 
   private projectInventory(result: QueryResult, contextGraphId?: string): PersistedLiftJob[] {
@@ -134,4 +139,11 @@ export class LiftJobStoreSelectors {
 function parseInventoryPayload(binding?: string): PersistedLiftJob | null {
   const decoded = decodeLiftJobPayload(binding);
   return decoded.kind === 'canonical' || decoded.kind === 'compatibility' ? decoded.job : null;
+}
+
+function selectAccepted(rows: Array<Record<string, string>>): LiftJobAccepted | undefined {
+  return rows.map((row) => parseInventoryPayload(row['payload']))
+    .filter((job): job is LiftJobAccepted => job?.status === 'accepted')
+    .sort(compareAcceptedJobs)
+    .at(0);
 }

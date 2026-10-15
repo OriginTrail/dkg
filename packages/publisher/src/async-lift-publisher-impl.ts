@@ -730,8 +730,7 @@ export class TripleStoreAsyncLiftPublisher
         ensureGraph: async () => await this.ensureGraph(),
         isPaused: () => this.paused,
         readStatus: async (jobId) => await this.readJobPayload(jobId),
-        nextAccepted: async () => await this.readNextAcceptedJob(),
-        reacceptDueFailedJobs: async (now) => await this.reacceptDueFailedJobs(now),
+        nextClaimCandidate: async (now) => await this.readNextClaimCandidate(now),
         toClaimed: (current, walletId) =>
           this.buildTransitionJob(current, 'claimed', { claim: { walletId } }),
         writeJob: async (job, kind) => await this.writeJob(job, kind),
@@ -952,8 +951,12 @@ export class TripleStoreAsyncLiftPublisher
     return this.jobSelectors.list(filter);
   }
 
-  private async readNextAcceptedJob(): Promise<LiftJobAccepted | undefined> {
-    await this.ensureGraph();
+  private async readNextClaimCandidate(now: number): Promise<LiftJobAccepted | undefined> {
+    if (!this.autoRetryEnabled) return this.jobSelectors.nextAccepted();
+    const candidates = await this.jobSelectors.claimCandidates(now);
+    if (candidates.dueRetries.length === 0) return candidates.nextAccepted;
+    await this.reacceptDueFailedJobs(now, candidates.dueRetries);
+    // Any decoded due candidate may have changed while its exact job lock was acquired.
     return this.jobSelectors.nextAccepted();
   }
 
@@ -3390,9 +3393,7 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  private async reacceptDueFailedJobs(now: number): Promise<number> {
-    if (!this.autoRetryEnabled) return 0;
-    const candidates = await this.jobSelectors.dueRetries(now);
+  private async reacceptDueFailedJobs(now: number, candidates: PersistedLiftJob[]): Promise<number> {
     let retried = 0;
     for (const job of candidates.filter(isFailedJob)) {
       if (retried >= TripleStoreAsyncLiftPublisher.MAX_REACCEPTS_PER_SWEEP) break;

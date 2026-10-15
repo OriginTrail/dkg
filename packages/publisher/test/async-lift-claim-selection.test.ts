@@ -138,9 +138,10 @@ describe('async-lift accepted-job selection', () => {
         if (result.type !== 'bindings') throw new Error('expected retry bindings');
         failedBindingsRead += result.bindings.length;
       }
-      if (args[1]?.source === 'publisher.asyncLift.nextAccepted') {
+      if (args[1]?.source === 'publisher.asyncLift.claimCandidates') {
         if (result.type !== 'bindings') throw new Error('expected selector bindings');
-        selectedBindingCount = result.bindings.length;
+        selectedBindingCount = result.bindings.filter((row) => row['retry'] === undefined).length;
+        failedBindingsRead += result.bindings.filter((row) => row['retry'] !== undefined).length;
       }
       return result;
     };

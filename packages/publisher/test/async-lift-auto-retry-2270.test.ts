@@ -84,7 +84,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
     // Not due yet: no failed payload crosses the store boundary.
     const querySpy = vi.spyOn(h.store, 'query');
     expect(await publisher.claimNext('wallet-2')).toBeNull();
-    const retryRead = querySpy.mock.calls.findIndex(([, options]) => options?.source === 'publisher.asyncLift.dueRetries');
+    const retryRead = querySpy.mock.calls.findIndex(([, options]) => options?.source === 'publisher.asyncLift.claimCandidates');
     expect(retryRead).toBeGreaterThanOrEqual(0);
     expect(await querySpy.mock.results[retryRead]!.value).toMatchObject({ type: 'bindings', bindings: [] });
     querySpy.mockRestore();
@@ -276,7 +276,7 @@ describe('GH#2270 async lift automatic retry lane', () => {
     const querySpy = vi.spyOn(h.store, 'query');
     expect(await disabled.claimNext('wallet-2')).toBeNull();
     expect(querySpy.mock.calls.some(([, options]) =>
-      options?.source === 'publisher.asyncLift.dueRetries' || options?.source === 'publisher.asyncLift.list',
+      options?.source === 'publisher.asyncLift.claimCandidates' || options?.source === 'publisher.asyncLift.list',
     )).toBe(false);
     querySpy.mockRestore();
     const stranded = await disabled.getStatus(jobId);

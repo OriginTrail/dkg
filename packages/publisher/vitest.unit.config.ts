@@ -29,6 +29,8 @@ export default defineConfig({
       'test/async-lift-detached-completion.test.ts',
       'test/async-lift-work-available.test.ts',
       'test/async-lift-claim-selection.test.ts',
+      'test/async-lift-wallet-snapshot.test.ts',
+      'test/async-lift-claim-candidates.test.ts',
       'test/async-lift-claim-trace.test.ts',
       'test/async-lift-journal-serialize.test.ts',
       'test/async-lift-journal-append.test.ts',
