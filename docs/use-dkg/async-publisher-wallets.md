@@ -133,6 +133,14 @@ duration histogram also labels `outcome` as `ok` or `error`; its sample count
 shows completed operation volume. Increasing store concurrency is not a
 substitute for diagnosing the operations occupying the normal lane.
 
+For a focused investigation, start the daemon with `DKG_ASYNC_PUBLISH_TRACE=1`.
+The opt-in `async_publish_claim_trace` log records monotonic claim-lock wait/hold
+boundaries, native wallet-ownership decisions, durable lock changes and worker
+outcomes. It adds no store reads and is disabled by default. Wallet identifiers
+are hashed; job IDs are retained for correlation, so treat these logs as
+operational diagnostics. A free wallet can still wait for the claim lock or
+store capacity, and a worker may still be finishing an earlier execution after
+its wallet is released. Do not infer wallet availability from job finalization.
 ## Funding
 
 Every async publisher wallet needs the chain's native gas token because it submits on-chain transactions.

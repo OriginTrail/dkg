@@ -1,3 +1,4 @@
+import { traceProcessNext } from './async-lift-claim-trace.js';
 import { LiftJobStoreSelectors } from './lift-job-store-selectors.js';
 import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
 import { LiftJobChainObservations } from './lift-job-chain-observations.js';
@@ -799,7 +800,7 @@ export class TripleStoreAsyncLiftPublisher
       };
       await this.writeJob(job, 'admission');
       return jobId;
-    });
+    }, 'admission');
   }
 
 
@@ -1005,12 +1006,14 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async processNext(walletId: string): Promise<PersistedLiftJob | null> {
-    const outcome = await this.claimCoordinator.processClaim(
-      walletId,
-      async (session) => await this.jobHandlerFor(session.claim.request).process(session),
-      (release) => this.onClaimProcessingReleased(release),
-    );
-    return outcome.kind === 'idle' ? null : outcome.job;
+    return traceProcessNext(walletId, async () => {
+      const outcome = await this.claimCoordinator.processClaim(
+        walletId,
+        async (session) => await this.jobHandlerFor(session.claim.request).process(session),
+        (release) => this.onClaimProcessingReleased(release),
+      );
+      return outcome.kind === 'idle' ? null : outcome.job;
+    });
   }
 
   private onClaimProcessingReleased(release: AsyncLiftClaimProcessingRelease): void {
