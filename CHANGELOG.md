@@ -18,6 +18,14 @@ caught up again. A share that meets the legacy shared-memory fence waits
 for the fence to drop, for up to 60 seconds, where it was refused and
 retried a minute or more later.
 
+A member that reaches the owner of a registered public graph only through a
+relay now gets the graph's definition, where its writes were refused. An
+author's catalog no longer stops updating after a curator publishes one of
+the author's shared assets, and a node that is stalled this way recovers
+when it runs this release. A node that verifies a private graph registered
+on chain reports a typed reason when the graph is past its scan limit, and
+the operator guide lists the catalog limits.
+
 Two warnings that read as failures are gone. The owner of a new graph no
 longer logs that it is denied its own graph's shared memory while the
 graph's authority is being accepted, and the catalog replay after a
@@ -44,6 +52,8 @@ accepts. Other message formats are unchanged.
 | A share that meets the legacy shared-memory fence waits for the fence to drop (#3250) | Up to 60 s, where it waited 2 s, was refused, and was retried 48 to 72 s later and then at growing intervals. A fence that has been up for 60 s without a break is not waited for, at most 16 promotes wait the full time, and every wait ends when the node begins to stop. A wait of more than 5 s is logged at info, for example `A promote of <ual> waited <n> ms for the RFC-64 legacy SWM fence raised by receiver-lease on the graph of <graph>`, and a wait that stopped is logged at warn. A synchronous share can take up to 60 s longer, and it holds its request meanwhile | None. Clients in this repository send shares with a 240 s timeout; other clients should allow 60 s more than before |
 | A gossip subscription that waits for the graph's RFC-64 authority is logged at info (#3246) | `SWM gossip subscription denied for "<graph>": local node is not authorized` and `SWM gossip unsubscribed for "<graph>": local node is no longer authorized` stay warnings, written only for a refusal. While the graph's RFC-64 authority is not accepted on the node, it logs `SWM gossip subscription for "<graph>" waits for the graph's RFC-64 authority (not accepted on this node yet); not subscribed yet` at info, with `last refresh: <reason>` after a failed authority refresh and repeats at debug, and once it subscribes `SWM gossip subscription for "<graph>" made after waiting for the graph's RFC-64 authority`. The SWM sync planning skips such a graph with `Skipping SWM sync for "<graph>" for now: it waits for the graph's RFC-64 authority (...)` at info, once per wait | None. Tooling that counted the denial warning sees it only for refusals |
 | The catalog replay after a connection warns only when this node may lack heads (#3255) | `RFC-64 catalog replay incomplete for "<graph>" after <peer> connected` now ends with its reason and counts, for example `: this node may lack catalog heads its peers hold until a full replay passes (1 peer(s) answered, 1 failed, 0 retried later)`. It is written once per replay run, only while the graph's replay status says that this node may lack heads its peers hold. A run that only could not replay from some peers writes one debug line, and each peer that gave no answer gets a debug line with its reason. A peer whose replay request this node authorized counts among the graph's followers at once, also when this node answers it busy | None. Tooling that counted the warning sees it only for heads this node may lack |
+| An author's node removes the inventory row of its own asset when it retires the asset's finalized twin (#3268) | This happens when a curator publishes a member's shared asset under the member's seal. The removal is one catalog successor, the same kind that the publishing node produces, and receivers accept it. A projection that fails on such a row left behind before this release sweeps the author's inventory once per inventory head and logs one line for each graph and author it cleaned. `finalizedRowHealPasses` and `finalizedRowsHealed` under `rfc64Catalog.authorCatalogCapacity` in `GET /api/status` count the sweeps and the rows removed. Finalized private lanes keep their rows | None. A stalled author's catalog resumes after the upgrade, without a re-share |
+| A private graph registered on chain that is past the verification scan limit is refused with a typed reason (#3265) | A node that applies a private graph's catalogs itself checks each author head against the graph's on-chain inventory, which it reads within a budget that covers 818 assets. Past that it failed with an unclassified `resource-limit`; it now ends with the terminal reason `chain-inventory-limit`, the graph reads `known-incomplete`, and `rfc64Catalog.privateRecovery` in `GET /api/status` shows the reason per graph and counts it in `outcomeCounts`. Below the limit nothing changes. A member on the default configuration receives private graphs on the member lane and does not run this check | None. The limits are listed in `docs/use-dkg/rfc64-selected-public-catalog.md` |
 
 ### Known issues
 
@@ -64,22 +74,31 @@ accepts. Other message formats are unchanged.
   a release slot by itself, when it sets stale package copies aside. No
   tracked file differs from the commit in that case, and the updater
   keeps working. Nodes installed from npm are not affected.
-- **An author's catalog for a Context Graph holds 1,024 assets, and a graph
-  holds at most 64 author catalogs** (#3134): the catalog is one signed
-  bucket of at most 1,024 rows. A further new asset of that author in that
-  graph is published, finalized and stored as before, but the catalog does
-  not list it. Its placement is refused once and parked, and the node
-  reports it: a `catalog_full` warning when a catalog first refuses and then
-  at most one an hour, for the placement and for the share-time projection
-  each, and `rfc64Catalog.authorCatalogCapacity` in `GET /api/status`. A
-  newer version of an asset the catalog holds is still placed, and a
-  removal frees a row. The catalog replay covers at most 64 author catalogs
-  of one graph. A member on the default configuration keeps receiving such
-  assets, with a delay: in a test on a public testnet a member of a private
-  graph with 1,050 assets from one author held all of them, and in later
-  tests on that graph a further verified asset reached the member hours
-  after its confirmation. Retention of older rows and catalogs of more than
-  one bucket are planned in #3134.
+- **The catalogs of a Context Graph have fixed limits** (#3134): they are
+  listed in `docs/use-dkg/rfc64-selected-public-catalog.md` (#3265).
+  - An author's catalog of a graph is one signed bucket of at most 1,024
+    rows. A further new asset of that author in that graph is published,
+    finalized and stored as before, but the catalog does not list it. Its
+    placement is refused once and parked, and the node reports it: a
+    `catalog_full` warning when a catalog first refuses and then at most
+    one an hour, for the placement and for the share-time projection each,
+    and `rfc64Catalog.authorCatalogCapacity` in `GET /api/status`. A newer
+    version of an asset the catalog holds is still placed, and a removal
+    frees a row. A member on the default configuration keeps receiving
+    such assets, with a delay: in a test on a public testnet a member of a
+    private graph with 1,050 assets from one author held all of them, and
+    in later tests on that graph a further verified asset reached the
+    member hours after its confirmation.
+  - A graph's catalog replay covers at most 64 author catalogs.
+  - A node that verifies a private graph registered on chain itself reads
+    at most 818 of the graph's assets on chain, and refuses the graph past
+    that with the reason `chain-inventory-limit`.
+  - An author's shared-asset inventory of a graph holds at most 8 MiB,
+    about 19,500 rows. Rows of finalized assets that push an inventory past
+    the catalog's row limit are not swept out (#3268).
+
+  Retention of older rows and catalogs of more than one bucket are planned
+  (#3134).
 - **An author's catalog cannot leave out a finalized asset of a private
   graph registered on chain** (#3134): a node that applies the catalogs of
   such a graph itself refuses an author's head when the chain shows a
@@ -267,7 +286,12 @@ accepts. Other message formats are unchanged.
   connection (#3216), but each one costs a circuit on a relay.
 - **A subscriber that does not get a graph's definition is not asked again
   until the next subscribe call** (#3207): when no connected peer holds it,
-  or the request fails for a reason other than the one #3216 removes.
+  or the request fails for a reason other than the one #3216 removes. A
+  member of a registered public graph now asks its connected peers for the
+  definition (#3267), but while no connected peer holds it, for example
+  while the owner is offline, it does not take the definition from the
+  chain, and the repeated catch-up job of #3249 covers graphs that are not
+  registered on chain only.
 - **A public graph that is not registered on chain can stay unsynced on a
   member that already holds some of its content** (#3207, #3249): the
   repeated catch-up job proves an empty graph only when every peer it asks
@@ -337,6 +361,37 @@ accepts. Other message formats are unchanged.
   ran once over the rows that were live at the time, so a row that was
   dormant then lost its flags at the next subscribe call; it is now
   migrated when it activates.
+- **A member of a registered public graph that reaches the owner only
+  through a relay gets the graph's definition** (#3267, #3264): the
+  metadata bootstrap pulls a public graph's definition from connected peers
+  when the node holds none, but it asked whether the graph was readable,
+  and on a member of a registered public graph the chain proof answers that
+  on its own. The bootstrap then asked nobody, and nothing else brings the
+  definition on the catalog path. The member listed the graph with no
+  access policy, its writes were refused with `CONTEXT_GRAPH_NOT_FOUND`,
+  and the graph never became `synced`. The bootstrap now checks whether the
+  node holds the graph's public definition, and pulls it from connected
+  peers when it does not.
+- **An author's catalog keeps updating after a curator publishes one of the
+  author's shared assets** (#3268, #3134): when a curator published a
+  member's shared asset under the member's seal, the member's node retired
+  its shared copy of the asset but kept the asset's row in its inventory.
+  Every later projection of the member's catalog then failed with an
+  integrity error, retried up to once a minute, and the member's later
+  shares were never placed in its catalog, so other members did not get
+  them through it. The author's node now removes the row when it retires the
+  copy, as the publishing node does. A node that is stalled this way,
+  because of a row left behind before this release, sweeps the row out and
+  places its later shares once it runs this release. Members that stopped
+  receiving that author's later shares get them once the author's node is
+  upgraded; nobody needs to share again.
+- **A private graph past the verification scan limit is reported with its
+  reason** (#3265, #3134): a node that verifies a private graph registered
+  on chain itself failed past 818 on-chain assets with a generic resource
+  limit that the node did not classify, and the graph's bootstrap reported
+  an ordinary failure with no reason. It now reports `known-incomplete`
+  with the reason `chain-inventory-limit`, per graph and as a count, under
+  `rfc64Catalog.privateRecovery` in `GET /api/status`.
 - **A share no longer fails on a fence that drops seconds later** (#3250,
   #3052): a share whose root write met the legacy shared-memory retirement
   fence waited 2 s and was refused, and the promote queue retried it 48 to
@@ -384,6 +439,9 @@ accepts. Other message formats are unchanged.
 - **A change notice from the owner of a public graph** (#3256): the owner
   tells the graph's followers that the graph changed, and they pull the
   change from it. It carries no data; see the upgrade table.
+- **The catalog limits in the operator guide** (#3265): a section "Capacity
+  limits" in `docs/use-dkg/rfc64-selected-public-catalog.md` lists the
+  limits named under Known issues.
 - **Switches for the shared-memory pull changes** (#3258):
   `DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT=0` gives up the reserved slot,
   and `DKG_RECENT_SHARED_MEMORY_PULL_ENABLED=0` turns off the pull of public
