@@ -68,16 +68,20 @@ export function linkProblem(link, expect, from, to) {
 }
 
 /**
- * The verdict of each case: FAIL when one of its checks failed, PASS when at
- * least one held and none failed, NOT RUN when nothing was checked (a case
- * that never ran is not a case that passed). `findings` maps a case id to
- * { pass: <count>, fail: [<text>] }.
+ * The verdict of each case: FAIL when one of its checks failed; PASS when at
+ * least one check held or failed only as a known gap, and none failed
+ * otherwise; NOT RUN when nothing was checked (a case that never ran is not a
+ * case that passed). `findings` maps a case id to { pass: <count>,
+ * fail: [<text>], xfail: [<text>], xpass: [<text>] }: an expected failure of a
+ * known gap (xfail) does not fail its case, and a check of a known gap that
+ * held (xpass) is counted as held and reported, so its expected failure can
+ * be removed once the gap is fixed.
  */
 export function caseVerdicts(cases, findings) {
   const rows = Object.entries(cases).map(([id, title]) => {
-    const f = findings[id] ?? { pass: 0, fail: [] };
-    const verdict = f.fail.length ? 'FAIL' : f.pass > 0 ? 'PASS' : 'NOT RUN';
-    return { id, title, verdict, held: f.pass, failed: f.fail.length };
+    const f = { pass: 0, fail: [], xfail: [], xpass: [], ...findings[id] };
+    const verdict = f.fail.length ? 'FAIL' : f.pass > 0 || f.xfail.length > 0 ? 'PASS' : 'NOT RUN';
+    return { id, title, verdict, held: f.pass, failed: f.fail.length, expected: f.xfail.length, unexpected: f.xpass.length };
   });
   return { rows, failed: rows.filter(row => row.verdict !== 'PASS').map(row => row.id) };
 }

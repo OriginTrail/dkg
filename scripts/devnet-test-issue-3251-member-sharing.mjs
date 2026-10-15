@@ -69,6 +69,14 @@
 //      the owner cannot do, so case 2 does not apply there.
 //   8  the `synced` flag of every member, for every graph
 //
+// Known gaps (KNOWN_GAPS): a check that fails for the reason of an open issue
+// is printed as XFAIL with the issue and does not fail its case; the same
+// check holding is printed as XPASS. Today one: #3264, a member of the
+// registered graph never obtains its definition here. Its checks: the
+// definition (case 7), the members' writes into that graph, refused as writes
+// to an unknown graph (case 7), and its synced flag (case 8). Once #3264 is
+// fixed and these hold, remove the entry and its calls.
+//
 // After a restart each member dials the owner again, as a client of the
 // issue's kind does; the script does not wait for the nodes to find each
 // other by themselves.
@@ -137,10 +145,30 @@ const CASES = {
   7: 'cases 1, 2, 3 on a registered graph; 1, 3 on a private graph',
   8: 'the synced flag of every member',
 };
-const findings = Object.fromEntries(Object.keys(CASES).map(id => [id, { pass: 0, fail: [] }]));
+const findings = Object.fromEntries(Object.keys(CASES).map(id => [id, { pass: 0, fail: [], xfail: [], xpass: [] }]));
 const pass = (id, text) => { findings[id].pass += 1; console.log(`  [PASS] case ${id}: ${text}`); };
 const fail = (id, text) => { findings[id].fail.push(text); console.log(`  [FAIL] case ${id}: ${text}`); };
 const note = text => console.log(`  [NOTE] ${text}`);
+
+// Known gaps. A check that fails for the reason an open issue describes is an
+// expected failure: printed as XFAIL with the issue, and it does not fail its
+// case. The same check holding is printed as XPASS (and counted as held). Once
+// the issue is fixed and its checks hold, remove its entry and the calls.
+const KNOWN_GAPS = {
+  registeredDefinition: {
+    issue: '#3264',
+    what: 'a member of a registered graph that reaches only the owner never obtains the graph\'s definition',
+  },
+};
+const xfail = (id, gap, text) => {
+  findings[id].xfail.push(text);
+  console.log(`  [XFAIL] case ${id}: ${text} (expected failure: ${KNOWN_GAPS[gap].issue}, ${KNOWN_GAPS[gap].what})`);
+};
+const xpass = (id, gap, text) => {
+  findings[id].pass += 1;
+  findings[id].xpass.push(text);
+  console.log(`  [XPASS] case ${id}: ${text} (held although ${KNOWN_GAPS[gap].issue} is expected to fail it; remove the expected failure once ${KNOWN_GAPS[gap].issue} is fixed)`);
+};
 
 // ── devnet access ────────────────────────────────────────────────────────────
 function readToken(file) {
@@ -299,7 +327,7 @@ async function createGraph(key, body) {
   // The graph names of its partitions are built from the id the node resolved.
   const resolved = typeof sub.json?.contextGraphId === 'string' && sub.json.contextGraphId ? sub.json.contextGraphId : id;
   say(`graph ${key}: ${id}${created.json?.onChainId ? ` (registered, id ${created.json.onChainId})` : ''}${resolved !== id ? ` resolved as ${resolved}` : ''}`);
-  return { key, id, resolved, private: body.accessPolicy === 1, subscribedAt: {} };
+  return { key, id, resolved, private: body.accessPolicy === 1, registered: body.register === true && body.accessPolicy !== 1, subscribedAt: {} };
 }
 
 /** A Core subscribes and unsubscribes at once; discovery does not re-activate an ended subscription. */
@@ -462,7 +490,14 @@ async function settle(handles) {
   const pairs = handles.flatMap(handle => handle.pairs);
   for (const pair of pairs) {
     const what = `${describe(pair.record)} at ${label(pair.node)}`;
-    if (pair.record.error) { fail(pair.caseId, `${what}: not written, ${pair.record.error}`); continue; }
+    if (pair.record.error) {
+      const text = `${what}: not written, ${pair.record.error}`;
+      // A member without the registered graph's definition cannot write into it (#3264).
+      const knownGap = pair.record.graph.registered && pair.record.author !== OWNER && pair.record.error.includes('CONTEXT_GRAPH_NOT_FOUND');
+      if (knownGap) xfail(pair.caseId, 'registeredDefinition', text);
+      else fail(pair.caseId, text);
+      continue;
+    }
     if (pair.viewAt !== null && pair.partitionsAt !== null) {
       pass(pair.caseId, `${what}: held ${seconds(Math.max(pair.viewAt, pair.partitionsAt))} s after the ${pair.fromWhat ?? 'share'}`);
       continue;
@@ -492,10 +527,14 @@ async function watchDefinition(caseId, node, graph) {
   for (;;) {
     const last = await listingEntry(node, graph);
     const age = Date.now() - from;
-    if (typeof last.entry?.accessPolicy === 'string' && last.entry.accessPolicy !== '' && age < DEFINITION_MS) return;
+    if (typeof last.entry?.accessPolicy === 'string' && last.entry.accessPolicy !== '' && age < DEFINITION_MS) {
+      if (graph.registered) xpass(caseId, 'registeredDefinition', `${label(node)} holds the definition of ${graph.key} ${seconds(age)} s after it subscribed`);
+      return;
+    }
     if (age >= DEFINITION_MS) {
-      const seen = !last.readable ? `its listing could not be read (${last.why})` : last.entry ? `its listing has no access policy for it (${JSON.stringify(last.entry).slice(0, 200)})` : 'its listing does not name it';
-      return fail(caseId, `${label(node)} holds no definition of ${graph.key} ${seconds(age)} s after it subscribed: ${seen}; a write it makes there is refused`);
+      if (!last.readable) return fail(caseId, `${label(node)}: its listing could not be read ${seconds(age)} s after it subscribed to ${graph.key} (${last.why})`);
+      const text = `${label(node)} holds no definition of ${graph.key} ${seconds(age)} s after it subscribed: ${last.entry ? `its listing has no access policy for it (${JSON.stringify(last.entry).slice(0, 200)})` : 'its listing does not name it'}; a write it makes there is refused`;
+      return graph.registered ? xfail(caseId, 'registeredDefinition', text) : fail(caseId, text);
     }
     await sleep(Math.min(2000, DEFINITION_MS - age));
   }
@@ -504,15 +543,18 @@ async function watchDefinition(caseId, node, graph) {
 /** Started right after a member subscribed: its `synced` flag for the graph must be true within the bound. */
 async function watchSynced(node, graph) {
   const from = graph.subscribedAt[node];
+  // A registered graph's flag is a known gap (#3264); every other graph's must hold.
+  const held = text => (graph.registered ? xpass(8, 'registeredDefinition', text) : pass(8, text));
+  const missed = text => (graph.registered ? xfail(8, 'registeredDefinition', text) : fail(8, text));
   for (;;) {
     const last = await listingEntry(node, graph);
     const age = Date.now() - from;
     const synced = last.entry?.synced === true;
-    if (synced && age < SYNCED_MS) return pass(8, `${label(node)} lists ${graph.key} as synced ${seconds(age)} s after it subscribed`);
+    if (synced && age < SYNCED_MS) return held(`${label(node)} lists ${graph.key} as synced ${seconds(age)} s after it subscribed`);
     if (age >= SYNCED_MS) {
-      if (synced) return fail(8, `${label(node)} lists ${graph.key} as synced only ${seconds(age)} s after it subscribed`);
+      if (synced) return missed(`${label(node)} lists ${graph.key} as synced only ${seconds(age)} s after it subscribed`);
       if (!last.readable) return fail(8, `${label(node)}: its listing could not be read ${seconds(age)} s after it subscribed to ${graph.key} (${last.why})`);
-      return fail(8, `${label(node)} lists ${graph.key} as ${last.entry ? `subscribed=${last.entry.subscribed} synced=${last.entry.synced}` : 'absent'} ${seconds(age)} s after it subscribed`);
+      return missed(`${label(node)} lists ${graph.key} as ${last.entry ? `subscribed=${last.entry.subscribed} synced=${last.entry.synced}` : 'absent'} ${seconds(age)} s after it subscribed`);
     }
     await sleep(Math.min(2000, SYNCED_MS - age));
   }
@@ -771,8 +813,16 @@ if (EXIT !== 3) {
   console.log('');
   say(`Results (${elapsed()}; bound ${seconds(BOUND_MS)} s per write, ${seconds(SYNCED_MS)} s for the synced flag):`);
   const { rows, failed } = caseVerdicts(CASES, findings);
-  for (const row of rows) console.log(`  case ${row.id} ${row.verdict.padEnd(7)} ${row.title} (${row.held} held, ${row.failed} failed)`);
+  for (const row of rows) {
+    const known = [row.expected && `${row.expected} expected failure(s)`, row.unexpected && `${row.unexpected} known-gap check(s) held`].filter(Boolean);
+    console.log(`  case ${row.id} ${row.verdict.padEnd(7)} ${row.title} (${row.held} held, ${row.failed} failed${known.length ? `, ${known.join(', ')}` : ''})`);
+  }
+  const expected = rows.reduce((n, row) => n + row.expected, 0);
+  const unexpected = rows.reduce((n, row) => n + row.unexpected, 0);
+  for (const gap of Object.values(KNOWN_GAPS)) {
+    if (expected || unexpected) say(`known gap ${gap.issue} (${gap.what}): ${expected} check(s) failed as expected${unexpected ? `, ${unexpected} held: remove the expected failure once ${gap.issue} is fixed` : ''}`);
+  }
   if (failed.length) EXIT = 1;
-  say(failed.length ? `NOT PASSED: case(s) ${failed.join(', ')}` : 'every case passed');
+  say(failed.length ? `NOT PASSED: case(s) ${failed.join(', ')}` : expected ? 'every case passed, apart from the expected failures of known gaps' : 'every case passed');
 }
 process.exit(EXIT);

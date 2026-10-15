@@ -82,3 +82,18 @@ test('a case passes only when something held and nothing failed; a case that nev
   assert.deepEqual(failed, ['2', '3', '4']);
   assert.deepEqual(caseVerdicts({ 1: 'one' }, { 1: { pass: 1, fail: [] } }).failed, []);
 });
+
+test('an expected failure of a known gap does not fail its case; any other failure still does', () => {
+  const cases = { 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten' };
+  const { rows, failed } = caseVerdicts(cases, {
+    7: { pass: 13, fail: [], xfail: ['member1 holds no definition of registered'] },
+    8: { pass: 0, fail: [], xfail: ['member2 lists registered as synced=false'] },
+    9: { pass: 2, fail: ['member1 sub-graph write never reached member2'], xfail: ['member2 holds no definition'] },
+    10: { pass: 1, fail: [], xfail: [], xpass: ['member1 lists registered as synced'] },
+  });
+  assert.deepEqual(rows.map(row => [row.id, row.verdict, row.held, row.failed, row.expected, row.unexpected]),
+    [['7', 'PASS', 13, 0, 1, 0], ['8', 'PASS', 0, 0, 1, 0], ['9', 'FAIL', 2, 1, 1, 0], ['10', 'PASS', 1, 0, 0, 1]]);
+  assert.deepEqual(failed, ['9']);
+  // Findings without the newer lists still read as before.
+  assert.deepEqual(caseVerdicts({ 1: 'one' }, { 1: { pass: 0, fail: [] } }).rows[0].verdict, 'NOT RUN');
+});
