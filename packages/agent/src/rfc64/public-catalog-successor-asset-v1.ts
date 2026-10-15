@@ -45,14 +45,14 @@ export function snapshotRfc64PublicCatalogSuccessorAssetV1(
 export function snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
   input: unknown,
   label = 'RFC-64 catalog successor assets',
+  /** One bucket's rows, unless the set is a whole catalog of more than one bucket (GH#3134). */
+  maxAssets: number = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
 ): readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[] {
   if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
     throw new TypeError(`${label} must be an ordinary Array`);
   }
-  if (input.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
-    throw new RangeError(
-      `${label} exceeds ${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} assets`,
-    );
+  if (input.length > maxAssets) {
+    throw new RangeError(`${label} exceeds ${maxAssets} assets`);
   }
   const ownKeys = Reflect.ownKeys(input);
   const expectedOwnKeys = new Set<string>([

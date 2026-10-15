@@ -4,13 +4,18 @@
 
 import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
-  canonicalizeCanonicalGraphScopedAuthorSealV1,
+  catalogKeyToBucketIdV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeAuthorCatalogScopeDigestV1,
   createOperationContext,
+  parseDeterministicKnowledgeAssetUal,
   type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
+  type CountV1,
+  type DecimalU64V1,
+  type EvmAddressV1,
+  type KaIdV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 
@@ -20,6 +25,9 @@ import type {
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogSuccessorAssetInputV1,
 } from './dkg-agent-rfc64-catalog.js';
+import { readCurrentAuthorCatalogScopeV1 } from './internal/author-catalog-current-scope.js';
+import { moveAuthorCatalogToMoreBucketsV1 } from './internal/author-catalog-move.js';
+import { reconcileMovedCatalogV1 } from './internal/catalog-bucket-reconcile.js';
 import {
   rfc64CatalogMutationMemoryV1,
   type Rfc64CatalogMutationStateV1,
@@ -29,12 +37,11 @@ import type { Rfc64VerifiedCatalogRowsV1 } from './internal/verified-catalog-row
 import { yieldMainThread } from './main-thread-time-slice.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
-  compareRfc64PublicCatalogSuccessorAssetsByKaIdV1,
   snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
   snapshotRfc64PublicCatalogSuccessorAssetV1,
 } from './rfc64/public-catalog-successor-asset-v1.js';
 import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './rfc64/catalog-peers-v1.js';
-import { computeRfc64AppliedInventoryDigestV1 } from './rfc64/public-catalog-inventory-completeness-v1.js';
+import { computeRfc64CatalogAppliedInventoryDigestV1 } from './rfc64/applied-catalog-inventory-digest-v1.js';
 import type { AnnounceRfc64PublicCatalogHeadResultV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
@@ -42,10 +49,23 @@ import {
 } from './rfc64/abort-v1.js';
 import {
   AuthorCatalogFullErrorV1,
+  MAX_AUTHOR_CATALOG_ROWS_V1,
   assertAuthorCatalogTakesNewRowsV1,
+  assertAuthorCatalogUnderMaximumV1,
+  authorCatalogBucketMovesEnabledV1,
 } from './internal/author-catalog-capacity.js';
 import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
   './rfc64/swm-author-inventory-producer-v1.js';
+import {
+  assertReplacementHistoryIsContiguousV1,
+  planNextRfc64CatalogExactSetV1,
+  planRfc64CatalogProjectionTargetV1,
+  sameRfc64SuccessorAssetSetsV1,
+  sameRfc64SuccessorAssetV1,
+  type Rfc64CatalogProjectionTargetPolicyV1,
+} from './internal/catalog-exact-set-plan.js';
+
+export type { Rfc64CatalogProjectionTargetPolicyV1 } from './internal/catalog-exact-set-plan.js';
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
   readonly author: Rfc64CatalogAuthorSignerV1;
@@ -98,10 +118,6 @@ interface ReconcileRfc64SwmInventoryCatalogParamsV1
   ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>;
 }
 
-export type Rfc64CatalogProjectionTargetPolicyV1 =
-  | 'exact-replacement'
-  | 'monotonic-union';
-
 interface Rfc64CatalogProjectionMutationOptionsV1 {
   readonly targetPolicy: Rfc64CatalogProjectionTargetPolicyV1;
   readonly commitAppliedHead?: (
@@ -140,7 +156,11 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   ): Promise<boolean> {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const state = await this.readRfc64CatalogMutationStateV1(persistence, params.scope);
+    const { scope, state } = await this.readRfc64CatalogMutationStateV1(persistence, params.scope, (current) => {
+      const ual = parseDeterministicKnowledgeAssetUal(params.expectedRow.kaUal);
+      const kaId = ((BigInt(ual.agentAddress) << 96n) | BigInt(ual.kaNumber)).toString() as KaIdV1;
+      return catalogKeyToBucketIdV1(kaId, current.bucketCount);
+    });
     const asset = state?.assets.find((candidate) => (
       candidate.seal.kaUal === params.expectedRow.kaUal
     ));
@@ -158,7 +178,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       && computeCanonicalGraphScopedAuthorSealDigestV1(asset.seal) === params.expectedRow.sealDigest
     );
     // The answer retires a durable repair marker: it does not rest on memory alone.
-    if (covered) await this.confirmRfc64CatalogDurableV1(persistence, params.scope, state!, asset);
+    if (covered) await this.confirmRfc64CatalogDurableV1(persistence, scope, state!, asset);
     return covered;
   }
 
@@ -203,15 +223,47 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     const stateStartedAt = observer.now();
 
     return this.runRfc64CatalogMutationV1(params.scope, async (mutation) => {
+      // GH#3134 — the lane's current scope, read under the lane's lock, and the asset's bucket of it.
+      const readState = () => this.readRfc64CatalogMutationStateV1(
+        persistence,
+        params.scope,
+        (current) => catalogKeyToBucketIdV1(params.asset.seal.reservedKaId as KaIdV1, current.bucketCount),
+      );
       // The state phase includes the wait for the mutation lock, so it starts before `run`.
-      const state = await observer.measure('state', async () => (
-        await this.readRfc64CatalogMutationStateV1(persistence, params.scope)
-      ) ?? this.createRfc64CatalogGenesisStateV1(params), stateStartedAt);
-      const assets = [...state.assets];
+      let { scope, state } = await observer.measure('state', async () => {
+        const read = await readState();
+        return { scope: read.scope, state: read.state ?? await this.createRfc64CatalogGenesisStateV1(params) };
+      }, stateStartedAt);
+      let assets = [...state.assets];
       const existingIndex = assets.findIndex(
         (asset) => asset.seal.reservedKaId === params.asset.seal.reservedKaId,
       );
-      // GH#3134 — a new asset needs a free row; a row the catalog holds is replaced in place.
+      // GH#3134 — a new asset needs a free row in its bucket; a row the catalog holds is replaced in
+      // place. Where moves are on, a full bucket first moves the catalog to more buckets, unless the
+      // catalog already holds the node's maximum.
+      if (
+        existingIndex < 0
+        && assets.length >= MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
+        && state.current !== null
+        && authorCatalogBucketMovesEnabledV1()
+      ) {
+        assertAuthorCatalogUnderMaximumV1(Number(state.current.inventoryRowCount), assets, 1);
+        await moveAuthorCatalogToMoreBucketsV1({
+          persistence,
+          scope,
+          applied: state.current,
+          signer: {
+            issuer: params.author.address.toLowerCase() as EvmAddressV1,
+            signDigest: (digest) => params.author.signMessage(digest),
+          },
+          issuedAt: Date.now().toString() as TimestampMsV1,
+          stageOnly: authority.reconciliationLane === 'shadow-stage',
+        });
+        const moved = await readState();
+        scope = moved.scope;
+        state = moved.state!;
+        assets = [...state.assets];
+      }
       if (existingIndex < 0) assertAuthorCatalogTakesNewRowsV1(assets, 1);
       if (
         existingIndex >= 0
@@ -220,7 +272,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         if (state.current === null) {
           throw new Error('RFC-64 staged genesis unexpectedly contains an ordinary asset');
         }
-        await this.confirmRfc64CatalogDurableV1(persistence, params.scope, state, assets[existingIndex]!);
+        await this.confirmRfc64CatalogDurableV1(persistence, scope, state, assets[existingIndex]!);
         return state.current;
       }
       if (existingIndex >= 0) {
@@ -238,7 +290,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           if (state.current === null) {
             throw new Error('RFC-64 staged genesis unexpectedly contains an ordinary asset');
           }
-          await this.confirmRfc64CatalogDurableV1(persistence, params.scope, state, existing);
+          await this.confirmRfc64CatalogDurableV1(persistence, scope, state, existing);
           return state.current;
         }
         if (
@@ -257,7 +309,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       const committed = await this.applyRfc64CatalogSuccessorV1(
         persistence,
         state,
-        params,
+        { ...params, scope },
         assets,
         peers,
         authority.reconciliationLane === 'shadow-stage',
@@ -311,6 +363,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     const requestedAssets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
       params.assets,
       'RFC-64 exact-set target assets',
+      // GH#3134 — a whole target: where catalogs move to more buckets, up to the node's maximum.
+      authorCatalogBucketMovesEnabledV1() ? MAX_AUTHOR_CATALOG_ROWS_V1 : undefined,
     );
     for (const asset of requestedAssets) {
       if (asset.seal.authorAddress !== params.scope.authorAddress) {
@@ -333,7 +387,15 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       // The coordinator tail follows this physical read. Caller cancellation
       // remains prompt through the coordinator's outer race, but persistence
       // cannot close until a non-cooperative read actually settles.
-      let state = await this.readRfc64CatalogMutationStateV1(persistence, params.scope);
+      const read = await this.readRfc64CatalogMutationStateV1(persistence, params.scope);
+      if (read.scope.bucketCount !== '1') {
+        return this.reconcileRfc64CatalogBucketsV1(persistence, read.scope, params, requestedAssets, options, {
+          mutation,
+          peers,
+          stageOnly: authority.reconciliationLane === 'shadow-stage',
+        });
+      }
+      let state = read.state;
       throwIfAbortedV1(params.signal);
       if (state === null && requestedAssets.length === 0) {
         return Object.freeze({
@@ -407,6 +469,37 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     }, params.signal);
   }
 
+  /** GH#3134 — the exact-set reconciliation of a moved catalog, bucket by bucket, under the lane's lock. */
+  private async reconcileRfc64CatalogBucketsV1(
+    this: DKGAgent,
+    persistence: Rfc64PersistenceV1,
+    scope: AuthorCatalogScopeV1,
+    params: ReconcileRfc64PublicRootCatalogExactSetParamsV1,
+    requested: readonly Rfc64CatalogSuccessorAssetInputV1[],
+    options: Readonly<Rfc64CatalogProjectionMutationOptionsV1>,
+    work: Readonly<{ mutation: Rfc64CatalogMutationV1; peers: readonly string[]; stageOnly: boolean }>,
+  ): Promise<ReconcileRfc64SwmInventoryCatalogResultV1> {
+    return reconcileMovedCatalogV1({
+      persistence,
+      scope,
+      requested,
+      policy: options.targetPolicy,
+      readBucketState: async (bucketId) => (
+        await this.readRfc64CatalogMutationStateV1(persistence, params.scope, () => bucketId)
+      ).state!,
+      applySuccessor: async (state, assets) => this.applyRfc64CatalogSuccessorV1(
+        persistence,
+        state,
+        { ...params, scope },
+        assets,
+        work.peers,
+        work.stageOnly,
+        { signal: params.signal, commitAppliedHead: options.commitAppliedHead, mutation: work.mutation },
+      ),
+      throwIfAborted: () => throwIfAbortedV1(params.signal),
+    });
+  }
+
   private assertRfc64CatalogAuthoringModeV1(
     this: DKGAgent,
     contextGraphId: string,
@@ -422,24 +515,42 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   }
 
   /**
-   * The verified state of the scope's applied head: from memory while the durable applied head
+   * The verified state of the lane's current catalog: from memory while the durable applied head
    * and the scope's accepted policy are the ones it was read under, else from the durable store.
+   * GH#3134 — the current catalog is the lane's one-bucket catalog until its bucket is full; then
+   * it is the scope of the lane's newest applied head, and the state is that of the bucket
+   * `bucketOf` names in it.
    */
-  private readRfc64CatalogMutationStateV1(
+  private async readRfc64CatalogMutationStateV1(
     this: DKGAgent,
     persistence: Rfc64PersistenceV1,
-    scope: AuthorCatalogScopeV1,
-  ): Promise<Rfc64CatalogMutationStateV1 | null> {
+    lane: AuthorCatalogScopeV1,
+    bucketOf?: (current: AuthorCatalogScopeV1) => DecimalU64V1,
+  ): Promise<Readonly<{ scope: AuthorCatalogScopeV1; state: Rfc64CatalogMutationStateV1 | null }>> {
+    const oneBucket = lane.bucketCount === '1' ? lane : { ...lane, bucketCount: '1' as CountV1 };
+    const applied = persistence.inventory.readAppliedCatalogHeadV1(
+      computeAuthorCatalogScopeDigestV1(oneBucket),
+      lane.authorAddress,
+    );
+    const scope = applied !== null && BigInt(applied.inventoryRowCount) >= MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
+      ? readCurrentAuthorCatalogScopeV1(persistence.inventory, oneBucket)
+      : oneBucket;
     let authority: string | undefined;
     try {
       authority = this.rfc64PublicCatalogServiceV1?.acceptedPolicyDigestForCatalogScope(scope);
     } catch { /* No accepted policy for this exact scope: nothing is served from memory. */ }
-    return rfc64CatalogMutationMemoryV1(this).read(
+    const bucketId = scope.bucketCount === '1' || bucketOf === undefined
+      ? '0' as DecimalU64V1
+      : bucketOf(scope);
+    const state = await rfc64CatalogMutationMemoryV1(this).read(
       persistence,
       computeAuthorCatalogScopeDigestV1(scope),
       scope.authorAddress,
       authority,
+      { bucketCount: scope.bucketCount, bucketId },
+      scope.bucketCount === '1' ? applied : undefined,
     );
+    return Object.freeze({ scope, state });
   }
 
   /**
@@ -534,6 +645,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         signatureVariantDigest: genesis.signatureVariantDigest,
       }),
       catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      bucketId: '0' as DecimalU64V1,
       assets: [],
       expectedCurrentCatalogHeadDigest: null,
     });
@@ -574,6 +686,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         author: params.author,
         catalogIssuerAuthorization: state.catalogIssuerAuthorization,
         assets,
+        selectedBucketId: state.bucketId,
         deployment: params.deployment,
         issuedAt: Date.now().toString() as TimestampMsV1,
         peers: [],
@@ -582,9 +695,14 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       throwIfAbortedV1(signal);
       return {
         successor: produced,
-        appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+        appliedInventoryDigest: computeRfc64CatalogAppliedInventoryDigestV1({
           catalogScopeDigest: produced.catalogScopeDigest,
           rows: produced.assets,
+          directory: {
+            bucketCount: produced.catalogScope.bucketCount,
+            directoryRootDigest: produced.directoryRootDigest,
+            totalRows: produced.inventoryRowCount,
+          },
         }),
       };
     });
@@ -595,7 +713,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         currentCatalogHeadDigest: successor.headObjectDigest,
         appliedInventoryDigest,
         catalogVersion: successor.announcement.catalogVersion,
-        inventoryRowCount: successor.signedBucketRowCount,
+        inventoryRowCount: successor.inventoryRowCount,
         expectedCurrentCatalogHeadDigest: state.expectedCurrentCatalogHeadDigest,
         stageOnly,
       }).snapshot
@@ -647,139 +765,4 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     );
   }
 
-}
-
-function assertReplacementHistoryIsContiguousV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-): void {
-  const currentByKaId = new Map(current.map((asset) => [asset.seal.reservedKaId, asset]));
-  for (const targetAsset of target) {
-    const currentAsset = currentByKaId.get(targetAsset.seal.reservedKaId);
-    if (currentAsset === undefined || sameRfc64SuccessorAssetV1(currentAsset, targetAsset)) continue;
-    const currentVersion = BigInt(currentAsset.seal.assertionVersion);
-    const targetVersion = BigInt(targetAsset.seal.assertionVersion);
-    if (
-      currentAsset.assertionCoordinate !== targetAsset.assertionCoordinate
-      || targetVersion <= currentVersion
-    ) {
-      throw new Error(
-        `RFC-64 exact-set replacement for KA ${targetAsset.seal.reservedKaId} is not a newer assertion version on the same coordinate`,
-      );
-    }
-  }
-}
-
-/** Build the explicit projection target before entering the mutation engine. */
-export function planRfc64CatalogProjectionTargetV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  requested: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  policy: Rfc64CatalogProjectionTargetPolicyV1,
-): readonly Rfc64CatalogSuccessorAssetInputV1[] {
-  if (policy === 'exact-replacement') return requested;
-  const retained = current.filter((existing) => !requested.some(
-    (candidate) => candidate.seal.reservedKaId === existing.seal.reservedKaId,
-  ));
-  // GH#3134 — requested rows the catalog does not hold are new; the others replace their rows.
-  assertAuthorCatalogTakesNewRowsV1(current, retained.length + requested.length - current.length);
-  return snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
-    [...retained, ...requested],
-    'RFC-64 monotonic-union target assets',
-  );
-}
-
-export function planNextRfc64CatalogExactSetV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-): Rfc64CatalogSuccessorAssetInputV1[] {
-  let currentIndex = 0;
-  let targetIndex = 0;
-  while (currentIndex < current.length || targetIndex < target.length) {
-    const currentAsset = current[currentIndex];
-    const targetAsset = target[targetIndex];
-    if (currentAsset === undefined) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset!);
-    }
-    if (targetAsset === undefined) {
-      return current.filter((_, index) => index !== currentIndex);
-    }
-    const comparison = compareRfc64CatalogAssetsByKaIdV1(currentAsset, targetAsset);
-    if (comparison < 0) return current.filter((_, index) => index !== currentIndex);
-    if (comparison > 0) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset);
-    }
-    if (!sameRfc64SuccessorAssetV1(currentAsset, targetAsset)) {
-      if (
-        BigInt(targetAsset.seal.assertionVersion)
-          > BigInt(currentAsset.seal.assertionVersion) + 1n
-      ) {
-        // A durable inventory can advance more than once while catalog
-        // projection is unavailable. Remove the stale row first, then insert
-        // the independently verified latest row on the following successor.
-        return current.filter((_, index) => index !== currentIndex);
-      }
-      const next = [...current];
-      next[currentIndex] = targetAsset;
-      return next;
-    }
-    currentIndex += 1;
-    targetIndex += 1;
-  }
-  throw new Error('RFC-64 exact-set planner was called for an already-converged target');
-}
-
-function insertOrFreeRfc64CatalogCapacityV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  asset: Rfc64CatalogSuccessorAssetInputV1,
-): Rfc64CatalogSuccessorAssetInputV1[] {
-  if (current.length < MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
-    return insertRfc64CatalogAssetV1(current, asset);
-  }
-  const targetKaIds = new Set(target.map((targetAsset) => targetAsset.seal.reservedKaId));
-  for (let index = current.length - 1; index >= 0; index -= 1) {
-    if (!targetKaIds.has(current[index]!.seal.reservedKaId)) {
-      return current.filter((_currentAsset, currentIndex) => currentIndex !== index);
-    }
-  }
-  throw new AuthorCatalogFullErrorV1(current, 1);
-}
-
-function insertRfc64CatalogAssetV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  asset: Rfc64CatalogSuccessorAssetInputV1,
-): Rfc64CatalogSuccessorAssetInputV1[] {
-  const next = [...current, asset];
-  next.sort((left, right) => compareRfc64CatalogAssetsByKaIdV1(left, right));
-  return next;
-}
-
-function compareRfc64CatalogAssetsByKaIdV1(
-  left: Rfc64CatalogSuccessorAssetInputV1,
-  right: Rfc64CatalogSuccessorAssetInputV1,
-): -1 | 0 | 1 {
-  return compareRfc64PublicCatalogSuccessorAssetsByKaIdV1(left, right);
-}
-
-function sameRfc64SuccessorAssetSetsV1(
-  left: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  right: readonly Rfc64CatalogSuccessorAssetInputV1[],
-): boolean {
-  return left.length === right.length
-    && left.every((asset, index) => sameRfc64SuccessorAssetV1(asset, right[index]!));
-}
-
-function sameRfc64SuccessorAssetV1(
-  left: Rfc64CatalogSuccessorAssetInputV1,
-  right: Rfc64CatalogSuccessorAssetInputV1,
-): boolean {
-  return left.assertionCoordinate === right.assertionCoordinate
-    && canonicalizeCanonicalGraphScopedAuthorSealV1(left.seal)
-      === canonicalizeCanonicalGraphScopedAuthorSealV1(right.seal)
-    && equalBytes(left.projectionBytes, right.projectionBytes);
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return left.byteLength === right.byteLength
-    && left.every((byte, index) => byte === right[index]);
 }

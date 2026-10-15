@@ -18,7 +18,12 @@ import {
 import { CATALOG_FULL_RETRY_INTERVAL_MS_V1 } from '../rfc64/catalog-repair-retry-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../rfc64/finalized-private-placement-repair-store-v1.js';
-import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
+import {
+  MAX_AUTHOR_CATALOG_ROWS_V1,
+  authorCatalogBucketMovesEnabledV1,
+  findAuthorCatalogFullErrorV1,
+} from './author-catalog-capacity.js';
+import { readCurrentAuthorCatalogScopeV1 } from './author-catalog-current-scope.js';
 
 /**
  * GH#3134 — what the catalog supervisor does about an author catalog at its row cap. A full
@@ -110,6 +115,8 @@ type AppliedHeadV1 = Readonly<{ rows: number }>;
 /** One full catalog scope: what its last refusal read, and when it is attempted again. */
 interface FullScopeV1 {
   readonly catalogScopeDigest: Digest32V1;
+  /** The author lane, at one bucket: its digest is {@link catalogScopeDigest}. */
+  readonly lane: Readonly<AuthorCatalogScopeV1>;
   readonly contextGraphId: string;
   readonly authorAddress: EvmAddressV1;
   readonly rows: number;
@@ -211,12 +218,14 @@ export class FullCatalogParkingV1 {
   ): boolean {
     const full = findAuthorCatalogFullErrorV1(error);
     if (full === undefined) return false;
-    const scopeKey = catalogScopeDigestV1(repair);
+    const lane = laneScopeV1(repair);
     // A marker whose scope cannot be named keeps the ordinary failure handling.
-    if (scopeKey === undefined) return false;
+    if (lane === undefined) return false;
+    const scopeKey = computeAuthorCatalogScopeDigestV1(lane) as Digest32V1;
     const known = this.#scopes.get(scopeKey);
     this.#scopes.set(scopeKey, {
       catalogScopeDigest: scopeKey,
+      lane,
       contextGraphId: repair.contextGraphId,
       authorAddress: repair.authorAddress,
       rows: full.rowCount,
@@ -243,7 +252,9 @@ export class FullCatalogParkingV1 {
     for (const scopeKey of this.#parked.values()) parked.set(scopeKey, (parked.get(scopeKey) ?? 0) + 1);
     for (const [scopeKey, scope] of this.#scopes) {
       const parkedPlacements = parked.get(scopeKey);
-      if (parkedPlacements !== undefined) this.#name(scope, 'placement', scope.rows, parkedPlacements);
+      if (parkedPlacements !== undefined) {
+        this.#name(scope, 'placement', scope.rows, scope.rowCap, parkedPlacements);
+      }
     }
   }
 
@@ -262,7 +273,14 @@ export class FullCatalogParkingV1 {
       if (scope !== undefined && namedScopeV1(scope) === namedScopeV1(repair)) parkedPlacements += 1;
     }
     // The projection target's own bound reports no row count.
-    this.#name(repair, 'projection', findAuthorCatalogFullErrorV1(error)?.rowCount ?? null, parkedPlacements);
+    const full = findAuthorCatalogFullErrorV1(error);
+    this.#name(
+      repair,
+      'projection',
+      full?.rowCount ?? null,
+      full?.rowCap ?? MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+      parkedPlacements,
+    );
     return true;
   }
 
@@ -331,10 +349,18 @@ export class FullCatalogParkingV1 {
     this.#held.delete(scopeKey);
   }
 
-  /** The scope's applied head, null when it has none, undefined when it cannot be read. */
+  /**
+   * The scope's applied head, null when it has none, undefined when it cannot be read. GH#3134 —
+   * where a full bucket moves its catalog, it is the head of the lane's current bucket count.
+   */
   #appliedHead(scope: FullScopeV1): AppliedHeadV1 | null | undefined {
+    const read = this.#dependencies.readAppliedCatalogHead;
     try {
-      const head = this.#dependencies.readAppliedCatalogHead?.(scope.catalogScopeDigest, scope.authorAddress);
+      const catalogScopeDigest = read !== undefined && authorCatalogBucketMovesEnabledV1()
+        ? currentScopeDigestV1(scope.lane, read)
+        : scope.catalogScopeDigest;
+      if (catalogScopeDigest === undefined) return undefined;
+      const head = read?.(catalogScopeDigest, scope.authorAddress);
       return head === null || head === undefined
         ? head
         : { rows: Number(head.inventoryRowCount) };
@@ -348,6 +374,7 @@ export class FullCatalogParkingV1 {
     scope: Readonly<{ contextGraphId: string; authorAddress: string }>,
     refused: 'placement' | 'projection',
     rows: number | null,
+    rowCap: number,
     parkedPlacements: number,
   ): void {
     // Each path has its line and its hour. A share is refused before its publication is
@@ -372,30 +399,58 @@ export class FullCatalogParkingV1 {
         authorAddress: scope.authorAddress,
         refused,
         rows,
-        rowCap: MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+        rowCap,
         parkedPlacements,
       }));
     } catch { /* Diagnostics must not alter repair state or waiter settlement. */ }
   }
 }
 
-/** True or false when the applied head was read; undefined when it could not be. */
+/**
+ * True or false when the applied head was read; undefined when it could not be. GH#3134 — where a
+ * full bucket moves its catalog to more buckets, only the node's maximum holds a placement back.
+ */
 function hasFreeRowV1(head: AppliedHeadV1 | null | undefined, scope: FullScopeV1): boolean | undefined {
-  return head === undefined ? undefined : head === null || head.rows < scope.rowCap;
+  if (head === undefined) return undefined;
+  return head === null
+    || head.rows < (authorCatalogBucketMovesEnabledV1() ? MAX_AUTHOR_CATALOG_ROWS_V1 : scope.rowCap);
+}
+
+/** The author lane a marker names, at one bucket, or undefined when it names none. */
+function laneScopeV1(
+  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+): Readonly<AuthorCatalogScopeV1> | undefined {
+  const lane = { ...repair.inventoryScope, bucketCount: '1' } as AuthorCatalogScopeV1;
+  try {
+    computeAuthorCatalogScopeDigestV1(lane);
+  } catch {
+    return undefined;
+  }
+  return Object.freeze(lane);
 }
 
 /** The canonical digest of the author catalog scope a marker names, or undefined when it names none. */
 function catalogScopeDigestV1(
   repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
 ): Digest32V1 | undefined {
-  try {
-    return computeAuthorCatalogScopeDigestV1({
-      ...repair.inventoryScope,
-      bucketCount: '1',
-    } as AuthorCatalogScopeV1) as Digest32V1;
-  } catch {
-    return undefined;
-  }
+  const lane = laneScopeV1(repair);
+  return lane === undefined ? undefined : computeAuthorCatalogScopeDigestV1(lane) as Digest32V1;
+}
+
+/** The digest of the lane's current scope, read through `read`; undefined when a head is unreadable. */
+function currentScopeDigestV1(
+  lane: Readonly<AuthorCatalogScopeV1>,
+  read: NonNullable<FullCatalogParkingDependenciesV1['readAppliedCatalogHead']>,
+): Digest32V1 | undefined {
+  let unreadable = false;
+  const current = readCurrentAuthorCatalogScopeV1({
+    readAppliedCatalogHeadV1: (catalogScopeDigest, authorAddress) => {
+      const head = read(catalogScopeDigest, authorAddress);
+      if (head === undefined) unreadable = true;
+      return (head ?? null) as never;
+    },
+  }, lane);
+  return unreadable ? undefined : computeAuthorCatalogScopeDigestV1(current) as Digest32V1;
 }
 
 /** One graph and author, as the log and the status count name a scope. */

@@ -10,16 +10,16 @@ import {
   encodeOpaqueKaBundleV1,
   parseCanonicalGraphScopedAuthorSealV1,
   type AuthorCatalogScopeV1,
+  type CountV1,
+  type DecimalU64V1,
   type Digest32V1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
-import {
-  loadBoundedAuthorCatalogHistoryV1,
-  type BoundedAuthorCatalogHistoryV1,
-  type PublishAuthorCatalogExactSetSuccessorResultV1,
-  type Rfc64CatalogSuccessorAssetInputV1,
-  type Rfc64StagedAuthorCatalogHeadRefV1,
+import type {
+  PublishAuthorCatalogExactSetSuccessorResultV1,
+  Rfc64CatalogSuccessorAssetInputV1,
+  Rfc64StagedAuthorCatalogHeadRefV1,
 } from '../dkg-agent-rfc64-catalog.js';
 import { mapWithConcurrencyDrained } from '../map-with-concurrency.js';
 import type { AppliedCatalogHeadSnapshotV1 } from '../rfc64/inventory-v1/index.js';
@@ -30,6 +30,10 @@ import { compareRfc64PublicCatalogSuccessorAssetsByKaIdV1 } from
   '../rfc64/public-catalog-successor-asset-v1.js';
 import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from
   '../rfc64/public-catalog-successor-producer-v1.js';
+import {
+  loadBoundedAuthorCatalogHistoryV1,
+  type BoundedAuthorCatalogHistoryV1,
+} from './author-catalog-history.js';
 import {
   Rfc64VerifiedCatalogRowSetV1,
   type Rfc64VerifiedCatalogRowsV1,
@@ -72,10 +76,23 @@ export interface Rfc64CatalogMutationStateV1 {
   readonly current: AppliedCatalogHeadSnapshotV1 | null;
   readonly previousHead: Rfc64StagedAuthorCatalogHeadRefV1;
   readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
+  /** GH#3134 — the bucket `assets` fill; bucket 0 of a one-bucket catalog holds every row. */
+  readonly bucketId: DecimalU64V1;
   /** In mathematical KA order, as the signed bucket lists them. */
   readonly assets: readonly Rfc64CatalogSuccessorAssetInputV1[];
   readonly expectedCurrentCatalogHeadDigest: Digest32V1 | null;
 }
+
+/** Which bucket of which catalog a state is read for. */
+export interface Rfc64CatalogMutationSliceV1 {
+  readonly bucketCount: CountV1;
+  readonly bucketId: DecimalU64V1;
+}
+
+const ONE_BUCKET_SLICE_V1: Rfc64CatalogMutationSliceV1 = Object.freeze({
+  bucketCount: '1' as CountV1,
+  bucketId: '0' as DecimalU64V1,
+});
 
 export interface Rfc64CatalogMutationMemoryLimitsV1 {
   /** Author catalog scopes remembered at once; zero remembers nothing. */
@@ -278,18 +295,30 @@ export class Rfc64CatalogMutationMemoryV1 {
   /**
    * The verified state of the scope's applied head, or null when it has none. `authority` is the
    * digest of the policy accepted for the scope; without one nothing is served from memory or kept.
+   * A catalog of more than one bucket (GH#3134) is read one bucket, `slice.bucketId`, at a time from
+   * the durable store, and nothing of it is kept.
    */
   async read(
     persistence: Rfc64PersistenceV1,
     catalogScopeDigest: Digest32V1,
     authorAddress: AuthorCatalogScopeV1['authorAddress'],
     authority: string | undefined,
+    slice: Rfc64CatalogMutationSliceV1 = ONE_BUCKET_SLICE_V1,
+    /** The scope's applied-head record when the caller has just read it from the inventory. */
+    applied?: AppliedCatalogHeadSnapshotV1 | null,
   ): Promise<Rfc64CatalogMutationStateV1 | null> {
     const key = scopeKeyV1(catalogScopeDigest, authorAddress);
-    const current = persistence.inventory.readAppliedCatalogHeadV1(catalogScopeDigest, authorAddress);
+    const current = applied !== undefined
+      ? applied
+      : persistence.inventory.readAppliedCatalogHeadV1(catalogScopeDigest, authorAddress);
     if (current === null) {
       this.#forget(key);
       return null;
+    }
+    if (slice.bucketCount !== '1') {
+      const read = await this.#readVerified(persistence, current, slice.bucketId);
+      this.#readByItsHolder.add(read);
+      return read;
     }
     const remembered = this.#scopes.get(key);
     const state = remembered?.state;
@@ -367,6 +396,7 @@ export class Rfc64CatalogMutationMemoryV1 {
         signatureVariantDigest: successor.signatureVariantDigest,
       }),
       catalogIssuerAuthorization: previous.catalogIssuerAuthorization,
+      bucketId: previous.bucketId,
       assets: Object.freeze([...assets].sort(compareRfc64PublicCatalogSuccessorAssetsByKaIdV1)),
       expectedCurrentCatalogHeadDigest: applied.currentCatalogHeadDigest,
     });
@@ -403,7 +433,11 @@ export class Rfc64CatalogMutationMemoryV1 {
   ): Promise<void> {
     if (this.#readByItsHolder.has(state)) return;
     try {
-      const history = await loadBoundedAuthorCatalogHistoryV1(persistence, state.previousHead);
+      const history = await loadBoundedAuthorCatalogHistoryV1(
+        persistence,
+        state.previousHead,
+        state.bucketId,
+      );
       const rows = history.previousBucket?.payload.rows ?? [];
       if (asset !== undefined) {
         await bundleDurablyHeldV1(
@@ -580,10 +614,11 @@ export class Rfc64CatalogMutationMemoryV1 {
   }
 }
 
-/** Read and verify the applied head's state from the durable store. */
+/** Read and verify the applied head's state of one bucket from the durable store. */
 export async function readVerifiedRfc64CatalogMutationStateV1(
   persistence: Rfc64PersistenceV1,
   current: AppliedCatalogHeadSnapshotV1,
+  bucketId: DecimalU64V1 = '0' as DecimalU64V1,
 ): Promise<Rfc64CatalogMutationStateV1> {
   const storedHead = await persistence.controlObjects.getVerifiedObjectByDigest({
     objectDigest: current.currentCatalogHeadDigest,
@@ -598,7 +633,7 @@ export async function readVerifiedRfc64CatalogMutationStateV1(
       storedHead.envelope.signature,
     ) as Digest32V1,
   });
-  const history = await loadBoundedAuthorCatalogHistoryV1(persistence, previousHead);
+  const history = await loadBoundedAuthorCatalogHistoryV1(persistence, previousHead, bucketId);
   const assets = await loadRfc64CatalogSuccessorAssetsV1(persistence, history);
   const storedDelegation = await persistence.controlObjects.getVerifiedObjectByDigest({
     objectDigest: history.previousHead.payload.catalogIssuerDelegationDigest,
@@ -615,6 +650,7 @@ export async function readVerifiedRfc64CatalogMutationStateV1(
       catalogIssuerDelegation: storedDelegation.envelope,
       parentAuthorAgentEvidence: null,
     }),
+    bucketId,
     assets: Object.freeze(assets),
     expectedCurrentCatalogHeadDigest: current.currentCatalogHeadDigest,
   });

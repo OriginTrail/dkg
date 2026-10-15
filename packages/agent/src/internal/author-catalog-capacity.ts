@@ -9,34 +9,42 @@ export const AUTHOR_CATALOG_FULL_CODE_V1 = 'catalog-full';
 type HeldCatalogRowV1 = Readonly<{ seal: Readonly<{ kaUal: string }> }>;
 
 /**
- * GH#3134 — an author catalog is one signed bucket of at most
- * {@link MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} rows, and a catalog at that cap has no row for a NEW
- * asset. This is that refusal, raised from the row count before a successor is built, signed,
- * committed or announced. A newer version of an asset the catalog already holds replaces its row,
- * and a removal frees one, so neither is refused here.
- *
- * Local and descriptive only: the cap, the signed catalog format and the wire are unchanged. What
- * a full catalog should do instead (more buckets, an eviction rule) is not decided here.
+ * GH#3134 — the most rows one author catalog holds on this node, over all its buckets. It is
+ * above the 100,000 rows catalogs are validated at, and a catalog of typical rows that size stays
+ * within 256 buckets, one directory node.
+ */
+export const MAX_AUTHOR_CATALOG_ROWS_V1 = 131_072;
+
+/**
+ * GH#3134 — a bucket of an author catalog holds at most {@link MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1}
+ * rows, and a full bucket has no row for a NEW asset. Where the catalog moves to more buckets, a
+ * full bucket moves it first, and only a catalog at {@link MAX_AUTHOR_CATALOG_ROWS_V1} refuses.
+ * This is that refusal, raised from the row count before a successor is built, signed, committed
+ * or announced. A newer version of an asset the catalog already holds replaces its row, and a
+ * removal frees one, so neither is refused here.
  */
 export class AuthorCatalogFullErrorV1 extends Error {
   readonly code = AUTHOR_CATALOG_FULL_CODE_V1;
-  readonly rowCap = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1;
-  /** Rows the catalog holds. */
+  /** Rows the refusing catalog may hold: one bucket's, or the node's maximum for a catalog. */
+  readonly rowCap: number;
+  /** Rows the refusing catalog holds. */
   readonly rowCount: number;
-  /** The assets those rows place, by UAL: placing one of them again replaces its row. */
+  /** The assets the refusing bucket holds, by UAL: placing one of them again replaces its row. */
   readonly heldKaUals: ReadonlySet<string>;
 
   constructor(
     held: readonly HeldCatalogRowV1[],
     /** Rows for new assets the refused change asked for. */
     readonly newRows: number,
+    /** A catalog refused at the node's maximum: its row count and that maximum. */
+    limit?: Readonly<{ rowCount: number; rowCap: number }>,
   ) {
-    super(
-      `RFC-64 author catalog holds ${held.length} of ${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} rows`
-        + ` and cannot take ${newRows} more`,
-    );
+    const rowCount = limit?.rowCount ?? held.length;
+    const rowCap = limit?.rowCap ?? MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1;
+    super(`RFC-64 author catalog holds ${rowCount} of ${rowCap} rows and cannot take ${newRows} more`);
     this.name = 'AuthorCatalogFullErrorV1';
-    this.rowCount = held.length;
+    this.rowCap = rowCap;
+    this.rowCount = rowCount;
     this.heldKaUals = new Set(held.map(({ seal }) => seal.kaUal));
   }
 }
@@ -46,6 +54,29 @@ export function assertAuthorCatalogTakesNewRowsV1(held: readonly HeldCatalogRowV
   if (held.length + newRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
     throw new AuthorCatalogFullErrorV1(held, newRows);
   }
+}
+
+/**
+ * GH#3134 — refuse a new row for a catalog of `totalRows` at the node's maximum; `held` are the
+ * assets of the bucket the new row would go to.
+ */
+export function assertAuthorCatalogUnderMaximumV1(
+  totalRows: number,
+  held: readonly HeldCatalogRowV1[],
+  newRows: number,
+): void {
+  if (totalRows + newRows > MAX_AUTHOR_CATALOG_ROWS_V1) {
+    throw new AuthorCatalogFullErrorV1(held, newRows, { rowCount: totalRows, rowCap: MAX_AUTHOR_CATALOG_ROWS_V1 });
+  }
+}
+
+/**
+ * GH#3134 — whether a full bucket moves its catalog to more buckets. Off unless
+ * `DKG_RFC64_CATALOG_BUCKET_MOVES=1`: until receivers apply a moved catalog, a full bucket refuses
+ * new rows as before and the placement is parked.
+ */
+export function authorCatalogBucketMovesEnabledV1(): boolean {
+  return process.env.DKG_RFC64_CATALOG_BUCKET_MOVES?.trim() === '1';
 }
 
 /** The typed refusal that `error` is or was caused by, if any. */

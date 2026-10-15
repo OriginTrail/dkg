@@ -47,7 +47,9 @@ import {
   verifyAuthorCatalogRowAuthorshipV1,
 } from './catalog-row-authorship.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
+import { MAX_AUTHOR_CATALOG_ROWS_V1 } from '../internal/author-catalog-capacity.js';
 import { mintRfc64CatalogNativeScopedReadCapabilityV1 } from './catalog-native-scoped-read-capability-v1-internal.js';
+import { openMultiBucketHeadReadsV1 } from './catalog-native-multi-bucket-read-v1.js';
 import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
 import type { Rfc64KaBundleOperationsV1 } from './ka-bundle-store-v1.js';
 import {
@@ -182,6 +184,24 @@ async function resolveExactBoundedHeadCapability(
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(storedDelegation.envelope);
   const delegation = storedDelegation.envelope;
   assertDirectAuthorCatalogIssuerDelegationBinding(delegation, head, catalogScope);
+  if (head.payload.bucketCount !== '1') {
+    // GH#3134 — a head of more than one bucket is closed lazily, bucket by bucket.
+    const requireCurrent = () => requireAcceptedCurrentCatalogScope(options, catalogScope, scope.policyDigest);
+    await requireCurrent();
+    const reads = await openMultiBucketHeadReadsV1({
+      controlObjects: options.controlObjects,
+      kaBundles: options.kaBundles,
+      verifyIssuerSignature: options.verifyIssuerSignature,
+      head: { envelope: head, issuerSignature: storedHead.issuerSignature },
+      delegation: { envelope: delegation, issuerSignature: storedDelegation.issuerSignature },
+      catalogScope,
+      requireCurrent,
+      ...(options.onAuthorCatalogBucketProof === undefined
+        ? {}
+        : { onAuthorCatalogBucketProof: options.onAuthorCatalogBucketProof }),
+    });
+    return Object.freeze({ capability: mintRfc64CatalogNativeScopedReadCapabilityV1({ scope, ...reads }), catalogScope });
+  }
 
   const storedDirectory = await readStored(options, head.payload.directoryRootDigest);
   if (storedDirectory === null) throw new Error('catalog directory root is not stored');
@@ -462,6 +482,8 @@ function assertExactRequestedBoundedHead(
   scope: Readonly<Rfc64PublicCatalogNativeFetchScopeV1>,
 ): void {
   const totalRows = Number(BigInt(head.payload.totalRows));
+  // GH#3134 — one bucket of at most a bucket's rows, or more buckets of at most the node's maximum.
+  const oneBucket = head.payload.bucketCount === '1';
   if (
     head.objectDigest !== scope.catalogHeadObjectDigest
     || head.payload.networkId !== scope.networkId
@@ -470,11 +492,10 @@ function assertExactRequestedBoundedHead(
     || head.payload.authorAddress !== scope.authorAddress
     || head.payload.era !== scope.catalogEra
     || head.payload.version !== scope.catalogVersion
-    || head.payload.bucketCount !== '1'
-    || head.payload.directoryHeight !== '0'
+    || (oneBucket && head.payload.directoryHeight !== '0')
     || !Number.isSafeInteger(totalRows)
     || totalRows < 0
-    || totalRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
+    || totalRows > (oneBucket ? MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 : MAX_AUTHOR_CATALOG_ROWS_V1)
   ) {
     throw new Error('stored head differs from the exact requested bounded catalog scope');
   }

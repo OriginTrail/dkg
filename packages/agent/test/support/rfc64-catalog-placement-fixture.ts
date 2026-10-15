@@ -13,7 +13,7 @@ import {
 import { vi } from 'vitest';
 
 import type { DKGAgent } from '../../src/index.js';
-import { loadBoundedAuthorCatalogHistoryV1 } from '../../src/dkg-agent-rfc64-catalog.js';
+import { loadBoundedAuthorCatalogHistoryV1 } from '../../src/internal/author-catalog-history.js';
 import { readVerifiedRfc64CatalogMutationStateV1 } from '../../src/internal/catalog-mutation-memory.js';
 import type { Rfc64PersistenceV1 } from '../../src/rfc64/persistence-v1.js';
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from

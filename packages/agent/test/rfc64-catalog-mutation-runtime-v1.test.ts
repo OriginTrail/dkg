@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  computeAuthorCatalogScopeDigestV1,
   type AuthorCatalogScopeV1,
 } from '@origintrail-official/dkg-core';
 import { describe, expect, it } from 'vitest';
@@ -12,7 +13,7 @@ import {
 
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 
-function catalogScope(contextGraphId: string): Readonly<AuthorCatalogScopeV1> {
+function catalogScope(contextGraphId: string, bucketCount = '1'): Readonly<AuthorCatalogScopeV1> {
   return Object.freeze({
     networkId: 'hardhat1',
     contextGraphId,
@@ -22,7 +23,7 @@ function catalogScope(contextGraphId: string): Readonly<AuthorCatalogScopeV1> {
     subGraphName: null,
     authorAddress: AUTHOR,
     era: '0',
-    bucketCount: '1',
+    bucketCount,
   }) as AuthorCatalogScopeV1;
 }
 
@@ -127,6 +128,36 @@ describe('RFC-64 catalog mutation coordinator', () => {
     await expect(Promise.all(contenders)).resolves.toEqual([undefined, undefined]);
     expect(alphaContenderEntered).toBe(true);
     expect(omegaContenderEntered).toBe(true);
+    expect(coordinator.activeScopeCount).toBe(0);
+  });
+
+  it('keys a one-bucket scope by its own digest, as before GH#3134', () => {
+    const scope = catalogScope(`${AUTHOR}/alpha`);
+    expect(rfc64CatalogMutationScopeKeyV1(scope))
+      .toBe(`${computeAuthorCatalogScopeDigestV1(scope)}\n${AUTHOR}`);
+  });
+
+  it('serializes every bucket count of one author lane on one lock (GH#3134)', async () => {
+    const coordinator = new Rfc64CatalogMutationCoordinatorV1();
+    const oneBucket = catalogScope(`${AUTHOR}/alpha`);
+    const moved = catalogScope(`${AUTHOR}/alpha`, '4');
+    expect(rfc64CatalogMutationScopeKeyV1(moved)).toBe(rfc64CatalogMutationScopeKeyV1(oneBucket));
+    let release!: () => void;
+    let markEntered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const first = coordinator.run(oneBucket, async () => { markEntered(); await gate; });
+    await entered;
+
+    let movedEntered = false;
+    const second = coordinator.run(moved, async () => { movedEntered = true; });
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    expect(movedEntered).toBe(false);
+
+    release();
+    await Promise.all([first, second]);
+    expect(movedEntered).toBe(true);
+    await expect(coordinator.runMany([moved, oneBucket], async () => 'one lock')).resolves.toBe('one lock');
     expect(coordinator.activeScopeCount).toBe(0);
   });
 

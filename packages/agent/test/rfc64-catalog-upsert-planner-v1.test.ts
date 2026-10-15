@@ -9,11 +9,11 @@ import {
 import { ethers } from 'ethers';
 import { describe, expect, it } from 'vitest';
 
+import type { ReconcileRfc64PublicRootCatalogExactSetParamsV1 } from '../src/dkg-agent-rfc64-catalog-upsert.js';
 import {
   planRfc64CatalogProjectionTargetV1,
   planNextRfc64CatalogExactSetV1,
-  type ReconcileRfc64PublicRootCatalogExactSetParamsV1,
-} from '../src/dkg-agent-rfc64-catalog-upsert.js';
+} from '../src/internal/catalog-exact-set-plan.js';
 import { AuthorCatalogFullErrorV1 } from '../src/internal/author-catalog-capacity.js';
 
 type Asset = ReconcileRfc64PublicRootCatalogExactSetParamsV1['assets'][number];
