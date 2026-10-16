@@ -39,7 +39,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
   const { host, authority, ctx, remotePeerId, contextGraphIds, onPhase, onAccessDenied, sinceBatchIdFor, options } = request;
 
   const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
-  const syncAgentsMeta = resolveSyncAgentsMeta(host.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
+  const syncAgentsMeta = resolveSyncAgentsMeta(host.policy().syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
   const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
   const exactAssetFetchPolicy = normalizeExactAssetFetchPolicy(
     options?.exactAssetFetchPolicy, () => options?.exactAssetSelection, options?.forceFreshExactSession,
@@ -65,7 +65,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
   });
   const orderedContextGraphIds = orderContextGraphIdsByPriority(
     contextGraphIds,
-    host.config.syncContextGraphPriorities,
+    host.policy().syncContextGraphPriorities,
   );
   let exactFetchDisposition: ExactDurableFetchDisposition | undefined;
   let exactResponderCapability: ExactAssetResponderCapability | undefined;
@@ -128,7 +128,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
           return durableSyncAccumulatorFromResult(detailed.result);
         },
       })),
-      priorities: host.config.syncContextGraphPriorities,
+      priorities: host.policy().syncContextGraphPriorities,
       emptyResult: createDurableSyncAccumulator,
       runWithAdmission: async (item, work) => {
         try {
@@ -136,19 +136,14 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
             host.owner,
             remotePeerId,
             item.contextGraphId,
-            () => host.runContextGraphSyncWithBackpressure(
-              ctx,
-              item.contextGraphId,
-              item.lane,
-              item.operationId,
-              work,
-              {
-                priorityOverride: options?.priority,
-                operationSignal: operationBoundary.signal,
-                source: options?.source,
-                onWorkStarted: admissionBoundary.startWork,
-              },
-            ),
+            () => host.admission.run({
+              ctx, contextGraphId: item.contextGraphId, lane: item.lane,
+              label: item.operationId, work,
+              priorityOverride: options?.priority,
+              operationSignal: operationBoundary.signal,
+              source: options?.source,
+              onWorkStarted: admissionBoundary.startWork,
+            }),
             operationBoundary.signal,
           );
         } catch (error) {
