@@ -162,6 +162,37 @@ describe('Blazegraph confirmed bulk publication', () => {
     } finally { await store.close(); }
   });
 
+  it('ends publication cancellation at the receipt but drains cleanup before releasing admission', async () => {
+    const caller = new AbortController();
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
+      healthReservedSlots: 0, normalReservedSlots: 0, backgroundReservedSlots: 0 });
+    let enterCleanup!: () => void, finishCleanup!: () => void;
+    const cleanupEntered = new Promise<void>(resolve => { enterCleanup = resolve; });
+    const cleanupDone = new Promise<void>(resolve => { finishCleanup = resolve; });
+    let publicationSignal!: AbortSignal;
+    const request = vi.fn().mockImplementationOnce(async (_url, init) => {
+      publicationSignal = init.signal; return new Response('');
+    }).mockResolvedValueOnce(new Response(''))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ boolean: true })))
+      .mockImplementationOnce(async () => { enterCleanup(); await cleanupDone; return new Response(''); });
+    vi.stubGlobal('fetch', request);
+    const store = new BlazegraphStore('http://fixture.invalid/sparql', { scheduler });
+    const work = store.replaceAssetGroup(members, { signal: caller.signal });
+    try {
+      await cleanupEntered;
+      caller.abort(new Error('caller left after confirmed publication'));
+      expect(publicationSignal.aborted).toBe(false);
+      expect(store.getPressureSnapshot().normalInflight).toBe(1);
+      const next = vi.fn(async () => {});
+      const queued = scheduler.run('normal', 'after-publication', next);
+      expect(next).not.toHaveBeenCalled();
+      finishCleanup(); await expect(work).resolves.toBeUndefined(); await queued;
+      expect(next).toHaveBeenCalledOnce();
+      expect(request).toHaveBeenCalledTimes(4);
+      expect(store.getPressureSnapshot().normalInflight).toBe(0);
+    } finally { finishCleanup(); await work.catch(() => undefined); await store.close(); }
+  });
+
   it.each(['deadline', 'caller-abort'] as const)('cleans owned staging after publication %s without replay', async cause => {
     const caller = new AbortController();
     const cancellation = new Error('caller cancelled publication');
