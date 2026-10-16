@@ -1,3 +1,4 @@
+import { observeOutboundBulkFrames } from './observe-bulk-graph-frames.js';
 import { afterEach, expect } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { startOxigraphSparqlEndpoint } from '../../../storage/test/helpers/oxigraph-sparql-endpoint.js';
@@ -110,17 +111,9 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
   const request: BulkGraphRequest = {version:1,contextGraphId:cg,snapshotDigest:'a'.repeat(64),assetUals:uals};
   const groups: number[]=[]; const heaps: number[]=[];
   if (hooks.onControl || hooks.tamperDigest === 'chunk') {
-    const exchange = router.withDuplexStream.bind(router);
-    router.withDuplexStream = (peer, protocol, options, consume) => exchange(peer, protocol, options, (stream, signal) => {
-      const send = stream.send.bind(stream);
-      stream.send = bytes => {
-        const data = bytes.subarray(), header = new DataView(data.buffer, data.byteOffset, data.byteLength);
-        const frame = { kind: header.getUint8(4), index: header.getUint32(8), sequence: header.getUint32(12), payload: data.subarray(20) };
-        if (frame.kind === K.COMMIT && frame.index === 7) markPrefixCommitted();
-        hooks.onControl?.(frame);
-        return send(bytes);
-      };
-      return consume(stream, signal);
+    observeOutboundBulkFrames(router, frame => {
+      if (frame.kind === K.COMMIT && frame.index === 7) markPrefixCommitted();
+      hooks.onControl?.(frame);
     });
   }
   if (failClose) {

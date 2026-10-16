@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BlazegraphStore, OxigraphStore, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, OxigraphStore, StorePriorityScheduler, DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS, type TripleStore, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { parseNQuadsTextTolerant } from '../../storage/src/nquads-text.js';
 import { replaceLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
 import { materializeVerifiedGraphScopedGroup } from '../src/sync/requester/graph-scoped-group.js';
@@ -156,4 +156,41 @@ it.each(['singleton','group'] as const)('holds publication and quarantine locks 
     await new Promise(r=>setTimeout(r,10));expect(newerSettled).toBe(false);
     releaseQuarantine.resolve();expect(await pending).toBe('quarantined');expect(await newer).toBe('applied');
   } finally {releasePublish.resolve();releaseQuarantine.resolve();await Promise.allSettled([pending,newer]);}
+});
+
+it.each([true, false])('prepares eight members without queueing behind itself (capacity reported=%s)', async reported => {
+  const { store, asset } = setup();
+  const scheduler = new StorePriorityScheduler({ maxConcurrent: 4, ackReservedSlots: 1,
+    healthReservedSlots: 1, normalReservedSlots: 1, backgroundReservedSlots: 1, now: () => Date.now() });
+  expect(scheduler.snapshot.backgroundInflightLimit).toBe(1);
+  expect(scheduler.snapshot.queueWaitTimeoutMs).toBe(DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS);
+  const scheduledStore: TripleStore = store;
+  if (reported) scheduledStore.getPressureSnapshot = () => scheduler.snapshot;
+  const query = store.query.bind(store);
+  let versionsRead = 0;
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  const reads = vi.spyOn(store, 'query').mockImplementation((sparql, options) =>
+    scheduler.run(options?.priority, 'group-metadata', async () => {
+      if (sparql.includes('SELECT ?version')) {
+        await new Promise(resolve => setTimeout(resolve, 2_000));
+        versionsRead++;
+      }
+      return query(sparql, options);
+    }, options?.signal));
+  const started = Date.now();
+  let completedAt = 0;
+  const pending = materializeVerifiedGraphScopedGroup({ store: scheduledStore,
+    assets: Array.from({ length: 8 }, (_, index) => asset(index + 1)),
+    options: { priority: 'background' }, assertCurrent: () => {}, shouldQuarantineCommitted: () => false,
+  }).then(value => { completedAt = Date.now(); return { value }; }, error => ({ error }));
+  try {
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await pending).toEqual({ value: 'applied' });
+    expect(versionsRead).toBe(8);
+    expect(completedAt - started).toBe(16_000);
+    expect(completedAt - started).toBeGreaterThan(DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS);
+    expect(await store.countQuads()).toBe(24);
+    expect(scheduler.snapshot.backgroundQueued).toBe(0);
+    expect(scheduler.snapshot.backgroundInflight).toBe(0);
+  } finally { await pending; reads.mockRestore(); vi.useRealTimers(); }
 });

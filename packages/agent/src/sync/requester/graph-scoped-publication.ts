@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { withMaterializationLocks } from '@origintrail-official/dkg-publisher';
-import type { AtomicAssetReplacement, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
+import { storeLaneInflightLimit, type AtomicAssetReplacement, type QueryOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { VerifiedGraphScopedAsset, GraphScopedMaterializationOutcome } from './graph-scoped-materialization.js';
 import { prepareGraphScopedReplacementUnderLock } from './graph-scoped-replacement.js';
 
@@ -16,16 +16,20 @@ export async function executeGraphScopedPublication<T extends GraphScopedMateria
   const { assets, options, assertCurrent } = params;
   const apply = async (): Promise<T | 'quarantined'> => {
     assertCurrent();
-    // At most eight members, under the complete ordered lock set. Drain every
-    // preparation before inspecting results or releasing any member lock.
-    const prepared = await Promise.allSettled(assets.map(asset =>
-      prepareGraphScopedReplacementUnderLock({ store: params.store, asset, options,
-        assertCurrent, requireCurrentMetadata: params.requireCurrentMetadata })));
+    // Keep the complete lock set, but never queue this group's reads behind its
+    // own preparations. Unknown lane capacity conservatively permits one member.
+    const width = storeLaneInflightLimit(params.store, options.priority) ?? 1;
     const replacements: AtomicAssetReplacement[] = [];
-    for (const result of prepared) {
-      if (result.status === 'rejected') throw result.reason;
-      if (!result.value) return params.stale();
-      replacements.push(result.value);
+    for (let offset = 0; offset < assets.length; offset += width) {
+      // Drain every started preparation before inspecting failures or releasing locks.
+      const prepared = await Promise.allSettled(assets.slice(offset, offset + width).map(asset =>
+        prepareGraphScopedReplacementUnderLock({ store: params.store, asset, options,
+          assertCurrent, requireCurrentMetadata: params.requireCurrentMetadata })));
+      for (const result of prepared) {
+        if (result.status === 'rejected') throw result.reason;
+        if (!result.value) return params.stale();
+        replacements.push(result.value);
+      }
     }
     assertCurrent();
     // Once dispatched, publication and any quarantine drain under every lock.
