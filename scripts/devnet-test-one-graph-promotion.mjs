@@ -344,11 +344,12 @@ const holdsDefinition = (node, graph) => waitFor(async () => {
  * can: it dials the curator through its relay (a subscriber asks only the
  * peers it is connected to for the graph's declaration, and the curator may
  * be the only one that holds it) and subscribes again with an explicit
- * catch-up (`forceCatchup`). Resolves to { dialError, from (the second
+ * catch-up (`forceCatchup`). `onSubscribed(from)` runs as soon as that
+ * subscribe was accepted. Resolves to { dialError, from (the second
  * subscribe), held (whether it held the definition within DEFINITION_MS),
  * heldAfterMs }.
  */
-async function rejoin(node, graph) {
+async function rejoin(node, graph, onSubscribed) {
   let dialError = null;
   if (node !== edges.curator) {
     try {
@@ -358,6 +359,7 @@ async function rejoin(node, graph) {
     }
   }
   const from = await graphs.subscribe(node, graph, { forceCatchup: true });
+  onSubscribed?.(from);
   const held = (await holdsDefinition(node, graph)).ok;
   return { dialError, from, held, heldAfterMs: Date.now() - from };
 }
@@ -394,12 +396,14 @@ async function subscribeChecked(node, graph, caseId) {
  * definition within DEFINITION_MS. With the definition, its write into the
  * sub-graph before it registers the sub-graph itself is a check under
  * `caseId` (known gap #3293); then it registers the sub-graph (POST
- * /api/sub-graph/create) and must list it. Resolves to { from (the second
- * subscribe: the node's later bounds count from it), probe (the record of
- * that write, a report like the others once written) }.
+ * /api/sub-graph/create) and must list it. `onSubscribed(from)` runs as soon
+ * as the second subscribe was accepted, so that a watch timed from it starts
+ * at once. Resolves to { from (the second subscribe: the node's later bounds
+ * count from it), probe (the record of that write, a report like the others
+ * once written) }.
  */
-async function remedy(node, graph, caseId) {
-  const { dialError, from, held, heldAfterMs } = await rejoin(node, graph);
+async function remedy(node, graph, caseId, { onSubscribed } = {}) {
+  const { dialError, from, held, heldAfterMs } = await rejoin(node, graph, onSubscribed);
   if (dialError) fail(10, `${node.label} could not dial the curator through its relay: ${dialError}`);
   else pass(10, `${node.label} dialed the curator through its relay`);
   if (held) pass(10, `${node.label} holds the definition of ${graph.key} ${seconds(heldAfterMs)} s after it subscribed again with forceCatchup`);
@@ -600,8 +604,13 @@ async function run() {
   await checkProfile([late]);
   await precondition(7, 'once the late Edge is up');
   await subscribeChecked(late, main, 7);
-  const recovery = await remedy(late, main, 7);
-  await settle([io.watch(placementPairs(7, shared, promoted, [late], { from: recovery.from, fromWhat: 'late subscribed again', bound: RECOVERY_MS }))]);
+  // The recovery counts from the second subscribe, and its watch starts the
+  // moment that subscribe is accepted, beside the remedy's other steps.
+  let recoveryWatch = null;
+  const recovery = await remedy(late, main, 7, {
+    onSubscribed: from => { recoveryWatch = io.watch(placementPairs(7, shared, promoted, [late], { from, fromWhat: 'late subscribed again', bound: RECOVERY_MS })); },
+  });
+  await settle([recoveryWatch]);
   if (recovery.probe && !recovery.probe.error) {
     shared.push(recovery.probe);
     await settle([io.watch(io.pairs(7, recovery.probe, others(late), 'swm'))]);

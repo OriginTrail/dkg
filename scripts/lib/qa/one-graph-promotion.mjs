@@ -28,10 +28,13 @@ export function inVerifiedScope(graphCell, scope) {
   return graph === scope.root || graph.startsWith(scope.prefix);
 }
 
-/** Whether rows of one subject hold nothing for the predicate: a report that has left a layer. */
-export function judgeGone(rows, { predicate }) {
-  const found = rows.filter(row => bare(cellText(row.p)) === predicate).length;
-  return { gone: found === 0, found };
+/**
+ * Whether rows of one report's subject hold nothing at all: a report that has
+ * left a layer. The reads select only that subject, so any triple of it left
+ * in the layer (its value, its body, its class) means it has not left.
+ */
+export function judgeGone(rows) {
+  return { gone: rows.length === 0, found: rows.length };
 }
 
 /**
@@ -120,8 +123,9 @@ export function pairOutcome(pair, { boundMs }) {
 /**
  * The curator's promotion of a report another node authored (POST
  * /api/knowledge-assets/:name/vm/publish with `selectedAuthorAgentAddress`):
- * { ok: true, ual, txHash } once the publish was confirmed on chain under the
- * author's seal, else { ok: false, why }. A confirmed publish whose binding to
+ * { ok: true, ual, txHash } once the publish was confirmed on chain and the
+ * answer names the report's author as the one whose seal was published, else
+ * { ok: false, why }; an answer that names no author is no evidence of it. A confirmed publish whose binding to
  * the context graph failed (HTTP 207) is not a promotion of the report into
  * the graph's Verified Memory.
  */
@@ -129,8 +133,9 @@ export function promotionOutcome(answer, { authorAddress }) {
   const json = answer?.json ?? {};
   if (answer?.status !== 200 || json.status !== 'confirmed') return { ok: false, why: brief(answer) };
   if (!json.ual && json.kaId === undefined) return { ok: false, why: `confirmed without a UAL or an asset id: ${brief(answer)}` };
-  const sealedBy = typeof json.authorAddress === 'string' ? json.authorAddress : null;
-  if (sealedBy && sealedBy.toLowerCase() !== String(authorAddress).toLowerCase()) {
+  const sealedBy = typeof json.authorAddress === 'string' && json.authorAddress ? json.authorAddress : null;
+  if (!sealedBy) return { ok: false, why: `confirmed without the address of the author whose seal was published: ${brief(answer)}` };
+  if (sealedBy.toLowerCase() !== String(authorAddress).toLowerCase()) {
     return { ok: false, why: `published under the seal of ${sealedBy}, not of its author ${authorAddress}` };
   }
   return { ok: true, ual: json.ual ?? null, txHash: json.txHash ?? null };
@@ -322,7 +327,7 @@ export function slotHolder(reading, admissions, isTransfer) {
   if (candidates.length === 0) return { state: 'unclear' };
   if (!candidates.some(isTransfer)) return { state: 'other', admission: candidates[0] };
   if (!candidates.every(isTransfer)) return { state: 'unclear' };
-  return { state: 'transfer', admission: candidates[0] };
+  return { state: 'transfer', admission: candidates[0], candidates, start };
 }
 
 /**
@@ -347,18 +352,20 @@ export function transferLifetime(logText, admissions, isTransfer) {
 /**
  * Whether the large transfer held the node's only general slot when a report
  * arrived at `receivedAt`: the first reading taken at or after that moment
- * (and soon enough) shows the transfer, through an admission that started in
- * a log second wholly before `receivedAt`. One admission holds its slot
+ * (and soon enough) shows the transfer, and dates the start of the running
+ * admission before `receivedAt` (the latest start the reading allows, not the
+ * log second of any one candidate: when several of the transfer's admissions
+ * match, the running one may be a later one). One admission holds its slot
  * without a break, so it held it at `receivedAt`. Returns { held, why }.
  */
 export function transferHeldAt(receivedAt, readings, admissions, isTransfer) {
   const after = readings.filter(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= receivedAt).sort((a, b) => a.at - b.at)[0];
   if (!after || after.at - receivedAt > RECEIPT_READING_MS) return { held: false, why: 'no reading of the slot right after it' };
-  const { state, admission } = slotHolder(after, admissions, isTransfer);
+  const { state, start } = slotHolder(after, admissions, isTransfer);
   if (state !== 'transfer') {
     return { held: false, why: { other: 'the slot held other work or none', unclear: 'the reading after it could not tell which work held the slot', unreadable: 'the slot could not be read' }[state] };
   }
-  if (admission.at + 999 >= receivedAt) return { held: false, why: 'the transfer\'s admission in the slot started only then' };
+  if (start.to >= receivedAt) return { held: false, why: 'the transfer\'s admission in the slot may have started only then' };
   return { held: true, why: null };
 }
 

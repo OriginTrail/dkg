@@ -58,10 +58,12 @@ test('Verified Memory of a sub-graph is its content graph and the per-asset grap
   assert.equal(inVerifiedScope(`${base}/reports/_verifiable_memory/0xa/1`, root), false);
 });
 
-test('a report has left a layer when no row of it carries the predicate', () => {
-  assert.deepEqual(judgeGone([], { predicate: LABEL }), { gone: true, found: 0 });
-  assert.deepEqual(judgeGone([{ p: 'urn:other', o: '"x"' }], { predicate: LABEL }), { gone: true, found: 0 });
-  assert.deepEqual(judgeGone([{ p: `<${LABEL}>`, o: '"x"' }, { p: LABEL, o: '"y"' }], { predicate: LABEL }), { gone: false, found: 2 });
+test('a report has left a layer only when no triple of its subject is left there', () => {
+  assert.deepEqual(judgeGone([]), { gone: true, found: 0 });
+  // Its value gone, its body or its class still there: it has not left.
+  assert.deepEqual(judgeGone([{ p: 'urn:one-graph:ReportBody', o: '"x"' }]), { gone: false, found: 1 });
+  assert.deepEqual(judgeGone([{ p: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', o: 'urn:one-graph:Report' }]), { gone: false, found: 1 });
+  assert.deepEqual(judgeGone([{ p: `<${LABEL}>`, o: '"x"' }, { p: LABEL, o: '"y"' }]), { gone: false, found: 2 });
 });
 
 test('a read that failed satisfies no pair, not even one waiting for absence', () => {
@@ -138,7 +140,13 @@ test('a promotion counts once confirmed under its author\'s seal and bound to th
   assert.equal(promotionOutcome({ status: 207, json: { status: 'confirmed', ual: 'u' }, text: '{"contextGraphError":"x"}' }, { authorAddress: author.agentAddress }).ok, false);
   assert.match(promotionOutcome({ status: 502, json: { status: 'tentative' }, text: 'did not confirm' }, { authorAddress: author.agentAddress }).why, /^HTTP 502 did not confirm/);
   assert.match(promotionOutcome({ status: 200, json: { status: 'confirmed' }, text: '{}' }, { authorAddress: author.agentAddress }).why, /without a UAL/);
-  assert.equal(promotionOutcome({ status: 200, json: { status: 'confirmed', kaId: '7' } }, { authorAddress: author.agentAddress }).ok, true);
+  assert.equal(promotionOutcome({ status: 200, json: { status: 'confirmed', kaId: '7', authorAddress: author.agentAddress } }, { authorAddress: author.agentAddress }).ok, true);
+  // An answer that names no author is no evidence of whose seal was published.
+  for (const json of [{ status: 'confirmed', kaId: '7' }, { status: 'confirmed', ual: 'u', authorAddress: '' }, { status: 'confirmed', ual: 'u', authorAddress: null }]) {
+    const outcome = promotionOutcome({ status: 200, json, text: JSON.stringify(json) }, { authorAddress: author.agentAddress });
+    assert.equal(outcome.ok, false, JSON.stringify(json));
+    assert.match(outcome.why, /^confirmed without the address of the author whose seal was published/);
+  }
   assert.equal(promotionOutcome({ status: 0, json: null, text: 'fetch failed' }, { authorAddress: author.agentAddress }).ok, false);
 });
 
@@ -344,8 +352,10 @@ test('a receipt counts as made while the transfer held the slot only with a read
   assert.deepEqual(transferHeldAt(second33 + 3500, holding, admissions, isTransfer), { held: true, why: null });
   // No reading soon enough after the receipt.
   assert.match(transferHeldAt(second33 + 1500, holding, admissions, isTransfer).why, /no reading of the slot right after it/);
-  // The admission in the slot started in the receipt's own second.
-  assert.match(transferHeldAt(second33 - 200, [reading(second33 + 100, 20, [durable(700)])], admissions, isTransfer).why, /started only then/);
+  // The reading dates the running admission at 33.3 s, after the receipt at 33.2 s: not proven.
+  assert.match(transferHeldAt(second33 - 200, [reading(second33 + 100, 20, [durable(200)])], admissions, isTransfer).why, /may have started only then/);
+  // Dated at 32.8 s, before it (its log line came within the log lag): proven.
+  assert.deepEqual(transferHeldAt(second33 - 200, [reading(second33 + 100, 20, [durable(700)])], admissions, isTransfer), { held: true, why: null });
   // Control-plane work in the slot, or none.
   const second31 = new Date('2026-10-16T01:16:31.500').getTime();
   assert.match(transferHeldAt(second31 + 1000, [reading(second31 + 1200, 20, [durable(1200)])], admissions, isTransfer).why, /other work or none/);
@@ -446,7 +456,7 @@ test('#3294: the curator\'s promotion of another Edge\'s report refused as not r
   const own = { author: curatorNode, graph: { key: 'main' }, sub: 'reports', value: 'curator report 1 (1)' };
   const ownResult = answer => promotionResult({ record: own, curator: curatorNode, outcome: promotionOutcome(answer, { authorAddress: curatorNode.agentAddress }), answer, heldByCurator: true });
   assert.equal(ownResult(confirmed).check, 'curator-promotion');
-  assert.equal(verdictOf(ownResult({ status: 200, json: { status: 'confirmed', ual: 'u' } })), 'pass');
+  assert.equal(verdictOf(ownResult({ status: 200, json: { status: 'confirmed', ual: 'u', authorAddress: curatorNode.agentAddress } })), 'pass');
   assert.equal(verdictOf(ownResult(notResident)), 'fail');
 });
 
@@ -503,4 +513,39 @@ test('a promotion\'s delivery to the busy Edge counts once the transfer held the
   assert.deepEqual(transferContended(promotedAt, promotedAt + 100, readings, admissions, isTransfer), { held: false, why: 'no reading was taken between them' });
   // After the transfer's life, even with contention before.
   assert.match(busyReceiptOutcome(result, { received: life.to + 5, life, held: contended, delivery: true }).text, /had ended by then$/);
+});
+
+test('successive transfer admissions around a receipt: the reading must date the running one before the receipt', () => {
+  // Two admissions of the transfer in the log seconds 0 and 1 (relative), a receipt at 1.1 s.
+  const base = new Date('2026-10-16T01:20:00').getTime();
+  const log = [
+    '2026-10-16 01:20:00 sync aaaa [DKGAgent] Sync backpressure running durable:0xabc/one-graph-large-1:QP4sWZbL (global inflight=1/1, queued=0/0)',
+    '2026-10-16 01:20:01 sync bbbb [DKGAgent] Sync backpressure running durable:0xabc/one-graph-large-1:EJfXkbMM (global inflight=1/1, queued=0/0)',
+  ].join('\n');
+  const admissions = parseAdmissions(log);
+  const receivedAt = base + 1100;
+  // Sent at 2.0 s, answered at 2.2 s, age 1000 ms: the running admission started between 1.0 and 1.2 s,
+  // which both log lines match, and the later one may have started after the receipt.
+  const straddling = reading(base + 2000, 200, [durable(1000)]);
+  assert.equal(slotHolder(straddling, admissions, isTransfer).candidates.length, 2);
+  assert.deepEqual(transferHeldAt(receivedAt, [straddling], admissions, isTransfer), { held: false, why: 'the transfer\'s admission in the slot may have started only then' });
+  // A reading that dates the running admission wholly before the receipt proves it.
+  const before = reading(base + 2000, 20, [durable(1600)]);
+  assert.deepEqual(transferHeldAt(receivedAt, [before], admissions, isTransfer), { held: true, why: null });
+});
+
+test('an absence watch fails a report whose value left the layer but whose body is still there', async () => {
+  const started = Date.now();
+  const cg = '0xabc/one-graph-main-1';
+  const devnet = {
+    api: async (_node, _method, _path, body) => {
+      const rows = [{ ...(body.includeContextGraphPartitions ? { g: `${sharedMemoryScope(cg, 'reports')}/0xaa/1` } : {}), p: 'urn:one-graph:ReportBody', o: '"report 1"' }];
+      return { status: 200, json: null, text: JSON.stringify({ result: { type: 'bindings', bindings: rows } }) };
+    },
+  };
+  const io = createReports(devnet, { stamp: 'S', sub: 'reports', predicate: LABEL, type: 'urn:one-graph:Report', boundMs: 300, definitionMs: 1000, syncedMs: 1000, pollMs: 40 });
+  const report = { author, graph: { key: 'main', id: cg, resolved: cg }, sub: 'reports', subject: 'urn:one-graph:S:1', value: 'r (1)', doneAt: started, error: null };
+  const handle = io.watch(io.pairs(4, report, [node], 'gone', { from: started, fromWhat: 'promotion', bound: 300 }));
+  await handle.done;
+  assert.match(pairOutcome(handle.pairs[0], { boundMs: 300 }).text, /: STILL in the shared-working-memory view of reports \(1 row\(s\) of it\) and in the cross-partition read \(1 row\(s\) of it\) 0 s after the promotion$/);
 });

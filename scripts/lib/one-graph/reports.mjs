@@ -87,7 +87,7 @@ export function createReports(devnet, config) {
   }
 
   const written = record => ({ predicate, value: record.value });
-  const judge = (kind, rows, record) => (PAIR_KINDS[kind].want === 'gone' ? judgeGone(rows, written(record)) : judgeHeld(rows, written(record)));
+  const judge = (kind, rows, record) => (PAIR_KINDS[kind].want === 'gone' ? judgeGone(rows) : judgeHeld(rows, written(record)));
 
   const inVm = kind => PAIR_KINDS[kind].layer === 'vm';
 
