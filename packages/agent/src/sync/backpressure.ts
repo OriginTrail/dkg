@@ -81,6 +81,8 @@ interface GlobalQueuePayload {
   automaticBackgroundLimit: number;
   /** Set for a shared-memory pull, which may hold a reserved slot instead. */
   sharedMemoryReserve?: SharedMemoryReserve;
+  /** Set for a shared-memory pull admitted with `reservedSlotOnly`. */
+  reservedOnly?: boolean;
   /** Set at start: the admission holds a reserved slot, not a general one. */
   reserved?: boolean;
   label: string;
@@ -322,12 +324,14 @@ let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
 
 const reservedSlots = new ReservedSharedMemorySlots();
-const generalCapacityAvailable = (payload: GlobalQueuePayload): boolean => capacityTracker.canRun(
-  payload.capacityClaim,
-  payload.admissionClass,
-  payload.policy,
-  payload.automaticBackgroundLimit,
-);
+// A pull admitted with `reservedSlotOnly` never takes a general slot, free or not.
+const generalCapacityAvailable = (payload: GlobalQueuePayload): boolean => !payload.reservedOnly
+  && capacityTracker.canRun(
+    payload.capacityClaim,
+    payload.admissionClass,
+    payload.policy,
+    payload.automaticBackgroundLimit,
+  );
 
 const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   now: () => performance.now(),
@@ -336,7 +340,7 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   onStart: (entry) => {
     const { capacityClaim, admissionClass } = entry.payload;
     // Started right after `canRun` said yes: a general slot whenever one is
-    // free, so a reserved slot never narrows what other work may admit.
+    // free and allowed, so a reserved slot never narrows what other work may admit.
     entry.payload.reserved = !generalCapacityAvailable(entry.payload);
     if (entry.payload.reserved) reservedSlots.take();
     const releaseCapacity = entry.payload.reserved
@@ -455,6 +459,11 @@ export interface SyncAdmissionOptions {
   priorityClass?: SyncPriorityClass;
   source?: SyncAdmissionSource;
   selectedSwmPriority?: boolean;
+  /**
+   * A shared-memory pull that may run only in a reserved shared-memory slot,
+   * never in a general one. Ignored where no reserve applies.
+   */
+  reservedSlotOnly?: boolean;
   agingThresholdMs?: number;
 }
 
@@ -517,6 +526,7 @@ function syncAdmissionTerms(
         limit,
         automaticBackgroundLimit: automaticBackgroundLimits.get(policy) ?? limit,
         sharedMemoryReserve: reserve,
+        reservedOnly: reserve !== undefined && options.reservedSlotOnly === true,
         label: options.label,
         contextGraphId: options.contextGraphId,
         source: normalizedSource,
@@ -850,7 +860,8 @@ export async function withGlobalSyncBackpressure<T>(
   if (admission.status === 'queued') {
     options.logInfo?.(
       options.ctx,
-      `Sync backpressure queued ${options.label} `
+      `Sync backpressure queued ${options.label}`
+        + `${admission.entry.payload.reservedOnly ? ' for a reserved shared-memory slot' : ''} `
         + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${admission.queuedBefore}/${queueLimit}`
         + `${reservedSharedMemoryState(sharedMemoryReserve)})`,
     );

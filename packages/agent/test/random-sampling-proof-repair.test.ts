@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
 import { resolveRandomSamplingBinding, type RandomSamplingHandle } from '../src/random-sampling-bind.js';
@@ -439,7 +440,7 @@ describe('Random Sampling proof-time exact repair', () => {
         subscribedContextGraphs: new Map([[localContextGraphId, { subscribed: true }]]),
         contextGraphBindingState: new ContextGraphBindingState(),
         graphScopedStoreClosed: false,
-        graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+        workLifetime: new AgentWorkLifetime(),
         syncCheckpoints: {
           delete: vi.fn(),
           set: vi.fn(),
@@ -468,7 +469,7 @@ describe('Random Sampling proof-time exact repair', () => {
     expect(repaired.privateRoots).toEqual([privateRoot]);
     expect(clean.agentLike.runContextGraphSyncWithBackpressure).toHaveBeenCalledTimes(1);
     expect(clean.insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
-    expect(clean.agentLike.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(clean.agentLike.workLifetime.physicalRuns.size).toBe(0);
 
     const tampered = makeAgent({ ...historicalQuad, object: '"tampered"' });
     await expect(LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset.call(

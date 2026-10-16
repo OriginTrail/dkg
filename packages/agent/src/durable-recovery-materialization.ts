@@ -20,7 +20,6 @@ export interface RecoveryMaterializationPorts {
   bindingGeneration(id: string): number;
   isBindingGenerationCurrent(id: string, generation: number): boolean;
   track(run: Promise<unknown>): void;
-  untrack(run: Promise<unknown>): void;
   verifyBinding(id: string, onChainId: string, ctx: OperationContext, signal?: AbortSignal): Promise<boolean>;
   persistSubscription(id: string, subscription: ContextGraphSub, reason: 'on-chain id binding', isCurrent: () => boolean): Promise<void>;
   bindSubscription(id: string, subscription: ContextGraphSub, onChainId: string): void;
@@ -77,7 +76,6 @@ export class RecoveryMaterializationOwner {
       assertLifecycleCurrent,
       asAbortError: asSyncFetchAbortError,
       track: (run) => ports.track(run),
-      untrack: (run) => ports.untrack(run),
     });
     return {
       authenticateChallengePinnedAsset: ({
