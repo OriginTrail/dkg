@@ -45,6 +45,7 @@ import { isCanonicalAuthoritativeContextGraphId } from
 import { ensureCuratorConnected } from './curator-peer-connection.js';
 import {
   learnPeerSubGraphs,
+  readLocalSubGraphNames,
   readPeerSubGraphRegistrations,
   type PeerSubGraphRegistration,
 } from './peer-sub-graph-registration.js';
@@ -113,7 +114,7 @@ interface CuratorBoundSubscription {
   onChainHash?: string;
 }
 
-interface CuratorMetaRefreshAgent {
+export interface CuratorMetaRefreshAgent {
   readonly peerId: string;
   readonly metaRefreshTimestamps: Map<string, number>;
   readonly node: { libp2p: Libp2pConnectHost };
@@ -495,7 +496,12 @@ async function fetchAuthoritativeMetaSnapshot(
   return {
     checkpointKey: result.checkpointKey,
     quads,
-    subGraphs: readPeerSubGraphRegistrations(contextGraphId, result.quads),
+    // Registrations this node holds are left out before the per-snapshot
+    // limit applies, so a node that refreshes a definition with more
+    // registrations than the limit learns the next ones each time (#3293).
+    subGraphs: readPeerSubGraphRegistrations(contextGraphId, result.quads, {
+      exclude: await readLocalSubGraphNames(agent.store, contextGraphId),
+    }),
     ...(approvedMember === undefined ? {} : { approvedMember }),
   };
 }

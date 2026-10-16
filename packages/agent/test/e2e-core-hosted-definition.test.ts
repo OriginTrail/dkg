@@ -23,6 +23,9 @@
  * write into `reports` was refused with SUB_GRAPH_NOT_FOUND.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ethers } from 'ethers';
 import type { DKGAgent } from '../src/index.js';
 import {
@@ -53,7 +56,19 @@ const MEMBER_KEY = HARDHAT_KEYS.EXTRA1;
 const REPORTS = 'reports';
 
 const pool = new RealChainAgents();
+const tempDirs: string[] = [];
 let fileSnapshot: string;
+
+/**
+ * An agent as a daemon runs it: with a data directory a registered graph is
+ * catalog-authoritative and gets no legacy durable sync of `_meta`, so the
+ * definition reaches a member only through the metadata fetch tested here.
+ */
+async function dataDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), `dkg-e2e-hosted-definition-${prefix}-`));
+  tempDirs.push(dir);
+  return dir;
+}
 beforeAll(async () => {
   fileSnapshot = await takeSnapshot();
   // Registering a Context Graph pulls the registration deposit.
@@ -64,6 +79,7 @@ beforeAll(async () => {
 afterEach(async () => {
   vi.restoreAllMocks();
   await pool.stopAll();
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 afterAll(async () => {
   await revertSnapshot(fileSnapshot);
@@ -75,6 +91,7 @@ async function startEdge(name: string, operationalKey: string, core: DKGAgent): 
     name,
     operationalKey,
     listenHost: '127.0.0.1',
+    dataDir: await dataDir(name),
     bootstrapPeers: [dialableAddress(core)],
   });
   await agent.start();
@@ -97,6 +114,7 @@ describe('E2E: a Core serves the owner\'s definition of a hosted registered publ
       name: 'HostedDefinitionCore',
       operationalKey: HARDHAT_KEYS.CORE_OP,
       listenHost: '127.0.0.1',
+      dataDir: await dataDir('core'),
       nodeRole: 'core',
     });
     await core.start();
@@ -162,8 +180,11 @@ describe('E2E: a Core serves the owner\'s definition of a hosted registered publ
       { contextGraphId, onChainId },
     );
 
-    // The definition came from a connected peer, the Core, not from the chain alone.
-    expect(fetched, 'how the member obtained the definition').toBe('fetched');
+    // The definition came from a connected peer, the Core, not from the chain
+    // alone: the subscription's own activation pull may have taken it from the
+    // Core before this call (`already-confirmed`), and the chain fallback would
+    // have installed no curator.
+    expect(['fetched', 'already-confirmed'], 'how the member obtained the definition').toContain(fetched);
     expect(await holdsCoreHostedOwnerDefinition(member.store, contextGraphId, ownerAddress), 'the member holds the owner\'s definition').toBe(true);
     expect(await subGraphNames(member, contextGraphId), 'the member lists the owner\'s sub-graph').toEqual([REPORTS]);
     expect(isConnected(member, owner), 'the member never reached the owner').toBe(false);

@@ -116,12 +116,14 @@ interface PeerSubGraphResolutionAgent extends PeerSubGraphRegistrationPorts, Fre
  * the graph's `_meta`: subject `<graph>/<name>` typed `dkg:SubGraph` and named
  * `<name>`, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT}. `options.first`
  * (the sub-graph a write names) is taken first when the snapshot holds it, so
- * the limit never leaves it out; the rest follow in name order.
+ * the limit never leaves it out; the rest follow in name order. Names in
+ * `options.exclude` (the registrations this node holds) are left out before
+ * the limit applies, so repeated reads of a large snapshot progress through it.
  */
 export function readPeerSubGraphRegistrations(
   contextGraphId: string,
   quads: readonly Quad[],
-  options: { readonly first?: string } = {},
+  options: { readonly first?: string; readonly exclude?: ReadonlySet<string> } = {},
 ): PeerSubGraphRegistration[] {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
@@ -129,6 +131,7 @@ export function readPeerSubGraphRegistrations(
   for (const quad of quads) {
     if (quad.graph !== metaGraph || !quad.subject.startsWith(prefix)) continue;
     const name = quad.subject.slice(prefix.length);
+    if (options.exclude?.has(name)) continue;
     const rows = rowsByName.get(name) ?? [];
     rows.push(quad);
     rowsByName.set(name, rows);
@@ -161,6 +164,22 @@ export function readPeerSubGraphRegistrations(
     });
   }
   return found;
+}
+
+/** The names of the sub-graphs this node has registered in the graph's `_meta`. */
+export async function readLocalSubGraphNames(store: TripleStore, contextGraphId: string): Promise<Set<string>> {
+  const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
+  const result = await store.query(
+    `SELECT ?s WHERE { GRAPH <${contextGraphMetaGraphUri(contextGraphId)}> { ?s <${RDF_TYPE}> <${SUB_GRAPH_TYPE}> } }`,
+    { source: 'agent.peerSubGraphRegistration.localNames' },
+  );
+  const names = new Set<string>();
+  if (result.type !== 'bindings') return names;
+  for (const row of result.bindings) {
+    const subject = row['s'];
+    if (typeof subject === 'string' && subject.startsWith(prefix)) names.add(subject.slice(prefix.length));
+  }
+  return names;
 }
 
 /**
@@ -365,7 +384,10 @@ async function resolveFromPeers(
       continue;
     }
     answered += 1;
-    const found = readPeerSubGraphRegistrations(contextGraphId, quads, { first: subGraphName });
+    const found = readPeerSubGraphRegistrations(contextGraphId, quads, {
+      first: subGraphName,
+      exclude: await readLocalSubGraphNames(agent.store, contextGraphId),
+    });
     if (await withinBudget(registerPeerSubGraphs(agent, contextGraphId, found, peerId, ctx), budget) === OUT_OF_TIME) {
       outOfTime = true;
       break;

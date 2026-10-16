@@ -45,7 +45,10 @@ import {
 } from '../src/core-hosted-definition.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
 import { Rfc64MetaBootstrapMethods } from '../src/dkg-agent-rfc64-meta-bootstrap.js';
-import { SUB_GRAPH_RESOLUTION_MAX_PEERS } from '../src/peer-sub-graph-registration.js';
+import {
+  PEER_SUB_GRAPH_REGISTRATION_LIMIT,
+  SUB_GRAPH_RESOLUTION_MAX_PEERS,
+} from '../src/peer-sub-graph-registration.js';
 import { readDurableMetaPage } from '../src/sync/responder/graph-plan.js';
 
 const OWNER = new ethers.Wallet(`0x${'95'.repeat(32)}`).address.toLowerCase() as EvmAddressV1;
@@ -80,6 +83,9 @@ const OWNER_DECLARATION: readonly Quad[] = Object.freeze([
 ]);
 
 /** A declaration that names another wallet as the graph's curator. */
+/** What a subscriber that took its definition from the chain holds: the canonical facts, no curator. */
+const CANONICAL_CHAIN_FACTS: readonly Quad[] = Object.freeze(OWNER_DECLARATION.slice(0, 2));
+
 const FORGED_CURATOR_DECLARATION: readonly Quad[] = Object.freeze([
   rootQuad(DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
   rootQuad(DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"public"'),
@@ -203,6 +209,8 @@ interface CoreOptions {
   connected?: readonly string[];
   /** The nodes the Core's agent registry lists for the owner wallet; default the owner's node. */
   ownerNodes?: readonly string[];
+  /** The curator node the Core's metadata projection names; default none. */
+  curatorNode?: string;
   /** The connected peers the Core's seed selection returns; default none. */
   seedPeers?: readonly string[];
   hosted?: boolean;
@@ -233,6 +241,7 @@ function coreNode(peers: Peers, options: CoreOptions = {}) {
       )),
     },
     resolveRfc64UnregisteredAuthoritySeedPeersV1: vi.fn(() => [...(options.seedPeers ?? [])]),
+    resolveCuratorPeerId: vi.fn(async () => options.curatorNode),
   };
   const node: PeerNode = { store, answer: 'complete' };
   return { agent: surface as unknown as object, surface, store, node, connected, stop, fetchSyncPages: base.fetchSyncPages, log: base.log };
@@ -471,14 +480,15 @@ describe('a Core keeps the owner\'s definition of a hosted registered public gra
     expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
     expect(core.surface.peerResolver.connect).not.toHaveBeenCalled();
 
-    // Not hosted here, or a request that was cancelled: nothing happens.
+    // Not hosted here, or a request already cancelled by its requester: no refresh starts.
     await refreshCoreHostedDefinitionBeforeServing(core.agent, `${OWNER}/another-graph`);
     const cancelled = new AbortController();
     cancelled.abort();
     core.connected.push(OWNER_PEER_ID);
     clock.mockReturnValue(now + 3 * (CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1));
     await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId, cancelled.signal);
-    expect(core.fetchSyncPages).toHaveBeenCalledTimes(3);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
   });
 
   it('fetches a missing definition in the background when a subscriber asks and no owner node is connected', async () => {
@@ -497,6 +507,112 @@ describe('a Core keeps the owner\'s definition of a hosted registered public gra
     await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
     await expect(inFlight).resolves.toBe('fetched');
     expect(core.fetchSyncPages).toHaveBeenCalledOnce();
+  });
+  it('does not take the canonical chain facts a peer serves for the owner\'s definition, and goes on to a peer that holds it', async () => {
+    const subscriber = await peerNode([...CANONICAL_CHAIN_FACTS]);
+    const otherCore = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const core = coreNode(peersOf([[OTHER_PEER_ID, subscriber], [SECOND_CORE_PEER_ID, otherCore]]), {
+      connected: [OTHER_PEER_ID, SECOND_CORE_PEER_ID], ownerNodes: [], seedPeers: [OTHER_PEER_ID, SECOND_CORE_PEER_ID],
+    });
+
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OTHER_PEER_ID, SECOND_CORE_PEER_ID]);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+
+    // Only the canonical facts anywhere: installed (they are correct), but not the owner's definition; the retry stays.
+    const alone = coreNode(peersOf([[OTHER_PEER_ID, subscriber]]), { connected: [OTHER_PEER_ID], ownerNodes: [], seedPeers: [OTHER_PEER_ID] });
+    await expect(ensureCoreHostedDefinition(alone.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    await expect(holdsAuthoritativePublicDefinitionV1(alone.store, contextGraphId)).resolves.toBe(true);
+    await expect(holdsCoreHostedOwnerDefinition(alone.store, contextGraphId, OWNER)).resolves.toBe(false);
+    expect(hasPendingCoreHostedDefinitionRetry(alone.agent, contextGraphId)).toBe(true);
+  });
+
+  it('names the owner\'s node through the definition it holds when the agent registry lists none, and remembers the peer a definition came from', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]), { ownerNodes: [], seedPeers: [OWNER_PEER_ID] });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    expect(core.log.info.mock.calls.map((call) => String(call[1])))
+      .toContainEqual(expect.stringContaining(`installed the owner's definition from peer ${OWNER_PEER_ID.slice(-8)}`));
+
+    // The owner registers a sub-graph. The projection now names the curator
+    // node, and the peer the definition came from is remembered: either names
+    // the connected owner for the refresh before serving.
+    await owner.store.insert(subGraphRegistration(REPORTS));
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+
+    const named = coreNode(peersOf([[OWNER_PEER_ID, owner]]), { ownerNodes: [], curatorNode: OWNER_PEER_ID });
+    await expect(ensureCoreHostedDefinition(named.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    expect(named.log.info.mock.calls.map((call) => String(call[1])))
+      .toContainEqual(expect.stringContaining(`installed the owner's definition from owner node ${OWNER_PEER_ID.slice(-8)}`));
+  });
+
+  it(`learns a graph's sub-graphs past the per-snapshot limit of ${PEER_SUB_GRAPH_REGISTRATION_LIMIT} across refreshes`, async () => {
+    const names = Array.from({ length: PEER_SUB_GRAPH_REGISTRATION_LIMIT + 1 }, (_, i) => `s${String(i).padStart(4, '0')}`);
+    const last = names.at(-1)!;
+    const owner = await peerNode([...OWNER_DECLARATION, ...names.flatMap((name) => subGraphRegistration(name))]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, names[0]!)).resolves.toBe(true);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, last)).resolves.toBe(false);
+
+    // The next refresh takes the registrations the Core does not hold yet.
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, last)).resolves.toBe(true);
+
+    // A member connected to the Core only writes into the last one.
+    const member = memberNode(peersOf([[CORE_PEER_ID, core.node]]), { connected: [CORE_PEER_ID] });
+    await member.store.insert([...OWNER_DECLARATION]);
+    const publisher = await memberPublisher(member);
+    await expect(firstWrite(publisher, 'report-last', last)).resolves.toBeUndefined();
+    expect(askedPeers(member.fetchSyncPages)).toEqual([CORE_PEER_ID]);
+  });
+
+  it('answers a subscriber\'s request within the refresh budget when the agent registry, the owner or a running attempt stalls', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const budgetMs = 60;
+    const within = async (work: Promise<void>) => {
+      const startedAt = performance.now();
+      await work;
+      return performance.now() - startedAt;
+    };
+
+    // The agent registry never answers: the stored copy is served after the budget.
+    const stalledRegistry = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(stalledRegistry.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    stalledRegistry.surface.discovery.findAgents.mockImplementation(() => new Promise(() => undefined));
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+    expect(await within(refreshCoreHostedDefinitionBeforeServing(stalledRegistry.agent, contextGraphId, undefined, budgetMs)))
+      .toBeLessThan(budgetMs * 10);
+    expect(stalledRegistry.fetchSyncPages).toHaveBeenCalledOnce();
+
+    // The owner never answers the fetch: the stored copy is served after the budget.
+    const stalledOwner = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(stalledOwner.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    stalledOwner.fetchSyncPages.mockImplementation(() => new Promise(() => undefined));
+    expect(await within(refreshCoreHostedDefinitionBeforeServing(stalledOwner.agent, contextGraphId, undefined, budgetMs)))
+      .toBeLessThan(budgetMs * 10);
+
+    // An attempt already running stalls: the request waits for it only within the budget.
+    const stalledAttempt = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    stalledAttempt.fetchSyncPages.mockImplementation(() => new Promise(() => undefined));
+    const attempt = ensureCoreHostedDefinition(stalledAttempt.agent, contextGraphId, 'recorded');
+    expect(await within(refreshCoreHostedDefinitionBeforeServing(stalledAttempt.agent, contextGraphId, undefined, budgetMs)))
+      .toBeLessThan(budgetMs * 10);
+    expect(stalledAttempt.fetchSyncPages).toHaveBeenCalledOnce();
+    // A request cancelled by its requester ends the wait at once.
+    const cancelled = new AbortController();
+    cancelled.abort();
+    expect(await within(refreshCoreHostedDefinitionBeforeServing(stalledAttempt.agent, contextGraphId, cancelled.signal)))
+      .toBeLessThan(budgetMs);
+    clock.mockRestore();
+    void attempt;
   });
 });
 

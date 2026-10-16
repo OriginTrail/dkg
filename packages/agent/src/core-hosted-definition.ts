@@ -20,12 +20,19 @@
  * its owner (`<owner wallet>/<name>`):
  *  - when a graph is recorded as hosted, and when a hosted row is restored at
  *    start, the Core fetches the owner's `_meta` ({@link ensureCoreHostedDefinition}):
- *    from the owner's node when it can name it, else from connected peers,
- *    and retries with a growing delay while it holds none;
+ *    from the owner's nodes when it can name them (the curator node a held
+ *    definition names, the agent registry's entries for the owner wallet, the
+ *    peer the definition last came from), else from connected peers; a
+ *    definition counts only once the Core holds the owner's declaration (a
+ *    peer may serve the canonical chain facts, which name no curator), and
+ *    the Core retries with a growing delay while it holds none;
  *  - before it serves the first page of a hosted graph's durable `_meta`, it
- *    refreshes its copy from the owner when the owner is connected and the
+ *    refreshes its copy from the owner when an owner node is connected and the
  *    copy is older than the cooldown ({@link refreshCoreHostedDefinitionBeforeServing}),
- *    so a sub-graph the owner registered since reaches the subscriber;
+ *    within a bounded time, so a sub-graph the owner registered since reaches
+ *    the subscriber; registrations the Core holds already are left out before
+ *    the per-snapshot limit applies, so a graph with more sub-graphs than the
+ *    limit is learned across refreshes;
  *  - the responder serves what the Core holds in the same pages as before
  *    (`readDurableMetaPage`): the root declaration and the registrations of
  *    the sub-graphs the Core registered with it.
@@ -51,7 +58,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { holdsAuthoritativePublicDefinitionV1 } from './context-graph-meta-confirmation.js';
-import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
+import { runCuratorMetaRefreshFromPeer, type CuratorMetaRefreshAgent } from './curator-meta-refresh.js';
 import { META_REFRESH_COOLDOWN_MS } from './dkg-agent-constants.js';
 import { rfc64UnregisteredAuthorityOwnerV1 } from './rfc64/unregistered-authority-transport-v1.js';
 
@@ -82,22 +89,20 @@ export type CoreHostedDefinitionOutcome =
   /** No peer served a verified definition; a retry is scheduled. */
   | 'not-found';
 
-/** What keeping a hosted definition needs of the agent. */
-export interface CoreHostedDefinitionAgent {
-  readonly peerId: string;
-  readonly store: TripleStore;
-  readonly node: {
+/**
+ * What keeping a hosted definition needs of the agent: the curator metadata
+ * refresh's own dependencies (transport, store, locks, checkpoints), and the
+ * hosted rows, the agent registry and the peer selection used here.
+ */
+export interface CoreHostedDefinitionAgent extends CuratorMetaRefreshAgent {
+  readonly node: CuratorMetaRefreshAgent['node'] & {
     readonly stopSignal?: AbortSignal;
     readonly libp2p: { getConnections(): Array<{ remotePeer: { toString(): string } }> };
   };
-  readonly subscribedContextGraphs: ReadonlyMap<string, { readonly coreHosted?: boolean }>;
+  readonly subscribedContextGraphs: Map<string, { readonly coreHosted?: boolean; onChainId?: string; onChainHash?: string }>;
   readonly localContextGraphProvenance: { hasLocalCreate(contextGraphId: string): boolean };
   readonly discovery: {
     findAgents(options: { agentAddress?: string; signal?: AbortSignal }): Promise<Array<{ peerId: string; agentAddress?: string }>>;
-  };
-  readonly log: {
-    info(ctx: OperationContext, message: string): void;
-    warn(ctx: OperationContext, message: string): void;
   };
   resolveRfc64UnregisteredAuthoritySeedPeersV1(options: { contextGraphId?: string }): readonly string[];
 }
@@ -109,6 +114,8 @@ interface CoreHostedDefinitionState {
   readonly retries: Map<string, { timer: ReturnType<typeof setTimeout>; attempt: number }>;
   /** When each graph's copy was last refreshed from the owner, or the refresh refused. */
   readonly lastAttemptAt: Map<string, number>;
+  /** The peer each graph's definition was last installed from. */
+  readonly sources: Map<string, string>;
 }
 
 const states = new WeakMap<object, CoreHostedDefinitionState>();
@@ -121,7 +128,7 @@ function stopped(signal: AbortSignal | undefined): boolean {
 function stateOf(agent: object): CoreHostedDefinitionState {
   let state = states.get(agent);
   if (state === undefined) {
-    state = { inFlight: new Map(), retries: new Map(), lastAttemptAt: new Map() };
+    state = { inFlight: new Map(), retries: new Map(), lastAttemptAt: new Map(), sources: new Map() };
     states.set(agent, state);
   }
   return state;
@@ -162,23 +169,33 @@ export async function holdsCoreHostedOwnerDefinition(
   return curator.type === 'boolean' && curator.value === true;
 }
 
-/** The peer ids of `owner`'s nodes this node knows, connected ones first. */
+/**
+ * The peer ids of `owner`'s nodes this node can name, connected ones first:
+ * the curator node the graph's definition names (once a definition is held),
+ * the agent registry's entries for the owner wallet, and the peer the
+ * definition was last installed from.
+ */
 async function ownerPeerIds(
   agent: CoreHostedDefinitionAgent,
+  state: CoreHostedDefinitionState,
+  contextGraphId: string,
   owner: string,
   signal: AbortSignal | undefined,
 ): Promise<string[]> {
-  let agents: Array<{ peerId: string; agentAddress?: string }>;
+  const named = await agent.resolveCuratorPeerId(contextGraphId, { signal }).catch(() => undefined);
+  signal?.throwIfAborted();
+  let agents: Array<{ peerId: string; agentAddress?: string }> = [];
   try {
     agents = await agent.discovery.findAgents({ agentAddress: owner, signal });
   } catch {
     signal?.throwIfAborted();
-    return [];
   }
   const connected = connectedPeerIds(agent);
-  const peerIds = [...new Set(
-    agents.filter((entry) => entry.agentAddress?.toLowerCase() === owner.toLowerCase()).map((entry) => entry.peerId),
-  )].filter((peerId) => peerId !== agent.peerId).sort();
+  const peerIds = [...new Set([
+    ...(named === undefined ? [] : [named]),
+    ...agents.filter((entry) => entry.agentAddress?.toLowerCase() === owner.toLowerCase()).map((entry) => entry.peerId).sort(),
+    ...(state.sources.has(contextGraphId) ? [state.sources.get(contextGraphId)!] : []),
+  ])].filter((peerId) => peerId !== agent.peerId);
   return [
     ...peerIds.filter((peerId) => connected.has(peerId)),
     ...peerIds.filter((peerId) => !connected.has(peerId)),
@@ -264,7 +281,7 @@ async function attemptCoreHostedDefinition(
     cancelRetry(state, contextGraphId);
     return 'held';
   }
-  const owners = await ownerPeerIds(agent, hosted.owner, stopSignal);
+  const owners = await ownerPeerIds(agent, state, contextGraphId, hosted.owner, stopSignal);
   const fallback = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId })
     .filter((peerId) => peerId !== agent.peerId && !owners.includes(peerId))
     .slice(0, CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS);
@@ -272,6 +289,11 @@ async function attemptCoreHostedDefinition(
     if (stopped(stopSignal)) return 'not-hosted';
     state.lastAttemptAt.set(contextGraphId, Date.now());
     if (!(await refreshFromPeer(agent, contextGraphId, hosted.owner, peerId, stopSignal))) continue;
+    // A peer may serve a verified definition that is not the owner's: the
+    // canonical facts another subscriber took from the chain name no
+    // curator. That is installed (it is correct) but ends nothing here.
+    if (!(await holdsCoreHostedOwnerDefinition(agent.store, contextGraphId, hosted.owner))) continue;
+    state.sources.set(contextGraphId, peerId);
     cancelRetry(state, contextGraphId);
     agent.log.info(
       ctx,
@@ -344,36 +366,47 @@ export async function refreshCoreHostedDefinitionBeforeServing(
   agentObject: object,
   contextGraphId: string,
   signal?: AbortSignal,
+  budgetMs: number = CORE_HOSTED_DEFINITION_SERVE_REFRESH_BUDGET_MS,
 ): Promise<void> {
+  // A request already cancelled by its requester starts no refresh.
+  if (signal?.aborted === true) return;
   const agent = agentObject as CoreHostedDefinitionAgent;
   const hosted = hostedOwnerOf(agent, contextGraphId);
   if ('reason' in hosted) return;
   const state = stateOf(agentObject);
-  const budget = AbortSignal.timeout(CORE_HOSTED_DEFINITION_SERVE_REFRESH_BUDGET_MS);
+  // One budget for the whole refresh, the owner lookup included: a slow
+  // agent registry or owner must not hold a subscriber's request.
+  const budget = AbortSignal.timeout(budgetMs);
   const running = state.inFlight.get(contextGraphId);
-  if (running !== undefined) {
-    await withinBudget(running, budget, signal);
-    return;
-  }
+  const work = running ?? refreshFromConnectedOwner(agentObject, agent, state, contextGraphId, hosted.owner, budget);
+  await withinBudget(work.catch(() => undefined), budget, signal);
+}
+
+async function refreshFromConnectedOwner(
+  agentObject: object,
+  agent: CoreHostedDefinitionAgent,
+  state: CoreHostedDefinitionState,
+  contextGraphId: string,
+  owner: string,
+  budget: AbortSignal,
+): Promise<void> {
   const lastAttemptAt = state.lastAttemptAt.get(contextGraphId);
   if (lastAttemptAt !== undefined && Date.now() - lastAttemptAt < CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS) return;
   const connected = connectedPeerIds(agent);
-  const ownerPeer = (await ownerPeerIds(agent, hosted.owner, signal).catch(() => []))
+  const ownerPeer = (await ownerPeerIds(agent, state, contextGraphId, owner, budget).catch(() => []))
     .find((peerId) => connected.has(peerId));
   if (ownerPeer === undefined) {
-    if (!(await holdsCoreHostedOwnerDefinition(agent.store, contextGraphId, hosted.owner).catch(() => true))) {
+    if (!(await holdsCoreHostedOwnerDefinition(agent.store, contextGraphId, owner).catch(() => true))) {
       void ensureCoreHostedDefinition(agentObject, contextGraphId, 'serve');
     }
     return;
   }
   state.lastAttemptAt.set(contextGraphId, Date.now());
-  const refresh = refreshFromPeer(agent, contextGraphId, hosted.owner, ownerPeer, budget)
-    .then((refreshed) => {
-      if (refreshed) cancelRetry(state, contextGraphId);
-      return refreshed;
-    })
-    .catch(() => false);
-  await withinBudget(refresh, budget, signal);
+  const refreshed = await refreshFromPeer(agent, contextGraphId, owner, ownerPeer, budget).catch(() => false);
+  if (refreshed && await holdsCoreHostedOwnerDefinition(agent.store, contextGraphId, owner).catch(() => false)) {
+    state.sources.set(contextGraphId, ownerPeer);
+    cancelRetry(state, contextGraphId);
+  }
 }
 
 /** `work`'s settlement, or the end of `budget` or `signal`, whichever comes first. */
