@@ -6,6 +6,7 @@ import {
   literal, parseIntegerLiteral, serializeJournalEntry,
 } from './async-lift-control-plane.js';
 import { expectBindings } from './async-lift-publisher-utils.js';
+import { withKeyedLocks } from './keyed-lock.js';
 
 type CapturedJournalFacts = Readonly<Omit<AdmissionJournalEntry, 'seq' | 'at'>>;
 
@@ -152,24 +153,13 @@ export class AsyncLiftJournalCompletion {
   private async appendToLineage(facts: CapturedJournalFacts, released: Promise<void>): Promise<void> {
     const captured = { ...facts };
     // The journal graph is fixed; preserve the existing process-wide lineage-only FIFO domain.
-    const key = captured.lineageKey;
-    const previous = AsyncLiftJournalCompletion.lineageQueues.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => { release = resolve; });
-    AsyncLiftJournalCompletion.lineageQueues.set(key, next);
-    await previous;
-    try {
+    // The canonical primitive releases FIFO before notification bookkeeping in append().
+    return withKeyedLocks(AsyncLiftJournalCompletion.lineageQueues, [captured.lineageKey], async () => {
       await released;
-      const seq = await this.allocateSequence(key);
+      const seq = await this.allocateSequence(captured.lineageKey);
       const entry = { ...captured, seq, at: this.now() };
       await this.store.insert(serializeJournalEntry(entry, DEFAULT_JOURNAL_GRAPH_URI));
-    } finally {
-      // Release FIFO before notification bookkeeping; the job tail still includes that bookkeeping.
-      release();
-      if (AsyncLiftJournalCompletion.lineageQueues.get(key) === next) {
-        AsyncLiftJournalCompletion.lineageQueues.delete(key);
-      }
-    }
+    });
   }
 
   /** Numeric MAX+1 with the original legacy parser; an empty lineage starts at zero. */
