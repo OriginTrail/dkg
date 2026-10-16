@@ -129,7 +129,7 @@ describe('query read admission', () => {
       await store.countQuads('urn:g', options);
       await expect(store.query('INSERT DATA { <urn:s> <urn:p> <urn:o> }', options)).rejects.toThrow('Mutations');
       await expect(store.replaceAssetGroup([{ graphUri: 'urn:data', metaGraphUri: 'urn:meta', metadataSubject: 'urn:asset',
-        graphQuads: [{ graph: 'urn:data', subject: 'urn:s', predicate: 'urn:p', object: '\"value\"' }], metadataQuads: [],
+        graphQuads: [{ graph: 'urn:data', subject: 'urn:s', predicate: 'urn:p', object: '"value"' }], metadataQuads: [],
       }], options)).rejects.toThrow('Mutations');
     }, options);
     expect(run).toHaveBeenCalledTimes(1);
