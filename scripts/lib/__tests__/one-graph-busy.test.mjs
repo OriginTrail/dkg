@@ -453,7 +453,7 @@ test('the busy case passes a report and a promotion that reached edgeB while the
     // edgeB's receipt of the report, dated by its reads, under the transfer's admission.
     assert.ok(passed.some(line => /"edgeA while edgeB is busy 1 \(1\)" by node8 \(edgeA\) in main\/reports at node9 \(edgeB\): in shared memory \d+ s after the share, while an admission of the transfer held the general slot$/.test(line)), scenario.lines.join('\n'));
     // The promotion edgeB finalized before the curator's answer: dated by the watch armed at that answer.
-    assert.ok(passed.some(line => /"earlier \(1\)" by node8 \(edgeA\) in main\/reports at node9 \(edgeB\): in Verified Memory 0 s after the promotion, while an admission of the transfer held the general slot$/.test(line)), scenario.lines.join('\n'));
+    assert.ok(passed.some(line => line.endsWith('"earlier (1)" by node8 (edgeA) in main/reports at node9 (edgeB): in Verified Memory 0 s after the promotion, while an admission of the transfer held the general slot')), scenario.lines.join('\n'));
     assert.ok(passed.some(line => /"earlier \(1\)" .* at node9 \(edgeB\): left shared memory 0 s after the promotion, and out of it to the end of the 2 s, while an admission of the transfer held the general slot$/.test(line)), scenario.lines.join('\n'));
     // The other Edges' pairs are ordinary delivery checks.
     assert.ok(passed.some(line => /"earlier \(1\)" .* at node7 \(curator\): in Verified Memory 0 s after the promotion$/.test(line)), scenario.lines.join('\n'));
