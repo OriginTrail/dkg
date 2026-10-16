@@ -3,13 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const renderers = vi.hoisted(() => ({ two: [] as any[], three: [] as any[], init: undefined as (() => Promise<void>) | undefined }));
 vi.mock('../src/core/renderer.js', () => ({ Canvas2DRenderer: class {
-  render = vi.fn(); resize = vi.fn(); destroy = vi.fn(); applyAnimation = vi.fn();
+  init = vi.fn(); render = vi.fn(); resize = vi.fn(); destroy = vi.fn(); applyAnimation = vi.fn();
   constructor() { renderers.two.push(this); }
 } }));
-vi.mock('../src/core/renderer-3d.js', () => ({ WebGL3DRenderer: class {
-  render = vi.fn(); resize = vi.fn(); destroy = vi.fn(); applyAnimation = vi.fn();
-  constructor() { renderers.three.push(this); }
-  init() { return renderers.init?.() ?? Promise.resolve(); }
+vi.mock('../src/core/renderer-3d.js', () => ({ createWebGL3DRenderer: async () => {
+  const renderer = { render: vi.fn(), resize: vi.fn(), destroy: vi.fn(), applyAnimation: vi.fn() };
+  renderers.three.push(renderer);
+  try { await renderers.init?.(); return renderer; }
+  catch (error) { renderer.destroy(); throw error; }
 } }));
 import { RdfGraphViz } from '../src/core/rdf-graph-viz.js';
 

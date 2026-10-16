@@ -1,6 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { OxigraphStore } from '../../storage/dist/index.js';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import {
   fileUrl,
   authHeaders,
@@ -56,7 +55,6 @@ let server: Server;
 let baseUrl: string;
 const requestLog: Array<{ url: string; method: string; body: string }> = [];
 let queryBindings: any[] = [];
-let queryStore: OxigraphStore | undefined;
 // Scripted per-call responses (status + body) for tests that need a non-200
 // reply, e.g. a fail-closed publish precondition. Each entry is consumed on
 // first match (FIFO). Cleared in beforeEach.
@@ -131,7 +129,7 @@ function startTestServer(): Promise<void> {
         } else if (url.startsWith('/api/context-graph/list') || url.startsWith('/api/context-graphs')) {
           res.end(JSON.stringify({ contextGraphs: [{ id: 'cg1' }] }));
         } else if (url.startsWith('/api/query')) {
-          const bindings = queryStore ? (await queryStore.query(JSON.parse(body).sparql)).bindings : queryBindings;
+          const bindings = queryBindings;
           res.end(JSON.stringify({ result: { bindings } }));
         } else if (url.startsWith('/api/shared-memory')) {
           res.end(JSON.stringify({ success: true, ual: 'did:dkg:test' }));
@@ -181,7 +179,6 @@ describe('UI API tests', () => {
     queryBindings = [];
     responseOverrides = [];
   });
-  afterEach(async () => { await queryStore?.close(); queryStore = undefined; });
 
   describe('fileUrl', () => {
     it('preserves sha256: prefix', () => {
@@ -829,21 +826,6 @@ describe('UI API tests', () => {
       expect(list.map(a => a.name)).toEqual(['my-import.md']);
     });
 
-    it('listAssertions(wm) dedupes when BOTH the URN and data-URI markers exist', async () => {
-      const agent = '0x' + '2'.repeat(40);
-      const id = `urn:dkg:assertion:cg-1:${agent}:doc`;
-      const alias = `did:dkg:context-graph:cg-1/assertion/${agent}/doc`;
-      const graph = 'did:dkg:context-graph:cg-1/_meta';
-      queryStore = new OxigraphStore();
-      await queryStore.insert([
-        { subject: id, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"WM"', graph },
-        { subject: alias, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"WM"', graph },
-        { subject: id, predicate: 'http://dkg.io/ontology/assertionGraph', object: alias, graph },
-      ]);
-      const list = await listAssertions('cg-1', 'wm');
-      expect(list.map(a => a.name)).toEqual(['doc']);
-    });
-
     it('listAssertions(wm) parses sub-graph-scoped URN markers and names containing ":"', async () => {
       const agent = '0x' + '3'.repeat(40);
       queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:code:${agent}:a:b.md` } }];
@@ -861,22 +843,6 @@ describe('UI API tests', () => {
       queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:shared-doc.md` } }];
       const list = await listAssertions('cg-1', 'swm');
       expect(list.map(a => a.name)).toEqual(['shared-doc.md']);
-    });
-
-    it('listAssertions(swm) excludes assertions already published to VM (dkg:vmCurrentAssertion)', async () => {
-      // Publish records a vmCurrentAssertion pointer but does NOT flip memoryLayer
-      // off "SWM" (backend gap), so the SWM list must drop published rows itself.
-      const agent = '0x' + '5'.repeat(40);
-      const graph = 'did:dkg:context-graph:cg-1/_meta';
-      queryStore = new OxigraphStore();
-      await queryStore.insert([
-        ...['unpublished.md', 'published.md'].map(name => ({
-          subject: `urn:dkg:assertion:cg-1:${agent}:${name}`, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"SWM"', graph,
-        })),
-        { subject: `urn:dkg:assertion:cg-1:${agent}:published.md`, predicate: 'http://dkg.io/ontology/vmCurrentAssertion', object: 'urn:vm:published', graph },
-      ]);
-      const list = await listAssertions('cg-1', 'swm');
-      expect(list.map(a => a.name)).toEqual(['unpublished.md']);
     });
 
     it('fetchAssertionUals maps assertionName -> reservedUal (shown next to the filename)', async () => {

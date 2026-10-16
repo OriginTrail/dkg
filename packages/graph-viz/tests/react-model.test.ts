@@ -3,6 +3,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../src/core/renderer.js', () => ({ Canvas2DRenderer: class {
+  init = vi.fn();
   render = vi.fn(); resize = vi.fn(); destroy = vi.fn();
 } }));
 import { RdfGraphViz } from '../src/core/rdf-graph-viz.js';

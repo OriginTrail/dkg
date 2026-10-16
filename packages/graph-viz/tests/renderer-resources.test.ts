@@ -4,7 +4,7 @@ const graph = vi.hoisted(() => ({ callbacks: new Map<string, any>(), factory: vi
 vi.mock('force-graph', () => ({ default: () => () => graph.chain }));
 vi.mock('3d-force-graph', () => ({ default: () => graph.factory }));
 import { Canvas2DRenderer } from '../src/core/renderer.js';
-import { WebGL3DRenderer } from '../src/core/renderer-3d.js';
+import { WebGL3DRenderer, createWebGL3DRenderer } from '../src/core/renderer-3d.js';
 import { GraphEventEmitter } from '../src/core/events.js';
 import { Texture } from 'three';
 const config = () => ({ container: document.createElement('div'), events: new GraphEventEmitter(),
@@ -22,6 +22,20 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('renderer hit regions and resources', () => {
+  it('publishes a ready backend and destroys it if synchronous initialization fails', async () => {
+    const renderer = await createWebGL3DRenderer(config());
+    expect(graph.factory).toHaveBeenCalledOnce();
+    renderer.destroy();
+    const destroy = vi.spyOn(WebGL3DRenderer.prototype, 'destroy');
+    const release = vi.fn(); const chain = graph.chain;
+    graph.chain = new Proxy({}, { get: (_target, key) => key === '_destructor' ? release
+      : key === 'height' ? () => { throw new Error('setup failed'); } : chain[key] });
+    graph.factory.mockReturnValue(graph.chain);
+    await expect(createWebGL3DRenderer(config())).rejects.toThrow('setup failed');
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it('makes the whole visible node clickable, including at coordinate zero', () => {
     const conf = config(); const clicked = vi.fn(); conf.events.on('node:click', clicked);
     const renderer = new Canvas2DRenderer(conf); renderer.init();
@@ -62,12 +76,12 @@ describe('renderer hit regions and resources', () => {
     expect(remaining.material.dispose).toHaveBeenCalledOnce(); expect(cancel).toHaveBeenCalledWith(7);
     expect(internal._currentNodes.size).toBe(0);
   });
-  it('initializes 3D once for concurrent callers and never allocates after early destruction', async () => {
+  it('initializes 3D synchronously once and never allocates after destruction', () => {
     const renderer = new WebGL3DRenderer(config());
-    await Promise.all([renderer.init(), renderer.init(), renderer.init()]);
+    renderer.init(); renderer.init(); renderer.init();
     expect(graph.factory).toHaveBeenCalledOnce();
     renderer.destroy(); expect(vi.getTimerCount()).toBe(0);
-    const early = new WebGL3DRenderer(config()); const pending = early.init(); early.destroy(); await pending;
+    const early = new WebGL3DRenderer(config()); early.destroy(); early.init();
     expect(graph.factory).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
   });
 

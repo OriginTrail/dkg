@@ -3,7 +3,7 @@ import { sparqlIri } from '@origintrail-official/dkg-core/sparql-safe';
 import { executeQuery } from './query-api.js';
 import type { AssertionInfo } from './api.js';
 import { UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
-import { decodeRdfStringLiteral } from '../rdf-literal.js';
+import { bindingLexicalValue } from './query-bindings.js';
 
 export interface AssertionsPage {
   items: Array<AssertionInfo & { reservedUal?: string; dataGraphUri?: string }>;
@@ -19,8 +19,7 @@ interface AssertionPageOptions {
 }
 
 const DKG = 'http://dkg.io/ontology/';
-const value = (term: unknown): string => typeof term === 'string' ? term
-  : String((term as { value?: unknown } | undefined)?.value ?? '');
+const value = (term: unknown): string => bindingLexicalValue(term) ?? '';
 
 /** Page membership metadata first, then count only the visible KAs' data graphs. */
 export async function listAssertionsPage(
@@ -60,7 +59,7 @@ export async function listAssertionsPage(
     const graphUri = value(row.g);
     const parsed = decodeAssertionIdentity(graphUri, contextGraphId);
     if (!parsed || (parsed.subGraph === 'meta' && !(options.includeQueryCatalog && parsed.name.startsWith('query-catalog-')))) return [];
-    return [{ ...parsed, graphUri, reservedUal: decodeRdfStringLiteral(value(row.ual)) || undefined,
+    return [{ ...parsed, graphUri, reservedUal: value(row.ual) || undefined,
       dataGraphUri: value(row.dg) || (graphUri.startsWith(base) ? graphUri : undefined) }];
   });
   if (items.length && layer === 'wm' && options.includeCounts !== false) {
@@ -102,5 +101,5 @@ export async function fetchAssertionPageCounts(contextGraphId: string, items: As
     GRAPH ?dg { ?s ?p ?o }
   } GROUP BY ?g`, { contextGraphId, includeContextGraphPartitions: true }, { maxAgeMs: options.fresh ? 0 : UI_READ_MAX_AGE_MS });
   return Object.fromEntries((counts.result?.bindings ?? []).map(row =>
-    [value(row.g), Number(value(row.cnt).replace(/^"(\d+)".*$/, '$1'))]).filter(([, count]) => Number.isFinite(count)));
+    [value(row.g), Number(value(row.cnt))]).filter(([, count]) => Number.isFinite(count)));
 }

@@ -312,6 +312,15 @@ describe('assertion pages against the native scoped query engine', () => {
     ]);
     expect((await listAssertionsPage(cg, 'swm', { pageSize: 1 })).items.map(item => item.graphUri)).toEqual([live]);
     expect(requests).toHaveLength(1);
+    expect((await listAssertions(cg, 'swm')).map(item => item.graphUri)).toEqual([live]);
+  });
+  it('bulk enumeration deduplicates explicit lifecycle URN and physical assertion-graph markers', async () => {
+    const id = iri('explicit-alias'); const alias = physical('explicit-alias');
+    await store.insert([
+      ...[id, alias].map(subject => ({ subject, predicate: dkg + 'memoryLayer', object: '"WM"', graph: meta })),
+      { subject: id, predicate: dkg + 'assertionGraph', object: alias, graph: meta },
+    ]);
+    expect((await listAssertions(cg, 'wm')).map(item => item.graphUri)).toEqual([id]);
   });
   it('does not count foreign-context data through a metadata pointer', async () => {
     const id = iri('foreign-pointer');

@@ -23,19 +23,16 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   const cursors = paging.scope === scope ? paging.cursors : [undefined];
   const pageIndex = paging.scope === scope ? paging.index : 0;
   const cursor = cursors[pageIndex];
-  const { data: loadedPage, loading, error: loadError, refresh: loadPage } = useFetch(
-    async () => ({ scope, cursor, ...await listAssertionsPage(contextGraphId, layer, { includeQueryCatalog, cursor, includeCounts: false }) }),
+  const { data: page, loading, error: loadError, refresh: loadPage } = useFetch(
+    () => listAssertionsPage(contextGraphId, layer, { includeQueryCatalog, cursor, includeCounts: false }),
     [contextGraphId, layer, includeQueryCatalog, cursor],
-    0
+    0, { scope: JSON.stringify([scope, cursor]), retention: 'scope' },
   );
-  const page = loadedPage?.scope === scope && loadedPage.cursor === cursor ? loadedPage : null;
   const assertions = page?.items ?? [];
   const countKey = JSON.stringify([scope, assertions.map(item => item.graphUri)]);
-  const pageCounts = useFetch(async () => ({
-    key: countKey,
-    counts: layer === 'wm' ? await fetchAssertionPageCounts(contextGraphId, assertions) : {},
-  }), [countKey, page]);
-  const counts = pageCounts.data?.key === countKey ? pageCounts.data.counts : {};
+  const pageCounts = useFetch<Record<string, number>>(() => layer === 'wm' ? fetchAssertionPageCounts(contextGraphId, assertions) : Promise.resolve({}),
+    [countKey, page], 0, { scope: countKey, retention: 'scope' });
+  const counts = pageCounts.data ?? {};
   const refresh = useCallback(() => { invalidateQueryCache(contextGraphId); loadPage(); }, [contextGraphId, loadPage]);
   useMemoryGraphEvents(contextGraphId, loadPage, { layers: [layer] });
   const [busy, setBusy] = useState<string | null>(null);

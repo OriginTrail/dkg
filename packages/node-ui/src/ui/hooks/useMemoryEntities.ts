@@ -80,11 +80,11 @@ export interface MemoryData {
   /** Per-layer query status so UI can distinguish a VM miss from WM/SWM failures. */
   layerStatus: Record<MemoryLayerKey, MemoryLayerStatus>;
   refresh: () => void;
-  hasMore?: boolean;
-  loadMore?: () => void;
-  pageError?: string | null;
+  hasMore: boolean;
+  loadMore: () => void;
+  pageError: string | null;
   /** A deterministic read budget left relationships outside the preview. */
-  limitMessage?: string | null;
+  limitMessage: string | null;
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';

@@ -52,7 +52,7 @@ export class RdfGraphViz {
   private _reificationCollapser: ReificationCollapser;
   private _metadataExtractor: MetadataExtractor;
   private _events: GraphEventEmitter;
-  private _renderer: RendererBackend;
+  private _renderer: RendererBackend | null = null;
   private _config: RdfGraphVizConfig;
   private _collapsedNodeIds = new Set<string>();
   private _rendererReady: Promise<void>;
@@ -94,25 +94,23 @@ export class RdfGraphViz {
     // Create renderer backend based on config (default: 2D canvas)
     if (config.renderer === '3d') {
       // Dynamic import for tree-shaking: 3d-force-graph only loaded when needed
-      let resolveReady: () => void;
-      this._rendererReady = new Promise((r) => { resolveReady = r; });
-
-      // Temporary placeholder until async import resolves
-      this._renderer = null as unknown as RendererBackend;
-
-      import('./renderer-3d.js').then(({ WebGL3DRenderer }) => {
-        if (this._destroyed) { resolveReady(); return; }
-        this._renderer = new WebGL3DRenderer(backendConfig);
-        return Promise.resolve(this._renderer.init()).then(() => { resolveReady(); });
+      this._rendererReady = import('./renderer-3d.js').then(({ createWebGL3DRenderer }) => {
+        if (this._destroyed) return;
+        return createWebGL3DRenderer(backendConfig);
+      }).then(renderer => {
+        if (!renderer) return;
+        if (this._destroyed) { renderer.destroy(); return; }
+        this._renderer = renderer;
       }).catch((err) => {
-        if (this._destroyed) { resolveReady(); return; }
+        if (this._destroyed) return;
         console.warn('[dkg-graph-viz] 3D renderer not available, falling back to 2D:', err.message);
-        this._renderer?.destroy();
-        this._renderer = new Canvas2DRenderer(backendConfig);
-        resolveReady();
+        const renderer = new Canvas2DRenderer(backendConfig);
+        renderer.init();
+        this._renderer = renderer;
       });
     } else {
       this._renderer = new Canvas2DRenderer(backendConfig);
+      this._renderer.init();
       this._rendererReady = Promise.resolve();
     }
 
@@ -477,7 +475,7 @@ export class RdfGraphViz {
    * Captures the canvas content from the active renderer backend.
    */
   async exportImage(): Promise<Blob> {
-    const canvas = this._renderer.getCanvas();
+    const canvas = this._renderer?.getCanvas();
     if (!canvas) {
       throw new Error('Cannot export: renderer not initialized or no canvas available');
     }

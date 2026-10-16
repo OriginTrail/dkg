@@ -190,7 +190,7 @@ describe('useMemoryEntities live updates', () => {
     await act(async () => root.render(React.createElement(Probe, { contextGraphId: 'project-a' })));
     if (mode === 'continuation') {
       expect(memory.counts.total).toBe(5);
-      await act(async () => memory.loadMore?.());
+      await act(async () => memory.loadMore());
     }
     expect(release).toBeTypeOf('function');
     const before = normalReads;

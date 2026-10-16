@@ -56,6 +56,7 @@ function addGraph(id: string, options: {
     counts,
     loading: false, error: options.error ?? null, partial: options.partial ?? false,
     layerStatus: { wm: 'ok', swm: options.failedLayer ? 'error' : 'ok', vm: 'ok' }, refresh: () => {},
+    hasMore: false, loadMore: () => {}, pageError: null, limitMessage: null,
   });
 }
 

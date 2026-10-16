@@ -34,6 +34,10 @@ async function assertLargeGraphControl(page: Page, input: 'mouse' | 'touch') {
   await page.goto('/?view=large-graph');
   const showAll = page.getByRole('button', { name: 'Show all loaded nodes (3,001)', exact: true });
   await expect(page.locator('.v10-graph-view canvas').first()).toBeVisible();
+  const rendered = () => page.evaluate(() => (window as any).largeGraphRenderedIds as string[] | undefined);
+  // The initial connected component has 2,999 nodes; the other two are separate.
+  await expect.poll(async () => (await rendered())?.length).toBe(2999);
+  expect(await rendered()).not.toContain('urn:disconnected:b');
   expect(await page.locator('.v10-graph-overlay').evaluate(node => getComputedStyle(node).pointerEvents)).toBe('none');
   expect(await showAll.evaluate(node => getComputedStyle(node).pointerEvents)).toBe('auto');
   const point = await page.locator('.v10-graph-legend > span').evaluate(node => {
@@ -50,6 +54,8 @@ async function assertLargeGraphControl(page: Page, input: 'mouse' | 'touch') {
   if (input === 'mouse') await showAll.click();
   else await showAll.tap();
   await expect(page.getByText('Showing all 3,001 loaded nodes.', { exact: true })).toBeVisible();
+  await expect.poll(async () => (await rendered())?.length).toBe(3001);
+  expect(await rendered()).toEqual(expect.arrayContaining(['urn:disconnected:a', 'urn:disconnected:b']));
 }
 test.describe('large graph control with the application stylesheet', () => {
   test.use({ hasTouch: true });

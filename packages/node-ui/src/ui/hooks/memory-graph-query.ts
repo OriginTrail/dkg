@@ -1,30 +1,12 @@
 import { postQueryDeduped } from '../api.js';
 import { UI_READ_MAX_AGE_MS } from '../lib/read-cache.js';
 import { QueryResponseLimitError } from '../query-transport.js';
-import { decodeRdfStringLiteral } from '../../rdf-literal.js';
+import { bindingLexicalValue as bv, bindingRdfTerm as rdfBindingValue } from '../query-bindings.js';
 import { sparqlIri } from '@origintrail-official/dkg-core/sparql-safe';
 import { definitionsForLayer, memoryQuery, type MemoryQueryDefinition } from './memory-query-definition.js';
 import type { Triple, LayeredTriple, MemoryLayerKey } from './useMemoryEntities.js';
 
-function bv(v: unknown): string | undefined {
-  if (v == null) return undefined;
-  if (typeof v === 'string') return v;
-  if (typeof v === 'object' && 'value' in (v as any)) return String((v as any).value);
-  return String(v);
-}
-
-export function rdfBindingValue(term: unknown): string | undefined {
-  if (!term || typeof term !== 'object') return bv(term);
-  const binding = term as { type?: string; value?: string; datatype?: string; 'xml:lang'?: string };
-  if (binding.type === 'bnode') return `_:${String(binding.value).replace(/^_:/, '')}`;
-  if (binding.type === 'literal' || binding.type === 'typed-literal') {
-    const text = JSON.stringify(binding.value ?? '');
-    if (binding['xml:lang']) return `${text}@${binding['xml:lang']}`;
-    if (binding.datatype) return `${text}^^<${binding.datatype}>`;
-    return text;
-  }
-  return bv(term);
-}
+export { rdfBindingValue };
 
 export function isUri(s: string): boolean {
   const value = canonicalEntityUri(s);
@@ -96,6 +78,13 @@ interface QueryLayerOptions {
   signal?: AbortSignal;
 }
 
+function queryMemory(definition: MemoryQueryDefinition, contextGraphId: string, sparql: string,
+  options: { includeContextGraphPartitions?: boolean } = {}) {
+  return postQueryDeduped({ sparql, contextGraphId, ...options,
+    ...(definition.layer === 'shared' ? { includeSharedMemory: true } : {}),
+  }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
+}
+
 const CURSOR_VARIABLES = ['?__g', '?__s', '?__p', '?__kind', '?__o', '?__lang', '?__datatype'];
 const CURSOR_BINDINGS = `
   BIND(STR(?g) AS ?__g)
@@ -107,15 +96,22 @@ const CURSOR_BINDINGS = `
   BIND(IF(isLiteral(?o), STR(DATATYPE(?o)), "") AS ?__datatype)`;
 
 function cursorForRow(row: Record<string, unknown>): RowCursor {
-  const values = CURSOR_VARIABLES.map(variable => {
-    const term = row[variable.slice(1)];
-    const value = bv(term);
-    // SPARQL JSON bindings are already lexical; flat daemon strings are RDF literals.
-    return typeof term === 'object' ? value : value === undefined ? undefined : decodeRdfStringLiteral(value);
-  });
+  const values = CURSOR_VARIABLES.map(variable => bv(row[variable.slice(1)]));
   if (values.some(value => value === undefined)) throw new Error('Memory query omitted its continuation key');
   const [graph, ...termKey] = values as string[];
   return { kind: 'row', graph, termKey: termKey as TermKey };
+}
+
+function triplesFromRows(rows: Record<string, unknown>[], contextGraphId: string, response = ''): Triple[] {
+  return rows.flatMap(row => {
+    const graph = bv(row.g) ?? '';
+    const term = (value: unknown) => {
+      const text = rdfBindingValue(value) ?? '';
+      return text.startsWith('_:') ? `_:${encodeURIComponent(graph)}:${response}${text.slice(2)}` : text;
+    };
+    const subject = term(row.s); const predicate = bv(row.p) ?? ''; const object = term(row.o);
+    return subject && predicate && object ? [{ subject, predicate, object, graph, subGraph: subGraphOf(graph, contextGraphId) }] : [];
+  });
 }
 
 function cursorFilter(cursor?: RowCursor): string {
@@ -138,8 +134,7 @@ export async function readMemoryGraphPage(
     const checkCurrent = () => signal?.throwIfAborted();
     const read = async (sparql: string) => {
       checkCurrent();
-      const data = await postQueryDeduped({ sparql, contextGraphId, ...requestOpts },
-        { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
+      const data = await queryMemory(definition, contextGraphId, sparql, requestOpts);
       checkCurrent();
       return data.result?.bindings ?? [];
     };
@@ -156,19 +151,7 @@ export async function readMemoryGraphPage(
       }
     };
     const triples: Triple[] = [];
-    const append = (rows: Record<string, unknown>[]) => {
-      for (const row of rows) {
-        const graph = canonicalEntityUri(bv(row.g) ?? '');
-        // Blank labels belong to this graph's single blank-edge response. They
-        // are never used as constants in another query or merged with another graph.
-        const term = (value: unknown) => {
-          const text = rdfBindingValue(value) ?? '';
-          return text.startsWith('_:') ? `_:${encodeURIComponent(graph)}:${text.slice(2)}` : text;
-        };
-        const subject = term(row.s); const predicate = bv(row.p) ?? ''; const object = term(row.o);
-        if (subject && predicate && object) triples.push({ subject, predicate, object, graph, subGraph: subGraphOf(graph, contextGraphId) });
-      }
-    };
+    const append = (rows: Record<string, unknown>[]) => { triples.push(...triplesFromRows(rows, contextGraphId)); };
     let pending: string[];
     let resume: RowCursor | undefined;
     if (cursor?.kind === 'blank-graphs') {
@@ -223,6 +206,14 @@ export async function readMemoryGraphPage(
   }
 }
 
+export interface MemoryEntityRead {
+  triples: LayeredTriple[];
+  partial: boolean;
+  /** Blank edges in these graphs belong exclusively to this captured response. */
+  blankGraphs: string[];
+}
+let detailResponseId = 0;
+
 /** Read a clicked resource directly, even when its facts fall outside the loaded graph pages. */
 export async function fetchMemoryEntity(
   contextGraphId: string,
@@ -230,7 +221,7 @@ export async function fetchMemoryEntity(
   layer?: MemoryLayerKey,
   includeQueryCatalog = false,
   preview?: { triples: LayeredTriple[]; partial: boolean },
-): Promise<{ triples: LayeredTriple[]; partial: boolean }> {
+): Promise<MemoryEntityRead> {
   const target = canonicalEntityUri(uri);
   const blank = target.startsWith('_:');
   const definitions = definitionsForLayer(contextGraphId, layer, includeQueryCatalog);
@@ -242,6 +233,7 @@ export async function fetchMemoryEntity(
       triples: (preview?.triples ?? []).filter(triple => layers.has(triple.layer)
         && (triple.subject === target || triple.object === target)),
       partial: preview?.partial ?? true,
+      blankGraphs: [],
     };
   }
   const results = await Promise.all(definitions.map(async definition => {
@@ -250,17 +242,29 @@ export async function fetchMemoryEntity(
       UNION { ?s ?p ${sparqlIri(target)} BIND(${sparqlIri(target)} AS ?o) FILTER(?s != ${sparqlIri(target)}) }
     }`;
     // Bind IRIs to use the store's subject/object indexes.
-    const data = await postQueryDeduped({ sparql: memoryQuery(definition, {
+    const data = await queryMemory(definition, contextGraphId, memoryQuery(definition, {
       pattern, limit: 1001,
-    }), contextGraphId, includeContextGraphPartitions: true }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
+    }), { includeContextGraphPartitions: true });
     const rows = data.result?.bindings ?? [];
-    return { truncated: rows.length > 1000, triples: rows.slice(0, 1000).map(row => ({
-      subject: rdfBindingValue(row.s) ?? '', predicate: bv(row.p) ?? '', object: rdfBindingValue(row.o) ?? '',
-      subGraph: subGraphOf(bv(row.g) ?? '', contextGraphId),
-    })) };
+    const direct = triplesFromRows(rows.slice(0, 1000), contextGraphId);
+    const isBlankEdge = (triple: Triple) => triple.subject.startsWith('_:') || triple.object.startsWith('_:');
+    const blankGraphs = [...new Set(direct.filter(isBlankEdge).map(triple => triple.graph!))];
+    if (!blankGraphs.length) return { truncated: rows.length > 1000, triples: direct, blankGraphs };
+    // Never combine labels from the indexed resource response with a second
+    // result. Capture blank facts once per graph, prioritizing the clicked
+    // resource's edges, and let the detail owner replace that graph's preview.
+    const blanks = await queryMemory(definition, contextGraphId, memoryQuery(definition, {
+      graphs: blankGraphs, filters: 'FILTER(isBlank(?s) || isBlank(?o))', limit: 1001,
+      order: `IF(?s = ${sparqlIri(target)} || ?o = ${sparqlIri(target)}, 0, 1)`,
+    }), { includeContextGraphPartitions: true });
+    const blankRows = blanks.result?.bindings ?? [];
+    return { truncated: rows.length > 1000 || blankRows.length > 1000, blankGraphs,
+      triples: [...direct.filter(triple => !isBlankEdge(triple)),
+        ...triplesFromRows(blankRows.slice(0, 1000), contextGraphId, `detail-${++detailResponseId}:`)] };
   }));
   return {
     triples: results.flatMap((result, index) => result.triples.map(triple => ({ ...triple, layer: definitions[index].layer }))),
     partial: results.some(result => result.truncated),
+    blankGraphs: results.flatMap(result => result.blankGraphs),
   };
 }

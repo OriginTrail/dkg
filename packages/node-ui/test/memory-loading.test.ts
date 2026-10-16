@@ -52,10 +52,10 @@ describe('bounded graph reads', () => {
     await act(async () => root.render(React.createElement(Probe, { id: 'cg-a' })));
     await flush();
     expect(memory.hasMore).toBe(true); expect(memory.partial).toBe(true); expect(memory.graphTriples).toHaveLength(5000);
-    await act(async () => memory.loadMore?.()); await flush();
+    await act(async () => memory.loadMore()); await flush();
     expect(memory.pageError).toContain('Retry'); expect(memory.graphTriples).toHaveLength(5000);
     pageFails = false;
-    await act(async () => memory.loadMore?.()); await flush();
+    await act(async () => memory.loadMore()); await flush();
     expect(memory.hasMore).toBe(false); expect(memory.partial).toBe(false); expect(memory.graphTriples).toHaveLength(5001);
     const pageReads = fetch.mock.calls.map(([, init]) => JSON.parse(String(init.body)).sparql).filter(sparql => sparql.includes('?__s > "I:urn:order:4999"'));
     expect(pageReads).toHaveLength(2);
@@ -97,6 +97,27 @@ describe('bounded graph reads', () => {
 });
 
 describe('pending tab reads', () => {
+  it('retains the current scope during refresh but hides previous selection data and errors immediately', async () => {
+    const pending = new Map<string, (value: string) => void>();
+    let read!: ReturnType<typeof useFetch<string>>;
+    let fail = false;
+    function FetchProbe({ id }: { id: string }) {
+      read = useFetch(() => fail ? Promise.reject(new Error('read failed'))
+        : new Promise<string>(resolve => pending.set(id, resolve)), [id, fail], 0, { scope: id, retention: 'scope' });
+      return React.createElement('div', null, read.data);
+    }
+    await act(async () => root.render(React.createElement(FetchProbe, { id: 'first' })));
+    await act(async () => pending.get('first')!('first result'));
+    expect(read.data).toBe('first result');
+    fail = true;
+    await act(async () => read.refresh());
+    expect(read.data).toBe('first result'); expect(read.error).toBe('read failed');
+    fail = false;
+    await act(async () => root.render(React.createElement(FetchProbe, { id: 'second' })));
+    expect(read.data).toBeNull(); expect(read.error).toBeNull(); expect(read.loading).toBe(true);
+    await act(async () => pending.get('second')!('second result'));
+    expect(read.data).toBe('second result'); expect(read.loading).toBe(false);
+  });
   it('applies slow polling responses without overlapping interval requests', async () => {
     vi.useFakeTimers();
     const fetcher = vi.fn(() => new Promise<string>(resolve => setTimeout(() => resolve('loaded'), 15_000)));

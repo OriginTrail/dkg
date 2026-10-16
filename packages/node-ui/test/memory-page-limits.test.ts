@@ -78,7 +78,7 @@ describe('memory read limits and response-local blank resources', () => {
     expect(detail.partial).toBe(false); expect(detail.triples).toHaveLength(2);
     expect(detail.triples.every(triple => triple.graph === graph)).toBe(true);
     expect(queries).toHaveLength(before);
-    expect(await fetchMemoryEntity(cg, '_:unknown', 'wm')).toEqual({ triples: [], partial: true });
+    expect(await fetchMemoryEntity(cg, '_:unknown', 'wm')).toEqual({ triples: [], partial: true, blankGraphs: [] });
     expect(queries).toHaveLength(before);
   });
 });

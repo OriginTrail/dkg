@@ -64,7 +64,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     await act(async () => root.render(React.createElement(Probe)));
     expect(memory.counts.wm).toBe(1); expect(memory.partial).toBe(true);
     const previewClaim = container.textContent;
-    await act(async () => memory.loadMore?.());
+    await act(async () => memory.loadMore());
     expect(memory.counts.wm).toBe(0); expect(memory.counts.swm).toBe(6);
     expect(memory.hasMore).toBe(false); expect(memory.partial).toBe(false);
     expect(previewClaim).toContain('Per-layer counts may change');
@@ -79,7 +79,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     failShared = true;
     await act(async () => root.render(React.createElement(Probe)));
     expect(memory.layerStatus.swm).toBe('error'); expect(memory.hasMore).toBe(true);
-    await act(async () => memory.loadMore?.());
+    await act(async () => memory.loadMore());
     expect(memory.limitMessage).toBeTruthy();
     expect(memory.hasMore).toBe(partitions > 5);
     const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry memory read');
@@ -100,7 +100,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     await act(async () => root.render(React.createElement(Probe)));
     expect(memory.graphTriples).toHaveLength(5000); expect(memory.hasMore).toBe(true);
     expect(memory.limitMessage).toBeNull();
-    await act(async () => memory.loadMore?.());
+    await act(async () => memory.loadMore());
     expect(memory.hasMore).toBe(false); expect(memory.partial).toBe(false);
     expect(memory.graphTriples).toHaveLength(5002);
     expect(memory.graphTriples.some(triple => triple.subject.startsWith('_:'))).toBe(true);
@@ -110,7 +110,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
   it.each(['switch', 'unmount'])('stops refreshed depth reads after %s while the first inventory is pending', async action => {
     await seed(cg, 12);
     await act(async () => root.render(React.createElement(Probe)));
-    await act(async () => memory.loadMore?.()); await act(async () => memory.loadMore?.());
+    await act(async () => memory.loadMore()); await act(async () => memory.loadMore());
     expect(memory.entityList).toHaveLength(12);
     holdRefresh = true; invalidateQueryCache(cg);
     await act(async () => events.refresh());
@@ -127,7 +127,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     await seed(cg, 6);
     await act(async () => root.render(React.createElement(Probe)));
     expect(memory.entityList).toHaveLength(5); expect(memory.partial).toBe(true);
-    await act(async () => memory.loadMore?.());
+    await act(async () => memory.loadMore());
     expect(memory.entityList).toHaveLength(6); expect(memory.partial).toBe(false);
     await seed(cg, 7); invalidateQueryCache(cg);
     await act(async () => events.refresh());
@@ -138,7 +138,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
   it('retains a coherent loaded preview if depth replay fails and recovers at that depth', async () => {
     await seed(cg, 6);
     await act(async () => root.render(React.createElement(Probe)));
-    await act(async () => memory.loadMore?.());
+    await act(async () => memory.loadMore());
     const previous = memory.graphTriples;
     const original = vi.mocked(fetch).getMockImplementation()!;
     vi.mocked(fetch).mockImplementation(async (url, init) => {
@@ -164,7 +164,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     await act(async () => root.render(React.createElement(Probe)));
     holdOldPage = true;
     let pending: unknown;
-    await act(async () => { pending = memory.loadMore?.(); });
+    await act(async () => { pending = memory.loadMore(); });
     expect(resolveOldPage).toBeTypeOf('function');
     await act(async () => root.render(React.createElement(Probe, { id: next })));
     const current = memory.entityList.map(entity => entity.uri);

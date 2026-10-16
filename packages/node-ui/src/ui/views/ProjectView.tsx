@@ -1,17 +1,14 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
-import { dedupeTriplesBySpo } from './project/entity-detail.js';
+import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import {
-  buildMemoryEntities,
   canonicalEntityUri,
   useMemoryEntities,
-  fetchMemoryEntity,
-  type LayeredTriple,
   type TrustLevel,
 } from '../hooks/useMemoryEntities.js';
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
@@ -469,35 +466,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   }, [refreshSubGraphCount]);
   useMemoryGraphEvents(contextGraphId, refreshSubGraphCount);
 
-  const selectedLayerTrust = selectedLayerContext ? TRUST_FOR_LAYER[selectedLayerContext] : null;
-  const detailKey = JSON.stringify([contextGraphId, selectedUri, selectedLayerContext, includeQueryCatalogInMemory]);
-  const detailRead = useFetch(async () => ({
-    key: detailKey,
-    ...(selectedUri ? await fetchMemoryEntity(contextGraphId, selectedUri, selectedLayerContext ?? undefined, includeQueryCatalogInMemory,
-      { triples: rawMemory.allTriples, partial: rawMemory.partial }) : { triples: [], partial: false }),
-  }), [detailKey, selectedUri?.startsWith('_:') ? rawMemory.allTriples : null, selectedUri?.startsWith('_:') ? rawMemory.partial : null]);
-  const fetchedDetail = detailRead.data?.key === detailKey ? detailRead.data : null;
-  useMemoryGraphEvents(contextGraphId, () => { if (selectedUri) detailRead.refresh(); });
-  const detailEntityTriples = useMemo(
-    () => selectedLayerTrust
-      ? [...rawMemory.allTriples.filter(t => t.layer === selectedLayerTrust), ...(fetchedDetail?.triples ?? [])]
-      : [...rawMemory.allTriples, ...(fetchedDetail?.triples ?? [])],
-    [rawMemory.allTriples, fetchedDetail, selectedLayerTrust],
-  );
-  const detailTriples = useMemo(
-    () => dedupeTriplesBySpo(detailEntityTriples),
-    [detailEntityTriples],
-  );
-  const detailEntities = useMemo(
-    () => selectedLayerTrust
-      ? buildMemoryEntities(detailEntityTriples as LayeredTriple[])
-      : fetchedDetail ? buildMemoryEntities(detailEntityTriples as LayeredTriple[]) : rawMemory.entities,
-    [detailEntityTriples, fetchedDetail, rawMemory.entities, selectedLayerTrust],
-  );
-  const selectedEntity = useMemo(
-    () => selectedUri ? detailEntities.get(selectedUri) ?? rawMemory.entities.get(selectedUri) ?? null : null,
-    [selectedUri, detailEntities, rawMemory.entities]
-  );
+  const detailRead = useMemoryEntityDetails(contextGraphId, selectedUri, selectedLayerContext, includeQueryCatalogInMemory, rawMemory);
+  const { entity: selectedEntity, entities: detailEntities, triples: detailTriples } = detailRead;
 
   // Route a sub-graph chip click to the sub-graph page. Selecting "All"
   // (null) exits the page back to the current layer view, or overview if
@@ -819,9 +789,9 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       />
 
       <main className="v10-memory-explorer-page" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
-      {selectedUri && (detailRead.loading || detailRead.error || fetchedDetail?.partial || !selectedEntity) && (
+      {selectedUri && (detailRead.loading || detailRead.error || detailRead.partial || !selectedEntity) && (
         <div className="v10-layer-action-note" role="status">
-          {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (fetchedDetail?.partial
+          {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (detailRead.partial
             ? 'The resource detail read reached its limit. Some relationships may be missing. Use a narrower query to inspect them.'
             : 'This resource is referenced here, but has no details in this view.')}
           {detailRead.error && <button onClick={detailRead.refresh}>Retry resource details</button>}

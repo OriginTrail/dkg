@@ -1,4 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import ForceGraph3D from '3d-force-graph';
+import * as THREE from 'three';
 import type { GraphNode, GraphEdge, ForceNode, ForceLink } from './types.js';
 import type { RendererBackend, RendererBackendConfig } from './renderer-backend.js';
 import type { AnimationConfig } from './view-config.js';
@@ -6,6 +8,13 @@ import type { ColorPalette } from './palette.js';
 import type { HexagonPainter } from './hexagon-painter.js';
 import type { StyleEngine } from './style-engine.js';
 import type { GraphEventEmitter } from './events.js';
+
+/** The lazy module's factory owns construction and initialization cleanup. */
+export async function createWebGL3DRenderer(config: RendererBackendConfig): Promise<RendererBackend> {
+  const renderer = new WebGL3DRenderer(config);
+  try { renderer.init(); return renderer; }
+  catch (error) { renderer.destroy(); throw error; }
+}
 
 /**
  * 3D WebGL renderer backend using 3d-force-graph (Three.js).
@@ -24,7 +33,6 @@ export class WebGL3DRenderer implements RendererBackend {
   private _container: HTMLElement;
   private _graph: any = null;
   private _destroyed = false;
-  private _initializing: Promise<void> | null = null;
   private _fadeFrame: number | null = null;
   private _iconSprites = new Map<string, { url: string; sprite: any }>();
   private _hexPainter: HexagonPainter;
@@ -81,28 +89,19 @@ export class WebGL3DRenderer implements RendererBackend {
     this._events = config.events;
   }
 
-  async init(): Promise<void> {
+  init(): void {
     if (this._destroyed || this._graph) return;
-    if (!this._initializing) this._initializing = this._initialize();
-    await this._initializing;
-  }
-
-  private async _initialize(): Promise<void> {
-
-    const [ForceGraph3DModule, THREE] = await Promise.all([
-      import('3d-force-graph'),
-      import('three'),
-    ]);
-
-    if (this._destroyed) return;
-    this._ForceGraph3D = ForceGraph3DModule.default ?? ForceGraph3DModule;
+    // This module is the lazy import boundary. Once loaded, initialization
+    // is synchronous and the visualizer publishes only a ready backend.
+    this._ForceGraph3D = ForceGraph3D;
     this._THREE = THREE;
     this._textureLoader = new THREE.TextureLoader();
 
     const width = this._container.clientWidth || this._container.offsetWidth || 800;
     const height = this._container.clientHeight || this._container.offsetHeight || 600;
 
-    this._graph = this._ForceGraph3D()(this._container)
+    this._graph = this._ForceGraph3D()(this._container);
+    this._graph
       .width(width)
       .height(height)
       .backgroundColor('#0a0a0f')
@@ -196,10 +195,7 @@ export class WebGL3DRenderer implements RendererBackend {
     collapsedNodeIds?: Set<string>
   ): void {
     if (this._destroyed) return;
-    if (!this._graph) {
-      this.init().then(() => this.render(nodes, edges, collapsedNodeIds));
-      return;
-    }
+    if (!this._graph) this.init();
 
     // Record load time for fade-in animation
     if (this._loadTime === 0) {

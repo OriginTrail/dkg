@@ -27,10 +27,13 @@ export function useFetch<T>(
   fetcher: () => Promise<T>,
   deps: unknown[] = [],
   intervalMs = 0,
+  options: { scope?: string; retention?: 'keep' | 'scope' } = {},
 ): { data: T | null; loading: boolean; error: string | null; refresh: () => void } {
-  const [data, setData] = useState<T | null>(null);
+  const { scope, retention = 'keep' } = options;
+  const [data, setData] = useState<{ scope?: string; value: T } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ scope?: string; message: string } | null>(null);
+  const startedScope = useRef(scope);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
   const inFlightRef = useRef<number | null>(null);
@@ -44,7 +47,7 @@ export function useFetch<T>(
     try {
       const result = await fetcher();
       if (mountedRef.current && generation === generationRef.current) {
-        setData(result);
+        setData({ scope, value: result });
         setError(null);
       }
     } catch (err: any) {
@@ -57,23 +60,24 @@ export function useFetch<T>(
             window.location.reload();
             return;
           }
-          setError(hasToken
+          setError({ scope, message: hasToken
             ? 'Authentication expired — please refresh the page.'
-            : 'API token required — enter it at the top of the page.');
+            : 'API token required — enter it at the top of the page.' });
           return;
         }
-        setError(err.message);
+        setError({ scope, message: err.message });
       }
     } finally {
       if (inFlightRef.current === generation) inFlightRef.current = null;
       if (mountedRef.current && generation === generationRef.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, [scope, ...deps]);
 
   useEffect(() => {
     generationRef.current++;
     mountedRef.current = true;
+    startedScope.current = scope;
     setLoading(true);
     load();
     let timer: ReturnType<typeof setInterval> | null = null;
@@ -108,7 +112,14 @@ export function useFetch<T>(
     };
   }, [load, intervalMs]);
 
-  return { data, loading, error, refresh: load };
+  // Scoped reads retain data during a refresh, but never expose another
+  // selection's data or error, including the render before effects run.
+  return {
+    data: retention === 'scope' && data?.scope !== scope ? null : data?.value ?? null,
+    loading: loading || (retention === 'scope' && startedScope.current !== scope),
+    error: retention === 'scope' && error?.scope !== scope ? null : error?.message ?? null,
+    refresh: load,
+  };
 }
 
 /** Format bytes to human-readable string. */
