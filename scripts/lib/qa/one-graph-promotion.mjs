@@ -147,17 +147,19 @@ export function pairOutcome(pair, { boundMs }) {
   const { view, partitions } = pair.progress;
   const names = { view: viewName(layer, record.sub), partitions: 'the cross-partition read' };
   // A report that must stay in the layer fails at the first reading that missed it, whatever came after.
+  // A reading that broke the pair, at its moment (`at`), from the anchor of the pair's bound.
+  const ageOf = violation => Math.max(0, violation.at - pair.from);
   if (pair.lapsed) {
-    const { read, age, seen } = pair.lapsed;
-    return { outcome: 'fail', text: `${what}: MISSING from ${names[read]}${readDetail(seen)} ${secs(age)} s after the ${after}, though it must stay in ${layerName}` };
+    const { read, seen } = pair.lapsed;
+    return { outcome: 'fail', text: `${what}: MISSING from ${names[read]}${readDetail(seen)} ${secs(ageOf(pair.lapsed))} s after the ${after}, though it must stay in ${layerName}` };
   }
   if (pairHeld(pair.progress)) {
     const at = secs(Math.max(view, partitions));
     if (want === 'gone') {
       const first = kind === 'gone' ? `left ${layerName} ${at} s after the ${after}` : `absent from ${layerName} ${at} s after the ${after}`;
       if (pair.reappeared) {
-        const { read, age, seen } = pair.reappeared;
-        return { outcome: 'fail', text: `${what}: ${first}, then was in ${names[read]}${readDetail(seen)} again ${secs(age)} s after it` };
+        const { read, seen } = pair.reappeared;
+        return { outcome: 'fail', text: `${what}: ${first}, then was in ${names[read]}${readDetail(seen)} again ${secs(ageOf(pair.reappeared))} s after it` };
       }
       const back = ['view', 'partitions'].filter(read => pair.confirm?.[read]?.satisfied === false && !pair.confirm[read].error);
       if (back.length) {
@@ -689,11 +691,12 @@ export function catchupDataTriples(logText, graphId) {
  * subscribe (with forceCatchup, at `from`), as a check with the evidence
  * known gap #3296 takes: `seen` is the last listing a poll made from that
  * subscribe ({ ok: it showed the graph synced, listed (listingEntry),
- * completedAt }), `boundMs` the deadline, and `heldAtSubscribe` and
+ * completedAt }), `boundMs` the deadline, `everSynced` whether any listing
+ * before that subscribe showed the graph synced, and `heldAtSubscribe` and
  * `catchup` as for syncedAtEndResult. A flag that showed only after the
  * deadline fails, however slowly the listing answered.
  */
-export function syncedAfterRemedyResult({ node, graph, seen, from, boundMs, heldAtSubscribe: held, catchup }) {
+export function syncedAfterRemedyResult({ node, graph, seen, from, boundMs, everSynced, heldAtSubscribe: held, catchup }) {
   const check = 'synced-after-remedy';
   const listed = seen?.listed;
   const bound = secs(boundMs);
@@ -704,7 +707,7 @@ export function syncedAfterRemedyResult({ node, graph, seen, from, boundMs, held
   const afterMs = Number.isFinite(seen.completedAt) ? seen.completedAt - from : null;
   const evidence = {
     readable: true, subscribed: entry?.subscribed === true, synced: entry?.synced === true, definitionHeld: listed.defined === true,
-    heldAtSubscribe: held === true, catchupPasses: catchup?.passes ?? 0, catchupDataTriples: catchup ? catchup.data : null,
+    everSynced, heldAtSubscribe: held === true, catchupPasses: catchup?.passes ?? 0, catchupDataTriples: catchup ? catchup.data : null,
   };
   if (evidence.synced && afterMs !== null && afterMs <= boundMs) {
     return { check, outcome: 'pass', text: `${node.label}: lists ${graph.key} as synced ${secs(afterMs)} s after it subscribed again with forceCatchup`, evidence };
@@ -720,16 +723,18 @@ export function syncedAfterRemedyResult({ node, graph, seen, from, boundMs, held
  * evidence known gap #3296 takes: `listed` is the node's listing entry
  * (listingEntry), `heldAtSubscribe` whether the node already held the
  * graph's reports when its last subscribe was accepted (heldAtSubscribe; only
- * a node watched from that moment has it), and `catchup` what its log says
- * its catch-up inserted after that subscribe (catchupDataTriples).
+ * a node watched from that moment has it), `everSynced` whether any earlier
+ * listing of it showed the graph synced (a flag lost after it held is no
+ * flag that never came), and `catchup` what its log says its catch-up
+ * inserted after that subscribe (catchupDataTriples).
  */
-export function syncedAtEndResult({ node, graph, listed, heldAtSubscribe: held, catchup }) {
+export function syncedAtEndResult({ node, graph, listed, everSynced, heldAtSubscribe: held, catchup }) {
   const check = 'synced-at-end';
   if (!listed?.readable) return { check, outcome: 'fail', text: `${node.label}: its listing could not be read at the end (${listed?.why ?? 'no answer'})`, evidence: { readable: false } };
   const { entry } = listed;
   const evidence = {
     readable: true, subscribed: entry?.subscribed === true, synced: entry?.synced === true, definitionHeld: listed.defined === true,
-    heldAtSubscribe: held === true, catchupPasses: catchup?.passes ?? 0, catchupDataTriples: catchup ? catchup.data : null,
+    everSynced, heldAtSubscribe: held === true, catchupPasses: catchup?.passes ?? 0, catchupDataTriples: catchup ? catchup.data : null,
   };
   if (evidence.synced) return { check, outcome: 'pass', text: `${node.label}: lists ${graph.key} as synced at the end`, evidence };
   return { check, outcome: 'fail', text: `${node.label}: lists ${graph.key} as ${entry ? `subscribed=${entry.subscribed} synced=${entry.synced}` : 'absent'} at the end`, evidence };

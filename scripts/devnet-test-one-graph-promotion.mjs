@@ -189,6 +189,7 @@ import {
 } from './lib/qa/one-graph-promotion.mjs';
 import { busyEdge } from './lib/one-graph/busy-transfer.mjs';
 import { OneGraphEdges } from './lib/one-graph/edges.mjs';
+import { pollUntil } from './lib/one-graph/poll.mjs';
 import { createGraphs } from './lib/one-graph/graphs.mjs';
 import { inheritedDkgEnv, PROFILE_CONFIG, PROFILE_ENV, PROFILE_NAMES } from './lib/one-graph/profile.mjs';
 import { createReports, settled } from './lib/one-graph/reports.mjs';
@@ -352,10 +353,10 @@ async function catalogStatus(node) {
  * slowly it answered.
  */
 async function holdsDefinition(node, graph, from) {
-  const seen = await waitFor(async () => {
+  const seen = await pollUntil(async () => {
     const listed = await io.listingEntry(node, graph);
     return { ok: listed.readable && listed.defined, completedAt: Date.now() };
-  }, Math.max(0, from + DEFINITION_MS - Date.now()), 2000);
+  }, from + DEFINITION_MS, 2000);
   return definitionInTime(seen, { from, boundMs: DEFINITION_MS });
 }
 
@@ -365,13 +366,15 @@ async function holdsDefinition(node, graph, from) {
  * made: { ok, listed (listingEntry), completedAt }, which
  * syncedAfterRemedyResult judges against the deadline.
  */
-const syncedBy = (node, graph, from) => waitFor(async () => {
+const syncedBy = (node, graph, from) => pollUntil(async () => {
   const listed = await io.listingEntry(node, graph);
   return { ok: listed.readable && listed.entry?.synced === true, listed, completedAt: Date.now() };
-}, Math.max(0, from + SYNCED_MS - Date.now()), 2000);
+}, from + SYNCED_MS, 2000);
 
 // Each remedy's poll of the subscriber's synced flag from its second subscribe, by node: case 8 judges it.
 const remedySynced = new Map();
+// Whether a subscription's observer saw the subscriber list the graph as synced, by graph and node.
+const seenSynced = new Map();
 
 /**
  * A subscriber that holds no definition of a graph rejoins it as a client
@@ -424,7 +427,12 @@ async function listsSubGraph(node, graph) {
  */
 async function subscribeChecked(node, graph, caseId) {
   const observer = io.observeSubscription(node, graph, await graphs.subscribe(node, graph));
-  reportSubscription(observer, await observer.done, caseId);
+  const observation = await observer.done;
+  if (observation) {
+    if (!seenSynced.has(graph)) seenSynced.set(graph, new Map());
+    seenSynced.get(graph).set(node, observation.syncedAt !== null && observation.syncedAt !== undefined);
+  }
+  reportSubscription(observer, observation, caseId);
 }
 
 /**
@@ -695,13 +703,18 @@ async function run() {
     const held = heldAtResubscribe.get(node) === true;
     return { heldAtSubscribe: held, catchup: held ? catchupDataTriples(devnet.logSince(node, 0), main.id) : null };
   };
+  // Whether any listing before showed the node synced: the first subscription's observer, then the remedy's poll.
+  const observed = seenSynced.get(main) ?? new Map();
+  const everSynced = new Map(observed);
   for (const [node, { graph, from, synced }] of remedySynced) {
     if (graph !== main) continue;
-    report.record(8, syncedAfterRemedyResult({ node, graph, seen: await synced, from, boundMs: SYNCED_MS, ...evidenceOf(node) }));
+    const seen = await synced;
+    report.record(8, syncedAfterRemedyResult({ node, graph, seen, from, boundMs: SYNCED_MS, everSynced: observed.get(node), ...evidenceOf(node) }));
+    if (seen?.ok) everSynced.set(node, true);
   }
   for (const node of edges.running) {
     const listed = await io.listingEntry(node, main);
-    report.record(8, syncedAtEndResult({ node, graph: main, listed, ...evidenceOf(node) }));
+    report.record(8, syncedAtEndResult({ node, graph: main, listed, everSynced: everSynced.get(node), ...evidenceOf(node) }));
   }
 
   // Case 9: the end state on every Edge.

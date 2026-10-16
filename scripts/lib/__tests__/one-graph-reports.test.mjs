@@ -84,7 +84,7 @@ test('a report back in shared memory after it had left fails, at any reading or 
   assert.equal(result.outcome, 'fail');
   assert.match(result.text, /left shared memory 3 s after the promotion, then was in the shared-working-memory view of reports \(1 row\(s\) of it\) again when the 60 s had passed$/);
   const between = pairOf('gone', { view: 2000, partitions: 3000 }, {
-    fromWhat: 'promotion', reappeared: { read: 'partitions', age: 10_400, seen: { satisfied: false, found: 2 } },
+    from: 1_000_000, fromWhat: 'promotion', reappeared: { read: 'partitions', at: 1_010_400, seen: { satisfied: false, found: 2 } },
     confirm: { view: { satisfied: true }, partitions: { satisfied: true } },
   });
   assert.equal(pairOutcome(between, { boundMs: 60_000 }).text,

@@ -12,6 +12,7 @@ import { freshSubscription, subscriptionResults } from '../qa/member-sharing.mjs
 import { classify, KNOWN_GAPS } from '../qa/known-gaps.mjs';
 import { createReport } from '../member-sharing/report.mjs';
 import { createReports } from '../one-graph/reports.mjs';
+import { pollUntil } from '../one-graph/poll.mjs';
 import { author, CG, LABEL, node } from './one-graph-fixtures.mjs';
 
 test('a promotion counts once confirmed under its author\'s seal and bound to the graph', () => {
@@ -246,32 +247,39 @@ test('#3296: a late Edge that held the reports at its subscribe, never marked sy
   const graph = { key: 'main' };
   const listed = (synced, defined = true) => ({ readable: true, entry: { subscribed: true, synced }, defined });
   const catchup = catchupDataTriples(CATCHUP_LOG, CG);
-  const stuck = syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: true, catchup });
+  const stuck = syncedAtEndResult({ node: late, graph, listed: listed(false), everSynced: false, heldAtSubscribe: true, catchup });
   assert.equal(stuck.text, 'node10 (late): lists main as subscribed=true synced=false at the end');
   assert.deepEqual([verdictOf(stuck), gapOf(stuck)], ['xfail', '#3296']);
   assert.match(classify(stuck).text, /; it held the graph's reports at its subscribe, and its catch-up's 2 shared-memory pass\(es\) inserted no data$/);
   // Without the gap's evidence: a plain failure.
   for (const [result, because] of [
-    [syncedAtEndResult({ node: late, graph, listed: listed(false, false), heldAtSubscribe: true, catchup }), /holds no definition of the graph, so this is not #3296$/],
-    [syncedAtEndResult({ node: late, graph, listed: { readable: true, entry: { subscribed: false, synced: false }, defined: true }, heldAtSubscribe: true, catchup }), /not subscribed to the graph, so this is not #3296$/],
-    [syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: true, catchup: { passes: 2, data: 18 } }), /inserted 18 data triple\(s\), so this is not #3296$/],
-    [syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: true, catchup: { passes: 0, data: 0 } }), /no shared-memory catch-up after its last subscribe/],
-    [syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: true, catchup: null }), /no shared-memory catch-up after its last subscribe/],
+    [syncedAtEndResult({ node: late, graph, listed: listed(false, false), everSynced: false, heldAtSubscribe: true, catchup }), /holds no definition of the graph, so this is not #3296$/],
+    [syncedAtEndResult({ node: late, graph, listed: { readable: true, entry: { subscribed: false, synced: false }, defined: true }, everSynced: false, heldAtSubscribe: true, catchup }), /not subscribed to the graph, so this is not #3296$/],
+    [syncedAtEndResult({ node: late, graph, listed: listed(false), everSynced: false, heldAtSubscribe: true, catchup: { passes: 2, data: 18 } }), /inserted 18 data triple\(s\), so this is not #3296$/],
+    [syncedAtEndResult({ node: late, graph, listed: listed(false), everSynced: false, heldAtSubscribe: true, catchup: { passes: 0, data: 0 } }), /no shared-memory catch-up after its last subscribe/],
+    [syncedAtEndResult({ node: late, graph, listed: listed(false), everSynced: false, heldAtSubscribe: true, catchup: null }), /no shared-memory catch-up after its last subscribe/],
   ]) {
     assert.equal(verdictOf(result), 'fail');
     assert.match(classify(result).text, because);
   }
+  // A node listed as synced before, which lost it, is another failure; so is one whose history is not known.
+  const lost = syncedAtEndResult({ node: late, graph, listed: listed(false), everSynced: true, heldAtSubscribe: true, catchup });
+  assert.deepEqual([verdictOf(lost), gapOf(lost)], ['fail', null]);
+  assert.match(classify(lost).text, /the node was listed as synced before and lost it, so this is not #3296$/);
+  const unknown = syncedAtEndResult({ node: late, graph, listed: listed(false), everSynced: undefined, heldAtSubscribe: true, catchup });
+  assert.match(classify(unknown).text, /it is not known whether the node was ever listed as synced, so this is not known to be #3296$/);
+  assert.equal(verdictOf(unknown), 'fail');
   // A node that did not hold the reports at its subscribe is not in the gap's state: a plain pass or failure.
   const other = syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: false, catchup: null });
   assert.deepEqual([verdictOf(other), gapOf(other)], ['fail', null]);
   const synced = syncedAtEndResult({ node: late, graph, listed: listed(true), heldAtSubscribe: false, catchup: null });
   assert.deepEqual([synced.text, verdictOf(synced), gapOf(synced)], ['node10 (late): lists main as synced at the end', 'pass', null]);
   // Synced in the gap's state: the gap's check held. Synced after a catch-up that inserted data: a plain pass.
-  const fixed = syncedAtEndResult({ node: late, graph, listed: listed(true), heldAtSubscribe: true, catchup });
+  const fixed = syncedAtEndResult({ node: late, graph, listed: listed(true), everSynced: false, heldAtSubscribe: true, catchup });
   assert.deepEqual([verdictOf(fixed), gapOf(fixed)], ['xpass', '#3296']);
-  assert.equal(verdictOf(syncedAtEndResult({ node: late, graph, listed: listed(true), heldAtSubscribe: true, catchup: { passes: 2, data: 18 } })), 'pass');
+  assert.equal(verdictOf(syncedAtEndResult({ node: late, graph, listed: listed(true), everSynced: false, heldAtSubscribe: true, catchup: { passes: 2, data: 18 } })), 'pass');
   // A listing that cannot be read fails, whatever the node held.
-  const unread = syncedAtEndResult({ node: late, graph, listed: { readable: false, why: 'HTTP 0 timeout' }, heldAtSubscribe: true, catchup });
+  const unread = syncedAtEndResult({ node: late, graph, listed: { readable: false, why: 'HTTP 0 timeout' }, everSynced: false, heldAtSubscribe: true, catchup });
   assert.deepEqual([unread.text, verdictOf(unread)], ['node10 (late): its listing could not be read at the end (HTTP 0 timeout)', 'fail']);
   // Through the report: the expected failure does not fail case 8, and the gap is summed up.
   const lines = [];
@@ -302,7 +310,7 @@ test('#3296: snapshots a catch-up materialized are data it inserted, counted onc
   // The reviewer's case: snapshots totalling 3 triples, then a round of 0 data: not the gap.
   const late = { label: 'node10 (late)' };
   const listed = { readable: true, entry: { subscribed: true, synced: false }, defined: true };
-  const withSnapshot = syncedAtEndResult({ node: late, graph: { key: 'main' }, listed, heldAtSubscribe: true,
+  const withSnapshot = syncedAtEndResult({ node: late, graph: { key: 'main' }, listed, everSynced: false, heldAtSubscribe: true,
     catchup: catchupDataTriples(`${CATCHUP_LOG}\n2026-10-16 14:50:30 sync s1 [DKGAgent] SWM sync for "${CG}": materialized 1 graph-scoped KA snapshot(s) totalling 3 triples`, CG) });
   assert.equal(verdictOf(withSnapshot), 'fail');
   assert.match(classify(withSnapshot).text, /its catch-up inserted 3 data triple\(s\), so this is not #3296$/);
@@ -314,7 +322,7 @@ test('the synced flag after the remedy must show within its deadline, apart from
   const from = 2_000_000;
   const listed = synced => ({ readable: true, entry: { subscribed: true, synced }, defined: true });
   const catchup = catchupDataTriples(CATCHUP_LOG, CG);
-  const judged = (seen, heldAtSubscribe = false) => syncedAfterRemedyResult({ node: late, graph, seen, from, boundMs: 90_000, heldAtSubscribe, catchup: heldAtSubscribe ? catchup : null });
+  const judged = (seen, heldAtSubscribe = false) => syncedAfterRemedyResult({ node: late, graph, seen, from, boundMs: 90_000, everSynced: false, heldAtSubscribe, catchup: heldAtSubscribe ? catchup : null });
   const timely = judged({ ok: true, listed: listed(true), completedAt: from + 12_000 });
   assert.deepEqual([timely.check, timely.outcome, timely.text], ['synced-after-remedy', 'pass', 'node10 (late): lists main as synced 12 s after it subscribed again with forceCatchup']);
   // Recovery and writes went well, but the flag showed only after 120 s: a failure, whatever the node held.
@@ -336,4 +344,21 @@ test('the synced flag after the remedy must show within its deadline, apart from
   caseReport.record(8, judged({ ok: true, listed: listed(true), completedAt: from + 120_000 }));
   caseReport.record(8, syncedAtEndResult({ node: late, graph, listed: listed(true), heldAtSubscribe: false, catchup: null }));
   assert.deepEqual(caseReport.summary('Results'), ['8']);
+});
+
+test('a deadline poll reads until just before its deadline, never a whole interval early', async () => {
+  let start = Date.now();
+  const sent = [];
+  const missed = await pollUntil(async () => { sent.push(Date.now() - start); return { ok: false }; }, start + 500, 200, { leadMs: 50 });
+  assert.equal(missed.ok, false);
+  // Polls at 0, 200 and 400 ms, then once more at 450 ms, the last interval shortened to end 50 ms before the deadline.
+  assert.ok(sent.length >= 4 && sent.at(-1) >= 430 && sent.at(-1) <= 500, JSON.stringify(sent));
+  // What arrives in that last stretch is seen; a poll that stopped once another whole interval would pass the deadline (at 400 ms) would miss it.
+  start = Date.now();
+  const found = await pollUntil(async () => ({ ok: Date.now() - start >= 420, at: Date.now() - start }), start + 500, 200, { leadMs: 50 });
+  assert.equal(found.ok, true, JSON.stringify(found));
+  // The first poll is made even when the deadline has passed.
+  let polls = 0;
+  await pollUntil(async () => { polls += 1; return { ok: false }; }, Date.now() - 1000, 200);
+  assert.equal(polls, 1);
 });

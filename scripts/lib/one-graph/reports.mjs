@@ -9,7 +9,7 @@
 
 import { brief, sleep } from '../member-sharing/devnet.mjs';
 import { createObservation } from '../member-sharing/observation.mjs';
-import { foldRead, inScope, pairHeld, sharedMemoryScope } from '../qa/member-sharing.mjs';
+import { inScope, pairHeld, sharedMemoryScope } from '../qa/member-sharing.mjs';
 import { inVerifiedScope, judgeGone, judgeReport, PAIR_KINDS, readOutcome, verifiedScope, writeRetryable } from '../qa/one-graph-promotion.mjs';
 import { parseObservation } from '../qa/query-observation.mjs';
 
@@ -172,78 +172,78 @@ export function createReports(devnet, config) {
    * not made again; a pair that holds throughout (its absence, or `kept`)
    * keeps reading to the end of the bound. A reading that shows a report back
    * after it was absent is kept (`pair.reappeared`), and so is a reading that
-   * shows a `kept` report missing at any time (`pair.lapsed`). Such a pair is
-   * read once more when its bound has passed (`pair.confirm`, each read
-   * retried up to three times while it fails). `pair.dating` keeps, for each
+   * shows a `kept` report missing at any time (`pair.lapsed`), each with the
+   * moment it completed (`at`). Such a pair is read once more when its bound
+   * has passed (`pair.confirm`, each read retried up to three times while it
+   * fails). The observations are absolute: `pair.dating` keeps, for each
    * read, when the last read that did not show what the pair waits for was
    * sent (from `notBefore` on) and when the first that showed it was sent and
-   * completed: one history for the delivery and for arrivalWindow. Returns a
+   * completed, one history for the delivery and for arrivalWindow;
+   * `pair.progress` (each read's age at its first find within the bound) is
+   * derived from it once the bound has its anchor (`pair.from`). Returns a
    * handle { pairs, done, cancel, close, arm }, not a promise, so that
    * whoever starts a watch does not wait; `close()` ends the bound of a pair
    * that runs until closed at that moment, and `arm(from)` starts the bound
    * of its pending pairs.
    */
   function watch(list) {
+    const anchored = pair => pair.from !== null && pair.from !== undefined;
+    // A pair's progress, derived from its reads' observations once its bound has
+    // an anchor: each read's first find, by its age (0 for a find made before the
+    // anchor), counted only within the bound.
+    const progressOf = pair => Object.fromEntries(READS.map(which => {
+      const { hit } = pair.dating[which];
+      if (!hit || !anchored(pair)) return [which, null];
+      const age = Math.max(0, hit.completedAt - pair.from);
+      return [which, age < pair.boundMs ? age : null];
+    }));
     for (const pair of list) {
       pair.from = pair.pending ? null : pair.from ?? pair.record.doneAt;
-      pair.progress = { view: null, partitions: null };
       pair.last = { view: null, partitions: null };
       const unseen = Number.isFinite(pair.notBefore) ? pair.notBefore : null;
       pair.dating = Object.fromEntries(READS.map(which => [which, { lastMissSentAt: unseen, hit: null }]));
+      Object.defineProperty(pair, 'progress', { get: () => progressOf(pair), enumerable: true, configurable: true });
     }
     let cancelled = false;
     const absence = pair => PAIR_KINDS[pair.kind].want === 'gone';
     const kept = pair => PAIR_KINDS[pair.kind].throughout === true;
     const throughout = pair => absence(pair) || kept(pair);
-    // The bound starts when the report's share ended, or when a pending pair is armed;
-    // a read that found what the pair waits for before then counts with age 0.
+    // The anchor of a pair's bound: the end of the report's share, or the moment a pending pair is armed.
     const arm = (pair, from = pair.pending ? null : pair.record.doneAt) => {
-      if (pair.from !== null && pair.from !== undefined) return;
-      if (from === null || from === undefined) return;
+      if (anchored(pair) || from === null || from === undefined) return;
       pair.from = from;
       pair.pending = false;
-      for (const which of READS) {
-        const { hit } = pair.dating[which];
-        if (hit && pair.progress[which] === null) pair.progress = { ...pair.progress, [which]: Math.max(0, hit.completedAt - pair.from) };
-      }
     };
-    const armed = pair => pair.from !== null && pair.from !== undefined;
-    const open = (pair, which) => !cancelled && !pair.record.error && (!armed(pair) || Date.now() - pair.from < pair.boundMs)
-      && (pair.progress[which] === null || throughout(pair));
+    // A read's observations, in absolute time: when it last missed what the pair waits for (before
+    // its first find), its first find, and a reading that broke the pair (a report back after it had
+    // left, or a report that must stay in the layer missing from it).
     const fold = (pair, which, seen, sentAt, completedAt) => {
       const dating = pair.dating[which];
       const missed = seen.satisfied === false && !seen.error;
-      if (!armed(pair)) {
-        if (seen.satisfied && !dating.hit) dating.hit = { sentAt, completedAt };
-        else if (missed && !dating.hit) dating.lastMissSentAt = sentAt;
-        else if (missed && absence(pair)) pair.reappeared ??= { read: which, age: 0, seen };
-      } else {
-        const before = pair.progress[which];
-        pair.progress = foldRead(pair.progress, which, { held: seen.satisfied, completedAt }, { from: pair.from, boundMs: pair.boundMs });
-        if (before === null && pair.progress[which] !== null) dating.hit ??= { sentAt, completedAt };
-        else if (before === null && missed && !dating.hit) dating.lastMissSentAt = sentAt;
-        // Absent before, present now: the report is back in the layer within the bound.
-        if (absence(pair) && before !== null && missed) pair.reappeared ??= { read: which, age: completedAt - pair.from, seen };
-      }
-      // A report that must stay in the layer was missing from it at this reading.
-      if (kept(pair) && missed) pair.lapsed ??= { read: which, age: armed(pair) ? completedAt - pair.from : 0, seen };
+      if (seen.satisfied && !dating.hit) dating.hit = { sentAt, completedAt };
+      else if (missed && !dating.hit) dating.lastMissSentAt = sentAt;
+      else if (missed && absence(pair)) pair.reappeared ??= { read: which, at: completedAt, seen };
+      if (kept(pair) && missed) pair.lapsed ??= { read: which, at: completedAt, seen };
       pair.last[which] = seen;
     };
+    // A read's watch is over once cancelled, the report never written, its bound passed, or
+    // (for a pair that does not hold throughout) its find made; before its anchor, it waits for it.
+    const over = (pair, which) => cancelled || Boolean(pair.record.error)
+      || (anchored(pair) && (Date.now() - pair.from >= pair.boundMs || (Boolean(pair.dating[which].hit) && !throughout(pair))));
     const poll = async (pair, which) => {
       for (;;) {
         arm(pair);
-        if (!open(pair, which)) return;
-        // Found before the share ended: nothing to read until its bound starts.
-        if (armed(pair) || !pair.dating[which].hit || throughout(pair)) {
+        if (over(pair, which)) return;
+        // A find made before the anchor needs no more reads, only the anchor.
+        if (!pair.dating[which].hit || throughout(pair)) {
           const sentAt = Date.now();
           const seen = await read(which, pair.kind, pair.node, pair.record);
-          const completedAt = Date.now();
+          fold(pair, which, seen, sentAt, Date.now());
           arm(pair);
-          fold(pair, which, seen, sentAt, completedAt);
-          if (!open(pair, which)) return;
+          if (over(pair, which)) return;
         }
         const every = pair.everyMs ?? pollMs;
-        await sleep(armed(pair) ? Math.min(every, Math.max(0, pair.from + pair.boundMs - Date.now())) : every);
+        await sleep(anchored(pair) ? Math.min(every, Math.max(0, pair.from + pair.boundMs - Date.now())) : every);
       }
     };
     // The check after the bound: each read until one answers, up to three times.
@@ -261,11 +261,11 @@ export function createReports(devnet, config) {
     };
     const settle = async pair => {
       await Promise.all(READS.map(which => poll(pair, which)));
-      if (!cancelled && throughout(pair) && armed(pair) && pairHeld(pair.progress) && !pair.lapsed) await confirm(pair);
+      if (!cancelled && throughout(pair) && anchored(pair) && pairHeld(pair.progress) && !pair.lapsed) await confirm(pair);
     };
     const done = Promise.all(list.map(settle)).then(() => undefined);
     const close = () => {
-      for (const pair of list) if (armed(pair) && !Number.isFinite(pair.boundMs)) pair.boundMs = Math.max(0, Date.now() - pair.from);
+      for (const pair of list) if (anchored(pair) && !Number.isFinite(pair.boundMs)) pair.boundMs = Math.max(0, Date.now() - pair.from);
     };
     return { pairs: list, done, cancel: () => { cancelled = true; }, close, arm: from => { for (const pair of list) if (pair.pending) arm(pair, from); } };
   }

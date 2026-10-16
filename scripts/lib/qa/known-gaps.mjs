@@ -108,9 +108,11 @@ const MEMBER_PROMOTION = {
  * that held every report it should, in its layer, at the first reads after
  * its last subscribe was accepted (`heldAtSubscribe`). A failure is the gap
  * only with evidence: the node holds the graph's definition and is
- * subscribed, it was never marked synced, and its log shows shared-memory
- * catch-up passes after that subscribe, none of which inserted data (rows or
- * snapshots). The flag holding on such a node is the gap's check holding.
+ * subscribed, no listing of it ever showed the graph synced (`everSynced`
+ * false: a node that was synced and lost it is another failure), and its log
+ * shows shared-memory catch-up passes after that subscribe, none of which
+ * inserted data (rows or snapshots). The flag holding on such a node is the
+ * gap's check holding.
  */
 const caughtUpOnNothing = evidence => evidence?.catchupPasses > 0 && evidence?.catchupDataTriples === 0;
 const SYNCED_CHECKS = ['synced-after-remedy', 'synced-at-end'];
@@ -123,6 +125,9 @@ const HELD_DATA_NEVER_SYNCED = {
     if (evidence.definitionHeld !== true) return { expected: false, because: 'the node holds no definition of the graph, so this is not #3296' };
     if (evidence.subscribed !== true) return { expected: false, because: 'the node is not subscribed to the graph, so this is not #3296' };
     if (evidence.synced === true) return { expected: false, because: 'the node was marked synced, only late, so this is not #3296' };
+    if (evidence.everSynced !== false) {
+      return { expected: false, because: evidence.everSynced === true ? 'the node was listed as synced before and lost it, so this is not #3296' : 'it is not known whether the node was ever listed as synced, so this is not known to be #3296' };
+    }
     if (!(evidence.catchupPasses > 0)) return { expected: false, because: 'its log shows no shared-memory catch-up after its last subscribe, so this is not known to be #3296' };
     if (evidence.catchupDataTriples !== 0) return { expected: false, because: `its catch-up inserted ${evidence.catchupDataTriples} data triple(s), so this is not #3296` };
     return { expected: true, because: `it held the graph's reports at its subscribe, and its catch-up's ${evidence.catchupPasses} shared-memory pass(es) inserted no data` };

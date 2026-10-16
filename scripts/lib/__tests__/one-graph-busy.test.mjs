@@ -4,12 +4,17 @@
 // when a receipt or a delivery counts.
 
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   admissionPolicyProblem, arrivalWindow, busyReceiptOutcome, countLogLines, deliveryEvidence, durableStart, pairOutcome, parseAdmissions,
   slotHolder, transferContended, transferHeldThrough, transferLifetime, transferOccupancy,
 } from '../qa/one-graph-promotion.mjs';
 import { sharedMemoryScope } from '../qa/member-sharing.mjs';
+import { createReport } from '../member-sharing/report.mjs';
+import { busyEdge } from '../one-graph/busy-transfer.mjs';
 import { createReports } from '../one-graph/reports.mjs';
 import { author, BODY, LABEL, node, RDF_TYPE } from './one-graph-fixtures.mjs';
 
@@ -341,4 +346,138 @@ test('a promotion the busy Edge finalized locally while a transfer admission hel
   const neither = deliveryEvidence(contended, { held: false, why: 'the slot held other work or none' });
   assert.match(busyReceiptOutcome(result, { received: window.by, life, held: neither, delivery: true }).text,
     /; not exercised: the transfer never held the general slot between the promotion and the delivery \(no reading was taken between them; nor throughout its arrival: the slot held other work or none\)$/);
+});
+
+// A devnet for the busy case, from one script of when things happen: edgeB's sync slots (one transfer
+// admission from `transfer.from` to `transfer.until`) and its log, the client routes of a report, and
+// each node's reads of the reports. A report edgeA creates reaches edgeB `reportDelayMs` after its
+// create and the curator at once; an earlier report is in every node's shared memory until it is
+// promoted, and in Verified Memory from then on.
+function busyDevnet({ dir, cg, large, edgeB, transfer, reportDelayMs }) {
+  const created = new Map();
+  const earlier = new Map();
+  const promotedAt = new Map();
+  const ok = json => ({ status: 200, json, text: JSON.stringify(json) });
+  const api = async (node, method, path, body) => {
+    const now = Date.now();
+    if (path === '/api/diagnostics/backpressure') {
+      const running = now >= transfer.from && now < transfer.until;
+      const activeOperations = running ? [{ operation: 'durable:catchup-foreground', oldestAgeMs: now - transfer.from }] : [];
+      return ok({ schedulers: [{ scheduler: 'sync-global', lanes: [{ lane: 'durable', activeOperations }] }] });
+    }
+    if (method === 'POST' && path === '/api/knowledge-assets') {
+      created.set(body.quads[0].subject, { quads: body.quads, at: now });
+      return ok({});
+    }
+    if (path.endsWith('/swm/share-async')) return ok({ jobId: 'j' });
+    if (path.startsWith('/api/knowledge-assets/swm/share-jobs/')) return ok({ state: 'succeeded' });
+    if (path !== '/api/query') return { status: 404, json: null, text: 'not used' };
+    const subject = /<([^>]+)>/.exec(body.sparql)[1];
+    let swm = false;
+    let vm = false;
+    let quads;
+    if (created.has(subject)) {
+      ({ quads } = created.get(subject));
+      swm = node === edgeB ? now >= created.get(subject).at + reportDelayMs : true;
+    } else if (earlier.has(subject)) {
+      quads = earlier.get(subject);
+      const at = promotedAt.get(subject);
+      vm = at !== undefined && now >= at;
+      swm = !vm;
+    } else quads = [];
+    const rows = (inLayer, graph) => (inLayer ? quads.map(quad => ({ ...(graph ? { g: graph } : {}), p: quad.predicate, o: quad.object })) : []);
+    const bindings = body.view === 'shared-working-memory' ? rows(swm)
+      : body.view === 'verifiable-memory' ? rows(vm)
+        : [...rows(swm, `${sharedMemoryScope(cg, 'reports')}/0xaa/1`), ...rows(vm, `did:dkg:context-graph:${cg}/reports/_verifiable_memory/1`)];
+    return ok({ result: { type: 'bindings', bindings } });
+  };
+  const admission = `${logStamp(transfer.from)} sync aaaa [DKGAgent] Sync backpressure running durable:${large.id}:QP4sWZbL (global inflight=1/1, queued=0/0)`;
+  return {
+    devnet: { dir, api, logSize: () => 0, logSince: node => (node === edgeB ? admission : '') },
+    // An earlier report of edgeA's, in every node's shared memory.
+    earlier: (n, author) => {
+      const subject = `urn:one-graph:E:${n}`;
+      const triples = [
+        { name: 'class', predicate: RDF_TYPE, iri: 'urn:one-graph:Report' }, { name: 'value', predicate: LABEL, text: `earlier (${n})` },
+        { name: 'body', predicate: BODY, text: `earlier body ${n}` },
+      ];
+      earlier.set(subject, triples.map(triple => ({ subject, predicate: triple.predicate, object: 'iri' in triple ? triple.iri : `"${triple.text}"` })));
+      return { author, graph: null, sub: 'reports', name: `og-e-${n}`, subject, value: `earlier (${n})`, sequence: n, doneAt: Date.now() - 60_000, error: null, triples };
+    },
+    // The curator's publish of an earlier report reaches Verified Memory on every node at `at`.
+    promoteAt: (record, at) => promotedAt.set(record.subject, at),
+  };
+}
+
+function busyCase({ transfer, reportDelayMs, promotions = [], boundMs = 1500 }) {
+  const dir = mkdtempSync(join(tmpdir(), 'one-graph-busy-'));
+  const cg = '0xabc/one-graph-main-1';
+  const main = { key: 'main', id: cg, resolved: cg, sub: 'reports' };
+  const large = { key: 'large', id: '0xabc/one-graph-large-1' };
+  const curator = { number: 7, role: 'curator', label: 'node7 (curator)' };
+  const edgeA = { number: 8, role: 'edgeA', label: 'node8 (edgeA)', agentAddress: author.agentAddress };
+  const edgeB = { number: 9, role: 'edgeB', label: 'node9 (edgeB)' };
+  const scripted = busyDevnet({ dir, cg, large, edgeB, transfer, reportDelayMs });
+  const lines = [];
+  const report = createReport({ 6: 'a large Verified Memory transfer holds an Edge\'s only sync slot' }, { print: line => lines.push(line) });
+  const io = createReports(scripted.devnet, { stamp: 'S', sub: 'reports', predicate: LABEL, type: 'urn:one-graph:Report', boundMs, definitionMs: 1000, syncedMs: 1000, pollMs: 100 });
+  const records = promotions.map(({ n }) => ({ ...scripted.earlier(n, edgeA), graph: main }));
+  const promoted = [];
+  const ctx = {
+    devnet: scripted.devnet, edges: { curator, edgeA, edgeB }, graphs: { subscribe: async () => Date.now() }, io, report, caseId: 6, boundMs, stamp: 'S',
+    ensureDefinition: async () => { throw new Error('the transfer was seen: no definition remedy expected'); },
+    // The curator's promotion: refused, or edgeB finalizes it locally `deliveredAfterMs` after the request, before the answer comes.
+    promote: async (_caseId, record) => {
+      const plan = promotions[records.indexOf(record)];
+      promoted.push(record.value);
+      if (plan.refused) return null;
+      scripted.promoteAt(record, Date.now() + plan.deliveredAfterMs);
+      await new Promise(resolve => setTimeout(resolve, plan.answerAfterMs));
+      return Date.now();
+    },
+  };
+  return { run: () => busyEdge(ctx, main, large, records), lines, report, records, promoted, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test('the busy case passes a report and a promotion that reached edgeB while the transfer held its slot, and leaves a refused promotion out', { timeout: 20_000 }, async () => {
+  const now = Date.now();
+  const scenario = busyCase({
+    transfer: { from: now - 300, until: now + 30_000 }, reportDelayMs: 300,
+    promotions: [{ n: 1, deliveredAfterMs: 150, answerAfterMs: 400 }, { n: 2, refused: true }],
+  });
+  try {
+    const { shared, promoted } = await scenario.run();
+    assert.deepEqual(promoted.map(record => record.value), ['earlier (1)']);
+    assert.deepEqual(shared.map(record => record.value), ['edgeA while edgeB is busy 1 (1)']);
+    const passed = scenario.lines.filter(line => line.startsWith('  [PASS] case 6: '));
+    // edgeB's receipt of the report, dated by its reads, under the transfer's admission.
+    assert.ok(passed.some(line => /"edgeA while edgeB is busy 1 \(1\)" by node8 \(edgeA\) in main\/reports at node9 \(edgeB\): in shared memory \d+ s after the share, while an admission of the transfer held the general slot$/.test(line)), scenario.lines.join('\n'));
+    // The promotion edgeB finalized before the curator's answer: dated by the watch armed at that answer.
+    assert.ok(passed.some(line => /"earlier \(1\)" by node8 \(edgeA\) in main\/reports at node9 \(edgeB\): in Verified Memory 0 s after the promotion, while an admission of the transfer held the general slot$/.test(line)), scenario.lines.join('\n'));
+    assert.ok(passed.some(line => /"earlier \(1\)" .* at node9 \(edgeB\): left shared memory 0 s after the promotion, and out of it to the end of the 2 s, while an admission of the transfer held the general slot$/.test(line)), scenario.lines.join('\n'));
+    // The other Edges' pairs are ordinary delivery checks.
+    assert.ok(passed.some(line => /"earlier \(1\)" .* at node7 \(curator\): in Verified Memory 0 s after the promotion$/.test(line)), scenario.lines.join('\n'));
+    // The refused promotion's watch was cancelled: no pair of it is reported.
+    assert.deepEqual(scenario.promoted, ['earlier (1)', 'earlier (2)']);
+    assert.ok(!scenario.lines.some(line => line.includes('earlier (2)')), scenario.lines.join('\n'));
+    assert.ok(!scenario.lines.some(line => line.startsWith('  [FAIL]')), scenario.lines.join('\n'));
+    assert.deepEqual(scenario.report.summary('Results'), []);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test('the busy case fails as not exercised when the report reached edgeB only after the transfer had ended', { timeout: 20_000 }, async () => {
+  const now = Date.now();
+  // Delivered within its bound of 4 s, 2.5 s after the share; the transfer ended at 1.2 s.
+  const scenario = busyCase({ transfer: { from: now - 300, until: now + 1200 }, reportDelayMs: 2500, boundMs: 4000 });
+  try {
+    await scenario.run();
+    const failed = scenario.lines.filter(line => line.startsWith('  [FAIL] case 6: '));
+    assert.equal(failed.length, 1, scenario.lines.join('\n'));
+    assert.match(failed[0], /"edgeA while edgeB is busy 1 \(1\)" .* at node9 \(edgeB\): in shared memory \d+ s after the share; not exercised: the transfer of the large graph had ended by then$/);
+    assert.deepEqual(scenario.report.summary('Results'), ['6']);
+  } finally {
+    scenario.cleanup();
+  }
 });
