@@ -1,0 +1,61 @@
+// Separate from the fixed-denominator comparison. No publication or HTTP replay.
+import fs from 'node:fs';
+import path from 'node:path';
+import {loadApiClientToken} from '../../packages/cli/dist/auth.js';
+import {DkgHomeFiles} from '../../packages/cli/dist/config.js';
+const [arm, mode] = process.argv.slice(2);
+const home = process.env.DKG_HOME, dir = `.tmp/2963/evidence/${arm}/restart-regression`;
+fs.mkdirSync(dir, {recursive:true});
+const cfg = JSON.parse(fs.readFileSync(path.join(home,'config.json')));
+const cg = cfg.contextGraphs[0], name = 'restart-recovery';
+const token = await loadApiClientToken(new DkgHomeFiles(home));
+const base = `http://127.0.0.1:${cfg.apiPort}`;
+const headers = {Authorization:`Bearer ${token}`,'Content-Type':'application/json'};
+const save = (file,value) => fs.writeFileSync(`${dir}/${file}.json`,JSON.stringify(value,null,2));
+async function get(route) {
+  const r = await fetch(base+route,{headers,signal:AbortSignal.timeout(60_000)});
+  return {status:r.status,value:await r.json()};
+}
+if (mode === 'start') {
+  if (!fs.existsSync(`.tmp/2963/evidence/${arm}/${arm}-observation-complete.json`)) throw Error('Matched arm must finish before crash regression');
+  if (fs.existsSync(`${dir}/request.json`)) throw Error('Crash request already recorded; never replay it');
+  const old = JSON.parse(fs.readFileSync(path.join(home,'2963-faults.json')));
+  if (old.some(f=>f.name===name)) throw Error('Crash fault already armed');
+  old.push({name,kind:'process-exit',contextGraphId:cg,agentAddress:'0x247B02C301B34E52e9021728F34C3457F81f2dFc'});
+  fs.writeFileSync(path.join(home,'2963-faults.json'),JSON.stringify(old,null,2));
+  const request = {startedAt:new Date().toISOString(),contextGraphId:cg,name,manualRepairs:0};
+  save('request',request); // durable denominator before sending
+  try {
+    const r = await fetch(base+'/api/knowledge-assets',{method:'POST',headers,signal:AbortSignal.timeout(120_000),
+      body:JSON.stringify({contextGraphId:cg,name,finalize:true,alsoShareSwm:true,
+        quads:Array.from({length:8},(_,i)=>({subject:`urn:2963:${arm}:${name}`,predicate:`https://schema.org/p${i}`,object:JSON.stringify(`${name} value ${i}`),graph:''}))})});
+    save('response',{status:r.status,value:await r.json(),at:new Date().toISOString()});
+  } catch(error) {save('response',{status:null,error:error.message,at:new Date().toISOString()});}
+  console.log('Crash request sent once; preserve the exit evidence and restart the same owned home.');
+} else if (mode === 'observe') {
+  const fault = JSON.parse(fs.readFileSync(path.join(home,`2963-fault-${name}.json`)));
+  const deadline = Date.parse(fault.firedAt)+20*60_000;
+  save('protocol',{faultAt:fault.firedAt,deadline:new Date(deadline).toISOString(),leaseMs:900_000,manualRepairs:0});
+  let firstSuccess;
+  while (Date.now() <= deadline) {
+    const at = new Date().toISOString();
+    try {
+      const [jobs,descriptor,status] = await Promise.all([
+        get('/api/knowledge-assets/swm/share-jobs'),
+        get(`/api/knowledge-assets/${name}?${new URLSearchParams({contextGraphId:cg,agentAddress:'0x247B02C301B34E52e9021728F34C3457F81f2dFc'})}`),
+        get('/api/status'),
+      ]);
+      const job = jobs.value.jobs.find(j=>j.assertionName===name);
+      const catalog = status.value.rfc64Catalog?.contextGraphs?.find(c=>c.contextGraphId===cg);
+      const observation={at,job,descriptor,catalog};
+      fs.appendFileSync(`${dir}/observations.jsonl`,JSON.stringify(observation)+'\n');
+      if (!firstSuccess && job?.state==='succeeded' && descriptor.status===200 && catalog?.appliedRowCount==='437' && catalog?.legacyReadOnlyCount===0) {
+        firstSuccess=observation;save('first-success',observation);
+        console.log('Automatic restart recovery observed',at,job.jobId);
+      }
+    } catch(error) {fs.appendFileSync(`${dir}/observations.jsonl`,JSON.stringify({at,error:error.message})+'\n');}
+    await new Promise(resolve=>setTimeout(resolve,Math.min(15000,Math.max(1,deadline-Date.now()+1))));
+  }
+  save('outcome',{completedByDeadline:!!firstSuccess,firstSuccessAt:firstSuccess?.at,manualRepairs:0,observedUntil:new Date().toISOString()});
+  if(!firstSuccess)process.exitCode=1;
+} else throw Error('Expected start or observe');

@@ -11,12 +11,14 @@ const token=new Contract(prior.token,['function balanceOf(address) view returns(
 const receipts=[];
 for(const j of snap){
  if(j.status!=='finalized') throw Error(`Unsettled job ${j.jobId}: ${j.status}`);
+ await new Promise(resolve=>setTimeout(resolve,400));
  const h=j.finalization.txHash; const r=await p.getTransactionReceipt(h); const t=await p.getTransaction(h);
  if(!r||r.status!==1||!t) throw Error('Unsettled receipt '+h);
  receipts.push({jobId:j.jobId,hash:h,status:r.status,blockNumber:r.blockNumber,from:t.from,nonce:t.nonce,logs:r.logs});
 }
 const wallets=[];
 for(const {address} of prior.wallets){
+ await new Promise(resolve=>setTimeout(resolve,800));
  const [latest,pending,native,trac]=await Promise.all([p.getTransactionCount(address,'latest'),p.getTransactionCount(address,'pending'),p.getBalance(address),token.balanceOf(address)]);
  wallets.push({address,latest,pending,native:formatEther(native),trac:formatEther(trac)});
 }

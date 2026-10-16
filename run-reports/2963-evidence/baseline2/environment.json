@@ -1,0 +1,130 @@
+{
+  "recordedAt": "2026-10-16T16:23:11.973215+00:00",
+  "productRevision": "9436b5c927f9fc8e5eb0cd5523da785dfa1cdd75",
+  "checkoutRevision": "c2dd02680e1059354f3f5401f66e6b156720d00a",
+  "productionSourceDiffFromParent": "",
+  "platform": "macOS-26.3-arm64-arm-64bit",
+  "node": "22.23.3 native arm64",
+  "pnpm": "10.28.1",
+  "hostCpus": 10,
+  "hostRamGiB": 32,
+  "dockerCpus": 10,
+  "dockerRamGiB": 8,
+  "storeCpuLimit": 4,
+  "storeMemoryGiB": 4,
+  "actualJvmMaxHeapGiB": 1,
+  "daemonMaxHeapMiB": 4096,
+  "storeImage": "islandora/blazegraph:6.4.3@sha256:015e308ae0a296cdb87c83c10da976ed970d2bfa971290aa1147593df8cf445d",
+  "configuration": {
+    "apiPort": 9297,
+    "listenPort": 0,
+    "nodeRole": "edge",
+    "contextGraphs": [
+      "0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-baseline2-20261016"
+    ],
+    "autoUpdate": {
+      "enabled": false,
+      "source": "npm"
+    },
+    "store": {
+      "backend": "blazegraph",
+      "options": {
+        "url": "http://127.0.0.1:9997/bigdata/namespace/2963-baseline2/sparql"
+      }
+    },
+    "publisher": {
+      "enabled": true,
+      "pollIntervalMs": 12000,
+      "errorBackoffMs": 5000,
+      "maxRetries": 10
+    }
+  },
+  "promoteQueueConfiguration": "repository defaults (enabled, 4 workers, 15-minute lease, 60-second heartbeat)",
+  "funding": "six publisher-owned TRAC wallets; no PCA",
+  "startingCatalogRows": 180,
+  "startingPublicationJobHistory": 0,
+  "initialAssetsPublishedDuringMeasurement": 48,
+  "sealedCatalogDraftsBeforeMeasurement": 256,
+  "manualRepairs": 0,
+  "limitations": [
+    "Sequential arms on public Base Sepolia; external chain load uncontrolled.",
+    "Native daemon CPU not pinned; Docker CPU/memory limits identical between arms.",
+    "Fresh publication-job history differs from the original WSL benchmark with 268 historical/smoke jobs.",
+    "Failure boundary is deterministic characterization, not proof of the original failing call."
+  ],
+  "walletBalancesAndNoncesBeforeGraphRegistration": [
+    {
+      "address": "0x247B02C301B34E52e9021728F34C3457F81f2dFc",
+      "latest": 6,
+      "pending": 6,
+      "native": "0.019993832131999163",
+      "trac": "199700.0"
+    },
+    {
+      "address": "0xD1Ff3DE51fc64d0297790688642317BE90aB9383",
+      "latest": 0,
+      "pending": 0,
+      "native": "0.01",
+      "trac": "1000.0"
+    },
+    {
+      "address": "0x740Ba951b85C7DBD8B10D91D551805680e74cf94",
+      "latest": 0,
+      "pending": 0,
+      "native": "0.01",
+      "trac": "1000.0"
+    },
+    {
+      "address": "0x0795194897aeC06dAFE61100ed478bA266c19038",
+      "latest": 0,
+      "pending": 0,
+      "native": "0.001",
+      "trac": "10.0"
+    },
+    {
+      "address": "0xAddff5D971ec77276Bd38D77AaD2822c41c72611",
+      "latest": 50,
+      "pending": 50,
+      "native": "0.019776178285983203",
+      "trac": "9999.999999999999999799"
+    },
+    {
+      "address": "0x66a70B361C827Ef9B7939AD2Ec21E72bC8927240",
+      "latest": 22,
+      "pending": 22,
+      "native": "0.01994587977199129",
+      "trac": "9999.999999999999999967"
+    },
+    {
+      "address": "0x1dFCC652dc4245C799c79B7984D1F1b7143B2429",
+      "latest": 24,
+      "pending": 24,
+      "native": "0.019941422239991421",
+      "trac": "9999.999999999999999944"
+    },
+    {
+      "address": "0x093ADac4F2937ED691808a61A4297040fD1f45a7",
+      "latest": 20,
+      "pending": 20,
+      "native": "0.019950838411991568",
+      "trac": "9999.999999999999999968"
+    },
+    {
+      "address": "0xBa7FeCe62cDD206323616eB8A05E264029786477",
+      "latest": 16,
+      "pending": 16,
+      "native": "0.019960237741993071",
+      "trac": "9999.999999999999999992"
+    },
+    {
+      "address": "0x1a297f7780777cE38FA9C814bb1Ead1a55198e4A",
+      "latest": 14,
+      "pending": 14,
+      "native": "0.019965214807995103",
+      "trac": "9999.999999999999999993"
+    }
+  ],
+  "runtimeVersion": "10.0.24",
+  "runtimeBuildTime": "2026-10-16T15:46:05.912Z",
+  "peerId": "12D3KooWBQyhfA2P1t5y9joeAfZdDV9hRhJf7vtGosobkaJjARox"
+}
