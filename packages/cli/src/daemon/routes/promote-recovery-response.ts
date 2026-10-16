@@ -12,6 +12,10 @@ export interface PromoteRecoveryContext {
 /** Seconds a client waits before repeating a share whose prerequisite was unavailable. */
 const PROMOTE_PREREQUISITE_RETRY_AFTER_SECONDS = '1';
 
+const RECIPIENT_AUTHORITY_SITES = new Set([
+  'transport-unavailable', 'transport-changed', 'revision-moved', 'recipient-set-changed',
+]);
+
 const ATTRIBUTION_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 /** A closed-set identity such as an error code or reason; anything else is dropped. */
@@ -59,12 +63,16 @@ export function respondPromoteRecoveryError(
     const cause: unknown = e.cause;
     const causeCode = attributionToken(cause, 'code');
     const causeReason = attributionToken(cause, 'reason');
+    const site = attributionToken(cause, 'site');
+    const causeSite = causeCode === 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE'
+      && site && RECIPIENT_AUTHORITY_SITES.has(site) ? site : undefined;
     process.stderr.write(`[DKG-Daemon] ${JSON.stringify({
       event: 'knowledge_asset_share_prerequisite_unavailable',
       code: e.code,
       step: diagnosticPromoteStage(typeof e.message === 'string' ? e.message : ''),
       ...(causeCode ? { causeCode } : {}),
       ...(causeReason ? { causeReason } : {}),
+      ...(causeSite ? { causeSite } : {}),
       ...context,
     })}\n`);
     jsonResponse(

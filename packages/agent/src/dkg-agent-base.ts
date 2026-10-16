@@ -4,6 +4,8 @@ import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
+import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
+import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
@@ -676,6 +678,8 @@ export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
   readonly store: TripleStore;
+  protected readonly storageAckLedgerTimestampWriter: StorageAckLedgerTimestampWriter;
+  protected readonly publishedNamedKaVmLifecycleWriter: PublishedNamedKaVmLifecycleWriter;
   readonly publisher: DKGPublisher;
   readonly queryEngine: DKGQueryEngine;
   readonly discovery: DiscoveryClient;
@@ -2079,11 +2083,16 @@ export class DKGAgentBase {
     workspaceOwnedEntities: Map<string, Map<string, string>>,
     writeLocks: Map<string, Promise<void>>,
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
+    publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
+    ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
   ) {
     this.config = config;
     this.wallet = wallet;
     this.node = node;
     this.store = store;
+    this.storageAckLedgerTimestampWriter = ledgerTimestampWriter ?? applyStorageAckLedgerTimestamp(store);
+    this.publishedNamedKaVmLifecycleWriter = publishedLifecycleWriter
+      ?? (input => applyPublishedNamedKaVmLifecycle(store, input));
     this.contextGraphMetaProjection = new ContextGraphMetaProjection(store);
     this.publisher = publisher;
     this.queryEngine = queryEngine;

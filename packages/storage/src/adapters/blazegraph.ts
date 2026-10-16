@@ -2,6 +2,7 @@ import { withAdmittedReadCancellation, type AdmittedReadDeadline } from '../admi
 import { executeReceiptConfirmedPublication } from '../receipt-confirmed-execution.js';
 import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
+import { prepareAtomicGraphReplace, prepareAtomicGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
 import { performance } from 'node:perf_hooks';
 import { QueryReadAdmission } from '../query-read-admission.js';
 import type {
@@ -36,9 +37,6 @@ import {
   type StorePriorityScheduler,
 } from '../store-priority-scheduler.js';
 import {
-  buildAtomicGraphAndSubjectReplaceUpdate,
-  buildAtomicGraphReplaceUpdate,
-  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
@@ -459,12 +457,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'BlazegraphStore.replaceGraph',
-    });
-    const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
-    statements.checkIris.replaceGraph(graphUri, quads);
+    const plan = prepareAtomicGraphReplace('blazegraph', graphUri, quads);
     try {
       await this.sparqlUpdate(
         plan.update,
@@ -525,23 +518,8 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     metadataQuads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'BlazegraphStore.replaceGraphAndSubject',
-    });
-    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
-      graphUri,
-      graphQuads,
-      metaGraphUri,
-      metadataSubject,
-      metadataQuads,
-    );
-    statements.checkIris.replaceGraphAndSubject(
-      graphUri,
-      graphQuads,
-      metaGraphUri,
-      metadataSubject,
-      metadataQuads,
+    const plan = prepareAtomicGraphAndSubjectReplace(
+      'blazegraph', graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
     );
     try {
       await this.sparqlUpdate(
@@ -565,19 +543,31 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'BlazegraphStore.replaceSubject',
-    });
     // Blazegraph runs one UPDATE request (DELETE WHERE + INSERT DATA) as a single
     // transaction, so the subject is replaced atomically. No staging/cleanup: a
     // failed request commits nothing.
-    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    statements.checkIris.replaceSubject(graphUri, subject, quads);
+    const update = prepareAtomicSubjectReplace('blazegraph', graphUri, subject, quads);
     await this.sparqlUpdate(
       update,
       { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
       'replaceSubject',
+    );
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string,
+    subject: string,
+    replacementQuads: DKGQuad[],
+    insertQuads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    const update = prepareAtomicSubjectAndInsert(
+      'blazegraph', graphUri, subject, replacementQuads, insertQuads,
+    );
+    await this.sparqlUpdate(
+      update,
+      { ...options, source: options?.source ?? 'blazegraph.replaceSubjectAndInsert' },
+      'replaceSubjectAndInsert',
     );
   }
 

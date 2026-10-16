@@ -286,7 +286,7 @@ interface PlacementAgentInternalsV1 {
     }>,
     observer: CatalogPlacementWaiterObserverV1,
   ): Rfc64FinalizedPrivatePlacementRepairRequestV1;
-  afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<void>;
+  afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<boolean>;
 }
 
 function internalsOf(agent: DKGAgent): PlacementAgentInternalsV1 {
@@ -476,12 +476,12 @@ export async function seedPlacementAssetV1(
 }
 
 /** One call of the real post-confirmation observer for `asset`, as a completion path makes it. */
-export function observeConfirmedV1(
+export async function observeConfirmedV1(
   agent: DKGAgent,
   asset: PlacementAssetV1,
   publicationLabel: 'publish' | 'queued publish' = 'queued publish',
 ): Promise<void> {
-  return agent.observeRfc64ConfirmedVmV1({
+  await agent.observeRfc64ConfirmedVmV1({
     contextGraphId: CONTEXT_GRAPH_ID,
     assertionCoordinate: asset.assertionCoordinate,
     shareOperationId: asset.shareOperationId,
@@ -496,8 +496,8 @@ export function observeConfirmedV1(
  * The tail a synchronous publish of `asset` awaits before it answers: `publishFromFinalizedAssertion`
  * ends in this call and returns its result right after it.
  */
-export function confirmedSynchronousPublishTailV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
-  return internalsOf(agent).afterConfirmedGraphScopedVmPublishV1({
+export async function confirmedSynchronousPublishTailV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+  await internalsOf(agent).afterConfirmedGraphScopedVmPublishV1({
     status: 'confirmed',
     contextGraphId: CONTEXT_GRAPH_ID,
     assertionCoordinate: asset.assertionCoordinate,
