@@ -10,12 +10,13 @@ import { fixture, cg } from './helpers/bulk-graph-fixture.js';
 
 const unusedStore = new OxigraphStore();
 afterAll(() => unusedStore.close());
-const unusedRecoveryCapabilities: Pick<PublicSnapshotBulkHost, 'store' | 'getOrCreateSyncVerifyWorker'
-  | 'processDurableBatchInWorker' | 'reconcileAfterGraphScopedMaterialization'> = {
+const unusedRecoveryCapabilities: Pick<PublicSnapshotBulkHost, 'store' | 'verification' | 'reconcile'> = {
   store: unusedStore,
-  getOrCreateSyncVerifyWorker: () => { throw new Error('Unexpected verifier'); },
-  processDurableBatchInWorker: async () => { throw new Error('Unexpected verification'); },
-  reconcileAfterGraphScopedMaterialization: async () => { throw new Error('Unexpected reconciliation'); },
+  verification: {
+    parseAndFilter: async () => { throw new Error('Unexpected verifier'); },
+    processBatch: async () => { throw new Error('Unexpected verification'); },
+  },
+  reconcile: async () => { throw new Error('Unexpected reconciliation'); },
 };
 
 // Reduce only the local fixture's chunk bound; run the real stream, verifier,
@@ -58,9 +59,11 @@ describe('public bulk snapshot recovery', () => {
     });
     const agent: PublicSnapshotBulkHost & { getPeerProtocols: typeof protocols } = {
       store: f.target, router: f.router, ensurePeerConnected: ensure, getPeerProtocols: protocols,
-      getOrCreateSyncVerifyWorker: () => f.worker,
-      processDurableBatchInWorker: (data, meta, _ctx, accept = false, mode) => f.worker.processDurableBatch(data, meta, accept, mode),
-      reconcileAfterGraphScopedMaterialization: async (asset: { ual: string }) => {
+      verification: {
+        parseAndFilter: (text, graph, cg) => f.worker.parseAndFilter(text, graph, cg),
+        processBatch: (data, meta, _ctx, accept = false, mode) => f.worker.processDurableBatch(data, meta, accept, mode),
+      },
+      reconcile: async (asset: { ual: string }) => {
         if (failure !== 'reconciliation') return;
         started.add(asset.ual); await held; completed.add(asset.ual);
       },

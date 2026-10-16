@@ -2,18 +2,18 @@
 import { join } from 'node:path';
 import { BULK_GRAPH_PROTOCOL, BULK_GRAPH_MAX_ASSETS, bulkGraphTransportOptions, createOperationContext,
   } from '@origintrail-official/dkg-core';
-import type { DKGAgent } from './dkg-agent.js';
+import type { ProtocolRouter } from '@origintrail-official/dkg-core';
+import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 import { type BulkGraphRequest } from './sync/bulk-graph-contract.js';
 import { exchangeBulkGraphVerified, type BulkGraphMetrics } from './sync/requester/bulk-graph-stream.js';
 import { materializeVerifiedGraphScopedGroup } from './sync/requester/graph-scoped-group.js';
 
-export type PublicSnapshotBulkHost = {
-  store: DKGAgent['store'];
-  router: Pick<DKGAgent['router'], 'probeProtocol' | 'withDuplexStream'>;
-  getOrCreateSyncVerifyWorker: () => Pick<ReturnType<DKGAgent['getOrCreateSyncVerifyWorker']>, 'parseAndFilter'>;
-} & { [K in 'ensurePeerConnected' | 'processDurableBatchInWorker'
-  | 'reconcileAfterGraphScopedMaterialization']: OmitThisParameter<DKGAgent[K]> };
+export type PublicSnapshotBulkHost = Pick<DurableRecoveryHost, 'verification' | 'reconcile'> & {
+  readonly store: Parameters<typeof materializeVerifiedGraphScopedGroup>[0]['store'];
+  readonly router: Pick<ProtocolRouter, 'probeProtocol' | 'withDuplexStream'>;
+  ensurePeerConnected(peer: string, options: { signal: AbortSignal }): Promise<void>;
+};
 
 /** One explicit public job, one configured supplier. No background or private sync policy changes. */
 export async function recoverPublicSnapshotBulk(agent: PublicSnapshotBulkHost, options: PublicSnapshotRecoveryOptions & {
@@ -57,8 +57,8 @@ export async function recoverPublicSnapshotBulk(agent: PublicSnapshotBulkHost, o
       {
         stagingRoot: join(options.dataDir!, 'bulk-snapshot-staging'),
         verification: { contextGraphId, ctx,
-          parseAndFilter: (text, graph, cg) => agent.getOrCreateSyncVerifyWorker().parseAndFilter(text, graph, cg),
-          processDurableBatchInWorker: agent.processDurableBatchInWorker.bind(agent),
+          parseAndFilter: agent.verification.parseAndFilter,
+          processDurableBatchInWorker: agent.verification.processBatch,
         },
         commit: async (assets, commitSignal) => {
           assertCurrent();
@@ -74,7 +74,7 @@ export async function recoverPublicSnapshotBulk(agent: PublicSnapshotBulkHost, o
         reconcile: async (authenticated, commitSignal) => {
           options.onCommitted();
           commitSignal.throwIfAborted(); assertCurrent();
-          await Promise.all(authenticated.map(asset => agent.reconcileAfterGraphScopedMaterialization(asset, ctx)));
+          await Promise.all(authenticated.map(asset => agent.reconcile(asset, ctx)));
         },
         onMetrics: metrics => options.log(`Bulk snapshot progress ${JSON.stringify(metrics)}`),
       });

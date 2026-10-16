@@ -31,7 +31,8 @@ function fixture() {
     persistSubscription: async () => { throw new Error('already bound'); },
     bindSubscription: () => { throw new Error('already bound'); },
     recordDrops: () => {},
-    cleanup: () => ({} as ReturnType<RecoveryMaterializationPorts['cleanup']>),
+    reconcile: (asset, ctx) => cleanup.reconcileAfterMaterialization(
+      {} as Parameters<typeof cleanup.reconcileAfterMaterialization>[0], asset, ctx),
   };
   const authority: DurableRecoveryAuthority = {
     coalescing: 'owner-only', admitVerifiedPage() {}, isRegisteredPublic: () => true,
