@@ -87,7 +87,8 @@ export class EntityGraphReader {
       rows = await this.query(spec, `SELECT DISTINCT ?p ?value WHERE {
         ${selected} } ORDER BY ?p ?value LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline, 256 * 1024, 16_384);
     } catch (error) {
-      if ((error as { code?: string })?.code === 'STORE_RESPONSE_TOO_LARGE')
+      if ((error as { code?: string })?.code === 'STORE_RESPONSE_TOO_LARGE'
+          && (error as { queryPhase?: string }).queryPhase === 'result')
         throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
       throw error;
     }
