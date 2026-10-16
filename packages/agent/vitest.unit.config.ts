@@ -44,6 +44,7 @@ export default defineConfig({
       "test/swm-target-executor.test.ts",
       "test/swm-sync-sub-graph-registration.test.ts",
       "test/registered-public-sub-graph-first-write.test.ts",
+      "test/core-hosted-definition.test.ts",
       "test/fresh-meta-fetch.test.ts",
       "test/swm-change-notice.test.ts",
       "test/swm-change-notice-wiring.test.ts",

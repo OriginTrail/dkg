@@ -1,0 +1,591 @@
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * A Core keeps the owner's definition of the registered public graphs it hosts
+ * and serves it to subscribers (`core-hosted-definition.ts`), so that a member
+ * that reaches a graph only through Cores makes its first write into a
+ * sub-graph the owner registered (the gap left between #3264 and #3293).
+ *
+ * The Core and the member run the real keeping, bootstrap, curator-refresh,
+ * lookup and responder page code over fake agent surfaces, each with a real
+ * store (as in registered-public-sub-graph-first-write.test.ts). A peer's
+ * `_meta` is served as that peer's store holds it, so the Core's copy is what
+ * the member reads.
+ */
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  DKG_ONTOLOGY,
+  generateEd25519Keypair,
+  TypedEventBus,
+  type ContextGraphIdV1,
+  type EvmAddressV1,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
+import {
+  DKGPublisher,
+  generateSubGraphRegistration,
+  hasSubGraphRegistration,
+} from '@origintrail-official/dkg-publisher';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { ethers } from 'ethers';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import type { DKGAgent } from '../src/index.js';
+import { holdsAuthoritativePublicDefinitionV1 } from '../src/context-graph-meta-confirmation.js';
+import {
+  CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS,
+  CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS,
+  CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS,
+  ensureCoreHostedDefinition,
+  hasPendingCoreHostedDefinitionRetry,
+  holdsCoreHostedOwnerDefinition,
+  refreshCoreHostedDefinitionBeforeServing,
+} from '../src/core-hosted-definition.js';
+import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
+import { Rfc64MetaBootstrapMethods } from '../src/dkg-agent-rfc64-meta-bootstrap.js';
+import { SUB_GRAPH_RESOLUTION_MAX_PEERS } from '../src/peer-sub-graph-registration.js';
+import { readDurableMetaPage } from '../src/sync/responder/graph-plan.js';
+
+const OWNER = new ethers.Wallet(`0x${'95'.repeat(32)}`).address.toLowerCase() as EvmAddressV1;
+const STRANGER = new ethers.Wallet(`0x${'96'.repeat(32)}`).address.toLowerCase();
+const MEMBER = new ethers.Wallet(`0x${'97'.repeat(32)}`).address;
+const OWNER_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const CORE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const SECOND_CORE_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const STRANGER_PEER_ID = '12D3KooWRBhwfeP2Y4TCx1SM6s9rUoHhR5STiGwxBhgFRcw3UERE';
+const OTHER_PEER_ID = '12D3KooWJWEKvSFbben74C7H4YtKjhPMTDxd7gP7zxWSUEeF27st';
+const MEMBER_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const ON_CHAIN_ID = '12';
+const contextGraphId = `${OWNER}/one-graph` as ContextGraphIdV1;
+const REPORTS = 'reports';
+const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+const registeredProof = Object.freeze({ contextGraphId, onChainId: ON_CHAIN_ID });
+const NAME = 'http://schema.org/name';
+const ON_CHAIN_ID_PREDICATE = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+
+function rootQuad(predicate: string, object: string): Quad {
+  return { subject: contextGraphUri, predicate, object, graph: metaGraph };
+}
+
+/** The owner's root declaration of the registered public graph, chain claims included. */
+const OWNER_DECLARATION: readonly Quad[] = Object.freeze([
+  rootQuad(DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+  rootQuad(DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"public"'),
+  rootQuad(DKG_ONTOLOGY.DKG_CURATOR, `did:dkg:agent:${OWNER}`),
+  rootQuad(DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, '"registered"'),
+  rootQuad(ON_CHAIN_ID_PREDICATE, `"${ON_CHAIN_ID}"`),
+]);
+
+/** A declaration that names another wallet as the graph's curator. */
+const FORGED_CURATOR_DECLARATION: readonly Quad[] = Object.freeze([
+  rootQuad(DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+  rootQuad(DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"public"'),
+  rootQuad(DKG_ONTOLOGY.DKG_CURATOR, `did:dkg:agent:${STRANGER}`),
+]);
+
+/** A declaration that would flip the public graph private. */
+const PRIVATE_DECLARATION: readonly Quad[] = Object.freeze([
+  rootQuad(DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+  rootQuad(DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"private"'),
+  rootQuad(DKG_ONTOLOGY.DKG_CURATOR, `did:dkg:agent:${OWNER}`),
+]);
+
+/** The rows `createSubGraph` on the owner's node writes into the graph's `_meta`. */
+function subGraphRegistration(subGraphName: string): Quad[] {
+  return generateSubGraphRegistration({
+    contextGraphId,
+    subGraphName,
+    createdBy: OWNER_PEER_ID,
+    description: `${subGraphName} of the graph`,
+    timestamp: new Date('2026-10-17T08:00:00.000Z'),
+  });
+}
+
+const stores: OxigraphStore[] = [];
+afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  await Promise.all(stores.splice(0).map((store) => store.close()));
+});
+
+function openStore(): OxigraphStore {
+  const store = new OxigraphStore();
+  stores.push(store);
+  return store;
+}
+
+/** A node of the network: its `_meta` as it serves it, read from its store on each request. */
+interface PeerNode {
+  readonly store: OxigraphStore;
+  /** `incomplete` answers with a partial page; `fail` refuses the request. */
+  answer: 'complete' | 'incomplete' | 'fail';
+}
+
+async function peerNode(rows: readonly Quad[] = []): Promise<PeerNode> {
+  const store = openStore();
+  if (rows.length > 0) await store.insert([...rows]);
+  return { store, answer: 'complete' };
+}
+
+async function servedMeta(peer: PeerNode): Promise<Quad[]> {
+  const result = await peer.store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`);
+  if (result.type !== 'bindings') throw new Error('expected the peer\'s _meta rows');
+  return result.bindings.map((row) => ({ subject: row['s']!, predicate: row['p']!, object: row['o']!, graph: metaGraph }));
+}
+
+type Peers = ReadonlyMap<string, PeerNode>;
+
+/** The transport and store ports both the Core and the member share with the curator refresh. */
+function nodeSurface(store: OxigraphStore, peerId: string, peers: Peers, connected: () => readonly string[]) {
+  const writeLocks = new Map<string, Promise<void>>();
+  const syncCheckpoints = new Map<string, number>();
+  const fetchSyncPages = vi.fn(async (
+    _ctx: OperationContext,
+    remotePeerId: string,
+    _contextGraphId: string,
+    _includeSharedMemory: boolean,
+    _phase: string,
+    _graphUri: string,
+    _deadline: number,
+    _options?: { forceFreshSession?: boolean; signal?: AbortSignal },
+  ) => {
+    const peer = peers.get(remotePeerId);
+    if (peer === undefined || peer.answer === 'fail') throw new Error(`dial to ${remotePeerId.slice(-8)} failed`);
+    const quads = await servedMeta(peer);
+    syncCheckpoints.set(`meta-checkpoint-${remotePeerId}`, quads.length);
+    return {
+      quads: peer.answer === 'incomplete' ? quads.slice(0, 1) : quads,
+      checkpointKey: `meta-checkpoint-${remotePeerId}`,
+      resumedFromOffset: 0,
+      completed: peer.answer === 'complete',
+    };
+  });
+  const log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+  const peerResolver = {
+    // A dial succeeds for a peer that exists and answers; connected peers are never dialled.
+    connect: vi.fn(async (remotePeerId: string) => ({
+      status: peers.get(remotePeerId)?.answer === 'fail' || !peers.has(remotePeerId) ? 'failed' : 'connected',
+    })),
+  };
+  return {
+    store,
+    log,
+    peerId,
+    writeLocks,
+    syncCheckpoints,
+    fetchSyncPages,
+    peerResolver,
+    metaRefreshTimestamps: new Map<string, number>(),
+    runContextGraphSyncWithBackpressure: vi.fn(async <T>(
+      _ctx: OperationContext,
+      _contextGraphId: string,
+      _lane: 'durable',
+      _label: string,
+      work: () => Promise<T>,
+    ): Promise<T> => work()),
+    node: {
+      libp2p: { getConnections: () => connected().map((remotePeerId) => ({ remotePeer: { toString: () => remotePeerId } })) },
+    },
+    oversizeTombstoneLog: { record: () => undefined },
+    invalidateListContextGraphsCache: vi.fn(),
+    contextGraphMetaProjection: { markDirty: vi.fn() },
+    bindSubscriptionOnChainId: vi.fn(),
+    recordCgWireId: vi.fn(),
+    persistContextGraphSubscription: vi.fn(),
+  };
+}
+
+interface CoreOptions {
+  /** The peers the Core is connected to; default the owner. */
+  connected?: readonly string[];
+  /** The nodes the Core's agent registry lists for the owner wallet; default the owner's node. */
+  ownerNodes?: readonly string[];
+  /** The connected peers the Core's seed selection returns; default none. */
+  seedPeers?: readonly string[];
+  hosted?: boolean;
+  localAuthor?: boolean;
+  graphId?: string;
+}
+
+/** A Core that hosts the graph by its chain policy (`recordCoreHostedPublicCg` wrote its row). */
+function coreNode(peers: Peers, options: CoreOptions = {}) {
+  const store = openStore();
+  const connected = [...(options.connected ?? [OWNER_PEER_ID])];
+  const stop = new AbortController();
+  const ownerNodes = options.ownerNodes ?? [OWNER_PEER_ID];
+  const base = nodeSurface(store, CORE_PEER_ID, peers, () => connected);
+  const graphId = options.graphId ?? contextGraphId;
+  const surface = {
+    ...base,
+    node: { ...base.node, stopSignal: stop.signal },
+    subscribedContextGraphs: new Map([[graphId, {
+      syncMode: 'always-on', subscribed: false, synced: false, onChainId: ON_CHAIN_ID, coreHosted: options.hosted !== false,
+    }]]),
+    localContextGraphProvenance: { hasLocalCreate: () => options.localAuthor === true },
+    discovery: {
+      findAgents: vi.fn(async (query: { agentAddress?: string }) => (
+        query.agentAddress?.toLowerCase() === OWNER
+          ? ownerNodes.map((remotePeerId) => ({ peerId: remotePeerId, agentAddress: OWNER }))
+          : []
+      )),
+    },
+    resolveRfc64UnregisteredAuthoritySeedPeersV1: vi.fn(() => [...(options.seedPeers ?? [])]),
+  };
+  const node: PeerNode = { store, answer: 'complete' };
+  return { agent: surface as unknown as object, surface, store, node, connected, stop, fetchSyncPages: base.fetchSyncPages, log: base.log };
+}
+
+interface MemberOptions {
+  /** The connected peers in the order the node's peer selection returns them. */
+  connected?: readonly string[];
+  /** The peer the member resolves as the graph's owner; default the owner's node. */
+  owner?: string;
+}
+
+/**
+ * A member subscribed to the graph, running the real bootstrap, lookup and
+ * refresh code (`Rfc64MetaBootstrapMethods`, `ContextGraphRegistryMethods`).
+ */
+function memberNode(peers: Peers, options: MemberOptions = {}) {
+  const store = openStore();
+  const connected = options.connected ?? [CORE_PEER_ID];
+  const base = nodeSurface(store, MEMBER_PEER_ID, peers, () => connected);
+  const owner = 'owner' in options ? options.owner : OWNER_PEER_ID;
+  const surface = {
+    ...base,
+    localContextGraphProvenance: { hasLocalCreate: () => false },
+    subscribedContextGraphs: new Map([[contextGraphId, { subscribed: true }]]),
+    readAcceptedRfc64CatalogAccessSnapshotV1: () => null,
+    hasConfirmedMetaState: vi.fn(async () => true),
+    resolveRfc64UnregisteredAuthoritySeedPeersV1: vi.fn(() => [...connected]),
+    resolveCuratorPeerId: vi.fn(async () => owner),
+    refreshMetaSyncedFlags: vi.fn(async () => undefined),
+    // The chain attests nothing in this fake: a member without a serving peer holds no definition.
+    resolveActivePublicContextGraphChainProof: vi.fn(async () => ({ state: 'unknown', reason: 'unprovable' })),
+    discovery: {},
+    resolveSubGraphRegistration: ContextGraphRegistryMethods.prototype.resolveSubGraphRegistration,
+  };
+  const agent = Object.defineProperties(
+    Object.create(Rfc64MetaBootstrapMethods.prototype) as object,
+    Object.getOwnPropertyDescriptors(surface),
+  ) as unknown as DKGAgent;
+  return { agent, store, surface, fetchSyncPages: base.fetchSyncPages, log: base.log, writeLocks: base.writeLocks };
+}
+
+/** The member's own publisher, wired to the agent as `DKGAgent.create` wires it. */
+async function memberPublisher(member: ReturnType<typeof memberNode>) {
+  return new DKGPublisher({
+    store: member.store,
+    chain: new MockChainAdapter(),
+    eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(),
+    writeLocks: member.writeLocks,
+    resolveUnregisteredSubGraph: (graphId, subGraphName) => member.agent.resolveSubGraphRegistration(graphId, subGraphName),
+  });
+}
+
+/** POST /api/knowledge-assets with `subGraphName`: create the draft, then write its triple. */
+async function firstWrite(publisher: DKGPublisher, name: string, subGraphName: string): Promise<void> {
+  await publisher.assertionCreate(contextGraphId, name, MEMBER, subGraphName);
+  await publisher.assertionWrite(
+    contextGraphId,
+    name,
+    MEMBER,
+    [{ subject: `urn:dkg:test-core-hosted:${name}`, predicate: NAME, object: `"${name}"`, graph: '' }],
+    subGraphName,
+  );
+}
+
+/** What the Core's sync responder serves for the graph's durable `_meta` (first page). */
+async function servedByCore(core: ReturnType<typeof coreNode>, registeredSubGraphNames: string[]) {
+  const rows = await readDurableMetaPage({ store: core.store, contextGraphId, registeredSubGraphNames, offset: 0, limit: 500 });
+  return rows.map((row) => `${row.s} ${row.p} ${row.o}`);
+}
+
+const askedPeers = (fetchSyncPages: ReturnType<typeof vi.fn>) => fetchSyncPages.mock.calls.map((call) => call[1]);
+const peersOf = (entries: Array<[string, PeerNode]>) => new Map(entries);
+
+describe('a Core keeps the owner\'s definition of a hosted registered public graph', () => {
+  it('fetches it from the owner\'s node with the sub-graph registrations, and serves it to subscribers', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+
+    await expect(holdsAuthoritativePublicDefinitionV1(core.store, contextGraphId)).resolves.toBe(true);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID]);
+    // The owner was connected: nothing was dialled.
+    expect(core.surface.peerResolver.connect).not.toHaveBeenCalled();
+    expect(core.log.info.mock.calls.map((call) => String(call[1])))
+      .toContainEqual(expect.stringContaining(`installed the owner's definition from owner node ${OWNER_PEER_ID.slice(-8)}`));
+
+    // The responder's durable `_meta` page carries the declaration and the registration.
+    const served = await servedByCore(core, [REPORTS]);
+    expect(served).toContainEqual(`${contextGraphUri} ${DKG_ONTOLOGY.DKG_ACCESS_POLICY} "public"`);
+    expect(served).toContainEqual(`${contextGraphUri} ${DKG_ONTOLOGY.DKG_CURATOR} did:dkg:agent:${OWNER}`);
+    expect(served).toContainEqual(`${contextGraphUri}/${REPORTS} ${NAME} "${REPORTS}"`);
+    // The owner's chain claims are the peer's claims, not chain truth: not kept, not served.
+    expect(served.some((row) => row.includes(ON_CHAIN_ID_PREDICATE))).toBe(false);
+
+    // Held now: a second call asks nobody.
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'restored')).resolves.toBe('held');
+    expect(core.fetchSyncPages).toHaveBeenCalledOnce();
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+  });
+
+  it('refuses a forged definition: another curator, or a private policy, from any peer', async () => {
+    const impostor = await peerNode([...FORGED_CURATOR_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const core = coreNode(peersOf([[STRANGER_PEER_ID, impostor]]), {
+      connected: [STRANGER_PEER_ID], ownerNodes: [STRANGER_PEER_ID],
+    });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    await expect(holdsAuthoritativePublicDefinitionV1(core.store, contextGraphId)).resolves.toBe(false);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(false);
+    expect(core.log.warn.mock.calls.map((call) => String(call[1])))
+      .toContainEqual(expect.stringContaining('its curator is not the owner the accepted policy names'));
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+
+    const downgrade = await peerNode([...PRIVATE_DECLARATION]);
+    const other = coreNode(peersOf([[OWNER_PEER_ID, downgrade]]));
+    await expect(ensureCoreHostedDefinition(other.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    await expect(holdsAuthoritativePublicDefinitionV1(other.store, contextGraphId)).resolves.toBe(false);
+    expect(other.log.warn.mock.calls.map((call) => String(call[1])))
+      .toContainEqual(expect.stringContaining('missing an unambiguous public definition'));
+  });
+
+  it('asks the owner\'s nodes first, then connected peers, and takes the first verified definition', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    owner.answer = 'fail';
+    const empty = await peerNode();
+    const otherCore = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const core = coreNode(
+      peersOf([[OWNER_PEER_ID, owner], [OTHER_PEER_ID, empty], [SECOND_CORE_PEER_ID, otherCore]]),
+      { connected: [OTHER_PEER_ID, SECOND_CORE_PEER_ID], seedPeers: [OTHER_PEER_ID, SECOND_CORE_PEER_ID, OWNER_PEER_ID, STRANGER_PEER_ID] },
+    );
+
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'restored')).resolves.toBe('fetched');
+    // The owner's node (not connected) is dialled and fails; the owner is not asked again among the connected peers.
+    expect(core.surface.peerResolver.connect).toHaveBeenCalledWith(OWNER_PEER_ID, expect.anything());
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OTHER_PEER_ID, SECOND_CORE_PEER_ID]);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(core.log.info.mock.calls.map((call) => String(call[1])))
+      .toContainEqual(expect.stringContaining(`installed the owner's definition from peer ${SECOND_CORE_PEER_ID.slice(-8)}`));
+  });
+
+  it(`asks at most ${CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS} connected peers besides the owner's nodes`, async () => {
+    const peers = [OTHER_PEER_ID, STRANGER_PEER_ID, SECOND_CORE_PEER_ID, MEMBER_PEER_ID];
+    const core = coreNode(
+      peersOf(await Promise.all(peers.map(async (peerId) => [peerId, await peerNode()] as [string, PeerNode]))),
+      { connected: peers, ownerNodes: [], seedPeers: peers },
+    );
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS);
+  });
+
+  it('keeps nothing for a graph it does not host, created itself, or whose id names no owner', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const peers = peersOf([[OWNER_PEER_ID, owner]]);
+    const notHosted = coreNode(peers, { hosted: false });
+    await expect(ensureCoreHostedDefinition(notHosted.agent, contextGraphId, 'recorded')).resolves.toBe('not-hosted');
+    const author = coreNode(peers, { localAuthor: true });
+    await expect(ensureCoreHostedDefinition(author.agent, contextGraphId, 'recorded')).resolves.toBe('local-author');
+    const numeric = coreNode(peers, { graphId: ON_CHAIN_ID });
+    await expect(ensureCoreHostedDefinition(numeric.agent, ON_CHAIN_ID, 'recorded')).resolves.toBe('no-owner-namespace');
+    const unknown = coreNode(peers);
+    await expect(ensureCoreHostedDefinition(unknown.agent, `${OWNER}/another-graph`, 'recorded')).resolves.toBe('not-hosted');
+    await expect(ensureCoreHostedDefinition(unknown.agent, 'ontology', 'recorded')).resolves.toBe('not-hosted');
+    for (const node of [notHosted, author, numeric, unknown]) expect(node.fetchSyncPages).not.toHaveBeenCalled();
+  });
+
+  it('retries with a growing delay while no peer serves it, shares one attempt, and stops with the node', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    owner.answer = 'fail';
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+
+    const [first, second] = await Promise.all([
+      ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded'),
+      ensureCoreHostedDefinition(core.agent, contextGraphId, 'restored'),
+    ]);
+    expect([first, second]).toEqual(['not-found', 'not-found']);
+    expect(core.fetchSyncPages).toHaveBeenCalledOnce();
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+    expect(core.log.info.mock.calls.map((call) => String(call[1])))
+      .toContainEqual(expect.stringContaining(`next attempt in ${CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]! / 1000} s`));
+
+    // The first retry fails too; the second comes later than the first.
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
+    expect(core.log.info.mock.calls.map((call) => String(call[1])))
+      .toContainEqual(expect.stringContaining(`next attempt in ${CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[1]! / 1000} s`));
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
+
+    // The owner is back: the next retry installs the definition and the chain of retries ends.
+    owner.answer = 'complete';
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[1]! - CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(3);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+
+    // A node that stops cancels its pending retry.
+    const stopping = coreNode(peersOf([[OWNER_PEER_ID, { store: owner.store, answer: 'fail' }]]));
+    await expect(ensureCoreHostedDefinition(stopping.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    expect(hasPendingCoreHostedDefinitionRetry(stopping.agent, contextGraphId)).toBe(true);
+    stopping.stop.abort();
+    expect(hasPendingCoreHostedDefinitionRetry(stopping.agent, contextGraphId)).toBe(false);
+    await expect(ensureCoreHostedDefinition(stopping.agent, contextGraphId, 'retry')).resolves.toBe('not-hosted');
+  });
+
+  it('refreshes its copy from a connected owner before serving, once per cooldown, and never dials for it', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+
+    // The owner registers a sub-graph after the Core took the definition.
+    await owner.store.insert(subGraphRegistration(REPORTS));
+    // Within the cooldown of the fetch above: served as it is.
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    expect(core.fetchSyncPages).toHaveBeenCalledOnce();
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(false);
+
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect((await servedByCore(core, [REPORTS]))).toContainEqual(`${contextGraphUri}/${REPORTS} ${NAME} "${REPORTS}"`);
+    // Refreshed just now: the next request is served from the copy.
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
+
+    // The owner went away: the copy is served as it is, and no dial is made for a subscriber's request.
+    clock.mockReturnValue(now + 2 * (CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1));
+    core.connected.splice(0);
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
+    expect(core.surface.peerResolver.connect).not.toHaveBeenCalled();
+
+    // Not hosted here, or a request that was cancelled: nothing happens.
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, `${OWNER}/another-graph`);
+    const cancelled = new AbortController();
+    cancelled.abort();
+    core.connected.push(OWNER_PEER_ID);
+    clock.mockReturnValue(now + 3 * (CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1));
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId, cancelled.signal);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(3);
+  });
+
+  it('fetches a missing definition in the background when a subscriber asks and no owner node is connected', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const otherCore = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [SECOND_CORE_PEER_ID, otherCore]]), {
+      connected: [SECOND_CORE_PEER_ID], ownerNodes: [], seedPeers: [SECOND_CORE_PEER_ID],
+    });
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    await vi.waitFor(() => expect(core.fetchSyncPages).toHaveBeenCalledOnce());
+    await vi.waitFor(async () => expect(await holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).toBe(true));
+    // A request that comes while the fetch runs waits for it (within its budget).
+    core.fetchSyncPages.mockClear();
+    await core.store.dropGraph(metaGraph);
+    const inFlight = ensureCoreHostedDefinition(core.agent, contextGraphId, 'restored');
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    await expect(inFlight).resolves.toBe('fetched');
+    expect(core.fetchSyncPages).toHaveBeenCalledOnce();
+  });
+});
+
+describe('a member that reaches a registered public graph only through Cores', () => {
+  it('takes the owner\'s definition from a Core, and its first write goes into the owner\'s sub-graph', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+
+    // The member is connected to the Core only; it can name the owner's node but not reach it.
+    const member = memberNode(peersOf([[CORE_PEER_ID, core.node]]), { connected: [CORE_PEER_ID] });
+    await expect(member.agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId, undefined, registeredProof))
+      .resolves.toBe('fetched');
+    expect(askedPeers(member.fetchSyncPages)).toEqual([CORE_PEER_ID]);
+    await expect(holdsCoreHostedOwnerDefinition(member.store, contextGraphId, OWNER)).resolves.toBe(true);
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, REPORTS)).resolves.toBe(true);
+
+    const publisher = await memberPublisher(member);
+    await expect(firstWrite(publisher, 'report-1', REPORTS)).resolves.toBeUndefined();
+    // Learned with the definition: the write asked nobody.
+    expect(member.fetchSyncPages).toHaveBeenCalledOnce();
+  });
+
+  it('finds a sub-graph the owner registered later at the Core, before trying to reach the owner', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    const member = memberNode(peersOf([[CORE_PEER_ID, core.node]]), { connected: [CORE_PEER_ID] });
+    await expect(member.agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId, undefined, registeredProof))
+      .resolves.toBe('fetched');
+
+    // The owner registers the sub-graph; the Core refreshes its copy when the member's lookup asks it.
+    await owner.store.insert(subGraphRegistration(REPORTS));
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+    const serve = member.fetchSyncPages.getMockImplementation()!;
+    member.fetchSyncPages.mockImplementation(async (...args) => {
+      // What the Core's responder does before it reads the first page.
+      if (args[1] === CORE_PEER_ID) await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+      return serve(...args);
+    });
+
+    const publisher = await memberPublisher(member);
+    await expect(firstWrite(publisher, 'report-1', REPORTS)).resolves.toBeUndefined();
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    // The Core was asked, and held it; the owner, out of reach, was not.
+    expect(askedPeers(member.fetchSyncPages)).toEqual([CORE_PEER_ID, CORE_PEER_ID]);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, OWNER_PEER_ID]);
+  });
+
+  it('writes into the owner\'s sub-graph once a Core holds the definition, even if it took its own from the chain', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    // The member subscribed while the Core held nothing: no peer served the definition.
+    const member = memberNode(peersOf([[CORE_PEER_ID, core.node]]), { connected: [CORE_PEER_ID] });
+    await expect(member.agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId, undefined, registeredProof))
+      .resolves.toBe('not-found');
+    // What #3264 installs from the chain: the graph is a public graph, nothing more.
+    await member.store.insert(OWNER_DECLARATION.slice(0, 2));
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, REPORTS)).resolves.toBe(false);
+
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    const publisher = await memberPublisher(member);
+    await expect(firstWrite(publisher, 'report-1', REPORTS)).resolves.toBeUndefined();
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    // The write's lookup asked the connected Core first; the owner it cannot reach came last and was not needed.
+    expect(askedPeers(member.fetchSyncPages)).toEqual([CORE_PEER_ID, CORE_PEER_ID]);
+  });
+
+  it('asks the owner first only when connected to it; otherwise the connected peers first and the owner last', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const others = await Promise.all([OTHER_PEER_ID, STRANGER_PEER_ID, SECOND_CORE_PEER_ID].map(() => peerNode([...OWNER_DECLARATION])));
+    const peers = peersOf([[OWNER_PEER_ID, owner], [OTHER_PEER_ID, others[0]!], [STRANGER_PEER_ID, others[1]!], [SECOND_CORE_PEER_ID, others[2]!]]);
+
+    const withOwner = memberNode(peers, { connected: [OTHER_PEER_ID, OWNER_PEER_ID, STRANGER_PEER_ID] });
+    await withOwner.store.insert([...OWNER_DECLARATION]);
+    await expect(withOwner.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toEqual({ registered: true });
+    expect(askedPeers(withOwner.fetchSyncPages)).toEqual([OWNER_PEER_ID]);
+
+    const withoutOwner = memberNode(peers, { connected: [OTHER_PEER_ID, STRANGER_PEER_ID, SECOND_CORE_PEER_ID] });
+    await withoutOwner.store.insert([...OWNER_DECLARATION]);
+    await expect(withoutOwner.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toEqual({ registered: true });
+    // Two connected peers, then the owner: the owner is always among the peers asked.
+    expect(askedPeers(withoutOwner.fetchSyncPages)).toEqual([OTHER_PEER_ID, STRANGER_PEER_ID, OWNER_PEER_ID]);
+    expect(askedPeers(withoutOwner.fetchSyncPages)).toHaveLength(SUB_GRAPH_RESOLUTION_MAX_PEERS);
+
+    const unnamed = memberNode(peers, { connected: [OTHER_PEER_ID, SECOND_CORE_PEER_ID], owner: undefined });
+    await unnamed.store.insert([...OWNER_DECLARATION]);
+    await expect(unnamed.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toMatchObject({ registered: false });
+    expect(askedPeers(unnamed.fetchSyncPages)).toEqual([OTHER_PEER_ID, SECOND_CORE_PEER_ID]);
+  });
+});

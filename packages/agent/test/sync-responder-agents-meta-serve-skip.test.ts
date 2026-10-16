@@ -237,3 +237,56 @@ describe('sync responder — injected servingWithheld predicate', () => {
     expect(out).toContain('"Open"');
   });
 });
+
+// A Core refreshes the owner's definition of a hosted graph before it serves
+// it: the injected `beforeServingDurableMeta` is awaited once per durable
+// `_meta` snapshot (its first page), never for a later page, a shared-memory
+// request, another phase or a withheld graph.
+describe('sync responder — injected beforeServingDurableMeta hook', () => {
+  let cap: ReturnType<typeof captureHandler>;
+  let served: Array<{ contextGraphId: string; signal: AbortSignal | undefined }>;
+  let shouldWithhold: (contextGraphId: string) => boolean;
+
+  beforeEach(async () => {
+    served = [];
+    shouldWithhold = () => false;
+    const store = new OxigraphStore();
+    await store.insert([
+      { graph: USER_META, subject: USER_ENTITY, predicate: `${DKG_NS}createdAt`, object: '"2026-07-08T00:00:00Z"' },
+      { graph: USER_ENTITY, subject: USER_ENTITY, predicate: `${DKG_NS}nodeRole`, object: '"core"' },
+    ]);
+    cap = captureHandler();
+    registerSyncHandler({
+      register: cap.register,
+      protocolSync: '/origintrail/dkg/sync/1.0.0',
+      syncDeniedResponse: 'sync-denied',
+      syncPageSize: 5000,
+      sharedMemoryTtlMs: 0,
+      store,
+      peerId: 'self-peer',
+      parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+      authorizeSyncRequest: async () => true,
+      shouldWithholdDurableMeta: (contextGraphId) => shouldWithhold(contextGraphId),
+      beforeServingDurableMeta: async (contextGraphId, signal) => {
+        served.push({ contextGraphId, signal });
+      },
+      logWarn: noopLog,
+      logDebug: noopLog,
+    });
+  });
+
+  it('is awaited before the first page of a durable meta snapshot, and the page is then served', async () => {
+    const out = await cap.invoke({ contextGraphId: USER_CG, offset: 0, limit: 5000, includeSharedMemory: false, phase: 'meta' });
+    expect(served.map((call) => call.contextGraphId)).toEqual([USER_CG]);
+    expect(lineGraphsFromNquads(out).has(USER_META)).toBe(true);
+  });
+
+  it('is not called for a later page, a shared-memory request, another phase or a withheld graph', async () => {
+    await cap.invoke({ contextGraphId: USER_CG, offset: 5000, limit: 5000, includeSharedMemory: false, phase: 'meta' });
+    await cap.invoke({ contextGraphId: USER_CG, offset: 0, limit: 5000, includeSharedMemory: true, phase: 'meta' });
+    await cap.invoke({ contextGraphId: USER_CG, offset: 0, limit: 5000, includeSharedMemory: false, phase: 'data' });
+    shouldWithhold = (contextGraphId) => contextGraphId === USER_CG;
+    await cap.invoke({ contextGraphId: USER_CG, offset: 0, limit: 5000, includeSharedMemory: false, phase: 'meta' });
+    expect(served).toEqual([]);
+  });
+});
