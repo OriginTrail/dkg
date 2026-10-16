@@ -675,6 +675,7 @@ export function catchupPeerResponded(
 export interface CatchupRunner {
   run(request: CatchupRunRequest): Promise<CatchupJobResult>;
   close(): Promise<void>;
+  selectedLaneFoundInactive?(contextGraphId: string): boolean;
 }
 
 type PendingRun = {
@@ -785,6 +786,10 @@ class WorkerCatchupRunner implements CatchupRunner {
   async close(): Promise<void> {
     this.selectedLaneWait.close();
     await this.worker.terminate();
+  }
+
+  selectedLaneFoundInactive(contextGraphId: string): boolean {
+    return this.selectedLaneWait.foundInactive(contextGraphId);
   }
 
   private async handleInvoke(message: Extract<WorkerMessage, { type: 'invoke' }>): Promise<void> {
