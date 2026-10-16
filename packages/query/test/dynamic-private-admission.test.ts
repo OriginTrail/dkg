@@ -44,7 +44,7 @@ async function fixture(kind: 'bare' | 'changelog' | 'index-outside' | 'index-ins
   ]);
   return { adapter, engine: new DKGQueryEngine(store), calls, admission, enumeration, controller, failure,
     options: { contextGraphId: ID, includeContextGraphPartitions: true, includePrivate: true,
-      signal: controller.signal, priority: 'background' as const, source: 'private-admission-test', maxResponseBytes: 4096 } };
+      signal: controller.signal, priority: 'background' as const, source: 'private-admission-test', maxResponseBytes: 4096, maxLiteralHydrationBytes: 4096 } };
 }
 
 describe('dynamic private catalog admission', () => {
@@ -57,8 +57,14 @@ describe('dynamic private catalog admission', () => {
       expect(f.enumeration).not.toHaveBeenCalled();
       expect(f.calls).toHaveLength(3);
       expect(f.calls.every(call => call.owned && call.options?.signal === f.controller.signal)).toBe(true);
-      expect(f.calls[0].options?.maxResponseBytes).toBe(QUERY_CATALOG_MAX_RESPONSE_BYTES);
-      for (const call of f.calls.slice(1)) expect(call.options).toMatchObject({ maxResponseBytes: 4096, priority: 'background', source: 'private-admission-test' });
+      expect(f.calls[1].sparql).toContain('SELECT DISTINCT ?ual');
+      for (const call of f.calls.slice(0, 2)) expect(call.options).toMatchObject({
+        maxResponseBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES, maxLiteralHydrationBytes: QUERY_CATALOG_MAX_RESPONSE_BYTES,
+        priority: 'background', source: 'private-admission-test',
+      });
+      expect(f.calls[2].sparql).toContain(NAME);
+      expect(f.calls[2].options).toMatchObject({ maxResponseBytes: 4096, maxLiteralHydrationBytes: 4096,
+        priority: 'background', source: 'private-admission-test' });
       f.calls.length = 0; f.admission.mockClear();
       expect((await f.engine.query(QUERY, { ...f.options, includePrivate: false })).bindings.map(row => row.name)).toEqual(['"public"']);
       expect(f.admission).toHaveBeenCalledTimes(1);
