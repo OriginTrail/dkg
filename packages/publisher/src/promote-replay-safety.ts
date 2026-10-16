@@ -1,3 +1,4 @@
+import { getPromoteNoEffectProof, PROMOTE_NO_EFFECT_REJECTION_CODE, type PromoteNoEffectProof } from './promote-no-effect-rejection.js';
 import {
   isStoreOperationTimeoutError,
   isStoreSchedulerBusyError,
@@ -52,6 +53,12 @@ export type PromoteFailureDiagnostic =
   | PromotePostCommitFailureDiagnostic;
 
 export type PromoteFailureDisposition =
+  | {
+      readonly classification: 'cap_exceeded';
+      readonly retryable: false;
+      readonly diagnostic: { readonly name: 'PromoteNoEffectRejection'; readonly code: 'PROMOTE_NO_EFFECT_REJECTION' };
+      readonly noEffectProof: PromoteNoEffectProof;
+    }
   | {
       readonly classification: 'transient';
       readonly retryable: true;
@@ -228,6 +235,9 @@ export function getPromoteReplaySafeErrorDiagnostic(
 export function getPromoteFailureDisposition(
   error: unknown,
 ): PromoteFailureDisposition | undefined {
+  const noEffectProof = getPromoteNoEffectProof(error);
+  if (noEffectProof) return {classification: 'cap_exceeded', retryable: false, noEffectProof,
+    diagnostic: {name: 'PromoteNoEffectRejection', code: PROMOTE_NO_EFFECT_REJECTION_CODE}};
   const postCommitDiagnostic = getPromotePostCommitFailureDiagnostic(error);
   if (postCommitDiagnostic) {
     return {

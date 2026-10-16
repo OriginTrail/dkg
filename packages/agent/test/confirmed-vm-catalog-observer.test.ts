@@ -1,3 +1,5 @@
+import { throwInventoryRecoveryFailure } from '../src/internal/promote/inventory-recovery-failure.js';
+import { requireInventoryRemovalLane, SwmCatalogAuthorityNotReady } from '../src/internal/swm-inventory-write.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import { Logger, createOperationContext, type SwmAuthorInventoryScopeV1 } from '@origintrail-official/dkg-core';
@@ -37,6 +39,22 @@ async function fixture() {
 }
 
 describe('confirmed VM catalog completion certificate', () => {
+  it.each([true,false])('retains retry only for required but inactive removal authority (required=%s)', async required => {
+    const {deps,params}=await fixture();
+    deps.removeInventory=async()=>{
+      try {return requireInventoryRemovalLane(null,()=>required);}
+      catch(cause){throw new SwmInventoryWriteFailure('inventory-maintenance',params.seal.kaUal??null,cause);}
+    };
+    const failure=await transferConfirmedVmCatalogV1(deps,params).catch(error=>error);
+    if(required){
+      expect(failure.cause).toBeInstanceOf(SwmCatalogAuthorityNotReady);
+      await expect(throwInventoryRecoveryFailure(failure)).rejects.toMatchObject({code:'PROMOTE_RETRYABLE_FAILURE'});
+    }else{
+      await expect(throwInventoryRecoveryFailure(failure)).rejects.toThrow('policy excluded removal');
+      expect(failure.cause).not.toBeInstanceOf(SwmCatalogAuthorityNotReady);
+    }
+  });
+
   it.each(['applied', 'absent', 'inactive'] as const)('strict recovery accepts only durable public removal: %s', async status => {
     const { deps, params } = await fixture();
     deps.removeInventory = vi.fn(async () => (status === 'inactive' ? { status } : { status, attempts: 0, snapshot: null }));

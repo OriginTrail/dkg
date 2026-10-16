@@ -1,3 +1,4 @@
+import { executePromoteRequest } from './execute-promote-request.js';
 /**
  * Async-promote queue worker supervisor.
  *
@@ -205,7 +206,7 @@ function failureBookkeepingUncertainty(error: unknown): { errorName: string; err
 
 export type PromoteJobRunResult<T extends { promotedCount: number }> =
   | { outcome: 'succeeded'; result: T }
-  | { outcome: 'failed_retrying' | 'failed_terminal'; cause: unknown; error: ClassifiedPromoteError }
+  | { outcome: 'failed_retrying' | 'failed_terminal'; cause: unknown; error: ClassifiedPromoteError; retiredNoEffect?: true }
   | { outcome: 'partial_promote_ambiguity'; result: T; cause: unknown; error: ClassifiedPromoteError }
   | { outcome: 'failure_bookkeeping_uncertain'; cause: unknown; bookkeepingCause: unknown;
       diagnostic: { errorName: string; errorCode: string } };
@@ -399,6 +400,7 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
         classification: classified.classification,
         recordedAt: now(),
         ...(classified.diagnostic ? { diagnosticCode: classified.diagnostic.code } : {}),
+        ...('noEffectProof' in classified ? {noEffectProof: classified.noEffectProof} : {}),
       };
       try {
         const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
@@ -408,7 +410,8 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
           () => queue.fail(job.jobId, claimToken, attemptError),
         );
         throwIfShutdownInterrupted();
-        return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', cause: err, error: classified };
+        return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', cause: err, error: classified,
+          ...(transition.state === 'failed' && transition.retiredNoEffect ? {retiredNoEffect: true as const} : {}) };
       } catch (failErr: unknown) {
         if (failErr instanceof PromoteWorkerShutdownError) throw failErr;
         // The write may have committed without an acknowledgement. A lost lease
@@ -648,22 +651,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           job: claimed,
           queue: config.agent.promoteQueue,
           workerId: slot.workerId,
-          runPromote: async (request, markPromoteStarted) => {
-            const entities: 'all' | string[] | undefined =
-              request.entities === undefined
-                ? undefined
-                : request.entities === 'all'
-                ? 'all'
-                : [...request.entities];
-            await markPromoteStarted();
-            return config.agent.assertion.promote(request.contextGraphId, request.assertionName, {
-              entities,
-              recoveryBinding: request.recoveryBinding,
-              subGraphName: request.subGraphName,
-              ...(request.agentAddress ? { agentAddress: request.agentAddress } : {}),
-              ...(request.authorAgentAddress ? { authorAgentAddress: request.authorAgentAddress } : {}),
-            });
-          },
+          runPromote: (request, markStarted) => executePromoteRequest(config.agent, request, markStarted),
           now,
           heartbeatIntervalMs,
           bookkeepingRetryIntervalMs: config.bookkeepingRetryIntervalMs,

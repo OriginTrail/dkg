@@ -1,3 +1,5 @@
+import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
+import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
 import { writeLocksForStore } from './store-write-locks.js';
 import { assertNoUnfinishedBoundShare } from './bound-share-mutation-guard.js';
 import type { BoundPromoteRequest } from './async-promote-queue-types.js';
@@ -475,6 +477,8 @@ export interface DurableRootPromotionAtomicCompanionResolver {
 
 export interface DKGPublisherConfig {
   store: TripleStore;
+  /** Trusted queue ownership scope, explicitly supplied by the composing agent. */
+  promoteOwnershipReader?: PromoteOwnershipReader;
   chain: ChainAdapter;
   eventBus: EventBus;
   keypair: Ed25519Keypair;
@@ -1110,6 +1114,7 @@ function isNoDataInSwmFailure(err: unknown): boolean {
 
 export class DKGPublisher implements Publisher {
   private readonly store: TripleStore;
+  private readonly promoteOwnershipReader: PromoteOwnershipReader;
   private readonly chain: ChainAdapter;
   private readonly eventBus: EventBus;
   private readonly keypair: Ed25519Keypair;
@@ -1148,6 +1153,7 @@ export class DKGPublisher implements Publisher {
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
+    this.promoteOwnershipReader = config.promoteOwnershipReader ?? createPromoteOwnershipReader(config.store);
     this.chain = config.chain;
     this.kaAllocator = config.kaAllocator;
     this.resolveDurableRootPromotionAtomicCompanion =
@@ -6989,7 +6995,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     subGraphName?: string,
   ): Promise<void> {
-    await assertNoUnfinishedBoundShare(this.store, contextGraphId, name, agentAddress, subGraphName);
+    await assertNoUnfinishedBoundShare(this.promoteOwnershipReader, contextGraphId, name, agentAddress, subGraphName);
     const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const [operationIdResult, intentResult, layerResult] = await Promise.all([
@@ -8863,7 +8869,7 @@ export class DKGPublisher implements Publisher {
 
       if (wrapped.message.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
         const hint = 'Reduce the complete assertion payload size.';
-        throw new SwmGossipPayloadTooLargeError({
+        const rejection = new SwmGossipPayloadTooLargeError({
           actualBytes: wrapped.message.length,
           maxBytes: DKG_GOSSIP_MAX_MESSAGE_BYTES,
           operation: 'promote',
@@ -8871,6 +8877,10 @@ export class DKGPublisher implements Publisher {
             `Promoted assertion too large for gossip (${formatBytesAsKb(wrapped.message.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
             hint,
           hint,
+        });
+        throw await certifyPromoteNoEffectRejection(rejection, opts?.recoveryBinding, {
+          operationAbsent: operation.kind === 'absent', resumingCommittedSwm,
+          readSwm: () => this.assertionScopedQuads(swmGraphUri),
         });
       }
       gossipPayload = wrapped;

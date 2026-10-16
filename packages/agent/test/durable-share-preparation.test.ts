@@ -1,3 +1,6 @@
+import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
+import { canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-official/dkg-core';
+import { startRepairAgentV1, seedDurableWorkspaceAssetV1, AUTHOR as REPAIR_AUTHOR, CONTEXT_GRAPH_ID as REPAIR_CG } from './support/rfc64-local-catalog-repair-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assertionLifecycleUri, contextGraphMetaUri, createOperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -23,6 +26,26 @@ async function setup() {
 }
 
 describe('agent durable share preparation and replay', () => {
+  it('configures custom ownership before lazy queue construction across store wrappers', async () => {
+    const agent=await startRepairAgentV1({name:'explicit-custom-ownership'});
+    const configuration={graphUri:'urn:custom:explicit-control'};
+    agent.configurePromoteQueue(configuration);configuration.graphUri='urn:mutated-after-configuration';
+    const seeded=await seedDurableWorkspaceAssetV1(agent,'custom-owned',98n);
+    const binding={version:1 as const,inventoryRequired:true,
+      sealDigest:computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seeded.seal)),
+      intent:{version:1 as const,operationId:seeded.shareOperationId,timestampMs:1,confirmationRequired:false,accessPolicy:'public' as const,allowedPeers:[]}};
+    const otherWrapper=new Proxy(agent.store,{get(target,key){const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;}});
+    const writer=new TripleStoreAsyncPromoteQueue(otherWrapper,{graphUri:'urn:custom:explicit-control'});
+    const job=await writer.enqueueAndClaim({contextGraphId:REPAIR_CG,assertionName:seeded.assertionCoordinate,
+      agentAddress:REPAIR_AUTHOR,entities:'all',recoveryBinding:binding},'external');
+    expect((agent as any)._promoteQueue).toBeUndefined();
+    await expect(agent.publisher.assertionPullFrom(REPAIR_CG,seeded.assertionCoordinate,REPAIR_AUTHOR,'swm'))
+      .rejects.toMatchObject({code:'KA_PROMOTE_RECOVERY_REQUIRED',recoveryJobId:job.jobId});
+    expect((agent as any)._promoteQueue).toBeUndefined();
+    expect((await agent.promoteQueue.getStatus(job.jobId))?.request.recoveryBinding).toEqual(binding);
+  });
+
+
   it('pins the original operation, preserves content on replay and tolerates gossip notification failure', async () => {
     const { agent, store, finalized } = await setup();
     const prepared = await agent.assertion.prepareDurableShare(CG, NAME);

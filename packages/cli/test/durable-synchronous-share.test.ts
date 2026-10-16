@@ -49,6 +49,67 @@ async function setup() {
 afterEach(() => { daemonState.promoteWorkerAvailable = false; });
 
 describe('durable synchronous share ownership', () => {
+  it('retires a producer-certified first-attempt size rejection and permits discard', async () => {
+    const {store, agent, publisher} = await setup();
+    const name = 'oversized';
+    await publisher.assertionCreate(CG, name, AUTHOR);
+    await publisher.assertionWrite(CG, name, AUTHOR, Array.from({length:80},(_,i)=>({subject:'urn:large',predicate:`urn:value:${i}`,object:JSON.stringify('x'.repeat(55_000))})));
+    const seal = await finalizeRootlessAssertionForTest({publisher,store,contextGraphId:CG,name,agentAddress:AUTHOR});
+    daemonState.promoteWorkerAvailable = true;
+    await expect(durableSynchronousShare(agent, CG, name, {agentAddress:AUTHOR}))
+      .rejects.toMatchObject({code:'SWM_GOSSIP_PAYLOAD_TOO_LARGE'});
+    const [job] = await agent.promoteQueue.list();
+    expect(job.state).toBe('failed');
+    expect(job.attempt.lastError).toMatchObject({classification:'cap_exceeded',retryable:false,
+      diagnosticCode:'PROMOTE_NO_EFFECT_REJECTION',noEffectProof:{sealDigest:job.request.recoveryBinding!.sealDigest,
+        operationId:job.request.recoveryBinding!.intent.operationId}});
+    expect(await store.countQuads(seal.sharedGraphUri)).toBe(0);
+    await expect(agent.assertion.discard(CG, name, {agentAddress:AUTHOR})).resolves.toBeUndefined();
+    expect(await store.countQuads(seal.graphUri)).toBe(0);
+    const reopened=new TripleStoreAsyncPromoteQueue(store);
+    await expect(reopened.recover(job.jobId)).rejects.toThrow('retired no-effect rejection');
+    expect(await reopened.clearTerminalJob(job.jobId)).toEqual({outcome:'cleared'});
+    await store.close();
+  });
+
+  it('does not retire an arbitrary cap-like failure without a producer certificate', async () => {
+    const {store,agent} = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    const assertion=agent.assertion;
+    vi.spyOn(agent,'assertion','get').mockReturnValue({...assertion,promote:async()=>{
+      throw Object.assign(new Error('payload too large'),{code:'SWM_GOSSIP_PAYLOAD_TOO_LARGE',noEffectProof:{}});
+    }});
+    const error=await durableSynchronousShare(agent,CG,NAME,{agentAddress:AUTHOR}).catch(e=>e);
+    expect(error.observation.state).toBe('inspection-required');
+    const job=await agent.promoteQueue.getStatus(error.observation.jobId);
+    expect(job!.attempt.lastError!.noEffectProof).toBeUndefined();
+    await expect(assertion.discard(CG,NAME,{agentAddress:AUTHOR})).rejects.toMatchObject({code:'KA_PROMOTE_RECOVERY_REQUIRED'});
+    expect(await agent.promoteQueue.clearTerminalJob(job!.jobId)).toMatchObject({outcome:'rejected'});
+    await store.close();
+  });
+
+  it('executes the admitted fields inline and in the worker despite later HTTP option mutation', async () => {
+    const {store,agent}=await setup(); daemonState.promoteWorkerAvailable=true; store.remaining=1;
+    const options={agentAddress:AUTHOR,subGraphName:undefined as string|undefined,curatorAckTimeoutMs:1234};
+    const queue=agent.promoteQueue, enqueue=queue.enqueueAndClaim.bind(queue);
+    vi.spyOn(queue,'enqueueAndClaim').mockImplementation(async(request,worker)=>{
+      const job=await enqueue(request,worker); options.agentAddress=`0x${'22'.repeat(20)}`;options.subGraphName='mutated';return job;
+    });
+    const assertion=agent.assertion, promote=vi.fn(assertion.promote);
+    vi.spyOn(agent,'assertion','get').mockReturnValue({...assertion,promote});
+    const error=await durableSynchronousShare(agent,CG,NAME,options).catch(e=>e);
+    expect(error.observation.state).toBe('pending');
+    const original=await queue.getStatus(error.observation.jobId);
+    const supervisor=createPromoteWorkerSupervisor({agent,workerConcurrency:1,pollIntervalMs:10,log:()=>undefined});
+    try { await supervisor.start(); await vi.waitFor(async()=>expect((await queue.getStatus(original!.jobId))?.state).toBe('succeeded')); }
+    finally {await supervisor.stop();}
+    expect(promote).toHaveBeenCalledTimes(2);
+    for(const [cg,name,opts] of promote.mock.calls){expect([cg,name]).toEqual([CG,NAME]);expect(opts).toMatchObject({agentAddress:AUTHOR,entities:'all',recoveryBinding:original!.request.recoveryBinding});expect(opts!.subGraphName).toBeUndefined();}
+    expect(promote.mock.calls[0][2]!.curatorAckTimeoutMs).toBe(1234);
+    expect(promote.mock.calls[1][2]!.curatorAckTimeoutMs).toBeUndefined();
+    await store.close();
+  });
+
   it('preserves a verified completed pre-intent share as a read-only no-op', async () => {
     const { store, agent } = await setup();
     daemonState.promoteWorkerAvailable = true;

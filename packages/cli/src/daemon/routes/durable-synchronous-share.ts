@@ -1,3 +1,4 @@
+import { executePromoteRequest } from '../worker/execute-promote-request.js';
 import { DurableShareFailure, observeShareRecovery } from './durable-share-failure.js';
 import { randomUUID } from 'node:crypto';
 import { PromoteJobConflictError, PromoteAdmissionUncertainError, type PromoteJob } from '@origintrail-official/dkg-publisher';
@@ -31,12 +32,11 @@ export async function durableSynchronousShare(
   const outcome = await runPromoteJob({ job, queue, workerId, now: Date.now,
     heartbeatIntervalMs: Math.min(60_000, Math.floor(queue.effectiveLeaseMs / 4)),
     log: message => console.warn(message),
-    runPromote: async (_request, markStarted) => {
-      await markStarted();
-      return agent.assertion.promote(contextGraphId, name, { ...options, ...prepared });
-    },
+    runPromote: (request, markStarted) => executePromoteRequest(agent, request, markStarted,
+      { curatorAckTimeoutMs: options?.curatorAckTimeoutMs }),
   });
   if (outcome.outcome === 'succeeded') return outcome.result;
+  if (outcome.outcome === 'failed_terminal' && outcome.retiredNoEffect) throw outcome.cause;
   const observation = outcome.outcome === 'failed_terminal'
     ? { state: 'inspection-required' as const, jobId: job.jobId }
     : outcome.outcome === 'failed_retrying'

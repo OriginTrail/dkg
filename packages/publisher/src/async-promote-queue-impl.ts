@@ -1,4 +1,5 @@
-import { registerPromoteControlGraph, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
+import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
+import { createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
 import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob, persistPromoteJob } from './bound-promote-job.js';
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
@@ -100,12 +101,16 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private nextIdleClaimAt = 0;
   private graphEnsured = false;
 
+  /** Compose lifecycle ownership independently of constructing a polling queue. */
+  static ownershipReader(store: TripleStore, config: Pick<AsyncPromoteQueueConfig, 'graphUri'> = {}) {
+    return createPromoteOwnershipReader(store, config.graphUri);
+  }
+
   constructor(
     private readonly store: TripleStore,
     config: AsyncPromoteQueueConfig = {},
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_PROMOTE_CONTROL_GRAPH_URI;
-    registerPromoteControlGraph(store, this.graphUri);
     this.maxRetries = config.maxRetries ?? DEFAULT_PROMOTE_RETRY_TUNING.maxRetries;
     this.effectiveLeaseMs = config.leaseMs ?? TripleStoreAsyncPromoteQueue.DEFAULT_LEASE_MS;
     this.now = config.now ?? (() => Date.now());
@@ -233,6 +238,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
           `Cannot recover job in state '${job.state}'. Only 'failed' jobs can be recovered.`,
         );
       }
+      if (isRetiredBoundRejection(job)) throw new Error('Cannot recover a retired no-effect rejection; clear it and share a corrected asset');
       const now = this.now();
       if (await this.abandonIfMissingStorageLane(job, now)) {
         throw new Error(`Cannot recover job ${jobId}: ${this.missingStorageLaneReason()}`);

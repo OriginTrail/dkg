@@ -1554,6 +1554,8 @@ export class DKGAgent extends DKGAgentBase {
 
     const publisher = new DKGPublisher({
       store: agentStore,
+      promoteOwnershipReader: request => TripleStoreAsyncPromoteQueue.ownershipReader(
+        agentStore, agentRef?._promoteQueueConfig)(request),
       chain,
       eventBus,
       keypair,
@@ -4422,7 +4424,7 @@ export class DKGAgent extends DKGAgentBase {
     if (this._promoteQueue) {
       throw new Error('configurePromoteQueue must be called before the queue is first accessed');
     }
-    this._promoteQueueConfig = config;
+    this._promoteQueueConfig = Object.freeze({ ...config });
   }
 
   /** Compatibility observation surface; lifecycle ownership lives in the runtime. */

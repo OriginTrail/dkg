@@ -1,3 +1,4 @@
+import type { PromoteNoEffectProof } from './promote-no-effect-rejection.js';
 import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 /**
  * Async Promote Queue — public types.
@@ -123,6 +124,8 @@ export interface PromoteAttemptError {
    * never reach the queue row. The recovery sweep keys on it.
    */
   diagnosticCode?: string;
+  /** Producer certificate; only the fenced first failed attempt may retire its owner. */
+  noEffectProof?: PromoteNoEffectProof;
 }
 
 export interface PromoteAttemptState {
@@ -239,7 +242,7 @@ export interface PromotePostCommitRecoveryEvent {
 /** The exact failure transition acknowledged after the queue's write and flush. */
 export type PromoteFailureTransition =
   | Readonly<{ state: 'failed_retrying'; jobId: string; attemptCount: number; nextRetryAt: number }>
-  | Readonly<{ state: 'failed'; jobId: string; attemptCount: number }>;
+  | Readonly<{ state: 'failed'; jobId: string; attemptCount: number; retiredNoEffect?: true }>;
 
 export type PromoteStats = Record<PromoteJobState, number>;
 

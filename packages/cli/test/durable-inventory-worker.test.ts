@@ -1,3 +1,4 @@
+import { throwInventoryRecoveryFailure } from '../../agent/src/internal/promote/inventory-recovery-failure.js';
 import { inventoryPersistenceFailure } from '../../agent/src/rfc64/inventory-persistence-failure.js';
 import { Wallet, getBytes } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
@@ -9,6 +10,51 @@ import { rfc64SwmInventoryShadowRuntimeV1 } from '../../agent/src/rfc64/swm-inve
 import { runPromoteJob, createPromoteWorkerSupervisor } from '../src/daemon/worker/async-promote-worker.js';
 
 describe('bound worker owns the real inventory CAS', () => {
+  it('automatically retries a confirmed removal whose authority disappears while waiting for the scope lock', async () => {
+    const agent=await startRepairAgentV1({name:'bound-confirmed-authority-transition'});
+    vi.spyOn(agent,'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    agent.acceptOpenContextGraphPolicyV1({networkId:NETWORK_ID,contextGraphId:CONTEXT_GRAPH_ID,ownerAddress:AUTHOR});
+    await agent.whenRfc64CatalogResponsibilitiesIdleV1(); await agent.whenRfc64CatalogSupervisorsIdleV1();
+    const seeded=await seedDurableWorkspaceAssetV1(agent,'confirmed-authority-transition',96n);
+    await agent.commitRfc64SwmAuthorInventoryV1({contextGraphId:CONTEXT_GRAPH_ID,assertionCoordinate:seeded.assertionCoordinate,
+      lifecycleAgentAddress:AUTHOR,shareOperationId:seeded.shareOperationId});
+    const binding={version:1 as const,inventoryRequired:true,
+      sealDigest:computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seeded.seal)),
+      intent:{version:1 as const,operationId:seeded.shareOperationId,timestampMs:1,confirmationRequired:false,accessPolicy:'public' as const,allowedPeers:[]}};
+    const queue=new TripleStoreAsyncPromoteQueue(agent.store,{backoff:()=>0,maxRetries:1});
+    const job=await queue.enqueueAndClaim({contextGraphId:CONTEXT_GRAPH_ID,assertionName:seeded.assertionCoordinate,
+      agentAddress:AUTHOR,entities:'all',recoveryBinding:binding},'original');
+    const params={contextGraphId:CONTEXT_GRAPH_ID,assertionCoordinate:seeded.assertionCoordinate,shareOperationId:seeded.shareOperationId,
+      seal:seeded.seal,assertionUri:'urn:confirmed:authority',ctx:createOperationContext('share'),publicationLabel:'queued publish' as const,
+      expectedWorkspaceAccessPolicy:'public' as const};
+    const complete=async()=>{try{expect(await agent.transferRfc64ConfirmedVmV1(params)).toBe('owned');}
+      catch(error){return throwInventoryRecoveryFailure(error);}return {promotedCount:0,sealed:true,publishReady:false};};
+    const runtime=rfc64SwmInventoryShadowRuntimeV1(agent), key=`${seeded.scopeDigest}\n${AUTHOR}`;
+    let unlock!:()=>void; const blocked=new Promise<void>(r=>{unlock=r;});
+    let entered!:()=>void;const acquired=new Promise<void>(r=>{entered=r;});
+    const holder=runtime.runScopeExclusive(key,async()=>{entered();await blocked;});await acquired;
+    let waiting!:()=>void;const queued=new Promise<void>(r=>{waiting=r;});
+    const lock=runtime.runScopeExclusive.bind(runtime);
+    const waitSpy=vi.spyOn(runtime,'runScopeExclusive').mockImplementation((scope,fn,signal)=>{if(scope===key)waiting();return lock(scope,fn,signal);});
+    const first=runPromoteJob({job,queue,workerId:'original',now:Date.now,heartbeatIntervalMs:60_000,log:()=>undefined,
+      runPromote:async(_request,started)=>{await started();return complete();}});
+    await queued;
+    const resolve=agent.resolveRfc64CatalogReceiverAuthorityV1.bind(agent);
+    const authority=vi.spyOn(agent,'resolveRfc64CatalogReceiverAuthorityV1').mockImplementation(cg=>({...resolve(cg),authoringAllowed:false}));
+    unlock(); await holder;
+    expect((await first).outcome).toBe('failed_retrying');
+    expect((await queue.getStatus(job.jobId))?.attempt.lastError).toMatchObject({diagnosticCode:'PROMOTE_RETRYABLE_FAILURE',retryable:true});
+    expect(agent.readRfc64SwmAuthorInventorySnapshotV1({inventoryScopeDigest:seeded.scopeDigest,authorAddress:AUTHOR})?.rows).toHaveLength(1);
+    authority.mockRestore();waitSpy.mockRestore();
+    vi.spyOn(agent,'promoteQueue','get').mockReturnValue(queue);const assertion=agent.assertion;
+    vi.spyOn(agent,'assertion','get').mockReturnValue({...assertion,promote:async(_cg,_name,options)=>{expect(options?.recoveryBinding).toEqual(binding);return complete();}});
+    const supervisor=createPromoteWorkerSupervisor({agent,workerConcurrency:1,pollIntervalMs:10,log:()=>undefined});
+    try{await supervisor.start();await vi.waitFor(async()=>expect((await queue.getStatus(job.jobId))?.state).toBe('succeeded'));}
+    finally{await supervisor.stop();}
+    expect((await queue.getStatus(job.jobId))?.attempt.count).toBe(2);
+    expect(agent.readRfc64SwmAuthorInventorySnapshotV1({inventoryScopeDigest:seeded.scopeDigest,authorAddress:AUTHOR})?.rows??[]).toHaveLength(0);
+  });
+
   it.each(['before-write', 'lost-acknowledgement', 'policy-not-accepted'])('recovers %s with one original inventory row', async fault => {
     const agent = await startRepairAgentV1({ name: `bound-inventory-${fault}` });
     vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);

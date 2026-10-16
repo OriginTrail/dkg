@@ -1,7 +1,7 @@
 import type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1 } from './internal/promote/swm-handoff-types.js';
 export type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1, BoundDurableSwmPromotionParamsV1 } from './internal/promote/swm-handoff-types.js';
 import { repairConfirmedPlacement } from './internal/confirmed-placement-repair.js';
-import { SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
+import { requireInventoryRemovalLane, SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
 import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -998,13 +998,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         // A VM confirmation may begin under owner authority and reach this
         // lock after registration. Never mutate that obsolete generation: the
         // promotion pass will observe the durable VM confirmation and omit it.
-        const currentLane = this.resolveRfc64CatalogAuthoringLaneV1(
-          params.scope.contextGraphId,
-          params.scope.subGraphName,
-        );
-        if (currentLane === null) {
-          throw new Error('RFC-64 SWM inventory authority changed before removal');
-        }
+        const currentLane = requireInventoryRemovalLane(this.resolveRfc64CatalogAuthoringLaneV1(
+          params.scope.contextGraphId, params.scope.subGraphName,
+        ), () => this.requiresRfc64ShareInventoryV1(params.scope.contextGraphId, params.scope.subGraphName ?? undefined));
         const currentScope = Object.freeze({
           ...currentLane.scopeBase,
           authorAddress: params.scope.authorAddress,

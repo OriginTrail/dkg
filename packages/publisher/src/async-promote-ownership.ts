@@ -1,3 +1,4 @@
+import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { PromoteJob } from './async-promote-queue-types.js';
 import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_CONTEXT_GRAPH_ID, PROMOTE_ASSERTION_NAME,
@@ -5,18 +6,16 @@ import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_CONTEXT_GRAPH_ID, PROMOTE_AS
   promoteLaneConflictScope, promoteLaneScopesConflict, uniquenessLookupKeys,
   type PromoteUniquenessInput } from './async-promote-queue-utils.js';
 
-// Only server-side queue construction registers authority. RDF content never does.
-const controlGraphs = new WeakMap<TripleStore, Set<string>>();
-export function registerPromoteControlGraph(store: TripleStore, graph: string): void {
-  let graphs = controlGraphs.get(store);
-  if (!graphs) controlGraphs.set(store, graphs = new Set([DEFAULT_PROMOTE_CONTROL_GRAPH_URI]));
-  graphs.add(graph);
+export type PromoteOwnershipReader = (request: PromoteUniquenessInput) => Promise<PromoteJob | undefined>;
+
+/** Explicit scope: constructing another queue never changes this reader's authority. */
+export function createPromoteOwnershipReader(store: TripleStore,
+  graph: string = DEFAULT_PROMOTE_CONTROL_GRAPH_URI): PromoteOwnershipReader {
+  return async request => (await readPromoteOwnershipCandidates(store, graph, promoteOwnershipLookup(request)))
+    .find(hasUnfinishedBoundObligation);
 }
-export function trustedPromoteControlGraphs(store: TripleStore): readonly string[] {
-  return [...(controlGraphs.get(store) ?? [DEFAULT_PROMOTE_CONTROL_GRAPH_URI])];
-}
-export function hasUnfinishedBoundObligation(job: { state: string; request: { recoveryBinding?: unknown } }): boolean {
-  return job.request.recoveryBinding !== undefined && job.state !== 'succeeded';
+export function hasUnfinishedBoundObligation(job: Omit<PromoteJob, 'state'> & { state: string }): boolean {
+  return job.request.recoveryBinding !== undefined && job.state !== 'succeeded' && !isRetiredBoundRejection(job);
 }
 export function storedPromoteLaneScope(job: PromoteJob) {
   return promoteLaneConflictScope(job.request, {
