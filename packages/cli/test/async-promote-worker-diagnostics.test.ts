@@ -263,7 +263,7 @@ describe('runPromoteJob diagnostics', () => {
       },
     });
 
-    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(result).toEqual({ outcome: 'succeeded', result: { promotedCount: 2 } });
     expect(logs).toContain(`memoryGraphChanged emit failed for ${job.jobId}: event stream closed`);
   });
 
@@ -291,7 +291,7 @@ describe('runPromoteJob diagnostics', () => {
       log: (message) => { logs.push(message); },
     });
 
-    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(result).toEqual({ outcome: 'succeeded', result: { promotedCount: 1 } });
     expect(logs).toContain(`Heartbeat error for ${job.jobId}: store unavailable`);
   });
 

@@ -156,10 +156,10 @@ describe('durable synchronous share ownership', () => {
     await store.close();
   });
 
-  it('keeps permanent curator rejection in an inspection hold', async () => {
+  it.each(['ordinary', 'network-cg', 'timeout', 'ECONNRESET'])('keeps permanent curator rejection for %s in an inspection hold', async rejectedGraph => {
     const { store, agent } = await setup();
     daemonState.promoteWorkerAvailable = true;
-    agent.buildCuratorAckConfirmer = async () => async () => { throw new CuratorRejectedError(CG); };
+    agent.buildCuratorAckConfirmer = async () => async () => { throw new CuratorRejectedError(rejectedGraph); };
     const error = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true }).catch(e => e);
     expect(error.cause.code).toBe('CURATOR_REJECTED');
     expect((await agent.promoteQueue.getStatus(error.observation.jobId)).state).toBe('failed');
@@ -225,6 +225,29 @@ describe('durable synchronous share ownership', () => {
     await store.close();
   });
 
+  it('requires durable catalog ownership after the real publisher verifies a VM no-op', async () => {
+    const { store, agent, finalized } = await setup();
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false });
+    const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    const swmTail = vi.spyOn(agent, 'afterDurableSwmPromotionV1').mockRejectedValueOnce(new Error('inventory CAS unavailable'));
+    await expect(agent.assertion.promote(CG, NAME, bound)).rejects.toThrow('inventory CAS unavailable');
+    const vm = finalized.sharedGraphUri.replace('/_shared_memory/', '/_verifiable_memory/');
+    await store.insert(finalized.publicQuads.map(q => ({ ...q, graph: vm })));
+    await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer' });
+    await store.insert([{ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"VM"' }]);
+    const confirmed = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1').mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await expect(agent.assertion.promote(CG, NAME, bound)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    expect(await agent.assertion.promote(CG, NAME, bound)).toEqual({ promotedCount: 0, sealed: true, publishReady: false });
+    expect(confirmed).toHaveBeenCalledTimes(2);
+    expect(confirmed.mock.calls[0][0]).toMatchObject({ requireDurableOwnership: true,
+      expectedWorkspaceAccessPolicy: bound.recoveryBinding.intent.accessPolicy,
+      shareOperationId: bound.recoveryBinding.intent.operationId });
+    expect(swmTail).toHaveBeenCalledTimes(1);
+    expect(await store.countQuads(vm)).toBe(1);
+    expect(await agent.assertion.history(CG, NAME, { agentAddress: AUTHOR })).toMatchObject({ memoryLayer: 'VM' });
+    await store.close();
+  });
+
   it('reclaims an expired started bound lease after process loss and fences the old token', async () => {
     const { store, agent, freshAgent } = await setup();
     let now = Date.now();
@@ -274,9 +297,17 @@ describe('durable synchronous share ownership', () => {
 
   it('fails before content mutation when atomic queue persistence is refused', async () => {
     const { store, agent, finalized } = await setup();
-    const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    daemonState.promoteWorkerAvailable = true;
+    const assertion = agent.assertion;
+    const promote = vi.fn(assertion.promote);
+    vi.spyOn(agent, 'assertion', 'get').mockReturnValue({ ...assertion, promote });
     vi.spyOn(store, 'replaceSubject').mockRejectedValue(new UnsupportedTripleStoreCapabilityError('replaceSubject'));
-    await expect(agent.promoteQueue.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...bound }, 'inline')).rejects.toBeInstanceOf(PromoteAdmissionUncertainError);
+    const error = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
+    expect(error).toBeInstanceOf(DurableShareFailure);
+    expect(error.cause).toBeInstanceOf(PromoteAdmissionUncertainError);
+    expect(error.observation).toEqual({ state: 'admission-unconfirmed', jobId: error.cause.jobId });
+    expect(await agent.promoteQueue.getStatus(error.cause.jobId)).toBeNull();
+    expect(promote).not.toHaveBeenCalled();
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
     expect(await store.countQuads(finalized.graphUri)).toBe(1);
     await store.close();
@@ -285,23 +316,31 @@ describe('durable synchronous share ownership', () => {
     const { store, agent, finalized } = await setup();
     let now = Date.now();
     const q = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100 });
-    const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    daemonState.promoteWorkerAvailable = true;
+    vi.spyOn(agent, 'promoteQueue', 'get').mockReturnValue(q);
+    const assertion = agent.assertion;
+    const promote = vi.fn(assertion.promote);
+    vi.spyOn(agent, 'assertion', 'get').mockReturnValue({ ...assertion, promote });
     const replace = store.replaceSubject.bind(store);
     vi.spyOn(store, 'replaceSubject').mockImplementationOnce(async (...args) => {
       await replace(...args); throw new Error('acknowledgement lost');
     });
-    const error = await q.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...bound }, 'lost')
-      .catch(error => error);
-    expect(error).toBeInstanceOf(PromoteAdmissionUncertainError);
-    expect((await q.getStatus(error.jobId))?.state).toBe('running');
+    const error = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
+    expect(error).toBeInstanceOf(DurableShareFailure);
+    expect(error.cause).toBeInstanceOf(PromoteAdmissionUncertainError);
+    expect(error.observation).toEqual({ state: 'admission-unconfirmed', jobId: error.cause.jobId });
+    const persisted = await q.getStatus(error.cause.jobId);
+    expect(persisted?.state).toBe('running');
+    expect(promote).not.toHaveBeenCalled();
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
     now += 101;
     const reopened = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100 });
     const reclaimed = await reopened.claimNext('new');
-    expect(reclaimed?.jobId).toBe(error.jobId);
-    expect(reclaimed?.request.recoveryBinding).toEqual(bound.recoveryBinding);
-    expect(await agent.assertion.promote(CG, NAME, bound)).toMatchObject({
-      promotedCount: 1, shareOperationId: bound.recoveryBinding.intent.operationId,
+    expect(reclaimed?.jobId).toBe(error.cause.jobId);
+    expect(reclaimed?.request.recoveryBinding).toEqual(persisted.request.recoveryBinding);
+    expect(await assertion.promote(CG, NAME, { agentAddress: AUTHOR, recoveryBinding: reclaimed.request.recoveryBinding })).toMatchObject({
+      promotedCount: 1, shareOperationId: persisted.request.recoveryBinding.intent.operationId,
     });
     await store.close();
   });

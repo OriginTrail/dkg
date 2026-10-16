@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { SwmInventoryWriteFailure } from './swm-inventory-write.js';
+
 import {
   assertAssertionCoordinateV1, assertContextGraphIdV1, assertSubGraphNameV1,
   canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -52,6 +54,7 @@ export async function observeConfirmedVmCatalogV1(
     }
     confirmedSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
   } catch (cause) {
+    if (params.requireDurableOwnership) throw cause;
     deps.log.warn(
       params.ctx,
       `Confirmed ${params.publicationLabel} for <${params.assertionUri}> but RFC-64 post-confirmation observer input was invalid: ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -71,6 +74,7 @@ export async function observeConfirmedVmCatalogV1(
     try {
       finalizedPrivateInventoryScope = deps.finalizedPrivateScope(contextGraphId, subGraphName, confirmedSeal.authorAddress);
     } catch (cause) {
+      if (params.requireDurableOwnership) throw cause;
       deps.log.warn(
         params.ctx,
         `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -97,9 +101,13 @@ export async function observeConfirmedVmCatalogV1(
         });
         // This committed marker owns placement across restart and transient catalog failures.
         // Nothing here waits for the supervisor or queues behind its running asset-tail repair.
-        await deps.storeRepair(repair);
+        try { await deps.storeRepair(repair); } catch (cause) {
+          if (params.requireDurableOwnership) throw new SwmInventoryWriteFailure('inventory-commit', confirmedSeal.kaUal, cause);
+          throw cause;
+        }
       } catch (cause) {
         placementWait.observer.released();
+        if (params.requireDurableOwnership) throw cause;
         deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 finalized-private placement was not recorded, so nothing owes it: ${cause instanceof Error ? cause.message : String(cause)}`);
         return false;
       }
@@ -135,13 +143,14 @@ export async function observeConfirmedVmCatalogV1(
             }
             return true;
           case 'dormant':
-            return true;
+            return !params.requireDurableOwnership;
           default:
             return false;
         }
       });
     } catch (cause) {
       placementWait.observer.released();
+      if (params.requireDurableOwnership) throw new SwmInventoryWriteFailure('inventory-commit', confirmedSeal.kaUal, cause);
       deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`);
       return false;
     }

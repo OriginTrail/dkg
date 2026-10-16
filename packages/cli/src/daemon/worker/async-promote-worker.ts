@@ -203,13 +203,12 @@ function failureBookkeepingUncertainty(error: unknown): { errorName: string; err
   return { errorName, errorCode };
 }
 
-type PromoteJobRunResult = {
-  outcome: 'succeeded' | 'failed_retrying' | 'failed_terminal' | 'partial_promote_ambiguity';
-  error?: ClassifiedPromoteError;
-} | {
-  outcome: 'failure_bookkeeping_uncertain';
-  diagnostic: { errorName: string; errorCode: string };
-};
+export type PromoteJobRunResult<T extends { promotedCount: number }> =
+  | { outcome: 'succeeded'; result: T }
+  | { outcome: 'failed_retrying' | 'failed_terminal'; cause: unknown; error: ClassifiedPromoteError }
+  | { outcome: 'partial_promote_ambiguity'; result: T; cause: unknown; error: ClassifiedPromoteError }
+  | { outcome: 'failure_bookkeeping_uncertain'; cause: unknown; bookkeepingCause: unknown;
+      diagnostic: { errorName: string; errorCode: string } };
 
 export interface PromoteWorkerCounters {
   succeeded: number;
@@ -253,7 +252,7 @@ function isRetryableQueueBookkeepingError(error: unknown): boolean {
  * in-flight heartbeat after that point throws a `PromoteJobLeaseError`,
  * which the heartbeat catcher logs and ignores.
  */
-export async function runPromoteJob(
+export async function runPromoteJob<T extends { promotedCount: number }>(
   args: {
     job: PromoteJob;
     queue: AsyncPromoteQueue;
@@ -261,7 +260,7 @@ export async function runPromoteJob(
     runPromote: (
       request: PromoteRequest,
       markPromoteStarted: () => Promise<void>,
-    ) => Promise<{ promotedCount: number }>;
+    ) => Promise<T>;
     now: () => number;
     heartbeatIntervalMs: number;
     bookkeepingRetryIntervalMs?: number;
@@ -271,7 +270,7 @@ export async function runPromoteJob(
     log: PromoteWorkerLogger;
     emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   },
-): Promise<PromoteJobRunResult> {
+): Promise<PromoteJobRunResult<T>> {
   const {
     job,
     queue,
@@ -370,7 +369,7 @@ export async function runPromoteJob(
   }
 
   try {
-    let result: { promotedCount: number };
+    let result: T;
     let promoteStartedMarked = false;
     const markPromoteStarted = async (): Promise<void> => {
       if (promoteStartedMarked) return;
@@ -409,12 +408,12 @@ export async function runPromoteJob(
           () => queue.fail(job.jobId, claimToken, attemptError),
         );
         throwIfShutdownInterrupted();
-        return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', error: classified };
+        return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', cause: err, error: classified };
       } catch (failErr: unknown) {
         if (failErr instanceof PromoteWorkerShutdownError) throw failErr;
         // The write may have committed without an acknowledgement. A lost lease
         // also forbids attributing another worker's outcome to this attempt.
-        return { outcome: 'failure_bookkeeping_uncertain', diagnostic: failureBookkeepingUncertainty(failErr) };
+        return { outcome: 'failure_bookkeeping_uncertain', cause: err, bookkeepingCause: failErr, diagnostic: failureBookkeepingUncertainty(failErr) };
       }
     }
 
@@ -464,7 +463,7 @@ export async function runPromoteJob(
           `Operator action: inspect SWM/VM for the assertion before any /recover.`,
       );
       return {
-        outcome: 'partial_promote_ambiguity',
+        outcome: 'partial_promote_ambiguity', result, cause: bookkeepingErr,
         error: {
           retryable: false,
           classification: 'fatal',
@@ -490,7 +489,7 @@ export async function runPromoteJob(
       }
     }
 
-    return { outcome: 'succeeded' };
+    return { outcome: 'succeeded', result };
   } finally {
     shutdownSignal?.removeEventListener('abort', stopHeartbeats);
     stopHeartbeats();

@@ -5,7 +5,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { PublisherAssertionPromoteOptions, AssertionPromoteResult } from './assertion-promote-types.js';
-import { createShareOperationId, createPromoteOperationIntent, parsePromoteOperationIntent,
+import { createShareOperationId, createPromoteOperationIntent, validatePromoteOperationIntent, assertPromoteOperationIntent,
   serializePromoteOperationIntent, type PromoteOperationIntent } from './promote-operation-intent.js';
 
 /** Immutable replay authority. This is produced internally, never accepted from HTTP. */
@@ -20,7 +20,7 @@ export function recoveryBindingConflict(message: string): Error {
   return Object.assign(new Error(message), { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
 }
 
-export function validatePromoteRecoveryBinding(value: unknown): PromoteRecoveryBinding {
+function assertBindingHeader(value: unknown): asserts value is Omit<PromoteRecoveryBinding, 'intent'> & { intent: { operationId: string } } {
   const candidate = value as Partial<PromoteRecoveryBinding> | undefined;
   if (candidate?.version !== 1 || typeof candidate.sealDigest !== 'string'
     || !/^0x[0-9a-f]{64}$/.test(candidate.sealDigest)
@@ -29,9 +29,22 @@ export function validatePromoteRecoveryBinding(value: unknown): PromoteRecoveryB
     || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(candidate.intent.operationId)) {
     throw recoveryBindingConflict('Missing or invalid immutable share recovery binding');
   }
-  const intent = parsePromoteOperationIntent(JSON.stringify(candidate.intent), candidate.intent.operationId);
-  return Object.freeze({ version: 1, sealDigest: candidate.sealDigest, intent,
-    inventoryRequired: candidate.inventoryRequired });
+}
+
+/** Predicates validate without constructing and discarding frozen snapshots. */
+export function isPromoteRecoveryBinding(value: unknown): value is PromoteRecoveryBinding {
+  try {
+    assertBindingHeader(value);
+    assertPromoteOperationIntent(value.intent, value.intent.operationId);
+    return true;
+  } catch { return false; }
+}
+
+export function validatePromoteRecoveryBinding(value: unknown): PromoteRecoveryBinding {
+  assertBindingHeader(value);
+  const intent = validatePromoteOperationIntent(value.intent, value.intent.operationId);
+  return Object.freeze({ version: 1, sealDigest: value.sealDigest, intent,
+    inventoryRequired: value.inventoryRequired });
 }
 
 export type PromoteRecoveryAdmission = PromoteRecoveryBinding | { completedResult: AssertionPromoteResult };

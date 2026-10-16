@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
+  CuratorRejectedError, CuratorUnconfirmedError,
   createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   PROMOTE_STEP_NAMES,
@@ -105,6 +106,17 @@ describe('safePromoteErrorIdentity', () => {
 });
 
 describe('classifyPromoteError', () => {
+  it.each(['network-cg', 'timeout', 'ECONNRESET'])('does not retry a typed curator rejection named %s', graph => {
+    for (const boundRecovery of [false, true]) {
+      expect(classifyPromoteError(new CuratorRejectedError(graph), { boundRecovery }))
+        .toEqual({ classification: 'fatal', retryable: false });
+    }
+    expect(classifyPromoteError(new CuratorUnconfirmedError(graph), { boundRecovery: true }))
+      .toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError(new Error(graph), { boundRecovery: true }))
+      .toEqual({ classification: 'fatal', retryable: false });
+  });
+
   // RFC §10 / plan §10.3 — the three patterns surfaced by the rc.10 Graphify import
   // (`INTEGRATION_NOTES_GRAPHIFY.md`), plus the fatal default.
 

@@ -1,3 +1,4 @@
+import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
 import { rfc64SwmInventoryShadowRuntimeV1 } from '../../rfc64/swm-inventory-shadow-runtime-v1.js';
 import { SwmInventoryWriteFailure, SwmCatalogAuthorityNotReady, type SwmInventoryWriteOutcome } from '../swm-inventory-write.js';
 import type { ContextGraphIdV1, EvmAddressV1 } from '@origintrail-official/dkg-core';
@@ -6,16 +7,17 @@ import type { DKGAgent } from '../../dkg-agent.js';
 import type { AfterDurableSwmPromotionParamsV1 } from '../../dkg-agent-rfc64-catalog-auto-publish.js';
 
 /** Queue completion transfers ownership to durable inventory, not a detached callback. */
-export function commitDurableShareInventory(agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1): Promise<void> {
+export async function commitDurableShareInventory(agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1): Promise<void> {
   // The strict seal resolver enforces coordinate author == seal/UAL author.
   // Use the same asset and author-lane boundary as confirmed VM removal.
-  return rfc64SwmInventoryShadowRuntimeV1(agent).runInventoryWriteExclusive({
+  const result = await rfc64SwmInventoryShadowRuntimeV1(agent).runInventoryWriteExclusive({
     contextGraphId: params.contextGraphId, subGraphName: params.subGraphName,
     authorAddress: params.lifecycleAgentAddress, assertionCoordinate: params.assertionCoordinate,
   }, () => commitInventoryUnderAssetLock(agent, params));
+  if (result === 'vm-confirmed') await commitConfirmedDurableShareInventory(agent, params);
 }
 
-async function commitInventoryUnderAssetLock(agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1): Promise<void> {
+async function commitInventoryUnderAssetLock(agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1): Promise<'vm-confirmed' | undefined> {
   if (!params.shareOperationId) throw new Error('A durable SWM handoff requires the original operation ID');
   let result: SwmInventoryWriteOutcome;
   try { result = await agent.commitRfc64SwmAuthorInventoryV1({ ...params, shareOperationId: params.shareOperationId }); }
@@ -34,8 +36,8 @@ async function commitInventoryUnderAssetLock(agent: DKGAgent, params: AfterDurab
       { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
   }
   // Confirmed public VM content is intentionally no longer in the SWM inventory.
-  // Private finalized inventory has its own durable confirmation owner.
-  if (result.status === 'dormant' && result.dormantReason === 'vm-confirmed') return;
+  // Verify the confirmation transfer; a prior observer may have failed to store its owner.
+  if (result.status === 'dormant' && result.dormantReason === 'vm-confirmed') return 'vm-confirmed';
   if (result.status !== 'applied' && result.status !== 'existing') {
     throw createPromoteRetryableFailure(new Error(`Durable share inventory remains pending: ${result.dormantReason ?? result.status}`));
   }

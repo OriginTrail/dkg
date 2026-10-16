@@ -1,4 +1,5 @@
-import { SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
+import { repairConfirmedPlacement } from './internal/confirmed-placement-repair.js';
+import { SwmInventoryWriteFailure, SwmCatalogAuthorityNotReady, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
 import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -43,6 +44,7 @@ import {
   verifyControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import {
+  type PromoteRecoveryBinding,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
@@ -200,6 +202,7 @@ export interface ObserveRfc64DurableSwmPromotionParamsV1
 export interface AfterDurableSwmPromotionParamsV1
   extends Omit<RecordRfc64SwmAuthorInventoryShadowParamsV1, 'shareOperationId'> {
   readonly durableInventory?: boolean;
+  readonly recoveryBinding?: PromoteRecoveryBinding;
   readonly shareOperationId: string | null;
   readonly ctx: OperationContext;
 }
@@ -213,6 +216,9 @@ export interface ObserveRfc64ConfirmedVmParamsV1 {
   readonly assertionUri: string;
   readonly ctx: OperationContext;
   readonly publicationLabel: 'publish' | 'queued publish';
+  /** Strict internal retry ownership; default observers remain best-effort. */
+  readonly requireDurableOwnership?: boolean;
+  readonly expectedWorkspaceAccessPolicy?: PromoteRecoveryBinding['intent']['accessPolicy'];
 }
 
 export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
@@ -663,13 +669,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /**
-   * Canonical post-confirmation observer. A public SWM-only lane retracts the
-   * pending row, and the publication waits for that. A finalized private lane
-   * keeps its tier-neutral row, stores the durable marker of its now-chain-backed
-   * placement and asks the catalog supervisor for it: the publication waits
-   * for that one write, never for a placement attempt or the start of one.
-   */
+  /** Transfer confirmed catalog work to durable removal or a private-placement marker.
+   * Strict callers retain their existing recovery owner until this transfer succeeds. */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
     params: ObserveRfc64ConfirmedVmParamsV1,
@@ -678,11 +679,23 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     try {
       lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName);
     } catch (cause) {
+      if (params.requireDurableOwnership) throw new SwmInventoryWriteFailure('authority', params.seal.kaUal ?? null, cause);
       this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`);
       return false;
     }
     // Supported legacy recovery seals need no RFC-64 conversion when no lane owes catalog work.
-    if (lane === null) return true;
+    if (lane === null) {
+      if (params.requireDurableOwnership) throw new SwmCatalogAuthorityNotReady('authoring-inactive');
+      return true;
+    }
+    if (params.requireDurableOwnership) {
+      if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, params.expectedWorkspaceAccessPolicy)) {
+        throw Object.assign(new Error('Confirmed share catalog policy differs from its binding'), { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
+      }
+      if (lane.kind === 'private' && !lane.acceptsFinalizedVmRepair) {
+        throw new SwmCatalogAuthorityNotReady('finalized-policy-not-ready');
+      }
+    }
     return observeConfirmedVmCatalogV1({
       owner: this,
       log: this.log,
@@ -708,24 +721,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<'repaired' | 'already-complete'> {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const assetKey = rfc64SwmInventoryAssetKeyV1({
-      contextGraphId: repair.contextGraphId,
-      authorAddress: repair.authorAddress,
-      assertionCoordinate: repair.assertionCoordinate,
-    });
-    let outcome: 'repaired' | 'already-complete' | null = null;
-    await rfc64SwmInventoryShadowRuntimeV1(this).runExclusive(assetKey, async () => {
-      const applied = await this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
-      if (applied === null) {
-        await persistence.finalizedPrivatePlacementRepairs.delete(repair);
-        outcome = 'already-complete';
-        return;
-      }
-      await persistence.finalizedPrivatePlacementRepairs.delete(repair);
-      outcome = 'repaired';
-    });
-    if (outcome === null) throw new Error('RFC-64 finalized-private placement repair did not run');
-    return outcome;
+    return repairConfirmedPlacement(this, repair, persistence.finalizedPrivatePlacementRepairs,
+      () => this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair, placement));
   }
 
   readRfc64SwmAuthorInventorySnapshotV1(

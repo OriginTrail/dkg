@@ -1,5 +1,5 @@
 import type { BoundPromoteRequest } from './async-promote-queue-types.js';
-import { validatePromoteRecoveryBinding } from './promote-recovery-binding.js';
+import { isPromoteRecoveryBinding } from './promote-recovery-binding.js';
 
 /** One runtime boundary for internal admission and persisted format-4 records. */
 export function isBoundPromoteRequest(value: unknown): value is BoundPromoteRequest {
@@ -10,5 +10,5 @@ export function isBoundPromoteRequest(value: unknown): value is BoundPromoteRequ
     || request.entities !== 'all' || typeof request.agentAddress !== 'string' || !request.agentAddress.trim()
     || (request.subGraphName !== undefined && typeof request.subGraphName !== 'string')
     || (request.authorAgentAddress !== undefined && typeof request.authorAgentAddress !== 'string')) return false;
-  try { validatePromoteRecoveryBinding(request.recoveryBinding); return true; } catch { return false; }
+  return isPromoteRecoveryBinding(request.recoveryBinding);
 }

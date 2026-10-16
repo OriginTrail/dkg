@@ -317,11 +317,11 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.recoveryJobId).toEqual(expect.any(String));
   });
 
-  it.each([false, true])('exposes permanent share recovery ownership (one-shot=%s)', async oneShot => {
+  it.each([[false, 'network-cg'], [false, 'timeout'], [true, 'ordinary']])('exposes permanent share recovery ownership (one-shot=%s, graph=%s)', async (oneShot, rejectedGraph) => {
     await startWith({
       history: async () => null, create: async () => {}, write: async () => {},
       finalize: async () => ({ merkleRoot: new Uint8Array(32), authorAddress: ROOTLESS_AUTHOR }),
-      promote: async () => { throw new CuratorRejectedError(CG_ID); },
+      promote: async () => { throw new CuratorRejectedError(rejectedGraph as string); },
     });
     const res = oneShot
       ? await postRoot({ contextGraphId: CG_ID, name: 'rejected', quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"' }], finalize: true, alsoShareSwm: true })

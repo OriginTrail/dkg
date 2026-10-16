@@ -1,3 +1,4 @@
+import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { validatePromoteRecoveryBinding } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
@@ -148,6 +149,14 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
       shareOperationId: shareOperationId ?? null,
       ctx: createOperationContext('share'),
       durableInventory: opts?.recoveryBinding?.inventoryRequired,
+      recoveryBinding: opts?.recoveryBinding,
+    });
+  }
+  if (!promotedAllRoots && opts?.recoveryBinding?.inventoryRequired) {
+    await commitConfirmedDurableShareInventory(agent, {
+      contextGraphId, subGraphName: opts.subGraphName, assertionCoordinate: name,
+      lifecycleAgentAddress: promoteAgentAddress, shareOperationId: opts.recoveryBinding.intent.operationId,
+      recoveryBinding: opts.recoveryBinding, ctx: createOperationContext('share'),
     });
   }
   // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import { Logger, createOperationContext, type SwmAuthorInventoryScopeV1 } from '@origintrail-official/dkg-core';
+import { SwmInventoryWriteFailure } from '../src/internal/swm-inventory-write.js';
 import { observeConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
 import { CatalogPlacementTimingV1, installCatalogPlacementTimingV1 } from '../src/internal/catalog-placement-timing.js';
 import { AUTHOR, CONTEXT_GRAPH_ID, NETWORK_ID, assertionSealV1, authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
@@ -36,6 +37,28 @@ async function fixture() {
 }
 
 describe('confirmed VM catalog completion certificate', () => {
+  it.each(['applied', 'absent', 'dormant', 'failed'] as const)('strict recovery accepts only durable public removal: %s', async status => {
+    const { deps, params } = await fixture();
+    deps.removeShadow = vi.fn(async () => ({ status, action: 'remove', attempts: 0, headObjectDigest: null, error: null }));
+    expect(await observeConfirmedVmCatalogV1(deps, { ...params, requireDurableOwnership: true }))
+      .toBe(status === 'applied' || status === 'absent');
+  });
+
+  it('strict recovery preserves authority refusal and classifies only marker persistence as a write boundary', async () => {
+    const { deps, params, scope } = await fixture();
+    const refusal = new Error('authority denied');
+    deps.finalizedPrivateScope = () => { throw refusal; };
+    await expect(observeConfirmedVmCatalogV1(deps, { ...params, requireDurableOwnership: true })).rejects.toBe(refusal);
+    expect(deps.storeRepair).not.toHaveBeenCalled();
+    deps.finalizedPrivateScope = () => scope;
+    const disk = new Error('disk unavailable');
+    deps.storeRepair = vi.fn(async () => { throw disk; });
+    const failure = await observeConfirmedVmCatalogV1(deps, { ...params, requireDurableOwnership: true }).catch(e => e);
+    expect(failure).toBeInstanceOf(SwmInventoryWriteFailure);
+    expect(failure).toMatchObject({ phase: 'inventory-commit', cause: disk });
+    expect(deps.requestPlacement).not.toHaveBeenCalled();
+  });
+
   it.each(['applied', 'failed', 'throws'] as const)('fences author retirement behind queued public confirmation (%s)', async (outcome) => {
     const { deps, params } = await fixture();
     const runtime = rfc64SwmInventoryShadowRuntimeV1(deps.owner);

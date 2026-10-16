@@ -8,7 +8,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   getPromoteFailureDisposition,
-  CuratorUnconfirmedError,
+  CuratorUnconfirmedError, CuratorRejectedError,
   type PromoteFailureDisposition,
   type PromoteFailureClassification,
 } from '@origintrail-official/dkg-publisher';
@@ -94,6 +94,7 @@ export function safePromoteRetryCauseCode(cause: unknown): string | undefined {
  * operator can inspect and explicitly recover them.
  */
 export function classifyPromoteError(err: unknown, options: { boundRecovery?: boolean } = {}): ClassifiedPromoteError {
+  if (err instanceof CuratorRejectedError) return { classification: 'fatal', retryable: false };
   if (options.boundRecovery && err instanceof CuratorUnconfirmedError) {
     return { classification: 'transient', retryable: true };
   }
@@ -158,6 +159,9 @@ export function classifyPromoteError(err: unknown, options: { boundRecovery?: bo
   ) {
     return { classification: 'fatal', retryable: false };
   }
+
+  // Unbounded bound recovery requires typed replay safety, never graph-controlled prose.
+  if (options.boundRecovery) return { classification: 'fatal', retryable: false };
 
   if (
     message.includes('fetch failed')

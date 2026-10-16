@@ -28,27 +28,21 @@ export async function durableSynchronousShare(
     }
     throw error;
   }
-  let response: Awaited<ReturnType<DKGAgent['assertion']['promote']>> | undefined;
-  let failure: unknown;
   const outcome = await runPromoteJob({ job, queue, workerId, now: Date.now,
     heartbeatIntervalMs: Math.min(60_000, Math.floor(queue.effectiveLeaseMs / 4)),
     log: message => console.warn(message),
     runPromote: async (_request, markStarted) => {
       await markStarted();
-      try {
-        response = await agent.assertion.promote(contextGraphId, name, { ...options, ...prepared });
-        return response;
-      } catch (error) { failure = error; throw error; }
+      return agent.assertion.promote(contextGraphId, name, { ...options, ...prepared });
     },
   });
-  if (outcome.outcome === 'succeeded' && response) return response;
-  const cause = failure ?? new Error('Share completion is awaiting durable recovery');
+  if (outcome.outcome === 'succeeded') return outcome.result;
   const observation = outcome.outcome === 'failed_terminal'
     ? { state: 'inspection-required' as const, jobId: job.jobId }
     : outcome.outcome === 'failed_retrying'
       ? { state: 'pending' as const, jobId: job.jobId }
       : await observeShareRecovery(queue, job.jobId);
-  throw new DurableShareFailure(cause, observation);
+  throw new DurableShareFailure(outcome.cause, observation);
 }
 
 export function synchronousShareSuccessBody(share: Awaited<ReturnType<DKGAgent['assertion']['promote']>>) {
