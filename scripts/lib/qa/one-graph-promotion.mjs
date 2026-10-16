@@ -78,10 +78,11 @@ function readDetail(read) {
 /**
  * One pair's result: { outcome: 'pass' | 'fail', text }. A pair holds when
  * both reads showed what it waits for within its bound. A pair that waits for
- * the report's absence and held must still hold when its bound has passed
- * (`pair.confirm`, one more reading of each read): a report back in the layer
- * fails; a reading that failed tells nothing. A report that was never written
- * fails every pair of it.
+ * the report's absence keeps reading until its bound has passed, and reads
+ * once more after that (`pair.confirm`): a report seen back in the layer at
+ * any of those readings (`pair.reappeared`, or the confirmation) fails it; a
+ * reading that failed tells nothing. A report that was never written fails
+ * every pair of it.
  */
 export function pairOutcome(pair, { boundMs }) {
   const { record, kind } = pair;
@@ -96,12 +97,16 @@ export function pairOutcome(pair, { boundMs }) {
   if (pairHeld(pair.progress)) {
     const at = secs(Math.max(view, partitions));
     if (want === 'gone') {
-      const back = ['view', 'partitions'].filter(read => pair.confirm?.[read]?.satisfied === false && !pair.confirm[read].error);
-      const absent = kind === 'gone' ? `left ${layerName} ${at} s after the ${after}` : `not in ${layerName} ${bound} s after the ${after}`;
-      if (back.length) {
-        return { outcome: 'fail', text: `${what}: ${absent}, but then in ${back.map(read => `${names[read]}${readDetail(pair.confirm[read])}`).join(' and in ')} within the bound` };
+      const first = kind === 'gone' ? `left ${layerName} ${at} s after the ${after}` : `absent from ${layerName} ${at} s after the ${after}`;
+      if (pair.reappeared) {
+        const { read, age, seen } = pair.reappeared;
+        return { outcome: 'fail', text: `${what}: ${first}, then was in ${names[read]}${readDetail(seen)} again ${secs(age)} s after it` };
       }
-      return { outcome: 'pass', text: `${what}: ${absent}` };
+      const back = ['view', 'partitions'].filter(read => pair.confirm?.[read]?.satisfied === false && !pair.confirm[read].error);
+      if (back.length) {
+        return { outcome: 'fail', text: `${what}: ${first}, then was in ${back.map(read => `${names[read]}${readDetail(pair.confirm[read])}`).join(' and in ')} again when the ${bound} s had passed` };
+      }
+      return { outcome: 'pass', text: `${what}: ${first}, and out of it to the end of the ${bound} s` };
     }
     return { outcome: 'pass', text: `${what}: in ${layerName} ${at} s after the ${after}` };
   }
@@ -131,18 +136,37 @@ export function promotionOutcome(answer, { authorAddress }) {
   return { ok: true, ual: json.ual ?? null, txHash: json.txHash ?? null };
 }
 
+// The chain's publisher authorization for a curated graph, as the chain
+// adapter words its refusal (contextGraphs.isAuthorizedPublisher answered
+// false); the refusal carries no code.
+const PUBLISH_DENIAL = /is not authorized to publish to context graph/;
+
 /**
  * A member's publish of its own report in a graph whose publish policy is
- * curated: it must not reach Verified Memory. { refused: true, why } for any
- * answer but a confirmed publish (the reason is reported, so that a refusal
- * for another cause than the policy shows), { refused: false, why } for a
- * confirmed one, whatever its HTTP status.
+ * curated: { verdict, why }. 'refused' only with evidence of the policy's
+ * refusal (the chain's publisher authorization); 'published' for a confirmed
+ * publish, whatever its HTTP status; 'unexercised' for any other answer (a
+ * transport failure, a chain RPC outage, a missing share), which says nothing
+ * about the policy.
  */
 export function memberPublishOutcome(answer) {
   const json = answer?.json ?? {};
-  if (json.status === 'confirmed') return { refused: false, why: `confirmed on chain (${json.ual ?? json.kaId ?? 'no id'}): ${brief(answer)}` };
-  return { refused: true, why: [json.code, json.error].filter(Boolean).join(': ').slice(0, 240) || brief(answer) };
+  if (json.status === 'confirmed') return { verdict: 'published', why: `confirmed on chain (${json.ual ?? json.kaId ?? 'no id'}): ${brief(answer)}` };
+  const why = ([json.code, json.error].filter(Boolean).join(': ') || brief(answer)).slice(0, 240);
+  const said = typeof json.error === 'string' ? json.error : String(answer?.text ?? '');
+  return { verdict: PUBLISH_DENIAL.test(said) ? 'refused' : 'unexercised', why };
 }
+
+/**
+ * The refusal codes of a report's create that a client retries: the node
+ * knows the graph but has not synced it for writes yet, or could not validate
+ * the graph for a moment (HTTP 503).
+ */
+export const RETRYABLE_WRITE_CODES = Object.freeze([
+  'CONTEXT_GRAPH_NOT_WRITABLE', 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE', 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+]);
+/** Whether a write's outcome ({ error, code } when refused) is a refusal a client retries. */
+export const writeRetryable = outcome => Boolean(outcome?.error) && RETRYABLE_WRITE_CODES.includes(outcome.code);
 
 /**
  * The topology every conclusion rests on, from one reading of each Edge's

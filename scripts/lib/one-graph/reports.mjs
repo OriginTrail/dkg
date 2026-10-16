@@ -10,21 +10,22 @@
 import { brief, sleep } from '../member-sharing/devnet.mjs';
 import { createObservation } from '../member-sharing/observation.mjs';
 import { foldRead, inScope, judgeHeld, pairHeld, sharedMemoryScope } from '../qa/member-sharing.mjs';
-import { inVerifiedScope, judgeGone, PAIR_KINDS, readOutcome, verifiedScope } from '../qa/one-graph-promotion.mjs';
+import { inVerifiedScope, judgeGone, PAIR_KINDS, readOutcome, verifiedScope, writeRetryable } from '../qa/one-graph-promotion.mjs';
 import { parseObservation } from '../qa/query-observation.mjs';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const READS = ['view', 'partitions'];
 
 /**
- * `config` is { stamp, sub, predicate, type, boundMs, definitionMs, syncedMs }:
- * the run's stamp (in every subject and asset name), the sub-graph every
- * report goes to, the predicate that carries a report's value, the report's
- * class, the default bound of a pair, and the deadlines of a subscription.
+ * `config` is { stamp, sub, predicate, type, boundMs, definitionMs, syncedMs,
+ * pollMs }: the run's stamp (in every subject and asset name), the sub-graph
+ * every report goes to, the predicate that carries a report's value, the
+ * report's class, the default bound of a pair, the deadlines of a
+ * subscription, and how often a read is made again (default 2 s).
  */
 export function createReports(devnet, config) {
   const { api } = devnet;
-  const { stamp, sub, predicate, type, boundMs, definitionMs, syncedMs } = config;
+  const { stamp, sub, predicate, type, boundMs, definitionMs, syncedMs, pollMs = 2000 } = config;
   // The client-like write, the listing and the subscription observer of the
   // member-sharing suite; its own watches are not used here.
   const base = createObservation(devnet, { boundMs, definitionMs, syncedMs, stamp, predicate });
@@ -41,9 +42,12 @@ export function createReports(devnet, config) {
    * One report, written with its seal and shared into the sub-graph's shared
    * memory by `author`: the record every pair of it uses. Resolves once the
    * share job ended; `doneAt` is when (the start of a pair's bound), or
-   * `error` says why the report was not written.
+   * `error` says why the report was not written. A create refused the way a
+   * client retries (writeRetryable: the graph not yet synced for writes, say)
+   * is made again every `pollMs` until `retryUntil`; `refused` then says how
+   * often and how long, and `doneAt` still counts from the share that ended.
    */
-  async function share(author, graph, what) {
+  async function share(author, graph, what, { retryUntil = 0 } = {}) {
     sequence += 1;
     const record = {
       author, graph, sub, what, sequence,
@@ -52,10 +56,22 @@ export function createReports(devnet, config) {
       value: `${what} (${sequence})`,
       doneAt: null, error: null,
     };
-    const outcome = await base.createAndShare(author, { contextGraphId: graph.id, name: record.name, subGraphName: sub, quads: quads(record) },
-      { createTimeoutMs: 120_000, jobTimeoutMs: 120_000, pollMs: 1000 });
-    if (outcome.error) record.error = outcome.error;
-    else record.doneAt = outcome.doneAt;
+    const started = Date.now();
+    for (;;) {
+      const outcome = await base.createAndShare(author, { contextGraphId: graph.id, name: record.name, subGraphName: sub, quads: quads(record) },
+        { createTimeoutMs: 120_000, jobTimeoutMs: 120_000, pollMs: 1000 });
+      if (!outcome.error) {
+        record.doneAt = outcome.doneAt;
+        break;
+      }
+      if (!writeRetryable(outcome) || Date.now() >= retryUntil) {
+        record.error = outcome.error;
+        break;
+      }
+      record.refused = { code: outcome.code, times: (record.refused?.times ?? 0) + 1 };
+      await sleep(pollMs);
+    }
+    if (record.refused) record.refused.waitedMs = Date.now() - started;
     return record;
   }
 
@@ -114,12 +130,13 @@ export function createReports(devnet, config) {
   /**
    * Starts watching pairs at once: each read of each pair polls on its own
    * until it shows what the pair waits for, the pair's bound has passed, or
-   * the watch is cancelled, and is not made again once it did. Each read
-   * counts with the time it completed. A pair that waits for the report's
-   * absence and held is read once more when its bound has passed
-   * (`pair.confirm`), so that a report back in the layer within the bound
-   * shows. Returns a handle { pairs, done, cancel }, not a promise, so that
-   * whoever starts a watch does not wait.
+   * the watch is cancelled. Each read counts with the time it completed. A
+   * read that showed a report present is not made again; one that waits for
+   * the report's absence keeps reading to the end of the bound, and a
+   * reading that shows the report back after it was absent is kept
+   * (`pair.reappeared`). Such a pair is read once more when its bound has
+   * passed (`pair.confirm`). Returns a handle { pairs, done, cancel }, not a
+   * promise, so that whoever starts a watch does not wait.
    */
   function watch(list) {
     for (const pair of list) {
@@ -128,14 +145,19 @@ export function createReports(devnet, config) {
       pair.last = { view: null, partitions: null };
     }
     let cancelled = false;
-    const open = (pair, which) => !cancelled && !pair.record.error && pair.progress[which] === null && Date.now() - pair.from < pair.boundMs;
+    const absence = pair => PAIR_KINDS[pair.kind].want === 'gone';
+    const open = (pair, which) => !cancelled && !pair.record.error && Date.now() - pair.from < pair.boundMs
+      && (pair.progress[which] === null || absence(pair));
     const poll = async (pair, which) => {
       while (open(pair, which)) {
         const seen = await read(which, pair.kind, pair.node, pair.record);
+        const before = pair.progress[which];
         pair.progress = foldRead(pair.progress, which, { held: seen.satisfied, completedAt: Date.now() }, { from: pair.from, boundMs: pair.boundMs });
+        // Absent before, present now: the report is back in the layer within the bound.
+        if (before !== null && seen.satisfied === false && !seen.error) pair.reappeared ??= { read: which, age: Date.now() - pair.from, seen };
         pair.last[which] = seen;
         if (!open(pair, which)) break;
-        await sleep(Math.min(2000, Math.max(0, pair.from + pair.boundMs - Date.now())));
+        await sleep(Math.min(pollMs, Math.max(0, pair.from + pair.boundMs - Date.now())));
       }
     };
     const confirm = async pair => {
@@ -146,7 +168,7 @@ export function createReports(devnet, config) {
     };
     const settle = async pair => {
       await Promise.all(READS.map(which => poll(pair, which)));
-      if (PAIR_KINDS[pair.kind].want === 'gone' && pairHeld(pair.progress)) await confirm(pair);
+      if (absence(pair) && pairHeld(pair.progress)) await confirm(pair);
     };
     const done = Promise.all(list.map(settle)).then(() => undefined);
     return { pairs: list, done, cancel: () => { cancelled = true; } };

@@ -3,8 +3,10 @@ import test from 'node:test';
 import {
   admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, inVerifiedScope, judgeGone, memberPublishOutcome,
   pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, slotHolder, transferHeldAt, transferLifetime,
-  transferOccupancy, verifiedScope,
+  transferOccupancy, verifiedScope, writeRetryable,
 } from '../qa/one-graph-promotion.mjs';
+import { sharedMemoryScope } from '../qa/member-sharing.mjs';
+import { createReports } from '../one-graph/reports.mjs';
 import { DEAD_DIRECT_ADDRESS, edgeEnv, edgeOverrides, inheritedDkgEnv, OVERRIDE_ENV, PROFILE_CONFIG, PROFILE_ENV, PROFILE_NAMES } from '../one-graph/profile.mjs';
 
 const LABEL = 'urn:one-graph:label';
@@ -81,11 +83,11 @@ test('a pair holds once both reads showed it, and says where and when', () => {
   assert.match(pairOutcome(pairOf('vm', { view: 4000, partitions: 5000 }, { fromWhat: 'promotion' }), { boundMs: 60_000 }).text,
     /: in Verified Memory 5 s after the promotion$/);
   assert.match(pairOutcome(pairOf('gone', { view: 7000, partitions: 9000 }, { fromWhat: 'promotion', confirm: { view: { satisfied: true }, partitions: { satisfied: true } } }), { boundMs: 60_000 }).text,
-    /: left shared memory 9 s after the promotion$/);
+    /: left shared memory 9 s after the promotion, and out of it to the end of the 60 s$/);
   assert.match(pairOutcome(pairOf('unpublished', { view: 100, partitions: 100 }, { fromWhat: 'refused publish', confirm: { view: { satisfied: true }, partitions: { satisfied: true } } }), { boundMs: 60_000 }).text,
-    /: not in Verified Memory 60 s after the refused publish$/);
+    /: absent from Verified Memory 0 s after the refused publish, and out of it to the end of the 60 s$/);
   assert.match(pairOutcome(pairOf('absent', { view: 100, partitions: 300 }, { fromWhat: 'check', boundMs: 30_000, confirm: { view: { satisfied: true }, partitions: { satisfied: true } } }), { boundMs: 60_000 }).text,
-    /: not in shared memory 30 s after the check$/);
+    /: absent from shared memory 0 s after the check, and out of it to the end of the 30 s$/);
 });
 
 test('a pair that did not hold names each read that missed it and what that read last saw', () => {
@@ -105,11 +107,17 @@ test('a pair that did not hold names each read that missed it and what that read
   assert.match(pairOutcome(different, { boundMs: 60_000 }).text, /holds another value: "other"\) nor in the cross-partition read \(never read\) 60 s after the share$/);
 });
 
-test('a report back in shared memory after it had left fails; a check that could not be read does not', () => {
+test('a report back in shared memory after it had left fails, at any reading or at the last; a reading that failed does not', () => {
   const back = pairOf('gone', { view: 2000, partitions: 3000 }, { fromWhat: 'promotion', confirm: { view: { satisfied: false, found: 1 }, partitions: { satisfied: true } } });
   const result = pairOutcome(back, { boundMs: 60_000 });
   assert.equal(result.outcome, 'fail');
-  assert.match(result.text, /left shared memory 3 s after the promotion, but then in the shared-working-memory view of reports \(1 row\(s\) of it\) within the bound$/);
+  assert.match(result.text, /left shared memory 3 s after the promotion, then was in the shared-working-memory view of reports \(1 row\(s\) of it\) again when the 60 s had passed$/);
+  const between = pairOf('gone', { view: 2000, partitions: 3000 }, {
+    fromWhat: 'promotion', reappeared: { read: 'partitions', age: 10_400, seen: { satisfied: false, found: 2 } },
+    confirm: { view: { satisfied: true }, partitions: { satisfied: true } },
+  });
+  assert.equal(pairOutcome(between, { boundMs: 60_000 }).text,
+    '"edgeA report 1 (1)" by node8 (edgeA) in main/reports at node9 (edgeB): left shared memory 3 s after the promotion, then was in the cross-partition read (2 row(s) of it) again 10 s after it');
   const unreadable = pairOf('gone', { view: 2000, partitions: 3000 }, { confirm: { view: { satisfied: false, error: 'HTTP 0 timeout' }, partitions: { satisfied: true } } });
   assert.equal(pairOutcome(unreadable, { boundMs: 60_000 }).outcome, 'pass');
 });
@@ -132,12 +140,83 @@ test('a promotion counts once confirmed under its author\'s seal and bound to th
   assert.equal(promotionOutcome({ status: 0, json: null, text: 'fetch failed' }, { authorAddress: author.agentAddress }).ok, false);
 });
 
-test('a member\'s own publish is refused unless it was confirmed, whatever the HTTP status', () => {
-  assert.deepEqual(memberPublishOutcome({ status: 500, json: { error: 'publish access-policy denied' } }), { refused: true, why: 'publish access-policy denied' });
-  assert.deepEqual(memberPublishOutcome({ status: 409, json: { code: 'VM_PUBLISH_PRECONDITION', error: 'x' } }), { refused: true, why: 'VM_PUBLISH_PRECONDITION: x' });
+test('a member\'s own publish passes the policy check only when the chain\'s publisher authorization refused it', () => {
+  const denial = 'Configured publisherAddress 0x25078a933762e37E9773Cb092D8e4403f2954c95 is not authorized to publish to context graph 8.';
+  assert.deepEqual(memberPublishOutcome({ status: 500, json: { error: denial } }), { verdict: 'refused', why: denial });
+  // A failure for any other reason says nothing about the policy.
+  for (const answer of [
+    { status: 0, json: null, text: 'The operation was aborted due to timeout' },
+    { status: 503, json: { code: 'CHAIN_RPC_UNAVAILABLE', error: 'all chain RPC endpoints failed', retryable: true } },
+    { status: 500, json: { error: 'publish access-policy unknown' } },
+    { status: 409, json: { code: 'VM_PUBLISH_PRECONDITION', error: 'No quads in shared memory for this assertion' } },
+    { status: 409, json: { code: 'PUBLISH_NOT_FULL_SHARE', error: 'no complete share is resident' } },
+    { status: 502, json: { status: 'tentative', error: 'VM publish did not confirm' } },
+  ]) assert.equal(memberPublishOutcome(answer).verdict, 'unexercised', JSON.stringify(answer));
   assert.match(memberPublishOutcome({ status: 0, json: null, text: 'socket hang up' }).why, /^HTTP 0 socket hang up/);
-  assert.equal(memberPublishOutcome({ status: 207, json: { status: 'confirmed', ual: 'u' } }).refused, false);
-  assert.equal(memberPublishOutcome({ status: 200, json: { status: 'confirmed', ual: 'u' } }).refused, false);
+  assert.equal(memberPublishOutcome({ status: 503, json: { code: 'CHAIN_RPC_UNAVAILABLE', error: 'down' } }).why, 'CHAIN_RPC_UNAVAILABLE: down');
+  // A confirmed publish is the member's, whatever its HTTP status (and whatever it says).
+  assert.equal(memberPublishOutcome({ status: 207, json: { status: 'confirmed', ual: 'u' } }).verdict, 'published');
+  assert.equal(memberPublishOutcome({ status: 200, json: { status: 'confirmed', ual: 'u', error: denial } }).verdict, 'published');
+});
+
+test('a create refused because the graph is not ready for writes yet is retried; any other refusal is not', () => {
+  for (const code of ['CONTEXT_GRAPH_NOT_WRITABLE', 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE', 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE']) {
+    assert.equal(writeRetryable({ error: 'refused', code }), true, code);
+  }
+  for (const outcome of [{ error: 'refused', code: 'CONTEXT_GRAPH_NOT_FOUND' }, { error: 'refused' }, { error: 'job failed', code: undefined }, { doneAt: 1 }, null]) {
+    assert.equal(writeRetryable(outcome), false, JSON.stringify(outcome));
+  }
+});
+
+/**
+ * createReports over a node whose query route answers from `present(age,
+ * body)`: whether the report's subject is in the asked layer at that age (ms
+ * since the start). The partitions read gets a row in the sub-graph's shared
+ * memory, the view read a row of its own.
+ */
+function scriptedReports(present) {
+  const started = Date.now();
+  const cg = '0xabc/one-graph-main-1';
+  const devnet = {
+    api: async (_node, _method, _path, body) => {
+      const rows = present(Date.now() - started, body)
+        ? [{ ...(body.includeContextGraphPartitions ? { g: `${sharedMemoryScope(cg, 'reports')}/0xaa/1` } : {}), p: LABEL, o: '"r (1)"' }]
+        : [];
+      return { status: 200, json: null, text: JSON.stringify({ result: { type: 'bindings', bindings: rows } }) };
+    },
+  };
+  const io = createReports(devnet, {
+    stamp: 'S', sub: 'reports', predicate: LABEL, type: 'urn:one-graph:Report', boundMs: 600, definitionMs: 1000, syncedMs: 1000, pollMs: 40,
+  });
+  const report = { author, graph: { key: 'main', id: cg, resolved: cg }, sub: 'reports', subject: 'urn:one-graph:S:1', value: 'r (1)', doneAt: started, error: null };
+  return { io, report, started };
+}
+
+test('an absence watch reads through its whole bound, and a report back in the layer before the last check fails', async () => {
+  // Gone at once, back from 150 ms to 350 ms, gone again well before the bound of 600 ms ends.
+  const { io, report, started } = scriptedReports(age => age >= 150 && age < 350);
+  const handle = io.watch(io.pairs(4, report, [node], 'gone', { from: started, fromWhat: 'promotion', bound: 600 }));
+  await handle.done;
+  const [pair] = handle.pairs;
+  assert.deepEqual([pair.confirm.view.satisfied, pair.confirm.partitions.satisfied], [true, true]);
+  const result = pairOutcome(pair, { boundMs: 600 });
+  assert.equal(result.outcome, 'fail');
+  assert.match(result.text, /: left shared memory 0 s after the promotion, then was in the (shared-working-memory view of reports|cross-partition read) \(1 row\(s\) of it\) again 0 s after it$/);
+});
+
+test('an absence watch passes a report that left the layer within the bound and stayed out, and keeps its first absence', async () => {
+  const { io, report, started } = scriptedReports(age => age < 200);
+  const handle = io.watch(io.pairs(4, report, [node], 'gone', { from: started, fromWhat: 'promotion', bound: 600 }));
+  await handle.done;
+  const [pair] = handle.pairs;
+  assert.equal(pair.reappeared, undefined);
+  assert.ok(pair.progress.view >= 200 && pair.progress.partitions >= 200, JSON.stringify(pair.progress));
+  assert.deepEqual(pairOutcome(pair, { boundMs: 600 }).outcome, 'pass');
+  // A report that never left within the bound fails as still there.
+  const stuck = scriptedReports(() => true);
+  const kept = stuck.io.watch(stuck.io.pairs(4, stuck.report, [node], 'gone', { from: stuck.started, fromWhat: 'promotion', bound: 300 }));
+  await kept.done;
+  assert.match(pairOutcome(kept.pairs[0], { boundMs: 300 }).text, /: STILL in the shared-working-memory view of reports \(1 row\(s\) of it\) and in the cross-partition read \(1 row\(s\) of it\) 0 s after the promotion$/);
 });
 
 test('Edges reach each other through relays only, each reaches a Core, and none a stranger', () => {

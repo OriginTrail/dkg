@@ -50,8 +50,8 @@
 //   ONE_GRAPH_BOUND_SECS (60): a report, from the end of its share job, to be
 //     in the shared memory of every other subscribed Edge; a promotion, from
 //     the curator's confirmed publish, to be in every Edge's Verified Memory
-//     and out of every Edge's shared memory, where it must stay out to the end
-//     of the bound.
+//     and out of every Edge's shared memory, where it must stay out at every
+//     reading to the end of the bound.
 //   ONE_GRAPH_RECOVERY_SECS (90): the late Edge, from its subscribe, to hold
 //     every promoted report in Verified Memory and not in shared memory, and
 //     every other report in shared memory.
@@ -68,7 +68,8 @@
 // run notes it. Likewise a subscriber must know the sub-graph `reports`
 // within 30 s of holding the definition (its writes there are refused until
 // it does); one that does not fails that check and registers the sub-graph
-// itself.
+// itself. A subscriber's report refused because the graph is not yet synced
+// for its writes is made again until its synced deadline, as a client does.
 //
 // Cases (each line of the report names the case, the report, the node and
 // what did not hold):
@@ -79,7 +80,9 @@
 //   2  reports reach every other Edge, live: the curator, edgeA and edgeB
 //      share two reports each; every other Edge must hold each
 //   3  the publish policy holds: edgeA's own publish of its second report is
-//      refused, and no Edge holds that report in Verified Memory
+//      refused by the chain's publisher authorization (any other failure of
+//      the publish leaves the policy unexercised and fails the case), and no
+//      Edge holds that report in Verified Memory
 //   4  promotion: the curator promotes the first report of each Edge, its
 //      own included; every Edge, the author included, holds it in Verified
 //      Memory and no longer in shared memory, and every report not promoted
@@ -356,6 +359,19 @@ async function subscribeWithDefinition(node, graph, caseId) {
   return { observer, from, fromWhat: held ? `${node.role} subscribed` : `${node.role} subscribed again` };
 }
 
+/**
+ * A report shared by `author`. Until `readyBy` (its subscription's synced
+ * deadline) a create refused the way a client retries (the graph not yet
+ * synced for writes) is made again, as a client does; the run notes it.
+ */
+async function shareReport(caseId, author, graph, what, readyBy = 0) {
+  const record = await io.share(author, graph, what, { retryUntil: readyBy });
+  if (record.refused) {
+    note(`case ${caseId}: ${describe(record)}: refused ${record.refused.times} time(s) as ${record.refused.code} before it was written, ${seconds(record.refused.waitedMs)} s after the first try`);
+  }
+  return record;
+}
+
 /** A settled subscription: a missing definition under `definitionCase`, the synced flag under case 8. */
 function reportSubscription(handle, observation, definitionCase) {
   if (!observation) return fail(definitionCase, `${handle.node.label}: its subscription to ${handle.graph.key} was not observed`);
@@ -410,10 +426,12 @@ async function run() {
   const others = author => edges.running.filter(node => node !== author);
   const shared = [];
   const byAuthor = new Map([[curator, []], [edgeA, []], [edgeB, []]]);
+  // Each subscriber has until its synced deadline to take writes.
+  const readyBy = new Map([edgeA, edgeB].map((member, i) => [member, subscriptions[i].from + SYNCED_MS]));
   const live = [];
   for (const author of [curator, edgeA, edgeB]) {
     for (const n of [1, 2]) {
-      const record = await io.share(author, main, `${author.role} report ${n}`);
+      const record = await shareReport(2, author, main, `${author.role} report ${n}`, readyBy.get(author));
       shared.push(record);
       byAuthor.get(author).push(record);
       live.push(io.watch(io.pairs(2, record, others(author), 'swm')));
@@ -431,13 +449,13 @@ async function run() {
   else {
     const { answer, at } = await io.ownPublish(edgeA, a2);
     const own = memberPublishOutcome(answer);
-    if (own.refused) pass(3, `${edgeA.label}'s own publish of ${describe(a2)} was refused: ${own.why}`);
-    else {
+    if (own.verdict === 'refused') pass(3, `${edgeA.label}'s own publish of ${describe(a2)} was refused by the publish policy: ${own.why}`);
+    else if (own.verdict === 'published') {
       fail(3, `${edgeA.label}, not the curator, published ${describe(a2)} to Verified Memory: ${own.why}`);
       // It is in Verified Memory now: the later cases expect it there and out of shared memory.
       promoted.add(a2);
-    }
-    await settle([io.watch(io.pairs(3, a2, edges.running, own.refused ? 'unpublished' : 'vm', { from: at, fromWhat: `${edgeA.role}'s own publish` }))]);
+    } else fail(3, `not exercised: ${edgeA.label}'s own publish of ${describe(a2)} failed for another reason than the publish policy: ${own.why}`);
+    await settle([io.watch(io.pairs(3, a2, edges.running, own.verdict === 'published' ? 'vm' : 'unpublished', { from: at, fromWhat: `${edgeA.role}'s own publish` }))]);
   }
 
   // Case 4: the curator promotes the first report of each Edge, its own included.
@@ -502,7 +520,7 @@ async function run() {
   const recovery = await subscribeWithDefinition(late, main, 7);
   await settle([io.watch(placementPairs(7, shared, promoted, [late], { from: recovery.from, fromWhat: recovery.fromWhat, bound: RECOVERY_MS }))]);
   reportSubscription(recovery.observer, await recovery.observer.done, 7);
-  const fromLate = await io.share(late, main, 'late report');
+  const fromLate = await shareReport(7, late, main, 'late report', recovery.from + SYNCED_MS);
   shared.push(fromLate);
   await settle([io.watch(io.pairs(7, fromLate, others(late), 'swm'))]);
 
