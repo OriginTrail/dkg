@@ -42,7 +42,11 @@ export function parseBulkRefusal(bytes: Uint8Array): BulkRefusal {
 }
 /** Length-bound directory hash: generation, ordered asset identities, metadata and exact encoding. */
 export function bulkChunkHash(request: BulkGraphRequest) {
-  return createHash('sha256').update(bulkJson(request));
+  // Request field order is not semantic; asset selection order remains part of the digest.
+  return createHash('sha256').update(bulkJson({
+    version: request.version, contextGraphId: request.contextGraphId,
+    snapshotDigest: request.snapshotDigest, assetUals: request.assetUals,
+  }));
 }
 export interface BulkAssetHeader { encodedBytes: number; plainBytes: number; offset: number; digest: string; metadata: string }
 export function parseBulkAssetHeader(bytes: Uint8Array): BulkAssetHeader {
