@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
-import type { DKGAgent } from '../src/dkg-agent.js';
-import { createDurableRecoveryHost } from '../src/dkg-agent-recovery.js';
+import type { DurableRecoveryHost } from '../src/durable-recovery-host.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 import * as cleanup from '../src/sync/requester/post-materialization.js';
 
@@ -21,7 +21,7 @@ it('binds lazy verification and one reconciliation adapter at the agent boundary
     retireLegacySwmAfterVerifiedVmTwin: vi.fn(async () => {}),
   };
   const reconcile = vi.spyOn(cleanup, 'reconcileAfterMaterialization').mockResolvedValue();
-  const host = createDurableRecoveryHost(agent as unknown as DKGAgent);
+  const host: DurableRecoveryHost = (DKGAgentBase as any).createDurableRecoveryCapabilities(agent);
   const ctx = createOperationContext('sync');
   const asset = { ual: 'asset' } as VerifiedGraphScopedAsset;
   expect(agent.getOrCreateSyncVerifyWorker).not.toHaveBeenCalled();
