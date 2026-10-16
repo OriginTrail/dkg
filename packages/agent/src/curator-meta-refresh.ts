@@ -46,6 +46,11 @@ import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
 import { ensureCuratorConnected } from './curator-peer-connection.js';
 import {
+  learnPeerSubGraphs,
+  readPeerSubGraphRegistrations,
+  type PeerSubGraphRegistration,
+} from './peer-sub-graph-registration.js';
+import {
   noteCuratorMetaRefreshStarted,
   noteCuratorRegistrationRefusal,
 } from './curator-registration-refusal.js';
@@ -116,6 +121,7 @@ interface CuratorMetaRefreshAgent {
   readonly node: { libp2p: Libp2pConnectHost };
   readonly peerResolver: Pick<PeerResolver, 'connect'>;
   readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
   readonly syncCheckpoints: Pick<SyncCheckpointStore, 'delete'>;
   readonly oversizeTombstoneLog: {
     record(drops: OversizeDrop[], seam: string): void;
@@ -175,6 +181,8 @@ interface CuratorMetaRefreshState {
 interface AuthoritativeMetaSnapshot {
   checkpointKey: string;
   quads: Quad[];
+  /** The sub-graph registrations the peer's `_meta` held, registered with the definition (#3293). */
+  subGraphs: readonly PeerSubGraphRegistration[];
   /**
    * The acceptance an approved member's snapshot was admitted under. The
    * replacement asks it again right before its first projection write.
@@ -544,6 +552,7 @@ async function fetchAuthoritativeMetaSnapshot(
   return {
     checkpointKey: result.checkpointKey,
     quads,
+    subGraphs: readPeerSubGraphRegistrations(contextGraphId, result.quads),
     ...(approvedMember === undefined ? {} : { approvedMember }),
   };
 }
@@ -826,6 +835,7 @@ async function executeCuratorMetaRefresh(
     if (options.ignoreRegistrationBinding !== true) {
       applyCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads);
     }
+    await learnPeerSubGraphs(agent, contextGraphId, snapshot.subGraphs, curatorPeerId, ctx);
     agent.syncCheckpoints.delete(snapshot.checkpointKey);
     agent.log.info(
       ctx,

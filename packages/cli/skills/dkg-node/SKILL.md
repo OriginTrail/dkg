@@ -281,10 +281,14 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
 
 > **Lifecycle provenance.** Every assertion carries a durable `dkg:Assertion` lifecycle record in the CG's `_meta` graph, updated as a side effect of create, `/wm/write`, `/wm/finalize`, `/swm/share`, `/wm/discard`, and `/vm/publish`. The assertion data moves WM→SWM→VM as it is shared and published — the lifecycle record is an independent audit trail you can read without touching the data itself. (The internal `dkg:state` values are `created` / `promoted` / `published` / `finalized` / `discarded`; these are data-model literals, distinct from the tool/verb names.)
 
-> If `subGraphName` is provided but the sub-graph is not registered in the CG's
-> `_meta` graph, all assertion operations throw
-> `Sub-graph "{name}" has not been registered in context graph "{id}". Call createSubGraph() first.`
-> Create the sub-graph before targeting it.
+> If `subGraphName` names a sub-graph that is not registered in the CG's `_meta`
+> graph on this node, the node first asks the graph's owner and connected peers
+> whether they hold it, and registers it when one does (a member also learns the
+> owner's sub-graphs together with the graph's definition when it subscribes).
+> When none holds it, assertion operations are refused with HTTP 400 and
+> `code: "SUB_GRAPH_NOT_FOUND"`:
+> `Sub-graph "{name}" has not been registered in context graph "{id}" (…)`.
+> Create a new sub-graph before targeting it.
 
 ### Shared Working Memory (SWM) — Team-visible
 
@@ -676,7 +680,7 @@ Implications:
 
 ### Sub-Graphs — partitions within a CG
 
-A **sub-graph** is a named partition inside a context graph. Use them to organize assertions by topic, source, or any other axis. Sub-graphs are optional — by default assertions live at the CG root. A sub-graph must be registered before any assertion op passes `subGraphName`; otherwise those ops fail with `Sub-graph "{name}" has not been registered in context graph "{id}". Call createSubGraph() first.`
+A **sub-graph** is a named partition inside a context graph. Use them to organize assertions by topic, source, or any other axis. Sub-graphs are optional — by default assertions live at the CG root. A sub-graph must exist before any assertion op passes `subGraphName`: registered on this node, or registered by another node of the graph (such as its owner), which this node learns from the graph's peers. Otherwise those ops are refused with HTTP 400 and `code: "SUB_GRAPH_NOT_FOUND"` (`Sub-graph "{name}" has not been registered in context graph "{id}" (…)`).
 
 - `POST /api/sub-graph/create` — register a new sub-graph. Body: `{ contextGraphId, subGraphName }`. Sub-graph names **cannot contain `/`** (it is the graph-URI path separator) — use `-` or `.` for hierarchy-flavored names (e.g. `research-alpha`, not `research/alpha`).
 - `GET /api/sub-graph/list?contextGraphId=...` — list all sub-graphs registered in a CG.
