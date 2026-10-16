@@ -129,13 +129,11 @@ import {
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   DEFAULT_GRAPH_URI,
   DEFAULT_JOURNAL_GRAPH_URI,
-  JOURNAL_SEQ,
   JOURNAL_LIFECYCLE_KEY,
   JOURNAL_JOB_ID,
   PAYLOAD_PREDICATE,
   CONTROL_LIFECYCLE_KEY,
   knowledgeAssetVmPublishLifecycleKey,
-  serializeJournalEntry,
   parseJournalEntry,
   summarizeJournal,
   serializeVmPublishIntentIndex,
@@ -157,7 +155,6 @@ import {
   rawLiftRequestFromJobRequest,
   jobSubject,
   literal,
-  parseIntegerLiteral,
   requestSubject,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
@@ -503,10 +500,6 @@ function resolveKnowledgeAssetVmPublishHandler(
 
 export class TripleStoreAsyncLiftPublisher
   implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer, AsyncLiftDetailedRetrier, AsyncLiftRetryStateReader {
-  // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from the coordinator's claim
-  // queue, so the read-modify-write seq allocation is atomic without touching the claim lock (lock
-  // order is always claim→journal; appendJournal never calls writeJob → no reentrancy).
-  private static readonly journalQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
   // Backoff/jitter defaults live in async-lift-retry-tuning.ts (the shared,
@@ -682,7 +675,6 @@ export class TripleStoreAsyncLiftPublisher
     this.jobSelectors = new LiftJobStoreSelectors(store, this.graphUri, (job) => this.chainObservations.project(job));
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
     this.journalWrites = config.journalWrites ?? false;
-    this.journalCompletion = new AsyncLiftJournalCompletion(store, this.graphUri);
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
     // ONE validation owner for the retry knobs (shared with the daemon config
     // boundary): ranges, the boolean kill-switch type, and the cross-field
@@ -696,6 +688,7 @@ export class TripleStoreAsyncLiftPublisher
     this.retryJitterRatio = retryTuning.retryJitterRatio;
     this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.now = config.now ?? (() => Date.now());
+    this.journalCompletion = new AsyncLiftJournalCompletion(store, this.graphUri, () => this.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.rand = config.rand ?? (() => Math.random());
     assertNoLegacyChainRecoveryResolver(config);
@@ -2997,25 +2990,7 @@ export class TripleStoreAsyncLiftPublisher
       const lineageKey = knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
       facts = this.captureJournalFacts(job, kind, lineageKey);
     } catch { completed(); return; } // Legacy delimiter-bearing facts remain auxiliary.
-    this.journalCompletion.registerJournal(job.jobId, (released) =>
-      this.withJournalLock(facts.lineageKey, async () => {
-        await released;
-        const seq = await this.allocateJournalSeq(facts.lineageKey);
-        const entry = { ...facts, seq, at: this.now() };
-        await this.store.insert(serializeJournalEntry(entry, this.journalGraphUri));
-      }).catch(() => { /* Auxiliary log must not abort the authoritative state write. */ }).then(completed));
-  }
-
-  /** #1829 — next per-lineageKey seq: numeric MAX+1 over the journal graph, first = 0. */
-  private async allocateJournalSeq(lineageKey: string): Promise<number> {
-    const result = await this.store.query(
-      `SELECT (MAX(?seq) AS ?m) WHERE { GRAPH <${this.journalGraphUri}> { ?e <${JOURNAL_LIFECYCLE_KEY}> ${literal(lineageKey)} ; <${JOURNAL_SEQ}> ?seq } }`,
-      { source: 'publisher.asyncLift.allocateJournalSeq' },
-    );
-    const rows = expectBindings(result);
-    const raw = rows.length === 0 ? undefined : rows[0]?.['m'];
-    if (raw === undefined) return 0;
-    return parseIntegerLiteral(raw) + 1;
+    this.journalCompletion.append(facts, completed);
   }
 
   private captureJournalFacts(job: LiftJob, kind: JournalKind, lineageKey: string): Omit<AdmissionJournalEntry, 'seq' | 'at'> {
@@ -3097,32 +3072,6 @@ export class TripleStoreAsyncLiftPublisher
       .map((map) => parseJournalEntry(map))
       .filter((e): e is AdmissionJournalEntry => e !== null)
       .sort((a, b) => a.seq - b.seq);
-  }
-
-  /**
-   * #1829 — per-lineageKey mutex for the journal read-modify-write (seq allocation +
-   * insert). Reserve synchronously in primary-commit order. The callback waits for canonical
-   * lock release and never acquires claim/job ownership; distinct lineages append in parallel.
-   */
-  private async withJournalLock<T>(lineageKey: string, fn: () => Promise<T>): Promise<T> {
-    // journalGraphUri is a fixed constant, so the lineageKey alone keys the bucket.
-    const key = lineageKey;
-    const previous = TripleStoreAsyncLiftPublisher.journalQueues.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    TripleStoreAsyncLiftPublisher.journalQueues.set(key, next);
-
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (TripleStoreAsyncLiftPublisher.journalQueues.get(key) === next) {
-        TripleStoreAsyncLiftPublisher.journalQueues.delete(key);
-      }
-    }
   }
 
   private async deleteJob(jobId: string): Promise<void> {

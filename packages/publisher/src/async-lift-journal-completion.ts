@@ -1,5 +1,13 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { findTripleStoreCapability, type TripleStore } from '@origintrail-official/dkg-storage';
+import type { AdmissionJournalEntry } from './lift-job.js';
+import {
+  DEFAULT_JOURNAL_GRAPH_URI, JOURNAL_LIFECYCLE_KEY, JOURNAL_SEQ,
+  literal, parseIntegerLiteral, serializeJournalEntry,
+} from './async-lift-control-plane.js';
+import { expectBindings } from './async-lift-publisher-utils.js';
+
+type CapturedJournalFacts = Readonly<Omit<AdmissionJournalEntry, 'seq' | 'at'>>;
 
 interface CompletionOwner {
   open: boolean;
@@ -27,10 +35,16 @@ interface JournalRegistration {
 /** Await auxiliary journals at operation settlement, never while retaining canonical locks. */
 export class AsyncLiftJournalCompletion {
   private static readonly domains = new WeakMap<object, Map<string, QueueCompletions>>();
+  // Reserve under canonical ownership, but dispatch after release; journal work never acquires it.
+  private static readonly lineageQueues = new Map<string, Promise<void>>();
   private readonly context = new AsyncLocalStorage<CompletionContext>();
   private readonly identity: object;
 
-  constructor(store: TripleStore, private readonly graphUri: string) {
+  constructor(
+    private readonly store: TripleStore,
+    private readonly graphUri: string,
+    private readonly now: () => number = () => Date.now(),
+  ) {
     this.identity = findTripleStoreCapability(store, (candidate): candidate is object =>
       typeof candidate === 'object' && candidate !== null && !('innerStore' in candidate)) ?? store;
   }
@@ -90,12 +104,14 @@ export class AsyncLiftJournalCompletion {
     });
   }
 
-  /** start must synchronously reserve its lineage FIFO; only its store body awaits released. */
-  registerJournal(jobId: string, start: (released: Promise<void>) => Promise<void>): JournalRegistration {
+  /** Reserve the append now; dispatch its store work only after canonical release. */
+  append(facts: CapturedJournalFacts, afterAttempt: () => void): JournalRegistration {
     const context = this.registrationContext();
-    let started: Promise<void>;
-    try { started = start(context.section?.released ?? Promise.resolve()); }
-    catch { started = Promise.resolve(); } // Auxiliary observers cannot poison operation settlement.
+    const jobId = facts.jobId;
+    // This call installs the lineage gate synchronously, before its first await.
+    const started = this.appendToLineage(facts, context.section?.released ?? Promise.resolve())
+      .catch(() => { /* Auxiliary journal failure must not abort the authoritative write. */ })
+      .then(afterAttempt);
     const queue = this.queue();
     const predecessor = queue.jobs.get(jobId);
     // A later journal's settlement includes earlier bookkeeping, not merely its FIFO insert.
@@ -107,6 +123,45 @@ export class AsyncLiftJournalCompletion {
       this.prune(queue);
     });
     return { settled: completion };
+  }
+
+  /**
+   * #1829 — reserve sequence allocation and INSERT in primary-commit order. Wait for canonical
+   * release without acquiring claim/job ownership; distinct lineages append in parallel.
+   */
+  private async appendToLineage(facts: CapturedJournalFacts, released: Promise<void>): Promise<void> {
+    const captured = { ...facts };
+    // The journal graph is fixed; preserve the existing process-wide lineage-only FIFO domain.
+    const key = captured.lineageKey;
+    const previous = AsyncLiftJournalCompletion.lineageQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => { release = resolve; });
+    AsyncLiftJournalCompletion.lineageQueues.set(key, next);
+    await previous;
+    try {
+      await released;
+      const seq = await this.allocateSequence(key);
+      const entry = { ...captured, seq, at: this.now() };
+      await this.store.insert(serializeJournalEntry(entry, DEFAULT_JOURNAL_GRAPH_URI));
+    } finally {
+      // Release FIFO before notification bookkeeping; the job tail still includes that bookkeeping.
+      release();
+      if (AsyncLiftJournalCompletion.lineageQueues.get(key) === next) {
+        AsyncLiftJournalCompletion.lineageQueues.delete(key);
+      }
+    }
+  }
+
+  /** Numeric MAX+1 with the original legacy parser; an empty lineage starts at zero. */
+  private async allocateSequence(lineageKey: string): Promise<number> {
+    const result = await this.store.query(
+      `SELECT (MAX(?seq) AS ?m) WHERE { GRAPH <${DEFAULT_JOURNAL_GRAPH_URI}> { ?e <${JOURNAL_LIFECYCLE_KEY}> ${literal(lineageKey)} ; <${JOURNAL_SEQ}> ?seq } }`,
+      { source: 'publisher.asyncLift.allocateJournalSeq' },
+    );
+    const rows = expectBindings(result);
+    const raw = rows.length === 0 ? undefined : rows[0]?.['m'];
+    if (raw === undefined) return 0;
+    return parseIntegerLiteral(raw) + 1;
   }
 
   /** Join only the captured predecessor, never another API's result or a changing future tail. */
