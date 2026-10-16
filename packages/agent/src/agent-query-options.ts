@@ -12,6 +12,8 @@ export interface AgentQueryOptions {
   requireCompleteGraphScope?: boolean;
   redactQuery?: boolean;
   maxResponseBytes?: number;
+  /** Independent literal hydration limit; defaults to the response cap. */
+  maxLiteralHydrationBytes?: number;
   /** Explicit acceptance of configured-core chain evidence for this graph. */
   chainEvidenceMode?: PublicSnapshotMode;
   graphSuffix?: "_shared_memory";
