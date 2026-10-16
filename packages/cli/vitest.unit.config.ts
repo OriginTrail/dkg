@@ -94,6 +94,9 @@ export default defineConfig({
           // A public graph its subscribe job left unproven gets the job again
           // (#3207). The real catch-up worker behind a fake thread; no hardhat.
           'test/context-graph-readiness-repeat.test.ts',
+          // So does a registered public graph whose job ran before its RFC-64
+          // authority was accepted (#3281). Same worker and fake thread.
+          'test/context-graph-readiness-repeat-authority.test.ts',
           // A persisted subscription restored unsynced gets a catch-up job
           // (#3251). Agent double and stub runner; no hardhat.
           'test/context-graph-activation-catchup.test.ts',

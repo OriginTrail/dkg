@@ -21,11 +21,7 @@ import {
 import type { ContextGraphSub, DKGAgentConfig, SharedMemorySyncResult } from './dkg-agent-types.js';
 import { resolveBoundedCuratorSyncPeer } from './dkg-agent-cg-resolve.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  durableSyncEnabled,
-  syncOnConnectEnabled,
-  syncReconcilerEnabled,
-} from './internal/lifecycle-sync-policy.js';
+import { durableSyncEnabled, syncOnConnectEnabled } from './internal/lifecycle-sync-policy.js';
 import type { SyncAdmissionSource } from './sync/policy.js';
 import {
   RECENT_SHARED_MEMORY_PULL_TICK_MS,
@@ -64,7 +60,7 @@ interface RecentSharedMemoryPullAgent {
   syncSharedMemoryFromPeerDetailed(
     remotePeerId: string,
     contextGraphIds: string[],
-    options?: { source?: SyncAdmissionSource },
+    options?: { source?: SyncAdmissionSource; reservedSlotOnly?: boolean },
   ): Promise<SharedMemorySyncResult>;
   requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
     contextGraphId: string,
@@ -82,14 +78,17 @@ export interface RecentSharedMemoryPullRuntime {
 }
 
 /**
- * On for Edges whose automatic sync of shared memory is on (the switches the
- * peer reconciler obeys). Cores host every public graph and receive its
- * writes as hosts, so they do not run it.
+ * On for Edges whose sync of shared memory is on: sync on connect, durable
+ * sync and shared memory on connect. The periodic peer reconciler is not one
+ * of them: a node that runs without it (so that it does not compete with a
+ * large transfer for a single sync slot) has nothing else that pulls a graph
+ * it already synced, and the pull runs in a reserved shared-memory slot, not
+ * a general one. Cores host every public graph and receive its writes as
+ * hosts, so they do not run it.
  * Env DKG_RECENT_SHARED_MEMORY_PULL_ENABLED=0 turns it off.
  */
 export function recentSharedMemoryPullsEnabled(config: DKGAgentConfig): boolean {
   return (config.nodeRole ?? 'edge') === 'edge'
-    && syncReconcilerEnabled(config)
     && syncOnConnectEnabled(config)
     && durableSyncEnabled(config)
     && (config.syncSharedMemoryOnConnect ?? true)
@@ -103,7 +102,8 @@ function errorMessage(error: unknown): string {
 /**
  * Start the safety net next to the peer reconciler when
  * {@link recentSharedMemoryPullsEnabled}: the reconciler re-pulls a synced
- * peer only every 10 to 15 min. Returns null when it does not run.
+ * peer only every 10 to 15 min, and not at all where it is switched off.
+ * Returns null when it does not run.
  */
 export function startRecentSharedMemoryPullsIfEnabled(
   agentObject: DKGAgent | object,
@@ -175,8 +175,13 @@ export function startRecentSharedMemoryPulls(
       };
     },
     pull: async (contextGraphId, peerId) => {
+      // A pull reads the graph's whole shared memory from the peer. On a node
+      // with one general sync slot and no queue, that slot is for the large
+      // transfers: holding it would refuse each of them for the whole pull.
+      // A pull that gets no reserved slot within 60 s waits for the next interval.
       const shared = await agent.syncSharedMemoryFromPeerDetailed(peerId, [contextGraphId], {
         source: 'reconcile',
+        reservedSlotOnly: true,
       });
       if (!agent.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
         // The catalog owns this graph's root scope: replay its heads.

@@ -59,11 +59,17 @@ export async function legacySharedMemoryLaneAllowed(
  * same window, on one shared check, so a job waits once however many peers it
  * walks. A call outside a window, and a call for a graph without an accepted
  * public policy, does not wait.
+ *
+ * It also remembers whether a call of the graph's current job found the lane
+ * still not active, after any wait: that job asked a peer nothing through it.
  */
 export class SelectedLaneActivationWait {
   readonly #deadlines = new Map<string, number>();
 
   readonly #waits = new Map<string, Promise<boolean>>();
+
+  /** Graphs for which a call of the current job found the lane not active. */
+  readonly #foundInactive = new Set<string>();
 
   #closed = false;
 
@@ -79,6 +85,7 @@ export class SelectedLaneActivationWait {
       if (deadline <= now) this.#deadlines.delete(known);
     }
     this.#deadlines.set(contextGraphId, now + this.waitMs);
+    this.#foundInactive.delete(contextGraphId);
   }
 
   /**
@@ -87,7 +94,10 @@ export class SelectedLaneActivationWait {
    */
   untilActive(agent: any, contextGraphId: string): Promise<boolean> {
     if (selectedSharedMemoryLaneActive(agent, contextGraphId)) return Promise.resolve(true);
-    if (!selectedSharedMemoryLanePending(agent, contextGraphId)) return Promise.resolve(false);
+    if (!selectedSharedMemoryLanePending(agent, contextGraphId)) {
+      this.#foundInactive.add(contextGraphId);
+      return Promise.resolve(false);
+    }
     let wait = this.#waits.get(contextGraphId);
     if (wait === undefined) {
       wait = this.#poll(agent, contextGraphId)
@@ -97,10 +107,20 @@ export class SelectedLaneActivationWait {
     return wait;
   }
 
+  /**
+   * Whether a call of the graph's current job found the lane not active, after
+   * any wait: the node had not accepted the graph's public policy, or had not
+   * activated the lane within the job's window.
+   */
+  foundInactive(contextGraphId: string): boolean {
+    return this.#foundInactive.has(contextGraphId);
+  }
+
   /** The runner is closing: waiting calls end now. */
   close(): void {
     this.#closed = true;
     this.#deadlines.clear();
+    this.#foundInactive.clear();
   }
 
   async #poll(agent: any, contextGraphId: string): Promise<boolean> {
@@ -125,6 +145,7 @@ export class SelectedLaneActivationWait {
             + `${Date.now() - startedAt} ms`,
           );
         }
+        if (!active) this.#foundInactive.add(contextGraphId);
         return active;
       }
       waited = true;
