@@ -96,7 +96,35 @@ const MEMBER_PROMOTION = {
   },
 };
 
-export const KNOWN_GAPS = [REGISTERED_DEFINITION, SUB_GRAPH_UNREGISTERED, MEMBER_PROMOTION];
+/**
+ * #3296: a node that already holds a graph's data when its catch-up runs is
+ * never marked synced. A catch-up marks a graph synced only when one of its
+ * planes inserted data triples; the node's shared-memory passes insert none,
+ * and the durable plane of a catalog-authoritative graph is not attempted.
+ * It covers the one-graph promotion suite's synced flag at the end of the run
+ * (`synced-at-end`) of a node in that state: one that held every report it
+ * should, in its layer, at the first reads after its last subscribe was
+ * accepted (`heldAtSubscribe`). A failure is the gap only with evidence: the
+ * node holds the graph's definition and is subscribed, and its log shows
+ * shared-memory catch-up passes after that subscribe, none of which inserted
+ * data. The flag holding on such a node is the gap's check holding.
+ */
+const caughtUpOnNothing = evidence => evidence?.catchupPasses > 0 && evidence?.catchupDataTriples === 0;
+const HELD_DATA_NEVER_SYNCED = {
+  issue: '#3296',
+  what: 'a node that already holds a graph\'s data is never marked synced: its catch-up inserts no data, and only inserted data marks a graph synced',
+  covers: ({ check, evidence }) => check === 'synced-at-end' && evidence?.heldAtSubscribe === true,
+  isTheGap: ({ check, evidence }) => check === 'synced-at-end' && evidence?.heldAtSubscribe === true && caughtUpOnNothing(evidence),
+  failure({ evidence }) {
+    if (evidence.definitionHeld !== true) return { expected: false, because: 'the node holds no definition of the graph, so this is not #3296' };
+    if (evidence.subscribed !== true) return { expected: false, because: 'the node is not subscribed to the graph, so this is not #3296' };
+    if (!(evidence.catchupPasses > 0)) return { expected: false, because: 'its log shows no shared-memory catch-up after its last subscribe, so this is not known to be #3296' };
+    if (evidence.catchupDataTriples !== 0) return { expected: false, because: `its catch-up inserted ${evidence.catchupDataTriples} data triple(s), so this is not #3296` };
+    return { expected: true, because: `it held the graph's reports at its subscribe, and its catch-up's ${evidence.catchupPasses} shared-memory pass(es) inserted no data` };
+  },
+};
+
+export const KNOWN_GAPS = [REGISTERED_DEFINITION, SUB_GRAPH_UNREGISTERED, MEMBER_PROMOTION, HELD_DATA_NEVER_SYNCED];
 
 /**
  * A check's result with the known gaps applied: { verdict: 'pass' | 'quiet' |

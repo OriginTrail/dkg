@@ -84,7 +84,10 @@
 // sub-graph, its listing naming none (cases 2, 7). #3294: the curator's
 // promotion of another Edge's report refused with HTTP 409
 // ASSERTION_AUTHOR_NOT_RESIDENT, though the report was in its shared memory
-// (cases 4, 6).
+// (cases 4, 6), and the share after it that is then not exercised (case 5).
+// #3296: a late Edge that held every report when its second subscribe was
+// accepted, never marked synced because its catch-up inserted no data (its
+// log shows the catch-up's shared-memory passes, none with data; case 8).
 //
 // Cases (each line of the report names the case, the report, the node and
 // what did not hold):
@@ -128,7 +131,8 @@
 //      layers within ONE_GRAPH_RECOVERY_SECS, then shares a report that every
 //      other Edge must hold
 //   8  the synced flag: every subscriber lists the graph as synced within
-//      ONE_GRAPH_SYNCED_SECS, and every Edge lists it so at the end
+//      ONE_GRAPH_SYNCED_SECS, and every Edge lists it so at the end (#3296
+//      for the late Edge when it already held the reports at its subscribe)
 //   9  the end state: on every Edge, each promoted report is in Verified
 //      Memory and not in shared memory, and every other report is in shared
 //      memory
@@ -178,8 +182,8 @@ import { brief, openDevnet, waitFor } from './lib/member-sharing/devnet.mjs';
 import { createReport } from './lib/member-sharing/report.mjs';
 import { describe, subscriptionResults } from './lib/qa/member-sharing.mjs';
 import {
-  admissionPolicyProblem, definitionInTime, memberPublishOutcome, pairOutcome, parseAdmissions, postPromotionCheck, profileStatusProblems,
-  promotionOutcome, promotionResult, subGraphWriteResult,
+  admissionPolicyProblem, catchupDataTriples, definitionInTime, heldAtSubscribe, memberPublishOutcome, pairOutcome, parseAdmissions,
+  postPromotionCheck, profileStatusProblems, promotionOutcome, promotionResult, subGraphWriteResult, syncedAtEndResult,
 } from './lib/qa/one-graph-promotion.mjs';
 import { busyEdge } from './lib/one-graph/busy-transfer.mjs';
 import { OneGraphEdges } from './lib/one-graph/edges.mjs';
@@ -641,6 +645,9 @@ async function run() {
     onSubscribed: from => { recoveryWatch = io.watch(placementPairs(7, shared, promoted, [late], { from, fromWhat: 'late subscribed again', bound: RECOVERY_MS })); },
   });
   await settle([recoveryWatch]);
+  // Whether the late Edge already held every report when its second subscribe
+  // was accepted: the state of known gap #3296, judged at the end.
+  const heldAtResubscribe = new Map([[late, heldAtSubscribe(recoveryWatch.pairs)]]);
   if (recovery.probeWatch) {
     shared.push(recovery.probe);
     await settle([recovery.probeWatch]);
@@ -649,12 +656,12 @@ async function run() {
   shared.push(fromLate);
   await settle([io.watch(io.pairs(7, fromLate, others(late), 'swm'))]);
 
-  // Case 8: every Edge lists the graph as synced at the end.
+  // Case 8: every Edge lists the graph as synced at the end. A node that held
+  // the graph's reports at its subscribe is judged with its catch-up's log (#3296).
   for (const node of edges.running) {
     const listed = await io.listingEntry(node, main);
-    if (!listed.readable) fail(8, `${node.label}: its listing could not be read at the end (${listed.why})`);
-    else if (listed.entry?.synced === true) pass(8, `${node.label}: lists ${main.key} as synced at the end`);
-    else fail(8, `${node.label}: lists ${main.key} as ${listed.entry ? `subscribed=${listed.entry.subscribed} synced=${listed.entry.synced}` : 'absent'} at the end`);
+    const held = heldAtResubscribe.get(node) === true;
+    report.record(8, syncedAtEndResult({ node, graph: main, listed, heldAtSubscribe: held, catchup: held ? catchupDataTriples(devnet.logSince(node, 0), main.id) : null }));
   }
 
   // Case 9: the end state on every Edge.

@@ -580,3 +580,61 @@ export function definitionInTime(seen, { from, boundMs }) {
   const showed = seen?.ok === true && afterMs !== null;
   return { held: showed && afterMs <= boundMs, late: showed && afterMs > boundMs, afterMs };
 }
+
+/**
+ * Whether a node already held a graph's reports when its last subscribe was
+ * accepted, before that subscribe's catch-up could insert anything: every
+ * pair of `pairs` (a watch timed from the subscribe, `pair.from`) held, and
+ * each of its reads showed what the pair waits for at its first try, sent
+ * within `withinMs` of the subscribe. False for no pairs.
+ */
+export function heldAtSubscribe(pairs, { withinMs = 2000 } = {}) {
+  if (!Array.isArray(pairs) || pairs.length === 0) return false;
+  return pairs.every(pair => pairHeld(pair.progress ?? {}) && Object.values(pair.dating ?? {}).length > 0
+    && Object.values(pair.dating).every(read => read.lastMissSentAt === null && read.hit && read.hit.sentAt - pair.from <= withinMs));
+}
+
+/**
+ * What a node's log says its shared-memory catch-up of a graph inserted
+ * after its last subscribe (`[subscribe] contextGraph=<graph> …`): { passes
+ * (the `SWM sync for "<graph>": N data + M meta triples` lines after it),
+ * data (their data triples together) }, or null when the log shows no
+ * subscribe of the graph.
+ */
+export function catchupDataTriples(logText, graphId) {
+  const text = String(logText ?? '');
+  const at = text.lastIndexOf(`[subscribe] contextGraph=${graphId} `);
+  if (at < 0) return null;
+  const marker = `SWM sync for "${graphId}": `;
+  let passes = 0;
+  let data = 0;
+  for (const line of text.slice(at).split('\n')) {
+    const from = line.indexOf(marker);
+    if (from < 0) continue;
+    const counts = /^(\d+) data \+ (\d+) meta triples/.exec(line.slice(from + marker.length));
+    if (!counts) continue;
+    passes += 1;
+    data += Number(counts[1]);
+  }
+  return { passes, data };
+}
+
+/**
+ * A node's synced flag for a graph at the end of the run, as a check with the
+ * evidence known gap #3296 takes: `listed` is the node's listing entry
+ * (listingEntry), `heldAtSubscribe` whether the node already held the
+ * graph's reports when its last subscribe was accepted (heldAtSubscribe; only
+ * a node watched from that moment has it), and `catchup` what its log says
+ * its catch-up inserted after that subscribe (catchupDataTriples).
+ */
+export function syncedAtEndResult({ node, graph, listed, heldAtSubscribe: held, catchup }) {
+  const check = 'synced-at-end';
+  if (!listed?.readable) return { check, outcome: 'fail', text: `${node.label}: its listing could not be read at the end (${listed?.why ?? 'no answer'})`, evidence: { readable: false } };
+  const { entry } = listed;
+  const evidence = {
+    readable: true, subscribed: entry?.subscribed === true, synced: entry?.synced === true, definitionHeld: listed.defined === true,
+    heldAtSubscribe: held === true, catchupPasses: catchup?.passes ?? 0, catchupDataTriples: catchup ? catchup.data : null,
+  };
+  if (evidence.synced) return { check, outcome: 'pass', text: `${node.label}: lists ${graph.key} as synced at the end`, evidence };
+  return { check, outcome: 'fail', text: `${node.label}: lists ${graph.key} as ${entry ? `subscribed=${entry.subscribed} synced=${entry.synced}` : 'absent'} at the end`, evidence };
+}

@@ -4,7 +4,7 @@ import {
   admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, inVerifiedScope, judgeGone, memberPublishOutcome,
   pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, slotHolder, transferHeldThrough, transferLifetime,
   transferOccupancy, verifiedScope, writeRetryable, busyReceiptOutcome, promotionResult, subGraphWriteResult, transferContended, postPromotionCheck,
-  arrivalWindow, definitionInTime, judgeReport,
+  arrivalWindow, definitionInTime, judgeReport, catchupDataTriples, heldAtSubscribe, syncedAtEndResult,
 } from '../qa/one-graph-promotion.mjs';
 import { freshSubscription, sharedMemoryScope, subscriptionResults } from '../qa/member-sharing.mjs';
 import { classify, KNOWN_GAPS } from '../qa/known-gaps.mjs';
@@ -813,4 +813,83 @@ test('a definition shown only past its deadline does not count, however slowly t
   assert.deepEqual(definitionInTime({ ok: true, completedAt: from + 90_000 }, { from, boundMs: 90_000 }), { held: true, late: false, afterMs: 90_000 });
   assert.deepEqual(definitionInTime({ ok: false, completedAt: from + 90_500 }, { from, boundMs: 90_000 }), { held: false, late: false, afterMs: 90_500 });
   assert.deepEqual(definitionInTime(undefined, { from, boundMs: 90_000 }), { held: false, late: false, afterMs: null });
+});
+
+// A late Edge's log around its second subscribe (run 6), with an earlier sync and another graph's beside.
+const CATCHUP_LOG = [
+  `[subscribe] contextGraph=${CG} includeSharedMemory=true syncMode=always-on forceCatchup=false`,
+  `2026-10-16 14:49:14 sync f5ca [DKGAgent] Auto-registered sub-graph "reports" in context graph "${CG}" from SWM sync`,
+  `2026-10-16 14:49:19 sync f5ca [DKGAgent] SWM sync for "${CG}": 18 data + 114 meta triples`,
+  `[subscribe] contextGraph=${CG} includeSharedMemory=true syncMode=always-on forceCatchup=true`,
+  `[2026-10-16T12:50:05.634Z] sync beb4 [DKGAgent] Catch-up for "${CG}": catalog-authoritative graph, legacy durable sync not attempted [DEBUG]`,
+  `2026-10-16 14:50:11 sync 21c2 [DKGAgent] SWM sync for "${CG}": 0 data + 133 meta triples`,
+  `2026-10-16 14:50:11 sync 21c2 [DKGAgent] SWM sync for "${CG}": materialized snapshot sha256:e9a6d9bc`,
+  `2026-10-16 14:50:11 sync zzzz [DKGAgent] SWM sync for "0xabc/one-graph-large-1": 7 data + 3 meta triples`,
+  `2026-10-16 14:50:12 sync c51d [DKGAgent] SWM sync for "${CG}": 0 data + 114 meta triples`,
+  `2026-10-16 14:50:17 sync a2c6 [DKGAgent] Catch-up SWM pass loop for "${CG}" stopped after 1 pass(es): no-capable-peers; 7/7 snapshots from ...MBWbbV5g`,
+].join('\n');
+
+test('#3296: what a node\'s catch-up inserted after its last subscribe, from its log', () => {
+  assert.deepEqual(catchupDataTriples(CATCHUP_LOG, CG), { passes: 2, data: 0 });
+  assert.equal(catchupDataTriples(CATCHUP_LOG, '0xabc/never-subscribed'), null);
+  assert.deepEqual(catchupDataTriples(`${CATCHUP_LOG}\n2026-10-16 14:50:20 sync b [DKGAgent] SWM sync for "${CG}": 3 data + 10 meta triples`, CG), { passes: 3, data: 3 });
+  assert.deepEqual(catchupDataTriples(`[subscribe] contextGraph=${CG} includeSharedMemory=true`, CG), { passes: 0, data: 0 });
+});
+
+test('#3296: a node held the reports at its subscribe only when every read found them at its first try, right after it', () => {
+  const from = 1_000_000;
+  const found = sentAt => ({ lastMissSentAt: null, hit: { sentAt, completedAt: sentAt + 30 } });
+  const pairAt = (dating, progress = { view: 30, partitions: 40 }) => ({ from, progress, dating });
+  const prompt = pairAt({ view: found(from + 5), partitions: found(from + 6) });
+  assert.equal(heldAtSubscribe([prompt, prompt]), true);
+  assert.equal(heldAtSubscribe([]), false);
+  assert.equal(heldAtSubscribe(undefined), false);
+  // A read that missed first: the report came after the subscribe.
+  assert.equal(heldAtSubscribe([prompt, pairAt({ view: { lastMissSentAt: from + 5, hit: { sentAt: from + 2005, completedAt: from + 2030 } }, partitions: found(from + 6) })]), false);
+  // A first find sent long after the subscribe (the reads before it failed): not at the subscribe.
+  assert.equal(heldAtSubscribe([pairAt({ view: found(from + 4000), partitions: found(from + 6) })]), false);
+  // A pair that never held.
+  assert.equal(heldAtSubscribe([pairAt({ view: found(from + 5), partitions: { lastMissSentAt: null, hit: null } }, { view: 30, partitions: null })]), false);
+});
+
+test('#3296: a late Edge that held the reports at its subscribe, never marked synced while its catch-up inserted nothing, is the known gap', () => {
+  const late = { label: 'node10 (late)' };
+  const graph = { key: 'main' };
+  const listed = (synced, defined = true) => ({ readable: true, entry: { subscribed: true, synced }, defined });
+  const catchup = catchupDataTriples(CATCHUP_LOG, CG);
+  const stuck = syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: true, catchup });
+  assert.equal(stuck.text, 'node10 (late): lists main as subscribed=true synced=false at the end');
+  assert.deepEqual([verdictOf(stuck), gapOf(stuck)], ['xfail', '#3296']);
+  assert.match(classify(stuck).text, /; it held the graph's reports at its subscribe, and its catch-up's 2 shared-memory pass\(es\) inserted no data$/);
+  // Without the gap's evidence: a plain failure.
+  for (const [result, because] of [
+    [syncedAtEndResult({ node: late, graph, listed: listed(false, false), heldAtSubscribe: true, catchup }), /holds no definition of the graph, so this is not #3296$/],
+    [syncedAtEndResult({ node: late, graph, listed: { readable: true, entry: { subscribed: false, synced: false }, defined: true }, heldAtSubscribe: true, catchup }), /not subscribed to the graph, so this is not #3296$/],
+    [syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: true, catchup: { passes: 2, data: 18 } }), /inserted 18 data triple\(s\), so this is not #3296$/],
+    [syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: true, catchup: { passes: 0, data: 0 } }), /no shared-memory catch-up after its last subscribe/],
+    [syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: true, catchup: null }), /no shared-memory catch-up after its last subscribe/],
+  ]) {
+    assert.equal(verdictOf(result), 'fail');
+    assert.match(classify(result).text, because);
+  }
+  // A node that did not hold the reports at its subscribe is not in the gap's state: a plain pass or failure.
+  const other = syncedAtEndResult({ node: late, graph, listed: listed(false), heldAtSubscribe: false, catchup: null });
+  assert.deepEqual([verdictOf(other), gapOf(other)], ['fail', null]);
+  const synced = syncedAtEndResult({ node: late, graph, listed: listed(true), heldAtSubscribe: false, catchup: null });
+  assert.deepEqual([synced.text, verdictOf(synced), gapOf(synced)], ['node10 (late): lists main as synced at the end', 'pass', null]);
+  // Synced in the gap's state: the gap's check held. Synced after a catch-up that inserted data: a plain pass.
+  const fixed = syncedAtEndResult({ node: late, graph, listed: listed(true), heldAtSubscribe: true, catchup });
+  assert.deepEqual([verdictOf(fixed), gapOf(fixed)], ['xpass', '#3296']);
+  assert.equal(verdictOf(syncedAtEndResult({ node: late, graph, listed: listed(true), heldAtSubscribe: true, catchup: { passes: 2, data: 18 } })), 'pass');
+  // A listing that cannot be read fails, whatever the node held.
+  const unread = syncedAtEndResult({ node: late, graph, listed: { readable: false, why: 'HTTP 0 timeout' }, heldAtSubscribe: true, catchup });
+  assert.deepEqual([unread.text, verdictOf(unread)], ['node10 (late): its listing could not be read at the end (HTTP 0 timeout)', 'fail']);
+  // Through the report: the expected failure does not fail case 8, and the gap is summed up.
+  const lines = [];
+  const caseReport = createReport({ 8: 'the synced flag of every Edge' }, { print: line => lines.push(line) });
+  caseReport.record(8, stuck);
+  caseReport.record(8, syncedAtEndResult({ node: { label: 'node8 (edgeA)' }, graph, listed: listed(true), heldAtSubscribe: false, catchup: null }));
+  assert.deepEqual(caseReport.summary('Results'), []);
+  assert.ok(lines.some(line => line.startsWith('  [XFAIL] case 8: node10 (late): lists main as subscribed=true synced=false at the end')), lines.join('\n'));
+  assert.ok(lines.some(line => line.includes('known gap #3296') && line.includes('1 check(s) failed as expected')), lines.join('\n'));
 });
