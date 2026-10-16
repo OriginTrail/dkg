@@ -12,6 +12,11 @@
  * policy, its writes were refused as unknown, and the graph never became
  * synced (devnet suite of #3261, cases 7 and 8). The fake agent below answers
  * that confirmation with `true` throughout.
+ *
+ * When no connected peer serves the declaration (a member that reaches the
+ * graph only through Cores, which hold none), the canonical definition comes
+ * from the chain registration itself, through the strict chain proof and the
+ * atomic repair that heal configured graphs at start.
  */
 import {
   contextGraphDataGraphUri,
@@ -26,7 +31,9 @@ import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { DKGAgent } from '../src/index.js';
+import type { ActivePublicContextGraphChainProof } from '../src/active-public-context-graph-chain-proof.js';
 import { holdsAuthoritativePublicDefinitionV1 } from '../src/context-graph-meta-confirmation.js';
+import { isPublicMetaDurabilityPending } from '../src/context-graph-public-meta-repair.js';
 import { Rfc64MetaBootstrapMethods } from '../src/dkg-agent-rfc64-meta-bootstrap.js';
 
 const OWNER = new ethers.Wallet(`0x${'74'.repeat(32)}`).address.toLowerCase() as EvmAddressV1;
@@ -57,7 +64,10 @@ const SERVED_DECLARATION: readonly Quad[] = Object.freeze([
 ]);
 
 interface AcceptedPolicyShape {
-  readonly policy: { readonly accessPolicy: 0 | 1; readonly source: { readonly kind: string } };
+  readonly policy: {
+    readonly accessPolicy: 0 | 1;
+    readonly source: { readonly kind: string; readonly ownerAddress?: string };
+  };
 }
 
 interface BootstrapAgentOptions {
@@ -65,6 +75,10 @@ interface BootstrapAgentOptions {
   readonly served?: readonly Quad[];
   /** The accepted RFC-64 policy snapshot, `null` until the catalog holds one. */
   readonly accepted?: AcceptedPolicyShape | null;
+  /** The connected peers the bootstrap may ask; default the one serving peer. */
+  readonly peers?: readonly string[];
+  /** What the strict metadata-bootstrap chain proof answers; default unprovable. */
+  readonly chainProof?: () => Promise<ActivePublicContextGraphChainProof>;
 }
 
 function createBootstrapAgent(store: OxigraphStore, options: BootstrapAgentOptions = {}) {
@@ -75,6 +89,13 @@ function createBootstrapAgent(store: OxigraphStore, options: BootstrapAgentOptio
     completed: true,
   }));
   const refreshMetaSyncedFlags = vi.fn(async () => undefined);
+  const resolveActivePublicContextGraphChainProof = vi.fn(
+    options.chainProof ?? (async (): Promise<ActivePublicContextGraphChainProof> => (
+      { state: 'unknown', reason: 'unprovable' }
+    )),
+  );
+  const invalidateListContextGraphsCache = vi.fn();
+  const markDirty = vi.fn();
   const log = { warn: vi.fn(), info: vi.fn() };
   const surface = {
     store,
@@ -85,7 +106,8 @@ function createBootstrapAgent(store: OxigraphStore, options: BootstrapAgentOptio
     readAcceptedRfc64CatalogAccessSnapshotV1: () => options.accepted ?? null,
     // Readable by chain proof: the answer that used to end the pull.
     hasConfirmedMetaState: vi.fn(async () => true),
-    resolveRfc64UnregisteredAuthoritySeedPeersV1: () => [SERVING_PEER_ID],
+    resolveRfc64UnregisteredAuthoritySeedPeersV1: () => [...(options.peers ?? [SERVING_PEER_ID])],
+    resolveActivePublicContextGraphChainProof,
     refreshMetaSyncedFlags,
     // The curator refresh's surface (as in rfc64-meta-bootstrap-binding-guard.test.ts).
     metaRefreshTimestamps: new Map<string, number>(),
@@ -104,8 +126,8 @@ function createBootstrapAgent(store: OxigraphStore, options: BootstrapAgentOptio
     discovery: {},
     fetchSyncPages,
     oversizeTombstoneLog: { record: () => undefined },
-    invalidateListContextGraphsCache: () => undefined,
-    contextGraphMetaProjection: { markDirty: () => undefined },
+    invalidateListContextGraphsCache,
+    contextGraphMetaProjection: { markDirty },
     bindSubscriptionOnChainId: vi.fn(),
     recordCgWireId: vi.fn(),
     persistContextGraphSubscription: vi.fn(),
@@ -117,11 +139,26 @@ function createBootstrapAgent(store: OxigraphStore, options: BootstrapAgentOptio
     Object.create(Rfc64MetaBootstrapMethods.prototype) as object,
     Object.getOwnPropertyDescriptors(surface),
   ) as unknown as DKGAgent;
-  return { agent, fetchSyncPages, refreshMetaSyncedFlags, log };
+  return {
+    agent,
+    fetchSyncPages,
+    refreshMetaSyncedFlags,
+    resolveActivePublicContextGraphChainProof,
+    invalidateListContextGraphsCache,
+    markDirty,
+    log,
+  };
 }
 
-function bootstrap(agent: DKGAgent, proof?: typeof registeredProof) {
-  return agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId, undefined, proof);
+function bootstrap(agent: DKGAgent, proof?: typeof registeredProof, signal?: AbortSignal) {
+  return agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId, signal, proof);
+}
+
+const PUBLIC_ON_CHAIN = async (): Promise<ActivePublicContextGraphChainProof> => ({ state: 'public' });
+
+/** The last info line the bootstrap logged. */
+function lastInfo(log: { info: { mock: { calls: unknown[][] } } }): string {
+  return String(log.info.mock.calls.at(-1)?.[1]);
 }
 
 async function rootMetaRows(store: OxigraphStore): Promise<Array<{ p: string; o: string }>> {
@@ -141,6 +178,8 @@ describe('RFC-64 metadata bootstrap of a registered public graph (#3264)', () =>
       await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('fetched');
 
       expect(harness.fetchSyncPages).toHaveBeenCalledOnce();
+      // A served declaration wins: the chain is read only when no peer serves one.
+      expect(harness.resolveActivePublicContextGraphChainProof).not.toHaveBeenCalled();
       const rows = await rootMetaRows(store);
       expect(rows).toContainEqual({ p: DKG_ONTOLOGY.RDF_TYPE, o: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH });
       expect(rows).toContainEqual({ p: DKG_ONTOLOGY.DKG_ACCESS_POLICY, o: '"public"' });
@@ -182,21 +221,24 @@ describe('RFC-64 metadata bootstrap of a registered public graph (#3264)', () =>
       await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('already-confirmed');
 
       expect(harness.fetchSyncPages).not.toHaveBeenCalled();
+      expect(harness.resolveActivePublicContextGraphChainProof).not.toHaveBeenCalled();
       expect(harness.refreshMetaSyncedFlags).not.toHaveBeenCalled();
     } finally {
       await store.close();
     }
   });
 
-  it('keeps a miss a miss: a peer that serves no public declaration installs nothing', async () => {
+  it('keeps a miss a miss: a peer that serves no public declaration, and a chain that proves nothing, install nothing', async () => {
     const store = new OxigraphStore();
     try {
       const harness = createBootstrapAgent(store, { served: [] });
 
       await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('not-found');
 
+      expect(harness.resolveActivePublicContextGraphChainProof).toHaveBeenCalledOnce();
       expect(await rootMetaRows(store)).toEqual([]);
       expect(harness.refreshMetaSyncedFlags).not.toHaveBeenCalled();
+      expect(lastInfo(harness.log)).toContain('the chain attests no public definition now (chain proof unprovable)');
       await expect(holdsAuthoritativePublicDefinitionV1(store, contextGraphId)).resolves.toBe(false);
     } finally {
       await store.close();
@@ -213,6 +255,235 @@ describe('RFC-64 metadata bootstrap of a registered public graph (#3264)', () =>
       await expect(holdsAuthoritativePublicDefinitionV1(store, contextGraphId)).resolves.toBe(true);
       await store.insert([metaQuad(DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"private"')]);
       await expect(holdsAuthoritativePublicDefinitionV1(store, contextGraphId)).resolves.toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+describe('RFC-64 metadata bootstrap: the definition from the chain when no peer serves one (#3264)', () => {
+  /** Exactly the canonical public definition: no curator, no chain claims. */
+  async function expectCanonicalDefinitionOnly(store: OxigraphStore): Promise<void> {
+    expect(await rootMetaRows(store)).toEqual(expect.arrayContaining([
+      { p: DKG_ONTOLOGY.RDF_TYPE, o: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH },
+      { p: DKG_ONTOLOGY.DKG_ACCESS_POLICY, o: '"public"' },
+    ]));
+    expect(await rootMetaRows(store)).toHaveLength(2);
+    await expect(holdsAuthoritativePublicDefinitionV1(store, contextGraphId)).resolves.toBe(true);
+  }
+
+  it('installs it when the connected peers (Cores that hold none) serve no declaration', async () => {
+    const store = new OxigraphStore();
+    try {
+      const harness = createBootstrapAgent(store, { served: [], chainProof: PUBLIC_ON_CHAIN });
+
+      await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('chain-attested');
+
+      expect(harness.fetchSyncPages).toHaveBeenCalledOnce();
+      expect(harness.resolveActivePublicContextGraphChainProof).toHaveBeenCalledOnce();
+      expect(harness.resolveActivePublicContextGraphChainProof.mock.calls[0]?.[0]).toBe(contextGraphId);
+      await expectCanonicalDefinitionOnly(store);
+      // Listings show it at once, as they do a peer's declaration.
+      expect(harness.markDirty).toHaveBeenCalledWith(contextGraphId);
+      expect(harness.invalidateListContextGraphsCache).toHaveBeenCalled();
+      expect(harness.refreshMetaSyncedFlags).toHaveBeenCalledWith([contextGraphId]);
+      expect(lastInfo(harness.log)).toContain(
+        `RFC-64 metadata bootstrap for "${contextGraphId}" installed the public definition attested by its chain registration`,
+      );
+      expect(isPublicMetaDurabilityPending(store, contextGraphId)).toBe(false);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('installs it with no connected peer at all', async () => {
+    const store = new OxigraphStore();
+    try {
+      const harness = createBootstrapAgent(store, { peers: [], chainProof: PUBLIC_ON_CHAIN });
+
+      await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('chain-attested');
+
+      expect(harness.fetchSyncPages).not.toHaveBeenCalled();
+      await expectCanonicalDefinitionOnly(store);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('installs it at receiver activation from a policy accepted from finalized chain state', async () => {
+    const store = new OxigraphStore();
+    try {
+      const harness = createBootstrapAgent(store, {
+        served: [],
+        accepted: { policy: { accessPolicy: 0, source: { kind: 'finalized-chain' } } },
+        chainProof: PUBLIC_ON_CHAIN,
+      });
+
+      await expect(bootstrap(harness.agent)).resolves.toBe('chain-attested');
+
+      await expectCanonicalDefinitionOnly(store);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('never reads the chain for a graph whose public policy is not chain evidence', async () => {
+    const store = new OxigraphStore();
+    try {
+      const harness = createBootstrapAgent(store, {
+        served: [],
+        accepted: { policy: { accessPolicy: 0, source: { kind: 'owner-signed-unregistered', ownerAddress: OWNER } } },
+        chainProof: PUBLIC_ON_CHAIN,
+      });
+
+      await expect(bootstrap(harness.agent)).resolves.toBe('not-found');
+
+      expect(harness.resolveActivePublicContextGraphChainProof).not.toHaveBeenCalled();
+      expect(await rootMetaRows(store)).toEqual([]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([
+    [{ state: 'not-public', reason: 'private' }, 'chain: private'],
+    [{ state: 'not-public', reason: 'unregistered' }, 'chain: unregistered'],
+    [{ state: 'unknown', reason: 'rpc-failure', detail: 'connection refused' }, 'chain proof rpc-failure'],
+  ] as const)('installs nothing when the chain answers %o', async (chainProof, reason) => {
+    const store = new OxigraphStore();
+    try {
+      const harness = createBootstrapAgent(store, { served: [], chainProof: async () => chainProof });
+
+      await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('not-found');
+
+      expect(await rootMetaRows(store)).toEqual([]);
+      expect(harness.refreshMetaSyncedFlags).not.toHaveBeenCalled();
+      expect(harness.invalidateListContextGraphsCache).not.toHaveBeenCalled();
+      expect(lastInfo(harness.log)).toContain(`the chain attests no public definition now (${reason})`);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('never overwrites a non-public policy held locally', async () => {
+    const store = new OxigraphStore();
+    try {
+      const privateDefinition = [
+        metaQuad(DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+        metaQuad(DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"private"'),
+      ];
+      await store.insert(privateDefinition);
+      const harness = createBootstrapAgent(store, { served: [], chainProof: PUBLIC_ON_CHAIN });
+
+      await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('not-found');
+
+      expect(await rootMetaRows(store)).toEqual(expect.arrayContaining([
+        { p: DKG_ONTOLOGY.DKG_ACCESS_POLICY, o: '"private"' },
+      ]));
+      expect(await rootMetaRows(store)).toHaveLength(2);
+      expect(harness.refreshMetaSyncedFlags).not.toHaveBeenCalled();
+      expect(lastInfo(harness.log)).toContain('(a non-public policy is held locally)');
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('counts a definition another arrival installed meanwhile as held', async () => {
+    const store = new OxigraphStore();
+    try {
+      const harness = createBootstrapAgent(store, { served: [], chainProof: PUBLIC_ON_CHAIN });
+      // The peer serves nothing, while another arrival installs the definition.
+      harness.fetchSyncPages.mockImplementationOnce(async () => {
+        await store.insert([...CANONICAL_PUBLIC_DECLARATION]);
+        return { quads: [], checkpointKey: 'registered-public-checkpoint', resumedFromOffset: 0, completed: true };
+      });
+
+      await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('already-confirmed');
+
+      expect(harness.resolveActivePublicContextGraphChainProof).not.toHaveBeenCalled();
+      expect(harness.refreshMetaSyncedFlags).toHaveBeenCalledWith([contextGraphId]);
+      await expectCanonicalDefinitionOnly(store);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('finishes an install whose flush failed on the next pass, before asking any peer', async () => {
+    const store = new OxigraphStore();
+    try {
+      const flush = store.flush.bind(store);
+      let failFlush = true;
+      store.flush = async () => {
+        if (failFlush) {
+          failFlush = false;
+          throw new Error('disk full');
+        }
+        await flush();
+      };
+      const harness = createBootstrapAgent(store, { served: [], chainProof: PUBLIC_ON_CHAIN });
+
+      await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('not-found');
+      expect(lastInfo(harness.log)).toContain('(install failed (mutation-or-durability): disk full)');
+      // Visible in memory, but not durable: it does not count as held.
+      expect(isPublicMetaDurabilityPending(store, contextGraphId)).toBe(true);
+      expect(harness.refreshMetaSyncedFlags).not.toHaveBeenCalled();
+
+      await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('already-confirmed');
+
+      expect(isPublicMetaDurabilityPending(store, contextGraphId)).toBe(false);
+      expect(harness.fetchSyncPages).toHaveBeenCalledOnce();
+      expect(harness.invalidateListContextGraphsCache).toHaveBeenCalled();
+      expect(harness.refreshMetaSyncedFlags).toHaveBeenCalledWith([contextGraphId]);
+      await expectCanonicalDefinitionOnly(store);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('leaves an unfinished install to the chain repair when the pass has no chain evidence', async () => {
+    const store = new OxigraphStore();
+    try {
+      const flush = store.flush.bind(store);
+      let failFlush = true;
+      store.flush = async () => {
+        if (failFlush) {
+          failFlush = false;
+          throw new Error('disk full');
+        }
+        await flush();
+      };
+      const harness = createBootstrapAgent(store, { served: [], chainProof: PUBLIC_ON_CHAIN });
+      await expect(bootstrap(harness.agent, registeredProof)).resolves.toBe('not-found');
+      const activation = createBootstrapAgent(store, {
+        accepted: { policy: { accessPolicy: 0, source: { kind: 'owner-signed-unregistered', ownerAddress: OWNER } } },
+      });
+
+      await expect(bootstrap(activation.agent)).resolves.toBe('not-found');
+
+      expect(activation.fetchSyncPages).not.toHaveBeenCalled();
+      expect(activation.resolveActivePublicContextGraphChainProof).not.toHaveBeenCalled();
+      expect(isPublicMetaDurabilityPending(store, contextGraphId)).toBe(true);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('rejects with the caller\'s reason when the caller aborts while the chain is read', async () => {
+    const store = new OxigraphStore();
+    try {
+      const controller = new AbortController();
+      const harness = createBootstrapAgent(store, {
+        served: [],
+        chainProof: async () => {
+          controller.abort(new Error('caller gave up'));
+          throw new Error('aborted');
+        },
+      });
+
+      await expect(bootstrap(harness.agent, registeredProof, controller.signal)).rejects.toThrow('caller gave up');
+
+      expect(await rootMetaRows(store)).toEqual([]);
+      expect(harness.refreshMetaSyncedFlags).not.toHaveBeenCalled();
     } finally {
       await store.close();
     }
