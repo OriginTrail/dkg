@@ -1,6 +1,7 @@
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import { registerPublicBulkGraph } from './sync/responder/bulk-graph-stream.js';
-import { asSyncFetchAbortError, authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
+import { createAbortError as asSyncFetchAbortError } from './bounded-operation.js';
+import { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
 export { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
 import { createRecoveryAuthority, memoizeRecoveryBindingProof, type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
 import { createRemoteQueryHandler } from "./remote-query-handler.js";
@@ -1873,6 +1874,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // retirement, which then goes on without it and is repeated if it did not get its turn. The
     // retirement stays this node's until it ended: stop() ends its wait and drains its work.
     const assertionVersion = String(input.assertionVersion);
+    // GH#3134 — the asset's row in its author's SWM inventory goes with the twin, detached.
+    this.scheduleRfc64SwmInventoryRowRemovalAfterFinalizedTwinV1({ ...input, assertionVersion });
     await this.owedLegacySwmRetirementsV1().retire(
       JSON.stringify([input.contextGraphId, input.subGraphName ?? null, input.kaUal, assertionVersion]),
       (signal) => retireRfc64LegacySwmAfterFinalizedVmV1(
@@ -6061,7 +6064,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** @internal The admitted executor receives one resolved operation-owned authority. */
-  async runAdmittedLegacyDurableContextGraph(this: DKGAgent,
+  protected async runAdmittedLegacyDurableContextGraph(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
     contextGraphId: string,
