@@ -1,4 +1,5 @@
-import { EntityGraphReader, documentKey, indexKey, PAGE_SIZE } from './documents.js';
+import { EntityGraphReader, PAGE_SIZE } from './documents.js';
+import { documentKey, indexKey } from './identity.js';
 import { EntityIndexStore, type IndexState } from './store.js';
 import { EntitySearchError, checkDeadline, unitVector, type EntityEmbedder, type EntityIndexStatus, type EntityReadinessResponse, type EntitySearchResponse, type EntityDocument } from './types.js';
 import type { NormalizedIndexRequest, NormalizedReadinessRequest, NormalizedSearchRequest } from './types.js';

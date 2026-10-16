@@ -1,39 +1,12 @@
+import { iri } from './requests.js';
 import { createHash } from 'node:crypto';
-import { isSafeIri, sparqlIri, sparqlString } from '@origintrail-official/dkg-core';
+import { sparqlString } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { isQueryResultTooLargeError, type DKGAgent } from '@origintrail-official/dkg-agent';
 import { EntitySearchError, checkDeadline, type EntityDocument, type EntityIndexSpec, type EntityIdentity } from './types.js';
 
 export const PAGE_SIZE = 8;
 export const MAX_DOCUMENT_ROWS = 256;
-export function iri(value: unknown): string {
-  if (typeof value !== 'string' || value.length > 2048 || !isSafeIri(value)) {
-    throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
-  }
-  return sparqlIri(value);
-}
-export function parseSpec(raw: unknown): EntityIndexSpec {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !('contextGraphId' in raw)
-      || typeof raw.contextGraphId !== 'string' || !raw.contextGraphId || raw.contextGraphId.length > 256
-      || !('view' in raw) || (raw.view !== 'verifiable-memory' && raw.view !== 'shared-working-memory')
-      || !('textPredicates' in raw)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
-  function terms(values: unknown, required: boolean): string[] {
-    if (!Array.isArray(values) || values.length > 16 || (required && !values.length)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
-    const validated = values.map(value => {
-      if (typeof value !== 'string') throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
-      iri(value); return value;
-    });
-    return [...new Set(validated)].sort();
-  }
-  return { contextGraphId: raw.contextGraphId, view: raw.view,
-    textPredicates: terms(raw.textPredicates, true), types: terms(('types' in raw ? raw.types : undefined) ?? [], false) };
-}
-export function indexKey(spec: EntityIndexSpec, fingerprint: string): string {
-  return createHash('sha256').update(JSON.stringify([spec, fingerprint])).digest('hex');
-}
-export function documentKey(doc: Pick<EntityDocument, 'entityUri' | 'sourceGraph'>): string {
-  return JSON.stringify([doc.sourceGraph, doc.entityUri]);
-}
 function selection(spec: EntityIndexSpec, graphOperand: string): string {
   return `VALUES ?p { ${spec.textPredicates.map(iri).join(' ')} }
     GRAPH ${graphOperand} { ?entity ?p ?value . FILTER(isIRI(?entity) && isLiteral(?value))
