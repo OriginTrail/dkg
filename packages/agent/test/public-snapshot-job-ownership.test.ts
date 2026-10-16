@@ -1,9 +1,13 @@
+import * as exactRecovery from '../src/exact-recovery-execution.js';
+import * as recoveryGraph from '../src/durable-recovery-graph.js';
+import { createDurableRecoveryHost } from '../src/durable-recovery-host.js';
+
 vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
   return { ...actual, exchangeExperimentalExactBatch: vi.fn() };
 });
 import { exchangeExperimentalExactBatch } from '@origintrail-official/dkg-core';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+
 import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import { CG, ctx, createExactBatchHostFixture, storedRows } from './_helpers/exact-batch-host.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
@@ -129,12 +133,12 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
     let authority!: import('../src/durable-recovery-authority.js').DurableRecoveryAuthority;
     // Only transport/chain responses are fixtures. Exercise the real receive
     // worker, job evidence authentication, physical fence and atomic store path.
-    const recover = vi.spyOn(LifecycleSyncMethods, 'recoverSnapshotExactAssets').mockImplementation(async (_agent, _peer, _graph, uals, policy, options) => {
+    const recover = vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ host: _agent, remotePeerId: _peer, contextGraphId: _graph, selectionInput: uals, authority: policy, options }) => {
       authority = policy;
-      return LifecycleSyncMethods.prototype['runAdmittedLegacyDurableContextGraph'].call(a, ctx, 'fixture-source', CG, 1, {
-        ...options, recoveryAuthority: policy, exactAssetSelection: createUalOnlyExactAssetSelection(uals),
+      return recoveryGraph.runAdmittedDurableGraph({ host: createDurableRecoveryHost(a), ctx, remotePeerId: 'fixture-source', contextGraphId: CG, remainingContextGraphs: 1, authority: policy, options: {
+        ...options, exactAssetSelection: createUalOnlyExactAssetSelection(uals),
         fetchTimeoutMs: 120000, authenticationTimeoutMs: 30000,
-      });
+      } });
     });
     let entered!: () => void, release!: () => void;
     const writing = new Promise<void>(resolve => { entered = resolve; });
