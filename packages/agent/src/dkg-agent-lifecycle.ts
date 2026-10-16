@@ -1,4 +1,5 @@
-import { asSyncFetchAbortError, authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
+import { createAbortError as asSyncFetchAbortError } from './bounded-operation.js';
+import { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
 export { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
 import { createRecoveryAuthority, memoizeRecoveryBindingProof, type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
 import { createRemoteQueryHandler } from "./remote-query-handler.js";
@@ -6045,7 +6046,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** @internal The admitted executor receives one resolved operation-owned authority. */
-  async runAdmittedLegacyDurableContextGraph(this: DKGAgent,
+  protected async runAdmittedLegacyDurableContextGraph(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
     contextGraphId: string,

@@ -1,22 +1,10 @@
+import { createAbortError as asSyncFetchAbortError } from './bounded-operation.js';
 import { withRetry } from '@origintrail-official/dkg-core';
 import { createRpcTimeoutError, isChainRpcTransportError, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { authenticateChallengePinnedGraphScopedAsset, authenticateVerifiedGraphScopedAsset,
   type ChallengePinnedGraphScopedAsset, type VerifiedGraphScopedAsset, type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import type { ExactAssetCommitment } from './sync/exact-assets.js';
-
-export function asSyncFetchAbortError(reason: unknown): Error {
-  if (reason instanceof Error) {
-    if (reason.name === 'AbortError') return reason;
-    const err = new Error(reason.message || 'aborted');
-    err.name = 'AbortError';
-    (err as Error & { cause?: unknown }).cause = reason;
-    return err;
-  }
-  const err = new Error(typeof reason === 'string' ? reason : 'aborted');
-  err.name = 'AbortError';
-  return err;
-}
 
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
 const DURABLE_AUTHENTICATION_RETRY_BASE_MS = 1_000;
