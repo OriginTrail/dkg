@@ -1,3 +1,8 @@
+import * as recoveryGraph from '../src/durable-recovery-graph.js';
+import * as recoveryExecution from '../src/durable-recovery-execution.js';
+import * as recoveryAuthority from '../src/durable-recovery-authority.js';
+import * as exactRecovery from '../src/exact-recovery-execution.js';
+import { createDurableRecoveryHost } from '../src/durable-recovery-host.js';
 import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -323,7 +328,7 @@ describe('durable sync lifecycle chain binding', () => {
       let release!: () => void;
       const started = new Promise<void>(resolve => { entered = resolve; });
       const held = new Promise<void>(resolve => { release = resolve; });
-      const physical = vi.spyOn(LifecycleSyncMethods.prototype, 'runAdmittedLegacyDurableContextGraph')
+      const physical = vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph')
         .mockImplementationOnce(async () => {
           entered();
           await held;
@@ -558,9 +563,9 @@ describe('durable sync lifecycle chain binding', () => {
     const ordinaryAuthority = { coalescing: 'allowed' } as any;
     const snapshotAuthority = { coalescing: 'owner-only' } as any;
     const registeredPublicEvidence = {} as any;
-    const resolve = vi.spyOn(LifecycleSyncMethods.prototype, 'resolveRecoveryAuthority')
+    const resolve = vi.spyOn(recoveryAuthority, 'resolveOrdinaryRecoveryAuthority')
       .mockReturnValue(ordinaryAuthority);
-    const execute = vi.spyOn(LifecycleSyncMethods.prototype, 'runDurableSyncWithAuthority')
+    const execute = vi.spyOn(recoveryExecution, 'runDurableRecovery')
       .mockResolvedValue({ result: {} as any, exactFetchDisposition: 'found' });
     const reenterPublic = vi.fn(() => { throw new Error('Internal recovery must not re-enter public SDK normalization'); });
     const agentLike = { runLegacyDurableSyncDetailed: reenterPublic } as any;
@@ -568,24 +573,22 @@ describe('durable sync lifecycle chain binding', () => {
     await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
       agentLike, 'fixture-peer', contextGraphId, [ual], { registeredPublicEvidence, signal },
     );
-    await LifecycleSyncMethods.recoverSnapshotExactAssets(
-      agentLike, 'fixture-peer', contextGraphId, [ual], snapshotAuthority, { signal },
-    );
+    await exactRecovery.runExactRecovery({ host: createDurableRecoveryHost(agentLike), ctx: createOperationContext('sync'), remotePeerId: 'fixture-peer', contextGraphId: contextGraphId, selectionInput: [ual], authority: snapshotAuthority, options: { signal } });
     expect(resolve).toHaveBeenCalledOnce();
-    expect(resolve.mock.calls[0][1]).toEqual({ registeredPublicEvidence });
+    expect(resolve.mock.calls[0][0].input).toEqual({ registeredPublicEvidence });
     expect(execute).toHaveBeenCalledTimes(2);
-    expect(execute.mock.calls[0][0]).toBe(ordinaryAuthority);
-    expect(execute.mock.calls[1][0]).toBe(snapshotAuthority);
+    expect(execute.mock.calls[0][0].authority).toBe(ordinaryAuthority);
+    expect(execute.mock.calls[1][0].authority).toBe(snapshotAuthority);
     for (const call of execute.mock.calls) {
-      expect(call[7]).toMatchObject({ signal, source: 'vm-recovery', priority: 1_000 });
-      expect(call[7]).not.toHaveProperty('registeredPublicEvidence');
+      expect(call[0].options).toMatchObject({ signal, source: 'vm-recovery', priority: 1_000 });
+      expect(call[0].options).not.toHaveProperty('registeredPublicEvidence');
     }
     expect(reenterPublic).not.toHaveBeenCalled();
   });
 
   it.each<ExactRecoveryTransportMode>(['legacy', 'stream-preferred', 'stream-required'])(
     'passes the closed %s transport decision through exact durable dispatch', async exactRecoveryTransportMode => {
-      const runDurableSyncWithAuthority = vi.spyOn(LifecycleSyncMethods.prototype, 'runDurableSyncWithAuthority').mockResolvedValue({
+      const runDurableSyncWithAuthority = vi.spyOn(recoveryExecution, 'runDurableRecovery').mockResolvedValue({
         admission: 'work-started' as const,
         result: {} as Awaited<ReturnType<typeof runDurableSync>>,
         exactFetchDisposition: 'incomplete' as const,
@@ -598,7 +601,7 @@ describe('durable sync lifecycle chain binding', () => {
         { kind: 'ual-only', assetUals: [ual] },
         { exactRecoveryTransportMode, signal, onWorkStarted, isCurrent },
       );
-      expect(runDurableSyncWithAuthority.mock.calls[0]?.[7]).toMatchObject({
+      expect(runDurableSyncWithAuthority.mock.calls[0]?.[0].options).toMatchObject({
         exactRecoveryTransportMode, signal, onWorkStarted, isCurrent,
         exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [ual] }, forceFreshSession: false, allowDurableCheckpoints: true },
       });
@@ -607,7 +610,7 @@ describe('durable sync lifecycle chain binding', () => {
 
   it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
     const physicalResult = {} as Awaited<ReturnType<typeof runDurableSync>>;
-    const runDurableSyncWithAuthority = vi.spyOn(LifecycleSyncMethods.prototype, 'runDurableSyncWithAuthority').mockResolvedValue({
+    const runDurableSyncWithAuthority = vi.spyOn(recoveryExecution, 'runDurableRecovery').mockResolvedValue({
       result: physicalResult,
       exactFetchDisposition: 'clean-absent' as const,
     });
@@ -624,7 +627,7 @@ describe('durable sync lifecycle chain binding', () => {
     );
 
     expect(runDurableSyncWithAuthority).toHaveBeenCalledTimes(1);
-    expect(runDurableSyncWithAuthority.mock.calls[0]?.[7]).toMatchObject({
+    expect(runDurableSyncWithAuthority.mock.calls[0]?.[0].options).toMatchObject({
       exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [exactUal] }, forceFreshSession: false, allowDurableCheckpoints: true },
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
@@ -635,12 +638,12 @@ describe('durable sync lifecycle chain binding', () => {
       source: 'vm-recovery',
       signal: controller.signal,
     });
-    expect(runDurableSyncWithAuthority.mock.calls[0]?.[7]).not.toHaveProperty('totalTimeoutMs');
+    expect(runDurableSyncWithAuthority.mock.calls[0]?.[0].options).not.toHaveProperty('totalTimeoutMs');
     expect(detailed).toEqual({ result: physicalResult, disposition: 'clean-absent' });
   });
 
   it('forwards a caller deadline through the real exact-sync lifecycle boundary', async () => {
-    const runDurableSyncWithAuthority = vi.spyOn(LifecycleSyncMethods.prototype, 'runDurableSyncWithAuthority').mockResolvedValue({
+    const runDurableSyncWithAuthority = vi.spyOn(recoveryExecution, 'runDurableRecovery').mockResolvedValue({
       result: {} as Awaited<ReturnType<typeof runDurableSync>>,
       exactFetchDisposition: 'incomplete' as const,
     });
@@ -651,7 +654,7 @@ describe('durable sync lifecycle chain binding', () => {
       { kind: 'ual-only', assetUals: ['did:dkg:base:84532/0x1111111111111111111111111111111111111111/1'] },
       { totalTimeoutMs: 120_000 },
     );
-    expect(runDurableSyncWithAuthority.mock.calls[0]?.[7]).toMatchObject({
+    expect(runDurableSyncWithAuthority.mock.calls[0]?.[0].options).toMatchObject({
       totalTimeoutMs: 120_000,
       stopOnBackoffWorthyFailure: true,
       source: 'vm-recovery',
@@ -660,7 +663,7 @@ describe('durable sync lifecycle chain binding', () => {
 
   it.each(['complete', 'responder-busy', 'stream-interrupted', undefined] as const)(
     'carries the stream outcome %s from the per-graph run to the exact-sync result', async (outcome) => {
-      const perGraph = vi.spyOn(LifecycleSyncMethods.prototype, 'runAdmittedLegacyDurableContextGraph')
+      const perGraph = vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph')
         .mockResolvedValue({
           result: {} as Awaited<ReturnType<typeof runDurableSync>>,
           exactFetchDisposition: outcome === 'complete' ? 'found' : 'incomplete',
@@ -691,7 +694,7 @@ describe('durable sync lifecycle chain binding', () => {
     });
 
   it('reports no stream outcome for a run over several graphs', async () => {
-    vi.spyOn(LifecycleSyncMethods.prototype, 'runAdmittedLegacyDurableContextGraph')
+    vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph')
       .mockResolvedValue({
         result: {} as Awaited<ReturnType<typeof runDurableSync>>,
         exactFetchDisposition: 'incomplete',
