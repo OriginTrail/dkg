@@ -1,3 +1,4 @@
+import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
@@ -1324,7 +1325,8 @@ export class DKGPublisher implements Publisher {
         const nameHash = await this.chain.getContextGraphNameHash(BigInt(normalizedOnChainId));
         return typeof nameHash === 'string' &&
           nameHash.toLowerCase() === ethers.keccak256(ethers.toUtf8Bytes(normalizedContextGraphId)).toLowerCase();
-      } catch {
+      } catch (error) {
+        throwIfCatalogFloorAuthorityUnavailable(error, 'name-binding');
         return false;
       }
     };
@@ -1362,7 +1364,8 @@ export class DKGPublisher implements Publisher {
             ).toLowerCase();
           return idMatches && creation.accessPolicy === 1;
         }
-      } catch {
+      } catch (error) {
+        throwIfCatalogFloorAuthorityUnavailable(error, 'finalized-proof');
         // A failed atomic proof is fail-closed. Do not splice either field
         // with a separate latest-state read from a potentially different fork.
         return false;
@@ -1372,7 +1375,8 @@ export class DKGPublisher implements Publisher {
     if (!await this.onChainContextGraphMatchesLocalId(contextGraphId, onChainContextGraphId)) return false;
     try {
       return Number(await this.chain.getContextGraphAccessPolicy(BigInt(onChainContextGraphId))) === 1;
-    } catch {
+    } catch (error) {
+      throwIfCatalogFloorAuthorityUnavailable(error, 'access-policy');
       return false;
     }
   }
