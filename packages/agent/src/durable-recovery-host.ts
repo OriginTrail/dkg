@@ -54,5 +54,5 @@ export interface DurableRecoveryHost {
   };
   readonly storeInsert: DurableSyncContext['storeInsert'];
   materialization(scope: RecoveryMaterializationScope): RecoveryMaterialization;
-  resolveAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;
+  resolveOrdinaryAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;
 }

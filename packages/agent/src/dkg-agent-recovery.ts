@@ -103,7 +103,7 @@ export class RecoveryHostMethods extends DKGAgentBase {
         warn: (ctx, message) => this.log.warn(ctx, message),
         debug: (ctx, message) => this.log.debug(ctx, message),
       },
-      resolveAuthority: (ctx, input) => createRecoveryAuthority({
+      resolveOrdinaryAuthority: (ctx, input) => createRecoveryAuthority({
         chain: this.chain,
         verifyContextGraphBinding: (id, onChainId, signal) => this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
         resolveAuthority: (id, signal) => this.resolveRegisteredContextGraphAuthority(id, { authorityReadMode: 'finalized-index-or-live', signal }),
