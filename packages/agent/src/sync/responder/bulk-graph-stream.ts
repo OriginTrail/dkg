@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { BULK_GRAPH_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
   createOperationContext, registerBulkGraphResponder, type ProtocolRouter, type BulkGraphSession } from '@origintrail-official/dkg-core';
 import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson, encodeBulkRefusal, encodeBulkChunkEnd,
-  validateBulkGraphRequest, type BulkGraphRequest } from '../bulk-graph-contract.js';
+  validateBulkGraphRequest, type BulkGraphRequest, type BulkAssetHeader } from '../bulk-graph-contract.js';
 import type { PublicAssetResponderOptions, PublicAssetServingOptions } from './public-asset-responder.js';
 
 import { observeExactBatch as observe } from '../exact-batch-observation.js';
@@ -70,7 +70,7 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: P
       await lease.assertCurrent();
       session.signal.throwIfAborted();
       const directory = bulkJson({ encodedBytes: lease.body.length, plainBytes: lease.plainBytes, offset: bytes,
-        digest: createHash('sha256').update(lease.body).digest('hex'), metadata: Buffer.from(lease.metadata).toString('base64') });
+        digest: createHash('sha256').update(lease.body).digest('hex'), metadata: Buffer.from(lease.metadata).toString('base64') } satisfies BulkAssetHeader);
       hash.update(directory).update(lease.body);
       offsets.push(bytes + lease.body.length);
       await session.send({ kind: K.META, index, sequence: 0, payload: directory });
