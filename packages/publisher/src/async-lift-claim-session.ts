@@ -151,6 +151,10 @@ export type AsyncLiftClaimProcessingOutcome =
   | { readonly kind: 'replaced'; readonly job: PersistedLiftJob }
   | { readonly kind: 'recovered'; readonly job: PersistedLiftJob | null };
 
+type AsyncLiftClaimProcessingDecision =
+  | Exclude<AsyncLiftClaimProcessingOutcome, { readonly kind: 'recovered' }>
+  | { readonly kind: 'recover'; readonly claim: ActiveLiftJobClaim };
+
 export type LiftJobOwnershipMode = 'released' | 'lease-bound' | 'proof-bound';
 
 /** The single lifecycle policy for whether and how a job owns its signing wallet. */
@@ -307,46 +311,44 @@ export class AsyncLiftClaimCoordinator {
     handler: (session: WorkerLiftJobClaimSession) => Promise<LiftJob>,
     onProcessingReleased?: (release: AsyncLiftClaimProcessingRelease) => void,
   ): Promise<AsyncLiftClaimProcessingOutcome> {
-    let claim: ActiveLiftJobClaim | null = null;
-    let outcome: AsyncLiftClaimProcessingOutcome | undefined;
-    let release: AsyncLiftClaimProcessingRelease = { kind: 'faulted' };
-    let recover = false;
+    let cleanup = (): void => {};
+    let decision: AsyncLiftClaimProcessingDecision;
     try {
-      await this.dependencies.journalCompletion.runPublicOperation(async (owner) => {
-        claim = await this.claimNextInternal(owner, walletId, true);
-        if (!claim) return;
+      decision = await this.dependencies.journalCompletion.runPublicOperation(async (owner): Promise<AsyncLiftClaimProcessingDecision> => {
+        const claim = await this.claimNextInternal(owner, walletId, true);
+        if (!claim) return { kind: 'idle' };
+        let release: AsyncLiftClaimProcessingRelease = { kind: 'faulted' };
+        // Capture this exact epoch now; invoke only after the operation's journals settle.
+        cleanup = () => {
+          if (this.activeProcessClaimTokens.get(claim.jobId) === claim.claim.claimToken) {
+            this.activeProcessClaimTokens.delete(claim.jobId);
+          }
+          try { onProcessingReleased?.(release); } catch { /* Scheduling cannot change cleanup or outcomes. */ }
+        };
         try {
           const job = await handler(this.openWorkerSession(owner, claim));
-          outcome = { kind: 'processed', job };
-          release = outcome;
+          release = { kind: 'processed', job };
+          return release;
         } catch (error) {
           if (!(error instanceof StaleLiftJobClaimError)) throw error;
           const current = await this.getStatus(claim.jobId);
           if (current && !this.claimFenceMatches(current, claim)) {
-            outcome = { kind: 'replaced', job: current };
-            release = outcome;
-          } else {
-            recover = true;
-            release = { kind: 'stale' };
+            release = { kind: 'replaced', job: current };
+            return release;
           }
+          release = { kind: 'stale' };
+          return { kind: 'recover', claim };
         }
       });
     } finally {
-      // Callback assignment survives await but is not tracked by TypeScript's local flow analysis.
-      const acquired = claim as ActiveLiftJobClaim | null;
-      if (acquired) {
-        if (this.activeProcessClaimTokens.get(acquired.jobId) === acquired.claim.claimToken) {
-          this.activeProcessClaimTokens.delete(acquired.jobId);
-        }
-        try { onProcessingReleased?.(release); } catch { /* Scheduling cannot change cleanup or outcomes. */ }
-      }
+      cleanup();
     }
-    if (!claim) return { kind: 'idle' };
-    if (recover) return { kind: 'recovered', job: await this.dependencies.journalCompletion.runPublicOperation(
-      (owner) => this.recoverUnreplacedExpiredClaim(owner, claim!),
-    ) };
-    if (!outcome) throw new Error('Claim processing completed without an outcome');
-    return outcome;
+    if (decision.kind === 'recover') {
+      return { kind: 'recovered', job: await this.dependencies.journalCompletion.runPublicOperation(
+        (owner) => this.recoverUnreplacedExpiredClaim(owner, decision.claim),
+      ) };
+    }
+    return decision;
   }
 
   openSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession {
