@@ -298,6 +298,10 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async (contextGraphId) => (
         await this.#getSubGraphAdmission(contextGraphId)
       ).excluded,
+      isOwnContextGraph: (contextGraphId, name) => isKnownContextGraphUri(
+        this.#ports.store,
+        `${contextGraphDataGraphUri(contextGraphId)}/${name}`,
+      ),
       includeRootScope: target.includeRootScope,
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,

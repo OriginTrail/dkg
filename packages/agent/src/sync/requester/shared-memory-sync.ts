@@ -49,11 +49,11 @@ import {
 import {
   canonicalGraphScopedSnapshotManifestQuads,
   canonicalizeGraphScopedSwmHeadRows,
-  discoverSwmRecoverySubGraphNames,
   materializeGraphScopedSwmRecoveryAsset,
   parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
+import { admitServedSubGraphNames } from './served-sub-graph-admission.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 import {
   createRecoveryExecutionAdmission,
@@ -416,6 +416,8 @@ export interface SharedMemorySyncContext {
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
+  /** True when `<graph>/<name>` is a context graph of this node's own: never admitted as a served sub-graph. */
+  isOwnContextGraph?: (contextGraphId: string, name: string) => Promise<boolean>;
   /**
    * False for the 10.0.16 named-subgraph compatibility lane. Remote aggregate
    * pages are still fetched, but root-scope rows are removed before verifier,
@@ -463,6 +465,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
+    isOwnContextGraph,
     includeRootScope = true,
     stopOnBackoffWorthyFailure = false,
     deleteCheckpoint,
@@ -694,16 +697,10 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         : wsMetaResult.quads.filter((quad) => (
           isNamedSubgraphSharedMemoryMetaGraph(pid, quad.graph)
         ));
-      const verificationSubGraphNames = includeRootScope
-        ? registeredSubGraphNames
-        : [...new Set([
-          ...(registeredSubGraphNames ?? []),
-          ...discoverSwmRecoverySubGraphNames({
-            contextGraphId: pid,
-            metaQuads: fetchedMetaQuads,
-            excludedSubGraphNames,
-          }),
-        ])];
+      // Every lane admits the sub-graphs the responder serves (#3301).
+      const verificationSubGraphNames = await recoveryBoundary.read(() => admitServedSubGraphNames({
+        contextGraphId: pid, metaQuads: fetchedMetaQuads, registeredSubGraphNames, excludedSubGraphNames, isOwnContextGraph,
+      }));
       const processed = await recoveryBoundary.read(() => processSharedMemoryBatch(
         fetchedDataQuads,
         fetchedMetaQuads,
