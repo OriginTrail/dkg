@@ -4,6 +4,7 @@ import { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from "@origi
 import type { AcceptedPublicGraphSnapshot } from "@origintrail-official/dkg-chain";
 import {
   parseDeterministicKnowledgeAssetUal,
+  contextGraphDataUri,
   contextGraphMetaUri,
   sparqlString,
 } from "@origintrail-official/dkg-core";
@@ -29,7 +30,7 @@ export async function markCoreTrustedGraph(
 ): Promise<void> {
   await store.insert([
     {
-      subject: contextGraphMetaUri(contextGraphId),
+      subject: contextGraphDataUri(contextGraphId),
       predicate: `${DKG}chainEvidenceMode`,
       object: '"core-cache"',
       graph: SNAPSHOT_TRUST_GRAPH,
@@ -54,11 +55,16 @@ export async function assertPublicSnapshotQueryTrust(
   // Storage partitions overlap in both directions: a parent can select a child's
   // partitions, and a descendant alias can select content imported by its parent.
   // Keep slash boundaries so similarly named, unrelated scopes remain readable.
-  const prefix = contextGraphId
-    ? sparqlString(contextGraphMetaUri(contextGraphId).replace(/_meta$/, "")) : "";
+  const graphUri = contextGraphId ? sparqlString(contextGraphDataUri(contextGraphId)) : "";
+  // Earlier pre-release jobs persisted metadata-keyed markers. Derive their
+  // possible ancestor keys from the requested ID; never decode stored partition names.
+  const legacyAncestors = contextGraphId ? contextGraphId.split("/").map((_, index, parts) =>
+    sparqlString(contextGraphMetaUri(parts.slice(0, index + 1).join("/")))).join(", ") : "";
   const scope = contextGraphId
-    ? `FILTER(STRSTARTS(STR(?graph), ${prefix}) ||
-        (STRENDS(STR(?graph), "/_meta") && STRSTARTS(${prefix}, SUBSTR(STR(?graph), 1, STRLEN(STR(?graph)) - 5))))`
+    ? `FILTER(STR(?graph) = ${graphUri} ||
+        STRSTARTS(STR(?graph), CONCAT(${graphUri}, "/")) ||
+        STRSTARTS(${graphUri}, CONCAT(STR(?graph), "/")) ||
+        STR(?graph) IN (${legacyAncestors}))`
     : "";
   const result = await store.query(
     `SELECT ?mode WHERE { GRAPH <${SNAPSHOT_TRUST_GRAPH}> { ?graph <${DKG}chainEvidenceMode> ?mode } ${scope} } LIMIT 1`,
