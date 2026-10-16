@@ -462,7 +462,10 @@ import {
   deserializeSwmSenderReceiveState,
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
-import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
+import { DKGAgentBase } from './dkg-agent-base.js';
+import { createMutationObservedStore } from './internal/context-graph-cache-invalidating-store.js';
+import { createObservedStoreMutation } from './internal/observed-store-mutation.js';
+import { createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
 import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
@@ -812,6 +815,7 @@ export class DKGAgent extends DKGAgentBase {
     wallet: DKGAgentWallet,
     node: DKGNode,
     store: TripleStore,
+    publishedLifecycleWriter: PublishedNamedKaVmLifecycleWriter,
     publisher: DKGPublisher,
     queryEngine: DKGQueryEngine,
     eventBus: TypedEventBus,
@@ -832,6 +836,7 @@ export class DKGAgent extends DKGAgentBase {
       workspaceOwnedEntities,
       writeLocks,
       publicSnapshotStore,
+      publishedLifecycleWriter,
     );
     this.initializeVmReconcilePublicCoreTransportPreferencePolicy();
     this.configureSwmTargetExecutorSessionsV1({
@@ -1530,13 +1535,16 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    const agentStore = createListContextGraphsCacheInvalidatingStore(
-      store,
+    const executeMutation = createObservedStoreMutation(
       () => {
         agentRef?.invalidateListContextGraphsCache();
       },
       createProjectionMutationObserver(() => agentRef?.contextGraphMetaProjection),
     );
+    const agentStore = createMutationObservedStore(store, executeMutation);
+    const publishedLifecycleWriter = createPublishedNamedKaVmLifecycleWriter({
+      updateStore: store, fallbackStore: agentStore, executeMutation,
+    });
 
     const publicSnapshotStore = config.publicSnapshotStore ?? (config.publicSnapshotStoreFactory
       ? config.publicSnapshotStoreFactory(agentStore)
@@ -1637,7 +1645,7 @@ export class DKGAgent extends DKGAgentBase {
     const queryEngine = new DKGQueryEngine(agentStore);
 
     const agent = new DKGAgent(
-      resolvedConfig, wallet, node, agentStore, publisher, queryEngine, eventBus, chain,
+      resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, publisher, queryEngine, eventBus, chain,
       workspaceOwnedEntities, writeLocks, publicSnapshotStore,
     );
     agentRef = agent;

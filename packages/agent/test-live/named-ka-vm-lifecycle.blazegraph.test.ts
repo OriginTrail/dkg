@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
-import { createListContextGraphsCacheInvalidatingStore } from '../src/internal/context-graph-cache-invalidating-store.js';
+import { applyPublishedNamedKaVmLifecycle, createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleWriter } from '../src/named-ka-vm-lifecycle.js';
+import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
+import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 
 // This explicit backend suite requires its CI/local lane to provide a Blazegraph endpoint.
 describe('named KA lifecycle scoped update (live Blazegraph)', () => {
@@ -15,6 +16,7 @@ describe('named KA lifecycle scoped update (live Blazegraph)', () => {
   let handles: Awaited<ReturnType<BlazegraphNamespaceManager['acquireMany']>> = [];
   let store: TripleStore | undefined;
   let composed: TripleStore;
+  let writer: PublishedNamedKaVmLifecycleWriter;
   let directory: string | undefined;
 
   beforeAll(async () => {
@@ -29,7 +31,9 @@ describe('named KA lifecycle scoped update (live Blazegraph)', () => {
       graphSetIndex: true, changelog: true,
       largeLiteralStorage: { enabled: true, directory, thresholdBytes: 4096 },
     });
-    store = createListContextGraphsCacheInvalidatingStore(composed, () => {});
+    const executeMutation = createObservedStoreMutation(() => {});
+    store = createMutationObservedStore(composed, executeMutation);
+    writer = createPublishedNamedKaVmLifecycleWriter({ updateStore: composed, fallbackStore: store, executeMutation });
   });
   afterAll(async () => {
     try { await store?.close(); } finally {
@@ -56,7 +60,7 @@ describe('named KA lifecycle scoped update (live Blazegraph)', () => {
     };
     await store!.insert(seed);
     const update = vi.spyOn(composed, 'update');
-    await applyPublishedNamedKaVmLifecycle(store!, value);
+    await writer(value);
     expect(update).toHaveBeenCalledTimes(1);
     const fast = await read();
     expect(fast).toHaveLength(packed ? 8 : 7);
@@ -69,7 +73,7 @@ describe('named KA lifecycle scoped update (live Blazegraph)', () => {
     } });
     await applyPublishedNamedKaVmLifecycle(fallback, value);
     expect(await read()).toEqual(fast);
-    await applyPublishedNamedKaVmLifecycle(store!, value);
+    await writer(value);
     expect(await read()).toEqual(fast);
     expect(await store!.listGraphs()).toContain(graph);
   });

@@ -1,3 +1,4 @@
+import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
@@ -565,6 +566,7 @@ export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
   readonly store: TripleStore;
+  protected readonly publishedNamedKaVmLifecycleWriter: PublishedNamedKaVmLifecycleWriter;
   readonly publisher: DKGPublisher;
   readonly queryEngine: DKGQueryEngine;
   readonly discovery: DiscoveryClient;
@@ -1972,11 +1974,14 @@ export class DKGAgentBase {
     workspaceOwnedEntities: Map<string, Map<string, string>>,
     writeLocks: Map<string, Promise<void>>,
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
+    publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
   ) {
     this.config = config;
     this.wallet = wallet;
     this.node = node;
     this.store = store;
+    this.publishedNamedKaVmLifecycleWriter = publishedLifecycleWriter
+      ?? (input => applyPublishedNamedKaVmLifecycle(store, input));
     this.contextGraphMetaProjection = new ContextGraphMetaProjection(store);
     this.publisher = publisher;
     this.queryEngine = queryEngine;

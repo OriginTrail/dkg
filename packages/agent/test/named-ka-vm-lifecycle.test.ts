@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, assertionLifecycleUri, contextGraphAssertionUri, contextGraphLayerUri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
 import { GraphSetIndexStore, OxigraphStore, UnsupportedTripleStoreCapabilityError, quadToNQuad, type Quad, type TripleStore, type UpdateOptions } from '@origintrail-official/dkg-storage';
 import { VM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
-import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
-import { createListContextGraphsCacheInvalidatingStore } from '../src/internal/context-graph-cache-invalidating-store.js';
+import { applyPublishedNamedKaVmLifecycle, createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
+import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
+import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
+import type { StoreMutationObserver } from '../src/internal/store-mutation.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
 
@@ -15,7 +17,13 @@ const input: PublishedNamedKaVmLifecycleInput = {
 };
 const stores: OxigraphStore[] = [];
 afterEach(async () => { for (const store of stores.splice(0)) await store.close(); });
-function fast(store: TripleStore): TripleStore { return createListContextGraphsCacheInvalidatingStore(store, () => {}); }
+function compose(store: TripleStore, invalidate: () => void = () => {}, observer?: StoreMutationObserver) {
+  const executeMutation = createObservedStoreMutation(invalidate, observer);
+  const wrapper = createMutationObservedStore(store, executeMutation);
+  const writer = createPublishedNamedKaVmLifecycleWriter({ updateStore: store, fallbackStore: wrapper, executeMutation });
+  return { wrapper, writer };
+}
+const fast = (store: TripleStore) => compose(store).writer;
 function memory() { const store = new OxigraphStore(); stores.push(store); return store; }
 function rows(value = input): Quad[] {
   const graph = contextGraphMetaUri(value.contextGraphId);
@@ -65,8 +73,8 @@ async function stack(options: { inner: (store: OxigraphStore) => TripleStore }) 
     predicate: 'https://dkg.network/ontology#publicEncryptionKey', object: '"existing-key"',
   }]);
   await projection.recipientKeyRouteFence.ensureReady();
-  const wrapper = createListContextGraphsCacheInvalidatingStore(options.inner(store), () => {}, createProjectionMutationObserver(() => projection));
-  return { store, wrapper, projection, fence: projection.recipientKeyRouteFence };
+  const { wrapper, writer } = compose(options.inner(store), () => {}, createProjectionMutationObserver(() => projection));
+  return { store, wrapper, writer, projection, fence: projection.recipientKeyRouteFence };
 }
 
 describe('named KA VM lifecycle batching', () => {
@@ -75,27 +83,27 @@ describe('named KA VM lifecycle batching', () => {
     const old = rows().flatMap(q => [{ ...q, object: '"old-a"' }, { ...q, object: '"old-b"' }]);
     await raw.insert([...old, ...unrelated]);
     const update = vi.spyOn(raw, 'update'); const insert = vi.spyOn(raw, 'insert'); const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
-    await applyPublishedNamedKaVmLifecycle(fast(raw), value);
+    await fast(raw)(value);
     expect(update).toHaveBeenCalledTimes(1);
     expect(update.mock.calls[0]![1]).toEqual({ touchedGraphs: [contextGraphMetaUri(input.contextGraphId)], source: 'agent.publish.namedKaVmLifecycle' });
     expect(insert).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
     const preserved = packed ? [] : old.slice(10);
     expect(await all(raw)).toEqual([...rows(value), ...unrelated, ...preserved].map(quadToNQuad).sort());
-    await applyPublishedNamedKaVmLifecycle(fast(raw), value);
+    await fast(raw)(value);
     expect(await all(raw)).toEqual([...rows(value), ...unrelated, ...preserved].map(quadToNQuad).sort());
   });
 
   it('inserts absent pairs and supersedes the root without deleting assertion version', async () => {
     const raw = memory(); await raw.insert(unrelated);
-    await applyPublishedNamedKaVmLifecycle(fast(raw), input);
+    await fast(raw)(input);
     const newer = { ...input, merkleRoot: 'cd'.repeat(32) };
-    await applyPublishedNamedKaVmLifecycle(fast(raw), newer);
+    await fast(raw)(newer);
     expect(await all(raw)).toEqual([...rows(newer), ...unrelated].map(quadToNQuad).sort());
   });
 
   it('round trips literal escaping without changing other graphs', async () => {
     const raw = memory(); const value = { ...input, publishedUal: 'did:test:quote"\\slash\nline\rtab\t' };
-    await raw.insert(unrelated); await applyPublishedNamedKaVmLifecycle(fast(raw), value);
+    await raw.insert(unrelated); await fast(raw)(value);
     expect(await all(raw)).toEqual([...rows(value), ...unrelated].map(quadToNQuad).sort());
   });
 
@@ -106,7 +114,7 @@ describe('named KA VM lifecycle batching', () => {
     const remove = raw.deleteByPatternWithoutCount.bind(raw); const insert = raw.insert.bind(raw);
     vi.spyOn(raw, 'deleteByPatternWithoutCount').mockImplementation(async q => { calls.push(`delete:${q.subject}:${q.predicate}`); await remove(q); });
     vi.spyOn(raw, 'insert').mockImplementation(async qs => { calls.push(`insert:${qs[0]!.subject}:${qs[0]!.predicate}`); await insert(qs); });
-    await applyPublishedNamedKaVmLifecycle(fast(store), input);
+    await fast(store)(input);
     expect(calls).toEqual(rows().flatMap(q => [`delete:${q.subject}:${q.predicate}`, `insert:${q.subject}:${q.predicate}`]));
     expect(await all(raw)).toEqual(rows().map(quadToNQuad).sort());
     expect(unsupported).toHaveBeenCalledTimes(mode === 'absent' ? 0 : 1);
@@ -116,14 +124,14 @@ describe('named KA VM lifecycle batching', () => {
     const raw = memory(); const failure = new Error('indeterminate update outcome');
     const store = view(raw, async (query, options) => { if (postcommit) await raw.update(query, options); throw failure; });
     const insert = vi.spyOn(raw, 'insert'); const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
-    await expect(applyPublishedNamedKaVmLifecycle(fast(store), input)).rejects.toBe(failure);
+    await expect(fast(store)(input)).rejects.toBe(failure);
     expect(insert).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
     expect(await all(raw)).toEqual(postcommit ? rows().map(quadToNQuad).sort() : []);
   });
 
   it.each([{ merkleRoot: 'bad' }, { contextGraphId: 'urn:bad> } INSERT DATA {' }])('validates the entire update before any mutation: %j', async change => {
     const raw = memory(); const update = vi.spyOn(raw, 'update'); const insert = vi.spyOn(raw, 'insert'); const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
-    await expect(applyPublishedNamedKaVmLifecycle(fast(raw), { ...input, ...change })).rejects.toThrow();
+    await expect(fast(raw)({ ...input, ...change })).rejects.toThrow();
     expect(update).not.toHaveBeenCalled(); expect(insert).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
   });
 
@@ -131,16 +139,16 @@ describe('named KA VM lifecycle batching', () => {
     const raw = memory(); const failure = new Error('index maintenance failed after commit');
     const store = view(raw, async (query, options) => { await raw.update(query, options); throw failure; });
     const invalidate = vi.fn(); const settle = vi.fn();
-    const wrapped = createListContextGraphsCacheInvalidatingStore(store, invalidate, { begin: () => settle });
+    const { writer } = compose(store, invalidate, { begin: () => settle });
     const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
-    await expect(applyPublishedNamedKaVmLifecycle(wrapped, input)).rejects.toBe(failure);
+    await expect(writer(input)).rejects.toBe(failure);
     expect(remove).not.toHaveBeenCalled(); expect(invalidate).toHaveBeenCalledOnce();
     expect(settle).toHaveBeenCalledExactlyOnceWith('indeterminate');
     expect(await all(raw)).toEqual(rows().map(quadToNQuad).sort());
   });
 
   it.each([true, false])('preserves real recipient read-fence isolation (update available=%s)', async supported => {
-    const { store: raw, wrapper, fence, projection } = await stack({
+    const { store: raw, writer, fence, projection } = await stack({
       inner: store => supported ? store : view(store, undefined),
     });
     stores.push(raw);
@@ -152,7 +160,7 @@ describe('named KA VM lifecycle batching', () => {
       expect(fence.cacheable).toBe(true);
       await update(query, options);
     });
-    await applyPublishedNamedKaVmLifecycle(wrapper, input);
+    await writer(input);
     expect(fence.revision).toBe(revision);
     expect(fence.cacheable).toBe(true);
     expect(projection.readContextGraphAuthorityFactsRevision('urn:unrelated:context')).toBe(unrelatedAuthority);
@@ -163,7 +171,7 @@ describe('named KA VM lifecycle batching', () => {
     const entered = new Promise<void>(resolve => { enter = resolve; });
     const held = new Promise<void>(resolve => { release = resolve; });
     const failure = new Error('response lost after commit');
-    const { store: raw, wrapper, fence, projection } = await stack({ inner: store => view(store, async (query, options) => {
+    const { store: raw, writer, fence, projection } = await stack({ inner: store => view(store, async (query, options) => {
       enter(); await held;
       if (outcome === 'unsupported') throw new UnsupportedTripleStoreCapabilityError('update', 'test');
       await store.update(query, options);
@@ -172,7 +180,7 @@ describe('named KA VM lifecycle batching', () => {
     stores.push(raw);
     const revision = fence.revision;
     const authority = projection.readContextGraphAuthorityFactsRevision('urn:unrelated:context');
-    const operation = applyPublishedNamedKaVmLifecycle(wrapper, input);
+    const operation = writer(input);
     const settled = operation.then(() => undefined, error => error);
     await entered;
     try {
@@ -184,10 +192,13 @@ describe('named KA VM lifecycle batching', () => {
     expect(projection.readContextGraphAuthorityFactsRevision('urn:unrelated:context')).toBe(authority);
   });
 
-  it('does not discover the private capability through an unknown outer wrapper', async () => {
-    const raw = memory(); const wrapped = fast(raw);
-    const unknown = new Proxy(wrapped, {});
+  it('keeps explicit writer capability independent of read-facing proxy identity', async () => {
+    const raw = memory(); const { wrapper, writer } = compose(raw);
+    const unknown = new Proxy(wrapper, {});
     const update = vi.spyOn(raw, 'update'); const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
+    await writer(input);
+    expect(update).toHaveBeenCalledOnce(); expect(remove).not.toHaveBeenCalled();
+    update.mockClear();
     await applyPublishedNamedKaVmLifecycle(unknown, input);
     expect(update).not.toHaveBeenCalled(); expect(remove).toHaveBeenCalledTimes(7);
     expect(await all(raw)).toEqual(rows().map(quadToNQuad).sort());
@@ -200,8 +211,8 @@ describe('named KA VM lifecycle batching', () => {
       expect(this).toBe(indexed); await original.call(this, query, options);
     });
     const invalidate = vi.fn(); const settle = vi.fn();
-    const wrapped = createListContextGraphsCacheInvalidatingStore(indexed, invalidate, { begin: () => settle });
-    await applyPublishedNamedKaVmLifecycle(wrapped, input);
+    const { writer } = compose(indexed, invalidate, { begin: () => settle });
+    await writer(input);
     expect(update).toHaveBeenCalledTimes(1); expect(invalidate).toHaveBeenCalledTimes(1); expect(settle).toHaveBeenCalledExactlyOnceWith('changed');
     expect(await indexed.listGraphs()).toEqual([contextGraphMetaUri(input.contextGraphId)]);
     expect(await all(raw)).toEqual(rows().map(quadToNQuad).sort());

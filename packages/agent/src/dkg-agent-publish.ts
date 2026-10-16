@@ -324,7 +324,6 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
@@ -4847,7 +4846,7 @@ export class PublishMethods extends DKGAgentBase {
     merkleRoot: string = request.sealMerkleRoot,
   ): Promise<void> {
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    await applyPublishedNamedKaVmLifecycle(this.store, {
+    await this.publishedNamedKaVmLifecycleWriter({
       contextGraphId: request.contextGraphId,
       agentAddress,
       name: request.name,

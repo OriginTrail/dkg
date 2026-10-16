@@ -1,29 +1,47 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { deleteByPatternWithoutCount, type TripleStore } from '@origintrail-official/dkg-storage';
-import {
-  buildNamedKaVmLifecycleMutation,
-  namedKaVmLifecycleExecutor,
-  type PublishedNamedKaVmLifecycleInput,
-} from './internal/named-ka-vm-lifecycle-mutation.js';
+import { deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { buildNamedKaVmLifecycleMutation, type PublishedNamedKaVmLifecycleInput } from './internal/named-ka-vm-lifecycle-mutation.js';
+import type { ObservedStoreMutation } from './internal/observed-store-mutation.js';
 
 export type { PublishedNamedKaVmLifecycleInput } from './internal/named-ka-vm-lifecycle-mutation.js';
+export type PublishedNamedKaVmLifecycleWriter = (input: PublishedNamedKaVmLifecycleInput) => Promise<void>;
 
-/** Canonical idempotent writer used by both normal publish and tx recovery. */
-export async function applyPublishedNamedKaVmLifecycle(
-  store: TripleStore,
-  input: PublishedNamedKaVmLifecycleInput,
-): Promise<void> {
-  const execute = namedKaVmLifecycleExecutor(store);
-  if (execute && await execute(input)) return;
-
-  // Raw/unknown wrappers and unsupported updates retain the ordered compatibility path.
-  // Build first to validate every term, including optional pointers, before any mutation.
-  const { replacements } = buildNamedKaVmLifecycleMutation(input);
+async function applyOrderedReplacements(store: TripleStore, replacements: readonly Quad[]): Promise<void> {
   for (const quad of replacements) {
     await deleteByPatternWithoutCount(store, {
       subject: quad.subject, predicate: quad.predicate, graph: quad.graph,
     });
     await store.insert([quad]);
   }
+}
+
+/** Explicit compatibility writer; no store-identity discovery or wrapper traversal. */
+export async function applyPublishedNamedKaVmLifecycle(
+  store: TripleStore,
+  input: PublishedNamedKaVmLifecycleInput,
+): Promise<void> {
+  await applyOrderedReplacements(store, buildNamedKaVmLifecycleMutation(input).replacements);
+}
+
+/** Compose over the configured decorated store and its observed fallback at agent construction. */
+export function createPublishedNamedKaVmLifecycleWriter({ updateStore, fallbackStore, executeMutation }: {
+  readonly updateStore: TripleStore;
+  readonly fallbackStore: TripleStore;
+  readonly executeMutation: ObservedStoreMutation;
+}): PublishedNamedKaVmLifecycleWriter {
+  return async input => {
+    // Query and observer scope have one closed, validated source of truth.
+    const plan = buildNamedKaVmLifecycleMutation(input);
+    if (typeof updateStore.update === 'function' && await executeMutation(
+      () => tryUpdateWithTouchedGraphs(updateStore, plan.sparql, [plan.graph], {
+        source: 'agent.publish.namedKaVmLifecycle',
+      }),
+      updated => updated,
+      plan.mutation,
+      'update',
+    )) return;
+    // Only absent or typed unsupported capability reaches this ordered path.
+    await applyOrderedReplacements(fallbackStore, plan.replacements);
+  };
 }

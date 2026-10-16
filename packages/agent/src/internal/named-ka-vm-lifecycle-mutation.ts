@@ -11,7 +11,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   type Quad,
-  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { VM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 
@@ -32,18 +31,6 @@ export interface PublishedNamedKaVmLifecycleInput {
 }
 
 import type { StoreMutation } from './store-mutation.js';
-
-type LifecycleExecutor = (input: PublishedNamedKaVmLifecycleInput) => Promise<boolean>;
-const executors = new WeakMap<TripleStore, LifecycleExecutor>();
-
-/** Agent-private capability: only the exact registered wrapper may execute this closed intent. */
-export function registerNamedKaVmLifecycleExecutor(store: TripleStore, executor: LifecycleExecutor): void {
-  executors.set(store, executor);
-}
-
-export function namedKaVmLifecycleExecutor(store: TripleStore): LifecycleExecutor | undefined {
-  return executors.get(store);
-}
 
 /** One validated source of truth for query scope and observer scope; no caller-supplied hints. */
 export function buildNamedKaVmLifecycleMutation(input: PublishedNamedKaVmLifecycleInput): {
