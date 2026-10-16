@@ -1,45 +1,58 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { DKGAgent } from './dkg-agent.js';
+import type { OperationContext } from '@origintrail-official/dkg-core';
+import type { SyncAdmissionSource, SyncContextGraphPriorityConfig } from './sync/policy.js';
+import type { SyncOperationLane } from './sync/attempt-telemetry.js';
+import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
+import type { DurableSyncContext, DurableSyncFetchRequest } from './sync/requester/durable-sync.js';
+import type { ExactBatchStreamDriverPorts } from './sync/requester/exact-batch-stream-driver.js';
+import type { DurableRecoveryAuthority, DurableRecoveryInput } from './durable-recovery-authority.js';
+import type { RecoveryMaterialization, RecoveryMaterializationScope } from './durable-recovery-materialization.js';
 
-/** Explicit, lazily bound dependencies; the owner preserves shared admission and capability identity. */
-export function createDurableRecoveryHost(agent: DKGAgent) {
-  const owner: object = agent;
-  return {
-    owner,
-    get bindSubscriptionOnChainId() { return agent['bindSubscriptionOnChainId'].bind(agent); },
-    get captureExperimentalExactBatchRefusalScope() { return agent['captureExperimentalExactBatchRefusalScope'].bind(agent); },
-    get chain() { return agent['chain']; },
-    get computeSyncDigest() { return agent['computeSyncDigest'].bind(agent); },
-    get config() { return agent['config']; },
-    get contextGraphBindingState() { return agent['contextGraphBindingState']; },
-    get ensurePeerConnected() { return agent['ensurePeerConnected'].bind(agent); },
-    get fetchSyncPages() { return agent['fetchSyncPages'].bind(agent); },
-    get getOrCreateSyncVerifyWorker() { return agent['getOrCreateSyncVerifyWorker'].bind(agent); },
-    get getPeerProtocols() { return agent['getPeerProtocols'].bind(agent); },
-    get getSyncReconcilerConnectionKey() { return agent['getSyncReconcilerConnectionKey'].bind(agent); },
-    get graphScopedStoreClosed() { return agent['graphScopedStoreClosed']; },
-    get graphScopedStorePhysicalRuns() { return agent['graphScopedStorePhysicalRuns']; },
-    get insertSyncedQuadsAndInvalidateListCache() { return agent['insertSyncedQuadsAndInvalidateListCache'].bind(agent); },
-    get invalidateListContextGraphsCache() { return agent['invalidateListContextGraphsCache'].bind(agent); },
-    get log() { return agent['log']; },
-    get node() { return agent['node']; },
-    get oversizeTombstoneLog() { return agent['oversizeTombstoneLog']; },
-    get peerId() { return agent['peerId']; },
-    get persistContextGraphSyncStateStrict() { return agent['persistContextGraphSyncStateStrict'].bind(agent); },
-    get processDurableBatchInWorker() { return agent['processDurableBatchInWorker'].bind(agent); },
-    get requireLocalCgMatchesOnChainSlot() { return agent['requireLocalCgMatchesOnChainSlot'].bind(agent); },
-    get reconcileAfterGraphScopedMaterialization() { return agent['reconcileAfterGraphScopedMaterialization'].bind(agent); },
-    get router() { return agent['router']; },
-    get store() { return agent['store']; },
-    get subscribedContextGraphs() { return agent['subscribedContextGraphs']; },
-    get syncCheckpoints() { return agent['syncCheckpoints']; },
-    runContextGraphSyncWithBackpressure<T>(
-      ...args: Parameters<typeof agent.runContextGraphSyncWithBackpressure<T>>
-    ): Promise<T> {
-      return agent.runContextGraphSyncWithBackpressure<T>(...args);
-    },
-    get resolveRegisteredContextGraphAuthority() { return agent['resolveRegisteredContextGraphAuthority'].bind(agent); },
-  };
+export { createDurableRecoveryHost } from './dkg-agent-recovery.js';
+
+export interface RecoveryAdmissionRequest<T> {
+  readonly ctx: OperationContext;
+  readonly contextGraphId: string;
+  readonly lane: SyncOperationLane;
+  readonly label: string;
+  readonly work: () => Promise<T>;
+  readonly priorityOverride?: number;
+  readonly operationSignal?: AbortSignal;
+  readonly source?: SyncAdmissionSource;
+  readonly onWorkStarted?: () => void;
 }
 
-export type DurableRecoveryHost = ReturnType<typeof createDurableRecoveryHost>;
+export type RecoveryStreamTransport = Omit<ExactBatchStreamDriverPorts,
+  'verification' | 'isRegisteredPublic'>;
+
+/** Consumer-owned operations: executors cannot reach agent storage, subscriptions or networking internals. */
+export interface DurableRecoveryHost {
+  /** Stable physical owner across adapters and exchanges. */
+  readonly owner: object;
+  policy(): {
+    readonly syncAgentsMeta?: boolean;
+    readonly syncContextGraphPriorities?: SyncContextGraphPriorityConfig;
+  };
+  readonly admission: { run<T>(request: RecoveryAdmissionRequest<T>): Promise<T> };
+  readonly transport: {
+    fetchPages(request: DurableSyncFetchRequest, options: {
+      readonly assetUals?: string[];
+      readonly forceFreshSession: boolean;
+      readonly checkpointStore?: SyncCheckpointStore;
+    }): ReturnType<DurableSyncContext['fetchSyncPages']>;
+    stream(ctx: OperationContext, remotePeerId: string, contextGraphId: string): RecoveryStreamTransport;
+  };
+  readonly verification: {
+    readonly processBatch: DurableSyncContext['processDurableBatchInWorker'];
+    readonly parseAndFilter: ExactBatchStreamDriverPorts['verification']['parseAndFilter'];
+  };
+  readonly checkpoints: Pick<DurableSyncContext, 'deleteCheckpoint' | 'setCheckpoint'>;
+  readonly log: {
+    readonly info: DurableSyncContext['logInfo'];
+    readonly warn: DurableSyncContext['logWarn'];
+    readonly debug: DurableSyncContext['logDebug'];
+  };
+  readonly storeInsert: DurableSyncContext['storeInsert'];
+  materialization(scope: RecoveryMaterializationScope): RecoveryMaterialization;
+  resolveAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;
+}
