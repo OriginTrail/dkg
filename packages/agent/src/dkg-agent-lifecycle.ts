@@ -5701,6 +5701,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: DurableSyncOptions,
   ): Promise<AdmittedDurableSyncResult> {
     const authority = LifecycleSyncMethods.prototype.resolveRecoveryAuthority.call(this, ctx, options);
+    return LifecycleSyncMethods.prototype.runDurableSyncWithAuthority.call(
+      this, authority, ctx, remotePeerId, contextGraphIds, onPhase, onAccessDenied, sinceBatchIdFor, options,
+    );
+  }
+
+  /** Internal operation-owned policy is separate from public SDK options. */
+  protected async runDurableSyncWithAuthority(this: DKGAgent,
+    authority: DurableRecoveryAuthority,
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphIds: string[],
+    onPhase?: PhaseCallback,
+    onAccessDenied?: (contextGraphId: string) => void,
+    sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
+    options?: DurableSyncOptions,
+  ): Promise<AdmittedDurableSyncResult> {
     const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
@@ -5976,11 +5992,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     selectionInput: ExactAssetSelection | readonly string[],
     options: ExactKnowledgeAssetRefreshSyncOptions = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
+    return LifecycleSyncMethods.prototype.runExactSyncWithAuthority.call(
+      this, remotePeerId, contextGraphId, selectionInput, options,
+    );
+  }
+
+  /** Module-internal snapshot bridge; static members are not mixed into DKGAgent. */
+  static recoverSnapshotExactAssets(agent: DKGAgent, remotePeerId: string, contextGraphId: string,
+    assetUals: readonly string[], authority: DurableRecoveryAuthority, options: ExactKnowledgeAssetSyncOptions,
+  ): Promise<ExactKnowledgeAssetSyncResult> {
+    return LifecycleSyncMethods.prototype.runExactSyncWithAuthority.call(
+      agent, remotePeerId, contextGraphId, assetUals, options, authority,
+    );
+  }
+
+  protected async runExactSyncWithAuthority(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+    selectionInput: ExactAssetSelection | readonly string[],
+    options: ExactKnowledgeAssetRefreshSyncOptions,
+    authority?: DurableRecoveryAuthority,
+  ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
       ? createUalOnlyExactAssetSelection(selectionInput)
       : requireExactAssetSelection(selectionInput);
     const ctx = createOperationContext('sync');
-    const detailed = await this.runLegacyDurableSyncDetailed(
+    const run = authority
+      ? LifecycleSyncMethods.prototype.runDurableSyncWithAuthority.bind(this, authority)
+      : this.runLegacyDurableSyncDetailed.bind(this);
+    const detailed = await run(
       ctx,
       remotePeerId,
       [contextGraphId],

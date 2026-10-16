@@ -559,16 +559,17 @@ it('indexes and revalidates allowed 256-row documents through HTTP serialization
   expect(await f.search()).toMatchObject({ staleCandidates: 0, entities: [{ entityUri: 'urn:boundary' }] });
 });
 
-it('materializes only ranked winners and keeps deterministic cosine tie order', async () => {
+it('ranks compact candidates without parsing documents and keeps deterministic cosine tie order', async () => {
   const f = await fixture(3); await f.index();
   const id = indexKey(parseSpec(spec), f.embedder.fingerprint);
   const parse = vi.spyOn(JSON, 'parse');
   const result = f.store.rank(id, [1, 0], 1, AbortSignal.timeout(1000), performance.now() + 1000);
-  expect(result.map(row => row.document.entityUri)).toEqual(['urn:entity:0']);
-  expect(parse.mock.calls.filter(([value]) => String(value).includes('contentHash'))).toHaveLength(1);
+  expect(result.map(row => row.entityUri)).toEqual(['urn:entity:0']);
+  expect(parse.mock.calls.filter(([value]) => String(value).includes('contentHash'))).toHaveLength(0);
+  expect(result[0]).not.toHaveProperty('text');
   parse.mockRestore();
   expect(f.store.rank(id, [0, 1], 2, AbortSignal.timeout(1000), performance.now() + 1000)
-    .map(row => row.document.entityUri)).toEqual(['urn:entity:1', 'urn:entity:2']);
+    .map(row => row.entityUri)).toEqual(['urn:entity:1', 'urn:entity:2']);
 });
 
 it.each(['index', 'search'] as const)('keeps the document hydration bound out of subgraph metadata during %s', async mode => {
