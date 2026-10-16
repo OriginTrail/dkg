@@ -17,10 +17,8 @@ export interface DurableRecoveryAuthority {
     AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
 }
 
-/** Compatibility is accepted only at caller entry points, never as competing internal policies. */
-export type DurableRecoveryInput =
-  | { recoveryAuthority: DurableRecoveryAuthority; registeredPublicEvidence?: never }
-  | { recoveryAuthority?: never; registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence };
+/** Public compatibility evidence; authentication strategies remain internal. */
+export interface DurableRecoveryInput { registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence }
 
 /** Successful immutable name bindings can be shared within one exchange; failures must be fresh. */
 export function memoizeRecoveryBindingProof(
@@ -53,10 +51,6 @@ export interface RecoveryAuthorityDependencies {
 export function createRecoveryAuthority(
   dependencies: RecoveryAuthorityDependencies, input: DurableRecoveryInput = {},
 ): DurableRecoveryAuthority {
-  if (input.recoveryAuthority) {
-    if (input.registeredPublicEvidence) throw new Error('Conflicting durable recovery authorities');
-    return input.recoveryAuthority;
-  }
   const evidence = input.registeredPublicEvidence;
   const verifyContextGraphBinding = memoizeRecoveryBindingProof(dependencies.verifyContextGraphBinding);
   return {

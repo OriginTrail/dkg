@@ -1,14 +1,9 @@
+import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { DKGAgent } from './dkg-agent.js';
 import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 
-export type PublicSnapshotExactHost = {
-  syncExactKnowledgeAssetsFromPeerDetailed: (peer: string, contextGraphId: string, uals: string[],
-    options: Parameters<DKGAgent['syncExactKnowledgeAssetsFromPeerDetailed']>[3],
-  ) => ReturnType<DKGAgent['syncExactKnowledgeAssetsFromPeerDetailed']>;
-};
-
-export async function recoverPublicSnapshotExact(agent: PublicSnapshotExactHost, options: PublicSnapshotRecoveryOptions): Promise<PublicSnapshotRecoveryResult> {
+export async function recoverPublicSnapshotExact(agent: DKGAgent, options: PublicSnapshotRecoveryOptions): Promise<PublicSnapshotRecoveryResult> {
   const { contextGraphId, peers, uals, evidence, signal, assertCurrent } = options;
   const committed = new Set<string>();
   const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
@@ -17,10 +12,9 @@ export async function recoverPublicSnapshotExact(agent: PublicSnapshotExactHost,
       assertCurrent();
       const remaining = batch.filter(ual => !committed.has(ual));
       if (!remaining.length) break;
-      const result = await agent.syncExactKnowledgeAssetsFromPeerDetailed(peer, contextGraphId, remaining, {
+      const result = await LifecycleSyncMethods.recoverSnapshotExactAssets(agent, peer, contextGraphId, remaining, evidence, {
         signal, isCurrent, forceFreshExactSession: true,
         exactRecoveryTransportMode: transport,
-        recoveryAuthority: evidence,
         totalTimeoutMs: 120_000,
       });
       for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
