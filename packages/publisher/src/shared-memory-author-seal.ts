@@ -10,17 +10,22 @@
  * finalize, so the author's node sends it with every share, as the canonical
  * graph-scoped seal bytes next to the asset's lifecycle name.
  *
- * A receiver keeps the seal only when the signature recovers the asset's
- * author and the seal commits to exactly the content the share delivered. It
- * then records the seal and the share-complete marker under the author's
- * coordinate in the graph's `_meta`, which is where VM publish looks for them.
- * The name is not signed; it is a local handle. Whatever name a seal is kept
- * under, publishing it publishes only what the author sealed.
+ * A receiver keeps the seal only when the seal's signature recovers the
+ * asset's author, the seal commits to exactly the content the share delivered,
+ * and the share's gossip envelope is signed by that same author. The seal
+ * itself binds neither a graph nor a name; the envelope signature covers both
+ * (the graph id and the whole share message), so no other peer can carry an
+ * author's seal into a graph or bind it to one of the author's names. The
+ * receiver then records the seal and the share-complete marker under the
+ * author's coordinate in the graph's `_meta`, which is where VM publish looks
+ * for them.
  */
 
 import {
   ASSERTION_SEAL_PREDICATES,
   AUTHOR_SCHEME_VERSION_V1,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   assertSafeIri,
   assertionLifecycleUri,
@@ -28,6 +33,7 @@ import {
   buildAuthorAttestationTypedData,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
+  computeGossipSigningPayload,
   contextGraphAssertionUri,
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
@@ -35,13 +41,16 @@ import {
   parseCanonicalGraphScopedAuthorSealV1,
   validateAssertionName,
   type AssertionSeal,
+  type GossipEnvelopeMsg,
   type GraphKnowledgeAssetScope,
   type Logger,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
+import { withKeyedLocks } from './keyed-lock.js';
 import { computeFlatKCRootV10 } from './merkle.js';
+import { VM_CURRENT_ASSERTION_PRED } from './metadata.js';
 
 /**
  * #1116 (review A1) — marker predicate stamped on the lifecycle URN when a KA
@@ -211,12 +220,15 @@ const SEAL_PREDICATES: ReadonlySet<string> = new Set(Object.values(ASSERTION_SEA
  * coordinate in `<cg>/_meta`, replacing an earlier seal of that coordinate.
  * Both address spellings are cleared, so one coordinate never holds two
  * seals. Other rows on these subjects, such as this node's own publish receipt
- * and VM pointer, are left alone.
+ * and VM pointer, are left alone. A coordinate whose asset this node already
+ * published keeps that asset's seal: a seal of another asset under the same
+ * name is refused (`false`), so the lifecycle and its seal stay one asset.
+ * Callers serialize calls per coordinate.
  */
 export async function keepSharedMemoryAuthorSeal(
   store: TripleStore,
   kept: VerifiedSharedMemoryAuthorSeal,
-): Promise<void> {
+): Promise<boolean> {
   const { contextGraphId, subGraphName, assertionName, seal } = kept;
   const metaGraph = contextGraphMetaUri(contextGraphId);
   const author = seal.authorAddress;
@@ -233,7 +245,14 @@ export async function keepSharedMemoryAuthorSeal(
     `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(metaGraph)}> { VALUES ?s { ${subjects} } ?s ?p ?o } }`,
     { source: 'publisher.swm.authorSeal.current' },
   );
-  const stale: Quad[] = (current.type === 'quads' ? current.quads : [])
+  const rows = current.type === 'quads' ? current.quads : [];
+  const holdsOtherAsset = rows.some((quad) => sealSubjects.includes(quad.subject)
+    && quad.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL
+    && quad.object.replace(/^<|>$/g, '') !== seal.kaUal);
+  const publishedHere = rows.some((quad) => lifecycleSubjects.includes(quad.subject)
+    && quad.predicate === VM_CURRENT_ASSERTION_PRED);
+  if (holdsOtherAsset && publishedHere) return false;
+  const stale: Quad[] = rows
     .filter((quad) => (sealSubjects.includes(quad.subject)
       ? SEAL_PREDICATES.has(quad.predicate)
       : quad.predicate === SWM_SHARE_COMPLETE_PRED))
@@ -261,6 +280,46 @@ export async function keepSharedMemoryAuthorSeal(
     }),
     { subject: lifecycleSubjects[0]!, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: metaGraph },
   ]);
+  return true;
+}
+
+/** How a share reached this node: its gossip envelope, if any, and the bytes the envelope signs. */
+export interface SharedMemoryShareDelivery {
+  readonly envelope?: GossipEnvelopeMsg;
+  readonly signedPayload: Uint8Array;
+}
+
+/**
+ * Whether `author` signed this delivery of a share into `contextGraphId`. The
+ * envelope signature covers the graph id and the whole share message, the
+ * assertion name included. No freshness window applies: an aged envelope (a
+ * retried or replayed share) proves the same authorship, and the share's own
+ * version checks ran before.
+ */
+export function sharedMemoryShareSignedBy(
+  delivery: SharedMemoryShareDelivery,
+  contextGraphId: string,
+  author: string,
+): boolean {
+  const { envelope } = delivery;
+  if (
+    !envelope?.signature?.length
+    || envelope.version !== GOSSIP_ENVELOPE_VERSION
+    || envelope.type !== GOSSIP_TYPE_WORKSPACE_PUBLISH
+    || envelope.contextGraphId !== contextGraphId
+  ) {
+    return false;
+  }
+  try {
+    const recovered = ethers.verifyMessage(
+      computeGossipSigningPayload(envelope.type, envelope.contextGraphId, envelope.timestamp, delivery.signedPayload),
+      ethers.hexlify(envelope.signature),
+    );
+    return knowledgeAssetAgentAddressesEqual(recovered, author)
+      && knowledgeAssetAgentAddressesEqual(envelope.agentAddress, author);
+  } catch {
+    return false;
+  }
 }
 
 /** The fields of a stored share that its author seal is judged against. */
@@ -279,10 +338,13 @@ export interface StoredSharedMemoryShare {
  * stored, keep the author seal it carries. The author's own node keeps the
  * seal its finalize wrote, since its lifecycle owns that seal and the marker;
  * a node that does not keep a graph's seals (`keepsAuthorSeals`, the graph's
- * curator does) skips them. A seal that does not verify is logged and
- * dropped; the share stands either way.
+ * curator does) skips them. A seal is kept only from a share its author
+ * signed; one that does not verify is logged and dropped. The share stands
+ * either way.
  */
 export class SharedMemoryAuthorSealKeeper {
+  private readonly coordinateLocks = new Map<string, Promise<void>>();
+
   constructor(
     private readonly store: TripleStore,
     private readonly log: Logger,
@@ -299,11 +361,16 @@ export class SharedMemoryAuthorSealKeeper {
     share: StoredSharedMemoryShare,
     scope: Pick<GraphKnowledgeAssetScope, 'ual' | 'assertionVersion' | 'agentAddress'>,
     storedQuads: readonly Quad[],
+    delivery: SharedMemoryShareDelivery,
   ): Promise<void> {
     if (!share.authorSeal?.length && !share.assertionName) return;
     const localAgents = this.options.localAgentAddresses ? await this.options.localAgentAddresses() : [];
     if (localAgents.some((agent) => knowledgeAssetAgentAddressesEqual(agent, scope.agentAddress))) return;
     if (this.options.keepsAuthorSeals && !(await this.options.keepsAuthorSeals(share.contextGraphId))) return;
+    if (!sharedMemoryShareSignedBy(delivery, share.contextGraphId, scope.agentAddress)) {
+      this.log.warn(ctx, `SWM author seal for ${scope.ual} not kept: the share is not signed by its author`);
+      return;
+    }
     const privateMerkleRoot = share.privateMerkleRoot?.length ? share.privateMerkleRoot : undefined;
     const verdict = verifySharedMemoryAuthorSeal(share, {
       contextGraphId: share.contextGraphId,
@@ -324,10 +391,28 @@ export class SharedMemoryAuthorSealKeeper {
       }
       return;
     }
-    await keepSharedMemoryAuthorSeal(this.store, verdict.verified);
+    const { verified } = verdict;
+    const coordinate = [
+      verified.contextGraphId,
+      verified.subGraphName ?? '',
+      verified.seal.authorAddress.toLowerCase(),
+      verified.assertionName,
+    ].join('\u0000');
+    const kept = await withKeyedLocks(
+      this.coordinateLocks,
+      [coordinate],
+      () => keepSharedMemoryAuthorSeal(this.store, verified),
+    );
+    if (!kept) {
+      this.log.warn(
+        ctx,
+        `SWM author seal for ${scope.ual} not kept: "${verified.assertionName}" is bound here to another, published asset`,
+      );
+      return;
+    }
     this.log.info(
       ctx,
-      `Kept the author seal of "${verdict.verified.assertionName}" (${scope.ual} version ${scope.assertionVersion})`,
+      `Kept the author seal of "${verified.assertionName}" (${scope.ual} version ${scope.assertionVersion})`,
     );
   }
 }

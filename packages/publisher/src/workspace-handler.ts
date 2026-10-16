@@ -1653,7 +1653,7 @@ export class SharedMemoryHandler {
               // Refresh local-only controls so a retry completes a prior
               // head/sidecar tear.
               await persistLocallyTrustedControls();
-              await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized);
+              await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized, { envelope, signedPayload });
               return swmWriteApplied;
             }
             const reason =
@@ -1792,7 +1792,7 @@ export class SharedMemoryHandler {
         // this assertion's locally recomputed root, only after the durable SWM
         // head has committed. Receipt recovery must fail closed without them.
         await persistLocallyTrustedControls();
-        await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized);
+        await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized, { envelope, signedPayload });
 
         return swmWriteApplied;
       });

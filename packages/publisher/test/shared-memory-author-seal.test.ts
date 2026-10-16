@@ -9,10 +9,14 @@ import {
   buildAssertionPublishReceiptQuads,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
+  computeGossipSigningPayload,
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  encodeGossipEnvelope,
   encodeWorkspacePublishRequest,
   generateEd25519Keypair,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
   parseAssertionSealQuads,
   parseGraphScopedAssertionSealCandidate,
   type AssertionSeal,
@@ -26,6 +30,7 @@ import {
   SWM_SHARE_COMPLETE_PRED,
   keepSharedMemoryAuthorSeal,
   sharedMemoryAuthorSealFields,
+  sharedMemoryShareSignedBy,
   verifySharedMemoryAuthorSeal,
   type SharedMemoryAuthorSealShare,
 } from '../src/shared-memory-author-seal.js';
@@ -129,6 +134,23 @@ function shareMessage(
   });
 }
 
+/** `message` in the gossip envelope its sender's node signs (the agent signs every share it sends). */
+async function signed(message: Uint8Array, signer = AUTHOR, contextGraphId = CG): Promise<Uint8Array> {
+  const timestamp = new Date().toISOString();
+  const signature = await signer.signMessage(
+    computeGossipSigningPayload(GOSSIP_TYPE_WORKSPACE_PUBLISH, contextGraphId, timestamp, message),
+  );
+  return encodeGossipEnvelope({
+    version: GOSSIP_ENVELOPE_VERSION,
+    type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+    contextGraphId,
+    agentAddress: signer.address,
+    timestamp,
+    signature: ethers.getBytes(signature),
+    payload: message,
+  });
+}
+
 async function rowsOf(store: OxigraphStore, subject: string): Promise<Quad[]> {
   const result = await store.query(
     `CONSTRUCT { <${subject}> ?p ?o } WHERE { GRAPH <${META_GRAPH}> { <${subject}> ?p ?o } }`,
@@ -203,6 +225,29 @@ describe('verifySharedMemoryAuthorSeal', () => {
   });
 });
 
+describe('sharedMemoryShareSignedBy', () => {
+  const message = new TextEncoder().encode('share bytes');
+  const deliveryOf = async (bytes: Uint8Array) => {
+    const { decodeGossipEnvelope } = await import('@origintrail-official/dkg-core');
+    const envelope = decodeGossipEnvelope(bytes);
+    return { envelope, signedPayload: new Uint8Array(envelope.payload) };
+  };
+
+  it('accepts the author\'s signature over this graph\'s share', async () => {
+    expect(sharedMemoryShareSignedBy(await deliveryOf(await signed(message)), CG, AUTHOR.address.toLowerCase())).toBe(true);
+  });
+
+  it('refuses an unsigned delivery, another signer, another graph and other bytes', async () => {
+    expect(sharedMemoryShareSignedBy({ signedPayload: message }, CG, AUTHOR.address)).toBe(false);
+    expect(sharedMemoryShareSignedBy(await deliveryOf(await signed(message, STRANGER)), CG, AUTHOR.address)).toBe(false);
+    expect(sharedMemoryShareSignedBy(await deliveryOf(await signed(message, AUTHOR, 'another-graph')), CG, AUTHOR.address)).toBe(false);
+    const delivery = await deliveryOf(await signed(message));
+    expect(sharedMemoryShareSignedBy({ ...delivery, signedPayload: new TextEncoder().encode('other bytes') }, CG, AUTHOR.address)).toBe(false);
+    expect(sharedMemoryShareSignedBy({ ...delivery, envelope: { ...delivery.envelope, type: 'share-chunk' } }, CG, AUTHOR.address)).toBe(false);
+    expect(sharedMemoryShareSignedBy({ ...delivery, envelope: { ...delivery.envelope, signature: new Uint8Array([1, 2, 3]) } }, CG, AUTHOR.address)).toBe(false);
+  });
+});
+
 describe('sharedMemoryAuthorSealFields', () => {
   it('sends no seal that has no canonical form', async () => {
     const seal = await sealOf('one');
@@ -265,7 +310,7 @@ describe('keepSharedMemoryAuthorSeal', () => {
     });
     await store.insert(receipt);
 
-    await keepSharedMemoryAuthorSeal(store, await verifiedOf('two', 2));
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('two', 2))).toBe(true);
 
     expect(await rowsOf(store, lowerSubject)).toEqual([]);
     expect(await hasShareCompleteMarker(store, lower)).toBe(false);
@@ -284,7 +329,7 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
   it('keeps the seal of an applied share, and heals it on an exact replay', async () => {
     const store = new OxigraphStore();
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
-    const message = shareMessage('one', await sealOf('one'));
+    const message = await signed(shareMessage('one', await sealOf('one')));
 
     expect(await handler.handle(message, PEER_ID)).toMatchObject({ applied: true });
     expect((await keptSeal(store))?.seal.assertionVersion).toBe('1');
@@ -298,8 +343,8 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
   it('replaces the seal when a newer version is shared', async () => {
     const store = new OxigraphStore();
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
-    await handler.handle(shareMessage('one', await sealOf('one')), PEER_ID);
-    expect(await handler.handle(shareMessage('two', await sealOf('two', { version: 2 })), PEER_ID))
+    await handler.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID);
+    expect(await handler.handle(await signed(shareMessage('two', await sealOf('two', { version: 2 }))), PEER_ID))
       .toMatchObject({ applied: true });
     const candidate = await keptSeal(store);
     expect(candidate?.seal.assertionVersion).toBe('2');
@@ -309,7 +354,7 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
   it('applies the share but keeps no seal that is not the author\'s', async () => {
     const store = new OxigraphStore();
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
-    const forged = shareMessage('one', await sealOf('one', { signer: STRANGER }));
+    const forged = await signed(shareMessage('one', await sealOf('one', { signer: STRANGER })));
     expect(await handler.handle(forged, PEER_ID)).toMatchObject({ applied: true });
     expect(await keptSeal(store)).toBeUndefined();
     expect(await hasShareCompleteMarker(store)).toBe(false);
@@ -318,7 +363,7 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
   it('keeps no seal for content other than what the share delivered', async () => {
     const store = new OxigraphStore();
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
-    expect(await handler.handle(shareMessage('one', await sealOf('two')), PEER_ID)).toMatchObject({ applied: true });
+    expect(await handler.handle(await signed(shareMessage('one', await sealOf('two'))), PEER_ID)).toMatchObject({ applied: true });
     expect(await keptSeal(store)).toBeUndefined();
   });
 
@@ -327,7 +372,7 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
     const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
       localAgentAddresses: () => [AUTHOR.address.toLowerCase()],
     });
-    expect(await handler.handle(shareMessage('one', await sealOf('one')), PEER_ID)).toMatchObject({ applied: true });
+    expect(await handler.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID)).toMatchObject({ applied: true });
     expect(await keptSeal(store)).toBeUndefined();
     expect(await hasShareCompleteMarker(store)).toBe(false);
   });
@@ -338,7 +383,7 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
     const elsewhere = new SharedMemoryHandler(notCurator, new TypedEventBus(), {
       keepsAuthorSeals: (contextGraphId) => { asked.push(contextGraphId); return false; },
     });
-    expect(await elsewhere.handle(shareMessage('one', await sealOf('one')), PEER_ID)).toMatchObject({ applied: true });
+    expect(await elsewhere.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID)).toMatchObject({ applied: true });
     expect(asked).toEqual([CG]);
     expect(await keptSeal(notCurator)).toBeUndefined();
 
@@ -346,14 +391,74 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
     const curator = new SharedMemoryHandler(curatorStore, new TypedEventBus(), {
       keepsAuthorSeals: async () => true,
     });
-    expect(await curator.handle(shareMessage('one', await sealOf('one')), PEER_ID)).toMatchObject({ applied: true });
+    expect(await curator.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID)).toMatchObject({ applied: true });
     expect(await keptSeal(curatorStore)).toBeDefined();
+  });
+
+  /** A share of another asset of the author's (KA 8), whose seal and content a peer could have seen elsewhere. */
+  async function otherAssetShare(): Promise<Uint8Array> {
+    return shareMessage('other', await sealOf('other', { number: 8n }), {
+      kaUal: ualOf(8n), kaNumber: '8', shareOperationId: 'op-other',
+    });
+  }
+
+  it.each([
+    ['unsigned', (message: Uint8Array) => Promise.resolve(message)],
+    ['signed by another peer', (message: Uint8Array) => signed(message, STRANGER)],
+    ['signed by the author for another graph', (message: Uint8Array) => signed(message, AUTHOR, 'another-graph')],
+  ])('keeps the author\'s name bound when another asset\'s seal arrives %s', async (_how, deliver) => {
+    // The curator holds the author's "report-1", bound to KA 7. A peer that saw
+    // the author's valid seal and content of KA 8 shares KA 8 under that name.
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    await handler.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID);
+    expect(await handler.handle(await deliver(await otherAssetShare()), PEER_ID)).toMatchObject({ applied: true });
+    const candidate = await keptSeal(store);
+    expect(candidate?.seal.kaUal).toBe(ualOf());
+    expect(ethers.hexlify(candidate!.seal.merkleRoot)).toBe(ethers.hexlify(rootOf('one')));
+  });
+
+  it('lets the author rebind its own name to another asset', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    await handler.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID);
+    await handler.handle(await signed(await otherAssetShare()), PEER_ID);
+    expect((await keptSeal(store))?.seal.kaUal).toBe(ualOf(8n));
+  });
+
+  it('keeps the seal of the asset this node published under the name', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    await handler.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID);
+    // This node published KA 7 under the name: its lifecycle carries the VM pointer.
+    await store.insert([{
+      subject: assertionLifecycleUri(CG, AUTHOR.address, NAME, SUB),
+      predicate: 'http://dkg.io/ontology/vmCurrentAssertion',
+      object: `"${ethers.hexlify(rootOf('one')).slice(2)}"`,
+      graph: META_GRAPH,
+    }]);
+    await handler.handle(await signed(await otherAssetShare()), PEER_ID);
+    expect((await keptSeal(store))?.seal.kaUal).toBe(ualOf());
+  });
+
+  it('serializes two deliveries for one name: one whole seal remains', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const [first, second] = await Promise.all([
+      signed(shareMessage('one', await sealOf('one'))),
+      signed(await otherAssetShare()),
+    ]);
+    await Promise.all([handler.handle(first, PEER_ID), handler.handle(second, PEER_ID)]);
+    // Interleaved rows of two seals would not parse as one seal.
+    const candidate = await keptSeal(store);
+    expect([ualOf(), ualOf(8n)]).toContain(candidate?.seal.kaUal);
+    expect(await hasShareCompleteMarker(store)).toBe(true);
   });
 
   it('takes a share without a seal as before', async () => {
     const store = new OxigraphStore();
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
-    expect(await handler.handle(shareMessage('one', undefined), PEER_ID)).toMatchObject({ applied: true });
+    expect(await handler.handle(await signed(shareMessage('one', undefined)), PEER_ID)).toMatchObject({ applied: true });
     expect(await keptSeal(store)).toBeUndefined();
   });
 });
@@ -410,7 +515,7 @@ describe('a share carries the seal its finalize wrote', () => {
 
     const receiverStore = new OxigraphStore();
     const receiver = new SharedMemoryHandler(receiverStore, new TypedEventBus());
-    expect(await receiver.handle(promoted.gossipPayload!.message, PEER_ID)).toMatchObject({ applied: true });
+    expect(await receiver.handle(await signed(promoted.gossipPayload!.message), PEER_ID)).toMatchObject({ applied: true });
     const kept = await keptSeal(receiverStore);
     expect(kept?.seal.kaUal).toBe(written.kaUal);
     expect(ethers.hexlify(kept!.seal.merkleRoot)).toBe(ethers.hexlify(written.merkleRoot));
