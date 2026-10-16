@@ -404,6 +404,8 @@ export interface AdmissionProbe {
   readonly contextGraphId: string;
   readonly selected: boolean;
   readonly priority: number | undefined;
+  /** Recorded only when the admission asked for a reserved slot only. */
+  readonly reservedSlotOnly?: boolean;
   readonly event: 'start' | 'end';
 }
 
@@ -521,7 +523,7 @@ export interface SelectedSwmLifecycleAgentFixture {
     lane: string,
     operationId: string,
     work: () => Promise<SharedMemorySyncResult>,
-    admission: { priorityOverride?: number; selectedSwmPriority?: boolean },
+    admission: { priorityOverride?: number; selectedSwmPriority?: boolean; reservedSlotOnly?: boolean },
   ) => Promise<SharedMemorySyncResult>;
   syncCheckpoints: Map<string, number>;
   workspaceOwnedEntities: Map<string, Map<string, string>>;
@@ -847,6 +849,7 @@ export function createSelectedSwmLifecycleHarness(
         contextGraphId,
         selected: admission.selectedSwmPriority === true,
         priority: admission.priorityOverride,
+        ...(admission.reservedSlotOnly === undefined ? {} : { reservedSlotOnly: admission.reservedSlotOnly }),
       };
       admissions.push({ ...row, event: 'start' });
       try {

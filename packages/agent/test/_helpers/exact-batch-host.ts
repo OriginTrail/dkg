@@ -84,7 +84,6 @@ export function createExactBatchHostFixture(cleanups: Array<() => Promise<void>>
     contextGraphBindingState: new ContextGraphBindingState(), graphScopedStoreClosed: false,
     workLifetime: new AgentWorkLifetime(),
     captureExperimentalExactBatchRefusalScope: LifecycleSyncMethods.prototype.captureExperimentalExactBatchRefusalScope,
-    graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
     reconcileAfterGraphScopedMaterialization: LifecycleSyncMethods.prototype.reconcileAfterGraphScopedMaterialization,
     requireLocalCgMatchesOnChainSlot: vi.fn(async (cg: string, id: string) => cg === CG && id === '14'),
     syncCheckpoints: { delete: vi.fn(), set: vi.fn(), setManifestBoundOffset: vi.fn() },

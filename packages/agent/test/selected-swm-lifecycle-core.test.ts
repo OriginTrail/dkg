@@ -713,6 +713,52 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     }
   });
 
+  it('keeps a reserved-slot-only request on every pass, continuations included', async () => {
+    const publicCg = 'selected-reserved-only';
+    const privateCg = 'selected-reserved-only-private';
+    let initialSnapshotReads = 0;
+    let wallNow = 1_000;
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg, private: privateCg },
+      manifest: snapshotManifest(publicCg, 905),
+      clock: { now: () => wallNow, deadline: () => wallNow + 1 },
+      priorities: { [publicCg]: 100, [privateCg]: 0 },
+      onSnapshotRead: ({ publicAdmission }) => {
+        if (publicAdmission === 1) {
+          initialSnapshotReads += 1;
+          if (initialSnapshotReads === 672) wallNow += 120_000;
+        }
+      },
+    });
+
+    try {
+      const selected = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg, privateCg],
+        {
+          selectedSwmPriority: true,
+          requestedScope: { kind: 'rfc64-recovery-plan' },
+          priority: 2_000,
+          reservedSlotOnly: true,
+          recoveryTargets: [
+            { contextGraphId: publicCg, lane: 'selected-public' },
+            { contextGraphId: privateCg, lane: 'ordinary-private' },
+          ],
+        },
+      );
+      expect(selected.shared.continuationPasses).toBe(1);
+      // The continuation, too, asks for a reserved slot only: with one general
+      // slot and no queue it must leave that slot to other transfers.
+      expect(harness.probes.admissions.filter(({ event }) => event === 'start')).toEqual([
+        { contextGraphId: publicCg, selected: true, priority: 2_000, reservedSlotOnly: true, event: 'start' },
+        { contextGraphId: privateCg, selected: false, priority: undefined, reservedSlotOnly: true, event: 'start' },
+        { contextGraphId: publicCg, selected: true, priority: 2_000, reservedSlotOnly: true, event: 'start' },
+      ]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('keeps retry state when one selected CG completes and another remains incomplete', async () => {
     const completeCg = 'selected-multi-complete';
     const incompleteCg = 'selected-multi-incomplete';

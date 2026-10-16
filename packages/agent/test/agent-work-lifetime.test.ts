@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { AgentWorkLifetime, drainPhysicalWork } from '../src/agent-work-lifetime.js';
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 
 it('fences old continuations across close and reopen without losing physical work', async () => {
   const owner = new AgentWorkLifetime();
@@ -39,20 +39,18 @@ it('drains newly tracked retirement work and consumes physical rejections', asyn
   expect(owner.physicalRuns.size).toBe(0);
 });
 
-it('waits for cross-owner work enqueued while a dependency retires', async () => {
+it('waits for materialization work enqueued while a dependency retires', async () => {
   const owner = new AgentWorkLifetime();
-  const storeRuns = new Set<Promise<unknown>>();
   let release!: () => void, commit!: () => void;
   owner.track(new Promise<void>(resolve => { release = resolve; }).then(() => {
-    storeRuns.add(new Promise<void>(resolve => { commit = resolve; }));
+    owner.track(new Promise<void>(resolve => { commit = resolve; }));
   }));
   owner.close();
   let drained = false;
-  const drain = drainPhysicalWork(owner.physicalRuns, storeRuns).then(() => { drained = true; });
+  const drain = owner.drain().then(() => { drained = true; });
   release(); await new Promise(resolve => setImmediate(resolve));
   expect(drained).toBe(false);
-  expect(owner.physicalRuns.size).toBe(0);
-  expect(storeRuns.size).toBe(1);
+  expect(owner.physicalRuns.size).toBe(1);
   commit(); await drain;
-  expect(storeRuns.size).toBe(0);
+  expect(owner.physicalRuns.size).toBe(0);
 });

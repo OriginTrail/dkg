@@ -6,10 +6,11 @@
  * A member that already synced a public graph pulls its shared memory again
  * only when something else asks for it: a new connection, the peer
  * reconciler (every 5 min, for a peer last synced at least 10 min earlier, so
- * up to about 15 min for named sub-graphs), or the RFC-64 authority refresh
- * for the root scope (every 5 min, and not at all while that refresh cannot
- * complete). A write that only the graph's owner holds, because its author is
- * not connected to this member, waits that long or for ever.
+ * up to about 15 min for named sub-graphs; never on a node that runs without
+ * it), or the RFC-64 authority refresh for the root scope (every 5 min, and
+ * not at all while that refresh cannot complete). A write that only the
+ * graph's owner holds, because its author is not connected to this member,
+ * waits that long or for ever.
  *
  * While a graph is in use here, this scheduler pulls it from one connected
  * holder, the owner first, at a bounded interval. A graph is in use for

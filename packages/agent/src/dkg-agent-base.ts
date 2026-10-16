@@ -1135,7 +1135,6 @@ export class DKGAgentBase {
   /** Node-owned cancellation, generation fencing and physical retirement. */
   protected readonly workLifetime = new AgentWorkLifetime();
   /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */
-  protected readonly graphScopedStorePhysicalRuns = new Set<Promise<unknown>>();
   protected graphScopedStoreClosed = false;
   /** True only after startup has installed every dependency the VM worker uses. */
   protected vmReconcileRuntimeReady = false;
