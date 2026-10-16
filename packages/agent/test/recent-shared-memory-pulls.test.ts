@@ -326,15 +326,17 @@ describe('recent shared-memory pull runtime (#3251)', () => {
 
   afterEach(async () => {
     delete process.env.DKG_RECENT_SHARED_MEMORY_PULL_ENABLED;
+    delete process.env.DKG_SYNC_RECONCILER_ENABLED;
     vi.restoreAllMocks();
     await Promise.all(agents.splice(0).map((agent) => agent.stop().catch(() => {})));
   });
 
-  async function startedMember(name: string) {
+  async function startedMember(name: string, config: { syncReconcilerEnabled?: boolean } = {}) {
     const agent = await DKGAgent.create({
       name,
       listenHost: '127.0.0.1',
       chainAdapter: new MockChainAdapter(),
+      ...config,
     });
     agents.push(agent);
     await agent.start();
@@ -352,13 +354,23 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     // The member learned its owner from the join; nothing resolves it otherwise.
     internals.preferredSyncPeers.set(GRAPH, OWNER);
     internals.canUseSharedMemoryForContextGraph = async () => true;
-    const sharedPulls: Array<{ peerId: string; contextGraphIds: string[]; source?: string }> = [];
+    const sharedPulls: Array<{
+      peerId: string;
+      contextGraphIds: string[];
+      source?: string;
+      reservedSlotOnly?: boolean;
+    }> = [];
     internals.syncSharedMemoryFromPeerDetailed = async (
       peerId: string,
       contextGraphIds: string[],
-      options?: { source?: string },
+      options?: { source?: string; reservedSlotOnly?: boolean },
     ) => {
-      sharedPulls.push({ peerId, contextGraphIds, source: options?.source });
+      sharedPulls.push({
+        peerId,
+        contextGraphIds,
+        source: options?.source,
+        reservedSlotOnly: options?.reservedSlotOnly,
+      });
       return { ...emptySharedMemorySyncResult(), insertedTriples: 3, insertedDataTriples: 3 };
     };
     const rootReplays: string[] = [];
@@ -399,7 +411,9 @@ describe('recent shared-memory pull runtime (#3251)', () => {
       expect(sharedPulls).toEqual([]);
       clock += INTERVAL;
       expect(await runtime.tick()).toBe(1);
-      expect(sharedPulls).toEqual([{ peerId: OWNER, contextGraphIds: [GRAPH], source: 'reconcile' }]);
+      expect(sharedPulls).toEqual([
+        { peerId: OWNER, contextGraphIds: [GRAPH], source: 'reconcile', reservedSlotOnly: true },
+      ]);
       expect(rootReplays).toEqual([GRAPH]);
 
       clock += INTERVAL;
@@ -408,6 +422,37 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     } finally {
       await runtime.close();
     }
+  });
+
+  it('runs on a member whose periodic reconciler is off, and asks for the reserved slot', async () => {
+    const { agent, internals, sharedPulls } = await startedMember('Rfc3251NoReconciler', {
+      syncReconcilerEnabled: false,
+    });
+    // No reconciler timer runs; the agent started the safety net all the same.
+    expect(internals.syncReconcilerTimer).toBeNull();
+    expect(internals.recentSharedMemoryPulls).not.toBeNull();
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
+    try {
+      vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(true);
+      agent.subscribeToContextGraph(GRAPH, { syncMode: 'always-on' });
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      expect(sharedPulls).toEqual([
+        { peerId: OWNER, contextGraphIds: [GRAPH], source: 'reconcile', reservedSlotOnly: true },
+      ]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('does not run on a member with its own switch off and the periodic reconciler off', async () => {
+    process.env.DKG_RECENT_SHARED_MEMORY_PULL_ENABLED = '0';
+    const { internals } = await startedMember('Rfc3251SwitchedOff', { syncReconcilerEnabled: false });
+    expect(internals.syncReconcilerTimer).toBeNull();
+    expect(internals.recentSharedMemoryPulls).toBeNull();
   });
 
   it('keeps pulling when a routing hint names this node, and replays no root on the legacy lane', async () => {
@@ -517,16 +562,30 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     expect(noted).toEqual([GRAPH]);
   });
 
-  it('runs on an Edge whose periodic shared-memory sync is on', () => {
+  it('runs on an Edge whose shared-memory sync is on, with the periodic reconciler on or off', () => {
     expect(recentSharedMemoryPullsEnabled({})).toBe(true);
     expect(recentSharedMemoryPullsEnabled({ nodeRole: 'edge' })).toBe(true);
     expect(recentSharedMemoryPullsEnabled({ nodeRole: 'core' })).toBe(false);
-    expect(recentSharedMemoryPullsEnabled({ syncReconcilerEnabled: false })).toBe(false);
     expect(recentSharedMemoryPullsEnabled({ syncOnConnectEnabled: false })).toBe(false);
     expect(recentSharedMemoryPullsEnabled({ durableSyncEnabled: false })).toBe(false);
     expect(recentSharedMemoryPullsEnabled({ syncSharedMemoryOnConnect: false })).toBe(false);
+    // An Edge that keeps the reconciler away from its one sync slot: nothing
+    // else pulls a public graph it already synced.
+    const withoutReconciler = {
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: true,
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 0,
+    };
+    expect(recentSharedMemoryPullsEnabled(withoutReconciler)).toBe(true);
+    expect(recentSharedMemoryPullsEnabled({ ...withoutReconciler, nodeRole: 'core' })).toBe(false);
+    expect(recentSharedMemoryPullsEnabled({ ...withoutReconciler, syncOnConnectEnabled: false })).toBe(false);
+    process.env.DKG_SYNC_RECONCILER_ENABLED = '0';
+    expect(recentSharedMemoryPullsEnabled({})).toBe(true);
+
     process.env.DKG_RECENT_SHARED_MEMORY_PULL_ENABLED = '0';
     expect(recentSharedMemoryPullsEnabled({})).toBe(false);
+    expect(recentSharedMemoryPullsEnabled(withoutReconciler)).toBe(false);
   });
 
   it('skips graphs it may not pull and logs a pull that fails', async () => {
