@@ -430,6 +430,8 @@ export class QueryMethods extends DKGAgentBase {
       /** Suppress caller-supplied query text in normal query diagnostics. */
       redactQuery?: boolean;
       maxResponseBytes?: number;
+      /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
+      maxLiteralHydrationBytes?: number;
       graphSuffix?: '_shared_memory';
       includeSharedMemory?: boolean;
       /** @deprecated Use includeSharedMemory */
@@ -715,6 +717,7 @@ export class QueryMethods extends DKGAgentBase {
       priority: opts.priority,
       source: opts.source,
       maxResponseBytes: opts.maxResponseBytes,
+      maxLiteralHydrationBytes: opts.maxLiteralHydrationBytes,
       view: opts.view,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,
