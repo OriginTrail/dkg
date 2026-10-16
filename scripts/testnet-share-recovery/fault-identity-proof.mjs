@@ -18,8 +18,13 @@ for (const name of ['catalog-140', 'catalog-141']) {
   const matches = before.map(q => ({ subject: q.subject, predicate: q.predicate,
     matches: final.filter(r => r.s.value === q.subject && r.p.value === q.predicate).length === 1
       && final.some(r => r.s.value === q.subject && r.p.value === q.predicate && r.o.value === literal(q.object)) }));
-  const payload = fault.contentAtFault.quads.map(q => [q.subject, q.predicate, literal(q.object)]);
-  const contentMatches = payload.every(([s,p,o]) => final.some(r => r.s.value === s && r.p.value === p && r.o.value === o));
+  const graph = fault.intendedMetadataInsert.find(q => q.predicate === 'http://dkg.io/ontology/assertionGraph')?.object;
+  if (!graph) throw Error('Fault evidence lacks its exact SWM graph');
+  const term = value => value.type === 'uri' ? value.value : JSON.stringify(value.value)
+    + (value.datatype ? `^^<${value.datatype}>` : value['xml:lang'] ? `@${value['xml:lang']}` : '');
+  const payload = fault.contentAtFault.quads.map(q => JSON.stringify([q.subject, q.predicate, q.object])).sort();
+  const afterPayload = final.filter(r => r.g.value === graph).map(r => JSON.stringify([r.s.value, r.p.value, term(r.o)])).sort();
+  const contentMatches = payload.length > 0 && JSON.stringify(payload) === JSON.stringify(afterPayload);
   proofs.push({ name, firedAt: fault.firedAt, fields: matches, contentTriplesAtFault: payload.length,
     originalSealOperationAndContentPreserved: matches.every(m => m.matches) && contentMatches });
 }

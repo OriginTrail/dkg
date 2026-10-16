@@ -18,7 +18,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
+import { TripleStoreAsyncPromoteQueue, CuratorRejectedError } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp } from 'node:fs/promises';
@@ -303,6 +303,22 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       publishReady: true,
       shareOperationId: 'existing-share-operation',
     });
+  });
+
+  it.each([false, true])('exposes permanent share recovery ownership (one-shot=%s)', async oneShot => {
+    await startWith({
+      history: async () => null, create: async () => {}, write: async () => {},
+      finalize: async () => ({ merkleRoot: new Uint8Array(32), authorAddress: ROOTLESS_AUTHOR }),
+      promote: async () => { throw new CuratorRejectedError(CG_ID); },
+    });
+    const res = oneShot
+      ? await postRoot({ contextGraphId: CG_ID, name: 'rejected', quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"' }], finalize: true, alsoShareSwm: true })
+      : await post('swm/share', { contextGraphId: CG_ID });
+    expect(res.status).toBe(oneShot ? 207 : 409);
+    expect(res.body).toMatchObject({ recoveryState: 'inspection-required', retryable: false });
+    expect(res.body.recoveryJobId).toEqual(expect.any(String));
+    expect(res.body.recoveryStatusUrl).toBe(`/api/knowledge-assets/swm/share-jobs/${res.body.recoveryJobId}`);
+    if (!oneShot) expect(res.body).toMatchObject({ code: 'CURATOR_REJECTED', curatorDelivery: 'rejected' });
   });
 
   it('swm/share: KA_NAMED_GRAPH_SHARE_UNSUPPORTED → 409 { code, error, namedGraphs }', async () => {

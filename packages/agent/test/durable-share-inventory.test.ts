@@ -7,13 +7,13 @@ const params = { contextGraphId: 'cg', assertionCoordinate: 'asset', lifecycleAg
 
 describe('durable inventory handoff', () => {
   it.each(['inactive-lane', 'authority-transition'])('retains the obligation while %s', async dormantReason => {
-    const agent = { recordRfc64SwmAuthorInventoryShadowV1: vi.fn(async () => ({ status: 'dormant', dormantReason })),
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'dormant', dormantReason })),
       requestRfc64SwmCatalogProjectionV1: vi.fn() };
     await expect(commitDurableShareInventory(agent as any, params)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
     expect(agent.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
   });
   it('refuses policy mismatch and never substitutes a detached observer for durable admission', async () => {
-    const agent = { recordRfc64SwmAuthorInventoryShadowV1: vi.fn(async () => ({ status: 'dormant', dormantReason: 'policy-mismatch' })) };
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'dormant', dormantReason: 'policy-mismatch' })) };
     const detached = vi.fn();
     await expect(finishDurableShare(agent as any, params, async () => undefined, detached))
       .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
@@ -21,22 +21,22 @@ describe('durable inventory handoff', () => {
   });
   it('waits for the durable CAS and requests projection only after acknowledgement', async () => {
     let finish!: (value: any) => void;
-    const agent = { recordRfc64SwmAuthorInventoryShadowV1: vi.fn(() => new Promise(resolve => { finish = resolve; })),
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(() => new Promise(resolve => { finish = resolve; })),
       requestRfc64SwmCatalogProjectionV1: vi.fn(() => false) };
     const pending = commitDurableShareInventory(agent as any, params);
     expect(agent.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
     finish({ status: 'existing' }); await pending;
-    expect(agent.recordRfc64SwmAuthorInventoryShadowV1).toHaveBeenCalledWith(expect.objectContaining({
-      throwOnFailure: true, shareOperationId: 'original-operation', lifecycleAgentAddress: params.lifecycleAgentAddress,
+    expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledWith(expect.objectContaining({
+      shareOperationId: 'original-operation', lifecycleAgentAddress: params.lifecycleAgentAddress,
     }));
     expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
   });
   it('retains pointer failure ownership and does not run the catalog mutation', async () => {
-    const agent = { recordRfc64SwmAuthorInventoryShadowV1: vi.fn() };
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn() };
     const detached = vi.fn();
     await expect(finishDurableShare(agent as any, params, async () => { throw new Error('pointer write interrupted'); }, detached))
       .rejects.toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE' });
-    expect(agent.recordRfc64SwmAuthorInventoryShadowV1).not.toHaveBeenCalled();
+    expect(agent.commitRfc64SwmAuthorInventoryV1).not.toHaveBeenCalled();
     expect(detached).not.toHaveBeenCalled();
   });
 });

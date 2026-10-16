@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+/** Preserve the public share operation identifier format for both admission paths. */
+export function createShareOperationId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 /** Durable v1 envelope, shared by creation, replay validation and finalization. */
 export type PromoteOperationIntent = Readonly<{
   version: 1;

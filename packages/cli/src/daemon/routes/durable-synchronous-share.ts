@@ -1,3 +1,4 @@
+import { durableRecoveryDetails } from './durable-share-response.js';
 import { sanitizeRpcMessage, classifyStoreUnavailable } from '../http-utils.js';
 import { randomUUID } from 'node:crypto';
 import { PromoteJobConflictError, type PromoteJob } from '@origintrail-official/dkg-publisher';
@@ -42,20 +43,21 @@ export async function durableSynchronousShare(
   });
   if (outcome.outcome === 'succeeded' && response) return response;
   const error = failure instanceof Error ? failure : new Error('Share completion is awaiting durable recovery');
-  throw Object.assign(error, { contextGraphId, retryKnowledgeAssetName: name, recoveryJobId: job.jobId,
+  throw Object.assign(error, { contextGraphId, subGraphName: options?.subGraphName, retryKnowledgeAssetName: name, recoveryJobId: job.jobId,
     recoveryState: outcome.outcome === 'failed_terminal' ? 'inspection-required' : 'pending',
     recoveryStatusUrl: `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(job.jobId)}` });
 }
 
 export function durableShareFailureBody(error: any): Record<string, unknown> | undefined {
-  if ((!error?.recoveryJobId && error?.code !== 'SHARE_RECOVERY_UNAVAILABLE') || error?.recoveryState === 'inspection-required') return undefined;
+  if ((!error?.recoveryJobId && error?.code !== 'SHARE_RECOVERY_UNAVAILABLE') || (error?.recoveryState === 'inspection-required' && !classifyStoreUnavailable(error))) return undefined;
   return { code: error.code ?? 'SHARE_RECOVERY_PENDING', error: sanitizeRpcMessage(error.message),
     ...classifyStoreUnavailable(error)?.body,
-    ...(error.code === 'PROMOTE_POST_COMMIT_FAILURE' ? { retryAction: 'resume_existing_knowledge_asset',
-      retryPhase: 'swm-share', contextGraphId: error.contextGraphId, retryKnowledgeAssetName: error.retryKnowledgeAssetName } : {}),
+    ...(['PROMOTE_POST_COMMIT_FAILURE', 'PROMOTE_RETRYABLE_FAILURE'].includes(error.code) ? { retryAction: 'resume_existing_knowledge_asset',
+      retryPhase: 'swm-share', contextGraphId: error.contextGraphId, retryKnowledgeAssetName: error.retryKnowledgeAssetName,
+      ...(error.subGraphName ? { subGraphName: error.subGraphName } : {}) } : {}),
     retryable: error.recoveryState !== 'inspection-required',
-    ...(error.recoveryJobId ? { recoveryJobId: error.recoveryJobId,
-      recoveryState: error.recoveryState, recoveryStatusUrl: error.recoveryStatusUrl } : {}),
+    ...durableRecoveryDetails(error),
+    ...(error.code === 'CURATOR_UNCONFIRMED' ? { curatorDelivery: 'unconfirmed', contextGraphId: error.contextGraphId } : {}),
   };
 }
 

@@ -58,14 +58,17 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
   const { publisherOptions } = await prepareAssertionPromote(agent, {
     contextGraphId, publisherPeerId: agent.node.peerId.toString(), options: opts,
   });
-  const responsibility = agent.readRfc64CatalogResponsibilityV1(contextGraphId);
-  const inventoryRequired = !opts?.subGraphName && responsibility.mode !== 'legacy';
+  const authority = agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+  // Deliberate legacy/system/kill-switch admission does not owe catalog work.
+  // Temporary inactivity is not an exemption, and a later switch cannot erase
+  // the immutable obligation already captured by a bound job.
+  const inventoryRequired = !opts?.subGraphName && authority.mode !== 'legacy' && !authority.killSwitchActive;
   const recoveryBinding = await agent.publisher.prepareAssertionPromoteRecovery(
     contextGraphId, name, storageLane, publisherOptions, inventoryRequired);
-  if ('completedShareOperationId' in recoveryBinding) {
+  if ('completedResult' in recoveryBinding) {
     return { agentAddress: storageLane, recoveryBinding: undefined,
       completedResult: { promotedCount: 0, sealed: true, publishReady: false,
-        shareOperationId: recoveryBinding.completedShareOperationId } };
+        ...(recoveryBinding.completedResult.shareOperationId ? { shareOperationId: recoveryBinding.completedResult.shareOperationId } : {}) } };
   }
   return { agentAddress: storageLane, recoveryBinding, completedResult: undefined };
 }

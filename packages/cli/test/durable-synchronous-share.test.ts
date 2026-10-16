@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
+import { TripleStoreAsyncPromoteQueue, CuratorRejectedError } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
@@ -31,7 +31,7 @@ async function setup() {
     const { agent, publisher } = await createPromotionAgentForTest(store, options);
     // This fixture isolates publisher/queue recovery. Live validation exercises
     // actual inventory and authority; separate tests cover that handoff.
-    agent.readRfc64CatalogResponsibilityV1 = () => ({ mode: 'legacy' });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'legacy', killSwitchActive: false });
     agent.configurePromoteQueue({ backoff: () => 0, maxRetries: 1 });
     return { agent, publisher };
   };
@@ -84,6 +84,7 @@ describe('durable synchronous share ownership', () => {
     const error = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
     expect(error.recoveryState).toBe('pending');
     const failed = await agent.promoteQueue.getStatus(error.recoveryJobId);
+    expect(failed.request.recoveryBinding.intent.operationId).toMatch(/^[0-9a-z]+-[0-9a-z]+$/);
     expect(failed.state).toBe('failed_retrying');
     expect(failed.attempt.lastError.retryable).toBe(true);
     expect(await agent.assertion.history(CG, NAME, { agentAddress: AUTHOR })).toBeNull();
@@ -103,6 +104,67 @@ describe('durable synchronous share ownership', () => {
       const prepared = await restarted.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
       expect(prepared.recoveryBinding).toEqual(failed.request.recoveryBinding);
     } finally { await supervisor.stop(); await store.close(); }
+  });
+
+  it('automatically retries curator non-confirmation with the original required acknowledgement', async () => {
+    const { store, agent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    let connected = false;
+    const confirmation = vi.fn(async () => ({ applied: connected }));
+    agent.buildCuratorAckConfirmer = async () => confirmation;
+    const error = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true }).catch(e => e);
+    expect(error.code).toBe('CURATOR_UNCONFIRMED');
+    const failed = await agent.promoteQueue.getStatus(error.recoveryJobId);
+    expect(failed.state).toBe('failed_retrying');
+    expect(failed.request.recoveryBinding.intent.confirmationRequired).toBe(true);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    connected = true;
+    const supervisor = createPromoteWorkerSupervisor({ agent, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
+    try {
+      await supervisor.start();
+      await vi.waitFor(async () => expect((await agent.promoteQueue.getStatus(error.recoveryJobId)).state).toBe('succeeded'));
+      expect((await agent.promoteQueue.getStatus(error.recoveryJobId)).request.recoveryBinding).toEqual(failed.request.recoveryBinding);
+      expect(confirmation).toHaveBeenCalledTimes(2);
+    } finally { await supervisor.stop(); await store.close(); }
+  });
+
+  it('keeps permanent curator rejection in an inspection hold', async () => {
+    const { store, agent } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    agent.buildCuratorAckConfirmer = async () => async () => { throw new CuratorRejectedError(CG); };
+    const error = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true }).catch(e => e);
+    expect(error.code).toBe('CURATOR_REJECTED');
+    expect((await agent.promoteQueue.getStatus(error.recoveryJobId)).state).toBe('failed');
+    await store.close();
+  });
+
+  it.each([
+    ['legacy', false, false], ['catalog', true, false], ['catalog', false, true], ['shadow', false, true],
+  ])('captures effective %s admission with kill switch %s as inventoryRequired=%s', async (mode, killSwitchActive, required) => {
+    const { store, agent } = await setup();
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode, killSwitchActive, active: false });
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    expect(prepared.recoveryBinding.inventoryRequired).toBe(required);
+    await store.close();
+  });
+
+  it('keeps a complete pre-intent VM asset a read-only no-op', async () => {
+    const { store, agent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR });
+    const vm = finalized.sharedGraphUri.replace('/_shared_memory/', '/_verifiable_memory/');
+    await store.insert(finalized.publicQuads.map(q => ({ ...q, graph: vm })));
+    await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/promoteOperationIntent' });
+    await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer' });
+    await store.insert([{ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"VM"' }]);
+    const admission = vi.spyOn(agent.promoteQueue, 'enqueueAndClaim');
+    const insert = vi.spyOn(store, 'insert');
+    expect(await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR })).toEqual({ promotedCount: 0, sealed: true, publishReady: false });
+    expect(admission).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    await store.insert([{ graph: vm, subject: 'urn:extra', predicate: 'urn:p', object: '"corrupt"' }]);
+    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR })).rejects.toThrow();
+    await store.close();
   });
 
   it('reclaims an expired started bound lease after process loss and fences the old token', async () => {

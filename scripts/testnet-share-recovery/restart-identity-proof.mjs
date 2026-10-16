@@ -31,7 +31,9 @@ if(mode==='before'){
  const identityPredicates=new Set([...Object.values(ASSERTION_SEAL_PREDICATES),'http://dkg.io/ontology/shareOperationId','http://dkg.io/ontology/promoteOperationIntent']);
  const originalFields=fault.metadataAtFault.quads.filter(q=>identityPredicates.has(q.predicate));
  const originalSealAndIntent=originalFields.every(q=>rows.some(r=>r.s.value===q.subject&&r.p.value===q.predicate&&r.o.value===value(q.object)));
- const publicRows=rows.filter(r=>r.s.value===`urn:2963:${arm}:restart-recovery`);
+ const graph=fault.intendedMetadataInsert.find(q=>q.predicate==='http://dkg.io/ontology/assertionGraph')?.object;
+ if(!graph)throw Error('Missing exact crash graph');
+ const publicRows=rows.filter(r=>r.g.value===graph);
  const exactContent=publicRows.length===8&&fault.contentAtFault.quads.every(q=>publicRows.some(r=>r.s.value===q.subject&&r.p.value===q.predicate&&r.o.value===value(q.object)));
  const catalogs=JSON.parse(fs.readFileSync(`${root}/restart-readback/catalogs.json`)).flatMap(c=>c.rows);
  const publications=JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-publisher-jobs.json`)).value.jobs;

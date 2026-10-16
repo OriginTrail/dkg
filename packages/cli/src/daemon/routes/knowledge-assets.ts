@@ -1,3 +1,4 @@
+import { durableRecoveryDetails, partialDurableShareFailure } from './durable-share-response.js';
 import { durableSynchronousShare, durableShareFailureBody, synchronousShareSuccessBody } from './durable-synchronous-share.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { classifyKaIdentifier, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
@@ -1042,7 +1043,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
         } catch (e: any) {
           const recovery = durableShareFailureBody(e);
-          if (recovery) return jsonResponse(res, 503, { ...result, ...recovery, partial: true, failedPhase: 'swm-share' });
+          if (recovery) return jsonResponse(res, 503, partialDurableShareFailure(result, recovery, name), undefined, { 'Retry-After': '1' });
+          Object.assign(result, durableRecoveryDetails(e));
           if (respondWithPartialStoreFailure(e, 'swm-share')) return;
           errors.push({ phase: "swm-share", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
@@ -1392,15 +1394,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const recovery = durableShareFailureBody(e);
         if (recovery) return jsonResponse(res, 503, recovery, undefined, { 'Retry-After': '1' });
         if (respondIfStoreUnavailable(res, e)) return;
-        // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
-        // carries the recovery hint. Everything else (e.g. the curator-ack 503)
-        // propagates to the outer handler unchanged.
+        // A full share that cannot seal fails closed with WM preserved.
         if (e?.code === "UNSEALED_SHARE_BLOCKED") {
-          return jsonResponse(res, 409, { code: "UNSEALED_SHARE_BLOCKED", error: e.message, recovery: e.recovery });
+          return jsonResponse(res, 409, { code: "UNSEALED_SHARE_BLOCKED", error: e.message, recovery: e.recovery, ...durableRecoveryDetails(e) });
         }
         if (e?.code === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
           return jsonResponse(res, 409, {
-            code: "KA_NAMED_GRAPH_SHARE_UNSUPPORTED",
+            code: "KA_NAMED_GRAPH_SHARE_UNSUPPORTED", ...durableRecoveryDetails(e),
             error: e.message,
             namedGraphs: Array.isArray(e.namedGraphs) ? e.namedGraphs : undefined,
           });

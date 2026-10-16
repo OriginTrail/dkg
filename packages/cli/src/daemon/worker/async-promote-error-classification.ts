@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   getPromoteFailureDisposition,
+  CuratorUnconfirmedError,
   type PromoteFailureDisposition,
   type PromoteFailureClassification,
 } from '@origintrail-official/dkg-publisher';
@@ -92,7 +93,10 @@ export function safePromoteRetryCauseCode(cause: unknown): string | undefined {
  * Map a promote error to a queue disposition. Unknown errors fail closed so an
  * operator can inspect and explicitly recover them.
  */
-export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
+export function classifyPromoteError(err: unknown, options: { boundRecovery?: boolean } = {}): ClassifiedPromoteError {
+  if (options.boundRecovery && err instanceof CuratorUnconfirmedError) {
+    return { classification: 'transient', retryable: true };
+  }
   // Workflow-level replay safety is a typed producer disposition. It is more
   // authoritative than diagnostic prose inherited from the wrapped cause,
   // including incidental cap-like wording.

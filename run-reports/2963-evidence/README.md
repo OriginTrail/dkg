@@ -12,4 +12,4 @@ See the [self-contained report](../2026-10-16-2963-share-recovery.md) for interp
 - `baseline2/environment.json`, `protocol.json`, `traffic-end.json`: reproducible setup and fixed observation bounds.
 - `invalid-attempt/`: retained request denominator and correctness evidence from the readiness-invalid first attempt; excluded from the controlled performance comparison.
 
-Candidate evidence will be added after the fixed deadline. No manual repair counts as automatic recovery.
+`candidate/` contains the same complete evidence set for the first candidate at `7dfc334200bb2a716e7dc11cf25ec7a033cd9481`: 2/2 automatic recoveries, 436/436 exact catalog entries and descriptors, with higher publication latency in this pair. Both arms use the corrected whole-graph content audit. Final review-fixed runtime and actual restart evidence are still pending. No manual repair counts as automatic recovery.

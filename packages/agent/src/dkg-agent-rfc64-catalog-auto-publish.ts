@@ -1,3 +1,4 @@
+import { SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
 import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -45,7 +46,6 @@ import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
-  runPromoteCommittedFinalization,
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
 import { observeDurableSwmPromotionV1 } from './internal/durable-swm-promotion-observer.js';
@@ -178,7 +178,6 @@ function rfc64InventoryFailureDetailV1(cause: unknown): string {
 }
 
 export interface RecordRfc64SwmAuthorInventoryShadowParamsV1 {
-  readonly throwOnFailure?: boolean;
   readonly contextGraphId: string;
   readonly subGraphName?: string | null;
   readonly assertionCoordinate: string;
@@ -883,107 +882,63 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /**
-   * Observe an already-durable WM→SWM commit without participating in its outcome.
-   * Unsupported/unselected graphs are dormant; every attempted failure is
-   * counted and logged, then returned instead of crossing back into the user write.
-   */
-  async recordRfc64SwmAuthorInventoryShadowV1(
-    this: DKGAgent,
-    params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
-  ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+  /** Prepare and commit inventory with scope fencing; throws without suppressing failures. */
+  async commitRfc64SwmAuthorInventoryV1(
+    this: DKGAgent, params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
+  ): Promise<SwmInventoryWriteOutcome> {
     let kaUal: string | null = null;
+    let phase: SwmInventoryWriteFailure['phase'] = 'authority';
+    const dormant = (dormantReason: SwmInventoryWriteOutcome['dormantReason']): SwmInventoryWriteOutcome =>
+      ({ status: 'dormant', dormantReason, attempts: 0, headObjectDigest: null, kaUal });
     try {
-      if (this.resolveRfc64CatalogAuthoringLaneV1(
-        params.contextGraphId,
-        params.subGraphName,
-      ) === null) {
-        return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-          shadowResult('dormant', 'upsert', 0, null, null, 'inactive-lane'),
-          params.contextGraphId,
-          null,
-        );
-      }
-      let prepared: PreparedRfc64SwmAuthorInventoryRowV1;
-      try {
-        prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(params, { allowTerminalStale: false });
-      } catch (cause) {
-        // This phase only reads evidence. Never extend retry classification across inventory writes.
-        if (params.throwOnFailure || !isStoreSchedulerBusyError(cause) || !isStoreOperationNotStarted(cause, 'query')) throw cause;
-        return this.recordRfc64SwmAuthorInventoryShadowStatsV1({
-          ...this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause),
-          status: 'failed', action: 'upsert', failurePhase: 'preparation-read',
-        }, params.contextGraphId, null);
-      }
-      if (prepared.status === 'stale') {
-        const dormantReason = prepared.reason === 'policy-mismatch'
-          ? 'policy-mismatch'
-          : 'vm-confirmed';
-        return shadowResult('dormant', 'upsert', 0, null, null, dormantReason);
-      }
+      if (this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName) === null) return dormant('inactive-lane');
+      phase = 'preparation-read';
+      const prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(params, { allowTerminalStale: false });
+      if (prepared.status === 'stale') return dormant(prepared.reason === 'policy-mismatch' ? 'policy-mismatch' : 'vm-confirmed');
       kaUal = prepared.row.kaUal;
+      phase = 'authority';
       const persistence = this.rfc64PersistenceV1;
       if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
       const signer = this.createRfc64CatalogAuthorSignerV1(prepared.scope.authorAddress);
       const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(prepared.scope);
       const maintained = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
-        `${inventoryScopeDigest}\n${prepared.scope.authorAddress}`,
-        async () => {
-          // Authority may advance while workspace/seal evidence is loading.
-          // Re-resolve it under the exact source-scope lock so no old-generation
-          // writer can commit after promotion has taken its stable snapshot.
-          const currentLane = this.resolveRfc64CatalogAuthoringLaneV1(
-            params.contextGraphId,
-            params.subGraphName,
-          );
-          if (
-            currentLane === null
-            || currentLane.kind !== prepared.laneKind
-          ) throw new Rfc64SwmInventoryAuthorityTransitionV1();
-          const currentScope = Object.freeze({
-            ...currentLane.scopeBase,
-            authorAddress: prepared.scope.authorAddress,
-          }) as SwmAuthorInventoryScopeV1;
-          if (
-            computeSwmAuthorInventoryScopeDigestV1(currentScope)
-            !== inventoryScopeDigest
-          ) throw new Rfc64SwmInventoryAuthorityTransitionV1();
-          const commit = () => maintainRfc64SwmAuthorInventoryV1(
-            persistence.swmAuthorInventory,
-            {
-              scope: currentScope,
-              row: prepared.row,
-              issuedAt: prepared.issuedAt,
-              signer: Object.freeze({
-                issuer: signer.address as EvmAddressV1,
-                signDigest: signer.signMessage,
-              }),
-            },
-          );
-          return params.throwOnFailure ? runPromoteCommittedFinalization(commit) : commit();
-        },
-      );
-      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-        shadowResult(
-          maintained.status,
-          'upsert',
-          maintained.attempts,
-          maintained.snapshot.head.objectDigest,
-          null,
-        ),
-        params.contextGraphId,
-        kaUal,
-      );
+        `${inventoryScopeDigest}\n${prepared.scope.authorAddress}`, async () => {
+          // Recheck authority under the source-scope lock, before the CAS phase.
+          const currentLane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName);
+          if (currentLane === null || currentLane.kind !== prepared.laneKind) throw new Rfc64SwmInventoryAuthorityTransitionV1();
+          const currentScope = Object.freeze({ ...currentLane.scopeBase, authorAddress: prepared.scope.authorAddress }) as SwmAuthorInventoryScopeV1;
+          if (computeSwmAuthorInventoryScopeDigestV1(currentScope) !== inventoryScopeDigest) throw new Rfc64SwmInventoryAuthorityTransitionV1();
+          phase = 'inventory-commit';
+          return maintainRfc64SwmAuthorInventoryV1(persistence.swmAuthorInventory, {
+            scope: currentScope, row: prepared.row, issuedAt: prepared.issuedAt,
+            signer: Object.freeze({ issuer: signer.address as EvmAddressV1, signDigest: signer.signMessage }),
+          });
+        });
+      return { status: maintained.status, attempts: maintained.attempts,
+        headObjectDigest: maintained.snapshot.head.objectDigest, kaUal };
     } catch (cause) {
-      if (params.throwOnFailure && !(cause instanceof Rfc64SwmInventoryAuthorityTransitionV1)) throw cause;
-      if (cause instanceof Rfc64SwmInventoryAuthorityTransitionV1) {
-        return shadowResult('dormant', 'upsert', 0, null, null, 'authority-transition');
-      }
+      if (cause instanceof Rfc64SwmInventoryAuthorityTransitionV1) return dormant('authority-transition');
+      throw new SwmInventoryWriteFailure(phase, kaUal, cause);
+    }
+  }
+
+  /** Best-effort observation wraps the throwing domain write; never owns share completion. */
+  async recordRfc64SwmAuthorInventoryShadowV1(
+    this: DKGAgent, params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
+  ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+    try {
+      const result = await this.commitRfc64SwmAuthorInventoryV1(params);
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-        this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause),
-        params.contextGraphId,
-        kaUal,
-      );
+        shadowResult(result.status, 'upsert', result.attempts, result.headObjectDigest, null, result.dormantReason),
+        params.contextGraphId, result.kaUal);
+    } catch (error) {
+      const cause = error instanceof SwmInventoryWriteFailure ? error.cause : error;
+      const failed = this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause);
+      const preparationRejected = error instanceof SwmInventoryWriteFailure && error.phase === 'preparation-read'
+        && isStoreSchedulerBusyError(cause) && isStoreOperationNotStarted(cause, 'query');
+      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        preparationRejected ? { ...failed, status: 'failed', action: 'upsert', failurePhase: 'preparation-read' } : failed,
+        params.contextGraphId, error instanceof SwmInventoryWriteFailure ? error.kaUal : null);
     }
   }
 

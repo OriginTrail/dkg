@@ -382,7 +382,7 @@ export async function runPromoteJob(
       result = await runPromote(job.request, markPromoteStarted);
     } catch (err: unknown) {
       throwIfShutdownInterrupted();
-      const classified = classifyPromoteError(err);
+      const classified = classifyPromoteError(err, { boundRecovery: job.request.recoveryBinding !== undefined });
       const message = err instanceof Error ? err.message : String(err);
       logPromoteAttemptFailure({
         job,

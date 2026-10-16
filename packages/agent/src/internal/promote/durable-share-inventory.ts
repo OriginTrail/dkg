@@ -1,3 +1,4 @@
+import { SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from '../swm-inventory-write.js';
 import type { ContextGraphIdV1, EvmAddressV1 } from '@origintrail-official/dkg-core';
 import { createPromoteRetryableFailure, runPromoteCommittedFinalization } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
@@ -6,9 +7,15 @@ import type { AfterDurableSwmPromotionParamsV1 } from '../../dkg-agent-rfc64-cat
 /** Queue completion transfers ownership to durable inventory, not a detached callback. */
 export async function commitDurableShareInventory(agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1): Promise<void> {
   if (!params.shareOperationId) throw new Error('A durable SWM handoff requires the original operation ID');
-  const result = await agent.recordRfc64SwmAuthorInventoryShadowV1({
-    ...params, shareOperationId: params.shareOperationId, throwOnFailure: true,
-  });
+  let result: SwmInventoryWriteOutcome;
+  try { result = await agent.commitRfc64SwmAuthorInventoryV1({ ...params, shareOperationId: params.shareOperationId }); }
+  catch (error) {
+    if (!(error instanceof SwmInventoryWriteFailure)) throw error;
+    // Only the replay-safe inventory CAS is a committed finalization boundary.
+    // Authority and preparation-read errors retain their original classification.
+    if (error.phase === 'inventory-commit') await runPromoteCommittedFinalization(async () => { throw error.cause; });
+    throw error.cause;
+  }
   if (result.status === 'dormant' && result.dormantReason === 'policy-mismatch') {
     throw Object.assign(new Error('Catalog policy no longer matches the admitted share'),
       { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });

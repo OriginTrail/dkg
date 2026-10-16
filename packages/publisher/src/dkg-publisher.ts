@@ -37,6 +37,7 @@ import {
 } from './promote-replay-safety.js';
 import { finalizeCommittedAssertionPromote } from './assertion-promote-finalization.js';
 import {
+  createShareOperationId,
   createPromoteOperationIntent,
   parsePromoteOperationIntent,
   serializePromoteOperationIntent,
@@ -8400,13 +8401,17 @@ export class DKGPublisher implements Publisher {
   ): Promise<PromoteRecoveryAdmission> {
     return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, opts?.subGraphName,
       () => preparePromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts, inventoryRequired,
-        (seal, operationId) => verifyCompletedLegacyPromote({
-          store: this.store, privateStore: this.privateStore,
-          scopedQuads: graph => this.assertionScopedQuads(graph),
-          hasMarker: () => this.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName),
-          hasTail: scope => this.hasDurableAssertionPromoteTail(contextGraphId, operationId, scope.ual, scope.assertionVersion, opts?.subGraphName),
-          validatePayload: (publicQuads, privateQuads) => validateGraphScopedPayloadAgainstSeal(seal, publicQuads, privateQuads, 'shared-memory'),
-        }, contextGraphId, name, agentAddress, seal, opts?.subGraphName)));
+        (seal, operationId) => this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName, operationId)));
+  }
+
+  private verifyCompletedAssertionPromote(contextGraphId: string, name: string, agentAddress: string,
+    seal: AssertionSeal, subGraphName?: string, operationId?: string): Promise<AssertionPromoteResult | null> {
+    return verifyCompletedLegacyPromote({ store: this.store, privateStore: this.privateStore,
+      scopedQuads: graph => this.assertionScopedQuads(graph),
+      hasMarker: () => this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName),
+      hasTail: (scope, id) => this.hasDurableAssertionPromoteTail(contextGraphId, id, scope.ual, scope.assertionVersion, subGraphName),
+      validatePayload: (publicQuads, privateQuads) => validateGraphScopedPayloadAgainstSeal(seal, publicQuads, privateQuads, 'completed-memory'),
+    }, contextGraphId, name, agentAddress, seal, subGraphName, operationId);
   }
 
   async assertionPromote(
@@ -8431,7 +8436,8 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     opts?: PublisherAssertionPromoteOptions,
   ): Promise<AssertionPromoteResult> {
-    if (opts?.recoveryBinding) await assertPromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts);
+    const boundEvidence = opts?.recoveryBinding
+      ? await assertPromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts) : undefined;
     // #1464 (PR1, diagnostic) — every awaited op below runs BEFORE the
     // `store.insert(swmQuads)` that actually lands the root in SWM. A masked
     // rejection here (typically a sparql-http read hitting the 30s
@@ -8463,14 +8469,13 @@ export class DKGPublisher implements Publisher {
       opts?.subGraphName,
     );
     const promoteMetaGraph = contextGraphMetaUri(contextGraphId);
-    const sealResult = await this.store.query(
+    const sealResult = boundEvidence ? undefined : await this.store.query(
       `CONSTRUCT { <${assertSafeIri(sealSubject)}> ?p ?o } WHERE {
         GRAPH <${assertSafeIri(promoteMetaGraph)}> { <${assertSafeIri(sealSubject)}> ?p ?o }
       }`,
     );
-    const seal = parseAssertionSealQuads(
-      sealResult.type === 'quads' ? sealResult.quads : [],
-      sealSubject,
+    const seal = boundEvidence?.seal ?? parseAssertionSealQuads(
+      sealResult?.type === 'quads' ? sealResult.quads : [], sealSubject,
     );
     if (!seal) {
       throw Object.assign(
@@ -8510,12 +8515,7 @@ export class DKGPublisher implements Publisher {
       contentScope,
       opts?.subGraphName,
     );
-    const vmGraphUri = knowledgeAssetLayerGraphUri(
-      contextGraphId,
-      MemoryLayer.VerifiableMemory,
-      contentScope,
-      opts?.subGraphName,
-    );
+
 
     // #1116 (round 10) — the swmShareComplete marker MUST be maintained on EVERY
     // return path of assertionPromote, not just the success tail. A non-full share
@@ -8558,7 +8558,9 @@ export class DKGPublisher implements Publisher {
     // validated and any stale completion marker cleared before operation
     // metadata is parsed: corrupt IDs/intents must never leave a publishable
     // marker exposed.
-    const layerResult = await this.store.query(
+    const layerResult = boundEvidence
+      ? { type: 'bindings' as const, bindings: boundEvidence.layer ? [{ layer: JSON.stringify(boundEvidence.layer) }] : [] }
+      : await this.store.query(
       `SELECT ?layer WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
         <${assertSafeIri(lifecycleSubject)}> <http://dkg.io/ontology/memoryLayer> ?layer
       } } LIMIT 2`,
@@ -8600,18 +8602,8 @@ export class DKGPublisher implements Publisher {
       // left stale WM behind. Never re-promote that copy or regress VM lifecycle.
       // A sanctioned reopened draft has a new WM lifecycle/seal instead.
       // Validate the exact VM payload before accepting the stale retry as a no-op.
-      const existingVmQuads = (await this.assertionScopedQuads(vmGraphUri)).filter(
-        (quad) => !isReservedSubject(quad.subject) && !isTrustLevelQuad(quad),
-      );
-      const existingPrivateQuads = immutablePrivateQuads.filter(
-        (quad) => !isReservedSubject(quad.subject) && !isTrustLevelQuad(quad),
-      );
-      await validateGraphScopedPayloadAgainstSeal(
-        seal,
-        existingVmQuads,
-        existingPrivateQuads,
-        'verifiable-memory',
-      );
+      const completed = await this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName);
+      if (!completed) throw new Error('Cannot verify completed VM promotion');
       // A legacy marker-before-cleanup promotion may leave this exact WM
       // family behind after publish. VM has just been seal-verified, so retire
       // only that stale copy under the lifecycle lock before reporting success.
@@ -8682,7 +8674,12 @@ export class DKGPublisher implements Publisher {
     // Keep the operation cardinality checks separate and bounded. Combining
     // OPTIONALs creates a Cartesian product on corrupt rows — precisely the
     // sort of recovery path that should not double as an accidental OOM test.
-    const [operationIdResult, promoteIntentResult] = await Promise.all([
+    const [operationIdResult, promoteIntentResult] = boundEvidence ? [
+      { type: 'bindings' as const, bindings: boundEvidence.operation.kind === 'complete'
+        ? [{ shareOperationId: JSON.stringify(boundEvidence.operation.intent.operationId) }] : [] },
+      { type: 'bindings' as const, bindings: boundEvidence.operation.kind === 'complete'
+        ? [{ promoteIntent: JSON.stringify(serializePromoteOperationIntent(boundEvidence.operation.intent)) }] : [] },
+    ] : await Promise.all([
       this.store.query(
         `SELECT ?shareOperationId WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
           <${assertSafeIri(lifecycleSubject)}> <${SHARE_OPERATION_ID_PRED}> ?shareOperationId
@@ -8711,21 +8708,10 @@ export class DKGPublisher implements Publisher {
           await maintainMarker(false);
           throw error;
         }
-        if (
-          legacyOperationId
-          && await this.hasDurableAssertionPromoteTail(
-            contextGraphId,
-            legacyOperationId,
-            contentScope.ual,
-            contentScope.assertionVersion,
-            opts?.subGraphName,
-          )
-        ) {
-          return {
-            promotedCount: 0,
-            promotedAllRoots: false,
-            shareOperationId: legacyOperationId,
-          };
+        if (legacyOperationId) {
+          const completed = await this.verifyCompletedAssertionPromote(
+            contextGraphId, name, agentAddress, seal, opts?.subGraphName, legacyOperationId);
+          if (completed) return completed;
         }
       }
       // The shape was not a complete legacy commit. Remove the stale marker
@@ -8893,7 +8879,7 @@ export class DKGPublisher implements Publisher {
 
     const operationId = durableShareOperationId
       ?? opts?.recoveryBinding?.intent.operationId
-      ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      ?? createShareOperationId();
 
     // Canonicalize both partitions together so blank-node labels stay stable
     // across the public/private boundary and validate the complete sealed KA.

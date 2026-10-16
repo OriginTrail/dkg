@@ -1,3 +1,4 @@
+import { durableRecoveryDetails } from './durable-share-response.js';
 import { respondPromoteRecoveryError, type PromoteRecoveryContext } from './promote-recovery-response.js';
 export { respondPromoteRecoveryError } from './promote-recovery-response.js';
 import type { RequestContext } from './context.js';
@@ -54,6 +55,7 @@ export function respondAuthorSelectionError(res: RequestContext["res"], e: any):
     return false;
   }
   jsonResponse(res, 409, {
+    ...durableRecoveryDetails(e),
     code: e.code,
     error: e.message ?? String(e),
     ...(e.candidates ? { candidates: e.candidates } : {}),
@@ -64,6 +66,7 @@ export function respondAuthorSelectionError(res: RequestContext["res"], e: any):
 export function respondPublicationPricingPolicyError(res: RequestContext["res"], e: any): boolean {
   if (e?.code !== PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE) return false;
   jsonResponse(res, 409, {
+    ...durableRecoveryDetails(e),
     code: e.code,
     error: e.message ?? String(e),
   });
@@ -83,7 +86,7 @@ const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
 export function respondAssertionCodeError(res: RequestContext["res"], e: any): boolean {
   const status = ASSERTION_CODE_STATUS.get(e?.code);
   if (status === undefined) return false;
-  jsonResponse(res, status, { error: e.message, code: e.code });
+  jsonResponse(res, status, { error: e.message, code: e.code, ...durableRecoveryDetails(e) });
   return true;
 }
 
@@ -94,16 +97,17 @@ export function respondAssertionCodeError(res: RequestContext["res"], e: any): b
 export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   if (respondPromoteRecoveryError(res, e, context)) return;
   if (e?.code === "OVERSIZED_RDF_LITERAL") {
-    jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
+    jsonResponse(res, 400, { ...oversizedRdfLiteralResponseBody(e), ...durableRecoveryDetails(e) });
     return;
   }
   if (isPayloadTooLargeError(e)) {
-    jsonResponse(res, 413, payloadTooLargeResponseBody(e));
+    jsonResponse(res, 413, { ...payloadTooLargeResponseBody(e), ...durableRecoveryDetails(e) });
     return;
   }
   if (respondIfStoreUnavailable(res, e)) return;
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
     jsonResponse(res, 409, {
+      ...durableRecoveryDetails(e),
       error: e.message,
       code: "ASSERTION_NOT_PERSISTED",
       contextGraphId: e.contextGraphId,
@@ -118,6 +122,7 @@ export function respondAssertionError(res: RequestContext["res"], e: any, contex
   // status instead of a 500. The client is TOLD, never silently led to success.
   if (e?.code === "CURATOR_UNCONFIRMED") {
     jsonResponse(res, 503, {
+      ...durableRecoveryDetails(e),
       error: e.message,
       code: "CURATOR_UNCONFIRMED",
       curatorDelivery: "unconfirmed",
@@ -127,6 +132,7 @@ export function respondAssertionError(res: RequestContext["res"], e: any, contex
   }
   if (e?.code === "CURATOR_REJECTED") {
     jsonResponse(res, 409, {
+      ...durableRecoveryDetails(e),
       error: e.message,
       code: "CURATOR_REJECTED",
       curatorDelivery: "rejected",
@@ -153,8 +159,8 @@ export function respondAssertionError(res: RequestContext["res"], e: any, contex
     msg.includes("Unsafe") ||
     msg.includes("reserved namespace")
   ) {
-    jsonResponse(res, 400, { error: msg });
+    jsonResponse(res, 400, { error: msg, ...durableRecoveryDetails(e) });
     return;
   }
-  jsonResponse(res, 500, { error: msg });
+  jsonResponse(res, 500, { error: msg, ...durableRecoveryDetails(e) });
 }
