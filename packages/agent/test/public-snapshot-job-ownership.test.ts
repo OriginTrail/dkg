@@ -13,13 +13,16 @@ import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
+import { sealPublicGraphSnapshot, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGAgent } from '../src/dkg-agent.js';
+import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
 import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 
 const graph = 'snapshot-ownership';
 const request = { contextGraphId: graph, onChainId: '1', trustedCorePeerIds: ['core'] };
 function snapshot(extra = false) {
-  return sealPublicGraphSnapshot({ version: 1, chainId: 'evm:31337', deploymentId: 'test', contextGraphId: graph, onChainId: '1', nameHash: ethers.id(graph), contextGraphStorage: `0x${'1'.repeat(40)}`, assetStorage: `0x${'2'.repeat(40)}`, blockNumber: '10', blockHash: `0x${'a'.repeat(64)}`, finalityConfirmations: 1, observedAt: Date.now(), expiresAt: Date.now() + 120000, accessPolicy: 0, assets: extra ? [{id:'1',root:`0x${'b'.repeat(64)}`,version:'1'}] : [] });
+  const now = Date.now();
+  return sealPublicGraphSnapshot({ version: 1, chainId: 'evm:31337', deploymentId: 'test', contextGraphId: graph, onChainId: '1', nameHash: ethers.id(graph), contextGraphStorage: `0x${'1'.repeat(40)}`, assetStorage: `0x${'2'.repeat(40)}`, blockNumber: '10', blockHash: `0x${'a'.repeat(64)}`, finalityConfirmations: 1, observedAt: now, expiresAt: now + 120000, accessPolicy: 0, assets: extra ? [{id:'1',root:`0x${'b'.repeat(64)}`,version:'1'}] : [] });
 }
 function fixture() {
   let generation = 0;
@@ -27,17 +30,71 @@ function fixture() {
     started: true, vmReconcileRotationClosed: false, workLifetime: new AgentWorkLifetime(),
 
     subscribedContextGraphs: new Map(),
+    getSubscribedContextGraphs: () => a.subscribedContextGraphs,
     contextGraphBindingState: { capture: () => generation, isGenerationCurrent: (_: string, g: number) => g === generation },
     chain: { chainId: 'evm:31337', deploymentId: 'test', readPublicGraphSnapshot: vi.fn(async () => snapshot()) },
     store: { insert: vi.fn(async () => {}) },
     router: { send: vi.fn(async () => Buffer.from(JSON.stringify(snapshot()))) },
-    syncExactKnowledgeAssetsFromPeerDetailed: vi.fn(),
-    subscribeToContextGraph: vi.fn(() => { generation++; a.subscribedContextGraphs.set(graph, { subscribed: true, onChainId: '1' }); }),
+    recoverSnapshotExactAssets: vi.spyOn(exactRecovery, 'runExactRecovery'),
+    persistContextGraphSubscriptionState: vi.fn(async () => {}),
+    subscribeToContextGraph: vi.fn((_id: string, binding: object) => { generation++; a.subscribedContextGraphs.set(graph, { subscribed: true, ...binding }); }),
+    bindSubscriptionOnChainId: (_id: string, row: any, id: string) => { row.onChainId = id; },
+    setContextGraphSubscription: vi.fn((id: string, row: object) => { a.subscribedContextGraphs.set(id, row); return row; }),
   };
   return { a, invalidate: () => { generation++; a.subscribedContextGraphs.delete(graph); } };
 }
 const run = (a: any, mode: 'core-cache' | 'rpc-only') => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode});
 describe('public snapshot job ownership', () => {
+  it.each(['always-on', 'on-demand', 'core-hosted', 'inactive-core-hosted'] as const)('saves the complete binding according to %s intent after an empty job', async intent => {
+    const saved = new Map<string, ContextGraphSubscriptionRecord>();
+    const persistence = {
+      loadAll: async () => [...saved.values()],
+      save: async (row: ContextGraphSubscriptionRecord) => { saved.set(row.id, {...row}); },
+      delete: async (id: string) => { saved.delete(id); },
+    };
+    const chain = new MockChainAdapter();
+    Object.defineProperties(chain, { chainId: {value:'evm:31337'}, deploymentId: {value:'test'} });
+    Object.assign(chain, { readPublicGraphSnapshot: async () => snapshot() });
+    const create = () => DKGAgent.create({ name:'snapshot-persist-test', listenHost:'127.0.0.1', listenPort:0,
+      chainAdapter:chain, contextGraphSubscriptionStore:persistence, randomSamplingUseWorkerThread:false,
+      syncOnConnectEnabled:false, syncReconcilerEnabled:false, vmReconcilerEnabled:false });
+    const agent = await create();
+    try {
+      await agent.start();
+      agent.setContextGraphSubscription(graph, { subscribed:intent !== 'inactive-core-hosted', synced:false,
+        syncMode:intent === 'always-on' ? 'always-on' : 'on-demand', coreHosted:intent.endsWith('core-hosted') }, {persist:false});
+      const transition = vi.spyOn(agent, 'setContextGraphSubscription');
+      const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+      await expect(run(agent,'rpc-only')).resolves.toMatchObject({assets:0,current:true});
+      expect(transition.mock.calls.filter(([id]) => id === graph)).toHaveLength(1);
+      if (intent !== 'inactive-core-hosted') expect(subscribe).not.toHaveBeenCalled();
+      expect((agent as any).subscribedContextGraphs.get(graph)).toMatchObject({onChainId:'1',onChainHash:ethers.id(graph)});
+      if (intent.endsWith('core-hosted')) expect((agent as any).subscribedContextGraphs.get(graph))
+        .toMatchObject({subscribed:true,syncMode:'on-demand',coreHosted:true});
+      // An enqueued barrier drains the real persistence lane, including its freshness guard.
+      await (agent as any).enqueueContextGraphSubscriptionPersistWrite(graph, async () => {});
+      if(intent === 'on-demand') expect(saved.has(graph)).toBe(false);
+      else expect(saved.get(graph)).toMatchObject({id:graph,onChainId:'1',onChainHash:ethers.id(graph),
+        ...(intent.endsWith('core-hosted') ? {coreHosted:true,subscribed:false} : {subscribed:true})});
+    } finally { await agent.stop(); }
+    const restarted = await create();
+    try {
+      await restarted.start();
+      const restored = (restarted as any).subscribedContextGraphs.get(graph);
+      if(intent === 'on-demand') expect(restored).toBeUndefined();
+      // Startup retains the binding; fresh authority separately controls activation.
+      else expect(restored).toMatchObject({onChainId:'1',onChainHash:ethers.id(graph),syncMode:'always-on'});
+      if(intent.endsWith('core-hosted')) expect(saved.get(graph)?.coreHosted).toBe(true);
+    } finally { await restarted.stop(); }
+  });
+
+  it('does not overwrite a conflicting existing name binding', async () => {
+    const { a } = fixture();
+    a.subscribedContextGraphs.set(graph, { subscribed: true, onChainId: '1', onChainHash: ethers.id('different-graph') });
+    await expect(run(a, 'rpc-only')).rejects.toThrow('Graph name binding differs');
+    expect(a.setContextGraphSubscription).not.toHaveBeenCalled();
+    expect(a.recoverSnapshotExactAssets).not.toHaveBeenCalled();
+  });
   it.each(['expired', 'graph', 'on-chain-id', 'chain', 'deployment'] as const)(
     'rejects %s evidence from every core without RPC fallback or import side effects', async invalid => {
       const { a } = fixture();
@@ -63,7 +120,7 @@ describe('public snapshot job ownership', () => {
       }
       expect(a.chain.readPublicGraphSnapshot).not.toHaveBeenCalled();
       expect(recover).not.toHaveBeenCalled();
-      expect(a.syncExactKnowledgeAssetsFromPeerDetailed).not.toHaveBeenCalled();
+      expect(a.recoverSnapshotExactAssets).not.toHaveBeenCalled();
       expect(a.subscribeToContextGraph).not.toHaveBeenCalled();
       expect(a.store.insert).not.toHaveBeenCalled();
       expect(a.subscribedContextGraphs.size).toBe(0);
@@ -115,7 +172,7 @@ describe('public snapshot job ownership', () => {
     else { a.workLifetime.close(); a.workLifetime.open(); }
     release(snapshot()); await rejected;
     expect(a.subscribeToContextGraph).not.toHaveBeenCalled(); expect(a.store.insert).not.toHaveBeenCalled();
-    expect(a.syncExactKnowledgeAssetsFromPeerDetailed).not.toHaveBeenCalled(); expect(a.workLifetime.physicalRuns.size).toBe(0);
+    expect(a.recoverSnapshotExactAssets).not.toHaveBeenCalled(); expect(a.workLifetime.physicalRuns.size).toBe(0);
   });
   it.each(['core-cache', 'rpc-only'] as const)('keeps completed snapshot separate from changed current coverage in %s mode', async mode => {
     const {a} = fixture();

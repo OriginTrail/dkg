@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
 import { createUalOnlyExactAssetSelection } from './sync/exact-assets.js';
 import { exactAssetFetchSessionPolicy } from './sync/requester/exact-durable-fetch.js';
 import * as exactRecovery from './exact-recovery-execution.js';
@@ -113,17 +114,14 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           const initial = await read();
           const snapshot = initial.snapshot;
           assertCurrent();
+          if (subscription?.onChainHash && subscription.onChainHash.toLowerCase() !== snapshot.nameHash.toLowerCase())
+            throw new Error("Graph name binding differs from requested snapshot");
           const evidence = new PublicSnapshotEvidence(initial, isCurrent);
           // A validated public snapshot admits this job without scheduling the
           // daemon's separate legacy subscribe/catch-up pipeline.
-          if (!subscription?.subscribed || !subscription.onChainId) {
-            control.admitSubscription(() => this.subscribeToContextGraph(contextGraphId, {
-              onChainId,
-              syncMode: "on-demand",
-              trackSyncScope: false,
-              deferSharedMemoryGossipSubscribe: true,
-            }));
-          }
+          control.admitSubscription(() => {
+            admitAuthenticatedContextGraphSubscription(this, contextGraphId, { onChainId, onChainHash: snapshot.nameHash });
+          });
           assertCurrent();
           if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
           assertCurrent();
