@@ -17,6 +17,7 @@ let before: string;
 beforeEach(async () => { vi.stubEnv('DKG_PUBLIC_SNAPSHOT_BULK', '0'); before = await takeSnapshot(); });
 beforeAll(() => { vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1'); });
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const f of fixtures.splice(0).reverse()) await f.dispose();
   await revertSnapshot(before);
 });
