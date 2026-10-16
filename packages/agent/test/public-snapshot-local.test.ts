@@ -1,3 +1,4 @@
+import { observeOutboundBulkFrames } from './helpers/observe-bulk-graph-frames.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
@@ -5,7 +6,7 @@ import * as exactRecovery from '../src/exact-recovery-execution.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { BULK_GRAPH_KIND, BULK_GRAPH_PROTOCOL } from '@origintrail-official/dkg-core';
+import { BULK_GRAPH_KIND } from '@origintrail-official/dkg-core';
 import { performance } from 'node:perf_hooks';
 import { normalizePublicGraphSnapshot, EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -263,15 +264,9 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       await replace(...args);
     });
     const commits: number[] = [];
-    const exchange = receiver.router.withDuplexStream.bind(receiver.router);
-    vi.spyOn(receiver.router, 'withDuplexStream').mockImplementation((peer, protocol, options, consume) =>
-      exchange(peer, protocol, options, (stream, signal) => {
-        if (protocol === BULK_GRAPH_PROTOCOL) {
-          const send = stream.send.bind(stream);
-          stream.send = bytes => { const data = bytes.subarray(); if (data[4] === BULK_GRAPH_KIND.COMMIT) commits.push(data[4]); return send(bytes); };
-        }
-        return consume(stream, signal);
-      }));
+    observeOutboundBulkFrames(receiver.router, frame => {
+      if (frame.kind === BULK_GRAPH_KIND.COMMIT) commits.push(frame.kind);
+    });
     let settled = false;
     const pending = receiver.syncPublicGraphSnapshot({ transport: 'bulk', contextGraphId: graph,
       onChainId: f.onChainId, trustedCorePeerIds: [core.peerId] })
