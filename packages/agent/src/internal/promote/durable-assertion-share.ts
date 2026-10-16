@@ -1,6 +1,7 @@
+import { SwmCatalogAuthorityNotReady } from '../swm-inventory-write.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
-import { validatePromoteRecoveryBinding } from '@origintrail-official/dkg-publisher';
+import { createPromoteRetryableFailure, validatePromoteRecoveryBinding } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 import { prepareAssertionPromote } from './assertion-promote-precommit.js';
@@ -66,11 +67,9 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
   const { publisherOptions } = await prepareAssertionPromote(agent, {
     contextGraphId, publisherPeerId: agent.node.peerId.toString(), options: opts,
   });
-  const authority = agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-  // Deliberate legacy/system/kill-switch admission does not owe catalog work.
-  // Temporary inactivity is not an exemption, and a later switch cannot erase
-  // the immutable obligation already captured by a bound job.
-  const inventoryRequired = !opts?.subGraphName && authority.mode !== 'legacy' && !authority.killSwitchActive;
+  let inventoryRequired: boolean;
+  try { inventoryRequired = agent.requiresRfc64ShareInventoryV1(contextGraphId, opts?.subGraphName); }
+  catch (cause) { if (cause instanceof SwmCatalogAuthorityNotReady) throw createPromoteRetryableFailure(cause); throw cause; }
   const recoveryBinding = await agent.publisher.prepareAssertionPromoteRecovery(
     contextGraphId, name, storageLane, publisherOptions, inventoryRequired);
   if ('completedResult' in recoveryBinding) {
@@ -146,16 +145,15 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
       subGraphName: opts?.subGraphName,
       assertionCoordinate: name,
       lifecycleAgentAddress: promoteAgentAddress,
-      shareOperationId: shareOperationId ?? null,
       ctx: createOperationContext('share'),
-      durableInventory: opts?.recoveryBinding?.inventoryRequired,
-      recoveryBinding: opts?.recoveryBinding,
+      ...(opts?.recoveryBinding ? { recoveryBinding: opts.recoveryBinding }
+        : { shareOperationId: shareOperationId ?? null }),
     });
   }
   if (!promotedAllRoots && opts?.recoveryBinding?.inventoryRequired) {
     await commitConfirmedDurableShareInventory(agent, {
       contextGraphId, subGraphName: opts.subGraphName, assertionCoordinate: name,
-      lifecycleAgentAddress: promoteAgentAddress, shareOperationId: opts.recoveryBinding.intent.operationId,
+      lifecycleAgentAddress: promoteAgentAddress,
       recoveryBinding: opts.recoveryBinding, ctx: createOperationContext('share'),
     });
   }

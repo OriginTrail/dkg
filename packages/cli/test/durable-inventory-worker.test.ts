@@ -37,7 +37,7 @@ describe('bound worker owns the real inventory CAS', () => {
     } };
     const run = (claimed: typeof job, workerId: string) => runPromoteJob({ job: claimed, queue, workerId,
       now: Date.now, heartbeatIntervalMs: 60_000, log: () => undefined,
-      runPromote: async (_request, markStarted) => { await markStarted(); await commitDurableShareInventory(agent, params); return { promotedCount: 0 }; },
+      runPromote: async (_request, markStarted) => { await markStarted(); await commitDurableShareInventory(agent, { ...params, recoveryBinding: binding }); return { promotedCount: 0 }; },
     });
     expect((await run(job, 'first')).outcome).toBe('failed_retrying');
     expect((await queue.getStatus(job.jobId))?.attempt.lastError).toMatchObject({ diagnosticCode: policy ? 'PROMOTE_RETRYABLE_FAILURE' : 'PROMOTE_POST_COMMIT_FAILURE', retryable: true });
@@ -49,7 +49,7 @@ describe('bound worker owns the real inventory CAS', () => {
     const assertion = agent.assertion;
     vi.spyOn(agent, 'assertion', 'get').mockReturnValue({ ...assertion, promote: async (_cg, _name, options) => {
       expect(options?.recoveryBinding).toEqual(binding);
-      await commitDurableShareInventory(agent, params);
+      await commitDurableShareInventory(agent, { ...params, recoveryBinding: binding });
       return { promotedCount: 0, sealed: true, publishReady: true, shareOperationId: seeded.shareOperationId };
     } });
     const supervisor = createPromoteWorkerSupervisor({ agent, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
@@ -93,7 +93,7 @@ describe('bound worker owns the real inventory CAS', () => {
       const result = await runPromoteJob({ job, queue, workerId: 'original', now: Date.now, heartbeatIntervalMs: 60_000, log: () => undefined,
         runPromote: async (_request, started) => { await started(); await commitDurableShareInventory(agent, {
           contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: next.assertionCoordinate,
-          lifecycleAgentAddress: AUTHOR, shareOperationId: next.shareOperationId, recoveryBinding: binding, ctx: createOperationContext('share'),
+          lifecycleAgentAddress: AUTHOR, recoveryBinding: binding, ctx: createOperationContext('share'),
         }); return { promotedCount: 0 }; } });
       expect(result).toMatchObject({ outcome: 'failed_terminal', cause: { code: 'swm-inventory-producer-history' } });
       expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
@@ -118,7 +118,11 @@ describe('bound worker owns the real inventory CAS', () => {
     });
     const params = { contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seeded.assertionCoordinate,
       lifecycleAgentAddress: AUTHOR, shareOperationId: seeded.shareOperationId, ctx: createOperationContext('share') };
-    const handoff = commitDurableShareInventory(agent, params);
+    const binding = { version: 1 as const, inventoryRequired: true,
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seeded.seal)),
+      intent: { version: 1 as const, operationId: seeded.shareOperationId, timestampMs: 1,
+        confirmationRequired: false, accessPolicy: 'public' as const, allowedPeers: [] } };
+    const handoff = commitDurableShareInventory(agent, { ...params, recoveryBinding: binding });
     await paused;
     const runtime = rfc64SwmInventoryShadowRuntimeV1(agent);
     const handoffTracked = runtime.hasInventoryWrites({ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR });

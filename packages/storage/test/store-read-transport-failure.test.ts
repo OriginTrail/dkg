@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { authorCommitInput } from './rfc64-author-commit-cas-harness.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
-import { StoreReadTransportFailure } from '../src/store-read-transport-failure.js';
+import { isStoreReadTransportFailure } from '../src/store-read-transport-failure.js';
 
 afterEach(() => vi.unstubAllGlobals());
 describe.each(['blazegraph', 'sparql-http'])('%s read transport classification', backend => {
@@ -20,7 +20,7 @@ describe.each(['blazegraph', 'sparql-http'])('%s read transport classification',
     const store = create();
     try {
       const failure = await store.query('SELECT ?s WHERE { ?s ?p ?o }').catch(e => e);
-      expect(failure instanceof StoreReadTransportFailure).toBe(status === 503 || status === 429);
+      expect(isStoreReadTransportFailure(failure)).toBe(status === 503 || status === 429);
     } finally { await store.close(); }
   });
   it('keeps malformed read evidence outside automatic transport recovery', async () => {
@@ -28,19 +28,22 @@ describe.each(['blazegraph', 'sparql-http'])('%s read transport classification',
       headers: { 'content-type': 'application/sparql-results+json' },
     })));
     const store = create();
-    try { await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.not.toBeInstanceOf(StoreReadTransportFailure); }
+    try { expect(isStoreReadTransportFailure(await store.query('SELECT ?s WHERE { ?s ?p ?o }').catch(e => e))).toBe(false); }
     finally { await store.close(); }
   });
-  it('does not grant read-only retry safety to a receipt failure after a mutation', async () => {
+  it.each(['transport', 'http-503'])('does not grant read-only retry safety to a %s receipt failure after a mutation', async kind => {
     let requests = 0;
     vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
       requests++;
-      if (String(init?.body).includes('ASK')) throw new TypeError('fetch failed');
+      if (String(init?.body).includes('ASK')) {
+        if (kind === 'http-503') return new Response('unavailable', { status: 503 });
+        throw new TypeError('fetch failed');
+      }
       return new Response(null, { status: 200 });
     }));
     const store = create();
     try {
-      await expect(store.rfc64AuthorCommitCasV1(authorCommitInput())).rejects.not.toBeInstanceOf(StoreReadTransportFailure);
+      expect(isStoreReadTransportFailure(await store.rfc64AuthorCommitCasV1(authorCommitInput()).catch(e => e))).toBe(false);
       expect(requests).toBe(3); // Update, failed receipt, best-effort cleanup.
     } finally { await store.close(); }
   });
@@ -50,7 +53,7 @@ describe.each(['blazegraph', 'sparql-http'])('%s read transport classification',
     vi.stubGlobal('fetch', fetch);
     const store = create();
     try {
-      await expect(store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: '"x"', graph: 'urn:g' }])).rejects.not.toBeInstanceOf(StoreReadTransportFailure);
+      expect(isStoreReadTransportFailure(await store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: '"x"', graph: 'urn:g' }]).catch(e => e))).toBe(false);
       const prose = new Error('network timeout integrity refusal');
       fetch.mockRejectedValue(prose);
       await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBe(prose);

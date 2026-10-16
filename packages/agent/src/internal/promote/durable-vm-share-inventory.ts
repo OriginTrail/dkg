@@ -2,16 +2,13 @@ import { canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGrap
   contextGraphAssertionUri, type ContextGraphIdV1 } from '@origintrail-official/dkg-core';
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
-import type { AfterDurableSwmPromotionParamsV1 } from '../../dkg-agent-rfc64-catalog-auto-publish.js';
+import type { BoundDurableSwmPromotionParamsV1 } from '../../dkg-agent-rfc64-catalog-auto-publish.js';
 import { resolveDurableGraphScopedAuthorSealCandidateV1 } from '../../durable-author-seal-resolver-v1.js';
 import { throwInventoryRecoveryFailure } from './inventory-recovery-failure.js';
 
 /** The publisher verified VM content, or inventory observed the exact confirmation fence. */
-export async function commitConfirmedDurableShareInventory(agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1): Promise<void> {
+export async function commitConfirmedDurableShareInventory(agent: DKGAgent, params: BoundDurableSwmPromotionParamsV1): Promise<void> {
   const binding = params.recoveryBinding;
-  if (!binding?.inventoryRequired || params.shareOperationId !== binding.intent.operationId) {
-    throw Object.assign(new Error('Confirmed share lacks its original inventory obligation'), { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
-  }
   const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({
     store: agent.store, contextGraphId: params.contextGraphId as ContextGraphIdV1,
     agentAddress: params.lifecycleAgentAddress, assertionCoordinate: params.assertionCoordinate,

@@ -1500,6 +1500,16 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       },
     });
+    // Accepted private authority and the normalized legacy public fallback must
+    // agree on the obligation before durable synchronous admission.
+    expect((author as any).resolveRfc64CatalogAuthoringLaneV1(CONTEXT_GRAPH_ID, null)).toBeNull();
+    expect(author.requiresRfc64ShareInventoryV1(CONTEXT_GRAPH_ID, undefined)).toBe(false);
+    expect(author.requiresRfc64ShareInventoryV1(publicContextGraphId, undefined)).toBe(true);
+    const authority = author.resolveRfc64CatalogReceiverAuthorityV1.bind(author);
+    const inactive = vi.spyOn(author, 'resolveRfc64CatalogReceiverAuthorityV1').mockImplementation(cg => ({ ...authority(cg), active: false, authoringAllowed: false }) as any);
+    expect(author.requiresRfc64ShareInventoryV1(CONTEXT_GRAPH_ID, undefined)).toBe(false);
+    expect(author.requiresRfc64ShareInventoryV1(publicContextGraphId, undefined)).toBe(true);
+    inactive.mockRestore();
     const announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1')
       .mockImplementation(() => ({ status: 'queued' }));
 

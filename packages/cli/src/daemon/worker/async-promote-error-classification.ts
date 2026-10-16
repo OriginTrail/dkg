@@ -4,7 +4,7 @@ import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintr
 import {
   isReadOnlyStoreOperation,
   isStoreOperationTimeoutError,
-  StoreSchedulerBusyError, StoreReadTransportFailure,
+  StoreSchedulerBusyError, isStoreReadTransportFailure,
 } from '@origintrail-official/dkg-storage';
 import {
   getPromoteFailureDisposition,
@@ -147,7 +147,7 @@ export function classifyPromoteError(err: unknown, options: { boundRecovery?: bo
     return { classification: 'fatal', retryable: false };
   }
 
-  if (err instanceof StoreSchedulerBusyError || err instanceof StoreReadTransportFailure) {
+  if (err instanceof StoreSchedulerBusyError || isStoreReadTransportFailure(err)) {
     return { classification: 'transient', retryable: true };
   }
 

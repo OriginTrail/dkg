@@ -8,6 +8,18 @@ export class StoreReadTransportFailure extends Error {
   }
 }
 
+/** Retain the established SPARQL status/operation contract at proven read boundaries. */
+class StoreReadSparqlHttpFailure extends SparqlHttpResponseError {
+  constructor(cause: SparqlHttpResponseError) {
+    super(cause.operation, cause.status, cause.responseExcerpt);
+    this.cause = cause;
+  }
+}
+
+export function isStoreReadTransportFailure(error: unknown): error is StoreReadTransportFailure | SparqlHttpResponseError {
+  return error instanceof StoreReadTransportFailure || error instanceof StoreReadSparqlHttpFailure;
+}
+
 export class StoreReadHttpResponseError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
@@ -19,7 +31,8 @@ const TRANSPORT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDO
 /** Call only at a proven read boundary; this function never retries an operation. */
 export async function classifyStoreReadTransport<T>(read: Promise<T>): Promise<T> {
   try { return await read; } catch (error) {
-    if ((error instanceof StoreReadHttpResponseError || error instanceof SparqlHttpResponseError) && TRANSIENT_READ_STATUS.has(error.status)) throw new StoreReadTransportFailure(error);
+    if (error instanceof SparqlHttpResponseError && TRANSIENT_READ_STATUS.has(error.status)) throw new StoreReadSparqlHttpFailure(error);
+    if (error instanceof StoreReadHttpResponseError && TRANSIENT_READ_STATUS.has(error.status)) throw new StoreReadTransportFailure(error);
     if (error instanceof Error && (
       (error instanceof TypeError && (error.message === 'fetch failed' || error.message === 'terminated'))
       || ('code' in error && TRANSPORT_CODES.has(String(error.code)))

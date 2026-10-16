@@ -25,7 +25,7 @@ describe('bound VM share retains catalog ownership', () => {
       intent: { version: 1 as const, operationId: seeded.shareOperationId, timestampMs: Date.parse('2026-07-19T12:35:00.000Z'),
         confirmationRequired: false, accessPolicy: 'public' as const, allowedPeers: [] } };
     const params = { contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seeded.assertionCoordinate,
-      lifecycleAgentAddress: AUTHOR, shareOperationId: seeded.shareOperationId, recoveryBinding: binding, ctx: createOperationContext('share') };
+      lifecycleAgentAddress: AUTHOR, recoveryBinding: binding, ctx: createOperationContext('share') };
     const queue = new TripleStoreAsyncPromoteQueue(first.agent.store, { backoff: () => 0, maxRetries: 1 });
     const job = await queue.enqueueAndClaim({ contextGraphId: CONTEXT_GRAPH_ID, assertionName: seeded.assertionCoordinate,
       entities: 'all', agentAddress: AUTHOR, recoveryBinding: binding }, 'first');
@@ -50,7 +50,7 @@ describe('bound VM share retains catalog ownership', () => {
         batchId: seal.reservedKaId!, materializedVersion: { blockNumber: 1, txIndex: 0 } } } }),
     ]);
     first.failMarkerWrite = new Error('confirmation marker unavailable');
-    expect(await first.agent.observeRfc64ConfirmedVmV1({ ...params, seal: seeded.seal,
+    expect(await first.agent.observeRfc64ConfirmedVmV1({ ...params, shareOperationId: binding.intent.operationId, seal: seeded.seal,
       assertionUri: 'urn:bound-vm', publicationLabel: 'queued publish' })).toBe(false);
     expect(first.markers()).toHaveLength(0);
     expect(first.agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR })?.rows ?? []).toHaveLength(0);

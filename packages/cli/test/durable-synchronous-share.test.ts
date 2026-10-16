@@ -1,3 +1,4 @@
+import { resolveRfc64CatalogAuthoringPolicyV1 } from '../../agent/src/rfc64/public-catalog-activation-config-v1.js';
 import { classifySynchronousShareFailure } from '../src/daemon/routes/durable-share-response.js';
 import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/durable-share-failure.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -217,6 +218,43 @@ describe('durable synchronous share ownership', () => {
     agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode, killSwitchActive, active: false });
     const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
     expect(prepared.recoveryBinding.inventoryRequired).toBe(required);
+    await store.close();
+  });
+
+  it.each(['catalog', 'shadow'])('completes a private share under the public-only compatibility fallback (%s)', async mode => {
+    const { store, agent, finalized } = await setup();
+    agent.config = { rfc64CatalogDeploymentProfile: { networkId: 'otp:20430' },
+      rfc64CatalogAuthoringPolicy: resolveRfc64CatalogAuthoringPolicyV1({ selectedCatalogAuthoringControls: [], acceptedPolicies: [],
+        legacyPublicFallback: { mode: 'all-accepted-public', config: { peers: [], catalogIssuerDelegationExpiresAt: '253402300799000' } } }) };
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode, killSwitchActive: false, active: true, authoringAllowed: true });
+    vi.spyOn(agent, 'rfc64PublicCatalogServiceV1', 'get').mockReturnValue({ acceptedPolicySnapshot: () => ({ policy: { accessPolicy: 1 } }) });
+    agent.getContextGraphOnChainPolicy = async () => ({ accessPolicy: 1 });
+    // The configuration normalizer and public/private lane decision are real;
+    // this publisher fixture models accepted authority and transport separately.
+    expect(agent.resolveRfc64CatalogAuthoringLaneV1(CG, undefined)).toBeNull();
+    const inventory = vi.spyOn(agent, 'commitRfc64SwmAuthorInventoryV1');
+    daemonState.promoteWorkerAvailable = true;
+    const result = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR });
+    expect(result.promotedCount).toBe(1);
+    expect((await agent.promoteQueue.list({}))[0]).toMatchObject({ state: 'succeeded', request: { recoveryBinding: { inventoryRequired: false } } });
+    expect(inventory).not.toHaveBeenCalled();
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    await store.close();
+  });
+
+  it.each([null, 0])('requires accepted policy before exempting a public-only share (accepted=%s)', async accepted => {
+    const { store, agent, finalized } = await setup();
+    agent.config = { rfc64CatalogDeploymentProfile: { networkId: 'otp:20430' },
+      rfc64CatalogAuthoringPolicy: resolveRfc64CatalogAuthoringPolicyV1({ selectedCatalogAuthoringControls: [], acceptedPolicies: [],
+        legacyPublicFallback: { mode: 'all-accepted-public', config: { peers: [], catalogIssuerDelegationExpiresAt: '253402300799000' } } }) };
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, active: false, authoringAllowed: false });
+    vi.spyOn(agent, 'rfc64PublicCatalogServiceV1', 'get').mockReturnValue({ acceptedPolicySnapshot: () => accepted === null ? null : { policy: { accessPolicy: accepted } } });
+    const request = agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR, accessPolicy: 'ownerOnly' });
+    if (accepted === null) await expect(request).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    else expect((await request).recoveryBinding.inventoryRequired).toBe(true);
+    expect(await agent.promoteQueue.list({})).toHaveLength(0);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
     await store.close();
   });
 

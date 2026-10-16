@@ -27,7 +27,7 @@ export interface ConfirmedVmCatalogObserverDependencies {
     seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
     ctx: OperationContext;
   }, observer: CatalogPlacementWaiterObserverV1): { readonly accepted: boolean };
-  readonly removeShadow: OmitThisParameter<DKGAgent['commitRfc64ConfirmedInventoryRemovalV1']>;
+  readonly removeInventory: OmitThisParameter<DKGAgent['commitRfc64ConfirmedInventoryRemovalV1']>;
   readonly requestProjection: OmitThisParameter<DKGAgent['requestRfc64SwmCatalogProjectionV1']>;
 }
 
@@ -151,7 +151,7 @@ export async function transferConfirmedVmCatalogV1(
       return await shadowRuntime.runInventoryWriteExclusive({
         contextGraphId, subGraphName, authorAddress: confirmedSeal.authorAddress, assertionCoordinate,
       }, async () => {
-        const result = await deps.removeShadow({ contextGraphId, subGraphName, seal: params.seal });
+        const result = await deps.removeInventory({ contextGraphId, subGraphName, seal: params.seal });
         switch (result.status) {
           case 'applied':
           case 'absent':
@@ -167,10 +167,8 @@ export async function transferConfirmedVmCatalogV1(
               deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`);
             }
             return 'owned';
-          case 'dormant':
+          case 'inactive':
             return 'inactive';
-          default:
-            return 'pending';
         }
       });
     } catch (cause) {

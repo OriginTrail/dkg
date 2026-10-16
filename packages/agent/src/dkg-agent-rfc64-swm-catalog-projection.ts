@@ -325,6 +325,28 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }, placement);
   }
 
+  /** Configuration exclusion shared with admission; readiness cannot erase an obligation. */
+  isRfc64PublicOnlyAuthoringExcludedV1(this: DKGAgent, contextGraphId: string, privatePolicy: boolean): boolean {
+    const policy = this.config.rfc64CatalogAuthoringPolicy;
+    return privatePolicy && policy?.publicDefault !== undefined && policy.byContextGraph[contextGraphId] === undefined;
+  }
+
+  requiresRfc64ShareInventoryV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined): boolean {
+    const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+    if (subGraphName || authority.mode === 'legacy' || authority.killSwitchActive) return false;
+    const policy = this.config.rfc64CatalogAuthoringPolicy;
+    if (policy?.publicDefault === undefined || policy.byContextGraph[contextGraphId] !== undefined) return true;
+    // An ambiguous public-only fallback must wait before admission. A request's
+    // workspace policy is not authority to waive its catalog obligation.
+    assertContextGraphIdV1(contextGraphId, 'durable share catalog contextGraphId');
+    const networkId = this.config.rfc64CatalogDeploymentProfile?.networkId ?? this.config.networkIdentity?.chainId;
+    const service = this.rfc64PublicCatalogServiceV1;
+    if (service === undefined) throw new SwmCatalogAuthorityNotReady('service-unavailable');
+    const accepted = networkId === undefined ? null : service.acceptedPolicySnapshot(networkId as NetworkIdV1, contextGraphId);
+    if (accepted === null) throw new SwmCatalogAuthorityNotReady('policy-not-accepted');
+    return !this.isRfc64PublicOnlyAuthoringExcludedV1(contextGraphId, accepted.policy.accessPolicy === 1);
+  }
+
   /** Canonical selected-CG admission shared by inventory and projection. */
   protected resolveRfc64CatalogAuthoringLaneV1(
     this: DKGAgent,
@@ -611,9 +633,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       });
     }
     if (
-      exactControl === undefined
-      && publicDefault !== undefined
-      && acceptedPolicy.policy.accessPolicy === 1
+      this.isRfc64PublicOnlyAuthoringExcludedV1(contextGraphId, acceptedPolicy.policy.accessPolicy === 1)
     ) {
       // The compatibility fallback is intentionally public-only. A private
       // policy in the same bootstrap manifest is neither an authoring failure

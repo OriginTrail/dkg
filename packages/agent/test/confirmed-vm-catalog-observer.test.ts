@@ -16,7 +16,7 @@ async function fixture() {
     finalizedPrivateScope: () => null,
     storeRepair: vi.fn(async () => {}),
     requestPlacement: vi.fn(() => ({ accepted: false })),
-    removeShadow: vi.fn(async () => ({ status: 'absent', action: 'remove', attempts: 0, headObjectDigest: null, error: null })),
+    removeInventory: vi.fn(async () => ({ status: 'absent', attempts: 0, snapshot: null })),
     requestProjection: vi.fn(() => false),
   };
   const params = {
@@ -37,11 +37,11 @@ async function fixture() {
 }
 
 describe('confirmed VM catalog completion certificate', () => {
-  it.each(['applied', 'absent', 'dormant', 'failed'] as const)('strict recovery accepts only durable public removal: %s', async status => {
+  it.each(['applied', 'absent', 'inactive'] as const)('strict recovery accepts only durable public removal: %s', async status => {
     const { deps, params } = await fixture();
-    deps.removeShadow = vi.fn(async () => ({ status, action: 'remove', attempts: 0, headObjectDigest: null, error: null }));
+    deps.removeInventory = vi.fn(async () => (status === 'inactive' ? { status } : { status, attempts: 0, snapshot: null }));
     expect(await transferConfirmedVmCatalogV1(deps, params))
-      .toBe(status === 'applied' || status === 'absent' ? 'owned' : status === 'dormant' ? 'inactive' : 'pending');
+      .toBe(status === 'applied' || status === 'absent' ? 'owned' : 'inactive');
   });
 
   it('strict recovery preserves authority refusal and classifies only marker persistence as a write boundary', async () => {
@@ -59,7 +59,7 @@ describe('confirmed VM catalog completion certificate', () => {
     expect(deps.requestPlacement).not.toHaveBeenCalled();
   });
 
-  it.each(['applied', 'failed', 'throws'] as const)('fences author retirement behind queued public confirmation (%s)', async (outcome) => {
+  it.each(['applied', 'throws'] as const)('fences author retirement behind queued public confirmation (%s)', async (outcome) => {
     const { deps, params } = await fixture();
     const runtime = rfc64SwmInventoryShadowRuntimeV1(deps.owner);
     const lane = { contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR };
@@ -73,13 +73,13 @@ describe('confirmed VM catalog completion certificate', () => {
     const removalGate = new Promise<void>((resolve) => { releaseRemoval = resolve; });
     const entered = new Promise<void>((resolve) => { removalEntered = resolve; });
     const predecessor = runtime.runExclusive(assetKey, () => assetGate);
-    deps.removeShadow = vi.fn(async () => {
+    deps.removeInventory = vi.fn(async () => {
       events.push(`remove:${context.getStore()}`);
       removalEntered();
       await removalGate;
       events.push('removal-settled');
       if (outcome === 'throws') throw new Error('removal unavailable');
-      return { status: outcome, action: 'remove', attempts: 1, headObjectDigest: null, error: null };
+      return { status: outcome, attempts: 1, snapshot: null };
     });
     const pending = context.run('confirmation', () => observeConfirmedVmCatalogV1(deps, params));
     try {
@@ -109,10 +109,10 @@ describe('confirmed VM catalog completion certificate', () => {
     }
   });
 
-  it.each(['applied', 'absent', 'dormant', 'failed'] as const)('reports public removal %s honestly', async (status) => {
+  it.each(['applied', 'absent', 'inactive'] as const)('reports public removal %s honestly', async (status) => {
     const { deps, params } = await fixture();
-    deps.removeShadow = vi.fn(async () => ({ status, action: 'remove', attempts: 0, headObjectDigest: null, error: null }));
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(status !== 'failed');
+    deps.removeInventory = vi.fn(async () => (status === 'inactive' ? { status } : { status, attempts: 0, snapshot: null }));
+    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true);
     expect(deps.storeRepair).not.toHaveBeenCalled();
     expect(deps.requestProjection).toHaveBeenCalledTimes(status === 'applied' || status === 'absent' ? 1 : 0);
   });
@@ -146,7 +146,7 @@ describe('confirmed VM catalog completion certificate', () => {
     deps.finalizedPrivateScope = () => { throw new Error('authority unavailable'); };
     expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(false);
     deps.finalizedPrivateScope = () => null;
-    deps.removeShadow = vi.fn(async () => { throw new Error('store unavailable'); });
+    deps.removeInventory = vi.fn(async () => { throw new Error('store unavailable'); });
     expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(false);
   });
 
@@ -154,7 +154,7 @@ describe('confirmed VM catalog completion certificate', () => {
     ['finalizedPrivateScope', false, 'catalog authority was unavailable'],
     ['storeRepair', false, 'placement was not recorded, so nothing owes it'],
     ['requestPlacement', true, 'placement could not be requested; its durable marker stays'],
-    ['removeShadow', false, 'SWM inventory shadow removal escaped its failure boundary'],
+    ['removeInventory', false, 'SWM inventory shadow removal escaped its failure boundary'],
     ['requestProjection', true, 'SWM inventory shadow removal escaped its failure boundary'],
   ] as const)('keeps the durable verdict and ends timing when the %s getter throws', async (capability, expected, warning) => {
     const { deps, params, scope } = await fixture();
@@ -162,7 +162,7 @@ describe('confirmed VM catalog completion certificate', () => {
     deps.finalizedPrivateScope = () => privateLane ? scope : null;
     const stored = deps.storeRepair;
     const requested = deps.requestPlacement;
-    const removed = deps.removeShadow;
+    const removed = deps.removeInventory;
     Object.defineProperty(deps, capability, { get: () => { throw new Error('capability unavailable'); } });
     installCatalogPlacementTimingV1(deps.owner, new CatalogPlacementTimingV1({
       clock: () => 0, logThresholdMs: 0,
@@ -185,7 +185,7 @@ describe('confirmed VM catalog completion certificate', () => {
 
   it.each(['applied', 'absent'] as const)('retains a committed public %s when projection notification throws', async (status) => {
     const { deps, params } = await fixture();
-    deps.removeShadow = vi.fn(async () => ({ status, action: 'remove', attempts: 0, headObjectDigest: null, error: null }));
+    deps.removeInventory = vi.fn(async () => ({ status, attempts: 0, snapshot: null }));
     deps.requestProjection = vi.fn(() => { throw new Error('projection unavailable'); });
     const warn = vi.spyOn(deps.log, 'warn').mockImplementation(() => {});
     expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true);

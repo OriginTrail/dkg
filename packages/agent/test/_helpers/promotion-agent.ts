@@ -18,6 +18,7 @@ export async function createPromotionAgentForTest(
     kaAllocator,
   });
   const agent = Object.create(DKGAgent.prototype) as any;
+  agent.config = {};
   agent.defaultAgentAddress = agentAddress;
   agent.node = { peerId: { toString: () => peerId } };
   agent.store = store;
