@@ -5,6 +5,8 @@ export interface GraphScopedPhysicalOperationControl<Subscription> {
   isBindingCurrent(): boolean;
   /** Re-capture after this operation installs an authenticated binding. */
   recaptureBindingGeneration(): void;
+  /** Synchronously install an authenticated subscription after checking the old owner. */
+  admitSubscription(admit: () => void): void;
   /**
    * Continue under a row that was stored again while this operation ran, when
    * the host finds the operation's premises unchanged in it and the binding
@@ -31,7 +33,6 @@ export interface GraphScopedPhysicalOperationFenceOptions<T, Subscription> {
   bindingChangedError(): Error;
   asAbortError(reason: unknown): Error;
   track(run: Promise<unknown>): void;
-  untrack(run: Promise<unknown>): void;
   operation(control: GraphScopedPhysicalOperationControl<Subscription>): Promise<T>;
 }
 
@@ -44,7 +45,6 @@ export interface GraphScopedPhysicalOperationFenceHost<Subscription> {
   assertLifecycleCurrent(): void;
   asAbortError(reason: unknown): Error;
   track(run: Promise<unknown>): void;
-  untrack(run: Promise<unknown>): void;
 }
 
 export interface BoundGraphScopedPhysicalOperationOptions<T, Subscription> {
@@ -66,8 +66,9 @@ export function runGraphScopedPhysicalOperation<T, Subscription>(
   if (options.isClosed()) return Promise.reject(options.closedError());
 
   let subscription = options.captureSubscription();
+  let active = true;
   let bindingGeneration = options.captureBindingGeneration();
-  const isBindingCurrent = () => (
+  const isBindingCurrent = () => active && (
     options.captureSubscription() === subscription
     && options.isBindingGenerationCurrent(bindingGeneration)
   );
@@ -80,10 +81,15 @@ export function runGraphScopedPhysicalOperation<T, Subscription>(
     if (!isBindingCurrent()) throw options.bindingChangedError();
   };
   const physicalRun = Promise.resolve().then(() => options.operation({
-    get subscription() {
-      return subscription;
-    },
+    get subscription() { return subscription; },
     isBindingCurrent,
+    admitSubscription: (admit) => {
+      assertCurrent();
+      admit();
+      subscription = options.captureSubscription();
+      bindingGeneration = options.captureBindingGeneration();
+      assertCurrent();
+    },
     recaptureBindingGeneration: () => {
       bindingGeneration = options.captureBindingGeneration();
     },
@@ -96,9 +102,9 @@ export function runGraphScopedPhysicalOperation<T, Subscription>(
       ) subscription = current;
     },
     assertCurrent,
-  }));
+  })).finally(() => { active = false; });
   options.track(physicalRun);
-  return physicalRun.finally(() => options.untrack(physicalRun));
+  return physicalRun;
 }
 
 /** Capture lifecycle-stable wiring once; individual operations supply only ownership-specific work. */
@@ -117,7 +123,6 @@ export function createGraphScopedPhysicalOperationFence<Subscription>(
       assertLifecycleCurrent: host.assertLifecycleCurrent,
       asAbortError: host.asAbortError,
       track: host.track,
-      untrack: host.untrack,
     })
   );
 }

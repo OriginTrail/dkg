@@ -12,6 +12,7 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/public-snapshot-job.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
@@ -49,6 +50,7 @@ export default defineConfig({
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/bounded-query.test.ts',
+      'test/entity-search.test.ts',
       'test/query-catalog-profile-route.test.ts',
           'test/context-graph-route-read-authority.test.ts',
           'test/knowledge-assets-local-curator-read.test.ts',

@@ -1,3 +1,4 @@
+import { normalizeGraphScopedHex32 as normalizeHex32 } from "./graph-scoped-root.js";
 import { createHash } from 'node:crypto';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -15,7 +16,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { appendInPlace } from './append-in-place.js';
 import { compareCodePoint } from './code-point-order.js';
-import { isIriMetaSubject } from './iri-term.js';
+import { prepareDurableMeta, type PreparedDurableMeta } from './durable-metadata-intake.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const MERKLE_ROOT = `${DKG_NS}merkleRoot`;
@@ -70,41 +71,6 @@ const DURABLE_SYNC_CONTROL_PREDICATE_SET: ReadonlySet<string> = new Set([
 export interface DurableMetaGraphClassification {
   hasMerkleRoot: boolean;
   hasIntegrityEnvelope: boolean;
-}
-
-/**
- * One intake boundary for peer-supplied durable metadata.
- *
- * Verification consumes only IRI-subject rows. Admission retains indexes into
- * the caller's original array so selected rows can be persisted without a
- * positional remap, while the rejected-row count advances the wire cursor.
- */
-interface PreparedDurableMeta {
-  readonly originalMetaQuads: readonly Quad[];
-  readonly verificationView: readonly Quad[];
-  readonly admissibleOriginalIndexes: readonly number[];
-  readonly droppedNonIriSubjectTriples: number;
-}
-
-function prepareDurableMeta(metaQuads: readonly Quad[]): PreparedDurableMeta {
-  const verificationView: Quad[] = [];
-  const admissibleOriginalIndexes: number[] = [];
-  let droppedNonIriSubjectTriples = 0;
-  for (let index = 0; index < metaQuads.length; index++) {
-    const quad = metaQuads[index]!;
-    if (!isIriMetaSubject(quad.subject)) {
-      droppedNonIriSubjectTriples += 1;
-      continue;
-    }
-    verificationView.push(quad);
-    admissibleOriginalIndexes.push(index);
-  }
-  return {
-    originalMetaQuads: metaQuads,
-    verificationView,
-    admissibleOriginalIndexes,
-    droppedNonIriSubjectTriples,
-  };
 }
 
 /** Classify a parsed durable metadata record using the verifier's predicates. */
@@ -1401,7 +1367,7 @@ function selectAdmittedMetadataIndexes(
   authenticatedMetadataUals: ReadonlySet<string>,
 ): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
-  let droppedControls = 0;
+  let droppedControls = preparedMeta.droppedReceiverOwnedTriples;
   for (const index of preparedMeta.admissibleOriginalIndexes) {
     const quad = preparedMeta.originalMetaQuads[index]!;
     if (
@@ -1465,7 +1431,7 @@ function selectSystemOverrideMetadataIndexes(
   kaToKc: ReadonlyMap<string, string>,
 ): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
-  let droppedControls = 0;
+  let droppedControls = preparedMeta.droppedReceiverOwnedTriples;
   for (const index of preparedMeta.admissibleOriginalIndexes) {
     const quad = preparedMeta.originalMetaQuads[index]!;
     if (
@@ -1502,25 +1468,11 @@ function isDurableSyncControlQuad(
 }
 
 /**
- * GH#1778 — classify a `dkg:assertionVersion` row as DESCRIPTIVE author-seal
- * metadata rather than a delta/routing control. A graph-scoped author seal
- * (subject carries `dkg:assertionMerkleRoot`) is descriptive: its 13 sibling
- * quads (Merkle root, EIP-712 attestation, `dkg:kaUal`, counts) already sync
- * unauthenticated, and the seal's authenticity is established at PUBLISH time
- * (`parseAssertionSealQuads` + a Merkle recompute), not here. Only
- * `dkg:assertionVersion` collides with the sync-control set, so for a
- * not-yet-published KA it was being stripped — leaving 13/14 quads and making
- * `parseAssertionSealQuads` throw "Partial graph-scoped assertion seal".
- *
- * Classifying it here (via the core `parseGraphScopedAssertionSealCandidate`
- * check — the SAME canonical "publishable graph-scoped seal" definition VM
- * publish uses: complete v2 seal whose kaUal author == authorAddress ==
- * `.../assertion/<addr>/…` coordinate, single-valued identity fields) keeps the
- * control-authentication abstraction honest: the seal field follows the
- * descriptive path instead of being smuggled through `isAuthenticatedSyncControl`
- * as an "authenticated control". A peer that forges a version value gains nothing
- * the sibling quads didn't already allow — a tampered version derives the wrong
- * graph scope and fails closed at publish.
+ * Author-seal versions are descriptive until publishing verifies the seal and
+ * Merkle root (GH#1778). Require the same canonical seal shape as VM publish:
+ * complete v2 fields, single-valued identity, matching UAL author and coordinate.
+ * Descriptor-owned versions still pass the normal control-authentication gate.
+ * A forged seal version cannot grant routing authority and fails at publish.
  */
 function isGraphSealDescriptiveVersion(quad: Quad, metadata: IntegrityMetadataIndex): boolean {
   return quad.predicate === ASSERTION_VERSION
@@ -1749,11 +1701,6 @@ function safeCount(raw: string, field: string): number {
   return Number(value);
 }
 
-function normalizeHex32(raw: string, field: string): string {
-  const hex = stripLiteral(raw).replace(/^0x/i, '').toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error(`${field} must be exactly 32 bytes of hexadecimal data`);
-  return hex;
-}
 
 function hexToBytes(hex: string): Uint8Array {
   return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));

@@ -1517,6 +1517,9 @@ export function operationalSigningOf(
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
 export interface ChainAdapter {
+  /** Complete coherent public chain evidence for explicit snapshot recovery. */
+  readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
+
   chainType: 'evm' | 'solana';
   chainId: string;
   /**
