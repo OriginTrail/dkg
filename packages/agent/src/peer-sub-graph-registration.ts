@@ -104,6 +104,7 @@ export interface PeerSubGraphRegistrationPorts {
 /** What a resolution needs of the agent besides that. */
 interface PeerSubGraphResolutionAgent extends PeerSubGraphRegistrationPorts, FreshMetaFetchAgent {
   readonly peerId: string;
+  readonly node: { libp2p: { getConnections(): Array<{ remotePeer: { toString(): string } }> } };
   readonly localContextGraphProvenance: { hasLocalCreate(contextGraphId: string): boolean };
   readonly subscribedContextGraphs: ReadonlyMap<string, { readonly subscribed?: boolean }>;
   resolveCuratorPeerId(contextGraphId: string, options: { signal?: AbortSignal }): Promise<string | undefined>;
@@ -398,7 +399,16 @@ function rememberMiss(state: PeerSubGraphResolutionState, key: string, miss: Rem
   }
 }
 
-/** The graph's owner first, when this node can name its peer, then connected peers; never this node. */
+/**
+ * The peers to ask, never this node: the graph's owner first when this node
+ * can name its peer and is connected to it, then connected peers (the node's
+ * selection puts Cores, which keep and serve the owner's definition of the
+ * registered graphs they host, before other peers). An owner this node is not
+ * connected to is asked last, so a member that reaches the graph only through
+ * Cores (an Edge behind NAT) does not spend its budget on a dial before it
+ * asks them; a dial to the owner is still tried when no connected peer holds
+ * the sub-graph.
+ */
 async function resolutionPeers(
   agent: PeerSubGraphResolutionAgent,
   contextGraphId: string,
@@ -406,13 +416,12 @@ async function resolutionPeers(
 ): Promise<string[]> {
   // An owner this node cannot name still leaves the connected peers to ask.
   const owner = await agent.resolveCuratorPeerId(contextGraphId, { signal }).catch(() => undefined);
-  const candidates = [
-    ...(owner === undefined ? [] : [owner]),
-    ...agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId }),
-  ];
-  return [...new Set(candidates)]
-    .filter((peerId) => peerId !== agent.peerId)
-    .slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS);
+  const connected = new Set(agent.node.libp2p.getConnections().map((connection) => connection.remotePeer.toString()));
+  const peers = [...new Set(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId }))]
+    .filter((peerId) => peerId !== agent.peerId && peerId !== owner);
+  if (owner === undefined || owner === agent.peerId) return peers.slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS);
+  if (connected.has(owner)) return [owner, ...peers].slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS);
+  return [...peers.slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS - 1), owner];
 }
 
 /**

@@ -17,6 +17,7 @@ import { isAdmittedContextGraphSubscription } from './context-graph-subscription
 import { normalizeContextGraphNameHash } from './context-graph-name-candidate.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { createSwmHostModeHandler } from './internal/gossip/host-mode-handler.js';
+import { ensureCoreHostedDefinition } from './core-hosted-definition.js';
 import { Buffer } from 'node:buffer';
 import { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryPassAuthority, type VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
@@ -2959,6 +2960,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       `Phase D: marked public cg=${numericStr} as core-hosted under "${localCgId}" ` +
       '(will chain-reconcile to VM across restarts)',
     );
+    // A Core serves the owner's definition of the graphs it hosts to their
+    // subscribers; fetched in the background, retried while it is missing.
+    void ensureCoreHostedDefinition(this, localCgId, 'recorded');
     const outcome = options.durable === true
       ? await this.persistCoreHostedPublicCgStrict(localCgId, numericStr, recordingGeneration)
       : 'recorded';
