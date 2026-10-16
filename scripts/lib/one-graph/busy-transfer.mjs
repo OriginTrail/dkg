@@ -16,11 +16,13 @@
 // shared-memory slot beside the general one, so under one general slot the
 // durable work a reading shows holds that slot. A report reaches edgeB through
 // gossip and counts only when an admission of the transfer held the slot at
-// that moment. A read's completion is not that moment, so edgeB's reads of
-// each report are made every quarter second from before it is created, and
-// date its arrival between the last read that missed it and the first that
-// found it (arrivalWindow); the first reading after that window must show an
-// admission that started before the window opened. Because the transfer
+// that moment. A read's completion is not that moment, so edgeB's watch of
+// each report starts before the report is created and reads every quarter
+// second; the same reads decide the delivery within its bound (from the end
+// of the share) and date the arrival between the last read that missed the
+// report and the first that found it (arrivalWindow). The first reading
+// after that window must show an admission that started before the window
+// opened. Because the transfer
 // leaves the slot for moments between admissions, edgeA shares again, up to
 // SHARE_ATTEMPTS times, until a receipt lands inside one. A promotion reaches
 // edgeB through edgeB's own sync work, which needs the slot itself, so its
@@ -59,6 +61,17 @@ async function slotReading(devnet, node) {
   const operations = (Array.isArray(scheduler.lanes) ? scheduler.lanes : []).flatMap(lane => (Array.isArray(lane?.activeOperations) ? lane.activeOperations : [])
     .map(operation => ({ lane: lane.lane, operation: operation?.operation, oldestAgeMs: operation?.oldestAgeMs })));
   return { sentAt, at, operations };
+}
+
+/**
+ * When a pair's report reached its node, from its watch's reads: { received
+ * (the latest moment it can have arrived: the first read that found it
+ * completed), window (arrivalWindow) }, received null when the pair did not
+ * hold within its bound.
+ */
+function receipt(pair) {
+  const window = arrivalWindow(pair.dating);
+  return { received: heldAt(pair) === null || !window ? null : window.by, window };
 }
 
 /** Reads a node's sync slots every second until stopped. */
@@ -138,25 +151,26 @@ export async function busyEdge(ctx, main, large, promotions) {
   // transfer holds its slot throughout the window of its arrival.
   const shared = [];
   const reportPairs = [];
-  const arrivals = new Map();
   const readingAfter = moment => waitFor(() => ({ ok: slots.readings.some(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= moment) }), 5000, 200);
   for (let attempt = 1; attempt <= SHARE_ATTEMPTS; attempt += 1) {
     if (attempt > 1) await sleep(1500);
-    let dating = null;
-    const record = await io.share(edgeA, main, `edgeA while edgeB is busy ${attempt}`, { onStart: made => { dating = io.dateArrival(edgeB, made, 'swm'); } });
+    // The watches start before the report is created: it cannot be anywhere yet.
+    let watches = [];
+    const record = await io.share(edgeA, main, `edgeA while edgeB is busy ${attempt}`, {
+      onStart: made => {
+        const notBefore = Date.now();
+        watches = [io.watch(io.pairs(caseId, made, [edgeB], 'swm', { everyMs: 250, notBefore })), io.watch(io.pairs(caseId, made, [curator], 'swm'))];
+      },
+    });
     shared.push(record);
-    const pairs = await settled([io.watch(io.pairs(caseId, record, [edgeB, curator], 'swm'))]);
+    const pairs = await settled(watches);
     reportPairs.push(...pairs);
-    const window = arrivalWindow(await dating.stop());
-    arrivals.set(record, window);
-    const heldBy = heldAt(pairs.find(pair => pair.node === edgeB));
-    if (heldBy === null) break;
-    // The report was there by the first read that found it, the watch's or the dating's.
-    const received = Math.min(heldBy, window?.by ?? Infinity);
+    const { received, window } = receipt(pairs.find(pair => pair.node === edgeB));
+    if (received === null) break;
     await readingAfter(received);
     const log = devnet.logSince(edgeB, offset);
     const all = parseAdmissions(log);
-    if (transferHeldThrough(window && { after: window.after, by: received }, slots.readings, all, isTransfer).held) break;
+    if (transferHeldThrough(window, slots.readings, all, isTransfer).held) break;
     const life = transferLifetime(log, all, isTransfer, slots.readings);
     if (!life || received > life.to) break;
   }
@@ -186,13 +200,10 @@ export async function busyEdge(ctx, main, large, promotions) {
     // reads; a promotion's delivery, which needs the slot itself, must have
     // contended with the transfer for it, dated by its watch's reads.
     const delivery = pair.kind !== 'swm';
-    const window = delivery ? arrivalWindow(pair.dating) : arrivals.get(pair.record) ?? null;
-    const heldBy = heldAt(pair);
-    const received = heldBy === null ? null : Math.min(heldBy, window?.by ?? Infinity);
+    const { received, window } = receipt(pair);
     let held;
     if (received !== null) {
-      held = delivery ? transferContended(pair.from, window?.after, slots.readings, all, isTransfer)
-        : transferHeldThrough(window && { after: window.after, by: received }, slots.readings, all, isTransfer);
+      held = delivery ? transferContended(pair.from, window?.after, slots.readings, all, isTransfer) : transferHeldThrough(window, slots.readings, all, isTransfer);
     }
     const verdict = busyReceiptOutcome(result, { received, life, held, delivery });
     if (pair.kind === 'swm' && pair !== lastAttempt) report.note(`case ${caseId}: an earlier share: ${verdict.text}`);

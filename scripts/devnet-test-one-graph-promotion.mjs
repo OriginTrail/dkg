@@ -106,7 +106,8 @@
 //   4  promotion: the curator promotes the first report of each Edge, its
 //      own included (each promotion is a check); every Edge, the author
 //      included, holds it in Verified Memory and no longer in shared memory,
-//      and every report not promoted stays in shared memory
+//      and every report not promoted is in shared memory at every reading,
+//      from before the first promotion to the end of the last one's watch
 //   5  an author whose report was promoted still shares: edgeA and edgeB,
 //      each once its report of case 4 was promoted, share one more report,
 //      and every other Edge must hold it. An author whose report was not
@@ -577,23 +578,35 @@ async function run() {
   }
 
   // Case 4: the curator promotes the first report of each Edge, its own included.
+  // Every report that is not promoted stays in shared memory on every Edge at
+  // every reading, from before the first promotion (or from the refusal of its
+  // own) until the last promotion's watch has ended.
   await precondition(4, 'before the promotions');
+  const candidates = [a1, b1, c1];
+  const retained = [];
+  const retain = (records, fromWhat) => {
+    if (records.length) retained.push(io.watch(records.flatMap(record => io.pairs(4, record, edges.running, 'kept', { from: Date.now(), fromWhat, bound: Infinity }))));
+  };
+  retain(shared.filter(record => !record.error && !candidates.includes(record) && !promoted.has(record)), 'start of the promotions');
   const promotions = [];
-  for (const record of [a1, b1, c1]) {
+  for (const record of candidates) {
     if (record.error) {
       fail(4, `${describe(record)} was not written, so it was not promoted`);
       continue;
     }
     const at = await promoteChecked(4, record);
-    if (at === null) continue;
+    if (at === null) {
+      retain([record], 'refusal of its promotion');
+      continue;
+    }
     promoted.add(record);
     const options = { from: at, fromWhat: 'promotion' };
     promotions.push(io.watch([...io.pairs(4, record, edges.running, 'vm', options), ...io.pairs(4, record, edges.running, 'gone', options)]));
   }
   await settle(promotions);
+  for (const handle of retained) handle.close();
+  await settle(retained);
   const check = () => ({ from: Date.now(), fromWhat: 'check', bound: CHECK_MS });
-  const notPromoted = shared.filter(record => !record.error && !promoted.has(record));
-  await settle([io.watch(notPromoted.flatMap(record => io.pairs(4, record, edges.running, 'kept', check())))]);
   for (const record of promoted) {
     note(`case 4: on its author, ${describe(record)} has the record ${await io.lifecycle(record.author, record)}; the author's catalog status: ${await catalogStatus(record.author)}`);
   }

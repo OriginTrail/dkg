@@ -58,7 +58,8 @@ function cellShown(cell) {
  * the body or the class does not hold the report, and nor does one that
  * holds another object beside the written one (corrupted content). Other
  * predicates of the subject are not judged. Returns { held } or { held:
- * false, missing (the names of the triples not there), different }.
+ * false, missing (the names of the triples not there, when some are),
+ * different }.
  */
 export function judgeReport(rows, expected) {
   const missing = [];
@@ -73,6 +74,8 @@ export function judgeReport(rows, expected) {
     if (wrong.length) different.push(`its ${triple.name} ${[...new Set(wrong.map(cellShown))].join(' | ')}`);
   }
   if (missing.length === 0 && different.length === 0) return { held: true };
+  // Nothing of the report there at all: simply not held.
+  if (missing.length === expected.length) return { held: false };
   return { held: false, ...(missing.length ? { missing } : {}), ...(different.length ? { different: different.join('; ') } : {}) };
 }
 
@@ -80,17 +83,18 @@ export function judgeReport(rows, expected) {
  * What each kind of pair (a report, a node, what it must show) waits for, and
  * in which layer: `swm` the report in shared memory, `vm` in Verified Memory,
  * `gone` no longer in shared memory (it was just promoted), `absent` not in
- * shared memory (it was promoted before), `kept` still in shared memory
- * (another report was promoted), `unpublished` not in Verified Memory (its
- * publish was refused). A pair is read twice, with the layer's view and with
- * the cross-partition read, and holds once both showed it.
+ * shared memory (it was promoted before), `kept` in shared memory at every
+ * reading while other reports are promoted (`throughout`), `unpublished` not
+ * in Verified Memory (its publish was refused). A pair is read twice, with
+ * the layer's view and with the cross-partition read, and holds once both
+ * showed it.
  */
 export const PAIR_KINDS = Object.freeze({
   swm: { layer: 'swm', want: 'held' },
   vm: { layer: 'vm', want: 'held' },
   gone: { layer: 'swm', want: 'gone' },
   absent: { layer: 'swm', want: 'gone' },
-  kept: { layer: 'swm', want: 'held' },
+  kept: { layer: 'swm', want: 'held', throughout: true },
   unpublished: { layer: 'vm', want: 'gone' },
 });
 const LAYER_NAMES = { swm: 'shared memory', vm: 'Verified Memory' };
@@ -142,6 +146,11 @@ export function pairOutcome(pair, { boundMs }) {
   const bound = secs(pair.boundMs ?? boundMs);
   const { view, partitions } = pair.progress;
   const names = { view: viewName(layer, record.sub), partitions: 'the cross-partition read' };
+  // A report that must stay in the layer fails at the first reading that missed it, whatever came after.
+  if (pair.lapsed) {
+    const { read, age, seen } = pair.lapsed;
+    return { outcome: 'fail', text: `${what}: MISSING from ${names[read]}${readDetail(seen)} ${secs(age)} s after the ${after}, though it must stay in ${layerName}` };
+  }
   if (pairHeld(pair.progress)) {
     const at = secs(Math.max(view, partitions));
     if (want === 'gone') {
@@ -159,6 +168,17 @@ export function pairOutcome(pair, { boundMs }) {
         return { outcome: 'fail', text: `${what}: ${first}, but ${unknown.map(read => `${names[read]}${readDetail(pair.confirm?.[read])}`).join(' and ')} could not be read when the ${bound} s had passed, so the absence to the end is not known` };
       }
       return { outcome: 'pass', text: `${what}: ${first}, and out of it to the end of the ${bound} s` };
+    }
+    if (PAIR_KINDS[kind].throughout) {
+      const missing = ['view', 'partitions'].filter(read => pair.confirm?.[read]?.satisfied === false && !pair.confirm[read].error);
+      if (missing.length) {
+        return { outcome: 'fail', text: `${what}: in ${layerName} at every reading, then MISSING from ${missing.map(read => `${names[read]}${readDetail(pair.confirm[read])}`).join(' and from ')} when the ${bound} s had passed` };
+      }
+      const unknown = ['view', 'partitions'].filter(read => pair.confirm?.[read]?.satisfied !== true);
+      if (unknown.length) {
+        return { outcome: 'fail', text: `${what}: in ${layerName} at every reading, but ${unknown.map(read => `${names[read]}${readDetail(pair.confirm?.[read])}`).join(' and ')} could not be read when the ${bound} s had passed, so its stay to the end is not known` };
+      }
+      return { outcome: 'pass', text: `${what}: in ${layerName} at every reading from the ${after} to the end of the ${bound} s` };
     }
     return { outcome: 'pass', text: `${what}: in ${layerName} ${at} s after the ${after}` };
   }
@@ -585,13 +605,15 @@ export function definitionInTime(seen, { from, boundMs }) {
  * Whether a node already held a graph's reports when its last subscribe was
  * accepted, before that subscribe's catch-up could insert anything: every
  * pair of `pairs` (a watch timed from the subscribe, `pair.from`) held, and
- * each of its reads showed what the pair waits for at its first try, sent
- * within `withinMs` of the subscribe. False for no pairs.
+ * each of its reads showed what the pair waits for at its first try, which
+ * completed within `withinMs` of the subscribe. A read that was sent at once
+ * but answered late may have seen reports that arrived meanwhile, so it is no
+ * evidence. False for no pairs.
  */
 export function heldAtSubscribe(pairs, { withinMs = 2000 } = {}) {
   if (!Array.isArray(pairs) || pairs.length === 0) return false;
   return pairs.every(pair => pairHeld(pair.progress ?? {}) && Object.values(pair.dating ?? {}).length > 0
-    && Object.values(pair.dating).every(read => read.lastMissSentAt === null && read.hit && read.hit.sentAt - pair.from <= withinMs));
+    && Object.values(pair.dating).every(read => read.lastMissSentAt === null && read.hit && read.hit.completedAt - pair.from <= withinMs));
 }
 
 /**

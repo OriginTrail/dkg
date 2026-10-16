@@ -671,7 +671,8 @@ test('a report is held only whole: its class, its value and its body, each with 
   ], expected), { held: true });
   // The value alone: the class and the body were lost.
   assert.deepEqual(judgeReport([whole[1]], expected), { held: false, missing: ['class', 'body'] });
-  assert.deepEqual(judgeReport([], expected), { held: false, missing: ['class', 'value', 'body'] });
+  assert.deepEqual(judgeReport([], expected), { held: false });
+  assert.deepEqual(judgeReport([{ p: 'urn:x:other', o: '"x"' }], expected), { held: false });
   // An altered body, a class given as a text, a second value beside the written one.
   assert.deepEqual(judgeReport([whole[0], whole[1], { p: BODY, o: '"report 1 of run S: pay"' }], expected), { held: false, different: 'its body "report 1 of run S: pay"' });
   assert.deepEqual(judgeReport([{ p: RDF_TYPE, o: '"urn:one-graph:Report"' }, whole[1], whole[2]], expected), { held: false, different: 'its class "urn:one-graph:Report"' });
@@ -777,8 +778,13 @@ test('a report read only once an admission had started is not evidence of the bu
       { name: 'body', predicate: BODY, text: 'report 1 of run S: payload' },
     ],
   };
+  // The share ended at once; the watch of edgeB reads every 50 ms, its first miss at that moment.
   t0 = Date.now();
-  const window = arrivalWindow(await io.dateArrival(node, report, 'swm', { everyMs: 50, untilMs: 3000 }).done);
+  report.doneAt = t0;
+  const handle = io.watch(io.pairs(6, report, [node], 'swm', { everyMs: 50, notBefore: t0, bound: 3000 }));
+  await handle.done;
+  assert.equal(pairOutcome(handle.pairs[0], { boundMs: 3000 }).outcome, 'pass');
+  const window = arrivalWindow(handle.pairs[0].dating);
   assert.ok(window.after < arrival() && arrival() <= window.by, JSON.stringify({ window, arrival: arrival() }));
   assert.ok(window.by >= arrival() + 160, 'the read that found it completed long after the arrival');
   // The transfer's admission started at 350 ms, after the report arrived and before the read completed;
@@ -853,6 +859,8 @@ test('#3296: a node held the reports at its subscribe only when every read found
   assert.equal(heldAtSubscribe([prompt, pairAt({ view: { lastMissSentAt: from + 5, hit: { sentAt: from + 2005, completedAt: from + 2030 } }, partitions: found(from + 6) })]), false);
   // A first find sent long after the subscribe (the reads before it failed): not at the subscribe.
   assert.equal(heldAtSubscribe([pairAt({ view: found(from + 4000), partitions: found(from + 6) })]), false);
+  // Sent 5 ms after the subscribe but answered 20 s later: the reports may have arrived meanwhile.
+  assert.equal(heldAtSubscribe([pairAt({ view: { lastMissSentAt: null, hit: { sentAt: from + 5, completedAt: from + 20_000 } }, partitions: found(from + 6) })]), false);
   // A pair that never held.
   assert.equal(heldAtSubscribe([pairAt({ view: found(from + 5), partitions: { lastMissSentAt: null, hit: null } }, { view: 30, partitions: null })]), false);
 });
@@ -941,4 +949,86 @@ test('a run reclaims only nodes of its own suite whose run has ended; a running 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// A node that answers the whole report while `present(age)` holds (age from the stub's start), in both layers' reads of shared memory.
+function wholeReportNode(cg, present) {
+  const started = Date.now();
+  const rows = [{ p: RDF_TYPE, o: 'urn:one-graph:Report' }, { p: LABEL, o: '"r (1)"' }, { p: BODY, o: '"report 1 of run S: payload"' }];
+  return {
+    started,
+    api: async (_node, _method, _path, body) => {
+      const bindings = present(Date.now() - started)
+        ? rows.map(row => ({ ...(body.includeContextGraphPartitions ? { g: `${sharedMemoryScope(cg, 'reports')}/0xaa/1` } : {}), ...row }))
+        : [];
+      return { status: 200, json: null, text: JSON.stringify({ result: { type: 'bindings', bindings } }) };
+    },
+  };
+}
+const wholeReport = (cg, doneAt) => ({
+  author, graph: { key: 'main', id: cg, resolved: cg }, sub: 'reports', subject: 'urn:one-graph:S:1', value: 'r (1)', doneAt, error: null,
+  triples: [
+    { name: 'class', predicate: RDF_TYPE, iri: 'urn:one-graph:Report' }, { name: 'value', predicate: LABEL, text: 'r (1)' },
+    { name: 'body', predicate: BODY, text: 'report 1 of run S: payload' },
+  ],
+});
+const reportsOver = api => createReports({ api }, { stamp: 'S', sub: 'reports', predicate: LABEL, type: 'urn:one-graph:Report', boundMs: 600, definitionMs: 1000, syncedMs: 1000, pollMs: 40 });
+
+test('a watch started before the share ended reads at once, and its bound starts when the share ends', async () => {
+  const cg = '0xabc/one-graph-main-1';
+  // The report reaches the node at 100 ms; the share ends at 250 ms.
+  const early = wholeReportNode(cg, age => age >= 100);
+  const report = wholeReport(cg, null);
+  const io = reportsOver(early.api);
+  const handle = io.watch(io.pairs(6, report, [node], 'swm', { everyMs: 20, notBefore: early.started }));
+  await new Promise(resolve => setTimeout(resolve, 250));
+  report.doneAt = Date.now();
+  await handle.done;
+  const [pair] = handle.pairs;
+  assert.equal(pair.from, report.doneAt);
+  assert.deepEqual(pair.progress, { view: 0, partitions: 0 });
+  assert.equal(pairOutcome(pair, { boundMs: 600 }).text, '"r (1)" by node8 (edgeA) in main/reports at node9 (edgeB): in shared memory 0 s after the share');
+  // The same reads date the arrival, before the share ended.
+  const window = arrivalWindow(pair.dating);
+  assert.ok(window.after < early.started + 100 && window.by >= early.started + 100 && window.by < report.doneAt, JSON.stringify(window));
+  // A share that fails while its watch waits: the pair fails as not written, and the watch ends.
+  const failing = wholeReport(cg, null);
+  const never = io.watch(io.pairs(6, failing, [node], 'swm', { everyMs: 20, notBefore: Date.now() }));
+  await new Promise(resolve => setTimeout(resolve, 60));
+  failing.error = 'the share job ended failed: null';
+  await never.done;
+  assert.match(pairOutcome(never.pairs[0], { boundMs: 600 }).text, /: not written, the share job ended failed: null$/);
+});
+
+test('a report that must stay in shared memory fails at the first reading that misses it, even if it comes back', async () => {
+  const cg = '0xabc/one-graph-main-1';
+  const kept = async (present, { closeAfter = 300, bound = Infinity } = {}) => {
+    const stub = wholeReportNode(cg, present);
+    const io = reportsOver(stub.api);
+    const handle = io.watch(io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound }));
+    await new Promise(resolve => setTimeout(resolve, closeAfter));
+    handle.close();
+    await handle.done;
+    return pairOutcome(handle.pairs[0], { boundMs: 600 });
+  };
+  // There at every reading: held once the watch is closed.
+  const steady = await kept(() => true);
+  assert.equal(steady.outcome, 'pass');
+  assert.match(steady.text, /: in shared memory at every reading from the start of the promotions to the end of the 0 s$/);
+  // Gone for a while during the promotions, then back: a failure, not an eventual presence.
+  const dipped = await kept(age => age < 80 || age >= 160);
+  assert.equal(dipped.outcome, 'fail');
+  assert.match(dipped.text, /: MISSING from (the shared-working-memory view of reports|the cross-partition read) 0 s after the start of the promotions, though it must stay in shared memory$/);
+  // Missing at the first reading and present later: a failure too.
+  assert.equal((await kept(age => age >= 100)).outcome, 'fail');
+  // Missing at the check after the watch was closed.
+  let closedAt = Infinity;
+  const stub = wholeReportNode(cg, () => Date.now() < closedAt);
+  const io = reportsOver(stub.api);
+  const handle = io.watch(io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound: Infinity }));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  closedAt = Date.now();
+  handle.close();
+  await handle.done;
+  assert.match(pairOutcome(handle.pairs[0], { boundMs: 600 }).text, /: in shared memory at every reading, then MISSING from the shared-working-memory view of reports and from the cross-partition read when the 0 s had passed$/);
 });
