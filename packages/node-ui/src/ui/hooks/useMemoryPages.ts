@@ -4,7 +4,7 @@ import { invalidateQueryCache } from '../api.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
 import { memoryQueryDefinitions, type MemoryQueryDefinition } from './memory-query-definition.js';
 import { MEMORY_LIMIT_MESSAGE, readMemoryGraphPage, type MemoryGraphPage, type MemoryReadFailureReason } from './memory-graph-query.js';
-import type { LayeredTriple, MemoryLayerStatus, TrustLevel } from './useMemoryEntities.js';
+import type { LayeredMemoryTriple, MemoryLayerStatus, TrustLevel } from './useMemoryEntities.js';
 
 interface MemorySource {
   definition: MemoryQueryDefinition;
@@ -125,7 +125,7 @@ export function useMemoryPages(contextGraphId: string, includeQueryCatalog: bool
   useMemoryGraphEvents(contextGraphId, () => run('refresh'));
 
   const current = state.key === key;
-  const triples = useMemo<LayeredTriple[]>(() => current ? state.sources.flatMap(source =>
+  const triples = useMemo<LayeredMemoryTriple[]>(() => current ? state.sources.flatMap(source =>
     source.pages.flatMap(page => page.triples.map(triple => ({ ...triple, layer: source.definition.layer })))) : [], [state.sources, current]);
   const status = (layer: TrustLevel): MemoryLayerStatus => {
     const sources = current ? state.sources.filter(source => source.definition.layer === layer) : [];

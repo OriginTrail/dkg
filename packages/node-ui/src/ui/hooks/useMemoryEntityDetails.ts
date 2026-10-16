@@ -1,13 +1,13 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useFetch } from '../hooks.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
-import { buildMemoryEntities, canonicalEntityUri, fetchMemoryEntity, type LayeredTriple, type MemoryData, type MemoryLayerKey } from './useMemoryEntities.js';
+import { buildMemoryEntities, canonicalEntityUri, fetchMemoryEntity, type LayeredMemoryTriple, type MemoryData, type MemoryLayerKey } from './useMemoryEntities.js';
 import type { MemoryEntityRead } from './memory-graph-query.js';
 import { dedupeTriplesBySpo } from '../views/project/entity-detail.js';
 
 const TRUST = { wm: 'working', swm: 'shared', vm: 'verified' } as const;
 
-function mergeDetails(preview: LayeredTriple[], detail: MemoryEntityRead, iri: string, layer: MemoryLayerKey | null): LayeredTriple[] {
+function mergeDetails(preview: LayeredMemoryTriple[], detail: MemoryEntityRead, iri: string, layer: MemoryLayerKey | null): LayeredMemoryTriple[] {
   const ownedGraphs = new Set(detail.blankGraphs);
   const target = canonicalEntityUri(iri);
   // A complete response replaces the resource's old facts. Partial reads
@@ -17,7 +17,7 @@ function mergeDetails(preview: LayeredTriple[], detail: MemoryEntityRead, iri: s
   return [...detail.triples, ...preview.filter(triple => {
     if (!detail.partial && (!layer || triple.layer === TRUST[layer])
       && (canonicalEntityUri(triple.subject) === target || canonicalEntityUri(triple.object) === target)) return false;
-    return !ownedGraphs.has(triple.graph!) || (!triple.subject.startsWith('_:') && !triple.object.startsWith('_:'));
+    return !ownedGraphs.has(triple.graph) || (!triple.subject.startsWith('_:') && !triple.object.startsWith('_:'));
   })];
 }
 

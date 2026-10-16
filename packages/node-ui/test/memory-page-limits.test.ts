@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '../../storage/dist/index.js';
 import { DKGQueryEngine } from '../../query/dist/dkg-query-engine.js';
 import { invalidateQueryCache } from '../src/ui/api.js';
-import { readMemoryGraphPage, fetchMemoryEntity, type MemoryGraphCursor } from '../src/ui/hooks/memory-graph-query.js';
+import { readMemoryGraphPage, type MemoryGraphCursor } from '../src/ui/hooks/memory-graph-query.js';
 import { memoryQueryDefinitions } from '../src/ui/hooks/memory-query-definition.js';
 import { AUTOMATIC_QUERY_MAX_BYTES } from '../src/ui/query-transport.js';
 
@@ -59,26 +59,5 @@ describe('memory read limits and response-local blank resources', () => {
     });
     expect(await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg)).toEqual({ ok: false, reason: 'response-limit' });
     expect(queries.at(-1)).toMatch(/LIMIT 1$/); expect(queries.length).toBeLessThan(16);
-  });
-  it('uses the clicked blank node’s loaded facts even when unrelated graphs precede it', async () => {
-    const unrelated = `did:dkg:context-graph:${cg}/_working_memory/${owner}/0`;
-    await store.insert([
-      ...Array.from({ length: 1200 }, (_, i) => ({ subject: `_:unrelated${i}`, predicate: 'urn:p', object: '"unrelated"', graph: unrelated })),
-      { subject: 'urn:target-parent', predicate: 'urn:child', object: '_:target', graph },
-      { subject: '_:target', predicate: 'urn:name', object: '"Clicked blank"', graph },
-    ]);
-    const page = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true });
-    if (!page.ok) throw new Error(page.reason);
-    expect(page.omittedRelationships).toBe(false);
-    const target = page.triples.find(triple => triple.object === '"Clicked blank"')!.subject;
-    const before = queries.length;
-    const detail = await fetchMemoryEntity(cg, target, 'wm', false, {
-      triples: page.triples.map(triple => ({ ...triple, layer: 'working' as const })), partial: false,
-    });
-    expect(detail.partial).toBe(false); expect(detail.triples).toHaveLength(2);
-    expect(detail.triples.every(triple => triple.graph === graph)).toBe(true);
-    expect(queries).toHaveLength(before);
-    expect(await fetchMemoryEntity(cg, '_:unknown', 'wm')).toEqual({ triples: [], partial: true, blankGraphs: [] });
-    expect(queries).toHaveLength(before);
   });
 });

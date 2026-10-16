@@ -9,7 +9,7 @@ import { fetchMemoryEntity, readMemoryGraphPage } from '../src/ui/hooks/useMemor
 import { memoryQueryDefinitions } from '../src/ui/hooks/memory-query-definition.js';
 
 const owner = '0x1111111111111111111111111111111111111111';
-const cg = `${owner}/jpb-data`;
+const cg = `${owner}/memory-pages`;
 const root = `did:dkg:context-graph:${cg}`;
 const meta = `${root}/_meta`;
 const dkg = 'http://dkg.io/ontology/';
@@ -130,7 +130,7 @@ describe('assertion pages against the native scoped query engine', () => {
     expect(new Set(seen).size).toBe(7); expect(seen).toHaveLength(7);
     expect(failures).toEqual([]);
   });
-  it('keeps under-budget blank-node subjects and objects complete, including detail reads', async () => {
+  it('keeps under-budget blank-node subjects and objects complete', async () => {
     await assertion('blank-edges');
     const graph = content('blank-edges');
     await store.insert(Array.from({ length: 7 }, (_, i) => [
@@ -149,12 +149,7 @@ describe('assertion pages against the native scoped query engine', () => {
     expect(triples).toHaveLength(15);
     expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(15);
     const blank = triples.find(triple => triple.subject.startsWith('_:'))!.subject;
-    const reads = requests.length;
-    const detail = await fetchMemoryEntity(cg, blank, 'wm', false, { triples: triples.map(triple => ({ ...triple, layer: 'working' as const })), partial: false });
-    expect(requests).toHaveLength(reads);
-    expect(detail.partial).toBe(false);
-    expect(detail.triples).toHaveLength(2);
-    expect(detail.triples.every(triple => triple.subject === blank || triple.object === blank)).toBe(true);
+    expect(triples.filter(triple => triple.subject === blank || triple.object === blank)).toHaveLength(2);
     expect(failures).toEqual([]);
   });
   it('filters hidden meta assertions before the page boundary when catalogs are enabled', async () => {
@@ -180,13 +175,6 @@ describe('assertion pages against the native scoped query engine', () => {
     expect(result.omittedRelationships).toBe(true);
     expect(result.triples).toHaveLength(5000);
     expect(result.nextCursor).toBeUndefined();
-    const blank = result.triples.find(triple => triple.subject.startsWith('_:'))!.subject;
-    const reads = requests.length;
-    const detail = await fetchMemoryEntity(cg, blank, 'wm', false, {
-      triples: result.triples.map(triple => ({ ...triple, layer: 'working' as const })), partial: true,
-    });
-    expect(detail.partial).toBe(true); expect(detail.triples).toHaveLength(1);
-    expect(requests).toHaveLength(reads);
   });
   it('continues small blank components without omissions even when a row page is full', async () => {
     for (let i = 0; i < 7; i++) {

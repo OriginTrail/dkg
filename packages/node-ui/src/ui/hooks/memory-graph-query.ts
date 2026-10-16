@@ -4,7 +4,7 @@ import { QueryResponseLimitError } from '../query-transport.js';
 import { bindingLexicalValue as bv, bindingRdfTerm as rdfBindingValue } from '../query-bindings.js';
 import { sparqlIri } from '@origintrail-official/dkg-core/sparql-safe';
 import { definitionsForLayer, memoryQuery, type MemoryQueryDefinition } from './memory-query-definition.js';
-import type { Triple, LayeredTriple, MemoryLayerKey } from './useMemoryEntities.js';
+import type { MemoryTriple, LayeredMemoryTriple, MemoryLayerKey } from './useMemoryEntities.js';
 
 export { rdfBindingValue };
 
@@ -62,7 +62,7 @@ export type MemoryGraphCursor = RowCursor
   | { kind: 'blank-graphs'; graphs: string[]; resume?: RowCursor };
 export interface MemoryGraphPage {
   ok: true;
-  triples: Triple[];
+  triples: MemoryTriple[];
   nextCursor?: MemoryGraphCursor;
   omittedRelationships: boolean;
 }
@@ -79,10 +79,10 @@ interface QueryLayerOptions {
 }
 
 function queryMemory(definition: MemoryQueryDefinition, contextGraphId: string, sparql: string,
-  options: { includeContextGraphPartitions?: boolean } = {}) {
+  options: { includeContextGraphPartitions?: boolean } = {}, timeoutMs = 60_000) {
   return postQueryDeduped({ sparql, contextGraphId, ...options,
     ...(definition.layer === 'shared' ? { includeSharedMemory: true } : {}),
-  }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
+  }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs });
 }
 
 const CURSOR_VARIABLES = ['?__g', '?__s', '?__p', '?__kind', '?__o', '?__lang', '?__datatype'];
@@ -102,12 +102,32 @@ function cursorForRow(row: Record<string, unknown>): RowCursor {
   return { kind: 'row', graph, termKey: termKey as TermKey };
 }
 
-function triplesFromRows(rows: Record<string, unknown>[], contextGraphId: string, response = ''): Triple[] {
+const blankResponseScopes = new WeakMap<object, { id: number; nodes: Map<string, string> }>();
+let nextBlankResponseScope = 0;
+
+function projectedGraph(row: Record<string, unknown>): string {
+  const graph = bv(row.g);
+  if (!graph) throw new Error('Memory query omitted its source graph');
+  return canonicalEntityUri(graph);
+}
+
+function triplesFromRows(rows: Record<string, unknown>[], contextGraphId: string, response: object = rows): MemoryTriple[] {
   return rows.flatMap(row => {
-    const graph = bv(row.g) ?? '';
+    const graph = projectedGraph(row);
     const term = (value: unknown) => {
       const text = rdfBindingValue(value) ?? '';
-      return text.startsWith('_:') ? `_:${encodeURIComponent(graph)}:${response}${text.slice(2)}` : text;
+      if (!text.startsWith('_:')) return text;
+      let scope = blankResponseScopes.get(response);
+      if (!scope) {
+        scope = { id: ++nextBlankResponseScope, nodes: new Map() };
+        blankResponseScopes.set(response, scope);
+      }
+      let id = scope.nodes.get(text);
+      if (!id) {
+        id = `_:response-${scope.id}-node-${scope.nodes.size + 1}`;
+        scope.nodes.set(text, id);
+      }
+      return id;
     };
     const subject = term(row.s); const predicate = bv(row.p) ?? ''; const object = term(row.o);
     return subject && predicate && object ? [{ subject, predicate, object, graph, subGraph: subGraphOf(graph, contextGraphId) }] : [];
@@ -150,8 +170,10 @@ export async function readMemoryGraphPage(
         }
       }
     };
-    const triples: Triple[] = [];
-    const append = (rows: Record<string, unknown>[]) => { triples.push(...triplesFromRows(rows, contextGraphId)); };
+    const triples: MemoryTriple[] = [];
+    const append = (rows: Record<string, unknown>[], response: object = rows) => {
+      triples.push(...triplesFromRows(rows, contextGraphId, response));
+    };
     let pending: string[];
     let resume: RowCursor | undefined;
     if (cursor?.kind === 'blank-graphs') {
@@ -162,7 +184,7 @@ export async function readMemoryGraphPage(
         projection: 'DISTINCT ?g', inventory: true, order: 'STR(?g)', limit: 6,
         filters: cursor ? `FILTER(STR(?g) ${cursor.kind === 'after-graph' ? '>' : '>='} ${JSON.stringify(cursor.graph)})` : '',
       }));
-      const names = [...new Set(catalog.map(row => canonicalEntityUri(bv(row.g) ?? '')).filter(Boolean))];
+      const names = [...new Set(catalog.map(projectedGraph))];
       const graphs = names.slice(0, 5);
       if (!graphs.length) return { ok: true, triples, omittedRelationships: false };
       const { rows, limit } = await boundedRead(limit => memoryQuery(definition, {
@@ -171,7 +193,7 @@ export async function readMemoryGraphPage(
         bindings: CURSOR_BINDINGS, order: CURSOR_VARIABLES.join(' '), limit,
       }), layerLimit);
       const bindings = rows.slice(0, limit);
-      append(bindings);
+      append(bindings, rows);
       const clipped = bindings.length >= limit;
       const last = clipped ? cursorForRow(bindings.at(-1)!) : undefined;
       // Finish blank edges before advancing past a completed graph. The graph
@@ -192,7 +214,7 @@ export async function readMemoryGraphPage(
       // it a fresh page; split graph groups before declaring any graph oversized.
       if (triples.length) break;
       if (pending.length > 1) result = await load([pending[0]]);
-      append(result.rows.slice(0, budget));
+      append(result.rows.slice(0, budget), result.rows);
       omittedRelationships ||= !fits();
       pending.shift();
     }
@@ -207,35 +229,47 @@ export async function readMemoryGraphPage(
 }
 
 export interface MemoryEntityRead {
-  triples: LayeredTriple[];
+  triples: LayeredMemoryTriple[];
   partial: boolean;
   /** Blank edges in these graphs belong exclusively to this captured response. */
   blankGraphs: string[];
 }
-let detailResponseId = 0;
+const RESOURCE_DETAIL_LIMIT = 1000;
+const BLANK_GRAPH_DISCOVERY_ROUNDS = 5;
 
-/** Read a clicked resource directly, even when its facts fall outside the loaded graph pages. */
+/** Follow stable graph IRIs, never response-local blank labels, between reads. */
+async function connectedBlankGraphs(definition: MemoryQueryDefinition, contextGraphId: string, initial: string[]) {
+  let graphs = initial;
+  for (let round = 0; round < BLANK_GRAPH_DISCOVERY_ROUNDS; round++) {
+    const data = await queryMemory(definition, contextGraphId, memoryQuery(definition, {
+      projection: 'DISTINCT ?g', limit: 1,
+      pattern: `{
+        { ?b ?p ?o } UNION { ?s ?p ?b }
+        FILTER(isBlank(?b))
+      }`,
+      // Exclude visited graphs and stop at the first new one. Enumerating all
+      // matches would multiply repeated blank properties in a quadratic join.
+      filters: `VALUES ?known { ${graphs.map(sparqlIri).join(' ')} }
+        GRAPH ?known { { ?b ?knownP ?knownO } UNION { ?knownS ?knownP ?b } }
+        FILTER(?g NOT IN (${graphs.map(sparqlIri).join(', ')}))`,
+    }), { includeContextGraphPartitions: true }, 10_000);
+    const found = (data.result?.bindings ?? []).map(projectedGraph);
+    const next = [...new Set([...graphs, ...found])];
+    if (next.length === graphs.length) return { graphs, partial: false };
+    graphs = next;
+  }
+  return { graphs, partial: true };
+}
+
+/** Indexed IRI-only read. Blank navigation belongs to the hook owning the captured response. */
 export async function fetchMemoryEntity(
   contextGraphId: string,
-  uri: string,
+  iri: string,
   layer?: MemoryLayerKey,
   includeQueryCatalog = false,
-  preview?: { triples: LayeredTriple[]; partial: boolean },
 ): Promise<MemoryEntityRead> {
-  const target = canonicalEntityUri(uri);
-  const blank = target.startsWith('_:');
+  const target = canonicalEntityUri(iri);
   const definitions = definitionsForLayer(contextGraphId, layer, includeQueryCatalog);
-  if (blank) {
-    // A blank label cannot identify a resource in a fresh SPARQL result. Use
-    // the same graph-scoped response that supplied the clicked node instead.
-    const layers = new Set(definitions.map(definition => definition.layer));
-    return {
-      triples: (preview?.triples ?? []).filter(triple => layers.has(triple.layer)
-        && (triple.subject === target || triple.object === target)),
-      partial: preview?.partial ?? true,
-      blankGraphs: [],
-    };
-  }
   const results = await Promise.all(definitions.map(async definition => {
     const pattern = `{
       { ${sparqlIri(target)} ?p ?o BIND(${sparqlIri(target)} AS ?s) }
@@ -243,24 +277,26 @@ export async function fetchMemoryEntity(
     }`;
     // Bind IRIs to use the store's subject/object indexes.
     const data = await queryMemory(definition, contextGraphId, memoryQuery(definition, {
-      pattern, limit: 1001,
+      pattern, limit: RESOURCE_DETAIL_LIMIT + 1,
     }), { includeContextGraphPartitions: true });
     const rows = data.result?.bindings ?? [];
-    const direct = triplesFromRows(rows.slice(0, 1000), contextGraphId);
-    const isBlankEdge = (triple: Triple) => triple.subject.startsWith('_:') || triple.object.startsWith('_:');
-    const blankGraphs = [...new Set(direct.filter(isBlankEdge).map(triple => triple.graph!))];
-    if (!blankGraphs.length) return { truncated: rows.length > 1000, triples: direct, blankGraphs };
+    const direct = triplesFromRows(rows.slice(0, RESOURCE_DETAIL_LIMIT), contextGraphId, rows);
+    const isBlankEdge = (triple: MemoryTriple) => triple.subject.startsWith('_:') || triple.object.startsWith('_:');
+    const anchors = [...new Set(direct.filter(isBlankEdge).map(triple => triple.graph))];
+    if (!anchors.length) return { truncated: rows.length > RESOURCE_DETAIL_LIMIT, triples: direct, blankGraphs: [] };
+    const closure = await connectedBlankGraphs(definition, contextGraphId, anchors);
+    const blankGraphs = closure.graphs;
     // Never combine labels from the indexed resource response with a second
-    // result. Capture blank facts once per graph, prioritizing the clicked
+    // result. Capture related graphs together, prioritizing the clicked
     // resource's edges, and let the detail owner replace that graph's preview.
     const blanks = await queryMemory(definition, contextGraphId, memoryQuery(definition, {
-      graphs: blankGraphs, filters: 'FILTER(isBlank(?s) || isBlank(?o))', limit: 1001,
+      graphs: blankGraphs, filters: 'FILTER(isBlank(?s) || isBlank(?o))', limit: RESOURCE_DETAIL_LIMIT + 1,
       order: `IF(?s = ${sparqlIri(target)} || ?o = ${sparqlIri(target)}, 0, 1)`,
     }), { includeContextGraphPartitions: true });
     const blankRows = blanks.result?.bindings ?? [];
-    return { truncated: rows.length > 1000 || blankRows.length > 1000, blankGraphs,
+    return { truncated: closure.partial || rows.length > RESOURCE_DETAIL_LIMIT || blankRows.length > RESOURCE_DETAIL_LIMIT, blankGraphs,
       triples: [...direct.filter(triple => !isBlankEdge(triple)),
-        ...triplesFromRows(blankRows.slice(0, 1000), contextGraphId, `detail-${++detailResponseId}:`)] };
+        ...triplesFromRows(blankRows.slice(0, RESOURCE_DETAIL_LIMIT), contextGraphId, blankRows)] };
   }));
   return {
     triples: results.flatMap((result, index) => result.triples.map(triple => ({ ...triple, layer: definitions[index].layer }))),

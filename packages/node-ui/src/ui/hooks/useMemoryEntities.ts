@@ -66,10 +66,14 @@ export interface LayeredTriple extends Triple {
   layer: TrustLevel;
 }
 
+/** Memory reads always project their physical source graph. Rendering may use Triple. */
+export interface MemoryTriple extends Triple { graph: string }
+export interface LayeredMemoryTriple extends MemoryTriple { layer: TrustLevel }
+
 export interface MemoryData {
   entities: Map<string, MemoryEntity>;
   entityList: MemoryEntity[];
-  allTriples: LayeredTriple[];
+  allTriples: LayeredMemoryTriple[];
   graphTriples: Triple[];
   trustMap: Map<string, TrustLevel>;
   counts: { wm: number; swm: number; vm: number; total: number };
