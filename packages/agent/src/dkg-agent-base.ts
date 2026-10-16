@@ -629,7 +629,7 @@ export class DKGAgentBase {
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
-  syncResponderPreparedCacheOwner?: { closeAndDrain(): Promise<void> };
+  protected syncResponderPreparedCacheOwner?: { closeAndDrain(): Promise<void> };
   private swmTargetExecutorSessionFactoryV1?: SwmTargetExecutorSessionFactoryV1;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
