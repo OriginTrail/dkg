@@ -54,7 +54,6 @@ import {
   createOperationContext,
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
-  type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { holdsAuthoritativePublicDefinitionV1 } from './context-graph-meta-confirmation.js';
