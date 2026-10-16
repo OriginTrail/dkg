@@ -367,3 +367,21 @@ export function transferOccupancy({ readings, admissions, isTransfer, from, unti
   const window = readings.filter(reading => reading.at >= from && reading.at <= until);
   return { transfer: window.filter(reading => slotHolder(reading, admissions, isTransfer).state === 'transfer').length, total: window.length };
 }
+
+/**
+ * The busy Edge's check of one receipt: its pair result (pairOutcome), when
+ * the report reached the Edge, the transfer's life (transferLifetime) and
+ * whether an admission of the transfer held the general slot at that moment
+ * (transferHeldAt). It passes only when the transfer held the slot then. A
+ * receipt after the transfer ended, one between its admissions, or one the
+ * readings cannot place leaves the case not exercised and fails. A result
+ * that failed, or a pair that was never received, is returned as it is.
+ */
+export function busyReceiptOutcome(result, { received, life, held }) {
+  if (result.outcome !== 'pass' || received === null || received === undefined) return result;
+  if (!life || received > life.to) return { outcome: 'fail', text: `${result.text}; not exercised: the transfer of the large graph had ended by then` };
+  if (!held?.held) {
+    return { outcome: 'fail', text: `${result.text}; not exercised: no reading shows the transfer holding the general slot at that moment (${held?.why ?? 'no reading'})` };
+  }
+  return { outcome: 'pass', text: `${result.text}, while an admission of the transfer held the general slot` };
+}

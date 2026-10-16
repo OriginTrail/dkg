@@ -14,24 +14,29 @@
 // running durable work's start, and the log ties that start to an admission
 // of the transfer and to no other. Durable work never takes the reserved
 // shared-memory slot beside the general one, so under one general slot the
-// durable work a reading shows holds that slot. A check counts as exercised
-// when the report arrived within the transfer's life (its first admission to
-// the last line of its admissions' work); whether an admission of it held the
-// slot at that very moment is reported with it. The readings are kept in the
-// run's folder.
+// durable work a reading shows holds that slot. An edgeB receipt counts only
+// when an admission of the transfer held the slot at that moment: the first
+// reading after it shows an admission that started before it. Because the
+// transfer leaves the slot for moments between admissions, edgeA shares again,
+// up to SHARE_ATTEMPTS times, until a receipt lands inside one. A receipt
+// outside the transfer's admissions leaves the case not exercised. The
+// readings are kept in the run's folder.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { brief, sleep, waitFor } from '../member-sharing/devnet.mjs';
 import { heldAt } from '../member-sharing/observation.mjs';
 import {
-  admissionPolicyProblem, countLogLines, pairOutcome, parseAdmissions, promotionOutcome, slotHolder, transferHeldAt,
-  transferLifetime, transferOccupancy,
+  admissionPolicyProblem, busyReceiptOutcome, countLogLines, pairOutcome, parseAdmissions, promotionOutcome, slotHolder,
+  transferHeldAt, transferLifetime, transferOccupancy,
 } from '../qa/one-graph-promotion.mjs';
 import { describe } from '../qa/member-sharing.mjs';
 import { settled } from './reports.mjs';
 
 const secs = ms => Math.round(ms / 1000);
+// How often edgeA shares a report during the transfer, at most, until edgeB
+// receives one while an admission of the transfer holds its slot.
+const SHARE_ATTEMPTS = 6;
 
 /**
  * One reading of a node's sync slots: the running operations of every lane
@@ -68,7 +73,7 @@ function readSlots(devnet, node) {
  * (published), `promotions` the reports the curator promotes while the
  * transfer runs. `ensureDefinition(node, graph, caseId)` is the suite's
  * remedy for a subscriber that holds no definition of a graph. Returns the
- * record of the report shared in the window and the reports promoted, for
+ * records of the reports shared in the window and the reports promoted, for
  * the cases after it: { shared, promoted }.
  */
 export async function busyEdge(ctx, main, large, promotions) {
@@ -95,33 +100,59 @@ export async function busyEdge(ctx, main, large, promotions) {
   if (!seen.ok) {
     await slots.stop();
     report.fail(caseId, `not exercised: ${edgeB.label}'s transfer of the large graph was never seen in its general sync slot (last reading: ${seen.state}); raise ONE_GRAPH_LARGE_ASSETS / ONE_GRAPH_LARGE_TRIPLES`);
-    return { shared: null, promoted: [] };
+    return { shared: [], promoted: [] };
   }
   const policy = admissionPolicyProblem(seen.admission);
   if (policy) report.fail(caseId, `${edgeB.label} does not run the profile's sync policy: ${policy} (its admission ${seen.admission.label})`);
   report.note(`case ${caseId}: ${edgeB.label} runs ${seen.admission.label} in its general sync slot, ${secs(seen.admission.at - subscribedAt)} s after it subscribed to the large graph`);
 
   const from = Date.now();
-  const handles = [];
-  const shared = await io.share(edgeA, main, 'edgeA while edgeB is busy');
-  handles.push(io.watch(io.pairs(caseId, shared, [edgeB, curator], 'swm')));
-  const promoted = [];
-  for (const record of promotions) {
-    const { answer, at } = await io.promote(curator, record);
-    const outcome = promotionOutcome(answer, { authorAddress: record.author.agentAddress });
-    if (outcome.ok) {
-      promoted.push(record);
+  // The promotions run beside the reports; each is confirmed on chain before its watch starts.
+  const promoting = (async () => {
+    const watches = [];
+    const done = [];
+    for (const record of promotions) {
+      const { answer, at } = await io.promote(curator, record);
+      const outcome = promotionOutcome(answer, { authorAddress: record.author.agentAddress });
+      if (!outcome.ok) {
+        report.fail(caseId, `the curator's promotion of ${describe(record)} while ${edgeB.label} was busy failed: ${outcome.why}`);
+        continue;
+      }
+      done.push(record);
       const options = { from: at, fromWhat: 'promotion' };
-      handles.push(io.watch([
+      watches.push(io.watch([
         ...io.pairs(caseId, record, [edgeB, curator, edgeA], 'vm', options),
         ...io.pairs(caseId, record, [edgeB, curator, edgeA], 'gone', options),
       ]));
-    } else report.fail(caseId, `the curator's promotion of ${describe(record)} while ${edgeB.label} was busy failed: ${outcome.why}`);
+    }
+    return { promoted: done, pairs: await settled(watches) };
+  })();
+  // A report reaches edgeB at once through gossip, often between two of the
+  // transfer's admissions. edgeA shares again, up to SHARE_ATTEMPTS times while
+  // the transfer runs, until edgeB receives a report while an admission of the
+  // transfer holds its slot.
+  const shared = [];
+  const reportPairs = [];
+  const readingAfter = moment => waitFor(() => ({ ok: slots.readings.some(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= moment) }), 5000, 200);
+  for (let attempt = 1; attempt <= SHARE_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) await sleep(1500);
+    const record = await io.share(edgeA, main, `edgeA while edgeB is busy ${attempt}`);
+    shared.push(record);
+    const pairs = await settled([io.watch(io.pairs(caseId, record, [edgeB, curator], 'swm'))]);
+    reportPairs.push(...pairs);
+    const received = heldAt(pairs.find(pair => pair.node === edgeB));
+    if (received === null) break;
+    await readingAfter(received);
+    const log = devnet.logSince(edgeB, offset);
+    const all = parseAdmissions(log);
+    if (transferHeldAt(received, slots.readings, all, isTransfer).held) break;
+    const life = transferLifetime(log, all, isTransfer);
+    if (!life || received > life.to) break;
   }
-  const pairs = await settled(handles);
+  const { promoted, pairs: promotionPairs } = await promoting;
   const until = Date.now();
   // One reading taken after the last check, so that the evidence reaches the window's end.
-  await waitFor(() => ({ ok: slots.readings.some(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= until) }), 10_000, 200);
+  await readingAfter(until);
   await slots.stop();
   const kept = join(devnet.dir, 'one-graph-promotion', ctx.stamp);
   mkdirSync(kept, { recursive: true });
@@ -130,19 +161,21 @@ export async function busyEdge(ctx, main, large, promotions) {
   const log = devnet.logSince(edgeB, offset);
   const all = parseAdmissions(log);
   const life = transferLifetime(log, all, isTransfer);
-  for (const pair of pairs) {
+  // Every edgeB receipt counts only while an admission of the transfer held its
+  // slot (busyReceiptOutcome). Of the shares, the last decides; an earlier one
+  // is noted. The other Edges' pairs are ordinary delivery checks.
+  const lastAttempt = reportPairs.filter(pair => pair.node === edgeB).at(-1);
+  for (const pair of [...reportPairs, ...promotionPairs]) {
     const result = pairOutcome(pair, { boundMs: ctx.boundMs });
-    const received = pair.node === edgeB ? heldAt(pair) : null;
-    if (result.outcome !== 'pass' || received === null) {
+    if (pair.node !== edgeB) {
       (result.outcome === 'pass' ? report.pass : report.fail)(caseId, result.text);
       continue;
     }
-    if (!life || received > life.to) {
-      report.fail(caseId, `${result.text}; not exercised: the transfer of the large graph had ended by then`);
-      continue;
-    }
-    const at = transferHeldAt(received, slots.readings, all, isTransfer);
-    report.pass(caseId, `${result.text}, within the transfer's life (${at.held ? 'an admission of it held the slot then' : `its admissions left the slot then: ${at.why}`})`);
+    const received = heldAt(pair);
+    const held = received === null ? undefined : transferHeldAt(received, slots.readings, all, isTransfer);
+    const verdict = busyReceiptOutcome(result, { received, life, held });
+    if (pair.kind === 'swm' && pair !== lastAttempt) report.note(`case ${caseId}: an earlier share: ${verdict.text}`);
+    else (verdict.outcome === 'pass' ? report.pass : report.fail)(caseId, verdict.text);
   }
   const occupancy = transferOccupancy({ readings: slots.readings, admissions: all, isTransfer, from, until });
   const reserved = all.filter(admission => admission.reserved && admission.label.startsWith(`shared-memory:${main.id}:`) && admission.at >= from - 1000 && admission.at <= until);

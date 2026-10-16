@@ -3,7 +3,7 @@ import test from 'node:test';
 import {
   admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, inVerifiedScope, judgeGone, memberPublishOutcome,
   pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, slotHolder, transferHeldAt, transferLifetime,
-  transferOccupancy, verifiedScope, writeRetryable,
+  transferOccupancy, verifiedScope, writeRetryable, busyReceiptOutcome,
 } from '../qa/one-graph-promotion.mjs';
 import { sharedMemoryScope } from '../qa/member-sharing.mjs';
 import { createReports } from '../one-graph/reports.mjs';
@@ -363,4 +363,35 @@ test('the window\'s readings are counted by whether they show the transfer in th
   ];
   assert.deepEqual(transferOccupancy({ readings, admissions, isTransfer, from: second26, until: second26 + 9100 }), { transfer: 3, total: 4 });
   assert.deepEqual(transferOccupancy({ readings, admissions, isTransfer, from: second26 + 3000, until: second26 + 6000 }), { transfer: 0, total: 1 });
+});
+
+test('a busy Edge\'s receipt passes only while an admission of the transfer held its slot', () => {
+  const admissions = parseAdmissions(TRANSFER_LOG);
+  const life = transferLifetime(TRANSFER_LOG, admissions, isTransfer);
+  const held = { outcome: 'pass', text: '"r (1)" by node8 (edgeA) in main/reports at node9 (edgeB): in shared memory 1 s after the share' };
+  // Inside the second admission (01:16:33), with a reading right after that shows it.
+  const inside = new Date('2026-10-16T01:16:35.200').getTime();
+  const during = transferHeldAt(inside, [reading(inside + 300, 20, [durable(2100)])], admissions, isTransfer);
+  assert.deepEqual(busyReceiptOutcome(held, { received: inside, life, held: during }),
+    { outcome: 'pass', text: `${held.text}, while an admission of the transfer held the general slot` });
+  // Every receipt between the two admissions (01:16:30 to 01:16:32), the slot free or holding other work:
+  // the case cannot pass as exercised.
+  for (const at of ['2026-10-16T01:16:30.100', '2026-10-16T01:16:31.600', '2026-10-16T01:16:32.900']) {
+    const between = new Date(at).getTime();
+    const evidence = transferHeldAt(between, [reading(between + 300, 20, [])], admissions, isTransfer);
+    const verdict = busyReceiptOutcome(held, { received: between, life, held: evidence });
+    assert.equal(verdict.outcome, 'fail', at);
+    assert.match(verdict.text, /; not exercised: no reading shows the transfer holding the general slot at that moment \(the slot held other work or none\)$/);
+  }
+  // Slot evidence that cannot be read, or none at all, cannot pass either.
+  const unread = transferHeldAt(inside, [{ at: inside + 300, unreadable: 'HTTP 503' }], admissions, isTransfer);
+  assert.match(busyReceiptOutcome(held, { received: inside, life, held: unread }).text, /not exercised: .*could not be read/);
+  assert.match(busyReceiptOutcome(held, { received: inside, life, held: undefined }).text, /not exercised: .*\(no reading\)$/);
+  // After the transfer ended, or with no transfer at all.
+  assert.match(busyReceiptOutcome(held, { received: life.to + 1, life, held: during }).text, /not exercised: the transfer of the large graph had ended by then$/);
+  assert.match(busyReceiptOutcome(held, { received: inside, life: null, held: during }).text, /had ended by then$/);
+  // A failed check, or a pair never received, stays as it is.
+  const missed = { outcome: 'fail', text: 'NOT in shared memory' };
+  assert.equal(busyReceiptOutcome(missed, { received: inside, life, held: during }), missed);
+  assert.equal(busyReceiptOutcome(held, { received: null, life, held: during }), held);
 });

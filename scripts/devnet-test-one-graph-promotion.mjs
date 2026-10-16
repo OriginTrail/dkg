@@ -94,12 +94,13 @@
 //      the curator publishes) while edgeA shares a report and the curator
 //      promotes edgeA's report of case 3 and its own second report. edgeB
 //      must hold the new report, and each promoted one in Verified Memory and
-//      not in shared memory, within the
-//      bound and while the transfer still runs. The transfer is many short
-//      admissions (`durable:<graph>:<peer>`, one or a few assets each), so a
-//      check passed after the last of them ended fails as not exercised, and
-//      whether one of them held the slot at the moment of each receipt is
-//      reported with it (scripts/lib/one-graph/busy-transfer.mjs)
+//      not in shared memory, within the bound, and each receipt must land
+//      while an admission of the transfer holds its general slot, as edgeB's
+//      log and diagnostics show. The transfer is many short admissions
+//      (`durable:<graph>:<peer>`, one or a few assets each), so edgeA shares
+//      again, up to 6 times while the transfer runs, until a receipt lands
+//      inside one; a receipt outside the transfer's admissions fails as not
+//      exercised (scripts/lib/one-graph/busy-transfer.mjs)
 //   7  the late Edge recovers both layers within ONE_GRAPH_RECOVERY_SECS, then
 //      shares a report that every other Edge must hold
 //   8  the synced flag: every subscriber lists the graph as synced within
@@ -508,7 +509,7 @@ async function run() {
   if (large && await precondition(6, 'before the large transfer')) {
     const busy = await busyEdge({ devnet, edges, graphs, io, report, caseId: 6, boundMs: BOUND_MS, stamp: STAMP, ensureDefinition }, main, large,
       [a2, c2].filter(record => !record.error && !promoted.has(record)));
-    if (busy.shared) shared.push(busy.shared);
+    shared.push(...busy.shared);
     for (const record of busy.promoted) promoted.add(record);
   }
 
