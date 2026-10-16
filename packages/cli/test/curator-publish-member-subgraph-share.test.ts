@@ -266,5 +266,57 @@ describe('a curator publishes a member\'s sub-graph share from shared memory (GH
       { contextGraphId: CG, subGraphName: SUB_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(leftInCuratorSwm.bindings).toEqual([]);
+
+    // 6. The member, the author, follows the publication like every other node.
+    const inMemberVm = await pollUntil(
+      () => member.query(
+        `SELECT ?name WHERE { <${SUBJECT}> <http://schema.org/name> ?name }`,
+        { contextGraphId: CG, subGraphName: SUB_GRAPH },
+      ),
+      (result) => result.bindings.length > 0,
+      30_000,
+    );
+    expect(inMemberVm.bindings).toEqual([{ name: TITLE }]);
+    const leftInMemberSwm = await pollUntil(
+      () => member.query(
+        `SELECT ?name WHERE { <${SUBJECT}> <http://schema.org/name> ?name }`,
+        { contextGraphId: CG, subGraphName: SUB_GRAPH, graphSuffix: '_shared_memory' },
+      ),
+      (result) => result.bindings.length === 0,
+      30_000,
+    );
+    expect(leftInMemberSwm.bindings).toEqual([]);
   }, 180_000);
+
+  it('keeps author seals on the curator only: a member keeps none of the curator\'s', async () => {
+    // The curator's own asset in the sub-graph reaches the member's shared memory ...
+    const curatorReport = 'curator-report-1';
+    const curatorSubject = 'urn:dkg:test-3294:curator-report-1';
+    await curator.assertion.create(CG, curatorReport, { subGraphName: SUB_GRAPH });
+    await curator.assertion.write(CG, curatorReport, [
+      { subject: curatorSubject, predicate: 'http://schema.org/name', object: '"Curator report"' },
+    ], { subGraphName: SUB_GRAPH });
+    await curator.assertion.promote(CG, curatorReport, { subGraphName: SUB_GRAPH });
+    const inMemberSwm = await pollUntil(
+      () => member.query(
+        `SELECT ?name WHERE { <${curatorSubject}> <http://schema.org/name> ?name }`,
+        { contextGraphId: CG, subGraphName: SUB_GRAPH, graphSuffix: '_shared_memory' },
+      ),
+      (result) => result.bindings.length > 0,
+      30_000,
+    );
+    expect(inMemberSwm.bindings).toEqual([{ name: '"Curator report"' }]);
+
+    // ... but its seal stays out of the member's `_meta`: the member does not
+    // curate the graph, so it has no use for another author's seal.
+    expect(await member.resolveAssertionAuthor(CG, curatorReport, {
+      subGraphName: SUB_GRAPH,
+      callerAgentAddress: memberAddress,
+    })).toBeUndefined();
+    // The curator resolves its own seal, as before.
+    expect((await curator.resolveAssertionAuthor(CG, curatorReport, {
+      subGraphName: SUB_GRAPH,
+      callerAgentAddress: curatorAddress,
+    }))?.toLowerCase()).toBe(curatorAddress.toLowerCase());
+  }, 120_000);
 });

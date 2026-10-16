@@ -4132,10 +4132,10 @@ export class DKGAgent extends DKGAgentBase {
        * keyed by the assertion URI.
        *
        * After finalize, the assertion's content is sealed: subsequent
-       * `write` calls would invalidate the seal. The seal travels with
-       * the assertion through SWM gossip (because `_meta` propagates by
-       * default) and is consumed verbatim by the chain publish path —
-       * publish never re-signs or re-hashes.
+       * `write` calls would invalidate the seal. Each share of the
+       * assertion carries the seal, so a node that verifies it can publish
+       * the assertion as this author's (GH#3294); the chain publish path
+       * consumes it verbatim — publish never re-signs or re-hashes.
        *
        * Authorship resolution mirrors `publishFromSharedMemory`:
        *   1. `preSignedAuthorAttestation` wins (self-sovereign agents).

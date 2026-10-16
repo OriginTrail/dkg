@@ -1,0 +1,420 @@
+import { describe, expect, it } from 'vitest';
+import { ethers } from 'ethers';
+import {
+  ASSERTION_SEAL_PREDICATES,
+  AUTHOR_SCHEME_VERSION_V1,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  TypedEventBus,
+  assertionLifecycleUri,
+  buildAssertionPublishReceiptQuads,
+  buildAssertionSealQuads,
+  buildAuthorAttestationTypedData,
+  contextGraphAssertionUri,
+  contextGraphMetaUri,
+  encodeWorkspacePublishRequest,
+  generateEd25519Keypair,
+  parseAssertionSealQuads,
+  parseGraphScopedAssertionSealCandidate,
+  type AssertionSeal,
+  type WorkspacePublishRequestMsg,
+} from '@origintrail-official/dkg-core';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { DKGPublisher, computeFlatKCRootV10 } from '../src/index.js';
+import { SharedMemoryHandler } from '../src/workspace-handler.js';
+import {
+  SWM_SHARE_COMPLETE_PRED,
+  keepSharedMemoryAuthorSeal,
+  sharedMemoryAuthorSealFields,
+  verifySharedMemoryAuthorSeal,
+  type SharedMemoryAuthorSealShare,
+} from '../src/shared-memory-author-seal.js';
+import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
+
+const CG = 'curated-seal-receiver';
+const SUB = 'reports';
+const NAME = 'report-1';
+const PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const AUTHOR = new ethers.Wallet(`0x${'11'.repeat(32)}`);
+const STRANGER = new ethers.Wallet(`0x${'22'.repeat(32)}`);
+const KAV10 = ethers.getAddress(`0x${'12'.repeat(20)}`);
+const DATA_GRAPH = `did:dkg:context-graph:${CG}`;
+const META_GRAPH = contextGraphMetaUri(CG);
+const SUBJECT = 'urn:report:1';
+const NAME_PRED = 'http://schema.org/name';
+
+function ualOf(number: bigint = 7n): string {
+  return `did:dkg:evm:31337/${AUTHOR.address.toLowerCase()}/${number}`;
+}
+
+function rootOf(value: string): Uint8Array {
+  return computeFlatKCRootV10([{ subject: SUBJECT, predicate: NAME_PRED, object: `"${value}"`, graph: '' }], []);
+}
+
+/** A seal the author's finalize would write for one triple with `value`. */
+async function sealOf(value: string, opts: {
+  version?: number;
+  signer?: ethers.Wallet;
+  number?: bigint;
+} = {}): Promise<AssertionSeal> {
+  const number = opts.number ?? 7n;
+  const merkleRoot = rootOf(value);
+  const reservedKaId = (BigInt(AUTHOR.address) << 96n) | number;
+  const typed = buildAuthorAttestationTypedData({
+    chainId: 31337n,
+    kav10Address: KAV10,
+    merkleRoot,
+    authorAddress: AUTHOR.address,
+    reservedKaId,
+    schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+  });
+  const signature = ethers.Signature.from(
+    await (opts.signer ?? AUTHOR).signTypedData(typed.domain, typed.types, typed.message),
+  );
+  return {
+    merkleRoot,
+    authorAddress: AUTHOR.address,
+    authorAttestationR: ethers.getBytes(signature.r),
+    authorAttestationVS: ethers.getBytes(signature.yParityAndS),
+    authorSchemeVersion: AUTHOR_SCHEME_VERSION_V1,
+    chainId: 31337n,
+    kav10Address: KAV10,
+    reservedKaId,
+    finalizedAtIso: '2026-10-16T00:00:00.000Z',
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: ualOf(number),
+    assertionVersion: String(opts.version ?? 1),
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+    rootEntities: [],
+  };
+}
+
+function shareOf(value: string, overrides: Partial<SharedMemoryAuthorSealShare> = {}): SharedMemoryAuthorSealShare {
+  return {
+    contextGraphId: CG,
+    subGraphName: SUB,
+    kaUal: ualOf(),
+    assertionVersion: '1',
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+    merkleRoot: rootOf(value),
+    ...overrides,
+  };
+}
+
+/** The share message the author's node sends for one triple with `value`. */
+function shareMessage(
+  value: string,
+  seal: AssertionSeal | undefined,
+  overrides: Partial<WorkspacePublishRequestMsg> = {},
+): Uint8Array {
+  return encodeWorkspacePublishRequest({
+    contextGraphId: CG,
+    nquads: new TextEncoder().encode(`<${SUBJECT}> <${NAME_PRED}> "${value}" <${DATA_GRAPH}> .`),
+    manifest: [],
+    publisherPeerId: PEER_ID,
+    shareOperationId: `op-${value}`,
+    timestampMs: Date.now(),
+    subGraphName: SUB,
+    agentAddress: AUTHOR.address.toLowerCase(),
+    kaNumber: '7',
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: ualOf(),
+    assertionVersion: seal?.assertionVersion ?? '1',
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+    ...(seal ? sharedMemoryAuthorSealFields(NAME, seal) : {}),
+    ...overrides,
+  });
+}
+
+async function rowsOf(store: OxigraphStore, subject: string): Promise<Quad[]> {
+  const result = await store.query(
+    `CONSTRUCT { <${subject}> ?p ?o } WHERE { GRAPH <${META_GRAPH}> { <${subject}> ?p ?o } }`,
+  );
+  return result.type === 'quads' ? result.quads : [];
+}
+
+/** The seal VM publish would resolve at the author's coordinate, if any. */
+async function keptSeal(store: OxigraphStore, author = AUTHOR.address) {
+  const subject = contextGraphAssertionUri(CG, author, NAME, SUB);
+  return parseGraphScopedAssertionSealCandidate(await rowsOf(store, subject), subject);
+}
+
+async function hasShareCompleteMarker(store: OxigraphStore, author = AUTHOR.address): Promise<boolean> {
+  const result = await store.query(
+    `ASK { GRAPH <${META_GRAPH}> { <${assertionLifecycleUri(CG, author, NAME, SUB)}> <${SWM_SHARE_COMPLETE_PRED}> ?o } }`,
+  );
+  return result.type === 'boolean' && result.value;
+}
+
+describe('verifySharedMemoryAuthorSeal', () => {
+  it('accepts the author\'s seal of exactly the shared content', async () => {
+    const seal = await sealOf('one');
+    const verdict = verifySharedMemoryAuthorSeal(sharedMemoryAuthorSealFields(NAME, seal), shareOf('one'));
+    expect(verdict.kind).toBe('verified');
+    if (verdict.kind !== 'verified') return;
+    expect(verdict.verified).toMatchObject({ contextGraphId: CG, subGraphName: SUB, assertionName: NAME });
+    expect(verdict.verified.seal).toMatchObject({
+      authorAddress: AUTHOR.address,
+      kav10Address: KAV10,
+      chainId: 31337n,
+      reservedKaId: seal.reservedKaId,
+      kaUal: ualOf(),
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    });
+    expect(ethers.hexlify(verdict.verified.seal.merkleRoot)).toBe(ethers.hexlify(seal.merkleRoot));
+    expect(verdict.verified.seal.authorAttestationVS).toEqual(seal.authorAttestationVS);
+  });
+
+  it('reports a share without a seal as absent', () => {
+    expect(verifySharedMemoryAuthorSeal({}, shareOf('one'))).toEqual({ kind: 'absent' });
+    expect(verifySharedMemoryAuthorSeal({ assertionName: '', authorSeal: new Uint8Array() }, shareOf('one')))
+      .toEqual({ kind: 'absent' });
+  });
+
+  it.each([
+    ['a name without a seal', async () => ({ assertionName: NAME }), shareOf('one'), /without an author seal/],
+    ['a name that is not an assertion name', async () => ({
+      ...sharedMemoryAuthorSealFields(NAME, await sealOf('one')), assertionName: 'reports/1',
+    }), shareOf('one'), /invalid assertion name/],
+    ['seal bytes that are not a canonical seal', async () => ({
+      assertionName: NAME, authorSeal: new TextEncoder().encode('{"not":"a seal"}'),
+    }), shareOf('one'), /canonical-seal/],
+    ['a seal of another version', async () => sharedMemoryAuthorSealFields(NAME, await sealOf('one', { version: 2 })),
+      shareOf('one'), /the share for/],
+    ['a seal of another asset', async () => sharedMemoryAuthorSealFields(NAME, await sealOf('one', { number: 8n })),
+      shareOf('one'), /the share for/],
+    ['a seal counting other triples', async () => sharedMemoryAuthorSealFields(NAME, await sealOf('one')),
+      shareOf('one', { publicTripleCount: 2 }), /count different triples/],
+    ['a seal naming another private root', async () => sharedMemoryAuthorSealFields(NAME, await sealOf('one')),
+      shareOf('one', { privateTripleCount: 0, privateMerkleRoot: new Uint8Array(32).fill(9) }), /private roots/],
+    ['a seal of other content', async () => sharedMemoryAuthorSealFields(NAME, await sealOf('two')),
+      shareOf('one'), /does not commit to the content/],
+    ['a seal signed by someone else', async () => sharedMemoryAuthorSealFields(NAME, await sealOf('one', { signer: STRANGER })),
+      shareOf('one'), /not the author/],
+  ])('rejects %s', async (_label, fields, share, reason) => {
+    const verdict = verifySharedMemoryAuthorSeal(await fields(), share);
+    expect(verdict.kind).toBe('rejected');
+    expect(verdict.kind === 'rejected' ? verdict.reason : '').toMatch(reason);
+  });
+});
+
+describe('sharedMemoryAuthorSealFields', () => {
+  it('sends no seal that has no canonical form', async () => {
+    const seal = await sealOf('one');
+    expect(sharedMemoryAuthorSealFields(NAME, { ...seal, authorSchemeVersion: 2 })).toEqual({});
+    expect(sharedMemoryAuthorSealFields(NAME, { ...seal, reservedKaId: undefined })).toEqual({});
+  });
+});
+
+describe('keepSharedMemoryAuthorSeal', () => {
+  async function verifiedOf(value: string, version = 1) {
+    const verdict = verifySharedMemoryAuthorSeal(
+      sharedMemoryAuthorSealFields(NAME, await sealOf(value, { version })),
+      shareOf(value, { assertionVersion: String(version) }),
+    );
+    if (verdict.kind !== 'verified') throw new Error(`fixture seal not verified: ${JSON.stringify(verdict)}`);
+    return verdict.verified;
+  }
+
+  it('records the seal and the share-complete marker where VM publish reads them', async () => {
+    const store = new OxigraphStore();
+    await keepSharedMemoryAuthorSeal(store, await verifiedOf('one'));
+    const candidate = await keptSeal(store);
+    expect(candidate?.coordinate).toEqual({ scope: `${CG}/${SUB}`, agentAddress: AUTHOR.address, name: NAME });
+    expect(ethers.hexlify(candidate!.seal.merkleRoot)).toBe(ethers.hexlify(rootOf('one')));
+    expect(await hasShareCompleteMarker(store)).toBe(true);
+  });
+
+  it('replaces an earlier seal of the coordinate, in either address spelling, and keeps other rows', async () => {
+    const store = new OxigraphStore();
+    const lower = AUTHOR.address.toLowerCase();
+    const lowerSubject = contextGraphAssertionUri(CG, lower, NAME, SUB);
+    const old = await sealOf('one');
+    await store.insert([
+      ...buildAssertionSealQuads({
+        assertionUri: lowerSubject,
+        metaGraph: META_GRAPH,
+        merkleRoot: old.merkleRoot,
+        authorAddress: lower,
+        authorAttestationR: old.authorAttestationR,
+        authorAttestationVS: old.authorAttestationVS,
+        authorSchemeVersion: 1,
+        chainId: old.chainId,
+        kav10Address: old.kav10Address,
+        reservedKaId: old.reservedKaId!,
+        finalizedAtIso: old.finalizedAtIso,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: old.kaUal!,
+        assertionVersion: old.assertionVersion!,
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+      }),
+      { subject: assertionLifecycleUri(CG, lower, NAME, SUB), predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: META_GRAPH },
+    ]);
+    await keepSharedMemoryAuthorSeal(store, await verifiedOf('one'));
+    const receipt = buildAssertionPublishReceiptQuads({
+      assertionUri: contextGraphAssertionUri(CG, AUTHOR.address, NAME, SUB),
+      metaGraph: META_GRAPH,
+      txHash: '0xabc',
+      blockNumber: 12n,
+    });
+    await store.insert(receipt);
+
+    await keepSharedMemoryAuthorSeal(store, await verifiedOf('two', 2));
+
+    expect(await rowsOf(store, lowerSubject)).toEqual([]);
+    expect(await hasShareCompleteMarker(store, lower)).toBe(false);
+    const candidate = await keptSeal(store);
+    expect(candidate?.seal.assertionVersion).toBe('2');
+    expect(ethers.hexlify(candidate!.seal.merkleRoot)).toBe(ethers.hexlify(rootOf('two')));
+    expect(await hasShareCompleteMarker(store)).toBe(true);
+    const rows = await rowsOf(store, contextGraphAssertionUri(CG, AUTHOR.address, NAME, SUB));
+    for (const quad of receipt) {
+      expect(rows.some((row) => row.predicate === quad.predicate)).toBe(true);
+    }
+  });
+});
+
+describe('SharedMemoryHandler keeps the author seal a share carries', () => {
+  it('keeps the seal of an applied share, and heals it on an exact replay', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const message = shareMessage('one', await sealOf('one'));
+
+    expect(await handler.handle(message, PEER_ID)).toMatchObject({ applied: true });
+    expect((await keptSeal(store))?.seal.assertionVersion).toBe('1');
+    expect(await hasShareCompleteMarker(store)).toBe(true);
+
+    await store.deleteByPattern({ graph: META_GRAPH, subject: contextGraphAssertionUri(CG, AUTHOR.address, NAME, SUB) });
+    expect(await handler.handle(message, PEER_ID)).toMatchObject({ applied: true });
+    expect(await keptSeal(store)).toBeDefined();
+  });
+
+  it('replaces the seal when a newer version is shared', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    await handler.handle(shareMessage('one', await sealOf('one')), PEER_ID);
+    expect(await handler.handle(shareMessage('two', await sealOf('two', { version: 2 })), PEER_ID))
+      .toMatchObject({ applied: true });
+    const candidate = await keptSeal(store);
+    expect(candidate?.seal.assertionVersion).toBe('2');
+    expect(ethers.hexlify(candidate!.seal.merkleRoot)).toBe(ethers.hexlify(rootOf('two')));
+  });
+
+  it('applies the share but keeps no seal that is not the author\'s', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const forged = shareMessage('one', await sealOf('one', { signer: STRANGER }));
+    expect(await handler.handle(forged, PEER_ID)).toMatchObject({ applied: true });
+    expect(await keptSeal(store)).toBeUndefined();
+    expect(await hasShareCompleteMarker(store)).toBe(false);
+  });
+
+  it('keeps no seal for content other than what the share delivered', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    expect(await handler.handle(shareMessage('one', await sealOf('two')), PEER_ID)).toMatchObject({ applied: true });
+    expect(await keptSeal(store)).toBeUndefined();
+  });
+
+  it('leaves the author\'s own node alone: its finalize owns the seal', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      localAgentAddresses: () => [AUTHOR.address.toLowerCase()],
+    });
+    expect(await handler.handle(shareMessage('one', await sealOf('one')), PEER_ID)).toMatchObject({ applied: true });
+    expect(await keptSeal(store)).toBeUndefined();
+    expect(await hasShareCompleteMarker(store)).toBe(false);
+  });
+
+  it('keeps seals only where the node says it keeps them (the graph\'s curator)', async () => {
+    const asked: string[] = [];
+    const notCurator = new OxigraphStore();
+    const elsewhere = new SharedMemoryHandler(notCurator, new TypedEventBus(), {
+      keepsAuthorSeals: (contextGraphId) => { asked.push(contextGraphId); return false; },
+    });
+    expect(await elsewhere.handle(shareMessage('one', await sealOf('one')), PEER_ID)).toMatchObject({ applied: true });
+    expect(asked).toEqual([CG]);
+    expect(await keptSeal(notCurator)).toBeUndefined();
+
+    const curatorStore = new OxigraphStore();
+    const curator = new SharedMemoryHandler(curatorStore, new TypedEventBus(), {
+      keepsAuthorSeals: async () => true,
+    });
+    expect(await curator.handle(shareMessage('one', await sealOf('one')), PEER_ID)).toMatchObject({ applied: true });
+    expect(await keptSeal(curatorStore)).toBeDefined();
+  });
+
+  it('takes a share without a seal as before', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    expect(await handler.handle(shareMessage('one', undefined), PEER_ID)).toMatchObject({ applied: true });
+    expect(await keptSeal(store)).toBeUndefined();
+  });
+});
+
+describe('a share carries the seal its finalize wrote', () => {
+  it('reaches a receiver that is not the author, which keeps it', async () => {
+    const authorStore = new OxigraphStore();
+    const publisher = new DKGPublisher({
+      store: authorStore,
+      chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+    });
+    const subGraphUri = `${DATA_GRAPH}/${SUB}`;
+    await authorStore.insert([
+      { subject: subGraphUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: META_GRAPH },
+      { subject: subGraphUri, predicate: 'http://schema.org/name', object: `"${SUB}"`, graph: META_GRAPH },
+      { subject: subGraphUri, predicate: 'http://dkg.io/ontology/createdBy', object: 'did:dkg:agent:test-agent', graph: META_GRAPH },
+    ]);
+    await publisher.assertionCreate(CG, NAME, AUTHOR.address, SUB);
+    await publisher.assertionWrite(CG, NAME, AUTHOR.address, [
+      { subject: SUBJECT, predicate: NAME_PRED, object: '"one"' },
+    ], SUB);
+    await finalizeRootlessAssertionForTest({
+      publisher, store: authorStore, contextGraphId: CG, name: NAME, agentAddress: AUTHOR.address, subGraphName: SUB,
+    });
+    // The fixture finalize leaves inert signature bytes: sign the seal it wrote.
+    const sealSubject = contextGraphAssertionUri(CG, AUTHOR.address, NAME, SUB);
+    const sealRows = await rowsOf(authorStore, sealSubject);
+    const written = parseAssertionSealQuads(sealRows, sealSubject)!;
+    const typed = buildAuthorAttestationTypedData({
+      chainId: written.chainId,
+      kav10Address: written.kav10Address,
+      merkleRoot: written.merkleRoot,
+      authorAddress: written.authorAddress,
+      reservedKaId: written.reservedKaId!,
+      schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+    });
+    const signature = ethers.Signature.from(await AUTHOR.signTypedData(typed.domain, typed.types, typed.message));
+    await authorStore.delete(sealRows
+      .filter((row) => row.predicate === ASSERTION_SEAL_PREDICATES.AUTHOR_ATTESTATION_R
+        || row.predicate === ASSERTION_SEAL_PREDICATES.AUTHOR_ATTESTATION_VS)
+      .map((row) => ({ ...row, graph: META_GRAPH })));
+    await authorStore.insert([
+      { subject: sealSubject, predicate: ASSERTION_SEAL_PREDICATES.AUTHOR_ATTESTATION_R, object: `"${signature.r.slice(2)}"^^<http://www.w3.org/2001/XMLSchema#hexBinary>`, graph: META_GRAPH },
+      { subject: sealSubject, predicate: ASSERTION_SEAL_PREDICATES.AUTHOR_ATTESTATION_VS, object: `"${signature.yParityAndS.slice(2)}"^^<http://www.w3.org/2001/XMLSchema#hexBinary>`, graph: META_GRAPH },
+    ]);
+
+    const promoted = await publisher.assertionPromote(CG, NAME, AUTHOR.address, {
+      subGraphName: SUB,
+      publisherPeerId: PEER_ID,
+    });
+    expect(promoted.gossipPayload?.message).toBeInstanceOf(Uint8Array);
+
+    const receiverStore = new OxigraphStore();
+    const receiver = new SharedMemoryHandler(receiverStore, new TypedEventBus());
+    expect(await receiver.handle(promoted.gossipPayload!.message, PEER_ID)).toMatchObject({ applied: true });
+    const kept = await keptSeal(receiverStore);
+    expect(kept?.seal.kaUal).toBe(written.kaUal);
+    expect(ethers.hexlify(kept!.seal.merkleRoot)).toBe(ethers.hexlify(written.merkleRoot));
+    expect(ethers.hexlify(kept!.seal.authorAttestationR)).toBe(signature.r);
+    expect(await hasShareCompleteMarker(receiverStore)).toBe(true);
+  });
+});

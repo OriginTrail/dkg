@@ -104,6 +104,8 @@ import {
   assertQuadLiteralsMutf8Safe,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
+  ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
+  parseGraphScopedAssertionSealCandidate,
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
@@ -4436,6 +4438,26 @@ export class PublishMethods extends DKGAgentBase {
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
     });
     if (!history) {
+      // GH#3294 — a node that is not the author (a curator) keeps the author's
+      // seal and share when the share arrives, never the author's lifecycle
+      // record. This lane checks that record before and after it queues, so it
+      // refuses the asset; the synchronous lane needs only the seal and share.
+      const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+      const sealRows = await this.store.query(
+        `CONSTRUCT { <${sealSubject}> ?p ?o } WHERE { GRAPH <${contextGraphMetaUri(contextGraphId)}> { <${sealSubject}> ?p ?o } }`,
+        { source: 'agent.asyncVmPublish.foreignSeal' },
+      );
+      if (parseGraphScopedAssertionSealCandidate(sealRows.type === 'quads' ? sealRows.quads : [], sealSubject)) {
+        throw Object.assign(
+          new Error(
+            `Cannot publish "${name}" in context graph "${contextGraphId}" asynchronously: this node holds ` +
+              `the seal of author ${agentAddress} but not that author's lifecycle record, which the queued ` +
+              `lane checks. A seal kept from another author's share is published with ` +
+              `POST /api/knowledge-assets/${encodeURIComponent(name)}/vm/publish.`,
+          ),
+          { code: ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE },
+        );
+      }
       throw new Error(
         `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
       );
