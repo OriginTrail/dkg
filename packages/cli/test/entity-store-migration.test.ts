@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { EntityIndexStore, type IndexState } from '../src/entity-search/store.js';
-import { documentKey } from '../src/entity-search/documents.js';
+import { documentKey } from '../src/entity-search/identity.js';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const stop of cleanup.splice(0).reverse()) stop(); });
@@ -15,16 +15,17 @@ function directory() {
 function open(dir: string) { const store = new EntityIndexStore(dir); cleanup.push(() => store.close()); return store; }
 const spec = { contextGraphId: 'catalog', view: 'verifiable-memory' as const, textPredicates: ['urn:text'], types: [] };
 const document = { entityUri: 'urn:item', sourceGraph: 'urn:graph', text: 'ocean', contentHash: 'hash' };
+const candidate = { entityUri: document.entityUri, sourceGraph: document.sourceGraph, contentHash: document.contentHash, vector: [1, 0] };
 const state: IndexState = { id: 'a'.repeat(64), spec, fingerprint: 'model', cursor: { entityUri: document.entityUri, sourceGraph: document.sourceGraph }, scanComplete: false, completedAt: null };
 it('versions fresh creation and preserves a current interrupted scan on reopening', () => {
   const dir = directory(), store = open(dir);
-  store.begin(state); store.upsert(state, document, [1, 0]);
+  store.begin(state); store.upsert(state, candidate);
   const reopened = open(dir);
   expect(reopened.state(state.id)).toEqual(state);
-  expect(reopened.cached(state.id, documentKey(document))).toEqual({ document, vector: [1, 0] });
+  expect(reopened.cached(state.id, documentKey(document))).toEqual(candidate);
   const db = new Database(join(dir, 'entity-index.db'));
   try {
-    expect(db.pragma('user_version', { simple: true })).toBe(1);
+    expect(db.pragma('user_version', { simple: true })).toBe(2);
     const raw = db.prepare('SELECT state FROM entity_indexes WHERE id = ?').get(state.id) as { state: string };
     expect(JSON.parse(raw.state).cursor).toBe(documentKey(document));
   } finally { db.close(); }
@@ -43,8 +44,8 @@ it.each([true, false])('upgrades the completed-only legacy format once, scanComp
   const upgraded = open(dir);
   const expected = { ...state, scanComplete, completedAt: original.completedAt, cursor: scanComplete ? state.cursor : null };
   expect(upgraded.state(state.id)).toEqual(expected);
-  expect(upgraded.cached(state.id, documentKey(document))).toEqual({ document, vector: [1, 0] });
-  // A saved version-1 checkpoint is no longer reset by the legacy upgrade.
+  expect(upgraded.cached(state.id, documentKey(document))).toEqual(candidate);
+  // A saved version-2 checkpoint is no longer reset by the legacy upgrade.
   const cursor = { sourceGraph: 'urn:next-graph', entityUri: 'urn:next-entity' };
   upgraded.save({ ...expected, cursor });
   expect(open(dir).state(state.id)?.cursor).toEqual(cursor);
