@@ -149,9 +149,13 @@ export function startContextGraphCatchupJob(
       );
       // Whether the walk found the graph's selected shared-memory lane not
       // active, so that it asked no peer through it: the readiness repeat
-      // runs such a job again. Read before any await, since a later job for
-      // the graph starts its own record.
-      if (!hashOnly && daemonState.catchupRunner?.selectedLaneFoundInactive?.(targetContextGraphId)) {
+      // runs such a job again. Only a job that asked for shared memory has a
+      // record of its own; read it before any await, since a later job for
+      // the graph starts a new one.
+      if (
+        shouldSyncSharedMemory && !hashOnly
+        && daemonState.catchupRunner?.selectedLaneFoundInactive?.(targetContextGraphId)
+      ) {
         job.selectedLaneFoundInactive = true;
       }
       if (hashOnly) {

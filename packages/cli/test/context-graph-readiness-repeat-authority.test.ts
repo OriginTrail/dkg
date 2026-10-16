@@ -156,11 +156,11 @@ describe('a registered public graph whose catch-up ran before its authority was 
     return {
       catchupTracker,
       /** Subscribe; resolves with the job once it has finished. */
-      async subscribe(): Promise<any> {
+      async subscribe(includeSharedMemory = true): Promise<any> {
         const response = await fetch(`http://127.0.0.1:${port}/api/context-graph/subscribe`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contextGraphId: CG, includeSharedMemory: true }),
+          body: JSON.stringify({ contextGraphId: CG, includeSharedMemory }),
         });
         expect(response.status).toBe(200);
         const { jobId } = ((await response.json()) as { catchup: { jobId: string } }).catchup;
@@ -259,6 +259,19 @@ describe('a registered public graph whose catch-up ran before its authority was 
     expect(asked).toHaveLength(PEERS.length);
     expect(job.selectedLaneFoundInactive).toBeUndefined();
     expect(member.subscription()).toMatchObject({ subscribed: true, synced: false });
+    expect(armed()).toEqual([]);
+  });
+
+  it('records nothing for a job that did not ask for shared memory', async () => {
+    // The first call's walk found the lane not active. A later call without
+    // shared memory walks no lane, so the earlier job's finding is not its own.
+    const { member } = registeredMember();
+    const api = await startRoutes(member);
+    expect((await api.subscribe()).selectedLaneFoundInactive).toBe(true);
+
+    const durableOnly = await api.subscribe(false);
+
+    expect(durableOnly.selectedLaneFoundInactive).toBeUndefined();
     expect(armed()).toEqual([]);
   });
 
