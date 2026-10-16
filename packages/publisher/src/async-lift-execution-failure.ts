@@ -1,3 +1,4 @@
+import { isCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import {
   getChainWriteAheadHookCause,
   isTransientRpcTransportFailureWithoutTransaction,
@@ -194,9 +195,10 @@ export interface ExecutionFailureInput {
 export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailureMetadata {
   const { jobId, currentStatus, requestedOrigin, error, evidence, now } = input;
   const transientRpc = isTransientRpcFailure(error);
+  const catalogAuthorityUnavailable = isCatalogFloorAuthorityUnavailable(error);
   const preDispatchRecoverable = evidence?.neverDispatched === true
     && currentStatus === 'validated'
-    && (isProvenStoreRejection(error) || transientRpc);
+    && (isProvenStoreRejection(error) || transientRpc || catalogAuthorityUnavailable);
   // A failure raised while the job is still 'claimed' (the initial preflight) precedes validation,
   // and so precedes everything that could dispatch anything: the typed cause alone is enough. The
   // keyword chain below would otherwise record a multi-endpoint exhaustion message that carries
@@ -218,7 +220,9 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
       // to this pre-send branch, so their state and code cannot drift apart.
       // Everything message-keyed stays in the legacy chain below (#1974).
       classifyKnowledgeAssetVmPublishPreconditionCode(error)
-        ?? (preDispatchRecoverable || claimedTransientRpc
+        ?? (preDispatchRecoverable && catalogAuthorityUnavailable
+        ? 'authority_unavailable'
+        : preDispatchRecoverable || claimedTransientRpc
         ? 'workspace_unavailable'
         : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
         ? 'workspace_unavailable'

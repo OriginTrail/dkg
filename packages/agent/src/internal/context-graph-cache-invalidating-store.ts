@@ -4,14 +4,13 @@ import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
   deleteByPatternWithoutCount,
   describeRfc64AuthorCommitCasV1,
-  isStoreOperationNotStarted,
   type Rfc64AuthorCommitCasInputV1,
   type SortedGraphSetSource,
-  type Quad,
-  type StoreOperation,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
+import { createObservedStoreMutation, type ObservedStoreMutation, type ProjectionDirtyCallback } from './observed-store-mutation.js';
+export type { ProjectionDirtyCallback } from './observed-store-mutation.js';
 
 // A commit the canonical plan refuses is refused by the store before dispatch too; until it is,
 // it may change anything.
@@ -23,28 +22,6 @@ function describeCommit(input: Rfc64AuthorCommitCasInputV1): StoreMutation {
   }
 }
 
-/**
- * The third argument this factory took before it took an observer, still accepted because the
- * factory is reachable through the historical `dkg-agent-base` export: called after a write that
- * changed something, with its quads, or with the graph and subject it removed, or with nothing
- * when it may have changed anything.
- */
-export type ProjectionDirtyCallback = (quads?: readonly Quad[], targetGraph?: string, targetSubject?: string) => void;
-
-function observerFromCallback(markProjectionDirty: ProjectionDirtyCallback): StoreMutationObserver {
-  return {
-    begin: (mutation) => (outcome) => {
-      if (outcome === 'unchanged') return;
-      if (mutation.everything) {
-        markProjectionDirty();
-        return;
-      }
-      for (const { graph, subject } of mutation.removals ?? []) markProjectionDirty(undefined, graph, subject);
-      if (mutation.quads) markProjectionDirty(mutation.quads);
-    },
-  };
-}
-
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
   invalidate: () => void,
@@ -53,33 +30,14 @@ export function createListContextGraphsCacheInvalidatingStore(
   // ones) and the observer sees it before dispatch and again when it settles.
   observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
 ): TripleStore & Partial<SortedGraphSetSource> {
-  const observer = typeof observerOrCallback === 'function'
-    ? observerFromCallback(observerOrCallback)
-    : observerOrCallback;
-  const invalidateAfterMutation = async <T>(
-    work: () => Promise<T>,
-    changed: (result: T) => boolean,
-    mutation?: StoreMutation,
-    operation?: StoreOperation,
-  ): Promise<T> => {
-    const settle = mutation === undefined ? undefined : observer?.begin(mutation);
-    let result: T;
-    try {
-      result = await work();
-    } catch (error) {
-      // A mutation may have committed before its response was lost. Only an
-      // outcome-tagged pre-dispatch refusal proves cache/authority state did
-      // not change; every indeterminate outcome must invalidate fail-closed.
-      const indeterminate = operation !== undefined && !isStoreOperationNotStarted(error, operation);
-      if (indeterminate) invalidate();
-      settle?.(indeterminate ? 'indeterminate' : 'unchanged');
-      throw error;
-    }
-    const didChange = changed(result);
-    if (didChange) invalidate();
-    settle?.(didChange ? 'changed' : 'unchanged');
-    return result;
-  };
+  return createMutationObservedStore(innerStore, createObservedStoreMutation(invalidate, observerOrCallback));
+}
+
+/** Compose a store with the same observation owner used by typed agent writers. */
+export function createMutationObservedStore(
+  innerStore: TripleStore,
+  invalidateAfterMutation: ObservedStoreMutation,
+): TripleStore & Partial<SortedGraphSetSource> {
   const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
     === 'function'
     ? innerStore as TripleStore & SortedGraphSetSource
@@ -210,6 +168,16 @@ export function createListContextGraphsCacheInvalidatingStore(
             { removals: [{ graph: graphUri, subject }], quads },
             'replaceSubject',
           )
+      : undefined,
+    // Async publication reasserts the request and replaces its job in one commit.
+    // Describe both inserts, but fence deletions only for the mutable job subject.
+    replaceSubjectAndInsert: innerStore.replaceSubjectAndInsert
+      ? (graphUri, subject, replacement, inserts, options) => invalidateAfterMutation(
+          () => innerStore.replaceSubjectAndInsert!(graphUri, subject, replacement, inserts, options),
+          () => true,
+          { removals: [{ graph: graphUri, subject }], quads: [...replacement, ...inserts] },
+          'replaceSubjectAndInsert',
+        )
       : undefined,
     // RFC-64 author publication moves a complete public-SWM projection and
     // its bounded semantic control state through one backend CAS. Preserve the

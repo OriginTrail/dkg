@@ -1122,6 +1122,10 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       ual: 'did:dkg:local/queued-swm-removal',
       publishStatus: 'confirmed',
     });
+    // This scenario exercises active public removal; the shared harness remains inactive.
+    agentLike.resolveRfc64CatalogAuthoringLaneV1 = () => ({
+      kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
+    });
     const removal = recorder(async () => ({
       status: 'applied',
       action: 'remove',
@@ -1188,6 +1192,10 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       peerId: 'did:dkg:agent:queued-swm-removal-failure',
       ual: 'did:dkg:local/queued-swm-removal-failure',
       publishStatus: 'confirmed',
+    });
+    // This scenario exercises active public removal; the shared harness remains inactive.
+    agentLike.resolveRfc64CatalogAuthoringLaneV1 = () => ({
+      kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
     });
     agentLike.removeRfc64SwmAuthorInventoryShadowV1 = recorder(async () => {
       throw new Error('simulated RFC-64 SWM removal failure');

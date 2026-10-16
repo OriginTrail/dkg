@@ -102,6 +102,45 @@ Retryable jobs that carry no transaction evidence get a blocker too. `not_auto_r
 4. **If no adequate proof can be obtained, an operator cannot manufacture a safe retry either.** Keep the hold and its evidence. Elapsed time is not proof of non-effect, and neither is a missing receipt; escalating or deliberately abandoning the job is a decision, not a proof.
 5. **What clearing does.** `POST /api/publisher/clear-job` with `{ "jobId": "<id>", "allowPendingTransaction": true }` (node-operator token, or the agent that enqueued the job) removes that one record: it **abandons this node's tracking** of the job. It does not cancel a transaction that was already sent, does not prove that none was, and does not authorize a duplicate-safe replacement — a re-submit afterwards mints a **new** job for the Knowledge Asset, which may publish it a second time. A clear never touches the journal, so whatever it recorded about the job (best-effort, named-KA jobs) stays readable. `POST /api/publisher/cancel` removes only a job that is still `accepted` and cannot act on a held one.
 
+## Publication latency and store pressure
+
+Measure queueing separately from chain time using the job's `timestamps`:
+`acceptedAt` to `claimedAt` is admission wait; `rpcAcceptedAt` to
+`receiptObservedAt` is receipt wait; `finalityObservedAt` to `finalizedAt`
+is the remaining local completion interval. Missing timestamps mean that
+stage was not observed, rather than a zero-duration stage.
+
+Wallet count alone does not determine throughput. Claims serialize durable
+job and wallet ownership writes, and those writes share store capacity with
+other node work. Durable admission and resume wake parked wallet loops; repeated
+notifications coalesce, and ownership checks and error backoff still apply.
+The polling interval remains a fallback, rather than a required delay for new work.
+Automatic retry selection uses the persisted retry deadline
+index, and recovery inventories exclude accepted and finalized history.
+Recovery still retains every failed job needed to preserve its proof backoff.
+
+A detached named-KA executor can finish its own queue record after confirmed
+chain execution and successful local finalization. Failed local bookkeeping,
+incomplete results, or lost claim ownership retain the existing recovery path.
+Private catalog placement remains asynchronous after its durable repair marker
+is stored; publication does not wait for placement.
+
+Use `GET /api/diagnostics/backpressure` to inspect store lane occupancy. The
+`dkg.store.scheduler_queue_wait_ms` and
+`dkg.store.scheduler_operation_duration_ms` histograms separate admission wait
+from admitted execution time by `priority` and static `operation` label. The
+duration histogram also labels `outcome` as `ok` or `error`; its sample count
+shows completed operation volume. Increasing store concurrency is not a
+substitute for diagnosing the operations occupying the normal lane.
+
+For a focused investigation, start the daemon with `DKG_ASYNC_PUBLISH_TRACE=1`.
+The opt-in `async_publish_claim_trace` log records monotonic claim-lock wait/hold
+boundaries, native wallet-ownership decisions, durable lock changes and worker
+outcomes. It adds no store reads and is disabled by default. Wallet identifiers
+are hashed; job IDs are retained for correlation, so treat these logs as
+operational diagnostics. A free wallet can still wait for the claim lock or
+store capacity, and a worker may still be finishing an earlier execution after
+its wallet is released. Do not infer wallet availability from job finalization.
 ## Funding
 
 Every async publisher wallet needs the chain's native gas token because it submits on-chain transactions.

@@ -35,6 +35,8 @@ export default defineConfig({
       "test/authority-index-config.test.ts",
       "test/warm-core-sharding-gate.test.ts",
       "test/context-graph-discovery-options.test.ts",
+      "test/context-graph-meta-projection.test.ts",
+      "test/context-graph-meta-projection-priority.test.ts",
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",
       "test/swm-target-executor.test.ts",
@@ -60,6 +62,10 @@ export default defineConfig({
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
       "test/finalize-version-after-abandoned-update.test.ts",
+      "test/named-ka-vm-lifecycle.test.ts",
+      "test/storage-ack-ledger-timestamp-writer.test.ts",
+      "test/named-ka-vm-lifecycle-construction.test.ts",
+      "test/observed-store-mutation.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
@@ -295,6 +301,7 @@ export default defineConfig({
       // #3081 — where a confirmed publication waits for its catalog placement (observation only).
       "test/catalog-placement-timing.test.ts",
       "test/catalog-placement-wait-attribution.test.ts",
+      "test/confirmed-vm-catalog-observer.test.ts",
       // #3081 — a confirmed publication is terminal once its placement is durably owed.
       "test/publication-terminal-before-catalog-placement.test.ts",
       "test/finalized-private-placement-ownership.test.ts",
@@ -324,6 +331,7 @@ export default defineConfig({
       "test/finalization-recovery-sqlite-migration.test.ts",
       "test/finalization-recovery-sqlite-store.test.ts",
       "test/named-ka-publish-recovery.test.ts",
+      "test/named-ka-recovery-catalog-applicability.test.ts",
       "test/named-ka-recovery-pending-log.test.ts",
       "test/named-ka-recovery-pending-warning.test.ts",
       "test/named-ka-recovery-version-cause.test.ts",
@@ -394,6 +402,7 @@ export default defineConfig({
       // equal-count version change safe.
       "test/swm-materialization-witness.test.ts",
       "test/replace-subject-agent-wrapper.test.ts",
+      "test/replace-subject-and-insert-agent-wrapper.test.ts",
       "test/recipient-key-route-fence.test.ts",
       "test/recipient-key-route-fence-wrapper.test.ts",
       "test/recipient-key-route-fence.property.test.ts",

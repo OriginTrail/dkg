@@ -527,6 +527,23 @@ test('the Blazegraph lane covers agent live suites and scoped query catalogs', (
   assert.equal(pullRequestPlan([change('packages/network-sim/src/index.ts')]).lanes.tornado_blazegraph, false);
 });
 
+test('primary persistence integration keeps the Agent wrapper in the Agent layer', () => {
+  const wrapper = 'packages/agent/src/internal/context-graph-cache-invalidating-store.ts';
+  const traceTest = (file, lane) => traceLaneLoads(new Map([
+    [file, new Map([[lane, 'primary persistence integration']])],
+  ]));
+  const publisher = traceTest('packages/publisher/test/async-lift-primary-persistence.blazegraph.integration.test.ts', 'tornado_publisher');
+  assert.deepEqual([...publisher.loaded.keys()].filter(file => file.startsWith('packages/agent/')), []);
+  const agent = traceTest('packages/agent/test-live/primary-persistence-cache-wrapper.blazegraph.test.ts', 'tornado_agent');
+  assert.equal(agent.loaded.get(wrapper)?.has('tornado_agent'), true);
+  assert.equal(agent.loaded.get('packages/publisher/test/_helpers/primary-persistence-blazegraph.ts')?.has('tornado_agent'), true);
+  const plan = pullRequestPlan([change(wrapper)]);
+  assert.equal(plan.mode, 'delta');
+  assert.equal(plan.lanes.tornado_agent, true);
+  assert.equal(plan.lanes.tornado_blazegraph, true);
+  assert.equal(plan.lanes.tornado_publisher, false);
+});
+
 test('identity-wallet browser actions select the real-EVM chain scope', () => {
   // Every shape IDENTITY_WALLET_EVM_PATTERNS matches, including the extension
   // alternation (the .tsx spelling is a shape probe, not an existing file).
