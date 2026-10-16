@@ -10,7 +10,9 @@ root = pathlib.Path('.tmp/2963/evidence') / arm
 out = pathlib.Path('run-reports/2963-evidence') / arm
 out.mkdir(parents=True, exist_ok=True)
 read = lambda name: json.loads((root / name).read_text())
-write = lambda name, value: (out / name).write_text(json.dumps(value, indent=2) + '\n')
+def write(name, value):
+    text = '[\n' + ',\n'.join(json.dumps(row, separators=(',', ':')) for row in value) + '\n]' if isinstance(value, list) else json.dumps(value, indent=2)
+    (out / name).write_text(text + '\n')
 verification = read('verification.json')
 seals = {row['name']: row for row in read('seal-proof.json')}
 rows = [row for catalog in read(f'{label}/catalogs.json') for row in catalog['rows']]
