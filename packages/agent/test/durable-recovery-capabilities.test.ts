@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { RecoveryMaterializationOwner, type RecoveryMaterializationPorts } from '../src/durable-recovery-materialization.js';
@@ -13,7 +14,8 @@ function deferred() {
 afterEach(() => vi.restoreAllMocks());
 
 function fixture() {
-  const physicalRuns = new Set<Promise<unknown>>();
+  const lifetime = new AgentWorkLifetime();
+  const physicalRuns = lifetime.physicalRuns;
   let generation = 0;
   const subscription = { onChainId: '1' } as ReturnType<RecoveryMaterializationPorts['subscription']>;
   const asset = { contextGraphId: 'graph', ual: 'asset' } as materialization.VerifiedGraphScopedAsset;
@@ -24,8 +26,7 @@ function fixture() {
     subscription: () => subscription,
     bindingGeneration: () => generation,
     isBindingGenerationCurrent: (_id, captured) => captured === generation,
-    track: run => { physicalRuns.add(run); },
-    untrack: run => { physicalRuns.delete(run); },
+    track: run => { lifetime.track(run); },
     verifyBinding: async () => true,
     persistSubscription: async () => { throw new Error('already bound'); },
     bindSubscription: () => { throw new Error('already bound'); },
@@ -39,7 +40,7 @@ function fixture() {
   const scope = new RecoveryMaterializationOwner(ports).forOperation({
     ctx: createOperationContext('sync'), contextGraphId: 'graph', authority,
   });
-  return { scope, authority, asset, physicalRuns, rebind: () => { generation += 1; } };
+  return { scope, authority, asset, physicalRuns, lifetime, rebind: () => { generation += 1; } };
 }
 
 it('rejects rebinding during authentication before dispatching a physical write', async () => {
@@ -73,10 +74,15 @@ it('retains physical ownership through atomic settlement and cleanup after calle
   });
   const run = f.scope.storeGraphScopedAsset({ asset: f.asset, authenticationDeadline: Date.now() + 2_000, signal: controller.signal });
   await entered.promise;
-  controller.abort();
+  controller.abort(); f.lifetime.close();
+  let drained = false;
+  const draining = f.lifetime.drain().then(() => { drained = true; });
+  await Promise.resolve(); expect(drained).toBe(false);
   expect(f.physicalRuns.size).toBe(1);
   releaseWrite.resolve(); await cleanupEntered.promise;
+  expect(drained).toBe(false);
   expect(f.physicalRuns.size).toBe(1);
   releaseCleanup.resolve(); await expect(run).resolves.toBe('applied');
+  await draining; expect(drained).toBe(true);
   expect(f.physicalRuns.size).toBe(0);
 });
