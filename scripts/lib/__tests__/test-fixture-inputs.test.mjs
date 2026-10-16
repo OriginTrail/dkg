@@ -34,7 +34,7 @@ test('fixture edits invalidate only consumer fingerprints and Turbo tasks', (t) 
   const hashes = () => Object.fromEntries(JSON.parse(execFileSync(turbo, ['run', 'build', 'test', '--dry=json'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).tasks.map(({ taskId, hash }) => [taskId, hash]));
   for (const [fixture, consumers, buildConsumers] of [
     ['property-options', ['core', 'agent', 'publisher'], []],
-    ['ka-vm-publish', ['publisher'], ['publisher']],
+    ['ka-vm-publish', ['agent', 'publisher'], ['publisher']],
     ['snapshot-storage', ['agent', 'cli'], []],
     ['oxigraph', [], []],
   ]) {
