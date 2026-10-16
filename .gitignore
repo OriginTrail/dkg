@@ -29,6 +29,13 @@ packages/evm-module/cache-devnet/
 # .devnet/ is a runtime workspace (Hardhat data dir, per-node DKG_HOME
 # state, daemon logs). Not checked in.
 .devnet/
+# .devnet-versions/ holds the other builds a version layout runs
+# (DEVNET_VERSION_LAYOUT in scripts/devnet.sh): one checkout per ref, built
+# once. Left untracked it marks the build under test as dirty.
+.devnet-versions/
+# Failure artifacts of the devnet membership harness
+# (scripts/devnet-test-private-cg-membership-recovery.sh). Same reason.
+.harness-artifacts/
 # devnet suite `turns/` dirs hold n-quads files generated at test runtime.
 devnet/**/turns/
 # .dkg-testnet-node/ is a default DKG_HOME a daemon writes into when
