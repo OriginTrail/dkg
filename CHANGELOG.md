@@ -24,7 +24,7 @@ relay now gets the graph's definition, where its writes were refused. A
 subscription to a registered public graph whose first catch-up ran before
 the node accepted the graph's authority is caught up again, where it
 stayed unsynced until a restart. A node that already holds the graph's
-data can still list it as unsynced (#3296). An
+data is marked synced once a catch-up finds nothing missing (#3304). An
 author's catalog no longer stops updating after a curator publishes one of
 the author's shared assets, and a node that is stalled this way recovers
 when it runs this release. A node that verifies a private graph registered
@@ -36,14 +36,62 @@ longer logs that it is denied its own graph's shared memory while the
 graph's authority is being accepted, and the catalog replay after a
 connection warns only when this node may lack heads that its peers hold.
 
-**No smart-contract, ABI or deployment registry changes.** One new message:
-the owner of a public graph sends a change notice,
-`/dkg/10.0.1/swm-change-notice`, to the graph's followers when it applies a
-share from another peer (#3256). A node on an earlier version does not take
-that stream, and the owner goes on. For the root of a public graph that is
-not registered on chain the owner forwards the member's catalog head over
-the existing announcement protocol instead, which a node on 10.0.24 already
-accepts. Other message formats are unchanged.
+This release also carries the sync and query stack (#3121, #3298, #3299).
+A bounded local SELECT route answers within a deadline of at most 2 s and
+says whether the read was denied, ran out of time or had more rows than the
+caller allows, where `/api/query` answers an empty result in each of these
+cases. A node can index the entities of a Context Graph with a local
+embedding model and find them by description. An operator can recover a
+public graph registered on chain from a bounded snapshot of its chain
+state, served by a Core or read by the node itself, over the exact-asset
+stream; a Core can keep the verified asset bodies it served across a
+restart; and an opt-in bulk transport moves a public graph in chunks of up
+to 100 MB with grouped store commits. A scoped query of an explicitly named
+graph no longer waits behind catalog scans it does not need. Queued
+publications hold their locks for less of their work and recover sooner
+(#3253, #3309), and the node UI pages assertions and renders graphs without
+the stale, duplicated or missing rows it could show (#3236).
+
+Six fixes since the section was first written, for the members of public
+graphs registered on chain. A curator metadata refresh takes a reserved
+sync slot, so a node with one sync slot still gets a graph's definition and
+a private graph's member list (#3302). A member that reaches such a graph
+only through Cores takes the graph's definition from the chain (#3303), and
+a Core keeps and serves the owner's definition of the graphs it hosts
+(#3311). A catch-up that finds nothing missing marks the graph synced
+(#3304). Every shared-memory pull admits the sub-graphs it is served
+(#3305). A member writes into a sub-graph that the graph's owner registered
+(#3306). A share carries its author's seal, so the curator can publish a
+member's asset (#3307).
+<!-- PLACEHOLDER (no PR yet): the shared-memory write gate refreshes the
+     graph's member list before it rejects a member the curator has just
+     approved. Add one sentence here, a row in the upgrade table and a
+     Fixed entry from the PR's description once the PR exists. -->
+
+**No smart-contract, ABI or deployment registry changes.** Three new
+protocols and one changed message. The owner of a public graph sends a
+change notice, `/dkg/10.0.1/swm-change-notice`, to the graph's followers
+when it applies a share from another peer (#3256). A node on an earlier
+version does not take that stream, and the owner goes on. For the root of a
+public graph that is not registered on chain the owner forwards the
+member's catalog head over the existing announcement protocol instead,
+which a node on 10.0.24 already accepts. A Core registers
+`/dkg/10.0.0/public-graph-snapshot/1` and answers it, for the public graphs
+it hosts or follows, with a bounded snapshot of the graph's chain state;
+only the snapshot job of this release asks for one (#3140). The bulk
+transport `/dkg/experimental/bulk-graph/1.0.0` is registered and used only
+on nodes started with `DKG_PUBLIC_SNAPSHOT_BULK=1` (#3199). The share
+message gains two optional fields, the asset's name and its author's seal;
+a node on an earlier version ignores them, and a share from such a node
+carries none (#3307). The wire format of the exact-asset stream and of the
+sync, query and catalog messages is unchanged. A node on this release
+records, for each verified asset that a sync imports into a named
+sub-graph, which sub-graph it was authenticated for; it never takes that
+record from a peer, and a sync page that carries one from a peer counts it
+among the dropped control rows, which can write the existing warning
+`Dropped <n> unverified durable sync control metadata triple(s)` where
+nothing is wrong (#3298). This is read from the code and was not seen on a
+node.
 
 ### Upgrading from 10.0.24
 
@@ -55,12 +103,32 @@ accepts. Other message formats are unchanged.
 | The once-a-minute pull runs without the periodic sync reconciler, in the reserved slot only (#3288) | It started only when the periodic reconciler was on, so a node with `syncReconcilerEnabled: false` never pulled. It still needs sync on connect, durable sync and shared memory on connect. It now takes only the reserved shared-memory slot and waits in the shared-memory queue while that slot is busy, so it never holds a general sync slot. With `DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT=0` it is admitted like any other shared-memory pull. | None. `DKG_RECENT_SHARED_MEMORY_PULL_ENABLED=0` turns it off |
 | A sub-graph whose shared memory arrives by sync is registered (#3248) | A node that stores rows of a named sub-graph through the public sync lane registers the sub-graph as a live share does, once per sub-graph and sync session, and logs `Auto-registered sub-graph ... from SWM sync`. Reads over the graph's partitions then include it, writes into it are accepted, and the node serves it to peers. A node that already holds such rows gets the registration with its next sync round | None |
 | A subscription left unsynced is caught up again (#3249) | For a public graph that is not registered on chain, a subscribe job that ends with the graph still unsynced is run again after 15 s, 30 s, 1, 2, 4, 8, 16 and 30 minutes, at most eight times; a newer subscribe call starts a sequence of its own. A saved subscription that comes back active and unsynced after a restart, or once its authority recovers, gets the same job, and a saved row that the startup readiness migration skipped while it was dormant is migrated first | None |
-| A registered public graph whose catch-up ran before its authority was accepted is caught up again (#3287) | Such a member held the graph's writes but stayed `synced: false` until it restarted. The repeat of #3249 (15 s, 30 s, 1, 2, 4, 8, 16 and 30 minutes, at most eight times) now also takes a registered public graph while its last attempt found the graph's shared-memory lane not yet active, on subscribe and after a restart. A repeat that finds no new data leaves `synced: false`, for example when the graph's writes already arrived by gossip or a pull (#3296). | None |
+| A registered public graph whose catch-up ran before its authority was accepted is caught up again (#3287) | Such a member held the graph's writes but stayed `synced: false` until it restarted. The repeat of #3249 (15 s, 30 s, 1, 2, 4, 8, 16 and 30 minutes, at most eight times) now also takes a registered public graph while its last attempt found the graph's shared-memory lane not yet active, on subscribe and after a restart. A repeat whose peers serve only what the node already holds proves the graph synced (#3304). | None |
 | A share that meets the legacy shared-memory fence waits for the fence to drop (#3250) | Up to 60 s, where it waited 2 s, was refused, and was retried 48 to 72 s later and then at growing intervals. A fence that has been up for 60 s without a break is not waited for, at most 16 promotes wait the full time, and every wait ends when the node begins to stop. A wait of more than 5 s is logged at info, for example `A promote of <ual> waited <n> ms for the RFC-64 legacy SWM fence raised by receiver-lease on the graph of <graph>`, and a wait that stopped is logged at warn. A synchronous share can take up to 60 s longer, and it holds its request meanwhile | None. Clients in this repository send shares with a 240 s timeout; other clients should allow 60 s more than before |
 | A gossip subscription that waits for the graph's RFC-64 authority is logged at info (#3246) | `SWM gossip subscription denied for "<graph>": local node is not authorized` and `SWM gossip unsubscribed for "<graph>": local node is no longer authorized` stay warnings, written only for a refusal. While the graph's RFC-64 authority is not accepted on the node, it logs `SWM gossip subscription for "<graph>" waits for the graph's RFC-64 authority (not accepted on this node yet); not subscribed yet` at info, with `last refresh: <reason>` after a failed authority refresh and repeats at debug, and once it subscribes `SWM gossip subscription for "<graph>" made after waiting for the graph's RFC-64 authority`. The SWM sync planning skips such a graph with `Skipping SWM sync for "<graph>" for now: it waits for the graph's RFC-64 authority (...)` at info, once per wait | None. Tooling that counted the denial warning sees it only for refusals |
 | The catalog replay after a connection warns only when this node may lack heads (#3255) | `RFC-64 catalog replay incomplete for "<graph>" after <peer> connected` now ends with its reason and counts, for example `: this node may lack catalog heads its peers hold until a full replay passes (1 peer(s) answered, 1 failed, 0 retried later)`. It is written once per replay run, only while the graph's replay status says that this node may lack heads its peers hold. A run that only could not replay from some peers writes one debug line, and each peer that gave no answer gets a debug line with its reason. A peer whose replay request this node authorized counts among the graph's followers at once, also when this node answers it busy | None. Tooling that counted the warning sees it only for heads this node may lack |
 | An author's node removes the inventory row of its own asset when it retires the asset's finalized twin (#3268) | This happens when a curator publishes a member's shared asset under the member's seal. The removal is one catalog successor, the same kind that the publishing node produces, and receivers accept it. A projection that fails on such a row left behind before this release sweeps the author's inventory once per inventory head and logs one line for each graph and author it cleaned. `finalizedRowHealPasses` and `finalizedRowsHealed` under `rfc64Catalog.authorCatalogCapacity` in `GET /api/status` count the sweeps and the rows removed. Finalized private lanes keep their rows | None. A stalled author's catalog resumes after the upgrade, without a re-share |
 | A private graph registered on chain that is past the verification scan limit is refused with a typed reason (#3265) | A node that applies a private graph's catalogs itself checks each author head against the graph's on-chain inventory, which it reads within a budget that covers 818 assets. Past that it failed with an unclassified `resource-limit`; it now ends with the terminal reason `chain-inventory-limit`, the graph reads `known-incomplete`, and `rfc64Catalog.privateRecovery` in `GET /api/status` shows the reason per graph and counts it in `outcomeCounts`. Below the limit nothing changes. A member on the default configuration receives private graphs on the member lane and does not run this check | None. The limits are listed in `docs/use-dkg/rfc64-selected-public-catalog.md` |
+| A bounded local SELECT route distinguishes no rows from a denied, late or oversized read (#3121) | New route `POST /api/query/bounded`, with `GET` reporting its ceilings. It reads the local store with the caller's normal Context Graph authorization, over the default scope, `verifiable-memory` or `shared-working-memory`, with at most 8,192 rows, 1 MiB of result and a deadline of 1 to 2,000 ms, and it does not forward to peers or start a recovery. A denied read answers 403 `QUERY_ACCESS_DENIED`, a read past its deadline 503 `QUERY_DEADLINE_EXCEEDED`, a result over the bound 422 `QUERY_RESULT_TOO_LARGE`, and other unavailability 503 `QUERY_UNAVAILABLE`; `mode: "page"` with `offset` and an outer `ORDER BY` browses. The query may not use `SERVICE`, a dataset clause or an outer `LIMIT`. `/api/query` is unchanged. Described in `docs/BOUNDED_LOCAL_QUERY.md` | None. Build the CLI, agent and query packages of one release together; a newer CLI on an older agent does not support the route |
+| A node can index the entities of a Context Graph and find them by description (#3126) | Off unless `entitySearch.embedding` is set in the node's configuration: a local Ollama server at a loopback address, a model named by tag and immutable digest, and its dimensions. `dkg entities index <spec-file>` builds a resumable index in `entity-index.db` under the DKG home, up to eight entities a request, from the local Verifiable or Shared Working Memory of one graph, with the node operator's credential; `dkg entities search` and `POST /api/entities/search` rank the indexed entities by cosine score and re-read each candidate through the normal query authorization before returning it. `POST /api/entities/index` and `POST /api/entities/readiness` are the HTTP forms. At most 32 indexes, 100,000 documents an index, 16 KiB a document, 20 results a search, one index page and two searches at a time; a search defaults to 2 s and allows 5. No model is downloaded, no graph fact is written and nothing is synchronized. Described in `docs/ENTITY_DISCOVERY.md` | None. A node without the setting answers `ENTITY_SEARCH_DISABLED` |
+| A Core serves bounded snapshots of the chain state of the public graphs it hosts or follows (#3140) | New protocol `/dkg/10.0.0/public-graph-snapshot/1`, registered at start by every node with `nodeRole: core` whose chain adapter can read one. A snapshot is the graph's ordered asset inventory with each asset's root, version and binding at one block: at most 10,000 assets and 4 MiB, built from the Core's chain endpoint in at most 110 s, reused for 30 s, and kept for 8 graphs. A Core builds at most two at a time and at most two in a minute for one peer, and answers every other case, a private, unknown or unavailable graph included, with one refusal. A request is at most 1 KiB. Nothing on a Core asks for one; the snapshot job below does | None. There is no switch |
+| An operator can recover a public graph registered on chain from a chain snapshot (#3140) | New node-administrator route `POST /api/context-graph/snapshot-sync` with `contextGraphId`, `onChainId`, `trustedCorePeerIds` and `mode`: one job per node, 202 on start, 409 while one runs, and `GET` for its state. With `mode: "core-cache"`, the default, the node takes the snapshot from the listed Cores in turn, at most four, over the authenticated connection; with `"rpc-only"` it reads the same snapshot from its own chain endpoint. In both modes it fetches each asset through the exact-asset stream, ten at a time, from the listed Cores, checks it against the snapshot's root and version, observes the inventory again after the transfer, and ends the job after at most an hour, with no retry and no resume. A graph recovered in `core-cache` mode is marked durably, before the transfer: a query over it, its parent or a child must then say `chainEvidenceMode: "core-cache"`, and a query that does not, or an unscoped query on a node with any marked graph, is refused with 409 `CORE_CACHE_QUERY_TRUST_REQUIRED`. The mark stays across restarts and later syncs. The Cores must run the exact-asset stream (`DKG_EXACT_BATCH_STREAM_ENABLED=1`) and hold the graph. Described in `docs/sync/public-core-snapshot-recovery.md` | None, unless you run the job. Use `rpc-only`, or a separate profile and store, for a node whose queries must stay unscoped; see Known issues |
+| A Core can keep the verified bodies of the public assets it served across a restart (#3170) | Off unless `preparedContentCache.enabled` is set in the node's configuration, with the limits `maxBytes` (1 GiB by default, at most 16 GiB), `maxEntries` (8,192 by default, at most 65,536) and `ttlMs` (at most 6 hours), in `<dataDir>/prepared-content-v1` or an absolute `directory`. The first root-verified export of a public asset over the exact-asset stream is kept as one file with a manifest, and a later request for the same asset, version and root reuses it after the usual authorization and source checks; a damaged, oversized or expired file is a miss, and an IO failure falls back to a fresh export with one warning. Described in `docs/sync/prepared-content-cache.md` | None. The directory belongs to one node; do not share it |
+| An opt-in bulk transport moves a public graph in chunks of up to 100 MB (#3199) | On a Core and a receiver started with `DKG_PUBLIC_SNAPSHOT_BULK=1` (the Core also with `DKG_EXACT_BATCH_STREAM_ENABLED=1`), the snapshot job takes `transport: "bulk"`, the default on such a receiver, where `"exact"` keeps the ten-asset stream. One stream carries up to 100,000,000 bytes of encoded data or 1,024 assets a chunk in 64 KiB frames, staged on disk (16 MiB, 32 assets) and committed in groups of up to 8 assets and 8 MiB in one store transaction; the stream idles for at most 120 s, and the job keeps its one-hour limit. The receiver's store must commit a group atomically (managed Blazegraph, Oxigraph, or a SPARQL HTTP profile that declares it); another store fails the job. A Core without the switch does not register the protocol and fails an explicit bulk job. Described in `docs/experimental-bulk-snapshot.md` | None without the switch |
+| A scoped query reads its catalog and its data in one admission, and a graph listing is bounded (#3121, #3204, #3215) | A query that names an already authorized static graph, for example a graph's metadata, no longer queues the partition-catalog scans it does not need. A query with graph variables or dynamic partitions reads the catalog once, fresh, and keeps that read and the caller's read within one store admission at the caller's priority and deadline. The listing of a store's graphs that scoping needs is read with an 8 MiB bound and fails the query, instead of being cut, when it is larger. Query routing keeps every selected graph, and a memory-view query that combines several graphs with a `UNION` or solution-modifier shape the router cannot scope is refused with a client error. No authorization is cached and no deadline changes | None |
+| Queued publications serialize less of their work on the store (#3253, #3309) | A queued publication's request and job writes go through one atomic store write where the store supports it, the lineage order is reserved before the auxiliary journal work, and a claim may take a bounded turn while other claims queue, so a free wallet is claimed sooner. The publication still owns its transaction, its primary writes stay durable, and a confirmed publication still completes its local work before it is terminal. A recovery retries only a preparation read that is known not to have started, and repairs an inventory handle under a budget of its own. New histogram `dkg.store.scheduler_operation_duration_ms` beside `dkg.store.scheduler_queue_wait_ms`, by `priority`, `operation` and `outcome`. With `DKG_ASYNC_PUBLISH_TRACE=1` the node writes one `async_publish_claim_trace` line per claim decision, with hashed wallet identifiers; off by default. A synchronous share's recovery answer names the site of a recipient-authority failure in `causeSite` | None. `docs/use-dkg/async-publisher-wallets.md` says how to read a job's `timestamps` to separate admission wait from chain time |
+| The node UI pages assertions and caches its tabs (#3236) | A Context Graph's assertions are listed 50 at a time, rows render before their counts, and the tabs reuse a cache of five minutes scoped to the session and request, which a data change invalidates. A memory preview keeps its blank-node links across pages and says when a capture is incomplete; a selected entity's details load on their own, 1,000 rows at most, and a partial read is marked. The graph view keeps its textures through a refresh and expands disconnected components. The notification feed refreshes its curated graphs four at a time | None |
+| A metadata refresh takes a reserved sync slot when no general slot is free (#3302, #3280) | One reserved slot that transfers never take, for the curator metadata refresh that brings a graph's definition and a private graph's member list. It has no queue of its own: when that slot is busy too, a refresh waits in the general queue or, on a node without one, is refused at once, as before. The limits for large transfers are unchanged. The published `sync-global` capacity counts the reserve: one more running. The backpressure lines name the reserve, for example `Sync backpressure running durable:control-plane in a reserved control-plane slot (global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1)`. A node set to one slot now runs up to three sync jobs at once: one transfer, one shared-memory pull and one metadata refresh | None. `DKG_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT=0` restores the earlier behaviour |
+| A subscriber takes a registered public graph's definition from the chain when no connected peer serves one (#3303, #3264) | The definition fetch that a subscribe's catch-up runs first still asks the connected peers first, and the first verified declaration wins. When none serves one, the node installs the graph's canonical public definition, the two facts it installs at start for a configured graph, under the same strict chain proof, and only with chain evidence already in hand: the subscribe admission's proof, or a policy the catalog accepted from finalized chain state. An owner-signed policy of an unregistered graph never leads to a chain read, and a non-public policy the node holds is kept. The listing shows the access policy at once. A member that took its definition from the chain holds no curator, publish policy or allowlist rows until a peer serves the declaration | None. A node that subscribed on an earlier version and is listed synced without a definition gets one with a subscribe call with `forceCatchup` |
+| A Core keeps and serves the owner's definition of the registered public graphs it hosts (#3311, #3264, #3293) | For a hosted graph whose id names its owner and that the Core did not create, the Core fetches the owner's `_meta` when it records the graph as hosted and when a hosted row is restored at start: the owner's nodes first, then up to three connected peers, through the curator metadata refresh, which also registers the sub-graphs the declaration carries. While no peer serves it the Core tries again after 30 s, 1, 2 and 5 minutes and then every 10 minutes, one attempt per graph at a time. Before the first page of a graph's durable `_meta` snapshot to a subscriber, a Core whose copy is older than 30 s refreshes it from a connected owner node within 10 s; it never dials for a subscriber's request. A subscriber checks the Core's copy as it checks any peer's: the root curator must be the owner the graph's id names, and the serving peer's chain registration claims are stripped. A member that writes into a sub-graph it has not registered asks the owner first only when it is connected to it, and otherwise the connected peers, Cores first, then the owner | None |
+| A catch-up that finds nothing missing proves the graph synced (#3304, #3296) | A catch-up proves a data plane when a peer's round on it completed cleanly and either inserted verified data, as before, or served Knowledge Assets of which every one was already in the local store, in the exact content or a newer version, with none left to the catalog lane and no ref of its snapshot manifest unwritten. A failed or partial round, a round with no sync-capable peer, a round that served only metadata, and a round that left an asset to the catalog lane prove nothing. The proof is persisted, one clean peer is enough, and every peer is still asked | None. A member whose writes arrived by gossip, by a pull or before a restart reports `synced` with its next catch-up, repeat or subscribe call |
+| Every shared-memory pull admits the sub-graphs it is served (#3305, #3301) | The pull that also covers a graph's root scope, which a member runs against a peer that serves the graph complete, admitted only the sub-graphs registered on the member; it now admits the served ones, as the named-sub-graph pulls and private recovery already did. A served name that is a Context Graph of the node's own at `<graph>/<name>` is never admitted, in any lane, where the named-sub-graph pulls admitted it. A responder's registration rows are still not stored | None |
+| A member writes into a sub-graph the graph's owner registered (#3306, #3293) | A node that installs a `_meta` snapshot as a graph's definition also registers the sub-graphs it holds: well-formed registrations of that graph only, at most 256, with no writer lists, and never a name that is a Context Graph of its own. A write into a sub-graph this node has not registered first asks the graph's owner and up to two connected peers for their `_meta`, one lookup per sub-graph at a time within 30 s, and does not ask again for 30 s about a sub-graph no peer held. A write into a sub-graph nobody holds is refused with HTTP 400 and `SUB_GRAPH_NOT_FOUND` on `POST /api/knowledge-assets`, `wm/write`, `wm/pull-from`, `swm/share`, `wm/import-file` and `POST /api/memory/turn`, where it was HTTP 500; the message keeps its wording and adds what the lookup found. An async share job that meets it fails with the same error, and the queue retries it | Clients that matched the 500 should expect 400 with `code: "SUB_GRAPH_NOT_FOUND"` |
+| A share carries its author's seal, so the curator can publish it (#3307, #3294) | The share message gains two optional fields, the assertion's name and the canonical graph-scoped author seal that RFC-64 defines, which the author's node fills on every graph-scoped share. The graph's curator keeps the seal only when the share's envelope is signed by the seal's author, the seal names this share's asset, version, counts and private root, commits to the Merkle root of exactly the content stored, and its attestation recovers the asset's author; other members and Cores keep nothing. The curator then publishes the member's asset with `POST /api/knowledge-assets/:name/vm/publish` and `selectedAuthorAgentAddress`, with the member's attestation and the curator's wallet, into the member's namespace. `vm/publish-async` for another node's asset answers 409 `ASYNC_PUBLISH_FOREIGN_AUTHOR`, where it answered 500. A node on an earlier version ignores the fields, and a share from such a node carries none | Upgrade the author's node and the curator's node to publish a member's shared asset |
+
+<!-- PLACEHOLDER (no PR yet): upgrade row for the shared-memory write gate
+     that refreshes the graph's member list before it rejects a member the
+     curator has just approved. -->
 
 ### Known issues
 
@@ -195,41 +263,70 @@ accepts. Other message formats are unchanged.
   retried minutes apart: on a graph of a few hundred assets that was being
   published to, single assets took up to 15 minutes. Nothing is lost, and
   this is not new in this release.
-- **A node with one sync slot and no sync queue can miss a registered
-  graph's definition and keep graphs unsynced** (#3280): with
-  `DKG_SYNC_GLOBAL_MAX_INFLIGHT=1` and no global sync queue, a setting meant
-  for soak tests, shared-memory pulls get through on their reserved slot
-  (#3258). While another transfer holds the node's one slot, the metadata
-  refresh and the pull of a private graph's history are refused. Such a
-  node that joins a public graph registered on chain gets no definition of
-  it, so its writes there are refused. It can also keep a graph unsynced
-  although it holds the graph's shared memory, and the history of a
-  private graph may not arrive. Use the default setting, 10 slots and a
-  queue of 20.
-- **A member that reaches a registered public graph only through Cores
-  never gets the graph's definition** (#3264): the Cores host the graph but
-  do not hold its declaration, and the node asks only connected peers for
-  it. Without the definition the member's writes are refused with
-  `CONTEXT_GRAPH_NOT_FOUND`. Dial the graph's owner, through a relay if
-  needed, and subscribe again with `forceCatchup`; the definition then
-  arrives within seconds.
-- **The first write into a named sub-graph of a registered public graph
-  fails** (#3293) with HTTP 500 `Sub-graph <name> has not been registered`
-  until shared memory of that sub-graph reaches the node by sync. Create the
-  sub-graph on the node first with `POST /api/sub-graph/create`.
-- **A curator cannot publish a member's shared asset from a named
-  sub-graph** (#3294): the publish answers 409
-  `ASSERTION_AUTHOR_NOT_RESIDENT`, because the member's seal never reaches
-  the curator. A curator can publish an asset of its own built from the
-  member's.
-- **A node that already holds a graph's data can stay `synced: false`**
-  (#3296): a catch-up marks a graph synced only when it inserts new data.
-  The data is complete; only the flag is wrong.
+- **A node with one sync slot and no sync queue can get a private graph's
+  history late** (#3280): with `DKG_SYNC_GLOBAL_MAX_INFLIGHT=1` and no
+  global sync queue, a setting meant for soak tests, metadata refreshes and
+  shared-memory pulls get through on reserved slots (#3302, #3258), so such
+  a node gets a registered graph's definition and a private graph's member
+  list. While another transfer holds the node's one slot, the earlier
+  shared memory of a private graph arrives only with the next connection or
+  reconciler round, or once that slot is free. Use the default setting, 10
+  slots and a queue of 20.
+- **A member that reaches a registered public graph only through Cores has
+  its chain facts only until a Core hosts the graph** (#3264, #3293): a
+  Core hosts a graph from its first publication, so until then such a
+  member takes the canonical definition from the chain (#3303), with no
+  curator and no sub-graph list, and its first write into a sub-graph the
+  owner registered is refused with `SUB_GRAPH_NOT_FOUND` until a Core holds
+  the declaration (#3311). A member that took its definition from the chain
+  keeps that copy, and its listing shows no curator; its writes go through.
+  A registered public graph whose id does not name its owner gets no
+  definition from peers.
+- **A curator holds a member's seal only when the share reached it directly**
+  (#3294): a curator that was offline for the share and caught up by
+  shared-memory sync gets the share without the seal (#3307), and cannot
+  publish that asset. A second version of a member's asset still needs the
+  member's update attestation (`PUBLISH_AUTHOR_NOT_CUSTODIAL`), a member's
+  asset in the root of a catalog-owned graph is not curator-publishable,
+  and a seal by a smart-contract wallet, or by an agent other than the one
+  that signs the node's shares, is not kept.
+- **A member that subscribes to a registered graph without shared memory
+  lists it `synced: false` after a complete recovery** (#3296): a catch-up
+  now proves a plane on which it finds nothing missing (#3304), but the
+  Verified Memory plane of a graph whose catalog is authoritative is
+  recovered by the catalog lane, which writes no readiness, and the daemon's
+  catch-up never attempts it. The job's status also stays `unreachable` for
+  such a graph while `synced` turns true.
 - **The default store cannot hold a large graph** (#3291): a node without a
   `store` block in config.json uses the in-process worker store, which
   stops persisting once its store file nears 512 MiB, about 150 assets of a
   6.4M-triple graph. Use `store.backend: oxigraph-server` or Blazegraph for
   large graphs.
+- **Queries on a node that recovered a graph from a Core's chain snapshot
+  must accept that evidence** (#3140): the snapshot job in `core-cache`
+  mode marks the graph before it transfers anything, and the mark stays
+  across restarts, partial jobs and later syncs. A query over that graph,
+  its parent or a child without `chainEvidenceMode: "core-cache"`, and
+  every unscoped query on that node, answers 409
+  `CORE_CACHE_QUERY_TRUST_REQUIRED`; the node UI and the remote query and
+  lookup protocols send no mode, so they do not read such a graph. There is
+  no way to clear the mark. Run the job in `rpc-only` mode, or on a
+  separate profile and store.
+- **The snapshot job gives up when the node's own sync admission refuses a
+  batch** (#3140): the exact-asset stream of the job takes a general sync
+  slot, so on a node with one slot and no queue a batch that meets another
+  transfer is refused, and the job ends with `Snapshot recovery incomplete`
+  and no retry; a new job fetches every asset again. The bulk transport
+  takes no general slot. Use the default sync settings, or the bulk
+  transport, for such a recovery.
+- **Queued publications under sustained load** (#3252): the publisher
+  changes of this release (#3253) were measured on a public testnet with 48
+  queued publications and 256 shares into a private graph: every
+  publication finalized, 255 of 256 shares succeeded, and the catalog did
+  not drain within the fixed 20 minutes because of one share whose
+  synchronous request had failed. The timed acceptance therefore failed,
+  and no throughput improvement is claimed; the entry under Fixed gives the
+  latencies that improved.
 - **In a private graph, a member that reaches the others only through
   relays may get none of its root writes to them** (#3282): a write into
   the root of a private graph travels only with the member's catalog head.
@@ -333,20 +430,13 @@ accepts. Other message formats are unchanged.
 - **A request over a relayed connection still sets up a second circuit that
   is closed at once** (#3211): the request then goes out on the open
   connection (#3216), but each one costs a circuit on a relay.
-- **A subscriber that does not get a graph's definition is not asked again
-  until the next subscribe call** (#3207): when no connected peer holds it,
-  or the request fails for a reason other than the one #3216 removes. A
-  member of a registered public graph now asks its connected peers for the
-  definition (#3267), but while no connected peer holds it, for example
-  while the owner is offline, it does not take the definition from the
-  chain, and the repeated catch-up job of #3249 covers graphs that are not
-  registered on chain only.
-- **A public graph that is not registered on chain can stay unsynced on a
-  member that already holds some of its content** (#3207, #3249): the
-  repeated catch-up job proves an empty graph only when every peer it asks
-  answers empty, and once sub-graph content has reached the member by
-  another path such a round no longer proves the graph. The repeats are
-  kept in memory, and a restart starts them over.
+- **A subscriber of a public graph not registered on chain that does not get
+  the graph's definition is asked again only by the catch-up repeats**
+  (#3207, #3249): when no connected peer holds it, or the request fails for
+  a reason other than the one #3216 removes, the definition fetch runs again
+  with each repeat of the catch-up job, at most eight times over about an
+  hour, and then not until the next subscribe call. A member of a registered
+  public graph asks its connected peers and then the chain (#3267, #3303).
 - **A public graph created before 10.0.17, or with an id that its owner does
   not namespace, has no owner-signed seed** (#3249): the owner makes the
   seed when it creates a graph, and none is made later for an older graph.
@@ -471,6 +561,140 @@ accepts. Other message formats are unchanged.
   graph's followers only once this node's replay to it completed. A busy
   answer or a failed replay left it out, and this node's own shares into
   the graph did not go to it directly.
+- **A metadata refresh is no longer refused while a transfer holds a node's
+  only sync slot** (#3302, #3280): on a node with one sync slot and no
+  queue, every curator metadata refresh that no sync operation enclosed was
+  refused with `Sync backpressure rejected durable:control-plane` while
+  another transfer held the slot: the post-approval sync, the pending
+  join-approval recovery, the metadata bootstrap of a registered graph, the
+  curator lookup, and the authorization of an inbound private sync request.
+  On a devnet, a member's refresh of a private graph was refused 7 times in
+  4 minutes. Such a node never got a registered graph's definition, so it
+  refused its own writes into the graph, never got a private graph's member
+  list, and never started the work that waits on either: the catch-up's
+  proof and the graph's gossip subscription and member lanes. A refresh now
+  takes a reserved slot when no general slot is free; see the upgrade table.
+- **A member that reaches a registered public graph only through Cores gets
+  the graph's definition** (#3303, #3311, #3264): the Cores hosted the graph
+  by its chain policy and held no declaration of it, and the subscribe's
+  definition fetch asked only the connected peers, so such a member listed
+  the graph with no access policy and its writes were refused with
+  `CONTEXT_GRAPH_NOT_FOUND` until it dialled the graph's owner and
+  subscribed again with `forceCatchup`. The subscriber now takes the
+  canonical definition from the chain when no connected peer serves one
+  (#3303), and a Core keeps the owner's declaration of every registered
+  public graph it hosts and serves it, with the sub-graphs it registers, to
+  the graph's subscribers (#3311). In an end-to-end test with real nodes on
+  a local chain, a member connected to a Core only, never to the owner,
+  subscribed, took the definition, listed the owner's sub-graph and made its
+  first write and share into it.
+- **A node that already holds a graph's data is marked synced** (#3304,
+  #3296): a catch-up marked a graph synced only when it inserted new data.
+  A member whose writes arrived before its catch-up ran, by gossip, by a
+  pull, through another lane or before a restart, had its peers serve
+  content it already held, inserted nothing, and stayed `synced: false`
+  through every repeat (#3287) and re-subscribe; on the shared-memory lane
+  such a round logged `0 data + N meta triples`. A round that finds nothing
+  missing now proves the plane. In tests over the real catch-up worker,
+  subscribe route and readiness classifier, a member of a registered public
+  graph, a member of an unregistered one, the job after a restart, and one
+  held peer beside a failed one, all of which stayed unsynced, report
+  `synced`.
+- **A shared-memory pull that also covers the root stores the shares made
+  into a sub-graph the member never created** (#3305, #3301): a member
+  learns a public graph's named sub-graphs from what it is served, and
+  nothing replicates sub-graph registrations for a graph whose root is
+  catalog-owned. The pull lane that includes the root scope admitted only
+  the sub-graphs registered locally, where the named-sub-graph pulls and
+  private recovery admitted the served ones. A member that never created
+  the sub-graph discarded the metadata of a share made by UAL: its head was
+  never parsed, its snapshot never fetched, and the asset never arrived.
+  Every lane now admits the served sub-graphs.
+- **A member's first write into a sub-graph the graph's owner registered
+  goes through** (#3306, #3293): in a public graph registered on chain, the
+  write was refused with HTTP 500 `Sub-graph "<name>" has not been
+  registered in context graph "<graph>"` until shared memory of that
+  sub-graph reached the member by sync, so an application had to create the
+  sub-graph on every member first. The member installed the graph's
+  definition from a peer's `_meta`, which carries the owner's sub-graph
+  registrations in the same pages, and dropped them: that snapshot kept only
+  the graph's own subject and its delegations, and no other path carries the
+  registration of a sub-graph that has no content yet. The registrations
+  are now taken with the definition, and a write into a sub-graph the node
+  has not registered asks the graph's peers before it is refused; see the
+  upgrade table. In an end-to-end test with real nodes on a local chain, a
+  member admitted by the chain listed the owner's sub-graph after its
+  subscribe and its first write and share went through, and a sub-graph the
+  owner registered later was found on the first write into it.
+- **A curator can publish a member's shared asset from a named sub-graph**
+  (#3307, #3294): `POST /api/knowledge-assets/:name/vm/publish` with
+  `subGraphName` and `selectedAuthorAgentAddress` answered 409
+  `ASSERTION_AUTHOR_NOT_RESIDENT`, because the member's seal, the asset's
+  Merkle root with the member's attestation, was written only on the
+  member's node at finalize, and nothing in a catalog-owned graph carried
+  it: the share message had no seal fields, the legacy durable metadata
+  sync is not attempted, and the catalog's seals cover the root scope only.
+  The seal now travels with the share, and the curator keeps it after
+  checking it against the share's signature and content; see the upgrade
+  table. In an end-to-end test on a local chain the curator's publish
+  answered 200 `confirmed`, the asset was minted in the member's namespace,
+  and it was in Verified Memory and out of shared memory on both nodes.
+<!-- PLACEHOLDER (no PR yet): Fixed entry for the shared-memory write gate
+     that refreshes the graph's member list before it rejects a member the
+     curator has just approved. Write it from the PR's description once the
+     PR exists. -->
+- **A cold snapshot recovery is no longer cancelled when the graph's chain
+  binding is discovered during its first batch** (#3176): the snapshot job
+  installed the graph's numeric chain id without its name hash, so the
+  discovery of that same binding replaced the subscription record and
+  invalidated the job's ownership fence, which ended the job with
+  `Snapshot job ownership changed`. The job now admits the complete binding
+  before it starts, also for an existing subscription that lacks the hash,
+  and rejects a conflicting one.
+- **A Core serving the exact-asset stream no longer resets the stream when
+  its store is briefly busy** (#3180): a background store queue could
+  refuse the metadata read of an exact asset before it started, and the
+  responder let that retryable refusal reset the whole stream, verified
+  bodies in its cache included. Only that refusal, `STORE_SCHEDULER_BUSY`
+  with `not_started`, is now re-admitted, at most twice with short waits
+  that the caller can abort, for the initial read and the final source
+  fence; persistent overload and other errors still fail the stream.
+- **A scoped query no longer times out behind catalog scans it does not
+  need** (#3204, #3215): a query that named only an already authorized
+  static graph still queued unrelated partition-catalog scans before it
+  read, and a query with graph variables waited twice behind bulk imports,
+  for discovery and then for its read, so under an import a 2 s query could
+  end on its deadline before it started. See the upgrade table.
+- **A connection is no longer dropped when the node's health ping meets an
+  earlier ping on it** (#3215): the connection monitor of the libp2p
+  dependency took the refusal of a second outbound ping stream, a local
+  contention, for a failed heartbeat and aborted the connection. It now
+  skips its tick while an earlier ping on that connection is still open,
+  and treats the refusal as a skip. The change is a patch to the
+  dependency, applied at install.
+- **Queued publications into a private graph wait less for locks and store
+  capacity** (#3253, #3252): admissions, claims, journal writes and catalog
+  work of queued publications competed for the same locks and store
+  capacity, so publications waited while wallets were free; see the upgrade
+  table for what changed. In the test on a public testnet, six wallets, 48
+  queued publications and 256 shares into a private graph: all 48
+  finalized with exact proof, where the control finalized 47; the median
+  from durable acceptance to a terminal job fell from 359 s to 238 s, the
+  wait of a free wallet for its claim from 31 s to 7.5 s at the 90th
+  percentile, and the time from observed finality to a terminal job from
+  42 s to 17 s; the ACK collection tail grew from 14 s to 21 s. The timed
+  catalog drain failed; see Known issues.
+- **The node UI lists assertions without duplicates and renders graphs
+  without stale rows** (#3236): Context Graph tabs refetched recent data,
+  assertion counts delayed the visible rows, and a bounded graph read could
+  look complete while it left out components or resource details. Several
+  UALs or graph pointers could duplicate an assertion in a page, a blank
+  node could take different labels in one captured response or collide
+  across responses, a detail read could lose confirmed facts to a failed
+  refresh, and the graph view disposed shared textures too early on a
+  refresh and did not expand disconnected components. In a local browser
+  test, 2,999 connected nodes became all 3,001 on expansion. See the
+  upgrade table.
 
 ### Changed
 
@@ -482,6 +706,30 @@ accepts. Other message formats are unchanged.
   outcome** (#3250): a promote that waited and was admitted is logged at
   info, and every other fence event at warn, where every event was logged
   at warn.
+- **A Verifiable Memory import keeps a newer version it already holds**
+  (#3140): a finalization checks the stored assertion version under the
+  asset's lock, so a receipt that arrives late cannot replace a newer
+  version that a snapshot import stored. The snapshot job's imports carry
+  the mode, supplier, snapshot digest, observation time and block anchor of
+  their evidence in the asset's metadata.
+- **Strict denial is an option of a query** (#3121): a caller of the
+  agent's query API may ask for a typed `QUERY_ACCESS_DENIED` where a denied
+  or unreadable graph answered an empty result; the bounded route uses it,
+  and every existing caller keeps the empty answer. The shared-memory
+  admission of a query keeps its canonical metadata proof and authority
+  outcomes, so a strict bounded query answers 503 for an unavailable proof
+  where a legacy query answers empty, and a proof the chain has not
+  confirmed no longer aborts the recovery planning of later graphs.
+- **Queued finalization reports its completion where it is established**
+  (#3309, #3277, #3295): the queued finalization returns its typed
+  execution result, with the local-completion flag set or cleared there,
+  and the confirmed-VM observer takes the resolved private scope it is
+  given instead of reading it again. Accepted outcomes and the scheduling
+  of publications are unchanged.
+- **Test and CI plumbing** (#3298, #3299, #3236): the live Blazegraph step
+  of CI also runs the scoped-catalog backend tests of the query package and
+  the publisher's Blazegraph suite, and the memory-preview browser tests
+  are routed with the UI.
 
 ### Added
 
@@ -495,6 +743,40 @@ accepts. Other message formats are unchanged.
   `DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT=0` gives up the reserved slot,
   and `DKG_RECENT_SHARED_MEMORY_PULL_ENABLED=0` turns off the pull of public
   graphs in use.
+- **A bounded local SELECT route** (#3121): `POST /api/query/bounded`, with
+  `GET` for its ceilings, and the error code `QUERY_ACCESS_DENIED`; see the
+  upgrade table and `docs/BOUNDED_LOCAL_QUERY.md`.
+- **Entity discovery** (#3126): `dkg entities index` and
+  `dkg entities search`, the routes `POST /api/entities/index`,
+  `/api/entities/search` and `/api/entities/readiness`, and the
+  `entitySearch` configuration block; see the upgrade table and
+  `docs/ENTITY_DISCOVERY.md`.
+- **Public graph snapshot recovery** (#3140): the Core protocol
+  `/dkg/10.0.0/public-graph-snapshot/1`, the administrator route
+  `POST /api/context-graph/snapshot-sync`, the agent method
+  `syncPublicGraphSnapshot`, and the query option `chainEvidenceMode`
+  (`rpc-only` or `core-cache`) on `/api/query`, the bounded route and the
+  entity routes, which echo it; see the upgrade table and
+  `docs/sync/public-core-snapshot-recovery.md`.
+- **A persistent prepared-content cache for Cores** (#3170): the
+  `preparedContentCache` configuration block; see the upgrade table and
+  `docs/sync/prepared-content-cache.md`.
+- **An opt-in bulk transport for public graphs** (#3199):
+  `DKG_PUBLIC_SNAPSHOT_BULK=1`, the protocol
+  `/dkg/experimental/bulk-graph/1.0.0` and `transport: "bulk"` on the
+  snapshot job; see the upgrade table and
+  `docs/experimental-bulk-snapshot.md`.
+- **Publisher claim diagnostics** (#3253): the histogram
+  `dkg.store.scheduler_operation_duration_ms`, the opt-in
+  `async_publish_claim_trace` log under `DKG_ASYNC_PUBLISH_TRACE=1`, and a
+  section on publication latency and store pressure in
+  `docs/use-dkg/async-publisher-wallets.md`.
+- **`DKG_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT`** (#3302): set to `0`, it
+  gives up the reserved slot of the curator metadata refresh.
+- **Typed refusals of a write into an unknown sub-graph and of an async
+  publish of another node's asset** (#3306, #3307): HTTP 400
+  `SUB_GRAPH_NOT_FOUND` and 409 `ASYNC_PUBLISH_FOREIGN_AUTHOR`, where both
+  answered 500.
 
 ## [10.0.24] - 2026-10-14
 
