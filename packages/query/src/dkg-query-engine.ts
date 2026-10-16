@@ -1,21 +1,15 @@
+import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
-<<<<<<< HEAD
 import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
 import { storeOptions } from './query-store-options.js';
-=======
-import { selectContentPartitions, resolveDraftAccessPolicy, type ContentPartition, type DraftAccessPolicy } from './content-partition-policy.js';
-import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
-import { QueryResultTooLargeError } from './query-result-size-error.js';
->>>>>>> codex/v14-canary-pr3204-20261015
 import {
   asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
-  isSparqlHttpResponseError,
-  StoreResponseTooLargeError,
+  isSparqlHttpResponseError, StoreResponseTooLargeError,
 } from '@origintrail-official/dkg-storage';
 import type {
   TripleStore,
@@ -354,7 +348,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const validation = validateSubGraphName(options.subGraphName);
       if (!validation.valid) throw new Error(`Invalid sub-graph name for query: ${validation.reason}`);
     }
-<<<<<<< HEAD
     const admission = asQueryReadAdmissionCapability(this.store);
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       this.store.graphEnumerationVisibility ? admission : null);
@@ -364,68 +357,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
         plan.options.contextGraphId, plan.options, reads, reads.catalog);
       case 'unscoped': return this.execWithExclusions(initialGraphScope, reads, options?.excludeGraphPrefixes);
-=======
-
-    if (effectiveContextGraphId && !options?.view) {
-      const { dataGraph, sharedMemoryGraph, staticContentGraphs,
-        subGraphName, isSwmOnlyRoute, metaAllowList, staticPrivateAllowList } =
-        staticScopedRouteGraphs(effectiveContextGraphId, options);
-      // Explicit static GRAPH targets need only the route's static authority.
-      // Avoid unrelated catalog admissions while ingestion occupies the store.
-      // Variables and dynamic partitions still require fresh discovery below.
-      const staticAllowedGraphs = [
-        ...staticContentGraphs,
-        ...metaAllowList,
-        ...staticPrivateAllowList,
-      ];
-      const needsDiscovery = !initialGraphScope.hasGraphClause
-        || initialGraphScope.graphTargets.some(
-          (target) => target.kind !== 'iri' || !staticAllowedGraphs.includes(target.iri),
-        );
-      // Per-KA SWM: when a route targets SWM, expand the allow-set with the discovered
-      // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
-      const swmRouted = (options?.includeSharedMemory ?? options?.includeWorkspace) || options?.graphSuffix === '_shared_memory';
-      const swmPerKaGraphs = needsDiscovery && swmRouted
-        ? await this.discoverGraphsByPrefix(`${sharedMemoryGraph}/`, reads)
-        : [];
-      // Per-KA VM: published data is in …/_verifiable_memory/{addr}/{number}; bind those too
-      // for GRAPH-variable scans on any route that reads the data graph.
-      const dataRouted = options?.graphSuffix !== '_shared_memory';
-      const vmPerKaGraphs = needsDiscovery && dataRouted
-        ? await this.discoverGraphsByPrefix(
-            `${dataGraph}/_verifiable_memory/`,
-            reads,
-          )
-        : [];
-      const allowedGraphs = staticContentGraphs.flatMap(graph =>
-        [graph, ...(graph === dataGraph ? vmPerKaGraphs : swmPerKaGraphs)]);
-      const privateAllowList = options?.includePrivate && needsDiscovery
-        ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(
-            effectiveContextGraphId, reads.catalog, subGraphName,
-          ))]
-        : staticPrivateAllowList;
-      const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
-      const shouldExpandGraphVariables =
-        options?.includeContextGraphPartitions === true
-        && initialGraphScope.graphVariables.length > 0;
-      const variableAllowedGraphs = shouldExpandGraphVariables
-        ? await this.resolveScopedGraphVariableAllowList(
-            effectiveContextGraphId,
-            explicitAllowedGraphs,
-            { subGraphName, isSwmOnlyRoute, draftAccess: resolveDraftAccessPolicy(options) },
-            reads,
-          )
-        : explicitAllowedGraphs;
-      // Explicit GRAPH IRIs remain limited to the static route-specific
-      // allow-list. GRAPH variables only gain known same-CG content
-      // partitions for callers that explicitly opt into broad count scans;
-      // legacy scoped routes keep their selected memory-layer contract.
-      assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
-      routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
-        initialGraphScope,
-        variableAllowedGraphs,
-      ));
->>>>>>> codex/v14-canary-pr3204-20261015
     }
   }
 
@@ -436,7 +367,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
       const variableContentGraphs = discovery ? selectContentPartitions(
         discovery.partitions, plan.draftAccess, plan.graphs.subGraphName) : [];
-      return this.executeScoped(scope, plan, lane, variableContentGraphs);
+      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
     };
     switch (plan.discovery.catalog.kind) {
       case 'none': return execute(null);
@@ -447,7 +378,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   private async executeScoped(initialGraphScope: PreparedGraphScope,
-    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[]): Promise<QueryResult> {
+    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane): Promise<QueryResult> {
     const { staticContentGraphs, subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
     const partitions = new Map<string, string[]>();
     for (const { root, prefix } of plan.discovery.contentPrefixes) {
@@ -455,7 +386,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const allowedGraphs = staticContentGraphs.flatMap(graph => [graph, ...(partitions.get(graph) ?? [])]);
     const privateAllowList = plan.discovery.privatePartitions
-      ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.contextGraphId, reads, subGraphName))]
+      ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.contextGraphId, catalogReads, subGraphName))]
       : staticPrivateAllowList;
     const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
     const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...variableContentGraphs])];
@@ -528,7 +459,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         contextGraphId,
         options.agentAddress,
         options.assertionName,
-        reads.catalog,
+        catalogReads,
         options.subGraphName,
       );
     }
@@ -575,17 +506,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // `verifiedGraph` VM read — it is already pinned to one graph (like a
     // by-name WM read); fanning out would broaden it across every sub-graph's
     // VM partition and return unrelated rows.
-<<<<<<< HEAD
     if (fanOut) {
       for (const sub of subGraphs) {
-=======
-    if (!options.subGraphName && !options.verifiedGraph && !(view === 'working-memory' && options.assertionName)) {
-      const subNames = await this.discoverRegisteredSubGraphNames(
-        contextGraphId,
-        reads.catalog,
-      );
-      for (const sub of subNames) {
->>>>>>> codex/v14-canary-pr3204-20261015
         const subResolution = resolveViewGraphs(view, contextGraphId, {
           agentAddress: options.agentAddress,
           subGraphName: sub,
