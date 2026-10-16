@@ -52,7 +52,7 @@ export class RdfGraphViz {
   private _reificationCollapser: ReificationCollapser;
   private _metadataExtractor: MetadataExtractor;
   private _events: GraphEventEmitter;
-  private _renderer: RendererBackend;
+  private _renderer: RendererBackend | null = null;
   private _config: RdfGraphVizConfig;
   private _collapsedNodeIds = new Set<string>();
   private _rendererReady: Promise<void>;
@@ -61,6 +61,8 @@ export class RdfGraphViz {
   private _timelineOverlay: TimelineOverlay | null = null;
   private _renderQueued = false;
   private _autoFitDisabled = false;
+  private _resizeObserver: ResizeObserver | null = null;
+  private _destroyed = false;
 
   constructor(container: HTMLElement, config: RdfGraphVizConfig = {}) {
     this._config = config;
@@ -92,22 +94,23 @@ export class RdfGraphViz {
     // Create renderer backend based on config (default: 2D canvas)
     if (config.renderer === '3d') {
       // Dynamic import for tree-shaking: 3d-force-graph only loaded when needed
-      let resolveReady: () => void;
-      this._rendererReady = new Promise((r) => { resolveReady = r; });
-
-      // Temporary placeholder until async import resolves
-      this._renderer = null as unknown as RendererBackend;
-
-      import('./renderer-3d.js').then(({ WebGL3DRenderer }) => {
-        this._renderer = new WebGL3DRenderer(backendConfig);
-        resolveReady();
+      this._rendererReady = import('./renderer-3d.js').then(({ createWebGL3DRenderer }) => {
+        if (this._destroyed) return;
+        return createWebGL3DRenderer(backendConfig);
+      }).then(renderer => {
+        if (!renderer) return;
+        if (this._destroyed) { renderer.destroy(); return; }
+        this._renderer = renderer;
       }).catch((err) => {
+        if (this._destroyed) return;
         console.warn('[dkg-graph-viz] 3D renderer not available, falling back to 2D:', err.message);
-        this._renderer = new Canvas2DRenderer(backendConfig);
-        resolveReady();
+        const renderer = new Canvas2DRenderer(backendConfig);
+        renderer.init();
+        this._renderer = renderer;
       });
     } else {
       this._renderer = new Canvas2DRenderer(backendConfig);
+      this._renderer.init();
       this._rendererReady = Promise.resolve();
     }
 
@@ -124,39 +127,43 @@ export class RdfGraphViz {
 
     // Auto-resize on container resize
     if (typeof ResizeObserver !== 'undefined') {
-      const observer = new ResizeObserver(() => this._renderer?.resize());
-      observer.observe(container);
+      this._resizeObserver = new ResizeObserver(() => this._renderer?.resize());
+      this._resizeObserver.observe(container);
     }
   }
 
   // --- Data Loading ---
 
   /** Load N-Triples or N-Quads string */
-  async loadNTriples(input: string): Promise<void> {
+  async loadNTriples(input: string, signal?: AbortSignal): Promise<void> {
     const { parseNTriples } = await import('../parsers/ntriples.js');
     const triples = parseNTriples(input);
+    if (signal?.aborted) return;
     this._ingest(triples);
   }
 
   /** Load N-Quads string */
-  async loadNQuads(input: string): Promise<void> {
+  async loadNQuads(input: string, signal?: AbortSignal): Promise<void> {
     const { parseNQuads } = await import('../parsers/ntriples.js');
     const triples = parseNQuads(input);
+    if (signal?.aborted) return;
     this._ingest(triples);
   }
 
   /** Load Turtle string */
-  async loadTurtle(input: string): Promise<void> {
+  async loadTurtle(input: string, signal?: AbortSignal): Promise<void> {
     const { parseTurtle } = await import('../parsers/turtle.js');
     const { triples, prefixes } = parseTurtle(input);
+    if (signal?.aborted || this._destroyed) return;
     this._prefixManager.addPrefixes(prefixes);
     this._ingest(triples);
   }
 
   /** Load JSON-LD (object or string) */
-  async loadJsonLd(input: Record<string, unknown> | string): Promise<void> {
+  async loadJsonLd(input: Record<string, unknown> | string, signal?: AbortSignal): Promise<void> {
     const { parseJsonLd } = await import('../parsers/jsonld.js');
     const triples = await parseJsonLd(input);
+    if (signal?.aborted) return;
     this._ingest(triples);
   }
 
@@ -329,7 +336,7 @@ export class RdfGraphViz {
       this._renderer.autoFitDisabled = value;
     } else {
       this._rendererReady.then(() => {
-        if (this._renderer) this._renderer.autoFitDisabled = value;
+        if (!this._destroyed && this._renderer) this._renderer.autoFitDisabled = value;
       });
     }
   }
@@ -394,12 +401,8 @@ export class RdfGraphViz {
 
   // --- Highlight ---
 
-  /** Saved visual state for highlighted nodes, used by clearHighlight() to revert */
-  private _highlightState = new Map<string, {
-    riskScore?: number;
-    isHighRisk?: boolean;
-    sizeMultiplier?: number;
-  }>();
+  /** Only this highlight operation owns the transient decoration layer. */
+  private _highlightState = new Set<string>();
 
   /**
    * Visually emphasize a set of nodes without modifying underlying data.
@@ -424,18 +427,8 @@ export class RdfGraphViz {
 
     for (const [id, node] of this._model.nodes) {
       if (idSet.has(id)) {
-        // Save current state for revert
-        this._highlightState.set(id, {
-          riskScore: node.riskScore,
-          isHighRisk: node.isHighRisk,
-          sizeMultiplier: node.sizeMultiplier,
-        });
-
-        // Apply highlight emphasis
-        node.isHighRisk = true;
-        if (!node.sizeMultiplier || node.sizeMultiplier < 2.0) {
-          node.sizeMultiplier = 2.0;
-        }
+        this._highlightState.add(id);
+        node.highlight();
       }
     }
 
@@ -447,12 +440,10 @@ export class RdfGraphViz {
   clearHighlight(): void {
     if (this._highlightState.size === 0) return;
 
-    for (const [id, saved] of this._highlightState) {
+    for (const id of this._highlightState) {
       const node = this._model.nodes.get(id);
       if (node) {
-        node.riskScore = saved.riskScore;
-        node.isHighRisk = saved.isHighRisk;
-        node.sizeMultiplier = saved.sizeMultiplier;
+        node.clearHighlight();
       }
     }
 
@@ -468,7 +459,7 @@ export class RdfGraphViz {
    * Captures the canvas content from the active renderer backend.
    */
   async exportImage(): Promise<Blob> {
-    const canvas = this._renderer.getCanvas();
+    const canvas = this._renderer?.getCanvas();
     if (!canvas) {
       throw new Error('Cannot export: renderer not initialized or no canvas available');
     }
@@ -587,6 +578,7 @@ export class RdfGraphViz {
 
     // Apply animation after renderer is fully ready (3D init is async)
     this._rendererReady.then(() => {
+      if (this._destroyed) return;
       if (config.animation && this._renderer?.applyAnimation) {
         this._renderer.applyAnimation(config.animation);
       }
@@ -612,6 +604,10 @@ export class RdfGraphViz {
 
   /** Destroy the visualization and clean up resources */
   destroy(): void {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
     this._timelineOverlay?.unmount();
     this._timelineOverlay = null;
     this._renderer?.destroy();
@@ -624,6 +620,7 @@ export class RdfGraphViz {
 
   /** Ingest triples, resolve labels/images, and render */
   private _ingest(triples: RdfTriple[]): void {
+    if (this._destroyed) return;
     this._model.addTriples(triples);
     this._postIngest();
   }
@@ -632,13 +629,11 @@ export class RdfGraphViz {
   private _postIngest(): void {
     // Resolve image URLs for all nodes (direct and indirect)
     for (const node of this._model.nodes.values()) {
-      if (!node.imageUrl) {
-        node.imageUrl = this._hexPainter.resolveImageUrl(
-          node,
-          (id) => this._model.getNode(id),
-          (id) => this._model.getEdgesFrom(id)
-        );
-      }
+      node.setSourceImage(this._hexPainter.resolveImageUrl(
+        node,
+        (id) => this._model.getNode(id),
+        (id) => this._model.getEdgesFrom(id)
+      ));
     }
 
     // Resolve labels
@@ -652,6 +647,7 @@ export class RdfGraphViz {
 
   /** Render with current focus filter + temporal filter state */
   private _renderCurrent(): void {
+    if (this._destroyed) return;
     // In 3D mode, renderer module loads asynchronously.
     // Queue one deferred render instead of throwing on early data loads.
     if (!this._renderer) {
