@@ -20,6 +20,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
+import type { PublishedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
 
 const AUTHOR = `0x${'11'.repeat(20)}` as const;
 const KAV10 = `0x${'44'.repeat(20)}` as const;
@@ -172,11 +173,21 @@ describe('the steps a queued executor reports after the confirmation', () => {
       return publishResult();
     } });
     (host as any).defaultAgentAddress = effectiveAuthor;
+    const originalRequest = structuredClone(queued);
+    const writtenQuads: Quad[] = [];
+    const lifecycleWrites: PublishedNamedKaVmLifecycleInput[] = [];
+    // Exercise the real write boundaries: mocking these methods hides a second
+    // fallback to the default address after asynchronous publication finishes.
+    host._writeQueuedKnowledgeAssetVmPublishReceipt = PublishMethods.prototype._writeQueuedKnowledgeAssetVmPublishReceipt;
+    host._stampQueuedKnowledgeAssetVmPublishedLifecycle = PublishMethods.prototype._stampQueuedKnowledgeAssetVmPublishedLifecycle;
+    (host as any).publishedNamedKaVmLifecycleWriter = async (input: PublishedNamedKaVmLifecycleInput) => {
+      lifecycleWrites.push(input);
+    };
     const clear = vi.spyOn(host.publisher, 'clearPublishedKnowledgeAssetSwm');
     const marker = vi.spyOn(host.publisher, 'clearSwmShareComplete');
     const lifecycle = vi.spyOn(host as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
     const pointer = vi.spyOn(host as any, '_stampPointer');
-    const insert = vi.spyOn(host.store, 'insert');
+    const insert = vi.spyOn(host.store, 'insert').mockImplementation(async (quads) => { writtenQuads.push(...quads); });
     const catalog = vi.spyOn(host as any, 'observeRfc64ConfirmedVmV1');
     const metaGraph = contextGraphMetaUri(queued.contextGraphId);
     const lifecycleUri = assertionLifecycleUri(queued.contextGraphId, effectiveAuthor, queued.name, queued.subGraphName);
@@ -185,7 +196,17 @@ describe('the steps a queued executor reports after the confirmation', () => {
       kind: 'named-lifecycle', identity: { agentAddress: AUTHOR, kaNumber: KA_NUMBER },
     }, 'documents', expect.any(Object), UAL, '1');
     expect(marker).toHaveBeenCalledWith(queued.contextGraphId, queued.name, effectiveAuthor, 'documents');
-    expect(lifecycle).toHaveBeenCalledWith(queued, UAL, PACKED_KA_ID);
+    const assertionUri = contextGraphAssertionUri(queued.contextGraphId, effectiveAuthor, queued.name, queued.subGraphName);
+    expect(writtenQuads.some(quad => quad.subject === assertionUri)).toBe(true);
+    expect(lifecycleWrites).toEqual([expect.objectContaining({
+      contextGraphId: queued.contextGraphId, agentAddress: effectiveAuthor,
+      name: queued.name, subGraphName: queued.subGraphName, publishedUal: UAL,
+    })]);
+    const laterAuthor = `0x${'33'.repeat(20)}`;
+    expect(writtenQuads.some(quad => quad.subject.includes(laterAuthor))).toBe(false);
+    expect(lifecycleWrites.some(input => input.agentAddress === laterAuthor)).toBe(false);
+    expect(lifecycle).toHaveBeenCalledWith(expect.objectContaining({ ...queued, agentAddress: effectiveAuthor }), UAL, PACKED_KA_ID);
+    expect(queued).toEqual(originalRequest);
     expect(catalog).toHaveBeenCalledWith(expect.objectContaining({
       contextGraphId: queued.contextGraphId, subGraphName: 'documents', assertionCoordinate: queued.name,
       assertionUri: contextGraphAssertionUri(queued.contextGraphId, effectiveAuthor, queued.name, 'documents'),
@@ -200,7 +221,7 @@ describe('the steps a queued executor reports after the confirmation', () => {
     } else {
       expect(calls).toContain('publish()');
       expect(pointer).not.toHaveBeenCalled();
-      expect(insert).not.toHaveBeenCalled();
+      expect(writtenQuads.every(quad => quad.subject === assertionUri)).toBe(true);
     }
   });
 

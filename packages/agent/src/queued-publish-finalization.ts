@@ -89,10 +89,11 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   services: QueuedPublishFinalizationServices,
 ): Promise<true | undefined> {
   const {
-    request, seal, result, operationPlan, effectiveAuthor: agentAddress,
+    request: originalRequest, seal, result, operationPlan, effectiveAuthor: agentAddress,
     snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
   } = context;
-  // One validated request determines every finalization coordinate; author fallback is captured.
+  // Leaf writers must retain the captured author rather than re-read a mutable default.
+  const request = { ...originalRequest, agentAddress };
   const graphScope = createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
   const assertionUri = contextGraphAssertionUri(request.contextGraphId, agentAddress, request.name, request.subGraphName);
   const lifecycleUri = assertionLifecycleUri(request.contextGraphId, agentAddress, request.name, request.subGraphName);
