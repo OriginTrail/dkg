@@ -10,8 +10,8 @@ agent.createDurableRecoveryCapabilities();
 
 // The executor cannot bypass its transport or authenticated materialization operations.
 // @ts-expect-error Raw networking internals are not a recovery capability.
-host.node;
+void host.node;
 // @ts-expect-error Mutable subscription state belongs to the materialization owner.
-host.subscribedContextGraphs;
+void host.subscribedContextGraphs;
 // @ts-expect-error Direct store access would bypass the authentication and lifecycle fences.
-host.store;
+void host.store;
