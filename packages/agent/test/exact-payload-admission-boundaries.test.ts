@@ -1,7 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { EXACT_EXPORT_PAYLOAD_OPERATION as operation, retryExactPayloadAdmission } from '../src/sync/responder/exact-metadata-admission.js';
-import { withPublicSnapshotStoreReads } from '../src/sync/responder/public-snapshot-store-admission.js';
 import { exactAssetExportFixture as fixture } from './fixtures/exact-asset-export.js';
 
 afterEach(() => vi.restoreAllMocks());
@@ -14,8 +13,7 @@ it.each(['background', 'normal'] as const)('caps persistent %s payload pressure 
     if (options?.source === operation) return Promise.reject(error);
     return original(query, options);
   });
-  const acquire = () => f.cache.acquireEncoded(f);
-  await expect(priority === 'normal' ? withPublicSnapshotStoreReads(acquire) : acquire()).rejects.toBe(error);
+  await expect(f.cache.acquireEncoded({ ...f, readPriority: priority })).rejects.toBe(error);
   expect(f.query.mock.calls.filter(([, o]) => o?.source === operation)).toHaveLength(3);
   expect(f.budget.stats()).toEqual(before);
   expect(f.cache.stats().exports).toBe(0);

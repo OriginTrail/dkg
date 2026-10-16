@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StorePriorityScheduler, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
-import { withPublicSnapshotStoreReads, exactExportStorePriority } from '../src/sync/responder/public-snapshot-store-admission.js';
 import { EXACT_EXPORT_METADATA_OPERATION, retryExactMetadataAdmission } from '../src/sync/responder/exact-metadata-admission.js';
 import { exactAssetExportFixture } from './fixtures/exact-asset-export.js';
 
@@ -10,11 +9,11 @@ describe('public snapshot store admission', () => {
   it('keeps the existing two metadata re-admissions and rejects errors from another lane', async () => {
     const busy = new StoreSchedulerBusyError('queue_full', 'normal', EXACT_EXPORT_METADATA_OPERATION);
     const read = vi.fn(async () => { throw busy; });
-    await expect(withPublicSnapshotStoreReads(() => retryExactMetadataAdmission(read))).rejects.toBe(busy);
+    await expect(retryExactMetadataAdmission(read, undefined, undefined, 'normal')).rejects.toBe(busy);
     expect(read).toHaveBeenCalledTimes(3);
     const other = new StoreSchedulerBusyError('queue_full', 'background', EXACT_EXPORT_METADATA_OPERATION);
     read.mockReset().mockRejectedValue(other);
-    await expect(withPublicSnapshotStoreReads(() => retryExactMetadataAdmission(read))).rejects.toBe(other);
+    await expect(retryExactMetadataAdmission(read, undefined, undefined, 'normal')).rejects.toBe(other);
     expect(read).toHaveBeenCalledOnce();
   });
 
@@ -23,7 +22,7 @@ describe('public snapshot store admission', () => {
     const cold = (await f.cache.acquireEncoded(f))!;
     await cold.assertCurrent(); cold.release();
     const before = f.budget.stats();
-    const warm = await withPublicSnapshotStoreReads(() => f.cache.acquireEncoded({ ...f, signal: signal.signal }));
+    const warm = await f.cache.acquireEncoded({ ...f, signal: signal.signal, readPriority: 'normal' });
     const scheduler = new StorePriorityScheduler();
     let releaseRepair!: () => void, releaseQuery!: () => void;
     const repair = scheduler.run('background', 'repair', () => new Promise<void>(r => { releaseRepair = r; }));
@@ -32,11 +31,10 @@ describe('public snapshot store admission', () => {
     f.query.mockImplementation((text, options) => scheduler.run(options?.priority, options?.source ?? '',
       () => original(text, options), options?.signal));
     const reason = new Error('original caller deadline');
-    const pending = withPublicSnapshotStoreReads(() => warm!.assertCurrent());
+    const pending = warm!.assertCurrent();
     const rejected = expect(pending).rejects.toBe(reason);
     try {
       await vi.waitFor(() => expect(scheduler.snapshot.normalQueued).toBe(1));
-      expect(exactExportStorePriority()).toBe('background');
       expect(scheduler.snapshot).toMatchObject({ maxConcurrent: 4, backgroundInflight: 1, normalInflight: 1,
         ackReservedSlots: 1, healthReservedSlots: 1, backgroundReservedSlots: 1, normalReservedSlots: 1 });
       await expect(scheduler.run('health', 'health', async () => true)).resolves.toBe(true);
@@ -49,4 +47,21 @@ describe('public snapshot store admission', () => {
     }
     expect(f.budget.stats()).toEqual(before);
   });
+});
+
+it.each(['acquire', 'acquireEncoded'] as const)('captures explicit priority for %s lease fences without changing other readers', async acquire => {
+  const f = exactAssetExportFixture(3);
+  const request = { ...f, readPriority: 'normal' as 'normal' | 'background' };
+  const lease = (await f.cache[acquire](request))!;
+  expect(lease).not.toBeNull();
+  expect(f.query.mock.calls.every(([, options]) => options?.priority === 'normal')).toBe(true);
+  request.readPriority = 'background';
+  f.query.mockClear();
+  const background = (await f.cache[acquire](f))!;
+  await background.assertCurrent(); background.release();
+  expect(f.query.mock.calls.every(([, options]) => options?.priority === 'background')).toBe(true);
+  f.query.mockClear();
+  await lease.assertCurrent(); lease.release();
+  expect(f.query.mock.calls.length).toBeGreaterThan(0);
+  expect(f.query.mock.calls.every(([, options]) => options?.priority === 'normal')).toBe(true);
 });

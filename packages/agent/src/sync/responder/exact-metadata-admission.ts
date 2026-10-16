@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
-import { exactExportStorePriority } from './public-snapshot-store-admission.js';
+export type ExactExportReadPriority = 'normal' | 'background';
 
 export const EXACT_EXPORT_METADATA_OPERATION = 'sync.responder.exactAssetExport.metadata';
 export const EXACT_EXPORT_PAYLOAD_OPERATION = 'sync.responder.exactAssetExport.payload';
@@ -12,6 +12,7 @@ export const EXACT_EXPORT_PAYLOAD_OPERATION = 'sync.responder.exactAssetExport.p
  */
 async function retryExactReadAdmission<T>(
   operation: string, read: () => Promise<T>, signal?: AbortSignal, onRetry?: (waitMs: number) => void,
+  priority: ExactExportReadPriority = 'background',
 ): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     signal?.throwIfAborted();
@@ -19,7 +20,7 @@ async function retryExactReadAdmission<T>(
     catch (error) {
       signal?.throwIfAborted();
       if (attempt >= 2 || !isStoreSchedulerBusyError(error)
-        || error.priority !== exactExportStorePriority() || error.operation !== operation) throw error;
+        || error.priority !== priority || error.operation !== operation) throw error;
       const started = performance.now();
       try { await delay(250 * (attempt + 1), undefined, { signal }); }
       catch (error) { signal?.throwIfAborted(); throw error; }
@@ -31,12 +32,14 @@ async function retryExactReadAdmission<T>(
 
 export function retryExactMetadataAdmission<T>(
   read: () => Promise<T>, signal?: AbortSignal, onRetry?: (waitMs: number) => void,
+  priority: ExactExportReadPriority = 'background',
 ): Promise<T> {
-  return retryExactReadAdmission(EXACT_EXPORT_METADATA_OPERATION, read, signal, onRetry);
+  return retryExactReadAdmission(EXACT_EXPORT_METADATA_OPERATION, read, signal, onRetry, priority);
 }
 
 export function retryExactPayloadAdmission<T>(
   read: () => Promise<T>, signal?: AbortSignal, onRetry?: (waitMs: number) => void,
+  priority: ExactExportReadPriority = 'background',
 ): Promise<T> {
-  return retryExactReadAdmission(EXACT_EXPORT_PAYLOAD_OPERATION, read, signal, onRetry);
+  return retryExactReadAdmission(EXACT_EXPORT_PAYLOAD_OPERATION, read, signal, onRetry, priority);
 }

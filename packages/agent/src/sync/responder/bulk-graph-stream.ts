@@ -5,7 +5,6 @@ import { BULK_GRAPH_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
 import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson, encodeBulkRefusal, encodeBulkChunkEnd,
   validateBulkGraphRequest, type BulkGraphRequest } from '../bulk-graph-contract.js';
 import type { PublicAssetResponderOptions, PublicAssetServingOptions } from './public-asset-responder.js';
-import { withPublicSnapshotStoreReads } from './public-snapshot-store-admission.js';
 
 import { observeExactBatch as observe } from '../exact-batch-observation.js';
 const EMPTY = new Uint8Array();
@@ -25,7 +24,7 @@ export function registerPublicBulkGraph(router: ProtocolRouter,
       signal.throwIfAborted(); return request;
     });
   }, (request, session, peer) => options.admission.withAuthorizedResponseAdmission(peer, request.contextGraphId,
-    session.signal, () => withPublicSnapshotStoreReads(() => servePublicBulkChunk(request, session, options))), options);
+    session.signal, () => servePublicBulkChunk(request, session, options)), options);
 }
 
 export async function servePublicBulkChunk(request: BulkGraphRequest, session: Pick<BulkGraphSession, 'signal' | 'next' | 'send'>, options: PublicAssetServingOptions): Promise<void> {
@@ -50,7 +49,7 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: P
     if (options.servingWithheld?.(request.contextGraphId)
       || !await options.isPublicContextGraph(request.contextGraphId, session.signal)) throw new Error('Bulk graph public authority changed');
     const started = performance.now();
-    const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
+    const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal, readPriority: 'normal',
       signal: session.signal, authorizeMissingAccessPolicy: () => options.isPublicContextGraph(request.contextGraphId, session.signal),
       onStage: (stage, ms) => observe(() => options.onStage?.(stage, index, ms, context)),
       onFallback: (reason, budgetReason) => observe(() => options.onFallback?.(reason, index, context, budgetReason)) });

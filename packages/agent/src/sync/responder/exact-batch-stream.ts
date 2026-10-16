@@ -13,7 +13,6 @@ import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js'
 
 import { ExactBatchAssetMissingError } from './exact-asset-export-cache.js';
 import type { PublicAssetResponderOptions } from './public-asset-responder.js';
-import { withPublicSnapshotStoreReads } from './public-snapshot-store-admission.js';
 
 const EMPTY = new Uint8Array(0);
 export interface ExactBatchResponderBindingOptions extends Omit<PublicAssetResponderOptions, 'isPublicContextGraph'> {
@@ -106,7 +105,7 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
 
   const respond = async (authorized: AuthorizedExactBatchContext, session: ExactBatchAgentSession, _peerId: string): Promise<void> => {
     const { request, assetUals, context } = authorized.claim(authorizationOwner, _peerId, session);
-    return options.admission.withAuthorizedResponseAdmission(_peerId, request.contextGraphId, session.signal, () => withPublicSnapshotStoreReads(async () => {
+    return options.admission.withAuthorizedResponseAdmission(_peerId, request.contextGraphId, session.signal, async () => {
     const window = new ExactBatchSendWindow({ assetCount: assetUals.length, windowSize: EXACT_BATCH_STREAM_WINDOW_SIZE });
     const send = async (frame: ExactBatchFrame) => { window.acceptSent(frame); await session.send(frame); };
     const readAck = async () => {
@@ -124,7 +123,7 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         // becomes private. This never enters the private/member join lane.
         await requirePublicAuthority(request.contextGraphId, session.signal);
         let started = performance.now();
-        const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
+        const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal, readPriority: 'normal',
           signal: session.signal,
           // A definitive policy change during an already prepared export is
           // fenced by the cache as a changed source, before ASSET_END.
@@ -179,7 +178,7 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
       }
       throw error;
     } finally { window.close(); }
-    }));
+    });
   };
   return { authorizeRequest, respond };
 }
