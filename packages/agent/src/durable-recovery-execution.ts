@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
-import { type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
+import { type DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import type { ExactBatchStreamOutcome } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary } from './sync/requester/admission-boundary.js';
 import { type OperationContext } from '@origintrail-official/dkg-core';
@@ -9,7 +9,6 @@ import { type PhaseCallback } from '@origintrail-official/dkg-publisher';
 import { exactAssetUalsForSelection } from './sync/exact-assets.js';
 import { createDurableSyncFetchTimeoutMs, normalizeDurableSyncTimeoutMs } from './sync/requester/durable-sync-budget.js';
 import { type ExactAssetResponderCapability } from './sync/requester/durable-sync.js';
-import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { mergeExactAssetResponderCapability, mergeExactDurableFetchDisposition, type ExactDurableFetchDisposition } from './sync/requester/exact-durable-fetch.js';
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runOrderedContextGraphSyncs } from './sync/requester/ordered-sync.js';
@@ -18,7 +17,7 @@ import { createDurableSyncAccumulator, durableSyncAccumulatorHasPeerTransportFai
 import { orderContextGraphIdsByPriority } from './sync/policy.js';
 
 import { runAdmittedDurableGraph } from './durable-recovery-graph.js';
-import type { DurableSyncOptions, AdmittedDurableSyncResult } from './durable-recovery-types.js';
+import type { DurableRecoveryOptions, AdmittedDurableSyncResult } from './durable-recovery-types.js';
 import { runSyncSingleFlight } from './sync-single-flight.js';
 import { runSerializedDurableContextGraphSync, createDurableSyncOperationBoundary, durableSyncSingleFlightKey, DURABLE_RECOVERY_HARD_TIMEOUT_MS } from './durable-recovery-scheduling.js';
 
@@ -31,7 +30,7 @@ export interface DurableRecoveryRequest {
   readonly onPhase?: PhaseCallback;
   readonly onAccessDenied?: (contextGraphId: string) => void;
   readonly sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
-  readonly options?: Omit<DurableSyncOptions, keyof DurableRecoveryInput>;
+  readonly options?: DurableRecoveryOptions;
 }
 
 /** Named internal request keeps operation-owned authority outside SDK options. */
@@ -41,9 +40,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
   const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
   const syncAgentsMeta = resolveSyncAgentsMeta(host.policy().syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
   const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-  const exactAssetFetchPolicy = normalizeExactAssetFetchPolicy(
-    options?.exactAssetFetchPolicy, () => options?.exactAssetSelection, options?.forceFreshExactSession,
-  );
+  const exactAssetFetchPolicy = options?.exactAssetFetchPolicy;
   const exactAssetSelection = exactAssetFetchPolicy?.selection;
   const exactAssetUals = exactAssetSelection === undefined
     ? undefined

@@ -1,3 +1,4 @@
+import { exactAssetUalsForSelection } from '../src/sync/exact-assets.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
 
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
@@ -41,10 +42,10 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only') {
   };
   // Stub only the already-verified transport boundary. The actual job owns the
   // trust marker, evidence authentication, failure and real atomic store writes.
-  a.recoverSnapshotExactAssets=vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ host: _agent, remotePeerId: _peer, contextGraphId: _graph, selectionInput: uals, authority }) => {
+  a.recoverSnapshotExactAssets=vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ host: _agent, remotePeerId: _peer, contextGraphId: _graph, policy, authority }) => {
     await expect(query(store,graph)).rejects.toThrow('core-trusted');
     const committed:string[]=[];
-    for(const ual of uals) {
+    for(const ual of exactAssetUalsForSelection(policy.selection)) {
       const verified=assets.get(ual)!;
       if(verified.ual.endsWith('/11')) continue; // Second batch fails on both transports.
       const authenticated=await authority.authenticate(verified, performance.now() + 120000);

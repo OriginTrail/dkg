@@ -1,4 +1,3 @@
-import { createDurableRecoveryHost } from './dkg-agent-recovery.js';
 import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
@@ -129,7 +128,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           const recovery = { contextGraphId, peers, uals, evidence, signal, assertCurrent };
           let recovered: PublicSnapshotRecoveryResult;
           if (transport === 'bulk') {
-            const { verification, reconcile } = createDurableRecoveryHost(this);
+            const { verification, reconcile } = DKGAgentBase.createDurableRecoveryCapabilities(this);
             recovered = await recoverPublicSnapshotBulk({
               store: this.store, router: this.router, verification, reconcile,
               ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
@@ -142,7 +141,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
               onCommitted: () => this.invalidateListContextGraphsCache(),
               log: message => this.log.info(createOperationContext('sync'), message),
             });
-          } else recovered = await recoverPublicSnapshotExact(this, recovery);
+          } else recovered = await recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), recovery);
           const { committed, bulkChunks } = recovered;
 
           // A new inventory/root comparison is required before claiming current coverage.

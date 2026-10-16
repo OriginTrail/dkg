@@ -1,3 +1,4 @@
+import { exactAssetUalsForSelection } from '../src/sync/exact-assets.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -43,7 +44,8 @@ describe('snapshot admission racing historical graph discovery', () => {
     const { agent, snapshot } = await fixture();
     if (mode === 'core-cache') vi.spyOn(agent.router, 'send').mockImplementation(async () => Buffer.from(JSON.stringify(snapshot())));
     if (existing) agent.subscribeToContextGraph(graph, { onChainId: '1', syncMode: 'on-demand' });
-    const fetch = vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ selectionInput: uals, options }) => {
+    const fetch = vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ policy, options }) => {
+      const uals = exactAssetUalsForSelection(policy.selection);
       await agent.discoverContextGraphsFromStorage();
       return { applied: 0, committedExactAssetUals: options?.isCurrent?.() ? uals : [] } as Awaited<ReturnType<typeof agent.syncExactKnowledgeAssetsFromPeerDetailed>>;
     });
