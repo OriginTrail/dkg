@@ -61,7 +61,7 @@ export function resolvePreparedContentCacheConfig(config: PreparedContentCacheCo
     throw new TypeError('preparedContentCache.enabled must be boolean');
   }
   if (!config.enabled) return undefined;
-  const directory = config.directory ?? (dataDir ? join(dataDir, 'prepared-content-v1') : undefined);
+  const directory = config.directory ?? (dataDir ? resolve(dataDir, 'prepared-content-v1') : undefined);
   if (typeof directory !== 'string' || !isAbsolute(directory)) {
     throw new TypeError('preparedContentCache requires an absolute directory or dataDir');
   }
