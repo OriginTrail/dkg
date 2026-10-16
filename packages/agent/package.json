@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.24",
+  "version": "10.0.25",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -22,6 +22,11 @@
       "types": "./dist/chain-authority-read-budgets.d.ts",
       "import": "./dist/chain-authority-read-budgets.js",
       "default": "./dist/chain-authority-read-budgets.js"
+    },
+    "./public-snapshot-mode": {
+      "types": "./dist/public-snapshot-mode.d.ts",
+      "import": "./dist/public-snapshot-mode.js",
+      "default": "./dist/public-snapshot-mode.js"
     },
     "./package.json": "./package.json",
     "./dist/internal/*": null,
@@ -64,6 +69,7 @@
     "./dist/rfc64/unregistered-authority-seed-store-v1.js": null,
     "./dist/rfc64/unregistered-authority-transport-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,
+    "./dist/rfc64/swm-inventory-observation-retry-v1.js": null,
     "./dist/rfc64/swm-inventory-settlement-outlook-v1.js": null,
     "./dist/rfc64/control-object-store-v1-internal.js": null,
     "./dist/rfc64/control-object-store-v1.js": null,

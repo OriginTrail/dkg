@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+import { assertSafeIri, assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
+import { assertReplacementPayload, assertSubjectReplacementPayload, formatGraphBlock } from './atomic-graph-replace.js';
+import type { Quad } from './triple-store.js';
+
+/** One atomic visibility boundary, independently bounded from a transport chunk. */
+export interface AtomicAssetReplacement {
+  graphUri: string;
+  graphQuads: Quad[];
+  metaGraphUri: string;
+  metadataSubject: string;
+  metadataQuads: Quad[];
+}
+export const ATOMIC_ASSET_GROUP_MAX_ASSETS = 8;
+export const ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES = 32 * 1024 * 1024;
+
+/** Validate the entire group before any write; one backend transaction publishes all pairs. */
+export function validateAtomicAssetGroup(assets: readonly AtomicAssetReplacement[]): void {
+  if (!assets.length || assets.length > ATOMIC_ASSET_GROUP_MAX_ASSETS) throw new RangeError('Invalid atomic asset group size');
+  const graphs = new Set(assets.map(a => a.graphUri));
+  const subjects = new Set(assets.map(a => `${a.metaGraphUri}\0${a.metadataSubject}`));
+  if (graphs.size !== assets.length || subjects.size !== assets.length
+    || assets.some(a => graphs.has(a.metaGraphUri))) throw new Error('Overlapping atomic asset group destinations');
+  for (const a of assets) {
+    assertSafeIri(a.graphUri); assertSafeIri(a.metaGraphUri); assertSafeIri(a.metadataSubject);
+    assertReplacementPayload(a.graphUri, a.graphQuads);
+    assertSubjectReplacementPayload(a.metaGraphUri, a.metadataSubject, a.metadataQuads);
+  }
+}
+/** Enforce backend literal limits independently from optional IRI reporting. */
+export function preflightAtomicAssetGroupLiterals(assets: readonly AtomicAssetReplacement[]): void {
+  for (const a of assets) {
+    assertQuadLiteralsMutf8Safe([...a.graphQuads, ...a.metadataQuads], {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'replaceAssetGroup',
+    });
+  }
+}
+export function buildAtomicAssetGroupUpdate(assets: readonly AtomicAssetReplacement[]) {
+  validateAtomicAssetGroup(assets);
+  preflightAtomicAssetGroupLiterals(assets);
+  // Every caller promises whole-update atomicity; no staging is needed here.
+  const operations = assets.flatMap(a => [
+    `CLEAR SILENT GRAPH <${a.graphUri}>`,
+    `DELETE WHERE { GRAPH <${a.metaGraphUri}> { <${a.metadataSubject}> ?p ?o } }`,
+  ]);
+  const blocks = assets.flatMap(a => [
+    ...(a.graphQuads.length ? [formatGraphBlock(a.graphUri, a.graphQuads)] : []),
+    ...(a.metadataQuads.length ? [formatGraphBlock(a.metaGraphUri, a.metadataQuads)] : []),
+  ]);
+  if (blocks.length) operations.push(`INSERT DATA {\n${blocks.join('\n')}\n}`);
+  const update = operations.join(';\n');
+  if (Buffer.byteLength(update) > ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES) throw new RangeError('Atomic asset group byte allowance exceeded');
+  return { update, graphs: [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))] };
+}

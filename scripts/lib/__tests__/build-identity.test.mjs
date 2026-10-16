@@ -26,6 +26,10 @@ function fixture(t) {
   writeFileSync(join(dir, '.gitignore'), 'bin/\npackages/cli/build-info.json\npackages/cli/dist/\n');
   writeFileSync(join(dir, 'source.txt'), 'A\n');
   run('git', ['init', '-q'], dir);
+  // Keep fixture-owned Git work synchronous so cleanup cannot race a detached
+  // maintenance process creating objects after the final command has returned.
+  run('git', ['config', 'maintenance.auto', 'false'], dir);
+  run('git', ['config', 'gc.auto', '0'], dir);
   run('git', ['add', '.'], dir);
   run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'A'], dir);
   writeFileSync(join(dir, 'bin/tsc'), '#!/bin/sh\nmkdir -p dist\ncp ../../source.txt dist/source.txt\n', { mode: 0o755 });
