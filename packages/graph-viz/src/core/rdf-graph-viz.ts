@@ -428,7 +428,7 @@ export class RdfGraphViz {
     for (const [id, node] of this._model.nodes) {
       if (idSet.has(id)) {
         this._highlightState.add(id);
-        node.highlightOverrides = { isHighRisk: true, sizeMultiplier: Math.max(node.sizeMultiplier ?? 1, 2) };
+        node.highlight();
       }
     }
 
@@ -443,7 +443,7 @@ export class RdfGraphViz {
     for (const id of this._highlightState) {
       const node = this._model.nodes.get(id);
       if (node) {
-        node.highlightOverrides = {};
+        node.clearHighlight();
       }
     }
 
@@ -629,11 +629,11 @@ export class RdfGraphViz {
   private _postIngest(): void {
     // Resolve image URLs for all nodes (direct and indirect)
     for (const node of this._model.nodes.values()) {
-      node.dataDecorations.imageUrl = this._hexPainter.resolveImageUrl(
+      node.setSourceImage(this._hexPainter.resolveImageUrl(
         node,
         (id) => this._model.getNode(id),
         (id) => this._model.getEdgesFrom(id)
-      );
+      ));
     }
 
     // Resolve labels

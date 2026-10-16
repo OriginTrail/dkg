@@ -56,27 +56,18 @@ export function normalizeQueryExecutionResponse(
   return { result: { type: 'bindings', bindings } };
 }
 
-const inflightQuery = new Map<string, Promise<QueryExecutionResponse>>();
+const inflightQuery = new Map<string, { scope: string; promise: Promise<QueryExecutionResponse> }>();
 const graphListCache = new ReadCache<{ contextGraphs: any[] }>(2 * 1024 * 1024, 1);
-let graphListGeneration = 0;
 let graphListRequest: { key: string; promise: Promise<{ contextGraphs: any[] }> } | null = null;
 const queryReadCache = new ReadCache<QueryExecutionResponse>();
-const queryGenerations = new Map<string, number>();
 let querySession = '';
-let queryGeneration = 0;
 
 export function invalidateQueryCache(contextGraphId?: string): void {
   graphListCache.invalidate();
-  graphListGeneration++;
-  queryReadCache.invalidate(contextGraphId);
-  if (contextGraphId) {
-    if (!queryGenerations.has(contextGraphId) && queryGenerations.size >= 128) invalidateQueryCache();
-    queryGenerations.set(contextGraphId, (queryGenerations.get(contextGraphId) ?? 0) + 1);
-  }
-  else {
-    queryGeneration++;
-    queryGenerations.clear();
-    inflightQuery.clear();
+  graphListRequest = null;
+  queryReadCache.invalidate(contextGraphId || undefined);
+  for (const [key, request] of inflightQuery) {
+    if (!contextGraphId || request.scope === contextGraphId) inflightQuery.delete(key);
   }
 }
 
@@ -95,29 +86,25 @@ export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadO
     querySession = session;
   }
   const scope = String(body.contextGraphId ?? '');
-  const generation = queryGenerations.get(scope) ?? 0;
-  const globalGeneration = queryGeneration;
   const requestBody = JSON.stringify(body);
   const timeoutMs = read.timeoutMs === undefined ? AUTOMATIC_QUERY_TIMEOUT_MS : read.timeoutMs;
   const maxResponseBytes = read.maxResponseBytes === undefined ? AUTOMATIC_QUERY_MAX_BYTES : read.maxResponseBytes;
-  const key = JSON.stringify([session, globalGeneration, generation, requestBody, timeoutMs, maxResponseBytes]);
+  const key = JSON.stringify([session, requestBody, timeoutMs, maxResponseBytes]);
   const maxAgeMs = read.maxAgeMs ?? 0;
   const operation = classifySparqlOperation(String(body.sparql ?? '')).kind;
   const cacheable = maxAgeMs > 0 && operation === 'read';
   const cached = cacheable ? queryReadCache.get(key, maxAgeMs) : undefined;
   if (cached) return Promise.resolve(cached);
   const existing = inflightQuery.get(key);
-  if (existing) return existing;
-  const promise = (async () => {
-    const init = {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...headers },
-      body: requestBody,
-    };
-    const { response: res, body: responseBody } = await fetchQueryJson(`${BASE}/api/query`, init,
-      { timeoutMs, maxResponseBytes }, response => {
-        if (response.status === 401 || response.status === 403) invalidateQueryCache();
-      });
+  if (existing) return existing.promise;
+  const init = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: requestBody,
+  };
+  const promise = fetchQueryJson(`${BASE}/api/query`, init, { timeoutMs, maxResponseBytes }, response => {
+    if (inflightQuery.get(key)?.promise === promise && (response.status === 401 || response.status === 403)) invalidateQueryCache();
+  }).then(({ response: res, body: responseBody }) => {
     if (!res.ok) {
       const errBody = responseBody;
       const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -126,14 +113,14 @@ export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadO
     const result = normalizeQueryExecutionResponse(responseBody, String(body.sparql ?? ''));
     if (session !== JSON.stringify(authHeaders())) throw new HttpError(401, 'The session changed while loading data.');
     if (operation !== 'read') invalidateQueryCache(scope || undefined);
-    if (cacheable && session === querySession && globalGeneration === queryGeneration && generation === (queryGenerations.get(scope) ?? 0)) {
+    if (cacheable && inflightQuery.get(key)?.promise === promise) {
       queryReadCache.set(key, result, scope);
     }
     return result;
-  })().finally(() => {
-    if (inflightQuery.get(key) === promise) inflightQuery.delete(key);
+  }).finally(() => {
+    if (inflightQuery.get(key)?.promise === promise) inflightQuery.delete(key);
   });
-  inflightQuery.set(key, promise);
+  inflightQuery.set(key, { scope, promise });
   return promise;
 }
 
@@ -159,22 +146,21 @@ export const executeQuery = (
 export async function fetchContextGraphs(options: { fresh?: boolean } = {}): Promise<{ contextGraphs: any[] }> {
   const session = JSON.stringify(authHeaders());
   if (session !== querySession) { invalidateQueryCache(); querySession = session; }
-  if (options.fresh) { graphListCache.invalidate(); graphListGeneration++; }
-  const key = JSON.stringify([session, graphListGeneration]);
+  if (options.fresh) { graphListCache.invalidate(); graphListRequest = null; }
+  const key = session;
   const cached = graphListCache.get(key, UI_READ_MAX_AGE_MS);
   if (cached) return cached;
   if (graphListRequest?.key === key) return graphListRequest.promise;
-  const generation = graphListGeneration;
   const promise = getWithTimeout<{ contextGraphs?: any[] }>(
     '/api/context-graph/list',
     CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
   ).then(data => {
     if (session !== JSON.stringify(authHeaders())) throw new HttpError(401, 'The session changed while loading data.');
     const result = { contextGraphs: (data.contextGraphs ?? []).filter((p: any) => !p.isSystem) };
-    if (generation === graphListGeneration && session === JSON.stringify(authHeaders())) graphListCache.set(key, result);
+    if (graphListRequest?.promise === promise) graphListCache.set(key, result);
     return result;
   }).catch(error => {
-    if (error instanceof HttpError && (error.status === 401 || error.status === 403)) invalidateQueryCache();
+    if (graphListRequest?.promise === promise && error instanceof HttpError && (error.status === 401 || error.status === 403)) invalidateQueryCache();
     throw error;
   }).finally(() => { if (graphListRequest?.promise === promise) graphListRequest = null; });
   graphListRequest = { key, promise };

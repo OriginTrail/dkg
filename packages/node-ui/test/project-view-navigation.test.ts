@@ -111,6 +111,9 @@ function buildTestMemoryEntities(layered: any[]) {
 }
 
 const initialLayeredTriples = [
+  { subject: 'urn:entity:demo', predicate: NAME, object: 'Demo entity', layer: 'working', subGraph: 'demo' },
+  { subject: 'urn:entity:demo', predicate: 'related', object: 'urn:entity:other', layer: 'working', subGraph: 'demo' },
+  { subject: 'urn:entity:other', predicate: NAME, object: 'Other entity', layer: 'working', subGraph: 'other' },
   { subject: 'urn:entity:working', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
   { subject: 'urn:entity:working', predicate: NAME, object: 'Working entity', layer: 'working' },
   { subject: 'urn:entity:overlap', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
@@ -459,7 +462,10 @@ describe('ProjectView entity detail navigation', () => {
 
   beforeEach(async () => {
     resetMemory();
-    fetchMemoryEntityMock.mockReset().mockResolvedValue({ triples: [], partial: false });
+    fetchMemoryEntityMock.mockReset().mockImplementation(async (_cg: string, uri: string, layer?: string) => ({
+      partial: false, blankGraphs: [], triples: memory.allTriples.filter(t => (t.subject === uri || t.object === uri)
+        && (!layer || t.layer === ({ wm: 'working', swm: 'shared', vm: 'verified' } as Record<string, string>)[layer])),
+    }));
     apiWrapperMock.fetchContextGraphs.mockResolvedValue({
       contextGraphs: [{ id: 'cg-test', name: 'Context Graph Test' }],
     });
@@ -518,6 +524,12 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('entity-detail').dataset.connections).toBe('1');
     expect(query('entity-detail').dataset.subgraphs).toBe('remote');
     expect(document.body.textContent).not.toContain('Loading resource details');
+  });
+  it('shows a successful empty detail read without reviving a resource from the stale preview', async () => {
+    fetchMemoryEntityMock.mockResolvedValueOnce({ triples: [], partial: false, blankGraphs: [] });
+    await click('open-activity-entity'); await flush();
+    expect(document.querySelector('[data-testid="entity-detail"]')).toBeNull();
+    expect(document.body.textContent).toContain('has no details in this view');
   });
 
   it('keeps fetched details for the current selection when an older request finishes late', async () => {

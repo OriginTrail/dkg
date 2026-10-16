@@ -36,6 +36,38 @@ describe('bounded read cache', () => {
 });
 
 describe('scoped UI reads', () => {
+  it.each(['query', 'graph list'])('keeps the replacement %s request registered after an invalidated completion', async kind => {
+    const pending: Array<(response: Response) => void> = [];
+    const fetch = vi.fn(() => new Promise<Response>(resolve => pending.push(resolve)));
+    vi.stubGlobal('fetch', fetch);
+    const load = kind === 'query' ? () => postQueryDeduped(body(), read) : () => fetchContextGraphs();
+    const result = (id: string) => kind === 'query' ? response(id)
+      : new Response(JSON.stringify({ contextGraphs: [{ id }] }));
+    const old = load();
+    invalidateQueryCache('cg-a');
+    const replacement = load();
+    pending[0](result('old')); await old;
+    const joined = load();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    pending[1](result('new'));
+    const fresh = await replacement;
+    expect(await joined).toEqual(fresh); expect(await load()).toEqual(fresh);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it.each(['query', 'graph list'])('does not let an invalidated %s authorization failure evict its replacement', async kind => {
+    const pending: Array<(response: Response) => void> = [];
+    const fetch = vi.fn(() => new Promise<Response>(resolve => pending.push(resolve)));
+    vi.stubGlobal('fetch', fetch);
+    const load = kind === 'query' ? () => postQueryDeduped(body(), read) : () => fetchContextGraphs();
+    const old = load(); const failure = expect(old).rejects.toMatchObject({ status: 403 });
+    invalidateQueryCache('cg-a'); const replacement = load();
+    pending[0](new Response('{"error":"revoked"}', { status: 403 })); await failure;
+    const joined = load(); expect(fetch).toHaveBeenCalledTimes(2);
+    pending[1](kind === 'query' ? response('new') : new Response('{"contextGraphs":[{"id":"new"}]}'));
+    const fresh = await replacement;
+    expect(await joined).toEqual(fresh); expect(await load()).toEqual(fresh);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
   it('lets explicit console queries opt out while automatic reads have a deadline', async () => {
     vi.useFakeTimers();
     const fetch = vi.fn(async () => response()); vi.stubGlobal('fetch', fetch);

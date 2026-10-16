@@ -46,11 +46,8 @@ describe('React wrapper with the real graph model', () => {
       const triple = { subject: person.id, predicate: 'https://schema.org/image', object: image };
       viz.addTriples([triple]);
       expect(person.imageUrl).toBe('view.png');
-      expect(person.dataDecorations.imageUrl).toBe(image);
-      expect(person.viewOverrides.imageUrl).toBe('view.png');
       viz.applyView({ name: 'Default' });
       expect(person.imageUrl).toBe(image);
-      expect(person.viewOverrides).toEqual({});
       viz.removeTriples([triple]);
       viz.applyView({ name: 'After removal' });
       expect(person.imageUrl).toBeNull();
@@ -64,14 +61,12 @@ describe('React wrapper with the real graph model', () => {
       person.riskScore = 4; person.sizeMultiplier = 1.25;
       viz.applyView({ name: 'Focus', focal: { uri: person.id, image: 'focus.png', sizeMultiplier: 3 } });
       expect(person.imageUrl).toBe('focus.png'); expect(person.sizeMultiplier).toBe(3);
-      expect(person.dataDecorations).toEqual({ imageUrl: null });
-      expect(person.applicationOverrides).toEqual({ riskScore: 4, sizeMultiplier: 1.25 });
       person.imageUrl = 'latest-data.png';
       expect(person.imageUrl).toBe('focus.png');
       viz.applyView({ name: 'Default' });
       expect(viz.model.nodes.get(person.id)).toBe(person);
       expect(person.imageUrl).toBe('latest-data.png'); expect(person.riskScore).toBe(4);
-      expect(person.sizeMultiplier).toBe(1.25); expect(person.viewOverrides).toEqual({});
+      expect(person.sizeMultiplier).toBe(1.25);
     } finally { viz.destroy(); }
   });
   it('preserves application images across unrelated ingestion while still clearing removed RDF images', () => {

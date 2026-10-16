@@ -1,5 +1,6 @@
 import type { GraphNode, GraphEdge } from './types.js';
 import type { GraphModel } from './graph-model.js';
+import type { GraphModelNode } from './graph-node.js';
 import type { ColorPalette } from './palette.js';
 import type { TemporalConfig } from './temporal-filter.js';
 
@@ -246,14 +247,14 @@ export interface ViewConfig {
  * Call this AFTER loading triples into the model, BEFORE refresh().
  */
 export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
-  for (const node of model.nodes.values()) node.viewOverrides = {};
+  for (const node of model.nodes.values()) node.clearView();
   // 1. Focal entity
   if (config.focal) {
     const focalNode = findNodeAcrossNamespaces(model, config.focal.uri);
     if (focalNode) {
-      focalNode.viewOverrides.sizeMultiplier = config.focal.sizeMultiplier ?? 1.5;
+      focalNode.setViewDecoration('sizeMultiplier', config.focal.sizeMultiplier ?? 1.5);
       if (config.focal.image) {
-        focalNode.viewOverrides.imageUrl = config.focal.image;
+        focalNode.setViewDecoration('imageUrl', config.focal.image);
       }
     }
   }
@@ -269,7 +270,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
       for (const edge of platformEdges) {
         const platformId = edge.target.split('/').pop() ?? '';
         if (config.platformIcons.icons[platformId]) {
-          node.viewOverrides.imageUrl = config.platformIcons.icons[platformId];
+          node.setViewDecoration('imageUrl', config.platformIcons.icons[platformId]);
           break;
         }
       }
@@ -278,7 +279,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
       if (!node.imageUrl && config.platformIcons.urlFallbacks) {
         for (const [substr, platformKey] of Object.entries(config.platformIcons.urlFallbacks)) {
           if (node.id.includes(substr) && config.platformIcons.icons[platformKey]) {
-            node.viewOverrides.imageUrl = config.platformIcons.icons[platformKey];
+            node.setViewDecoration('imageUrl', config.platformIcons.icons[platformKey]);
             break;
           }
         }
@@ -316,12 +317,12 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
         if (value < 0) {
           // Negative values: magnitude = risk (e.g. negative sentiment)
           const riskMagnitude = Math.abs(value);
-          node.viewOverrides.riskScore = riskMagnitude;
+          node.setViewDecoration('riskScore', riskMagnitude);
           score = riskMagnitude;
           include = invert ? (riskMagnitude <= threshold && riskMagnitude > 0) : (riskMagnitude >= threshold);
         } else {
           // Positive values: normal = high is risky, invert = low is risky
-          node.viewOverrides.riskScore = value;
+          node.setViewDecoration('riskScore', value);
           if (invert) {
             include = value <= threshold;
             score = include ? threshold - value : 0; // lower value → higher score (riskier)
@@ -353,7 +354,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
         const node = model.nodes.get(id);
         if (!node) continue;
 
-        node.viewOverrides.isHighRisk = true;
+        node.setViewDecoration('isHighRisk', true);
 
         // Don't override focal entity's sizeMultiplier
         if (node.sizeMultiplier) continue;
@@ -372,7 +373,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
           normalized = 1.0;
         }
 
-        node.viewOverrides.sizeMultiplier = minSize + normalized * (maxSize - minSize);
+        node.setViewDecoration('sizeMultiplier', minSize + normalized * (maxSize - minSize));
       }
     }
   }
@@ -417,7 +418,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
         }
 
         // Map to sizeMultiplier range: 0.5x (min) to 3x (max)
-        node.viewOverrides.sizeMultiplier = 0.5 + normalized * 2.5;
+        node.setViewDecoration('sizeMultiplier', 0.5 + normalized * 2.5);
       }
     }
   }
@@ -434,7 +435,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
           || config.nodeTypes[`vocab:${shortType}`]
           || config.nodeTypes[shortType];
         if (typeConfig?.icon) {
-          node.viewOverrides.imageUrl = typeConfig.icon;
+          node.setViewDecoration('imageUrl', typeConfig.icon);
           break;
         }
       }
@@ -443,7 +444,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
 }
 
 /** Find a node trying multiple namespace variants of a URI */
-function findNodeAcrossNamespaces(model: GraphModel, uri: string): GraphNode | null {
+function findNodeAcrossNamespaces(model: GraphModel, uri: string): GraphModelNode | null {
   // Try exact match first
   const exact = model.nodes.get(uri);
   if (exact) return exact;

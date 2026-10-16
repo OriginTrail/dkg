@@ -72,6 +72,42 @@ afterEach(async () => {
 });
 
 describe('resource detail response ownership', () => {
+  it('replaces stale labels and deleted links with a complete successful resource response', async () => {
+    await store.deleteByPattern({ subject: 'urn:parent', graph });
+    await store.insert([{ subject: 'urn:parent', predicate: name, object: '"Updated parent"', graph }]);
+    memory = { ...memory, error: 'preview refresh failed', allTriples: [...memory.allTriples.map(triple =>
+      triple.subject === 'urn:parent' ? { ...triple, subject: '<urn:parent>' } : triple),
+      { subject: 'urn:referrer', predicate: 'urn:reference', object: '<urn:parent>', graph, layer: 'working' },
+      { subject: 'urn:referrer', predicate: name, object: '"Unrelated source"', graph, layer: 'working' },
+    ] };
+    const unrelated = memory.entities.get('urn:parent')!.connections[0].targetUri;
+    await render('<urn:parent>');
+    expect(read.entity!.label).toBe('Updated parent'); expect(read.entity!.connections).toHaveLength(0);
+    expect(read.triples.some(triple => triple.subject === unrelated)).toBe(true);
+    expect(read.entities.get('urn:referrer')!.label).toBe('Unrelated source');
+    expect(read.entities.get('urn:referrer')!.connections).toHaveLength(0);
+  });
+  it('removes a deleted resource after a successful empty read instead of reviving the stale fallback', async () => {
+    await store.deleteByPattern({ subject: 'urn:parent', graph });
+    await render('urn:parent');
+    expect(read.entity).toBeNull(); expect(read.entities.has('urn:parent')).toBe(false);
+    expect(read.triples.some(triple => triple.subject === 'urn:parent' || triple.object === 'urn:parent')).toBe(false);
+  });
+  it('prefers fresh labels but retains unconfirmed preview links when the detail read is truncated', async () => {
+    vi.mocked(fetchMemoryEntity).mockResolvedValueOnce({
+      triples: [{ subject: 'urn:parent', predicate: name, object: '"Updated parent"', graph, layer: 'working' }],
+      partial: true, blankGraphs: [],
+    });
+    await render('urn:parent');
+    expect(read.entity!.label).toBe('Updated parent'); expect(read.partial).toBe(true);
+    expect(read.entity!.connections.some(link => link.targetUri.startsWith('_:'))).toBe(true);
+  });
+  it('retains preview facts with an explicit error when no detail response succeeded', async () => {
+    vi.mocked(fetchMemoryEntity).mockRejectedValueOnce(new Error('detail unavailable'));
+    await act(async () => root.render(React.createElement(Probe, { uri: 'urn:parent' })));
+    expect(read.loading).toBe(false); expect(read.error).toBe('detail unavailable');
+    expect(read.entity!.label).toBe('Parent'); expect(read.entity!.connections).toHaveLength(1);
+  });
   it('shows one blank child and retains its originating facts through deeper navigation', async () => {
     const previewChild = memory.entities.get('urn:parent')!.connections[0].targetUri;
     await render('urn:parent');

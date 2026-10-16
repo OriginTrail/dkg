@@ -52,7 +52,7 @@ function edgeId(subject: string, predicate: string, object: string): string {
  * ReificationCollapser, and ViewConfig application on the render hot path.
  */
 export class GraphModel {
-  readonly nodes = new Map<string, GraphNode>();
+  readonly nodes = new Map<string, GraphModelNode>();
   readonly edges = new Map<string, GraphEdge>();
   prefixes: PrefixMap = {};
 
