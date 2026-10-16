@@ -191,11 +191,11 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'SharedMemoryLiteralBlobStore');
     }
-    await this.withExternalizedQuads([...replacementQuads, ...insertQuads], externalized =>
-      this.inner.replaceSubjectAndInsert!(
-        graphUri, subject, externalized.slice(0, replacementQuads.length),
-        externalized.slice(replacementQuads.length), options,
-      ));
+    const externalized = await this.externalizeQuads([...replacementQuads, ...insertQuads]);
+    await this.inner.replaceSubjectAndInsert(
+      graphUri, subject, externalized.slice(0, replacementQuads.length),
+      externalized.slice(replacementQuads.length), options,
+    );
   }
 
   async rfc64AuthorCommitCasV1(

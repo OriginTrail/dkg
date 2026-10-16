@@ -263,7 +263,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
-    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !this.isReservedGraph(graph));
+    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !this.reservedGuard.isReservedGraph(graph));
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
@@ -412,7 +412,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
     if (!this.enabled) return this.inner.replaceAssetGroup(assets, options);
     const touchedGraphs = [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))];
-    for (const graph of touchedGraphs) this.assertNotReserved(graph, 'replaceAssetGroup');
+    for (const graph of touchedGraphs) this.reservedGuard.assertNotReserved(graph, 'replaceAssetGroup');
     await this.runAtomicMutation({ operation: 'replaceAssetGroup', touchedGraphs, options,
       execute: options => this.inner.replaceAssetGroup!(assets, options) });
   }
