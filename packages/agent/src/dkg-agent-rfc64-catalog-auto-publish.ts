@@ -36,10 +36,9 @@ import {
   type SwmAuthorInventorySnapshotV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, withDefaultStoreWorkPriority, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, isStoreOperationNotStarted, isStoreSchedulerBusyError, type Quad } from '@origintrail-official/dkg-storage';
 import {
   verifyControlEnvelopeIssuerSignatureV1,
-  withOwnedRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
 import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
@@ -48,6 +47,7 @@ import {
   runPromoteCommittedFinalization,
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
+import { observeDurableSwmPromotionV1 } from './internal/durable-swm-promotion-observer.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -76,7 +76,6 @@ import {
 import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
   './durable-author-seal-resolver-v1.js';
 import { throwIfRfc64AbortedV1 as throwIfAbortedV1 } from './rfc64/abort-v1.js';
-import { rfc64SwmInventorySettlementCanConvergeV1 } from './rfc64/swm-inventory-settlement-outlook-v1.js';
 import {
   type Rfc64FinalizedPrivatePlacementRepairV1,
 } from './rfc64/finalized-private-placement-repair-store-v1.js';
@@ -635,104 +634,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
-    const observerRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
-    const observerSignal = observerRuntime.shutdownSignal;
-    return withDefaultStoreWorkPriority('background', () => withOwnedRpcRequestContext({
-      requestClass: 'background',
-      signal: observerSignal,
-    }, async () => {
-      const shutdownSignal = observerSignal;
-      try {
-        if (shutdownSignal.aborted) return;
-        let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
-        let lastResponsibilityFailure: unknown = null;
-        for (const delayMs of observerRuntime.responsibilitySettlementRetryDelaysMs) {
-          if (result.status !== 'dormant' || (
-            result.dormantReason !== 'inactive-lane'
-            && result.dormantReason !== 'authority-transition'
-          )) break;
-          if (shutdownSignal.aborted) return;
-          // Registered-chain conditions outlast this window; the refresh owner retries them.
-          if (!rfc64SwmInventorySettlementCanConvergeV1(
-            this.rfc64CatalogAuthorityRefreshFailureReasonV1(params.contextGraphId),
-          )) break;
-          // A durable promotion can race the asynchronous default-responsibility
-          // and authority transition for a newly created CG. Refresh and retry
-          // that normal lifecycle boundary for a bounded settlement window before
-          // classifying the row as deliberately unselected. The durable workspace
-          // and VM-confirmation fence are re-read by every retry, so this cannot
-          // resurrect a finalized public row.
-          let responsibility: Awaited<ReturnType<
-            DKGAgent['reconcileRfc64CatalogResponsibilityV1']
-          >>;
-          try {
-            responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
-              params.contextGraphId,
-            );
-            lastResponsibilityFailure = null;
-          } catch (cause) {
-            lastResponsibilityFailure = cause;
-            if (shutdownSignal.aborted) return;
-            if (!await observerRuntime.waitForResponsibilitySettlement(
-              delayMs,
-              shutdownSignal,
-            )) return;
-            continue;
-          }
-          if (responsibility.mode === 'legacy' || (
-            result.dormantReason === 'inactive-lane'
-            && (responsibility.selectionSource !== 'default'
-              || responsibility.mode !== 'catalog')
-          )) {
-            break;
-          }
-          if (!await observerRuntime.waitForResponsibilitySettlement(
-            delayMs,
-            shutdownSignal,
-          )) return;
-          result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
-        }
-        if (
-          result.status === 'dormant'
-          && (result.dormantReason === 'inactive-lane'
-            || result.dormantReason === 'authority-transition')
-          && lastResponsibilityFailure !== null
-        ) {
-          throw lastResponsibilityFailure;
-        }
-        if (result.status === 'dormant'
-          && result.dormantReason === 'authority-transition') {
-          this.log.warn(
-            params.ctx,
-            'RFC-64 SWM inventory authority did not settle after bounded post-commit retries',
-          );
-        }
-        if (result.status === 'applied' || result.status === 'existing') {
-          const projection = {
-            contextGraphId: params.contextGraphId as ContextGraphIdV1,
-            authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
-            ctx: params.ctx,
-          } as const;
-          if (!this.requestRfc64SwmCatalogProjectionV1(projection)) {
-            // The authority can turn over between the durable inventory CAS and
-            // projection admission. Reconcile once and retry the exact scope;
-            // ordinary supervisor backoff owns any later transient failure.
-            const responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
-              params.contextGraphId,
-            );
-            if (responsibility.active && responsibility.mode !== 'legacy') {
-              this.requestRfc64SwmCatalogProjectionV1(projection);
-            }
-          }
-        }
-      } catch (cause) {
-        if (shutdownSignal.aborted) return;
-        this.log.warn(
-          params.ctx,
-          `RFC-64 SWM inventory/catalog lifecycle escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
-        );
-      }
-    }));
+    await observeDurableSwmPromotionV1(this, params, (message) => this.log.warn(params.ctx, message));
   }
 
   /** Await a point-in-time observer snapshot for tests and controlled drains. */
@@ -759,12 +661,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): void {
-    rfc64SwmInventoryShadowRuntimeV1(this).scheduleInventoryWrite({
+    rfc64SwmInventoryShadowRuntimeV1(this).scheduleInventoryObservation({
       contextGraphId: params.contextGraphId,
       subGraphName: params.subGraphName,
       authorAddress: params.lifecycleAgentAddress,
       assertionCoordinate: params.assertionCoordinate,
-    }, () => this.observeRfc64DurableSwmPromotionV1(params));
+    }, params.shareOperationId, () => observeDurableSwmPromotionV1(this, params, (message) => this.log.warn(params.ctx, message)), (reason) => {
+      this.log.warn(params.ctx, `RFC-64 SWM inventory preparation-read retries exhausted (${reason}): ${params.contextGraphId} ${params.assertionCoordinate} ${params.shareOperationId}`);
+    });
   }
 
   /**
@@ -998,10 +902,16 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           null,
         );
       }
-      const prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(
-        params,
-        { allowTerminalStale: false },
-      );
+      let prepared: PreparedRfc64SwmAuthorInventoryRowV1;
+      try {
+        prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(params, { allowTerminalStale: false });
+      } catch (cause) {
+        // This phase only reads evidence. Never extend retry classification across inventory writes.
+        if (!isStoreSchedulerBusyError(cause) || !isStoreOperationNotStarted(cause, 'query')) throw cause;
+        return this.recordRfc64SwmAuthorInventoryShadowStatsV1({
+          ...this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause), retryablePreparationRead: true,
+        }, params.contextGraphId, null);
+      }
       if (prepared.status === 'stale') {
         const dormantReason = prepared.reason === 'policy-mismatch'
           ? 'policy-mismatch'

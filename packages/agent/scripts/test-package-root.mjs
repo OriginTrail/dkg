@@ -364,6 +364,7 @@ const blockedRfc64Modules = [
   'swm-inventory-catalog-reconciler-v1.js',
   'swm-catalog-durable-asset-resolver-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
+  'swm-inventory-observation-retry-v1.js',
   'swm-inventory-settlement-outlook-v1.js',
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',

@@ -1,4 +1,5 @@
 import { AsyncResource } from 'node:async_hooks';
+import { Rfc64SwmInventoryObservationRetryV1, type Rfc64SwmInventoryObservationVerdictV1 } from './swm-inventory-observation-retry-v1.js';
 
 import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
 
@@ -56,6 +57,7 @@ export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Readonly<{
   attempts: number;
   headObjectDigest: string | null;
   error: string | null;
+  retryablePreparationRead?: true;
   dormantReason?: 'inactive-lane' | 'authority-transition' | 'vm-confirmed' | 'policy-mismatch';
 }>;
 
@@ -92,6 +94,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     lastHeadDigest: null as string | null,
     lastError: null as string | null,
   };
+  readonly #observationRetries = new Rfc64SwmInventoryObservationRetryV1();
   readonly #inFlight = new Set<Promise<unknown>>();
   readonly #assetTails = new Map<string, Promise<unknown>>();
   /** Per author key, the registered inventory writes still queued or running. */
@@ -154,6 +157,21 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   scheduleInventoryWrite(write: Readonly<Rfc64SwmInventoryWriteV1>, observer: () => Promise<void>): boolean {
     if (this.#closed) return false;
     this.enqueue(rfc64SwmInventoryAssetKeyV1(write), observer, false, [], inventoryLaneKeyV1(write));
+    return true;
+  }
+
+  /** Retry only pre-mutation refusals; sleeping obligations hold no asset/author/worker slot. */
+  scheduleInventoryObservation(
+    write: Readonly<Rfc64SwmInventoryWriteV1>,
+    shareOperationId: string,
+    observer: () => Promise<Rfc64SwmInventoryObservationVerdictV1>,
+    exhausted: (reason: 'attempts' | 'capacity') => void,
+  ): boolean {
+    if (this.#closed) return false;
+    const assetKey = rfc64SwmInventoryAssetKeyV1(write);
+    this.#observationRetries.schedule(JSON.stringify([assetKey, shareOperationId]),
+      () => this.enqueue(assetKey, observer, false, [], inventoryLaneKeyV1(write)),
+      this.shutdownSignal, exhausted);
     return true;
   }
 
@@ -227,6 +245,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   }
 
   async drain(): Promise<void> {
+    await this.#observationRetries.drain();
     await Promise.allSettled([...this.#inFlight]);
   }
 
@@ -240,7 +259,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
 
   /** Reopen the fully drained feature owner for same-instance restart. */
   reopen(): void {
-    if (this.#inFlight.size > 0 || this.#pendingExecutions.length > 0) {
+    if (this.#observationRetries.size > 0 || this.#inFlight.size > 0 || this.#pendingExecutions.length > 0) {
       throw new Error('RFC-64 SWM inventory observer runtime cannot reopen before drain');
     }
     this.#closeAbort = new AbortController();
@@ -249,7 +268,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   }
 
   get inFlightCount(): number {
-    return this.#inFlight.size;
+    return this.#inFlight.size + this.#observationRetries.waitingCount;
   }
 
   status(): Readonly<Rfc64SwmAuthorInventoryShadowStatusV1> {
