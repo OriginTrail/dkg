@@ -1,3 +1,4 @@
+import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 /**
  * Async Promote Queue — public types.
  *
@@ -44,7 +45,7 @@ export type PromoteJobState = (typeof PROMOTE_JOB_STATES)[number];
  * legacy job). Bump this constant any time the on-disk job shape or
  * the recovery invariants change.
  */
-export const ASYNC_PROMOTE_QUEUE_FORMAT_VERSION = 3;
+export const ASYNC_PROMOTE_QUEUE_FORMAT_VERSION = 4;
 
 /**
  * Oldest persisted job format safe for automatic startup reclaim when the
@@ -71,6 +72,8 @@ export type PromoteFailureClassification = 'transient' | 'cap_exceeded' | 'fatal
  * replay. Validated at the HTTP layer; the queue stores it verbatim.
  */
 export interface PromoteRequest {
+  /** Internal immutable synchronous-recovery authority; never client supplied. */
+  recoveryBinding?: PromoteRecoveryBinding;
   contextGraphId: string;
   subGraphName?: string;
   assertionName: string;
@@ -237,6 +240,8 @@ export interface AsyncPromoteQueue {
   readonly effectiveLeaseMs: number;
   // RFC §3.1
   enqueue(request: PromoteRequest): Promise<string>;
+  /** Persist ownership and the inline lease together, before content mutation. */
+  enqueueAndClaim?(request: PromoteRequest, workerId: string): Promise<PromoteJob>;
   // RFC §3.2
   getStatus(jobId: string): Promise<PromoteJob | null>;
   // RFC §3.3

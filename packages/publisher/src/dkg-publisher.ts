@@ -1,3 +1,6 @@
+import type { PublisherAssertionPromoteOptions, AssertionPromoteResult } from './assertion-promote-types.js';
+export type { PublisherAssertionPromoteOptions } from './assertion-promote-types.js';
+import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
@@ -171,38 +174,6 @@ export {
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 
 
-/** Publisher-owned contract for assertion promotion after agent prerequisites resolve. */
-export type PublisherAssertionPromoteOptions = {
-  entities?: readonly string[] | 'all';
-  subGraphName?: string;
-  publisherPeerId?: string;
-  senderAgentAddress?: string;
-  /** Do not encrypt or emit a network-ready payload for a local capture. */
-  localOnly?: boolean;
-  /** Immutable access envelope persisted with the graph-scoped share. */
-  accessPolicy?: PublishOptions['accessPolicy'];
-  allowedPeers?: readonly string[];
-  trustedNonManifestCatalogTriples?: PublishOptions['trustedNonManifestCatalogTriples'];
-  onChainContextGraphId?: string | bigint;
-  /**
-   * Strict curator-ack gate (OT-RFC-49 curator-leader), the same contract as
-   * `ShareOptions.confirmBeforeCommit`: called with the gossip payload once it is
-   * built and BEFORE the WM→SWM mutation. `applied: false` aborts the promote
-   * (CuratorUnconfirmedError / CuratorRejectedError) leaving WM intact.
-   */
-  confirmBeforeCommit?: ConfirmWorkspaceGossipBeforeCommit;
-  /** Promote-scoped authority resolver; defaults to the configured workspace resolver. */
-  resolveWorkspaceRecipients?: WorkspaceAgentRecipientResolver;
-};
-
-type AssertionPromoteResult = {
-  promotedCount: number;
-  gossipPayload?: EncodedWorkspaceGossipPayload;
-  /** @deprecated Use gossipPayload.message. */
-  gossipMessage?: Uint8Array;
-  promotedAllRoots: boolean;
-  shareOperationId?: string;
-};
 
 
 /**
@@ -8422,6 +8393,14 @@ export class DKGPublisher implements Publisher {
     };
   }
 
+  async prepareAssertionPromoteRecovery(
+    contextGraphId: string, name: string, agentAddress: string,
+    opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean,
+  ): Promise<PromoteRecoveryBinding> {
+    return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, opts?.subGraphName,
+      () => preparePromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts, inventoryRequired));
+  }
+
   async assertionPromote(
     contextGraphId: string,
     name: string,
@@ -8431,6 +8410,7 @@ export class DKGPublisher implements Publisher {
     const stableOpts: PublisherAssertionPromoteOptions | undefined = opts
       ? {
           ...opts,
+          ...(opts.recoveryBinding ? { recoveryBinding: validatePromoteRecoveryBinding(opts.recoveryBinding) } : {}),
           ...(Array.isArray(opts.entities) ? { entities: [...opts.entities] } : {}),
           ...(opts.allowedPeers ? { allowedPeers: [...opts.allowedPeers] } : {}),
           ...(opts.trustedNonManifestCatalogTriples
@@ -8456,6 +8436,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     opts?: PublisherAssertionPromoteOptions,
   ): Promise<AssertionPromoteResult> {
+    if (opts?.recoveryBinding) await assertPromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts);
     // #1464 (PR1, diagnostic) — every awaited op below runs BEFORE the
     // `store.insert(swmQuads)` that actually lands the root in SWM. A masked
     // rejection here (typically a sparql-http read hitting the 30s
@@ -8916,6 +8897,7 @@ export class DKGPublisher implements Publisher {
     }
 
     const operationId = durableShareOperationId
+      ?? opts?.recoveryBinding?.intent.operationId
       ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Canonicalize both partitions together so blank-node labels stay stable
@@ -8953,7 +8935,7 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    const operationIntent = durablePromoteIntent ?? createPromoteOperationIntent({
+    const operationIntent = durablePromoteIntent ?? opts?.recoveryBinding?.intent ?? createPromoteOperationIntent({
       operationId,
       timestampMs: Date.now(),
       publisherPeerId: opts?.publisherPeerId,

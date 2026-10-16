@@ -101,7 +101,7 @@ import type { ContextGraphStorageDiscoveryStore } from './context-graph-storage-
 /** Public options for the agent assertion-promote facade. */
 export interface AssertionPromoteOptions extends Pick<
   PublisherAssertionPromoteOptions,
-  'entities' | 'subGraphName' | 'accessPolicy' | 'allowedPeers'
+  'entities' | 'subGraphName' | 'accessPolicy' | 'allowedPeers' | 'recoveryBinding'
 > {
   agentAddress?: string;
   authorAgentAddress?: string;

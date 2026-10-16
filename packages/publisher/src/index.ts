@@ -542,3 +542,5 @@ export {
 } from './workspace-recipient-dependencies.js';
 
 export { DEFAULT_PROMOTE_RETRY_TUNING, createDefaultPromoteBackoff, resolvePromoteRetryTuning, type PromoteRetryTuning } from './promote-retry-policy.js';
+
+export { validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';

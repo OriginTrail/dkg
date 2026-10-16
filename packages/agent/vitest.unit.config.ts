@@ -18,6 +18,8 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      'test/durable-share-inventory.test.ts',
+      'test/promote-lifecycle-partial-commit.test.ts',
       "test/assertion-write-history.test.ts",
       "test/authority-index-snapshot-runtime.test.ts",
       "test/authority-index-snapshot-service.test.ts",

@@ -4,7 +4,7 @@
 
 The synchronous share path can commit sealed content and lose its lifecycle/catalog tail without a durable retry owner. Manual replay validates and resumes the immutable operation, but neither the HTTP error nor restart creates a worker obligation. Establish a live baseline on the optimized publisher before changing production code, then add durable ownership of this narrowly validated recovery path. The principal risk is replaying a different asset version, bypassing authority, or repeating uncertain side effects.
 
-Status: discovery and baseline preparation; no recovery implementation yet. Single implementation owner: this chat. Independent remote review is required before completion; initial plan review uses separate self-review passes.
+Status: controlled baseline preserved; implementation and local regressions underway. Single implementation owner: this chat. Independent remote review is required before completion; initial plan review uses separate self-review passes.
 
 ## Sources and branch
 
@@ -124,3 +124,13 @@ sequenceDiagram
 ```
 
 The main live protocol is frozen at baseline-2 traffic start. Preparation completed without failure; exact starting catalog/inventory both contain 180 entries. Read-only evidence reducers additionally compare every original seal predicate, exact payload graph sets, catalog identity/version/seal digests, all 48 transaction carriers, and decoded `KnowledgeAssetCreated` events. Attempt 0's 48/48 canonical chain identities and 436/436 original seals are independently verified; its readiness invalidity remains unchanged.
+
+A further queue audit found a durability prerequisite: the legacy queue writer permits subject-scoped delete/insert fallback. Bound synchronous obligations must require atomic subject replacement for **every** state transition, otherwise a crash between that fallback's delete and insert could erase the only repair owner. Blazegraph and Oxigraph expose the required capability. Unsupported/refusing stores must fail before sharing, retaining any existing row; no fallback is allowed for bound records. Add a capability-refusal and uncertain-ack persistence regression. Ordinary unbound queue behavior is unchanged.
+
+Security/compatibility review refinement: capture whether the accepted request owes catalog inventory alongside its recovery binding. A later authority transition, unsubscribe or kill switch must not silently discharge an already-owned catalog obligation. Deliberate legacy and named-subgraph lanes keep their existing behavior. Persist the resolved curator-confirmation requirement so a changed daemon default after restart cannot weaken it. Bound recovery skips re-signing; original storage-lane casing, author attestation and nonce allocation stay pinned. The additional inline admission API should be an optional queue capability so custom legacy queue implementations remain type-compatible; unsupported capability fails before SWM mutation.
+
+## Baseline closure and implementation progress
+
+Controlled baseline2 completed on unchanged production revision 9436b5c927f9fc8e5eb0cd5523da785dfa1cdd75 before production edits. At the fixed deadline, 48/48 publications finalized and 254/256 synchronous requests succeeded; both injected partial commits remained incomplete (0/2 automatic recovery, zero manual repairs). Exact catalog/inventory count 434/436, descriptor count 434/436. All 436 seals and 48 chain identities preserved; all 98 signer transactions reconciled without nonce gaps. Same-runtime restart retained the incomplete state. Owned daemon and store stopped and matching claim released before candidate acquisition.
+
+Implemented the version-4 bound queue design, atomic inline admission, pinned seal/intent validation, started-lease reclaim, continued transient/post-commit retry beyond the normal cap, protected unfinished obligations, original-author worker propagation and synchronous/one-shot route integration. The catalog handoff now awaits the validated inventory CAS for bound obligations; detached observation remains the legacy path. Worker-disabled synchronous admission fails before sharing with an explicit 503 rather than promising an absent recovery owner. Permanent integrity failures remain visible; they cannot be cleared or cancelled as completed obligations. Candidate live run and remote review are still required. No merge authorized.

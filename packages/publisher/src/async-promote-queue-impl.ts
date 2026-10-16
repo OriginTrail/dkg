@@ -1,3 +1,4 @@
+import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob, persistPromoteJob } from './bound-promote-job.js';
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
 /**
@@ -25,7 +26,6 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
-import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
@@ -68,7 +68,6 @@ import {
   postCommitRecoveryExhaustedReason,
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
-  serializeJobRecord,
   uniquenessKey,
   uniquenessLookupKeys,
   type PromoteUniquenessInput,
@@ -152,6 +151,30 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return jobId;
   }
 
+  async enqueueAndClaim(request: PromoteRequest, workerId: string): Promise<PromoteJob> {
+    this.validateRequest(request);
+    if (!workerId) throw new Error('workerId is required');
+    const requestSnapshot = this.snapshotRequest(request);
+    return this.withMutationLock(async () => {
+      await this.ensureGraph();
+      await this.assertNoActiveConflict(this.conflictLookupForRequest(requestSnapshot));
+      const now = this.now(), jobId = this.idGenerator();
+      this.validateJobId(jobId);
+      const job = claimPromoteJob({ jobId, request: requestSnapshot, state: 'queued',
+        enqueuedAt: now, updatedAt: now, attempt: { count: 0, maxRetries: this.maxRetries },
+        formatVersion: ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
+      }, workerId, now, this.effectiveLeaseMs, this.claimTokenGenerator());
+      if (!isBoundPromoteJob(job)) throw new Error('Inline admission requires an immutable recovery binding');
+      try { await this.writeJob(job); } catch (cause) {
+        // An acknowledgement can be lost after the atomic write. Do not start
+        // content mutation; retain the handle for observation and lease recovery.
+        throw Object.assign(new Error('Durable share admission could not be confirmed', { cause }),
+          { code: 'SHARE_ADMISSION_UNCERTAIN', recoveryJobId: jobId, recoveryState: 'admission-unconfirmed' });
+      }
+      return job;
+    });
+  }
+
   async getStatus(jobId: string): Promise<PromoteJob | null> {
     return this.withMutationLock(async () => {
       await this.ensureGraph();
@@ -193,6 +216,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     await this.withMutationLock(async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
+      if (job.request.recoveryBinding) throw new Error('An unfinished durable share obligation cannot be cancelled');
       if (job.state !== 'queued') {
         throw new Error(
           `Cannot cancel job in state '${job.state}'. Only 'queued' jobs can be cancelled.`,
@@ -268,6 +292,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         'publisher.asyncPromote.claimNext.candidates',
       );
       const candidates = jobs.filter((j) => {
+        if ((j.formatVersion ?? 0) > ASYNC_PROMOTE_QUEUE_FORMAT_VERSION) return false;
         if (j.state === 'queued') return true;
         if (j.state === 'failed_retrying' && (j.attempt.nextRetryAt ?? 0) <= now) return true;
         return false;
@@ -299,30 +324,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
       // listUnlocked sorted once; filtering preserves the claim order.
       const next = eligible[0]!;
-      const claimToken = `${workerId}:${next.jobId}:${this.claimTokenGenerator()}`;
-      const attemptCount = next.attempt.count + 1;
-      const claimed: PromoteJob = {
-        ...next,
-        state: 'running',
-        updatedAt: now,
-        attempt: { ...next.attempt, count: attemptCount, nextRetryAt: undefined },
-        lease: {
-          workerId,
-          acquiredAt: now,
-          expiresAt: now + this.effectiveLeaseMs,
-          lastHeartbeatAt: now,
-          claimToken,
-        },
-        // Reset commit marker on every claim — recovery checks the
-        // marker BEFORE we reset, so this is safe to do at claim time.
-        commitMarker: {
-          promoteStarted: false,
-          swmInserted: false,
-          wmCleaned: false,
-          lifecycleStamped: false,
-          gossiped: false,
-        },
-      };
+      const claimed = claimPromoteJob(next, workerId, now, this.effectiveLeaseMs, this.claimTokenGenerator());
       await this.writeJob(claimed);
       return claimed;
     });
@@ -450,7 +452,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       // to the manual-recovery path below.
       const formatVersion = job.formatVersion ?? 0;
       const hasRecoverableCommitMarker = formatVersion >= ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION;
-      if (hasRecoverableCommitMarker && swmInserted === false && promoteStarted !== true) {
+      if (isBoundPromoteJob(job) || (formatVersion <= ASYNC_PROMOTE_QUEUE_FORMAT_VERSION
+        && hasRecoverableCommitMarker && swmInserted === false && promoteStarted !== true)) {
         const reclaimedJob: PromoteJob = {
           ...job,
           request: this.snapshotRequest(job.request),
@@ -657,24 +660,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     }
   }
 
-  /** Snapshot caller-owned input before the first await, preserving the worker-facing storage lane string. */
   private snapshotRequest(request: PromoteRequest): PromoteRequest {
-    const copied: PromoteRequest = {
-      contextGraphId: request.contextGraphId,
-      assertionName: request.assertionName,
-      entities: request.entities === 'all' ? 'all' : Object.freeze([...request.entities]),
-    };
-    if (request.subGraphName !== undefined) {
-      copied.subGraphName = request.subGraphName;
-    }
-    const agentAddress = request.agentAddress?.trim();
-    if (agentAddress !== undefined && agentAddress !== '') {
-      copied.agentAddress = agentAddress;
-    }
-    if (request.authorAgentAddress !== undefined) {
-      copied.authorAgentAddress = request.authorAgentAddress;
-    }
-    return copied;
+    return snapshotPromoteRequest(request);
   }
 
   private async ensureGraph(): Promise<void> {
@@ -705,24 +692,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     await this.store.flush?.();
   }
 
-  /** Capable stores replace atomically; older stores use a subject-scoped delete/insert
-   * fallback protected from same-process observation by the mutation lock.
-   * Flush completes durability separately; storage owns the record bookkeeping.
-   */
   private async persistJobRecord(job: PromoteJob): Promise<void> {
-    // The serializer owns record shaping AND the fail-loud single-subject guard (it throws if
-    // the record is ever not EXACTLY the job subject, before it reaches the STRICT
-    // single-subject replace / the jobRef-only fallback delete).
-    const { jobRef, jobQuads } = serializeJobRecord(job, this.graphUri);
-    // Persist via the shared writer (#1938), which owns the atomic-capable-vs-bounded-fallback
-    // policy for both queues (fallback delete scoped to EXACTLY jobRef).
-    await replaceSubjectAtomicallyOrFallback(
-      this.store,
-      this.graphUri,
-      jobRef,
-      jobQuads,
-      'publisher.asyncPromote.writeJob',
-    );
+    await persistPromoteJob(this.store, this.graphUri, job);
   }
 
   // #1837 — subject-scoped record removal (the delete half of writeJob, no re-insert).
@@ -765,6 +736,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (!(PROMOTE_JOB_STATES as readonly string[]).includes(job.state)) {
         return { outcome: 'rejected', reason: 'unknown' };
       }
+      if (job.request.recoveryBinding && job.state !== 'succeeded') return { outcome: 'rejected', reason: 'nonterminal' };
       if (!isTerminalPromoteJobState(job.state as PromoteJobState)) return { outcome: 'rejected', reason: 'nonterminal' };
       // The recovery sweep owns this replay-safe tail until its budget is spent.
       // A failed row is temporarily parked between sweeps, not eligible for clear.
@@ -823,8 +795,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     const rows = expectBindings(result);
     for (const row of rows) {
       const job = parseJobPayload(row['payload']);
+      if (!job) throw new Error('Conflicting share ownership record is unreadable; inspection required');
       if (job?.jobId === excludeJobId) continue;
-      if (job && ACTIVE_PROMOTE_STATES.includes(job.state) && this.jobConflictsWithRequest(job, lookup)) return job;
+      if ((ACTIVE_PROMOTE_STATES.includes(job.state) || (job.request.recoveryBinding && job.state !== 'succeeded'))
+        && this.jobConflictsWithRequest(job, lookup)) return job;
     }
     return null;
   }
@@ -870,16 +844,16 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   private usesLegacyWildcardLane(job: PromoteJob): boolean {
-    return (job.formatVersion ?? 0) < ASYNC_PROMOTE_QUEUE_FORMAT_VERSION && job.request.agentAddress === undefined;
+    return (job.formatVersion ?? 0) < 3 && job.request.agentAddress === undefined;
   }
 
 
   private missingStorageLaneReason(): string {
-    return `missing storage lane for pre-v${ASYNC_PROMOTE_QUEUE_FORMAT_VERSION} author-scoped promote job; needs operator inspection`;
+    return `missing storage lane for pre-v3 author-scoped promote job; needs operator inspection`;
   }
 
   private missingStorageLaneMessage(): string {
-    return `Pre-v${ASYNC_PROMOTE_QUEUE_FORMAT_VERSION} promote job carries authorAgentAddress without agentAddress; daemon refuses automatic reclaim because it cannot prove the WM storage lane`;
+    return `Pre-v3 promote job carries authorAgentAddress without agentAddress; daemon refuses automatic reclaim because it cannot prove the WM storage lane`;
   }
 
   private async abandonIfMissingStorageLane(job: PromoteJob, now: number): Promise<boolean> {

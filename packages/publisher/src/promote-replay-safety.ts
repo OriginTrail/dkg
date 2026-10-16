@@ -114,16 +114,17 @@ export function isStoreOperationProvenNotStarted(error: unknown): boolean {
 /**
  * The single classification boundary for idempotent durable finalization that a
  * replay of the same committed operation repairs: the publisher's commit tail
- * and the agent's SWM pointer stamp. Never wrap observer hooks or gossip in it.
+ * and the agent's SWM pointer / bound inventory CAS. Never wrap detached observers
+ * or gossip: only an immutable operation's validated durable tail qualifies.
  * A storage operation proven not to have started can re-enter the same
  * immutable operation and repair its tail. Unknown/indeterminate outcomes and
  * unrelated retry markers cannot earn that permission here.
  */
-export async function runPromoteCommittedFinalization(
-  finalize: () => Promise<void>,
-): Promise<void> {
+export async function runPromoteCommittedFinalization<T>(
+  finalize: () => Promise<T>,
+): Promise<T> {
   try {
-    await finalize();
+    return await finalize();
   } catch (error) {
     if (isStoreOperationProvenNotStarted(error)) throw error;
     throw createPromotePostCommitFailure(error);

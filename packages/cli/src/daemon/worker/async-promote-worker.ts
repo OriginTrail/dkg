@@ -2,8 +2,7 @@
  * Async-promote queue worker supervisor.
  *
  * PR #3 of the async-promote-queue series. PR #1 shipped the queue
- * library; PR #2 exposed it to the agent + HTTP routes. This module
- * drains the queue: an in-process queue signal wakes N worker slots,
+ * library and HTTP routes. This module drains the queue: an in-process queue signal wakes N worker slots,
  * with periodic polling retained for durable cross-process writes and
  * retry deadlines. A claimed slot calls `agent.assertion.promote(...)`,
  * then records success or classified failure back into the queue.
@@ -31,7 +30,7 @@
  * Shutdown semantics: RFC §6.2 says do NOT mark `running → queued`
  * on shutdown. We stop polling, let in-flight jobs complete (or
  * timeout), and rely on `recoverOnStartup()` at the next boot to
- * decide what to do with any leases the old worker held.
+ * reclaim immutable bound shares; ambiguous legacy attempts remain parked.
  */
 
 import type {
@@ -660,6 +659,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
             await markPromoteStarted();
             return config.agent.assertion.promote(request.contextGraphId, request.assertionName, {
               entities,
+              recoveryBinding: request.recoveryBinding,
               subGraphName: request.subGraphName,
               ...(request.agentAddress ? { agentAddress: request.agentAddress } : {}),
               ...(request.authorAgentAddress ? { authorAgentAddress: request.authorAgentAddress } : {}),

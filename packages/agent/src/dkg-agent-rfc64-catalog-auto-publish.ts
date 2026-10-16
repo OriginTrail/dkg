@@ -1,3 +1,4 @@
+import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -177,6 +178,7 @@ function rfc64InventoryFailureDetailV1(cause: unknown): string {
 }
 
 export interface RecordRfc64SwmAuthorInventoryShadowParamsV1 {
+  readonly throwOnFailure?: boolean;
   readonly contextGraphId: string;
   readonly subGraphName?: string | null;
   readonly assertionCoordinate: string;
@@ -198,6 +200,7 @@ export interface ObserveRfc64DurableSwmPromotionParamsV1
 
 export interface AfterDurableSwmPromotionParamsV1
   extends Omit<RecordRfc64SwmAuthorInventoryShadowParamsV1, 'shareOperationId'> {
+  readonly durableInventory?: boolean;
   readonly shareOperationId: string | null;
   readonly ctx: OperationContext;
 }
@@ -603,21 +606,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: AfterDurableSwmPromotionParamsV1,
   ): Promise<void> {
-    try {
-      await runPromoteCommittedFinalization(() => this._stampSwmPointer(
-        params.contextGraphId,
-        params.assertionCoordinate,
-        params.lifecycleAgentAddress,
-        params.subGraphName ?? undefined,
-      ));
-    } finally {
-      if (params.shareOperationId !== null) {
-        this.scheduleRfc64SwmInventoryObserverV1({
-          ...params,
-          shareOperationId: params.shareOperationId,
-        });
-      }
-    }
+    await finishDurableShare(this, params, () => this._stampSwmPointer(
+      params.contextGraphId, params.assertionCoordinate, params.lifecycleAgentAddress,
+      params.subGraphName ?? undefined,
+    ), () => this.scheduleRfc64SwmInventoryObserverV1({
+      ...params, shareOperationId: params.shareOperationId!,
+    }));
   }
 
   /**
@@ -915,7 +909,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(params, { allowTerminalStale: false });
       } catch (cause) {
         // This phase only reads evidence. Never extend retry classification across inventory writes.
-        if (!isStoreSchedulerBusyError(cause) || !isStoreOperationNotStarted(cause, 'query')) throw cause;
+        if (params.throwOnFailure || !isStoreSchedulerBusyError(cause) || !isStoreOperationNotStarted(cause, 'query')) throw cause;
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1({
           ...this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause),
           status: 'failed', action: 'upsert', failurePhase: 'preparation-read',
@@ -954,7 +948,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
             computeSwmAuthorInventoryScopeDigestV1(currentScope)
             !== inventoryScopeDigest
           ) throw new Rfc64SwmInventoryAuthorityTransitionV1();
-          return maintainRfc64SwmAuthorInventoryV1(
+          const commit = () => maintainRfc64SwmAuthorInventoryV1(
             persistence.swmAuthorInventory,
             {
               scope: currentScope,
@@ -966,6 +960,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
               }),
             },
           );
+          return params.throwOnFailure ? runPromoteCommittedFinalization(commit) : commit();
         },
       );
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
@@ -980,6 +975,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         kaUal,
       );
     } catch (cause) {
+      if (params.throwOnFailure && !(cause instanceof Rfc64SwmInventoryAuthorityTransitionV1)) throw cause;
       if (cause instanceof Rfc64SwmInventoryAuthorityTransitionV1) {
         return shadowResult('dormant', 'upsert', 0, null, null, 'authority-transition');
       }

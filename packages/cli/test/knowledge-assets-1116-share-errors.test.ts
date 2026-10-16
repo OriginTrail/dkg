@@ -17,6 +17,9 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -112,9 +115,12 @@ function rootlessIntent(snapshot: {
 describe('#1116 share/seal route error mapping (fake agent)', () => {
   let server: Server | undefined;
   let baseUrl: string;
+  let shareStore: OxigraphStore | undefined;
 
   afterEach(async () => {
     daemonState.promoteWorkerAvailable = false;
+    await shareStore?.close();
+    shareStore = undefined;
     if (server) {
       await new Promise<void>((resolve, reject) => {
         server!.close((err) => (err ? reject(err) : resolve()));
@@ -147,6 +153,18 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
             ? { error: new Error('test publisher startup failure') }
             : {}),
         };
+    // Keep the route fixture's promote callback, with a real durable owner.
+    const shareQueue = typeof assertion.promote === 'function'
+      ? new TripleStoreAsyncPromoteQueue(shareStore = new OxigraphStore()) : undefined;
+    if (shareQueue) {
+      daemonState.promoteWorkerAvailable = true;
+      assertion.prepareDurableShare = async (_cg: string, _name: string, opts: any) => ({
+        agentAddress: opts?.agentAddress ?? ROOTLESS_AUTHOR,
+        recoveryBinding: { version: 1, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: false,
+          intent: { version: 1, operationId: randomUUID(), timestampMs: Date.now(),
+            confirmationRequired: false, accessPolicy: 'public', allowedPeers: [] } },
+      });
+    }
     const agent = {
       async listContextGraphs() {
         return [{
@@ -160,6 +178,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       async contextGraphExists(cgId: string) {
         return cgId === CG_ID;
       },
+      promoteQueue: shareQueue,
       resolveAgentByToken: () => undefined,
       assertion,
       // Agent-level methods (e.g. publishFromFinalizedAssertion /

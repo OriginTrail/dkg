@@ -1,3 +1,4 @@
+import { durableSynchronousShare, durableShareFailureBody, synchronousShareSuccessBody } from './durable-synchronous-share.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { classifyKaIdentifier, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
@@ -1020,7 +1021,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           // Carry the same resolved author into the share. The asset is already
           // sealed (finalize above), so promote shares the existing seal verbatim
           // and passing the author keeps the whole atomic flow in one namespace.
-          const share = await agent.assertion.promote(resolvedContextGraphId, name, {
+          const share = await durableSynchronousShare(agent, resolvedContextGraphId, name, {
             subGraphName,
             ...atomicAuthorLane,
             awaitCuratorAck,
@@ -1040,6 +1041,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "promoted", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
           }
         } catch (e: any) {
+          const recovery = durableShareFailureBody(e);
+          if (recovery) return jsonResponse(res, 503, { ...result, ...recovery, partial: true, failedPhase: 'swm-share' });
           if (respondWithPartialStoreFailure(e, 'swm-share')) return;
           errors.push({ phase: "swm-share", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
@@ -1373,7 +1376,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         skipSeal = parsed.skipSeal;
       }
       try {
-        const share = await agent.assertion.promote(contextGraphId, name, {
+        const share = await durableSynchronousShare(agent, contextGraphId, name, {
           entities: parsed.entities,
           subGraphName,
           awaitCuratorAck,
@@ -1384,19 +1387,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
           recordActivityAndNotify(ctx, { contextGraphId, kind: "promoted", actorAgentAddress: requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
         }
-        // A durable idempotent replay returns zero newly-promoted rows together
-        // with the original shareOperationId. That is an already-completed share,
-        // not an ownership skip, so preserve its sealed/publish-ready status.
-        const durableReplay = share.promotedCount === 0 && Boolean(share.shareOperationId);
-        const swmShared = share.promotedCount > 0 || durableReplay;
-        return jsonResponse(res, 200, {
-          swmShared,
-          promotedCount: share.promotedCount,
-          ...(share.sealed !== undefined ? { sealed: swmShared && share.sealed } : {}),
-          ...(share.publishReady !== undefined ? { publishReady: swmShared && share.publishReady } : {}),
-          ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
-        });
+        return jsonResponse(res, 200, synchronousShareSuccessBody(share));
       } catch (e: any) {
+        const recovery = durableShareFailureBody(e);
+        if (recovery) return jsonResponse(res, 503, recovery, undefined, { 'Retry-After': '1' });
         if (respondIfStoreUnavailable(res, e)) return;
         // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
         // carries the recovery hint. Everything else (e.g. the curator-ack 503)
