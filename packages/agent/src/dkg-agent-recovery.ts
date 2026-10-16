@@ -8,7 +8,11 @@ import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
 
 /** Agent access boundary. Consumers receive operations; mutable fields remain agent-owned. */
 export class RecoveryHostMethods extends DKGAgentBase {
-  createDurableRecoveryCapabilities(this: DKGAgent): DurableRecoveryHost {
+  static create(agent: DKGAgent): DurableRecoveryHost {
+    return RecoveryHostMethods.prototype.createDurableRecoveryCapabilities.call(agent);
+  }
+
+  protected createDurableRecoveryCapabilities(this: DKGAgent): DurableRecoveryHost {
     const materialization = new RecoveryMaterializationOwner({
       chain: () => this.chain,
       store: () => this.store,
@@ -112,5 +116,5 @@ export class RecoveryHostMethods extends DKGAgentBase {
 
 /** Also supports existing method-level fixtures with an explicit composed-agent receiver. */
 export function createDurableRecoveryHost(agent: DKGAgent): DurableRecoveryHost {
-  return RecoveryHostMethods.prototype.createDurableRecoveryCapabilities.call(agent);
+  return RecoveryHostMethods.create(agent);
 }
