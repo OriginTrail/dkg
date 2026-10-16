@@ -5,7 +5,7 @@ import { DKGQueryEngine } from '../../query/dist/dkg-query-engine.js';
 import { generateAssertionCreatedMetadata } from '../../publisher/dist/metadata.js';
 import { listAssertionsPage, fetchAssertionPageCounts } from '../src/ui/assertions-page.js';
 import { invalidateQueryCache, listAssertions } from '../src/ui/api.js';
-import { fetchMemoryEntity, readMemoryGraphPage } from '../src/ui/hooks/useMemoryEntities.js';
+import { buildMemoryEntities, fetchMemoryEntity, readMemoryGraphPage } from '../src/ui/hooks/useMemoryEntities.js';
 import { memoryQueryDefinitions } from '../src/ui/hooks/memory-query-definition.js';
 
 const owner = '0x1111111111111111111111111111111111111111';
@@ -87,8 +87,10 @@ describe('assertion pages against the native scoped query engine', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ result: { bindings: [] } })));
     const page = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { layerLimit: 1 });
     expect(page.ok).toBe(true);
-    expect(page.nextCursor).toEqual({ kind: 'row', graph,
-      termKey: ['I:urn:cursor', 'urn:value', 'L', '"quoted"', '', 'http://www.w3.org/2001/XMLSchema#string'] });
+    expect(page.nextCursor).toEqual({ kind: 'row', key: new Map([
+      ['graph', graph], ['subject', 'I:urn:cursor'], ['predicate', 'urn:value'], ['objectKind', 'L'],
+      ['object', '"quoted"'], ['language', ''], ['datatype', 'http://www.w3.org/2001/XMLSchema#string'],
+    ]) });
     expect(page.triples[0].object).toBe(JSON.stringify('"quoted"'));
   });
   it.each(['$&', '$$', '$`', "$'", '$1'])('preserves %s in literal keyset cursors', async token => {
@@ -150,6 +152,52 @@ describe('assertion pages against the native scoped query engine', () => {
     expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(15);
     const blank = triples.find(triple => triple.subject.startsWith('_:'))!.subject;
     expect(triples.filter(triple => triple.subject === blank || triple.object === blank)).toHaveLength(2);
+    expect(failures).toEqual([]);
+  });
+  it.each([100, 3, 2])('retains a shared blank resource across inventory pages with a %i-row budget', async layerLimit => {
+    for (let i = 0; i < 6; i++) await assertion(`boundary-${i}`);
+    await store.insert([
+      { subject: 'urn:parent', predicate: 'urn:child', object: '_:shared', graph: content('boundary-0') },
+      { subject: '_:shared', predicate: 'http://schema.org/name', object: '"Child"', graph: content('boundary-5') },
+    ]);
+    const triples = []; let cursor; let incomplete = false;
+    for (let i = 0; i < 30; i++) {
+      const page = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit, cursor });
+      if (!page.ok) throw new Error(page.reason);
+      incomplete ||= page.omittedRelationships; triples.push(...page.triples);
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    const edge = triples.find(triple => triple.subject === 'urn:parent')!;
+    expect(edge).toBeDefined();
+    expect(triples.filter(triple => triple.subject === edge.object)).toEqual([
+      expect.objectContaining({ object: '"Child"', graph: content('boundary-5') }),
+    ]);
+    expect(incomplete).toBe(false);
+    expect(triples).toHaveLength(8);
+    expect(new Set(triples.filter(triple => triple.subject.startsWith('_:')).map(triple => triple.subject)).size).toBe(1);
+    const entities = buildMemoryEntities(triples.map(triple => ({ ...triple, layer: 'working' as const })));
+    const child = entities.get('urn:parent')!.connections[0].targetUri;
+    expect(entities.get(child)!.label).toBe('Child');
+    expect(failures).toEqual([]);
+  });
+  it('reports incomplete relationships when a cross-page blank capture exceeds its budget', async () => {
+    for (let i = 0; i < 6; i++) await assertion(`limited-${i}`);
+    await store.insert([
+      { subject: 'urn:parent', predicate: 'urn:child', object: '_:shared', graph: content('limited-0') },
+      { subject: '_:shared', predicate: 'urn:name', object: '"Child"', graph: content('limited-5') },
+      { subject: '_:shared', predicate: 'urn:description', object: '"Third fact"', graph: content('limited-5') },
+    ]);
+    let cursor; let incomplete = false; const triples = [];
+    for (let i = 0; i < 30; i++) {
+      const page = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
+      if (!page.ok) throw new Error(page.reason);
+      incomplete ||= page.omittedRelationships; triples.push(...page.triples);
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    expect(incomplete).toBe(true);
+    expect(triples).toHaveLength(8); // Six ordinary rows and two of the three connected blank facts.
     expect(failures).toEqual([]);
   });
   it('filters hidden meta assertions before the page boundary when catalogs are enabled', async () => {

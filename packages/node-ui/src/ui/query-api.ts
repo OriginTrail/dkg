@@ -3,7 +3,7 @@ import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/spa
 import type { PublicQueryQuad, PublicQueryResponse, PublicQueryResult } from '@origintrail-official/dkg-core/query-result';
 import { BASE, authHeaders, HttpError, getWithTimeout } from './http.js';
 import { fetchQueryJson, AUTOMATIC_QUERY_TIMEOUT_MS, AUTOMATIC_QUERY_MAX_BYTES } from './query-transport.js';
-import { ReadCache, UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
+import { CachedRead, UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
 
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60_000;
 
@@ -56,19 +56,13 @@ export function normalizeQueryExecutionResponse(
   return { result: { type: 'bindings', bindings } };
 }
 
-const inflightQuery = new Map<string, { scope: string; promise: Promise<QueryExecutionResponse> }>();
-const graphListCache = new ReadCache<{ contextGraphs: any[] }>(2 * 1024 * 1024, 1);
-let graphListRequest: { key: string; promise: Promise<{ contextGraphs: any[] }> } | null = null;
-const queryReadCache = new ReadCache<QueryExecutionResponse>();
+const graphLists = new CachedRead<{ contextGraphs: any[] }>(2 * 1024 * 1024, 1);
+const queries = new CachedRead<QueryExecutionResponse>();
 let querySession = '';
 
 export function invalidateQueryCache(contextGraphId?: string): void {
-  graphListCache.invalidate();
-  graphListRequest = null;
-  queryReadCache.invalidate(contextGraphId || undefined);
-  for (const [key, request] of inflightQuery) {
-    if (!contextGraphId || request.scope === contextGraphId) inflightQuery.delete(key);
-  }
+  graphLists.invalidate();
+  queries.invalidate(contextGraphId || undefined);
 }
 
 export interface QueryReadOptions {
@@ -93,18 +87,15 @@ export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadO
   const maxAgeMs = read.maxAgeMs ?? 0;
   const operation = classifySparqlOperation(String(body.sparql ?? '')).kind;
   const cacheable = maxAgeMs > 0 && operation === 'read';
-  const cached = cacheable ? queryReadCache.get(key, maxAgeMs) : undefined;
-  if (cached) return Promise.resolve(cached);
-  const existing = inflightQuery.get(key);
-  if (existing) return existing.promise;
   const init = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers },
     body: requestBody,
   };
-  const promise = fetchQueryJson(`${BASE}/api/query`, init, { timeoutMs, maxResponseBytes }, response => {
-    if (inflightQuery.get(key)?.promise === promise && (response.status === 401 || response.status === 403)) invalidateQueryCache();
-  }).then(({ response: res, body: responseBody }) => {
+  return queries.run(key, { scope, maxAgeMs: cacheable ? maxAgeMs : 0 }, async isCurrent => {
+    const { response: res, body: responseBody } = await fetchQueryJson(`${BASE}/api/query`, init, { timeoutMs, maxResponseBytes }, response => {
+      if (isCurrent() && (response.status === 401 || response.status === 403)) invalidateQueryCache();
+    });
     if (!res.ok) {
       const errBody = responseBody;
       const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -113,15 +104,8 @@ export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadO
     const result = normalizeQueryExecutionResponse(responseBody, String(body.sparql ?? ''));
     if (session !== JSON.stringify(authHeaders())) throw new HttpError(401, 'The session changed while loading data.');
     if (operation !== 'read') invalidateQueryCache(scope || undefined);
-    if (cacheable && inflightQuery.get(key)?.promise === promise) {
-      queryReadCache.set(key, result, scope);
-    }
     return result;
-  }).finally(() => {
-    if (inflightQuery.get(key)?.promise === promise) inflightQuery.delete(key);
   });
-  inflightQuery.set(key, { scope, promise });
-  return promise;
 }
 
 export type QueryExecutionView = GetView;
@@ -146,23 +130,16 @@ export const executeQuery = (
 export async function fetchContextGraphs(options: { fresh?: boolean } = {}): Promise<{ contextGraphs: any[] }> {
   const session = JSON.stringify(authHeaders());
   if (session !== querySession) { invalidateQueryCache(); querySession = session; }
-  if (options.fresh) { graphListCache.invalidate(); graphListRequest = null; }
-  const key = session;
-  const cached = graphListCache.get(key, UI_READ_MAX_AGE_MS);
-  if (cached) return cached;
-  if (graphListRequest?.key === key) return graphListRequest.promise;
-  const promise = getWithTimeout<{ contextGraphs?: any[] }>(
+  if (options.fresh) graphLists.invalidate();
+  return graphLists.run(session, { maxAgeMs: UI_READ_MAX_AGE_MS }, isCurrent => getWithTimeout<{ contextGraphs?: any[] }>(
     '/api/context-graph/list',
     CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
   ).then(data => {
     if (session !== JSON.stringify(authHeaders())) throw new HttpError(401, 'The session changed while loading data.');
     const result = { contextGraphs: (data.contextGraphs ?? []).filter((p: any) => !p.isSystem) };
-    if (graphListRequest?.promise === promise) graphListCache.set(key, result);
     return result;
   }).catch(error => {
-    if (graphListRequest?.promise === promise && error instanceof HttpError && (error.status === 401 || error.status === 403)) invalidateQueryCache();
+    if (isCurrent() && error instanceof HttpError && (error.status === 401 || error.status === 403)) invalidateQueryCache();
     throw error;
-  }).finally(() => { if (graphListRequest?.promise === promise) graphListRequest = null; });
-  graphListRequest = { key, promise };
-  return promise;
+  }));
 }

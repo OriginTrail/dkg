@@ -54,12 +54,24 @@ export function subGraphOf(gUri: string, cgId: string): string | undefined {
   return seg;
 }
 
-type TermKey = [string, string, string, string, string, string];
+const CURSOR_COLUMNS = [
+  { key: 'graph', variable: '?__g', expression: 'STR(?g)' },
+  { key: 'subject', variable: '?__s', expression: 'CONCAT("I:", STR(?s))' },
+  { key: 'predicate', variable: '?__p', expression: 'STR(?p)' },
+  { key: 'objectKind', variable: '?__kind', expression: 'IF(isIRI(?o), "I", "L")' },
+  { key: 'object', variable: '?__o', expression: 'STR(?o)' },
+  { key: 'language', variable: '?__lang', expression: 'IF(isLiteral(?o), LANG(?o), "")' },
+  { key: 'datatype', variable: '?__datatype', expression: 'IF(isLiteral(?o), STR(DATATYPE(?o)), "")' },
+] as const;
+type CursorColumn = typeof CURSOR_COLUMNS[number]['key'];
 type RowCursor =
-  | { kind: 'row'; graph: string; termKey: TermKey }
+  | { kind: 'row'; key: ReadonlyMap<CursorColumn, string> }
   | { kind: 'after-graph'; graph: string };
-export type MemoryGraphCursor = RowCursor
-  | { kind: 'blank-graphs'; graphs: string[]; resume?: RowCursor };
+export type MemoryGraphCursor = (RowCursor
+  | { kind: 'blank-graphs'; graphs: string[]; resume?: RowCursor }) & {
+    /** Stable graph IRIs whose blank facts were captured together on earlier pages. */
+    capturedBlankGraphs?: string[];
+  };
 export interface MemoryGraphPage {
   ok: true;
   triples: MemoryTriple[];
@@ -85,22 +97,25 @@ function queryMemory(definition: MemoryQueryDefinition, contextGraphId: string, 
   }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs });
 }
 
-const CURSOR_VARIABLES = ['?__g', '?__s', '?__p', '?__kind', '?__o', '?__lang', '?__datatype'];
-const CURSOR_BINDINGS = `
-  BIND(STR(?g) AS ?__g)
-  BIND(CONCAT("I:", STR(?s)) AS ?__s)
-  BIND(STR(?p) AS ?__p)
-  BIND(IF(isIRI(?o), "I", "L") AS ?__kind)
-  BIND(STR(?o) AS ?__o)
-  BIND(IF(isLiteral(?o), LANG(?o), "") AS ?__lang)
-  BIND(IF(isLiteral(?o), STR(DATATYPE(?o)), "") AS ?__datatype)`;
+const CURSOR_VARIABLES = CURSOR_COLUMNS.map(column => column.variable).join(' ');
+const CURSOR_BINDINGS = CURSOR_COLUMNS.map(column => `BIND(${column.expression} AS ${column.variable})`).join('\n');
 
 function cursorForRow(row: Record<string, unknown>): RowCursor {
-  const values = CURSOR_VARIABLES.map(variable => bv(row[variable.slice(1)]));
-  if (values.some(value => value === undefined)) throw new Error('Memory query omitted its continuation key');
-  const [graph, ...termKey] = values as string[];
-  return { kind: 'row', graph, termKey: termKey as TermKey };
+  const key = new Map<CursorColumn, string>();
+  for (const column of CURSOR_COLUMNS) {
+    const value = bv(row[column.variable.slice(1)]);
+    if (value === undefined) throw new Error('Memory query omitted its continuation key');
+    key.set(column.key, value);
+  }
+  return { kind: 'row', key };
 }
+
+function cursorValue(cursor: Extract<RowCursor, { kind: 'row' }>, column: CursorColumn): string {
+  const value = cursor.key.get(column);
+  if (value === undefined) throw new Error('Memory cursor omitted its continuation key');
+  return value;
+}
+const cursorGraph = (cursor: RowCursor) => cursor.kind === 'row' ? cursorValue(cursor, 'graph') : cursor.graph;
 
 const blankResponseScopes = new WeakMap<object, { id: number; nodes: Map<string, string> }>();
 let nextBlankResponseScope = 0;
@@ -136,10 +151,9 @@ function triplesFromRows(rows: Record<string, unknown>[], contextGraphId: string
 
 function cursorFilter(cursor?: RowCursor): string {
   if (cursor?.kind !== 'row') return '';
-  const values = [cursor.graph, ...cursor.termKey];
-  return `FILTER(${CURSOR_VARIABLES.map((variable, index) => {
-    const equal = CURSOR_VARIABLES.slice(0, index).map((prior, i) => `${prior} = ${JSON.stringify(values[i])}`);
-    return `(${[...equal, `${variable} > ${JSON.stringify(values[index])}`].join(' && ')})`;
+  return `FILTER(${CURSOR_COLUMNS.map((column, index) => {
+    const equal = CURSOR_COLUMNS.slice(0, index).map(prior => `${prior.variable} = ${JSON.stringify(cursorValue(cursor, prior.key))}`);
+    return `(${[...equal, `${column.variable} > ${JSON.stringify(cursorValue(cursor, column.key))}`].join(' && ')})`;
   }).join(' || ')})`;
 }
 
@@ -171,6 +185,10 @@ export async function readMemoryGraphPage(
       }
     };
     const triples: MemoryTriple[] = [];
+    const capturedBlankGraphs = new Set(cursor?.capturedBlankGraphs ?? []);
+    // Completed graph rows will not recur. Retain capture identities only for
+    // graphs whose ordinary rows are still waiting on a later inventory page.
+    const finishCapturedGraphs = (graphs: string[]) => graphs.filter(graph => !capturedBlankGraphs.delete(graph));
     const append = (rows: Record<string, unknown>[], response: object = rows) => {
       triples.push(...triplesFromRows(rows, contextGraphId, response));
     };
@@ -182,15 +200,15 @@ export async function readMemoryGraphPage(
       // Existence probes inventory five graphs without sorting their source rows.
       const catalog = await read(memoryQuery(definition, {
         projection: 'DISTINCT ?g', inventory: true, order: 'STR(?g)', limit: 6,
-        filters: cursor ? `FILTER(STR(?g) ${cursor.kind === 'after-graph' ? '>' : '>='} ${JSON.stringify(cursor.graph)})` : '',
+        filters: cursor ? `FILTER(STR(?g) ${cursor.kind === 'after-graph' ? '>' : '>='} ${JSON.stringify(cursorGraph(cursor))})` : '',
       }));
       const names = [...new Set(catalog.map(projectedGraph))];
       const graphs = names.slice(0, 5);
       if (!graphs.length) return { ok: true, triples, omittedRelationships: false };
       const { rows, limit } = await boundedRead(limit => memoryQuery(definition, {
-        projection: `?s ?p ?o ?g ${CURSOR_VARIABLES.join(' ')}`, graphs,
+        projection: `?s ?p ?o ?g ${CURSOR_VARIABLES}`, graphs,
         filters: `FILTER(!isBlank(?s) && !isBlank(?o)) ${cursorFilter(cursor)}`,
-        bindings: CURSOR_BINDINGS, order: CURSOR_VARIABLES.join(' '), limit,
+        bindings: CURSOR_BINDINGS, order: CURSOR_VARIABLES, limit,
       }), layerLimit);
       const bindings = rows.slice(0, limit);
       append(bindings, rows);
@@ -198,9 +216,10 @@ export async function readMemoryGraphPage(
       const last = clipped ? cursorForRow(bindings.at(-1)!) : undefined;
       // Finish blank edges before advancing past a completed graph. The graph
       // containing a row cursor is still in progress, so defer its blanks too.
-      pending = clipped ? graphs.slice(0, graphs.indexOf(last!.graph)) : graphs;
+      pending = clipped ? graphs.slice(0, graphs.indexOf(cursorGraph(last!))) : graphs;
       resume = last ?? (names.length > 5 ? { kind: 'after-graph', graph: graphs.at(-1)! } : undefined);
     }
+    pending = finishCapturedGraphs(pending);
     let omittedRelationships = false;
     while (pending.length && triples.length < layerLimit) {
       const budget = layerLimit - triples.length;
@@ -208,19 +227,29 @@ export async function readMemoryGraphPage(
         graphs, filters: 'FILTER(isBlank(?s) || isBlank(?o))', limit,
       }), budget + 1);
       let result = await load(pending);
+      if (!result.rows.length) { pending = []; break; }
+      checkCurrent();
+      let closure = await connectedBlankGraphs(definition, contextGraphId, pending, requestOpts, signal);
+      if (closure.graphs.length !== pending.length) result = await load(closure.graphs);
       const fits = () => result.rows.length <= budget && (result.limit === budget + 1 || result.rows.length < result.limit);
-      if (fits()) { append(result.rows); pending = []; break; }
       // Do not spend the tail of a row page on a partial blank response. Give
-      // it a fresh page; split graph groups before declaring any graph oversized.
-      if (triples.length) break;
-      if (pending.length > 1) result = await load([pending[0]]);
+      // it a fresh page. Split only into connected graph groups, never by labels.
+      if (!fits() && triples.length) break;
+      if (!fits() && pending.length > 1) {
+        closure = await connectedBlankGraphs(definition, contextGraphId, [pending[0]], requestOpts, signal);
+        result = await load(closure.graphs);
+      }
+      checkCurrent();
       append(result.rows.slice(0, budget), result.rows);
-      omittedRelationships ||= !fits();
-      pending.shift();
+      omittedRelationships ||= closure.partial || !fits();
+      for (const graph of closure.graphs) capturedBlankGraphs.add(graph);
+      pending = finishCapturedGraphs(pending);
     }
-    const nextCursor = pending.length ? { kind: 'blank-graphs' as const, graphs: pending, resume } : resume;
+    const continuation = pending.length ? { kind: 'blank-graphs' as const, graphs: pending, resume } : resume;
+    const nextCursor = continuation && capturedBlankGraphs.size
+      ? { ...continuation, capturedBlankGraphs: [...capturedBlankGraphs] } : continuation;
     if (!triples.length && !pending.length && resume) {
-      return readMemoryGraphPage(definition, contextGraphId, { ...opts, cursor: resume });
+      return readMemoryGraphPage(definition, contextGraphId, { ...opts, cursor: nextCursor });
     }
     return { ok: true, triples, nextCursor, omittedRelationships };
   } catch (error) {
@@ -238,21 +267,27 @@ const RESOURCE_DETAIL_LIMIT = 1000;
 const BLANK_GRAPH_DISCOVERY_ROUNDS = 5;
 
 /** Follow stable graph IRIs, never response-local blank labels, between reads. */
-async function connectedBlankGraphs(definition: MemoryQueryDefinition, contextGraphId: string, initial: string[]) {
+async function connectedBlankGraphs(definition: MemoryQueryDefinition, contextGraphId: string, initial: string[],
+  options: { includeContextGraphPartitions?: boolean } = { includeContextGraphPartitions: true }, signal?: AbortSignal) {
   let graphs = initial;
   for (let round = 0; round < BLANK_GRAPH_DISCOVERY_ROUNDS; round++) {
+    signal?.throwIfAborted();
     const data = await queryMemory(definition, contextGraphId, memoryQuery(definition, {
       projection: 'DISTINCT ?g', limit: 1,
       pattern: `{
         { ?b ?p ?o } UNION { ?s ?p ?b }
         FILTER(isBlank(?b))
       }`,
-      // Exclude visited graphs and stop at the first new one. Enumerating all
-      // matches would multiply repeated blank properties in a quadratic join.
+      // Filter both endpoint sets before joining: repeated literal values must
+      // not create a Cartesian product. Stop at the first unvisited graph.
       filters: `VALUES ?known { ${graphs.map(sparqlIri).join(' ')} }
-        GRAPH ?known { { ?b ?knownP ?knownO } UNION { ?knownS ?knownP ?b } }
+        GRAPH ?known {
+          { ?b ?knownP ?knownO } UNION { ?knownS ?knownP ?b }
+          FILTER(isBlank(?b))
+        }
         FILTER(?g NOT IN (${graphs.map(sparqlIri).join(', ')}))`,
-    }), { includeContextGraphPartitions: true }, 10_000);
+    }), options, 10_000);
+    signal?.throwIfAborted();
     const found = (data.result?.bindings ?? []).map(projectedGraph);
     const next = [...new Set([...graphs, ...found])];
     if (next.length === graphs.length) return { graphs, partial: false };

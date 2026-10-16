@@ -1,3 +1,5 @@
+import { resolveWithinAbort } from '@origintrail-official/dkg-core/dist/abort-boundary.js';
+
 /** Finite transport budgets for automatic reads; console execution opts out. */
 export const AUTOMATIC_QUERY_TIMEOUT_MS = 60_000;
 export const AUTOMATIC_QUERY_MAX_BYTES = 8 * 1024 * 1024;
@@ -20,14 +22,14 @@ export async function fetchQueryJson(
   }
   const controller = new AbortController();
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  let rejectAbort!: (reason: unknown) => void;
-  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
-  const onAbort = () => rejectAbort(controller.signal.reason);
-  controller.signal.addEventListener('abort', onAbort, { once: true });
   const timer = limits.timeoutMs === null ? undefined : setTimeout(() => {
     controller.abort(new Error(`Request timed out after ${Math.round(limits.timeoutMs! / 1000)}s`));
   }, limits.timeoutMs);
-  const guard = <T,>(promise: Promise<T>) => Promise.race([promise, aborted]);
+  const guard = async <T,>(work: () => Promise<T>): Promise<T> => {
+    const result = await resolveWithinAbort(async () => ({ value: await work() }), controller.signal);
+    if (result === null) throw controller.signal.reason;
+    return result.value;
+  };
   const checkBytes = (bytes: number) => {
     if (limits.maxResponseBytes !== null && bytes > limits.maxResponseBytes) {
       const error = new QueryResponseLimitError(limits.maxResponseBytes);
@@ -35,19 +37,20 @@ export async function fetchQueryJson(
     }
   };
   try {
-    const response = await guard(fetch(url, { ...init, signal: controller.signal }));
+    const response = await guard(() => fetch(url, { ...init, signal: controller.signal }));
     onResponse(response);
     const declared = response.headers?.get('Content-Length');
     if (declared && Number.isFinite(Number(declared))) checkBytes(Number(declared));
     if (!response.body?.getReader) {
-      const body: unknown = await guard(response.json());
+      const body: unknown = await guard(() => response.json());
       checkBytes(new TextEncoder().encode(JSON.stringify(body)).byteLength);
       return { response, body };
     }
     reader = response.body.getReader();
     const chunks: Uint8Array[] = []; let size = 0;
     while (true) {
-      const { value, done } = await guard(reader.read());
+      const activeReader = reader;
+      const { value, done } = await guard(() => activeReader.read());
       if (done) break;
       size += value.byteLength; checkBytes(size); chunks.push(value);
     }
@@ -58,7 +61,6 @@ export async function fetchQueryJson(
     catch (error) { if (!response.ok && error instanceof SyntaxError) return { response, body: {} }; throw error; }
   } finally {
     if (timer !== undefined) clearTimeout(timer);
-    controller.signal.removeEventListener('abort', onAbort);
     if (controller.signal.aborted) void reader?.cancel(controller.signal.reason).catch(() => {});
     try { reader?.releaseLock(); } catch { /* A canceled read may still be settling. */ }
   }

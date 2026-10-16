@@ -131,6 +131,7 @@ describe('resource detail response ownership', () => {
       ...chain.map((g, i) => ({ subject: `_:step${i}`, predicate: i < 5 ? 'urn:child' : name,
         object: i < 5 ? `_:step${i + 1}` : '"Tail"', graph: g })),
     ]);
+    invalidateQueryCache(cg);
     const before = queries.length;
     await render('urn:chain-parent');
     expect(read.partial).toBe(true);

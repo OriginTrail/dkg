@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ReadCache, UI_READ_MAX_AGE_MS } from '../src/ui/lib/read-cache.js';
+import { CachedRead, ReadCache, UI_READ_MAX_AGE_MS } from '../src/ui/lib/read-cache.js';
 import { fetchContextGraphs, invalidateQueryCache, postQueryDeduped, subscribeToContextGraph, submitJoinRequest } from '../src/ui/api.js';
 
 const body = (cg = 'cg-a') => ({ sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 50', contextGraphId: cg });
@@ -11,6 +11,11 @@ beforeEach(() => { invalidateQueryCache(); window.__DKG_TOKEN__ = 'session-a'; }
 afterEach(() => { delete window.__DKG_TOKEN__; invalidateQueryCache(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('bounded read cache', () => {
+  it('releases a synchronous failed loader and can retry', async () => {
+    const owner = new CachedRead<string>();
+    await expect(owner.run('key', { maxAgeMs: 1000 }, () => { throw new Error('failed'); })).rejects.toThrow('failed');
+    await expect(owner.run('key', { maxAgeMs: 1000 }, async () => 'fresh')).resolves.toBe('fresh');
+  });
   it('evicts least-recently-used entries and refuses oversized results', () => {
     const cache = new ReadCache<string>(24, 2);
     cache.set('a', 'A'); cache.set('b', 'B'); cache.get('a', 1000); cache.set('c', 'C');
@@ -36,6 +41,17 @@ describe('bounded read cache', () => {
 });
 
 describe('scoped UI reads', () => {
+  it('keeps another context in flight when only one context is invalidated', async () => {
+    const pending: Array<(response: Response) => void> = [];
+    const fetch = vi.fn(() => new Promise<Response>(resolve => pending.push(resolve)));
+    vi.stubGlobal('fetch', fetch);
+    const a = postQueryDeduped(body(), read); const b = postQueryDeduped(body('cg-b'), read);
+    invalidateQueryCache('cg-a');
+    const joined = postQueryDeduped(body('cg-b'), read);
+    pending[0](response('old-a')); pending[1](response('b'));
+    await a; expect(await joined).toEqual(await b);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
   it.each(['query', 'graph list'])('keeps the replacement %s request registered after an invalidated completion', async kind => {
     const pending: Array<(response: Response) => void> = [];
     const fetch = vi.fn(() => new Promise<Response>(resolve => pending.push(resolve)));

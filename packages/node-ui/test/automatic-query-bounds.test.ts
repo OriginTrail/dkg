@@ -44,6 +44,21 @@ describe('automatic query budgets', () => {
     expect(failure?.message).toContain('timed out'); await pending;
     expect(cancel).toHaveBeenCalledOnce();
   });
+  it('does not publish or cache a fetch which completes after its deadline', async () => {
+    let finish!: (value: Response) => void;
+    const fetch = vi.fn().mockImplementationOnce(() => new Promise<Response>(resolve => { finish = resolve; }))
+      .mockResolvedValueOnce(response([{ s: 'urn:fresh' }]));
+    vi.stubGlobal('fetch', fetch);
+    const body = { sparql: 'SELECT ?s WHERE { ?s ?p ?o }', contextGraphId: 'cg' };
+    const pending = postQueryDeduped(body, { maxAgeMs: 1000 }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect((await pending).message).toContain('timed out');
+    finish(response([{ s: 'urn:late' }]));
+    const fresh = await postQueryDeduped(body, { maxAgeMs: 1000 });
+    expect(fresh.result?.bindings).toEqual([{ s: 'urn:fresh' }]);
+    expect(await postQueryDeduped(body, { maxAgeMs: 1000 })).toEqual(fresh);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
   it('leaves explicit interactive execution without an implicit deadline', async () => {
     let finish!: (response: Response) => void;
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { finish = resolve; })));

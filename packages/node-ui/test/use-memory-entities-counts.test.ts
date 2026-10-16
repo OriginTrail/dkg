@@ -74,6 +74,9 @@ describe('useMemoryEntities canonical layer counts', () => {
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
       const { sparql = '', contextGraphId = 'cg' } =
         JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
+      if (sparql.includes('FILTER(isBlank(?s) || isBlank(?o))')) {
+        return { ok: true, json: async () => ({ result: { bindings: [] } }) } as Response;
+      }
       const isVm = sparql.includes('_verifiable_memory_meta');
       const isCatalogQuery = sparql.includes(PROFILE_QUERY_CATALOG);
       const isCatalogSwm = isCatalogQuery && sparql.includes('/meta/_shared_memory/');
