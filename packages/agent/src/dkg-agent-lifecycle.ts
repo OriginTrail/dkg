@@ -7893,6 +7893,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             priorityOverride: options?.priority,
             source: options?.source,
             selectedSwmPriority: true,
+            reservedSlotOnly: options?.reservedSlotOnly,
           },
         ),
         merge: mergeSamePeerSharedMemoryDiagnostics,
