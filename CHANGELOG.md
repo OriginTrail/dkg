@@ -52,8 +52,8 @@ publications hold their locks for less of their work and recover sooner
 (#3253, #3309), and the node UI pages assertions and renders graphs without
 the stale, duplicated or missing rows it could show (#3236).
 
-Six fixes since the section was first written, for the members of public
-graphs registered on chain. A curator metadata refresh takes a reserved
+Seven fixes since the section was first written, for the members of
+public graphs registered on chain. A curator metadata refresh takes a reserved
 sync slot, so a node with one sync slot still gets a graph's definition and
 a private graph's member list (#3302). A member that reaches such a graph
 only through Cores takes the graph's definition from the chain (#3303), and
@@ -62,11 +62,10 @@ a Core keeps and serves the owner's definition of the graphs it hosts
 (#3304). Every shared-memory pull admits the sub-graphs it is served
 (#3305). A member writes into a sub-graph that the graph's owner registered
 (#3306). A share carries its author's seal, so the curator can publish a
-member's asset (#3307).
-<!-- PLACEHOLDER (no PR yet): the shared-memory write gate refreshes the
-     graph's member list before it rejects a member the curator has just
-     approved. Add one sentence here, a row in the upgrade table and a
-     Fixed entry from the PR's description once the PR exists. -->
+member's asset (#3307). A node that receives a shared-memory write from a
+member its local member list does not hold yet refreshes the list before
+it rejects the write, and an authority it cannot read makes the rejection
+retryable, where the write was dropped (#3312).
 
 **No smart-contract, ABI or deployment registry changes.** Three new
 protocols and one changed message. The owner of a public graph sends a
@@ -125,10 +124,7 @@ node.
 | Every shared-memory pull admits the sub-graphs it is served (#3305, #3301) | The pull that also covers a graph's root scope, which a member runs against a peer that serves the graph complete, admitted only the sub-graphs registered on the member; it now admits the served ones, as the named-sub-graph pulls and private recovery already did. A served name that is a Context Graph of the node's own at `<graph>/<name>` is never admitted, in any lane, where the named-sub-graph pulls admitted it. A responder's registration rows are still not stored | None |
 | A member writes into a sub-graph the graph's owner registered (#3306, #3293) | A node that installs a `_meta` snapshot as a graph's definition also registers the sub-graphs it holds: well-formed registrations of that graph only, at most 256, with no writer lists, and never a name that is a Context Graph of its own. A write into a sub-graph this node has not registered first asks the graph's owner and up to two connected peers for their `_meta`, one lookup per sub-graph at a time within 30 s, and does not ask again for 30 s about a sub-graph no peer held. A write into a sub-graph nobody holds is refused with HTTP 400 and `SUB_GRAPH_NOT_FOUND` on `POST /api/knowledge-assets`, `wm/write`, `wm/pull-from`, `swm/share`, `wm/import-file` and `POST /api/memory/turn`, where it was HTTP 500; the message keeps its wording and adds what the lookup found. An async share job that meets it fails with the same error, and the queue retries it | Clients that matched the 500 should expect 400 with `code: "SUB_GRAPH_NOT_FOUND"` |
 | A share carries its author's seal, so the curator can publish it (#3307, #3294) | The share message gains two optional fields, the assertion's name and the canonical graph-scoped author seal that RFC-64 defines, which the author's node fills on every graph-scoped share. The graph's curator keeps the seal only when the share's envelope is signed by the seal's author, the seal names this share's asset, version, counts and private root, commits to the Merkle root of exactly the content stored, and its attestation recovers the asset's author; other members and Cores keep nothing. The curator then publishes the member's asset with `POST /api/knowledge-assets/:name/vm/publish` and `selectedAuthorAgentAddress`, with the member's attestation and the curator's wallet, into the member's namespace. `vm/publish-async` for another node's asset answers 409 `ASYNC_PUBLISH_FOREIGN_AUTHOR`, where it answered 500. A node on an earlier version ignores the fields, and a share from such a node carries none | Upgrade the author's node and the curator's node to publish a member's shared asset |
-
-<!-- PLACEHOLDER (no PR yet): upgrade row for the shared-memory write gate
-     that refreshes the graph's member list before it rejects a member the
-     curator has just approved. -->
+| A receiver refreshes its write gate before it rejects a shared-memory write by a signer its projected gate lacks (#3312) | A receiver judged an inbound shared-memory write by the member list in its local metadata, which for a member is the curator's metadata as of the receiver's last refresh. When an envelope's signature verifies but that list lacks the signer, the receiver now reads the canonical gate fresh and, when that still excludes the signer, refreshes the metadata from the curator under the existing cooldown and reads once more, all within 8 s. A signer the fresh gate holds is applied, logged at info; a signer it still excludes, or a graph with no member list, is rejected permanently as before; a gate that could not be read answers a retryable rejection, so the sender's fan-out retries on its watchdog where it dropped the share. A bad signature never reaches the refresh. Concurrent misses by one signer on one graph share one look, and a signer a fresh gate excluded is remembered for 10 s. The re-read is billed to the existing `cgAuth.workspaceApply` chain request site | None |
 
 ### Known issues
 
@@ -639,10 +635,22 @@ node.
   table. In an end-to-end test on a local chain the curator's publish
   answered 200 `confirmed`, the asset was minted in the member's namespace,
   and it was in Verified Memory and out of shared memory on both nodes.
-<!-- PLACEHOLDER (no PR yet): Fixed entry for the shared-memory write gate
-     that refreshes the graph's member list before it rejects a member the
-     curator has just approved. Write it from the PR's description once the
-     PR exists. -->
+- **A shared-memory write by a member the curator has just approved is no
+  longer dropped by a receiver whose member list is stale** (#3312): a
+  receiver judged an inbound write by the member list in its local
+  metadata, which for a member is the curator's metadata as of its last
+  refresh. A writer approved shortly before its first write was absent from
+  that list until the next refresh landed, and that refresh could lag or
+  fail while the write was in flight. The receiver logged `SWM write
+  rejected: agent <address> is not allowed for context graph <graph>` and
+  answered `agent envelope verification failed` with `retryable: false`,
+  so the sender dropped the share and never retried it, although the chain
+  roster, which the Sender Key setup and sync authorization already
+  consult, held the writer. An unavailable gate authority, a chain read or
+  registration binding that failed or timed out, got the same permanent
+  answer, so a receiver could not tell an outage from a non-member. The
+  write path now takes the second look that sync authorization already
+  took on the same miss; see the upgrade table.
 - **A cold snapshot recovery is no longer cancelled when the graph's chain
   binding is discovered during its first batch** (#3176): the snapshot job
   installed the graph's numeric chain id without its name hash, so the
