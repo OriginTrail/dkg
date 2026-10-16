@@ -1,3 +1,4 @@
+import { jsonResponse } from '../src/daemon/http-utils.js';
 import { describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { boundSelect, boundedResult } from '../src/daemon/bounded-query.js';
@@ -579,3 +580,33 @@ it.each(['complete', 'page'].flatMap(mode => ['verifiable-memory', 'shared-worki
     } finally { await store.close(); }
   },
 );
+
+const bindingFidelityCases = (['complete', 'page'] as const).flatMap(mode =>
+  ['message', 'error', 'detail', 'details'].flatMap(key => [
+    '"/srv/rules/policy.ts:12:34"',
+    '"at publish (/srv/rules/policy.ts:12:34)"',
+    '"Error: report\\n    at publish (/srv/rules/policy.ts:12:34)"',
+  ].map(value => ({ mode, key, value }))));
+
+it.each(bindingFidelityCases)('preserves $key binding bytes through $mode serialization: $value', async ({ mode, key, value }) => {
+  const bindings = [{ [key]: value }];
+  const read = context({ query: async () => ({ bindings }) }, {
+    mode, maxRows: 1, sparql: `SELECT ?${key} WHERE { ?s <urn:p> ?${key} } ORDER BY ?${key}`,
+  });
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(read.res.statusCode).toBe(200);
+  const body = JSON.parse(read.res.body);
+  expect(body.result.bindings).toEqual(bindings);
+  expect(body.resultComplete).toBe(mode === 'complete');
+  if (mode === 'page') expect(body).toMatchObject({ pageComplete: true, hasMore: false });
+});
+
+it('continues scrubbing actual error responses independently of successful bindings', () => {
+  const { res } = context({});
+  jsonResponse(res as unknown as RequestContext['res'], 503, Object.fromEntries(
+    ['message', 'error', 'detail', 'details'].map(key => [key, 'failure at publish (/srv/rules/policy.ts:12:34)'])));
+  expect(res.statusCode).toBe(503);
+  expect(res.body).not.toContain('/srv/rules/policy.ts');
+  expect(JSON.parse(res.body)).toEqual(Object.fromEntries(
+    ['message', 'error', 'detail', 'details'].map(key => [key, 'failure at publish <redacted-path>'])));
+});

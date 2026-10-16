@@ -4,7 +4,7 @@ import { authenticatedAgentAddress } from '../../auth.js';
 import {
   jsonResponse, readBody, safeParseJson, SMALL_BODY_BYTES,
   validateRequiredContextGraphId, respondIfStoreUnavailable,
-  respondIfContextGraphReadAuthorityUnavailable, serializeJsonResponse, sendSerializedJsonResponse,
+  respondIfContextGraphReadAuthorityUnavailable, sendSerializedJsonResponse,
 } from '../http-utils.js';
 import { createStoreQueryRequestLifecycle, isApiQueryCallerDisconnected } from '../store-query-lifecycle.js';
 import {
@@ -61,7 +61,8 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
     }
     // Validating and serializing the result is synchronous, so the deadline
     // timer cannot interrupt it: the deadline is judged once the answer is ready.
-    const body = serializeJsonResponse(200, {
+    // Bindings are caller data: error-shaped variable names must stay byte-exact.
+    const body = JSON.stringify({
       version: BOUNDED_QUERY_VERSION, queryId: randomUUID(), observedAt: new Date().toISOString(),
       contextGraphId: parsed.contextGraphId, coverage: 'local-only', ...bounded.response,
     });

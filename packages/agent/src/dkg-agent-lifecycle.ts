@@ -11306,31 +11306,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision;
       onAuthorityWait?: SharedMemoryAuthorityWaitSink } = {},
   ): Promise<SwmReadAdmission> {
-    let authorityWait: ReturnType<typeof rfc64SharedMemoryAuthorityWaitV1>;
-    return resolveSharedMemoryAdmission({
-      signal: opts.signal,
-      acceptedAuthority: () => {
-        opts.signal?.throwIfAborted();
-        const accepted = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId, opts);
-        // Capture the wait before an await can accept a policy for this graph.
-        authorityWait = accepted === false && opts.onAuthorityWait !== undefined
-          ? rfc64SharedMemoryAuthorityWaitV1(this, contextGraphId) : undefined;
-        return accepted;
-      },
-      legacyLane: async () => {
-        const admission = await this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, opts);
-        opts.signal?.throwIfAborted();
-        if (admission.outcome !== 'allowed' && authorityWait !== undefined) opts.onAuthorityWait?.(authorityWait);
-        return admission;
-      },
-      confirmedMetadata: () => this.resolveMetadataConfirmation(contextGraphId, opts),
-      // Reuse the caller's fresh authority, or retain the finalized-index/live policy.
-      readAuthority: async () => opts.readAuthority !== undefined ? opts.readAuthority
-        : withRpcUsageSite(CG_AUTH_RPC_SITES.sharedMemoryRead, () => this.resolveContextGraphReadAuthority(contextGraphId, {
-          callerAgentAddress: opts.callerAgentAddress, signal: opts.signal,
-          allowSubscriptionFallback: false, authorityReadMode: 'finalized-index-or-live',
-        })),
-    });
+    try {
+      opts.signal?.throwIfAborted();
+      const acceptedAuthority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId, opts);
+      // Capture the wait before an await can accept a policy for this graph.
+      const authorityWait = acceptedAuthority === false && opts.onAuthorityWait !== undefined
+        ? rfc64SharedMemoryAuthorityWaitV1(this, contextGraphId) : undefined;
+      return await resolveSharedMemoryAdmission({
+        signal: opts.signal,
+        acceptedAuthority,
+        legacyLane: async () => {
+          const admission = await this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, opts);
+          opts.signal?.throwIfAborted();
+          if (admission.outcome !== 'allowed' && authorityWait !== undefined) opts.onAuthorityWait?.(authorityWait);
+          return admission;
+        },
+        confirmedMetadata: () => this.resolveMetadataConfirmation(contextGraphId, opts),
+        // Reuse the caller's fresh authority, or retain the finalized-index/live policy.
+        readAuthority: async () => opts.readAuthority !== undefined ? opts.readAuthority
+          : withRpcUsageSite(CG_AUTH_RPC_SITES.sharedMemoryRead, () => this.resolveContextGraphReadAuthority(contextGraphId, {
+            callerAgentAddress: opts.callerAgentAddress, signal: opts.signal,
+            allowSubscriptionFallback: false, authorityReadMode: 'finalized-index-or-live',
+          })),
+      });
+    } finally { opts.signal?.throwIfAborted(); }
   }
 
   async verifySyncedDataInWorker(this: DKGAgent,
