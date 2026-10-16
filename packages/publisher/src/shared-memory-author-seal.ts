@@ -31,12 +31,17 @@ import {
   contextGraphAssertionUri,
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
+  knowledgeAssetAgentAddressesEqual,
   parseCanonicalGraphScopedAuthorSealV1,
   validateAssertionName,
   type AssertionSeal,
+  type GraphKnowledgeAssetScope,
+  type Logger,
+  type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
+import { computeFlatKCRootV10 } from './merkle.js';
 
 /**
  * #1116 (review A1) — marker predicate stamped on the lifecycle URN when a KA
@@ -223,6 +228,7 @@ export async function keepSharedMemoryAuthorSeal(
   const subjects = [...sealSubjects, ...lifecycleSubjects]
     .map((subject) => `<${assertSafeIri(subject)}>`)
     .join(' ');
+  // sparql-scan-allow: R4 -- exact CG meta graph and at most four exact subject IRIs (the seal and lifecycle subjects, two address spellings each) are bound by VALUES
   const current = await store.query(
     `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(metaGraph)}> { VALUES ?s { ${subjects} } ?s ?p ?o } }`,
     { source: 'publisher.swm.authorSeal.current' },
@@ -255,4 +261,73 @@ export async function keepSharedMemoryAuthorSeal(
     }),
     { subject: lifecycleSubjects[0]!, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: metaGraph },
   ]);
+}
+
+/** The fields of a stored share that its author seal is judged against. */
+export interface StoredSharedMemoryShare {
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
+  readonly assertionName?: string;
+  readonly authorSeal?: Uint8Array;
+  readonly publicTripleCount?: number;
+  readonly privateTripleCount?: number;
+  readonly privateMerkleRoot?: Uint8Array;
+}
+
+/**
+ * The receive side for `SharedMemoryHandler`: after a share's content is
+ * stored, keep the author seal it carries. The author's own node keeps the
+ * seal its finalize wrote, since its lifecycle owns that seal and the marker;
+ * a node that does not keep a graph's seals (`keepsAuthorSeals`, the graph's
+ * curator does) skips them. A seal that does not verify is logged and
+ * dropped; the share stands either way.
+ */
+export class SharedMemoryAuthorSealKeeper {
+  constructor(
+    private readonly store: TripleStore,
+    private readonly log: Logger,
+    private readonly options: {
+      readonly localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+      /** Whether this node keeps the seals of a graph's shares. Unset keeps them. */
+      readonly keepsAuthorSeals?: (contextGraphId: string) => boolean | Promise<boolean>;
+    } = {},
+  ) {}
+
+  /** Keep the seal `share` carries, judged against `storedQuads`, the public content stored for it. */
+  async keep(
+    ctx: OperationContext,
+    share: StoredSharedMemoryShare,
+    scope: Pick<GraphKnowledgeAssetScope, 'ual' | 'assertionVersion' | 'agentAddress'>,
+    storedQuads: readonly Quad[],
+  ): Promise<void> {
+    if (!share.authorSeal?.length && !share.assertionName) return;
+    const localAgents = this.options.localAgentAddresses ? await this.options.localAgentAddresses() : [];
+    if (localAgents.some((agent) => knowledgeAssetAgentAddressesEqual(agent, scope.agentAddress))) return;
+    if (this.options.keepsAuthorSeals && !(await this.options.keepsAuthorSeals(share.contextGraphId))) return;
+    const privateMerkleRoot = share.privateMerkleRoot?.length ? share.privateMerkleRoot : undefined;
+    const verdict = verifySharedMemoryAuthorSeal(share, {
+      contextGraphId: share.contextGraphId,
+      ...(share.subGraphName ? { subGraphName: share.subGraphName } : {}),
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      publicTripleCount: share.publicTripleCount ?? 0,
+      privateTripleCount: share.privateTripleCount ?? 0,
+      ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+      merkleRoot: computeFlatKCRootV10(
+        storedQuads.map((quad) => ({ ...quad, graph: '' })),
+        privateMerkleRoot ? [privateMerkleRoot] : [],
+      ),
+    });
+    if (verdict.kind !== 'verified') {
+      if (verdict.kind === 'rejected') {
+        this.log.warn(ctx, `SWM author seal for ${scope.ual} not kept: ${verdict.reason}`);
+      }
+      return;
+    }
+    await keepSharedMemoryAuthorSeal(this.store, verdict.verified);
+    this.log.info(
+      ctx,
+      `Kept the author seal of "${verdict.verified.assertionName}" (${scope.ual} version ${scope.assertionVersion})`,
+    );
+  }
 }

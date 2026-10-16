@@ -49,11 +49,7 @@ import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 import { computeFlatKCRootV10 } from './merkle.js';
-import {
-  keepSharedMemoryAuthorSeal,
-  verifySharedMemoryAuthorSeal,
-  type SharedMemoryAuthorSealShare,
-} from './shared-memory-author-seal.js';
+import { SharedMemoryAuthorSealKeeper } from './shared-memory-author-seal.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
 import {
@@ -312,12 +308,7 @@ export class SharedMemoryHandler {
   private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly writeLocks: Map<string, Promise<void>>;
   private readonly localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
-  /**
-   * GH#3294 — whether this node keeps the author seals that shares into a
-   * graph carry: a node that publishes other authors' assets (the graph's
-   * curator) needs them, every other receiver does not. Unset keeps them.
-   */
-  private readonly keepsAuthorSeals?: (contextGraphId: string) => boolean | Promise<boolean>;
+  private readonly authorSeals: SharedMemoryAuthorSealKeeper;
   private readonly contextGraphMetaOracle?: (
     contextGraphId: string,
   ) => Promise<ContextGraphMetaOracleRecord | null>;
@@ -560,7 +551,7 @@ export class SharedMemoryHandler {
     }
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
-    this.keepsAuthorSeals = options?.keepsAuthorSeals;
+    this.authorSeals = new SharedMemoryAuthorSealKeeper(store, this.log, options);
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
     this.publicAccessPolicyOracle = options?.publicAccessPolicyOracle
       ?? options?.publicAccessPolicyOnChainOracle;
@@ -928,36 +919,6 @@ export class SharedMemoryHandler {
       { source: 'publisher.swm.graphScoped.owedAckCopyPromoted' },
     );
     return !(promoted.type === 'boolean' && promoted.value);
-  }
-
-  /**
-   * GH#3294 — keep the author's seal a share carries, so this node can publish
-   * the asset as the author's. The author's own node keeps the seal its
-   * finalize wrote: its lifecycle owns that seal and the share-complete marker.
-   * A seal that does not verify is logged and dropped; the share stands.
-   */
-  private async keepSharedMemoryAuthorSeal(
-    ctx: import('@origintrail-official/dkg-core').OperationContext,
-    fields: { readonly assertionName?: string; readonly authorSeal?: Uint8Array },
-    share: SharedMemoryAuthorSealShare,
-  ): Promise<void> {
-    if (!fields.authorSeal?.length && !fields.assertionName) return;
-    const author = createGraphKnowledgeAssetScope(share.kaUal, share.assertionVersion).agentAddress;
-    const localAgents = this.localAgentAddresses ? await this.localAgentAddresses() : [];
-    if (localAgents.some((agent) => knowledgeAssetAgentAddressesEqual(agent, author))) return;
-    if (this.keepsAuthorSeals && !(await this.keepsAuthorSeals(share.contextGraphId))) return;
-    const verdict = verifySharedMemoryAuthorSeal(fields, share);
-    if (verdict.kind !== 'verified') {
-      if (verdict.kind === 'rejected') {
-        this.log.warn(ctx, `SWM author seal for ${share.kaUal} not kept: ${verdict.reason}`);
-      }
-      return;
-    }
-    await keepSharedMemoryAuthorSeal(this.store, verdict.verified);
-    this.log.info(
-      ctx,
-      `Kept the author seal of "${verdict.verified.assertionName}" (${share.kaUal} version ${share.assertionVersion})`,
-    );
   }
 
   /**
@@ -1354,9 +1315,8 @@ export class SharedMemoryHandler {
         privateTripleCount,
         accessPolicy: wireAccessPolicy,
         allowedPeers: wireAllowedPeers,
-        assertionName: sealedAssertionName,
-        authorSeal,
       } = request;
+      const sealedShare = request;
       const shareOperationId = request.shareOperationId?.trim();
       const requestLifecycleFields: SharedMemoryLifecycleFields = {
         contextGraphId,
@@ -1596,18 +1556,17 @@ export class SharedMemoryHandler {
               shareOperationId,
             }))
           : undefined;
-        let receivedMerkleRoot: Uint8Array | undefined;
-        const merkleRootOfReceived = (): Uint8Array => receivedMerkleRoot ??= computeFlatKCRootV10(
-          normalized.map((quad) => ({ ...quad, graph: '' })),
-          privateMerkleRoot?.length ? [privateMerkleRoot] : [],
-        );
         const persistLocallyTrustedControls = async (): Promise<void> => {
+          const merkleRoot = computeFlatKCRootV10(
+            normalized.map((quad) => ({ ...quad, graph: '' })),
+            privateMerkleRoot?.length ? [privateMerkleRoot] : [],
+          );
           await replaceLocallyTrustedKnowledgeAssetControlEnvelope(
             this.store,
             contentScope.ual,
             {
               assertionVersion: contentScope.assertionVersion,
-              merkleRoot: merkleRootOfReceived(),
+              merkleRoot,
             },
             {
               publisherPeerId,
@@ -1616,21 +1575,6 @@ export class SharedMemoryHandler {
             },
           );
         };
-        // GH#3294 — after the content is stored, so the seal is judged against
-        // exactly what this node now holds.
-        const keepAuthorSeal = (): Promise<void> => this.keepSharedMemoryAuthorSeal(ctx, {
-          assertionName: sealedAssertionName,
-          authorSeal,
-        }, {
-          contextGraphId,
-          ...(subGraphName ? { subGraphName } : {}),
-          kaUal: contentScope.ual,
-          assertionVersion: contentScope.assertionVersion,
-          publicTripleCount: publicTripleCount ?? 0,
-          privateTripleCount: privateTripleCount ?? 0,
-          ...(privateMerkleRoot?.length ? { privateMerkleRoot } : {}),
-          merkleRoot: merkleRootOfReceived(),
-        });
         const incomingPrivateRootHex = privateMerkleRoot?.length
           ? ethers.hexlify(privateMerkleRoot).toLowerCase()
           : undefined;
@@ -1709,7 +1653,7 @@ export class SharedMemoryHandler {
               // Refresh local-only controls so a retry completes a prior
               // head/sidecar tear.
               await persistLocallyTrustedControls();
-              await keepAuthorSeal();
+              await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized);
               return swmWriteApplied;
             }
             const reason =
@@ -1848,7 +1792,7 @@ export class SharedMemoryHandler {
         // this assertion's locally recomputed root, only after the durable SWM
         // head has committed. Receipt recovery must fail closed without them.
         await persistLocallyTrustedControls();
-        await keepAuthorSeal();
+        await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized);
 
         return swmWriteApplied;
       });
