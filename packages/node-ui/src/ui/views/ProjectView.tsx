@@ -473,8 +473,9 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const detailKey = JSON.stringify([contextGraphId, selectedUri, selectedLayerContext, includeQueryCatalogInMemory]);
   const detailRead = useFetch(async () => ({
     key: detailKey,
-    ...(selectedUri ? await fetchMemoryEntity(contextGraphId, selectedUri, selectedLayerContext ?? undefined, includeQueryCatalogInMemory) : { triples: [], partial: false }),
-  }), [detailKey]);
+    ...(selectedUri ? await fetchMemoryEntity(contextGraphId, selectedUri, selectedLayerContext ?? undefined, includeQueryCatalogInMemory,
+      { triples: rawMemory.allTriples, partial: rawMemory.partial }) : { triples: [], partial: false }),
+  }), [detailKey, selectedUri?.startsWith('_:') ? rawMemory.allTriples : null, selectedUri?.startsWith('_:') ? rawMemory.partial : null]);
   const fetchedDetail = detailRead.data?.key === detailKey ? detailRead.data : null;
   useMemoryGraphEvents(contextGraphId, () => { if (selectedUri) detailRead.refresh(); });
   const detailEntityTriples = useMemo(

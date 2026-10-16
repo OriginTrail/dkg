@@ -78,7 +78,9 @@ describe('memory continuation and refresh with the scoped native store', () => {
     ]);
     failShared = true;
     await act(async () => root.render(React.createElement(Probe)));
-    expect(memory.layerStatus.swm).toBe('error'); expect(memory.limitMessage).toBeTruthy();
+    expect(memory.layerStatus.swm).toBe('error'); expect(memory.hasMore).toBe(true);
+    await act(async () => memory.loadMore?.());
+    expect(memory.limitMessage).toBeTruthy();
     expect(memory.hasMore).toBe(partitions > 5);
     const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry memory read');
     expect(retry).toBeDefined();
@@ -89,7 +91,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     expect(memory.limitMessage).toBeTruthy();
     expect([...container.querySelectorAll('button')].map(button => button.textContent)).toEqual(partitions > 5 ? ['Load more graph data'] : []);
   });
-  it('keeps a clipped blank read partial after all IRI continuation pages finish', async () => {
+  it('loads a small blank component after all IRI continuation pages finish', async () => {
     await seed(cg, 1); const graph = `did:dkg:context-graph:${cg}/_working_memory/${owner}/00`;
     await store.insert([
       ...Array.from({ length: 5000 }, (_, i) => ({ subject: `urn:regular:${String(i).padStart(4, '0')}`, predicate: 'urn:p', object: '"value"', graph })),
@@ -97,11 +99,12 @@ describe('memory continuation and refresh with the scoped native store', () => {
     ]);
     await act(async () => root.render(React.createElement(Probe)));
     expect(memory.graphTriples).toHaveLength(5000); expect(memory.hasMore).toBe(true);
-    expect(container.textContent).toContain('Memory preview limit reached');
+    expect(memory.limitMessage).toBeNull();
     await act(async () => memory.loadMore?.());
-    expect(memory.hasMore).toBe(false); expect(memory.partial).toBe(true);
-    expect(memory.limitMessage).toContain('relationships remain unloaded');
-    expect(container.textContent).toContain('Memory preview limit reached');
+    expect(memory.hasMore).toBe(false); expect(memory.partial).toBe(false);
+    expect(memory.graphTriples).toHaveLength(5002);
+    expect(memory.graphTriples.some(triple => triple.subject.startsWith('_:'))).toBe(true);
+    expect(memory.limitMessage).toBeNull();
     expect(container.querySelector('button')).toBeNull();
   });
   it.each(['switch', 'unmount'])('stops refreshed depth reads after %s while the first inventory is pending', async action => {

@@ -1425,7 +1425,7 @@ export function SubGraphDetailView({
         view: execution.view,
         subGraphName: execution.subGraphName,
         ...(execution.view === 'working-memory' ? { includeContextGraphPartitions: true } : {}),
-      });
+      }, { timeoutMs: null, maxResponseBytes: null });
       const result = r.result;
       const resultType = result.type;
       if (resultType !== 'bindings') {

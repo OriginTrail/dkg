@@ -102,7 +102,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       // Bulk scope is intentionally independent from the display list. When
       // query-catalog visibility is enabled, catalog assertions remain
       // explicit row actions and are not silently admitted to this batch.
-      const bulkAssertions = await listAssertions(contextGraphId, layer);
+      const bulkAssertions = await listAssertions(contextGraphId, layer, { includeCounts: false });
       if (bulkAssertions.length === 0) {
         setResult(layer === 'wm'
           ? 'No user Knowledge Assets are ready to share.'

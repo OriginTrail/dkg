@@ -41,6 +41,7 @@ describe('bounded graph reads', () => {
     let pageFails = true;
     const fetch = vi.fn(async (_url: string, init: RequestInit) => {
       const request = JSON.parse(String(init.body));
+      if (request.sparql.includes('FILTER(isBlank(?s) || isBlank(?o))')) return response([]);
       if (request.sparql.includes('_verifiable_memory_meta') || request.sparql.includes('STRENDS(STR(?g), "/_shared_memory")')) return response([]);
       if (request.sparql.includes('?__s > "I:urn:order:4999"')) {
         if (pageFails) return new Response('{"error":"temporary"}', { status: 503 });

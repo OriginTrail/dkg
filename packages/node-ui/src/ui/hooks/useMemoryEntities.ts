@@ -56,6 +56,8 @@ export interface Triple {
   subject: string;
   predicate: string;
   object: string;
+  /** Physical source graph; blank labels are scoped to its loaded response. */
+  graph?: string;
   /** Sub-graph slug this triple was sourced from, if known (WM triples only). */
   subGraph?: string;
 }

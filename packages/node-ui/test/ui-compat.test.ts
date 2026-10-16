@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readDaemonSources } from './helpers/read-cli-daemon';
@@ -396,11 +396,15 @@ describe('fileUrl hash handling', () => {
 });
 
 describe('listAssertions query path', () => {
-  const api = readFile('api.ts');
-
-  it('uses executeQuery without view param (avoids agentAddress requirement)', () => {
-    expect(api).toMatch(/listAssertions[\s\S]*?executeQuery\(sparql, \{ contextGraphId \}\)/);
-    expect(api).not.toMatch(/listAssertions[\s\S]*?view:\s*'working-memory'/);
+  it('discovers membership without a view parameter that requires agentAddress', async () => {
+    const { listAssertions, invalidateQueryCache } = await import('../src/ui/api.js');
+    const request = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ result: { bindings: [] } })));
+    try {
+      await listAssertions('compat-scope', 'swm', { includeCounts: false });
+      const body = JSON.parse(String(request.mock.calls[0][1]?.body));
+      expect(body.contextGraphId).toBe('compat-scope');
+      expect(body.view).toBeUndefined();
+    } finally { request.mockRestore(); invalidateQueryCache(); }
   });
 });
 

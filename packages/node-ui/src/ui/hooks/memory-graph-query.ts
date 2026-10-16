@@ -73,10 +73,19 @@ export function subGraphOf(gUri: string, cgId: string): string | undefined {
 }
 
 type TermKey = [string, string, string, string, string, string];
-export type MemoryGraphCursor =
+type RowCursor =
   | { kind: 'row'; graph: string; termKey: TermKey }
   | { kind: 'after-graph'; graph: string };
-export interface LayerResult { triples: Triple[]; ok: boolean; truncated: boolean; rowCount: number; cursor?: MemoryGraphCursor; incomplete?: boolean }
+export type MemoryGraphCursor = RowCursor
+  | { kind: 'blank-graphs'; graphs: string[]; resume?: RowCursor };
+export interface MemoryGraphPage {
+  ok: true;
+  triples: Triple[];
+  nextCursor?: MemoryGraphCursor;
+  omittedRelationships: boolean;
+}
+export type LayerResult = MemoryGraphPage
+  | { ok: false; reason: 'unavailable' | 'response-limit' | 'cancelled' };
 export const MEMORY_LIMIT_MESSAGE = 'Memory preview limit reached. Some relationships remain unloaded. Use a narrower query to inspect them.';
 
 interface QueryLayerOptions {
@@ -84,7 +93,7 @@ interface QueryLayerOptions {
   layerLimit?: number;
   cursor?: MemoryGraphCursor;
   /** Stop dependent reads after the owning hook is replaced or unmounted. */
-  isCurrent?: () => boolean;
+  signal?: AbortSignal;
 }
 
 const CURSOR_VARIABLES = ['?__g', '?__s', '?__p', '?__kind', '?__o', '?__lang', '?__datatype'];
@@ -97,7 +106,7 @@ const CURSOR_BINDINGS = `
   BIND(IF(isLiteral(?o), LANG(?o), "") AS ?__lang)
   BIND(IF(isLiteral(?o), STR(DATATYPE(?o)), "") AS ?__datatype)`;
 
-function cursorForRow(row: Record<string, unknown>): MemoryGraphCursor {
+function cursorForRow(row: Record<string, unknown>): RowCursor {
   const values = CURSOR_VARIABLES.map(variable => {
     const term = row[variable.slice(1)];
     const value = bv(term);
@@ -109,7 +118,7 @@ function cursorForRow(row: Record<string, unknown>): MemoryGraphCursor {
   return { kind: 'row', graph, termKey: termKey as TermKey };
 }
 
-function cursorFilter(cursor?: MemoryGraphCursor): string {
+function cursorFilter(cursor?: RowCursor): string {
   if (cursor?.kind !== 'row') return '';
   const values = [cursor.graph, ...cursor.termKey];
   return `FILTER(${CURSOR_VARIABLES.map((variable, index) => {
@@ -124,9 +133,9 @@ export async function readMemoryGraphPage(
   opts: QueryLayerOptions = {},
 ): Promise<LayerResult> {
   try {
-    const { layerLimit: requestedLimit = WM_LIMIT, cursor, isCurrent, ...requestOpts } = opts;
+    const { layerLimit: requestedLimit = WM_LIMIT, cursor, signal, ...requestOpts } = opts;
     const layerLimit = Math.max(1, Math.min(WM_LIMIT, Math.trunc(requestedLimit) || WM_LIMIT));
-    const checkCurrent = () => { if (isCurrent && !isCurrent()) throw new Error('Obsolete memory read'); };
+    const checkCurrent = () => signal?.throwIfAborted();
     const read = async (sparql: string) => {
       checkCurrent();
       const data = await postQueryDeduped({ sparql, contextGraphId, ...requestOpts },
@@ -134,43 +143,83 @@ export async function readMemoryGraphPage(
       checkCurrent();
       return data.result?.bindings ?? [];
     };
-    // Only this small graph inventory feeds the data read; existence probes do
-    // not sort all source triples just to find the next five graph names.
-    const catalog = await read(memoryQuery(definition, {
-      projection: 'DISTINCT ?g', inventory: true, order: 'STR(?g)', limit: 6,
-      filters: cursor ? `FILTER(STR(?g) ${cursor.kind === 'after-graph' ? '>' : '>='} ${JSON.stringify(cursor.graph)})` : '',
-    }));
-    const names = [...new Set(catalog.map(row => canonicalEntityUri(bv(row.g) ?? '')).filter(Boolean))];
-    const graphNames = names.slice(0, 5);
-    if (!graphNames.length) return { triples: [], ok: true, truncated: false, rowCount: 0 };
-    const bindings = (await read(memoryQuery(definition, {
-      projection: `?s ?p ?o ?g ${CURSOR_VARIABLES.join(' ')}`, graphs: graphNames,
-      filters: `FILTER(!isBlank(?s) && !isBlank(?o)) ${cursorFilter(cursor)}`,
-      bindings: CURSOR_BINDINGS, order: CURSOR_VARIABLES.join(' '), limit: layerLimit,
-    }))).slice(0, layerLimit);
-    const clipped = bindings.length >= layerLimit;
-    // Blank labels are result-local and cannot be used as portable SPARQL
-    // constants. Read each entered graph's blank edges once, within the page
-    // budget, and explicitly retain incompleteness if that budget clips them.
-    const lastGraphIndex = clipped ? graphNames.indexOf(canonicalEntityUri(bv(bindings.at(-1)!.g) ?? '')) : graphNames.length - 1;
-    const blankGraphs = graphNames.slice(0, lastGraphIndex + 1)
-      .filter(graph => cursor?.kind !== 'row' || graph !== cursor.graph);
-    const blankBudget = layerLimit - bindings.length;
-    const blankBindings = blankGraphs.length ? (await read(memoryQuery(definition, {
-      graphs: blankGraphs, filters: 'FILTER(isBlank(?s) || isBlank(?o))', limit: blankBudget + 1,
-    }))).filter(row => rdfBindingValue(row.s)?.startsWith('_:') || rdfBindingValue(row.o)?.startsWith('_:')) : [];
-    const visibleBlanks = blankBindings.slice(0, blankBudget);
-    const triples = [...bindings, ...visibleBlanks].map(row => ({
-      subject: rdfBindingValue(row.s) ?? '', predicate: bv(row.p) ?? '', object: rdfBindingValue(row.o) ?? '',
-      subGraph: subGraphOf(bv(row.g) ?? '', contextGraphId),
-    })).filter(triple => triple.subject && triple.predicate && triple.object);
-    return {
-      triples, ok: true, truncated: clipped || names.length > 5,
-      incomplete: blankBindings.length > blankBudget, rowCount: bindings.length + visibleBlanks.length,
-      cursor: clipped ? cursorForRow(bindings.at(-1)!) : { kind: 'after-graph', graph: graphNames.at(-1)! },
+    // Keep exact projected ordering keys, but shrink wide row pages until their
+    // serialized response fits the transport budget. Never cache a failed read.
+    const boundedRead = async (query: (limit: number) => string, requested: number) => {
+      let limit = requested;
+      for (;;) {
+        try { return { rows: await read(query(limit)), limit }; }
+        catch (error) {
+          if (!(error instanceof QueryResponseLimitError) || limit === 1) throw error;
+          limit = Math.max(1, Math.floor(limit / 2));
+        }
+      }
     };
+    const triples: Triple[] = [];
+    const append = (rows: Record<string, unknown>[]) => {
+      for (const row of rows) {
+        const graph = canonicalEntityUri(bv(row.g) ?? '');
+        // Blank labels belong to this graph's single blank-edge response. They
+        // are never used as constants in another query or merged with another graph.
+        const term = (value: unknown) => {
+          const text = rdfBindingValue(value) ?? '';
+          return text.startsWith('_:') ? `_:${encodeURIComponent(graph)}:${text.slice(2)}` : text;
+        };
+        const subject = term(row.s); const predicate = bv(row.p) ?? ''; const object = term(row.o);
+        if (subject && predicate && object) triples.push({ subject, predicate, object, graph, subGraph: subGraphOf(graph, contextGraphId) });
+      }
+    };
+    let pending: string[];
+    let resume: RowCursor | undefined;
+    if (cursor?.kind === 'blank-graphs') {
+      pending = [...cursor.graphs]; resume = cursor.resume;
+    } else {
+      // Existence probes inventory five graphs without sorting their source rows.
+      const catalog = await read(memoryQuery(definition, {
+        projection: 'DISTINCT ?g', inventory: true, order: 'STR(?g)', limit: 6,
+        filters: cursor ? `FILTER(STR(?g) ${cursor.kind === 'after-graph' ? '>' : '>='} ${JSON.stringify(cursor.graph)})` : '',
+      }));
+      const names = [...new Set(catalog.map(row => canonicalEntityUri(bv(row.g) ?? '')).filter(Boolean))];
+      const graphs = names.slice(0, 5);
+      if (!graphs.length) return { ok: true, triples, omittedRelationships: false };
+      const { rows, limit } = await boundedRead(limit => memoryQuery(definition, {
+        projection: `?s ?p ?o ?g ${CURSOR_VARIABLES.join(' ')}`, graphs,
+        filters: `FILTER(!isBlank(?s) && !isBlank(?o)) ${cursorFilter(cursor)}`,
+        bindings: CURSOR_BINDINGS, order: CURSOR_VARIABLES.join(' '), limit,
+      }), layerLimit);
+      const bindings = rows.slice(0, limit);
+      append(bindings);
+      const clipped = bindings.length >= limit;
+      const last = clipped ? cursorForRow(bindings.at(-1)!) : undefined;
+      // Finish blank edges before advancing past a completed graph. The graph
+      // containing a row cursor is still in progress, so defer its blanks too.
+      pending = clipped ? graphs.slice(0, graphs.indexOf(last!.graph)) : graphs;
+      resume = last ?? (names.length > 5 ? { kind: 'after-graph', graph: graphs.at(-1)! } : undefined);
+    }
+    let omittedRelationships = false;
+    while (pending.length && triples.length < layerLimit) {
+      const budget = layerLimit - triples.length;
+      const load = (graphs: string[]) => boundedRead(limit => memoryQuery(definition, {
+        graphs, filters: 'FILTER(isBlank(?s) || isBlank(?o))', limit,
+      }), budget + 1);
+      let result = await load(pending);
+      const fits = () => result.rows.length <= budget && (result.limit === budget + 1 || result.rows.length < result.limit);
+      if (fits()) { append(result.rows); pending = []; break; }
+      // Do not spend the tail of a row page on a partial blank response. Give
+      // it a fresh page; split graph groups before declaring any graph oversized.
+      if (triples.length) break;
+      if (pending.length > 1) result = await load([pending[0]]);
+      append(result.rows.slice(0, budget));
+      omittedRelationships ||= !fits();
+      pending.shift();
+    }
+    const nextCursor = pending.length ? { kind: 'blank-graphs' as const, graphs: pending, resume } : resume;
+    if (!triples.length && !pending.length && resume) {
+      return readMemoryGraphPage(definition, contextGraphId, { ...opts, cursor: resume });
+    }
+    return { ok: true, triples, nextCursor, omittedRelationships };
   } catch (error) {
-    return { triples: [], ok: false, truncated: false, rowCount: 0, incomplete: error instanceof QueryResponseLimitError };
+    return { ok: false, reason: opts.signal?.aborted ? 'cancelled' : error instanceof QueryResponseLimitError ? 'response-limit' : 'unavailable' };
   }
 }
 
@@ -180,23 +229,32 @@ export async function fetchMemoryEntity(
   uri: string,
   layer?: MemoryLayerKey,
   includeQueryCatalog = false,
+  preview?: { triples: LayeredTriple[]; partial: boolean },
 ): Promise<{ triples: LayeredTriple[]; partial: boolean }> {
   const target = canonicalEntityUri(uri);
   const blank = target.startsWith('_:');
   const definitions = definitionsForLayer(contextGraphId, layer, includeQueryCatalog);
+  if (blank) {
+    // A blank label cannot identify a resource in a fresh SPARQL result. Use
+    // the same graph-scoped response that supplied the clicked node instead.
+    const layers = new Set(definitions.map(definition => definition.layer));
+    return {
+      triples: (preview?.triples ?? []).filter(triple => layers.has(triple.layer)
+        && (triple.subject === target || triple.object === target)),
+      partial: preview?.partial ?? true,
+    };
+  }
   const results = await Promise.all(definitions.map(async definition => {
-    const pattern = blank ? undefined : `{
+    const pattern = `{
       { ${sparqlIri(target)} ?p ?o BIND(${sparqlIri(target)} AS ?s) }
       UNION { ?s ?p ${sparqlIri(target)} BIND(${sparqlIri(target)} AS ?o) FILTER(?s != ${sparqlIri(target)}) }
     }`;
-    // Bind IRIs to use the store's subject/object indexes. For a clicked blank
-    // resource, inspect bounded returned terms rather than STR(blank) or an
-    // existential _:label pattern that could match unrelated resources.
+    // Bind IRIs to use the store's subject/object indexes.
     const data = await postQueryDeduped({ sparql: memoryQuery(definition, {
-      pattern, filters: blank ? 'FILTER(isBlank(?s) || isBlank(?o))' : '', limit: 1001,
+      pattern, limit: 1001,
     }), contextGraphId, includeContextGraphPartitions: true }, { maxAgeMs: UI_READ_MAX_AGE_MS, timeoutMs: 60_000 });
     const rows = data.result?.bindings ?? [];
-    return { truncated: rows.length > 1000, triples: rows.slice(0, 1000).filter(row => !blank || rdfBindingValue(row.s) === target || rdfBindingValue(row.o) === target).map(row => ({
+    return { truncated: rows.length > 1000, triples: rows.slice(0, 1000).map(row => ({
       subject: rdfBindingValue(row.s) ?? '', predicate: bv(row.p) ?? '', object: rdfBindingValue(row.o) ?? '',
       subGraph: subGraphOf(bv(row.g) ?? '', contextGraphId),
     })) };

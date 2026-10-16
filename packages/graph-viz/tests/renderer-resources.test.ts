@@ -52,7 +52,7 @@ describe('renderer hit regions and resources', () => {
     const sprite = label(); const texture = { dispose: vi.fn() };
     const removedMaterial = sprite.material;
     internal._iconSprites.set('urn:gone', { url: 'gone.png', sprite });
-    internal._iconMaterials.add(sprite.material); internal._textureCache.set('gone.png', texture);
+    internal._textureCache.set('gone.png', { texture });
     renderer.render(new Map(), new Map());
     expect(removedMaterial.dispose).toHaveBeenCalledOnce(); expect(texture.dispose).toHaveBeenCalledOnce();
     expect(internal._iconSprites.size).toBe(0); expect(internal._textureCache.size).toBe(0);
@@ -83,6 +83,7 @@ describe('renderer hit regions and resources', () => {
     const drawNode = graph.callbacks.get('nodeThreeObject');
     const first = drawNode({ _graphNode: node });
     const second = drawNode({ _graphNode: peer });
+    expect(first.material.opacity).toBe(0.9);
     const disposeFirst = vi.spyOn(first.material, 'dispose');
     const disposeSecond = vi.spyOn(second.material, 'dispose');
     for (let i = 0; i < 10; i++) {
@@ -118,6 +119,7 @@ describe('renderer hit regions and resources', () => {
     renderer.render(new Map([[a.id, a], [b.id, b]]), new Map());
     const drawNode = graph.callbacks.get('nodeThreeObject');
     const first = drawNode({ _graphNode: a }); const second = drawNode({ _graphNode: b });
+    expect(first.material.opacity).toBe(1);
     expect(images).toHaveLength(1);
     expect(first.material.map).toBe(second.material.map);
     const dispose = vi.spyOn(first.material.map, 'dispose');
@@ -127,6 +129,13 @@ describe('renderer hit regions and resources', () => {
     renderer.render(new Map(), new Map());
     expect(images[0].onload).toBeNull();
     expect(dispose).toHaveBeenCalledOnce();
+    lateLoad();
+    expect(context.drawImage).not.toHaveBeenCalled();
+    renderer.render(new Map([[a.id, a]]), new Map());
+    drawNode({ _graphNode: a });
+    expect(images).toHaveLength(2);
+    lateLoad(); // An old callback must not update a replacement with the same URL.
+    expect(context.drawImage).not.toHaveBeenCalled();
     renderer.destroy(); lateLoad();
     expect(context.drawImage).not.toHaveBeenCalled();
   });

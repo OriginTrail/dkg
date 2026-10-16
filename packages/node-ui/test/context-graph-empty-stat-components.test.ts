@@ -578,7 +578,7 @@ describe('Context Graph shared empty/stat patterns', () => {
       'wm',
       { includeQueryCatalog: true },
     );
-    expect(apiMocks.listAssertions).toHaveBeenNthCalledWith(2, 'cg-test', 'wm');
+    expect(apiMocks.listAssertions).toHaveBeenNthCalledWith(2, 'cg-test', 'wm', { includeCounts: false });
     expect(apiMocks.promoteAssertion).toHaveBeenCalledTimes(1);
     expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg-test', 'user-notes', {});
     expect(apiMocks.promoteAssertion).not.toHaveBeenCalledWith(

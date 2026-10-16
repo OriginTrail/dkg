@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CoalescingRecurringTask } from '@origintrail-official/dkg-core/dist/coalescing-recurring-task.js';
 import { invalidateQueryCache } from '../api.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
 import { memoryQueryDefinitions, type MemoryQueryDefinition } from './memory-query-definition.js';
-import { MEMORY_LIMIT_MESSAGE, readMemoryGraphPage, type LayerResult } from './memory-graph-query.js';
+import { MEMORY_LIMIT_MESSAGE, readMemoryGraphPage, type MemoryGraphPage } from './memory-graph-query.js';
 import type { LayeredTriple, MemoryLayerStatus, TrustLevel } from './useMemoryEntities.js';
 
 interface MemorySource {
   definition: MemoryQueryDefinition;
-  pages: LayerResult[];
+  pages: MemoryGraphPage[];
   status: MemoryLayerStatus;
   blocked?: boolean;
   pageError?: string;
@@ -23,29 +24,29 @@ interface MemoryPages {
 type ReadMode = 'refresh' | 'append';
 const RETRY_PAGE = 'Could not load more graph data. Retry to continue from the last loaded page.';
 const emptySource = (definition: MemoryQueryDefinition): MemorySource => ({ definition, pages: [], status: 'loading' });
-const canContinue = (source: MemorySource) => !source.blocked && !!source.pages.at(-1)?.truncated;
+const canContinue = (source: MemorySource) => !source.blocked && !!source.pages.at(-1)?.nextCursor;
 
 /** Refresh and continuation both accept complete pages through this transition. */
-function acceptPage(source: MemorySource, result: LayerResult): MemorySource {
+function acceptPage(source: MemorySource, result: MemoryGraphPage): MemorySource {
   return { ...source, pages: [...source.pages, result], status: 'ok', pageError: undefined };
 }
 
-async function readSource(source: MemorySource, mode: ReadMode, contextGraphId: string, isCurrent: () => boolean) {
+async function readSource(source: MemorySource, mode: ReadMode, contextGraphId: string, signal: AbortSignal) {
   const depth = mode === 'refresh' ? Math.max(1, source.pages.length) : 1;
   let next: MemorySource = { ...source, pages: mode === 'refresh' ? [] : source.pages,
     status: 'ok', blocked: false, pageError: undefined };
-  for (let page = 0; page < depth && isCurrent(); page++) {
+  for (let page = 0; page < depth && !signal.aborted; page++) {
     const previous = next.pages.at(-1);
-    if (previous && !previous.truncated) break;
+    if (previous && !previous.nextCursor) break;
     const result = await readMemoryGraphPage(source.definition, contextGraphId, {
-      includeContextGraphPartitions: true, cursor: previous?.cursor, isCurrent,
+      includeContextGraphPartitions: true, cursor: previous?.nextCursor, signal,
     });
     if (!result.ok) {
       return {
-        ...next, status: 'error' as const, blocked: result.incomplete,
+        ...next, status: 'error' as const, blocked: result.reason === 'response-limit',
         // Keep a coherent last successful preview if replay fails partway.
         pages: mode === 'refresh' && source.pages.length ? source.pages : next.pages,
-        pageError: mode === 'append' ? result.incomplete ? MEMORY_LIMIT_MESSAGE : RETRY_PAGE : undefined,
+        pageError: mode === 'append' ? result.reason === 'response-limit' ? MEMORY_LIMIT_MESSAGE : RETRY_PAGE : undefined,
       };
     }
     next = acceptPage(next, result);
@@ -60,56 +61,50 @@ export function useMemoryPages(contextGraphId: string, includeQueryCatalog: bool
   const [state, setState] = useState<MemoryPages>({ key: '', contextGraphId: '', sources: [], loading: true });
   // This ref points at the same committed collection, for queued async work.
   const stateRef = useRef(state);
-  const activeRef = useRef(false);
-  const versionRef = useRef(0);
-  const requestRef = useRef<{ key: string; promise: Promise<void>; again: boolean } | null>(null);
+  const taskRef = useRef<{ key: string; task: CoalescingRecurringTask; mode: ReadMode } | null>(null);
 
   const commit = useCallback((next: MemoryPages) => {
     stateRef.current = next;
     setState(next);
   }, []);
 
-  const run = useCallback((mode: ReadMode): Promise<void> => {
-    if (!contextGraphId) return Promise.resolve();
-    const running = requestRef.current;
-    if (running?.key === key) {
-      if (mode === 'refresh') running.again = true;
-      return running.promise;
-    }
-    const previous = stateRef.current;
-    const sources = definitions.map(definition => previous.contextGraphId === contextGraphId
-      ? previous.sources.find(source => source.definition.key === definition.key) ?? emptySource(definition)
-      : emptySource(definition));
-    if (mode === 'append' && !sources.some(canContinue)) return Promise.resolve();
-    const version = ++versionRef.current;
-    const isCurrent = () => activeRef.current && version === versionRef.current;
-    const entry = { key, promise: Promise.resolve(), again: false };
-    commit({ key, contextGraphId, sources, loading: true });
-    entry.promise = (async () => {
-      const results = await Promise.all(sources.map(source => mode === 'append' && !canContinue(source)
-        ? source : readSource(source, mode, contextGraphId, isCurrent)));
-      if (isCurrent()) commit({ key, contextGraphId, sources: results, loading: false });
-    })().finally(() => {
-      if (isCurrent() && stateRef.current.loading) commit({ ...stateRef.current, loading: false });
-      if (requestRef.current !== entry) return;
-      requestRef.current = null;
-      if (entry.again && isCurrent()) void run('refresh');
-    });
-    requestRef.current = entry;
-    return entry.promise;
-  }, [contextGraphId, definitions, key, commit]);
-
-  useMemoryGraphEvents(contextGraphId, () => { void run('refresh'); });
   useEffect(() => {
-    activeRef.current = true;
-    if (contextGraphId) void run('refresh');
+    const task: CoalescingRecurringTask = new CoalescingRecurringTask({
+      closingMessage: 'Memory graph scope closed',
+      runPass: async signal => {
+        const mode = entry.mode;
+        entry.mode = 'refresh';
+        const previous = stateRef.current;
+        const sources = definitions.map(definition => previous.contextGraphId === contextGraphId
+          ? previous.sources.find(source => source.definition.key === definition.key) ?? emptySource(definition)
+          : emptySource(definition));
+        if (mode === 'append' && !sources.some(canContinue)) return;
+        commit({ key, contextGraphId, sources, loading: true });
+        const results = await Promise.all(sources.map(source => mode === 'append' && !canContinue(source)
+          ? source : readSource(source, mode, contextGraphId, signal)));
+        if (!signal.aborted) commit({ key, contextGraphId, sources: results, loading: false });
+      },
+      onError: () => { if (!task.closed) commit({ ...stateRef.current, loading: false }); },
+    });
+    const entry = { key, mode: 'refresh' as ReadMode, task };
+    taskRef.current = entry;
+    if (contextGraphId) entry.task.request();
     else commit({ key, contextGraphId, sources: [], loading: false });
     return () => {
-      activeRef.current = false;
-      versionRef.current++;
-      requestRef.current = null;
+      taskRef.current = null;
+      void entry.task.close();
     };
-  }, [run, contextGraphId, key, commit]);
+  }, [contextGraphId, definitions, key, commit]);
+  const run = useCallback((mode: ReadMode) => {
+    const entry = taskRef.current;
+    if (!entry || entry.key !== key || !contextGraphId) return;
+    // Repeated Load more clicks are dropped; refreshes queue one pass behind
+    // whichever page read is active. The shared task owns cancellation/drain.
+    if (mode === 'append' && entry.task.running) return;
+    entry.mode = mode;
+    entry.task.request();
+  }, [key, contextGraphId]);
+  useMemoryGraphEvents(contextGraphId, () => run('refresh'));
 
   const current = state.key === key;
   const triples = useMemo<LayeredTriple[]>(() => current ? state.sources.flatMap(source =>
@@ -123,7 +118,7 @@ export function useMemoryPages(contextGraphId: string, includeQueryCatalog: bool
   const layerStatus = { wm: status('working'), swm: status('shared'), vm: status('verified') };
   const sources = current ? state.sources : [];
   const hasMore = sources.some(canContinue);
-  const incomplete = sources.some(source => source.blocked || source.pages.some(page => page.incomplete));
+  const incomplete = sources.some(source => source.blocked || source.pages.some(page => page.omittedRelationships));
   const failed = Object.values(layerStatus).filter(value => value === 'error').length;
   const refresh = useCallback(() => { invalidateQueryCache(contextGraphId); void run('refresh'); }, [contextGraphId, run]);
   const loadMore = useCallback(() => { void run('append'); }, [run]);

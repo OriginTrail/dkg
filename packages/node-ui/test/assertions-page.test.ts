@@ -4,7 +4,7 @@ import { OxigraphStore } from '../../storage/dist/index.js';
 import { DKGQueryEngine } from '../../query/dist/dkg-query-engine.js';
 import { generateAssertionCreatedMetadata } from '../../publisher/dist/metadata.js';
 import { listAssertionsPage, fetchAssertionPageCounts } from '../src/ui/assertions-page.js';
-import { invalidateQueryCache } from '../src/ui/api.js';
+import { invalidateQueryCache, listAssertions } from '../src/ui/api.js';
 import { fetchMemoryEntity, readMemoryGraphPage } from '../src/ui/hooks/useMemoryEntities.js';
 import { memoryQueryDefinitions } from '../src/ui/hooks/memory-query-definition.js';
 
@@ -87,7 +87,7 @@ describe('assertion pages against the native scoped query engine', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ result: { bindings: [] } })));
     const page = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { layerLimit: 1 });
     expect(page.ok).toBe(true);
-    expect(page.cursor).toEqual({ kind: 'row', graph,
+    expect(page.nextCursor).toEqual({ kind: 'row', graph,
       termKey: ['I:urn:cursor', 'urn:value', 'L', '"quoted"', '', 'http://www.w3.org/2001/XMLSchema#string'] });
     expect(page.triples[0].object).toBe(JSON.stringify('"quoted"'));
   });
@@ -101,8 +101,8 @@ describe('assertion pages against the native scoped query engine', () => {
     for (let page = 0; page < 5; page++) {
       const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 1, cursor });
       expect(result.ok).toBe(true); seen.push(...result.triples.map(triple => triple.object));
-      if (!result.truncated) break;
-      cursor = result.cursor;
+      if (!result.nextCursor) break;
+      cursor = result.nextCursor;
     }
     expect(seen).toEqual([JSON.stringify(token), '"a"', '"z"']);
     expect(failures).toEqual([]);
@@ -124,8 +124,8 @@ describe('assertion pages against the native scoped query engine', () => {
     for (let page = 0; page < 3; page++) {
       const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 100, cursor });
       expect(result.ok).toBe(true); seen.push(...result.triples.map(triple => triple.subject));
-      if (!result.truncated) break;
-      cursor = result.cursor;
+      if (!result.nextCursor) break;
+      cursor = result.nextCursor;
     }
     expect(new Set(seen).size).toBe(7); expect(seen).toHaveLength(7);
     expect(failures).toEqual([]);
@@ -143,13 +143,15 @@ describe('assertion pages against the native scoped query engine', () => {
       const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 20, cursor });
       expect(result.ok).toBe(true);
       triples.push(...result.triples);
-      if (!result.truncated) break;
-      cursor = result.cursor;
+      if (!result.nextCursor) break;
+      cursor = result.nextCursor;
     }
     expect(triples).toHaveLength(15);
     expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(15);
     const blank = triples.find(triple => triple.subject.startsWith('_:'))!.subject;
-    const detail = await fetchMemoryEntity(cg, blank, 'wm');
+    const reads = requests.length;
+    const detail = await fetchMemoryEntity(cg, blank, 'wm', false, { triples: triples.map(triple => ({ ...triple, layer: 'working' as const })), partial: false });
+    expect(requests).toHaveLength(reads);
     expect(detail.partial).toBe(false);
     expect(detail.triples).toHaveLength(2);
     expect(detail.triples.every(triple => triple.subject === blank || triple.object === blank)).toBe(true);
@@ -169,28 +171,38 @@ describe('assertion pages against the native scoped query engine', () => {
     await store.insert(Array.from({ length: 5001 }, (_, i) => ({
       subject: `_:large${i}`, predicate: 'urn:value', object: `"${i}"`, graph: content('large-blank'),
     })));
-    const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true });
-    expect(result.ok).toBe(true); expect(result.incomplete).toBe(true);
-    expect(result.triples.length).toBeLessThanOrEqual(5000);
-    expect(requests.filter(request => request.sparql.includes('FILTER(isBlank(?s) || isBlank(?o))')).every(request => /LIMIT\s+5000\s*$/.test(request.sparql))).toBe(true);
-    const detail = await fetchMemoryEntity(cg, result.triples.find(triple => triple.subject.startsWith('_:'))!.subject, 'wm');
-    expect(detail.partial).toBe(true); expect(detail.triples.length).toBeLessThanOrEqual(1000);
-    expect(requests.at(-1)!.sparql).toMatch(/LIMIT\s+1001\s*$/);
+    const first = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true });
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error(first.reason);
+    const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, cursor: first.nextCursor });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.omittedRelationships).toBe(true);
+    expect(result.triples).toHaveLength(5000);
+    expect(result.nextCursor).toBeUndefined();
+    const blank = result.triples.find(triple => triple.subject.startsWith('_:'))!.subject;
+    const reads = requests.length;
+    const detail = await fetchMemoryEntity(cg, blank, 'wm', false, {
+      triples: result.triples.map(triple => ({ ...triple, layer: 'working' as const })), partial: true,
+    });
+    expect(detail.partial).toBe(true); expect(detail.triples).toHaveLength(1);
+    expect(requests).toHaveLength(reads);
   });
-  it('explicitly flags omitted blank edges while continuing bounded nonblank pages', async () => {
+  it('continues small blank components without omissions even when a row page is full', async () => {
     for (let i = 0; i < 7; i++) {
       const name = `mix-${i}`; await assertion(name);
       await store.insert([{ subject: `_:blank${i}`, predicate: 'urn:blank', object: `"${i}"`, graph: content(name) }]);
     }
     const triples = []; let cursor; let incomplete = false;
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 30; i++) {
       const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
       expect(result.ok).toBe(true); expect(result.triples.length).toBeLessThanOrEqual(2);
-      incomplete ||= result.incomplete ?? false; triples.push(...result.triples);
-      if (!result.truncated) break;
-      cursor = result.cursor;
+      incomplete ||= result.omittedRelationships ?? false; triples.push(...result.triples);
+      if (!result.nextCursor) break;
+      cursor = result.nextCursor;
     }
-    expect(incomplete).toBe(true);
+    expect(incomplete).toBe(false);
+    expect(triples.filter(triple => triple.subject.startsWith('_:'))).toHaveLength(7);
     expect(triples.filter(triple => !triple.subject.startsWith('_:'))).toHaveLength(7);
     expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(triples.length);
   });
@@ -201,8 +213,8 @@ describe('assertion pages against the native scoped query engine', () => {
       const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 100, cursor });
       expect(result.ok).toBe(true); sizes.push(result.triples.length);
       seen.push(...result.triples.map(triple => triple.subject));
-      if (!result.truncated) break;
-      cursor = result.cursor;
+      if (!result.nextCursor) break;
+      cursor = result.nextCursor;
     }
     expect(sizes).toEqual([5, 5, 2]);
     expect(new Set(seen).size).toBe(12);
@@ -221,8 +233,8 @@ describe('assertion pages against the native scoped query engine', () => {
       const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
       expect(result.ok).toBe(true);
       triples.push(...result.triples);
-      if (!result.truncated) break;
-      cursor = result.cursor;
+      if (!result.nextCursor) break;
+      cursor = result.nextCursor;
     }
     expect(triples).toHaveLength(5);
     expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(5);
@@ -273,6 +285,11 @@ describe('assertion pages against the native scoped query engine', () => {
     expect(requests.filter(request => !request.sparql.includes('COUNT(*)')).every(request => request.sparql.endsWith('LIMIT 51'))).toBe(true);
     await listAssertionsPage(cg, 'wm');
     expect(requests).toHaveLength(6);
+    const bulk = await listAssertions(cg, 'wm', { includeCounts: false });
+    expect(bulk.map(item => item.graphUri)).toEqual(items.map(item => item.graphUri));
+    expect(requests).toHaveLength(8); // Fresh, 100-assertion pages, no count reads.
+    await assertion('zzz-after-cached-page');
+    expect((await listAssertions(cg, 'wm', { includeCounts: false })).at(-1)?.name).toBe('zzz-after-cached-page');
   });
   it('preserves legacy markers, colon-containing names, and opt-in catalog visibility', async () => {
     await assertion('input:order:42', 'WM', 'production');
@@ -307,5 +324,35 @@ describe('assertion pages against the native scoped query engine', () => {
     const page = await listAssertionsPage(cg, 'wm');
     expect(page.items).toHaveLength(1);
     expect(page.items[0].tripleCount).toBeUndefined();
+  });
+  it('pages assertions rather than combinations of multi-valued metadata', async () => {
+    const id = await assertion('00-multi'); await assertion('01-next'); await assertion('02-last');
+    await store.insert([
+      { subject: id, predicate: dkg + 'reservedUal', object: '"did:dkg:asset:restamped"', graph: meta },
+      { subject: id, predicate: dkg + 'assertionGraph', object: physical('00-multi'), graph: meta },
+    ]);
+    const first = await listAssertionsPage(cg, 'wm', { pageSize: 2, includeCounts: false });
+    const second = await listAssertionsPage(cg, 'wm', { pageSize: 2, cursor: first.nextCursor, includeCounts: false });
+    expect(first.items.map(item => item.name)).toEqual(['00-multi', '01-next']);
+    expect(second.items.map(item => item.name)).toEqual(['02-last']);
+    expect(second.nextCursor).toBeUndefined();
+  });
+  it('retains a small graph’s blank edges when the following graph fills a row page', async () => {
+    await assertion('00-small'); await assertion('01-large');
+    await store.insert([
+      ...Array.from({ length: 4 }, (_, i) => ({ subject: `_:small${i}`, predicate: 'urn:blank', object: `"${i}"`, graph: content('00-small') })),
+      ...Array.from({ length: 24 }, (_, i) => ({ subject: `urn:large:${String(i).padStart(2, '0')}`, predicate: 'urn:value', object: '"large"', graph: content('01-large') })),
+    ]);
+    const triples = []; let cursor;
+    for (let i = 0; i < 20; i++) {
+      const page = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 10, cursor });
+      expect(page.ok).toBe(true);
+      triples.push(...page.triples);
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    expect(triples.filter(triple => triple.subject.startsWith('_:'))).toHaveLength(4);
+    expect(triples).toHaveLength(30);
+    expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(30);
   });
 });

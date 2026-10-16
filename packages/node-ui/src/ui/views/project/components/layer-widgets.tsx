@@ -193,7 +193,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
       async () => {
         // The share route seals and transfers each complete KA atomically. It is
         // off-chain, so no client-side CG pre-registration is needed.
-        const assertions = await listAssertions(contextGraphId, 'wm');
+        const assertions = await listAssertions(contextGraphId, 'wm', { includeCounts: false });
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
@@ -271,7 +271,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         // per-assertion vm/publish path. No pre-register: the daemon runs preconditions first
         // and only auto-registers on its CG_NOT_REGISTERED retry, so a doomed publish never
         // burns gas.
-        const assertions = await listAssertions(contextGraphId, 'swm');
+        const assertions = await listAssertions(contextGraphId, 'swm', { includeCounts: false });
         // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
         const r = await publishAssertionsToVm(contextGraphId, assertions);
         const unknownNote = outcomeUnknownPublishNote(r);

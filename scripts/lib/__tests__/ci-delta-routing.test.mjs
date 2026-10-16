@@ -390,6 +390,8 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
 
   for (const [target, requirement, why] of [
     ['packages/node-ui/src/ui/assertion-identity.ts', 'evm:chain', 'the wallet integration suite loads the API assertion decoder'],
+    ['packages/node-ui/src/ui/assertions-page.ts', 'evm:chain', 'the wallet integration suite loads shared assertion discovery through the API'],
+    ['packages/node-ui/src/rdf-literal.ts', 'evm:chain', 'shared assertion discovery decodes reserved UAL literals'],
     ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
     ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],

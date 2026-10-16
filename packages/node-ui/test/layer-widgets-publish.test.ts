@@ -356,7 +356,7 @@ describe('PromoteWidget — promote flow (#1382)', () => {
     await clickPromote(container);
     for (let i = 0; i < 30 && order.length < 1; i++) await flush();
     expect(order).toEqual(['promote']);
-    expect(apiMocks.listAssertions).toHaveBeenCalledWith('cg', 'wm');
+    expect(apiMocks.listAssertions).toHaveBeenCalledWith('cg', 'wm', { includeCounts: false });
     expect(apiMocks.knowledgeAssetFinalize).not.toHaveBeenCalled();
     expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
     expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Shared 1 complete Knowledge Asset to Shared Memory');

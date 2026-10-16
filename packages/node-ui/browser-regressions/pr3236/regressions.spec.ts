@@ -142,10 +142,12 @@ test('Memory Stack keeps a budget warning after graph continuation ends', async 
     subject: `_:blank${i}`, predicate: 'urn:value', object: '"value"', graph,
   })));
   await page.goto('/');
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5');
+  await page.getByRole('button', { name: 'Load more graph data' }).click();
   await expect(page.getByText('Memory preview limit reached.', { exact: false })).toBeVisible();
-  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5000');
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5005');
   await page.getByRole('button', { name: 'Load more graph data' }).click();
   await expect(page.getByRole('button', { name: 'Load more graph data' })).toHaveCount(0);
   await expect(page.getByText('Memory preview limit reached.', { exact: false })).toBeVisible();
-  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5001');
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5006');
 });

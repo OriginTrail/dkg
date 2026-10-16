@@ -133,6 +133,7 @@ describe('SubGraphDetailView query catalog execution', () => {
     expect(apiMocks.executeQuery).toHaveBeenCalledWith(
       'SELECT ?entity WHERE { ?entity ?p ?o }',
       { contextGraphId: 'cg-test', subGraphName: 'incidents', view: 'working-memory', includeContextGraphPartitions: true },
+      { timeoutMs: null, maxResponseBytes: null },
     );
 
     apiMocks.executeQuery.mockClear();
