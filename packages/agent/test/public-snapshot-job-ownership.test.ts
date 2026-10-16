@@ -129,10 +129,10 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
     let authority!: import('../src/durable-recovery-authority.js').DurableRecoveryAuthority;
     // Only transport/chain responses are fixtures. Exercise the real receive
     // worker, job evidence authentication, physical fence and atomic store path.
-    a.syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async (_peer, _graph, uals, options) => {
-      authority = options.recoveryAuthority;
-      return LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(a, ctx, 'fixture-source', CG, 1, {
-        ...options, exactAssetSelection: createUalOnlyExactAssetSelection(uals),
+    const recover = vi.spyOn(LifecycleSyncMethods, 'recoverSnapshotExactAssets').mockImplementation(async (_agent, _peer, _graph, uals, policy, options) => {
+      authority = policy;
+      return LifecycleSyncMethods.prototype['runAdmittedLegacyDurableContextGraph'].call(a, ctx, 'fixture-source', CG, 1, {
+        ...options, recoveryAuthority: policy, exactAssetSelection: createUalOnlyExactAssetSelection(uals),
         fetchTimeoutMs: 120000, authenticationTimeoutMs: 30000,
       });
     });
@@ -173,7 +173,7 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
       expect(await storedRows(f.store, f.items[0]!.graph)).toBe(1);
       expect(await storedRows(f.store, f.items[1]!.graph)).toBe(0);
       expect(writes).toHaveBeenCalledTimes(1);
-      expect(a.syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(1);
+      expect(recover).toHaveBeenCalledTimes(1);
       expect(a.chain.readPublicGraphSnapshot).toHaveBeenCalledTimes(1);
       expect(a.workLifetime.physicalRuns.size).toBe(0);
       expect(a.graphScopedStorePhysicalRuns.size).toBe(0);
