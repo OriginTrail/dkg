@@ -1,3 +1,4 @@
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { BULK_GRAPH_KIND, BULK_GRAPH_PROTOCOL } from '@origintrail-official/dkg-core';
@@ -65,9 +66,9 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     receiver.recordCgWireId(graph, null);
     // Cold-start enumeration can finish while the first snapshot batch is
     // arriving. Use the real discovery/subscription path at that boundary.
-    const recover = receiver.syncExactKnowledgeAssetsFromPeerDetailed.bind(receiver);
+    const recover = LifecycleSyncMethods.recoverSnapshotExactAssets;
     let discoveredDuringRecovery = false;
-    vi.spyOn(receiver, "syncExactKnowledgeAssetsFromPeerDetailed").mockImplementation(async (...args) => {
+    vi.spyOn(LifecycleSyncMethods, "recoverSnapshotExactAssets").mockImplementation(async (...args) => {
       if (!discoveredDuringRecovery) {
         discoveredDuringRecovery = true;
         await receiver.discoverContextGraphsFromStorage();
@@ -334,9 +335,8 @@ describe("public snapshot recovery over live local nodes and chain", () => {
           checkpointKey:`malicious:${phase}`,completed:true,timedOut:false};
       });
     }
-    const rejected = await sink.syncExactKnowledgeAssetsFromPeerDetailed(supplier.peerId, graph, [ual], {
+    const rejected = await LifecycleSyncMethods.recoverSnapshotExactAssets(sink, supplier.peerId, graph, [ual], evidence, {
       forceFreshExactSession: true, exactRecoveryTransportMode: transport, totalTimeoutMs: 15000,
-      recoveryAuthority: evidence,
     });
     expect(await rows()).toEqual(beforeRows);
     if (scenario === 'legacy-envelope') {
