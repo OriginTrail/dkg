@@ -4,12 +4,12 @@ declare const response: BoundedQueryResponse;
 if (response.mode === 'page') {
   const complete: false = response.resultComplete;
   const page: true = response.pageComplete;
-  const offset: number | null = response.nextOffset;
+  const offset: number | null = void response.nextOffset;
   void [complete, page, offset];
 } else {
   const complete: true = response.resultComplete;
   // @ts-expect-error Complete results have no paging metadata.
-  response.nextOffset;
+  void response.nextOffset;
   void complete;
 }
 // @ts-expect-error Page results require all paging metadata.
