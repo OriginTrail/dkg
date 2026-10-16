@@ -34,6 +34,7 @@ import {
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import {
+  createPromotePostCommitFailure,
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
   PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
@@ -322,6 +323,31 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('KA_NAMED_GRAPH_SHARE_UNSUPPORTED');
     expect(String(res.body.error)).toContain('named-graph');
     expect(res.body.namedGraphs).toEqual(['urn:test:graph:one']);
+  });
+
+  it.each(['standalone', 'one-shot'])('%s post-commit failure returns a durable recovery handle and protects the queue row', async mode => {
+    await startWith({
+      create: async () => 'did:dkg:assertion:owned-share',
+      write: async () => undefined,
+      finalize: async () => ({ assertionUri: 'did:dkg:assertion:owned-share', merkleRoot: new Uint8Array(32),
+        authorAddress: ROOTLESS_AUTHOR, schemeVersion: 1, chainId: 1n,
+        kav10Address: `0x${'ef'.repeat(20)}`, eip712Digest: `0x${'12'.repeat(32)}` }),
+      promote: async () => { throw createPromotePostCommitFailure(new Error('lifecycle insert interrupted')); },
+    });
+    const res = mode === 'standalone'
+      ? await post('swm/share', { contextGraphId: CG_ID })
+      : await postRoot({ contextGraphId: CG_ID, name: ASSERTION_NAME, quads: [{
+        subject: 'urn:owned-share', predicate: 'https://schema.org/name', object: '"owned"', graph: '',
+      }], finalize: true, alsoShareSwm: true });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE', retryable: true,
+      recoveryState: 'pending', retryAction: 'resume_existing_knowledge_asset' });
+    expect(res.body.recoveryStatusUrl).toBe(`/api/knowledge-assets/swm/share-jobs/${res.body.recoveryJobId}`);
+    if (mode === 'one-shot') expect(res.body).toMatchObject({ partial: true, failedPhase: 'swm-share', name: ASSERTION_NAME });
+    const queue = new TripleStoreAsyncPromoteQueue(shareStore!);
+    expect(await queue.getStatus(res.body.recoveryJobId)).toMatchObject({ state: 'failed_retrying',
+      attempt: { lastError: { diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE', retryable: true } } });
+    expect(await queue.clearTerminalJob(res.body.recoveryJobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
   });
 
   it('wm/finalize (layer:swm): rejects read-only before invoking the engine', async () => {

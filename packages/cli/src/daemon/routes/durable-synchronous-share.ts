@@ -15,6 +15,7 @@ export async function durableSynchronousShare(
       { code: 'SHARE_RECOVERY_UNAVAILABLE' });
   }
   const prepared = await agent.assertion.prepareDurableShare(contextGraphId, name, options);
+  if (prepared.completedResult) return prepared.completedResult;
   const workerId = `http-share-${randomUUID()}`;
   let job: PromoteJob;
   try { job = await queue.enqueueAndClaim({ contextGraphId, assertionName: name, entities: 'all',

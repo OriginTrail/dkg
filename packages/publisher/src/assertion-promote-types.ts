@@ -1,5 +1,5 @@
 import type { PublishOptions } from './publisher.js';
-import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
+import { validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';
 import type { WorkspaceAgentRecipientResolver } from './workspace-agent-recipients.js';
 import type { ConfirmWorkspaceGossipBeforeCommit, EncodedWorkspaceGossipPayload } from './workspace-gossip-payload.js';
 
@@ -36,3 +36,13 @@ export type AssertionPromoteResult = {
   promotedAllRoots: boolean;
   shareOperationId?: string;
 };
+
+/** Snapshot caller-owned collections before waiting on the lifecycle lock. */
+export function snapshotPublisherPromoteOptions(opts?: PublisherAssertionPromoteOptions): PublisherAssertionPromoteOptions | undefined {
+  return opts ? { ...opts,
+    ...(opts.recoveryBinding ? { recoveryBinding: validatePromoteRecoveryBinding(opts.recoveryBinding) } : {}),
+    ...(Array.isArray(opts.entities) ? { entities: [...opts.entities] } : {}),
+    ...(opts.allowedPeers ? { allowedPeers: [...opts.allowedPeers] } : {}),
+    ...(opts.trustedNonManifestCatalogTriples ? { trustedNonManifestCatalogTriples: new Set(opts.trustedNonManifestCatalogTriples) } : {}),
+  } : undefined;
+}

@@ -46,7 +46,7 @@ Native macOS arm64, Node 22.23.3, pnpm 10.28.1. Pinned repository Blazegraph ima
 
 Target workload: 180 initial catalog identities, 48 prepared publication assets, 256 concurrent synchronous catalog shares (8 triples each), private registered context graph, six funded publishers. Preserve setup failures separately. Use a readiness barrier before timing; freeze actual concurrency/pacing and publication observation deadline in the harness before baseline. Fixed catalog drain: 20 minutes after submission traffic ends, no extension to turn a failed run into a pass. Record all 256 requests including timeout/503/unknown outcomes and all 48 publication jobs including failures/incompletes. Do not silently repair setup or timed failures.
 
-Run natural workload and separately labelled identical deterministic faults in both arms at lifecycle insertion after deletion, pointer maintenance and restart after content commit. At least one real process restart with persisted state is required. Neither a successful candidate without a matching fault nor unit tests establishes recovery.
+Run the natural workload with separately labelled identical deterministic lifecycle-insertion faults in both arms. Cover pointer maintenance through real queue/worker regressions, and supplement the matched workload with a separately reported process-crash/restart scenario after content commit. At least one real process restart with persisted state is required. Neither a successful candidate without a matching fault nor unit tests establishes recovery.
 
 Measure HTTP and durable-admission clocks separately, publication p50/p90 and full-cohort makespan (no full-cohort throughput if incomplete), recovery time from fault to verified completion, descriptors, lifecycle state/head/completion, exact expected inventory/catalog identity sets and convergence time. Compare canonical RDF/root, seal, operation envelope, version, WM cleanup, transaction carriers, receipts and all used signer pending/latest nonces. Manual repair is a separate result and never automatic success.
 
@@ -101,7 +101,7 @@ sequenceDiagram
   Agent-->>HTTP: 503; no retry owner
 ```
 
-After (planned, not yet implemented):
+After (implemented):
 
 ```mermaid
 sequenceDiagram
@@ -134,3 +134,7 @@ Security/compatibility review refinement: capture whether the accepted request o
 Controlled baseline2 completed on unchanged production revision 9436b5c927f9fc8e5eb0cd5523da785dfa1cdd75 before production edits. At the fixed deadline, 48/48 publications finalized and 254/256 synchronous requests succeeded; both injected partial commits remained incomplete (0/2 automatic recovery, zero manual repairs). Exact catalog/inventory count 434/436, descriptor count 434/436. All 436 seals and 48 chain identities preserved; all 98 signer transactions reconciled without nonce gaps. Same-runtime restart retained the incomplete state. Owned daemon and store stopped and matching claim released before candidate acquisition.
 
 Implemented the version-4 bound queue design, atomic inline admission, pinned seal/intent validation, started-lease reclaim, continued transient/post-commit retry beyond the normal cap, protected unfinished obligations, original-author worker propagation and synchronous/one-shot route integration. The catalog handoff now awaits the validated inventory CAS for bound obligations; detached observation remains the legacy path. Worker-disabled synchronous admission fails before sharing with an explicit 503 rather than promising an absent recovery owner. Permanent integrity failures remain visible; they cannot be cleared or cancelled as completed obligations. Candidate live run and remote review are still required. No merge authorized.
+
+### Compatibility review during the fixed candidate observation
+
+Self-review identified a completed pre-intent SWM case that the new admission binding rejected although the existing publisher supports a non-mutating no-op. Add a read-only verification under the existing lifecycle lock, return the original operation ID without a queue job, and continue rejecting incomplete or changed pre-intent content. This is not permission to reconstruct a missing immutable intent. Verify complete/no-op, incomplete and changed-content cases through the real agent/queue entry point. The running measured candidate remains compiled at `7dfc334200bb2a716e7dc11cf25ec7a033cd9481`; source edits are not rebuilt into that live daemon. Any later runtime revision is identified separately and needs live validation before the final claim.

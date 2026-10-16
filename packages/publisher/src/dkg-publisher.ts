@@ -1,6 +1,7 @@
-import type { PublisherAssertionPromoteOptions, AssertionPromoteResult } from './assertion-promote-types.js';
+import { verifyCompletedLegacyPromote } from './completed-legacy-promote.js';
+import { snapshotPublisherPromoteOptions, type PublisherAssertionPromoteOptions, type AssertionPromoteResult } from './assertion-promote-types.js';
 export type { PublisherAssertionPromoteOptions } from './assertion-promote-types.js';
-import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';
+import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
@@ -8396,9 +8397,16 @@ export class DKGPublisher implements Publisher {
   async prepareAssertionPromoteRecovery(
     contextGraphId: string, name: string, agentAddress: string,
     opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean,
-  ): Promise<PromoteRecoveryBinding> {
+  ): Promise<PromoteRecoveryAdmission> {
     return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, opts?.subGraphName,
-      () => preparePromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts, inventoryRequired));
+      () => preparePromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts, inventoryRequired,
+        (seal, operationId) => verifyCompletedLegacyPromote({
+          store: this.store, privateStore: this.privateStore,
+          scopedQuads: graph => this.assertionScopedQuads(graph),
+          hasMarker: () => this.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName),
+          hasTail: scope => this.hasDurableAssertionPromoteTail(contextGraphId, operationId, scope.ual, scope.assertionVersion, opts?.subGraphName),
+          validatePayload: (publicQuads, privateQuads) => validateGraphScopedPayloadAgainstSeal(seal, publicQuads, privateQuads, 'shared-memory'),
+        }, contextGraphId, name, agentAddress, seal, opts?.subGraphName)));
   }
 
   async assertionPromote(
@@ -8407,20 +8415,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     opts?: PublisherAssertionPromoteOptions,
   ): Promise<AssertionPromoteResult> {
-    const stableOpts: PublisherAssertionPromoteOptions | undefined = opts
-      ? {
-          ...opts,
-          ...(opts.recoveryBinding ? { recoveryBinding: validatePromoteRecoveryBinding(opts.recoveryBinding) } : {}),
-          ...(Array.isArray(opts.entities) ? { entities: [...opts.entities] } : {}),
-          ...(opts.allowedPeers ? { allowedPeers: [...opts.allowedPeers] } : {}),
-          ...(opts.trustedNonManifestCatalogTriples
-            ? {
-                trustedNonManifestCatalogTriples:
-                  new Set(opts.trustedNonManifestCatalogTriples),
-              }
-            : {}),
-        }
-      : undefined;
+    const stableOpts = snapshotPublisherPromoteOptions(opts);
     return this.withAssertionLifecycleWriteLock(
       contextGraphId,
       name,

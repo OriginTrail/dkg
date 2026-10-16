@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   assertionLifecycleUri, assertSafeIri, contextGraphAssertionUri, contextGraphMetaUri,
   parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1,
-  computeCanonicalGraphScopedAuthorSealDigestV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1, type AssertionSeal,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { PublisherAssertionPromoteOptions } from './dkg-publisher.js';
@@ -35,11 +35,14 @@ export function validatePromoteRecoveryBinding(value: unknown): PromoteRecoveryB
     inventoryRequired: candidate.inventoryRequired });
 }
 
+export type PromoteRecoveryAdmission = PromoteRecoveryBinding | { completedShareOperationId: string };
+
 /** Read only, called under the publisher's assertion lifecycle lock. */
 export async function preparePromoteRecoveryBinding(
   store: TripleStore, contextGraphId: string, name: string, agentAddress: string,
   opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean,
-): Promise<PromoteRecoveryBinding> {
+  verifyCompletedLegacy?: (seal: AssertionSeal, operationId: string) => Promise<boolean>,
+): Promise<PromoteRecoveryAdmission> {
   const subject = assertSafeIri(contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName));
   const lifecycle = assertSafeIri(assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName));
   const graph = assertSafeIri(contextGraphMetaUri(contextGraphId));
@@ -60,6 +63,10 @@ export async function preparePromoteRecoveryBinding(
   };
   const operationId = readLiteral('http://dkg.io/ontology/shareOperationId');
   const rawIntent = readLiteral('http://dkg.io/ontology/promoteOperationIntent');
+  if (operationId && !rawIntent && verifyCompletedLegacy
+    && await verifyCompletedLegacy(seal, operationId)) {
+    return { completedShareOperationId: operationId };
+  }
   if (Boolean(operationId) !== Boolean(rawIntent)) {
     throw recoveryBindingConflict('The existing share operation lacks a complete immutable intent');
   }
@@ -79,6 +86,7 @@ export async function assertPromoteRecoveryBinding(
 ): Promise<void> {
   const binding = validatePromoteRecoveryBinding(opts.recoveryBinding);
   const current = await preparePromoteRecoveryBinding(store, contextGraphId, name, agentAddress, opts, binding.inventoryRequired);
+  if ('completedShareOperationId' in current) throw recoveryBindingConflict('Legacy operations cannot authorize replay');
   if (current.sealDigest !== binding.sealDigest) throw recoveryBindingConflict('The sealed asset changed after durable share admission');
   // No intent is allowed only before its first write. Read the actual claim, not
   // the freshly generated envelope returned by the preparation helper.

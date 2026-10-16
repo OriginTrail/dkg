@@ -25,10 +25,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { createServer, type Server } from 'node:http';
-import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+
+import { randomUUID } from 'node:crypto';
+import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
+import { daemonState } from '../src/daemon/state.js';
 
 const CG_ID = 'issue-864-cg';
 const ASSERTION_NAME = 'orphan-assertion';
@@ -57,8 +61,11 @@ class FakeAssertionNotPersistedError extends Error {
 describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persisted envelope', () => {
   let server: Server | undefined;
   let baseUrl: string;
+  let store: OxigraphStore;
 
   afterEach(async () => {
+    daemonState.promoteWorkerAvailable = false;
+    await store?.close();
     if (server) {
       await new Promise<void>((resolve, reject) => {
         server!.close((err) => (err ? reject(err) : resolve()));
@@ -74,7 +81,10 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
       publishReady?: boolean;
     }>,
   ) {
+    store = new OxigraphStore();
+    daemonState.promoteWorkerAvailable = true;
     const agent = {
+      promoteQueue: new TripleStoreAsyncPromoteQueue(store),
       async listContextGraphs() {
         return [{
           id: CG_ID,
@@ -89,6 +99,11 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
       },
       resolveAgentByToken: () => undefined,
       assertion: {
+        prepareDurableShare: async () => ({ agentAddress: 'did:dkg:agent:test',
+          recoveryBinding: { version: 1, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: false,
+            intent: { version: 1, operationId: randomUUID(), timestampMs: Date.now(),
+              confirmationRequired: false, accessPolicy: 'public', allowedPeers: [] } },
+        }),
         promote,
       },
     };

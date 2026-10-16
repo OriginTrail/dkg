@@ -62,7 +62,12 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
   const inventoryRequired = !opts?.subGraphName && responsibility.mode !== 'legacy';
   const recoveryBinding = await agent.publisher.prepareAssertionPromoteRecovery(
     contextGraphId, name, storageLane, publisherOptions, inventoryRequired);
-  return { agentAddress: storageLane, recoveryBinding };
+  if ('completedShareOperationId' in recoveryBinding) {
+    return { agentAddress: storageLane, recoveryBinding: undefined,
+      completedResult: { promotedCount: 0, sealed: true, publishReady: false,
+        shareOperationId: recoveryBinding.completedShareOperationId } };
+  }
+  return { agentAddress: storageLane, recoveryBinding, completedResult: undefined };
 }
 
 export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, name: string,

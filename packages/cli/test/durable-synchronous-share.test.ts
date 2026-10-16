@@ -44,6 +44,39 @@ async function setup() {
 afterEach(() => { daemonState.promoteWorkerAvailable = false; });
 
 describe('durable synchronous share ownership', () => {
+  it('preserves a verified completed pre-intent share as a read-only no-op', async () => {
+    const { store, agent } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    const original = await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR });
+    await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle,
+      predicate: 'http://dkg.io/ontology/promoteOperationIntent' });
+    const admission = vi.spyOn(agent.promoteQueue, 'enqueueAndClaim');
+    const insert = vi.spyOn(store, 'insert');
+    const replace = vi.spyOn(store, 'replaceSubject');
+    expect(await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR })).toEqual({
+      promotedCount: 0, sealed: true, publishReady: false, shareOperationId: original.shareOperationId,
+    });
+    expect(admission).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+    await store.close();
+  });
+
+  it.each(['incomplete', 'changed-content'])('refuses pre-intent %s without admitting replay', async kind => {
+    const { store, agent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    if (kind === 'incomplete') store.remaining = 1;
+    await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR }).catch(() => undefined);
+    await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle,
+      predicate: 'http://dkg.io/ontology/promoteOperationIntent' });
+    if (kind === 'changed-content') await store.insert([{ graph: finalized.sharedGraphUri,
+      subject: 'urn:extra', predicate: 'urn:p', object: '"changed"' }]);
+    const admission = vi.spyOn(agent.promoteQueue, 'enqueueAndClaim');
+    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR })).rejects.toThrow();
+    expect(admission).not.toHaveBeenCalled();
+    await store.close();
+  });
+
   it.each([true, false])('automatically repairs a partial commit beyond the ordinary attempt cap (typed=%s)', async typed => {
     const { store, agent, freshAgent, finalized } = await setup();
     daemonState.promoteWorkerAvailable = true;
@@ -165,6 +198,24 @@ describe('durable synchronous share ownership', () => {
     await store.replaceSubject(graph, record.jobRef, record.jobQuads);
     expect(await q.claimNext('future')).toBeNull();
     await expect(q.enqueueAndClaim(request, 'competing')).rejects.toThrow('unreadable');
+    await store.close();
+  });
+
+  it('rechecks current recipient authority and preserves the admitted curator requirement', async () => {
+    const { store, agent, finalized } = await setup();
+    const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    agent.resolveWorkspaceRecipientsGated = async () => { throw new Error('current authority denied'); };
+    await expect(agent.assertion.promote(CG, NAME, bound)).rejects.toThrow('current authority denied');
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    agent.resolveWorkspaceRecipientsGated = async () => ({ requiresEncryption: false, recipients: [] });
+    const confirmer = vi.fn(async () => undefined);
+    agent.buildCuratorAckConfirmer = confirmer;
+    const required = { ...bound.recoveryBinding, intent: { ...bound.recoveryBinding.intent, confirmationRequired: true } };
+    await expect(agent.assertion.promote(CG, NAME, { ...bound, recoveryBinding: required, awaitCuratorAck: false }))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_CONFIRMATION_REQUIRED' });
+    expect(confirmer.mock.calls[0]?.[2]).toMatchObject({ awaitCuratorAck: true });
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
     await store.close();
   });
 
