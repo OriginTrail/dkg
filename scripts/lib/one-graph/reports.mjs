@@ -172,8 +172,9 @@ export function createReports(devnet, config) {
    * not made again; a pair that holds throughout (its absence, or `kept`)
    * keeps reading to the end of the bound. A reading that shows a report back
    * after it was absent is kept (`pair.reappeared`), and so is a reading that
-   * shows a `kept` report missing at any time (`pair.lapsed`), each with the
-   * moment it completed (`at`). Such a pair is read once more when its bound
+   * breaks a kind that holds throughout at any time (`pair.lapsed`: a `kept`
+   * report missing, an `unpublished` one found), each with the moment it
+   * completed (`at`). Such a pair is read once more when its bound
    * has passed (`pair.confirm`, each read retried up to three times while it
    * fails). The observations are absolute: `pair.dating` keeps, for each
    * read, when the last read that did not show what the pair waits for was
@@ -206,8 +207,9 @@ export function createReports(devnet, config) {
     }
     let cancelled = false;
     const absence = pair => PAIR_KINDS[pair.kind].want === 'gone';
-    const kept = pair => PAIR_KINDS[pair.kind].throughout === true;
-    const throughout = pair => absence(pair) || kept(pair);
+    // A kind that holds throughout (`kept`, `unpublished`) breaks at any reading that misses what it waits for.
+    const steady = pair => PAIR_KINDS[pair.kind].throughout === true;
+    const throughout = pair => absence(pair) || steady(pair);
     // The anchor of a pair's bound: the end of the report's share, or the moment a pending pair is armed.
     const arm = (pair, from = pair.pending ? null : pair.record.doneAt) => {
       if (anchored(pair) || from === null || from === undefined) return;
@@ -223,7 +225,7 @@ export function createReports(devnet, config) {
       if (seen.satisfied && !dating.hit) dating.hit = { sentAt, completedAt };
       else if (missed && !dating.hit) dating.lastMissSentAt = sentAt;
       else if (missed && absence(pair)) pair.reappeared ??= { read: which, at: completedAt, seen };
-      if (kept(pair) && missed) pair.lapsed ??= { read: which, at: completedAt, seen };
+      if (steady(pair) && missed) pair.lapsed ??= { read: which, at: completedAt, seen };
       pair.last[which] = seen;
     };
     // A read's watch is over once cancelled, the report never written, its bound passed, or

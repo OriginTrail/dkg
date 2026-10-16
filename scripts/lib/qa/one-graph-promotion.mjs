@@ -84,10 +84,11 @@ export function judgeReport(rows, expected) {
  * in which layer: `swm` the report in shared memory, `vm` in Verified Memory,
  * `gone` no longer in shared memory (it was just promoted), `absent` not in
  * shared memory (it was promoted before), `kept` in shared memory at every
- * reading while other reports are promoted (`throughout`), `unpublished` not
- * in Verified Memory (its publish was refused). A pair is read twice, with
- * the layer's view and with the cross-partition read, and holds once both
- * showed it.
+ * reading while other reports are promoted, `unpublished` in no reading of
+ * Verified Memory from before its publish was sent (its publish was
+ * refused). A kind that holds `throughout` fails at the first reading that
+ * breaks it, whatever comes after. A pair is read twice, with the layer's
+ * view and with the cross-partition read, and holds once both showed it.
  */
 export const PAIR_KINDS = Object.freeze({
   swm: { layer: 'swm', want: 'held' },
@@ -95,7 +96,7 @@ export const PAIR_KINDS = Object.freeze({
   gone: { layer: 'swm', want: 'gone' },
   absent: { layer: 'swm', want: 'gone' },
   kept: { layer: 'swm', want: 'held', throughout: true },
-  unpublished: { layer: 'vm', want: 'gone' },
+  unpublished: { layer: 'vm', want: 'gone', throughout: true },
 });
 const LAYER_NAMES = { swm: 'shared memory', vm: 'Verified Memory' };
 
@@ -146,17 +147,21 @@ export function pairOutcome(pair, { boundMs }) {
   const bound = secs(pair.boundMs ?? boundMs);
   const { view, partitions } = pair.progress;
   const names = { view: viewName(layer, record.sub), partitions: 'the cross-partition read' };
-  // A report that must stay in the layer fails at the first reading that missed it, whatever came after.
-  // A reading that broke the pair, at its moment (`at`), from the anchor of the pair's bound.
+  // A reading that broke the pair, at its moment (`at`), from the anchor of the pair's bound. A kind
+  // that holds throughout fails at the first reading that broke it, whatever came after.
   const ageOf = violation => Math.max(0, violation.at - pair.from);
   if (pair.lapsed) {
     const { read, seen } = pair.lapsed;
-    return { outcome: 'fail', text: `${what}: MISSING from ${names[read]}${readDetail(seen)} ${secs(ageOf(pair.lapsed))} s after the ${after}, though it must stay in ${layerName}` };
+    const broke = want === 'gone' ? `FOUND in ${names[read]}${readDetail(seen)}` : `MISSING from ${names[read]}${readDetail(seen)}`;
+    const rule = want === 'gone' ? `it must never be in ${layerName}` : `it must stay in ${layerName}`;
+    return { outcome: 'fail', text: `${what}: ${broke} ${secs(ageOf(pair.lapsed))} s after the ${after}, though ${rule}` };
   }
   if (pairHeld(pair.progress)) {
     const at = secs(Math.max(view, partitions));
     if (want === 'gone') {
-      const first = kind === 'gone' ? `left ${layerName} ${at} s after the ${after}` : `absent from ${layerName} ${at} s after the ${after}`;
+      const steady = PAIR_KINDS[kind].throughout === true;
+      const first = kind === 'gone' ? `left ${layerName} ${at} s after the ${after}`
+        : steady ? `absent from ${layerName} at every reading from the ${after}` : `absent from ${layerName} ${at} s after the ${after}`;
       if (pair.reappeared) {
         const { read, seen } = pair.reappeared;
         return { outcome: 'fail', text: `${what}: ${first}, then was in ${names[read]}${readDetail(seen)} again ${secs(ageOf(pair.reappeared))} s after it` };
@@ -169,7 +174,7 @@ export function pairOutcome(pair, { boundMs }) {
       if (unknown.length) {
         return { outcome: 'fail', text: `${what}: ${first}, but ${unknown.map(read => `${names[read]}${readDetail(pair.confirm?.[read])}`).join(' and ')} could not be read when the ${bound} s had passed, so the absence to the end is not known` };
       }
-      return { outcome: 'pass', text: `${what}: ${first}, and out of it to the end of the ${bound} s` };
+      return { outcome: 'pass', text: steady ? `${what}: ${first} to the end of the ${bound} s` : `${what}: ${first}, and out of it to the end of the ${bound} s` };
     }
     if (PAIR_KINDS[kind].throughout) {
       const missing = ['view', 'partitions'].filter(read => pair.confirm?.[read]?.satisfied === false && !pair.confirm[read].error);
@@ -644,7 +649,12 @@ const operationOf = line => /^(?:\[[^\]]+\]|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})
  * (`materialized snapshot <ref> as <graph> (N triples)`) and then, unless it
  * failed first, their sum (`materialized K graph-scoped KA snapshot(s)
  * totalling N triples`); a round's snapshots count once, the larger of the
- * two. Returns { passes (the rounds that logged their data and meta
+ * two. A recovery commits each verified snapshot as it comes (`SWM recovery
+ * for "<graph>": committed verified snapshot <ref> as <graph> (N triples)`),
+ * which stays in the store even when the recovery then stops incomplete; a
+ * recovery counts once, the larger of its commits and its summary. Any data
+ * inserted makes the count non-zero, which is all the evidence of #3296
+ * needs. Returns { passes (the rounds that logged their data and meta
  * triples), data }, or null when the log shows no subscribe of the graph.
  */
 export function catchupDataTriples(logText, graphId) {
@@ -652,7 +662,7 @@ export function catchupDataTriples(logText, graphId) {
   const at = text.lastIndexOf(`[subscribe] contextGraph=${graphId} `);
   if (at < 0) return null;
   const sync = `SWM sync for "${graphId}": `;
-  const recovery = `SWM recovery for "${graphId}" from `;
+  const recovery = `SWM recovery for "${graphId}"`;
   let passes = 0;
   let data = 0;
   const snapshots = new Map();
@@ -660,6 +670,12 @@ export function catchupDataTriples(logText, graphId) {
     const operation = operationOf(line);
     if (!snapshots.has(operation)) snapshots.set(operation, { each: 0, total: 0 });
     return snapshots.get(operation);
+  };
+  const recoveries = new Map();
+  const ofRecovery = line => {
+    const operation = operationOf(line);
+    if (!recoveries.has(operation)) recoveries.set(operation, { committed: 0, summary: 0 });
+    return recoveries.get(operation);
   };
   for (const line of text.slice(at).split('\n')) {
     const inSync = line.indexOf(sync);
@@ -676,13 +692,18 @@ export function catchupDataTriples(logText, graphId) {
       continue;
     }
     const inRecovery = line.indexOf(recovery);
-    const recovered = inRecovery >= 0 ? /: replaced \d+ roots, \d+ exact graphs, (\d+) data \+ \d+ meta triples/.exec(line.slice(inRecovery)) : null;
-    if (recovered) {
+    if (inRecovery < 0) continue;
+    const rest = line.slice(inRecovery + recovery.length);
+    const committed = /^: committed verified snapshot \S+ as \S+ \((\d+) triples\)/.exec(rest);
+    const recovered = /^ from \S+: replaced \d+ roots, \d+ exact graphs, (\d+) data \+ \d+ meta triples/.exec(rest);
+    if (committed) ofRecovery(line).committed += Number(committed[1]);
+    else if (recovered) {
       passes += 1;
-      data += Number(recovered[1]);
+      ofRecovery(line).summary += Number(recovered[1]);
     }
   }
   for (const { each, total } of snapshots.values()) data += Math.max(each, total);
+  for (const { committed, summary } of recoveries.values()) data += Math.max(committed, summary);
   return { passes, data };
 }
 

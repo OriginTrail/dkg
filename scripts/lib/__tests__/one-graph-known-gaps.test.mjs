@@ -362,3 +362,27 @@ test('a deadline poll reads until just before its deadline, never a whole interv
   await pollUntil(async () => { polls += 1; return { ok: false }; }, Date.now() - 1000, 200);
   assert.equal(polls, 1);
 });
+
+test('#3296: snapshots a recovery committed are data it inserted, even when the recovery then stopped incomplete', () => {
+  const op = '7b1c0d2e-recovery';
+  const incomplete = [
+    `[subscribe] contextGraph=${CG} includeSharedMemory=true syncMode=always-on forceCatchup=true`,
+    `2026-10-16 14:50:11 sync s0 [DKGAgent] SWM sync for "${CG}": 0 data + 114 meta triples`,
+    `2026-10-16 14:50:12 sync ${op} [DKGAgent] SWM recovery for "${CG}": committed verified snapshot sha256:aa01 as did:dkg:context-graph:${CG}/reports/_shared_memory/0xaa/1 (3 triples)`,
+    `2026-10-16 14:50:13 sync ${op} [DKGAgent] SWM recovery for "${CG}" from 12D3KooWPeer: graph-scoped public snapshot fetch incomplete — skipped, will retry`,
+  ].join('\n');
+  assert.deepEqual(catchupDataTriples(incomplete, CG), { passes: 1, data: 3 });
+  const late = { label: 'node10 (late)' };
+  const listed = { readable: true, entry: { subscribed: true, synced: false }, defined: true };
+  const stuck = syncedAtEndResult({ node: late, graph: { key: 'main' }, listed, everSynced: false, heldAtSubscribe: true, catchup: catchupDataTriples(incomplete, CG) });
+  assert.equal(verdictOf(stuck), 'fail');
+  assert.match(classify(stuck).text, /its catch-up inserted 3 data triple\(s\), so this is not #3296$/);
+  // A recovery that commits its snapshots and completes counts them once, beside its summary.
+  const completed = [
+    `[subscribe] contextGraph=${CG} includeSharedMemory=true syncMode=always-on forceCatchup=true`,
+    `2026-10-16 14:50:12 sync ${op} [DKGAgent] SWM recovery for "${CG}": committed verified snapshot sha256:aa01 as did:dkg:context-graph:${CG}/reports/_shared_memory/0xaa/1 (3 triples)`,
+    `2026-10-16 14:50:12 sync ${op} [DKGAgent] SWM recovery for "${CG}": committed verified snapshot sha256:aa02 as did:dkg:context-graph:${CG}/reports/_shared_memory/0xaa/2 (3 triples)`,
+    `2026-10-16 14:50:13 sync ${op} [DKGAgent] SWM recovery for "${CG}" from 12D3KooWPeer: replaced 0 roots, 2 exact graphs, 6 data + 10 meta triples`,
+  ].join('\n');
+  assert.deepEqual(catchupDataTriples(completed, CG), { passes: 1, data: 6 });
+});

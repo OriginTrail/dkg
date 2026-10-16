@@ -56,7 +56,7 @@ test('a pair holds once both reads showed it, and says where and when', () => {
   assert.match(pairOutcome(pairOf('gone', { view: 7000, partitions: 9000 }, { fromWhat: 'promotion', confirm: { view: { satisfied: true }, partitions: { satisfied: true } } }), { boundMs: 60_000 }).text,
     /: left shared memory 9 s after the promotion, and out of it to the end of the 60 s$/);
   assert.match(pairOutcome(pairOf('unpublished', { view: 100, partitions: 100 }, { fromWhat: 'refused publish', confirm: { view: { satisfied: true }, partitions: { satisfied: true } } }), { boundMs: 60_000 }).text,
-    /: absent from Verified Memory 0 s after the refused publish, and out of it to the end of the 60 s$/);
+    /: absent from Verified Memory at every reading from the refused publish to the end of the 60 s$/);
   assert.match(pairOutcome(pairOf('absent', { view: 100, partitions: 300 }, { fromWhat: 'check', boundMs: 30_000, confirm: { view: { satisfied: true }, partitions: { satisfied: true } } }), { boundMs: 60_000 }).text,
     /: absent from shared memory 0 s after the check, and out of it to the end of the 30 s$/);
 });
@@ -396,4 +396,34 @@ test('a pending watch reads from before the promotion and starts its bound when 
   refused.cancel();
   await refused.done;
   assert.equal(refused.pairs[0].from, null);
+});
+
+test('a refused publish fails at any reading that finds the report in Verified Memory, even before the answer and though it is gone later', { timeout: 10_000 }, async () => {
+  const cg = '0xabc/one-graph-main-1';
+  const vmGraph = `did:dkg:context-graph:${cg}/reports/_verifiable_memory/1`;
+  const rows = [{ p: RDF_TYPE, o: 'urn:one-graph:Report' }, { p: LABEL, o: '"r (1)"' }, { p: BODY, o: '"report 1 of run S: payload"' }];
+  const watched = async inVmUntil => {
+    const started = Date.now();
+    const api = async (_node, _method, _path, body) => {
+      const inVm = Date.now() - started < inVmUntil;
+      const bindings = body.view === 'verifiable-memory' ? (inVm ? rows : [])
+        : body.view ? [] : (inVm ? rows.map(row => ({ g: vmGraph, ...row })) : []);
+      return { status: 200, json: null, text: JSON.stringify({ result: { type: 'bindings', bindings } }) };
+    };
+    const io = reportsOver(api);
+    // Watched from before the publish is sent, armed when its refusal comes at 150 ms.
+    const handle = io.watch(io.pairs(3, wholeReport(cg, started - 60_000), [node], 'unpublished', { pending: true, fromWhat: 'own publish', bound: 300, everyMs: 20 }));
+    await new Promise(resolve => setTimeout(resolve, 150));
+    handle.arm(Date.now());
+    await handle.done;
+    return pairOutcome(handle.pairs[0], { boundMs: 300 });
+  };
+  // In Verified Memory for the first 80 ms, then removed: the side effect was seen, so the check fails.
+  const seen = await watched(80);
+  assert.equal(seen.outcome, 'fail');
+  assert.match(seen.text, /: FOUND in (the verifiable-memory view of reports|the cross-partition read) \(3 row\(s\) of it\) 0 s after the own publish, though it must never be in Verified Memory$/);
+  // Never in Verified Memory: it holds.
+  const never = await watched(0);
+  assert.equal(never.outcome, 'pass');
+  assert.match(never.text, /: absent from Verified Memory at every reading from the own publish to the end of the 0 s$/);
 });

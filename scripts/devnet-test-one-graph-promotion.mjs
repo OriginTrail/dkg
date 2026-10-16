@@ -593,6 +593,10 @@ async function run() {
   const promoted = new Set();
   if (a2.error) fail(3, `${describe(a2)} was not written, so its publish was not tried`);
   else {
+    // Watched from before the publish is sent: a report that must not reach Verified
+    // Memory fails at any reading that finds it there, even one before the answer.
+    const fromWhat = `${edgeA.role}'s own publish`;
+    const unpublished = io.watch(io.pairs(3, a2, edges.running, 'unpublished', { pending: true, fromWhat }));
     const { answer, at } = await io.ownPublish(edgeA, a2);
     const own = memberPublishOutcome(answer);
     if (own.verdict === 'refused') pass(3, `${edgeA.label}'s own publish of ${describe(a2)} was refused by the publish policy: ${own.why}`);
@@ -601,7 +605,13 @@ async function run() {
       // It is in Verified Memory now: the later cases expect it there and out of shared memory.
       promoted.add(a2);
     } else fail(3, `not exercised: ${edgeA.label}'s own publish of ${describe(a2)} failed for another reason than the publish policy: ${own.why}`);
-    await settle([io.watch(io.pairs(3, a2, edges.running, own.verdict === 'published' ? 'vm' : 'unpublished', { from: at, fromWhat: `${edgeA.role}'s own publish` }))]);
+    if (own.verdict === 'published') {
+      unpublished.cancel();
+      await settle([io.watch(io.pairs(3, a2, edges.running, 'vm', { from: at, fromWhat }))]);
+    } else {
+      unpublished.arm(at);
+      await settle([unpublished]);
+    }
   }
 
   // Case 4: the curator promotes the first report of each Edge, its own included.
