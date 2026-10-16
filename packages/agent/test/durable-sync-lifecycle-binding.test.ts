@@ -564,7 +564,7 @@ describe('durable sync lifecycle chain binding', () => {
     const ordinaryAuthority = { coalescing: 'allowed' } as any;
     const snapshotAuthority = { coalescing: 'owner-only' } as any;
     const registeredPublicEvidence = {} as any;
-    const resolve = vi.spyOn(recoveryAuthority, 'resolveOrdinaryRecoveryAuthority')
+    const resolve = vi.spyOn(recoveryAuthority, 'createRecoveryAuthority')
       .mockReturnValue(ordinaryAuthority);
     const execute = vi.spyOn(recoveryExecution, 'runDurableRecovery')
       .mockResolvedValue({ result: {} as any, exactFetchDisposition: 'found' });
@@ -576,7 +576,7 @@ describe('durable sync lifecycle chain binding', () => {
     );
     await exactRecovery.runExactRecovery({ host: createDurableRecoveryHost(agentLike), ctx: createOperationContext('sync'), remotePeerId: 'fixture-peer', contextGraphId: contextGraphId, selectionInput: [ual], authority: snapshotAuthority, options: { signal } });
     expect(resolve).toHaveBeenCalledOnce();
-    expect(resolve.mock.calls[0][0].input).toEqual({ registeredPublicEvidence });
+    expect(resolve.mock.calls[0][1]).toEqual({ registeredPublicEvidence });
     expect(execute).toHaveBeenCalledTimes(2);
     expect(execute.mock.calls[0][0].authority).toBe(ordinaryAuthority);
     expect(execute.mock.calls[1][0].authority).toBe(snapshotAuthority);

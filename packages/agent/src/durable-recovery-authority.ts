@@ -1,5 +1,3 @@
-import type { OperationContext } from '@origintrail-official/dkg-core';
-import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
 import { authenticateDurableGraphScopedAsset } from './durable-recovery-authentication.js';
@@ -68,12 +66,4 @@ export function createRecoveryAuthority(
         + `${error instanceof Error ? error.message : String(error)}`),
     }),
   };
-}
-
-export function resolveOrdinaryRecoveryAuthority(request: {
-  host: Pick<DurableRecoveryHost, 'resolveAuthority'>;
-  ctx: OperationContext;
-  input?: DurableRecoveryInput;
-}): DurableRecoveryAuthority {
-  return request.host.resolveAuthority(request.ctx, request.input ?? {});
 }

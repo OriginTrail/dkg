@@ -2,7 +2,6 @@
 import { createDurableRecoveryHost } from './durable-recovery-host.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
 import { runExactRecovery } from './exact-recovery-execution.js';
-import { resolveOrdinaryRecoveryAuthority } from './durable-recovery-authority.js';
 import { runAdmittedDurableGraph } from './durable-recovery-graph.js';
 import { runSyncSingleFlight, syncSingleFlightKey } from './sync-single-flight.js';
 import { DURABLE_RECOVERY_HARD_TIMEOUT_MS } from './durable-recovery-scheduling.js';
@@ -5041,7 +5040,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<AdmittedDurableSyncResult> {
     const { registeredPublicEvidence, ...executionOptions } = options ?? {};
     const host = createDurableRecoveryHost(this);
-    const authority = resolveOrdinaryRecoveryAuthority({ host, ctx, input: { registeredPublicEvidence } });
+    const authority = host.resolveOrdinaryAuthority(ctx, { registeredPublicEvidence });
     return runDurableRecovery({ host, authority, ctx, remotePeerId, contextGraphIds,
       onPhase, onAccessDenied, sinceBatchIdFor, options: executionOptions });
   }
@@ -5119,7 +5118,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     const { registeredPublicEvidence, ...executionOptions } = options;
     const host = createDurableRecoveryHost(this);
-    const authority = resolveOrdinaryRecoveryAuthority({ host, ctx, input: { registeredPublicEvidence } });
+    const authority = host.resolveOrdinaryAuthority(ctx, { registeredPublicEvidence });
     return runExactRecovery({ host, authority, ctx, remotePeerId, contextGraphId, selectionInput, options: executionOptions });
   }
 
@@ -5161,7 +5160,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<PhysicalDurableSyncResult> {
     const { registeredPublicEvidence, ...executionOptions } = options;
     const host = createDurableRecoveryHost(this);
-    const authority = resolveOrdinaryRecoveryAuthority({ host, ctx, input: { registeredPublicEvidence } });
+    const authority = host.resolveOrdinaryAuthority(ctx, { registeredPublicEvidence });
     return runAdmittedDurableGraph({ host, authority, ctx, remotePeerId, contextGraphId, remainingContextGraphs, options: executionOptions });
   }
 
