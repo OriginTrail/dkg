@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isSafeIri, sparqlIri, sparqlString } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { isQueryResultTooLargeError, type DKGAgent } from '@origintrail-official/dkg-agent';
 import { EntitySearchError, checkDeadline, type EntityDocument, type EntityIndexSpec, type EntityReadSpec, type EntityIdentity } from './types.js';
 
 export const PAGE_SIZE = 8;
@@ -87,8 +87,7 @@ export class EntityGraphReader {
       rows = await this.query(spec, `SELECT DISTINCT ?p ?value WHERE {
         ${selected} } ORDER BY ?p ?value LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline, 256 * 1024, 16_384);
     } catch (error) {
-      if ((error as { code?: string })?.code === 'STORE_RESPONSE_TOO_LARGE'
-          && (error as { queryPhase?: string }).queryPhase === 'result')
+      if (isQueryResultTooLargeError(error))
         throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
       throw error;
     }

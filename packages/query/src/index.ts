@@ -1,3 +1,8 @@
+export {
+  QueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from './query-result-size-error.js';
 export * from './query-engine.js';
 export * from './query-types.js';
 export { DKGQueryEngine, resolveViewGraphs, type ViewResolution } from './dkg-query-engine.js';
