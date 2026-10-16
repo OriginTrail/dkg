@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { EntitySearchError, checkDeadline, unitVector, type EntityCandidate, type EntityIndexSpec, type EntityIdentity } from './types.js';
-import { documentKey } from './documents.js';
+import { documentKey } from './identity.js';
 
 export interface IndexState {
   id: string; spec: EntityIndexSpec; fingerprint: string;

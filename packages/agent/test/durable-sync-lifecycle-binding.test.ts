@@ -556,22 +556,51 @@ describe('durable sync lifecycle chain binding', () => {
     });
   });
 
+  it('resolves ordinary authority once and shares the internal executor with snapshot recovery', async () => {
+    const ordinaryAuthority = { coalescing: 'allowed' } as any;
+    const snapshotAuthority = { coalescing: 'owner-only' } as any;
+    const registeredPublicEvidence = {} as any;
+    const resolve = vi.spyOn(LifecycleSyncMethods.prototype, 'resolveRecoveryAuthority')
+      .mockReturnValue(ordinaryAuthority);
+    const execute = vi.spyOn(LifecycleSyncMethods.prototype, 'runDurableSyncWithAuthority')
+      .mockResolvedValue({ result: {} as any, exactFetchDisposition: 'found' });
+    const reenterPublic = vi.fn(() => { throw new Error('Internal recovery must not re-enter public SDK normalization'); });
+    const agentLike = { runLegacyDurableSyncDetailed: reenterPublic } as any;
+    const signal = new AbortController().signal;
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
+      agentLike, 'fixture-peer', contextGraphId, [ual], { registeredPublicEvidence, signal },
+    );
+    await LifecycleSyncMethods.recoverSnapshotExactAssets(
+      agentLike, 'fixture-peer', contextGraphId, [ual], snapshotAuthority, { signal },
+    );
+    expect(resolve).toHaveBeenCalledOnce();
+    expect(resolve.mock.calls[0][1]).toEqual({ registeredPublicEvidence });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls[0][0]).toBe(ordinaryAuthority);
+    expect(execute.mock.calls[1][0]).toBe(snapshotAuthority);
+    for (const call of execute.mock.calls) {
+      expect(call[7]).toMatchObject({ signal, source: 'vm-recovery', priority: 1_000 });
+      expect(call[7]).not.toHaveProperty('registeredPublicEvidence');
+    }
+    expect(reenterPublic).not.toHaveBeenCalled();
+  });
+
   it.each<ExactRecoveryTransportMode>(['legacy', 'stream-preferred', 'stream-required'])(
     'passes the closed %s transport decision through exact durable dispatch', async exactRecoveryTransportMode => {
-      const runLegacyDurableSyncDetailed = vi.fn(async () => ({
+      const runDurableSyncWithAuthority = vi.spyOn(LifecycleSyncMethods.prototype, 'runDurableSyncWithAuthority').mockResolvedValue({
         admission: 'work-started' as const,
         result: {} as Awaited<ReturnType<typeof runDurableSync>>,
         exactFetchDisposition: 'incomplete' as const,
-      }));
+      });
       const signal = new AbortController().signal;
       const onWorkStarted = vi.fn();
       const isCurrent = () => true;
       await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
-        { runLegacyDurableSyncDetailed } as any, 'fixture-peer', contextGraphId,
+        {} as any, 'fixture-peer', contextGraphId,
         { kind: 'ual-only', assetUals: [ual] },
         { exactRecoveryTransportMode, signal, onWorkStarted, isCurrent },
       );
-      expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
+      expect(runDurableSyncWithAuthority.mock.calls[0]?.[7]).toMatchObject({
         exactRecoveryTransportMode, signal, onWorkStarted, isCurrent,
         exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [ual] }, forceFreshSession: false, allowDurableCheckpoints: true },
       });
@@ -580,11 +609,11 @@ describe('durable sync lifecycle chain binding', () => {
 
   it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
     const physicalResult = {} as Awaited<ReturnType<typeof runDurableSync>>;
-    const runLegacyDurableSyncDetailed = vi.fn(async () => ({
+    const runDurableSyncWithAuthority = vi.spyOn(LifecycleSyncMethods.prototype, 'runDurableSyncWithAuthority').mockResolvedValue({
       result: physicalResult,
       exactFetchDisposition: 'clean-absent' as const,
-    }));
-    const agentLike = { runLegacyDurableSyncDetailed };
+    });
+    const agentLike = {};
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
     const controller = new AbortController();
 
@@ -596,8 +625,8 @@ describe('durable sync lifecycle chain binding', () => {
       { signal: controller.signal },
     );
 
-    expect(runLegacyDurableSyncDetailed).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
+    expect(runDurableSyncWithAuthority).toHaveBeenCalledTimes(1);
+    expect(runDurableSyncWithAuthority.mock.calls[0]?.[7]).toMatchObject({
       exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [exactUal] }, forceFreshSession: false, allowDurableCheckpoints: true },
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
@@ -608,23 +637,23 @@ describe('durable sync lifecycle chain binding', () => {
       source: 'vm-recovery',
       signal: controller.signal,
     });
-    expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
+    expect(runDurableSyncWithAuthority.mock.calls[0]?.[7]).not.toHaveProperty('totalTimeoutMs');
     expect(detailed).toEqual({ result: physicalResult, disposition: 'clean-absent' });
   });
 
   it('forwards a caller deadline through the real exact-sync lifecycle boundary', async () => {
-    const runLegacyDurableSyncDetailed = vi.fn(async () => ({
+    const runDurableSyncWithAuthority = vi.spyOn(LifecycleSyncMethods.prototype, 'runDurableSyncWithAuthority').mockResolvedValue({
       result: {} as Awaited<ReturnType<typeof runDurableSync>>,
       exactFetchDisposition: 'incomplete' as const,
-    }));
+    });
     await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
-      { runLegacyDurableSyncDetailed } as any,
+      {} as any,
       '12D3KooWExactRecoveryPeer',
       '0x1111111111111111111111111111111111111111/public-recovery',
       { kind: 'ual-only', assetUals: ['did:dkg:base:84532/0x1111111111111111111111111111111111111111/1'] },
       { totalTimeoutMs: 120_000 },
     );
-    expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
+    expect(runDurableSyncWithAuthority.mock.calls[0]?.[7]).toMatchObject({
       totalTimeoutMs: 120_000,
       stopOnBackoffWorthyFailure: true,
       source: 'vm-recovery',
