@@ -81,6 +81,8 @@ export interface MemoryData {
   layerStatus: Record<MemoryLayerKey, MemoryLayerStatus>;
   refresh: () => void;
   hasMore: boolean;
+  /** A transient source failure can be retried without changing the query scope. */
+  canRetry: boolean;
   loadMore: () => void;
   pageError: string | null;
   /** A deterministic read budget left relationships outside the preview. */

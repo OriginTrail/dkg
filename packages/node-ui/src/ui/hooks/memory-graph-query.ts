@@ -66,8 +66,8 @@ export interface MemoryGraphPage {
   nextCursor?: MemoryGraphCursor;
   omittedRelationships: boolean;
 }
-export type LayerResult = MemoryGraphPage
-  | { ok: false; reason: 'unavailable' | 'response-limit' | 'cancelled' };
+export type MemoryReadFailureReason = 'unavailable' | 'response-limit' | 'cancelled';
+export type LayerResult = MemoryGraphPage | { ok: false; reason: MemoryReadFailureReason };
 export const MEMORY_LIMIT_MESSAGE = 'Memory preview limit reached. Some relationships remain unloaded. Use a narrower query to inspect them.';
 
 interface QueryLayerOptions {

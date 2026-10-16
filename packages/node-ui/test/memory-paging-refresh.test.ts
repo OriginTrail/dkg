@@ -7,6 +7,7 @@ import { DKGQueryEngine } from '../../query/dist/dkg-query-engine.js';
 import { invalidateQueryCache } from '../src/ui/api.js';
 import { useMemoryEntities, type MemoryData } from '../src/ui/hooks/useMemoryEntities.js';
 import { MemoryReadStatus } from '../src/ui/components/MemoryReadStatus.js';
+import { AUTOMATIC_QUERY_MAX_BYTES } from '../src/ui/query-transport.js';
 const events = vi.hoisted(() => ({ refresh: () => {} }));
 vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({ useMemoryGraphEvents: (_id: string, refresh: () => void) => { events.refresh = refresh; } }));
 const owner = '0x1111111111111111111111111111111111111111'; const cg = `${owner}/preview`;
@@ -14,6 +15,7 @@ let store: OxigraphStore; let engine: DKGQueryEngine; let root: Root; let contai
 let holdOldPage: boolean; let resolveOldPage: (() => void) | undefined;
 let holdRefresh: boolean; let resolveRefresh: (() => void) | undefined;
 let failShared: boolean;
+let failWorkingBudget: boolean;
 let requests: Array<{ contextGraphId: string; sparql: string }>;
 function Probe({ id = cg, catalog = false }: { id?: string; catalog?: boolean }) {
   memory = useMemoryEntities(id, { includeQueryCatalog: catalog });
@@ -34,12 +36,15 @@ async function seed(id: string, count: number) {
 beforeEach(() => {
   invalidateQueryCache(); store = new OxigraphStore(); engine = new DKGQueryEngine(store);
   holdOldPage = false; resolveOldPage = undefined;
-  holdRefresh = false; resolveRefresh = undefined; failShared = false; requests = [];
+  holdRefresh = false; resolveRefresh = undefined; failShared = false; failWorkingBudget = false; requests = [];
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
   vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
     const request = JSON.parse(String(init.body));
     requests.push(request);
+    if (failWorkingBudget && request.sparql.includes('SELECT ?s ?p ?o ?g ?__g') && request.sparql.includes('"/_working_memory/"')) {
+      return new Response('{}', { headers: { 'Content-Length': String(AUTOMATIC_QUERY_MAX_BYTES + 1) } });
+    }
     if (failShared && request.sparql.includes('STRENDS(STR(?g), "/_shared_memory")')) {
       return new Response('Temporarily unavailable', { status: 503 });
     }
@@ -55,6 +60,22 @@ beforeEach(() => {
 });
 afterEach(async () => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 describe('memory continuation and refresh with the scoped native store', () => {
+  it('derives actions from failure reasons even when a transient failure shares a budget warning', async () => {
+    await seed(cg, 1); failWorkingBudget = true;
+    await act(async () => root.render(React.createElement(Probe)));
+    expect(memory.layerStatus.wm).toBe('error'); expect(memory.limitMessage).toBeTruthy();
+    expect(memory.canRetry).toBe(false); expect(memory.hasMore).toBe(false);
+    expect(container.querySelectorAll('button')).toHaveLength(0);
+    failShared = true;
+    await act(async () => memory.refresh());
+    expect(memory.limitMessage).toBeTruthy(); expect(memory.canRetry).toBe(true);
+    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry memory read');
+    expect(retry).toBeDefined();
+    failWorkingBudget = false; failShared = false;
+    await act(async () => retry!.click());
+    expect(memory.canRetry).toBe(false); expect(memory.partial).toBe(false);
+    expect(memory.limitMessage).toBeNull(); expect(memory.graphTriples).toHaveLength(1);
+  });
   it('reports preview counts when a later SWM page reclassifies a loaded WM entity', async () => {
     await seed(cg, 1); const target = `urn:${cg}:00`;
     await store.insert(Array.from({ length: 6 }, (_, i) => ({
@@ -79,14 +100,17 @@ describe('memory continuation and refresh with the scoped native store', () => {
     failShared = true;
     await act(async () => root.render(React.createElement(Probe)));
     expect(memory.layerStatus.swm).toBe('error'); expect(memory.hasMore).toBe(true);
+    expect(memory.canRetry).toBe(true);
     await act(async () => memory.loadMore());
     expect(memory.limitMessage).toBeTruthy();
+    expect(memory.canRetry).toBe(true);
     expect(memory.hasMore).toBe(partitions > 5);
     const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry memory read');
     expect(retry).toBeDefined();
     failShared = false;
     await act(async () => retry!.click());
     expect(memory.layerStatus.swm).toBe('ok');
+    expect(memory.canRetry).toBe(false);
     expect(memory.graphTriples.some(triple => triple.subject === 'urn:shared')).toBe(true);
     expect(memory.limitMessage).toBeTruthy();
     expect([...container.querySelectorAll('button')].map(button => button.textContent)).toEqual(partitions > 5 ? ['Load more graph data'] : []);

@@ -6,6 +6,7 @@ import type {
   ChangeSet,
   PrefixMap,
 } from './types.js';
+import { GraphModelNode } from './graph-node.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -102,16 +103,7 @@ export class GraphModel {
   private ensureNode(id: string): GraphNode {
     let node = this.nodes.get(id);
     if (!node) {
-      node = {
-        id,
-        types: [],
-        label: id,
-        properties: new Map(),
-        imageUrl: null,
-        metadata: new Map(),
-        degree: 0,
-        isBoundary: false,
-      };
+      node = new GraphModelNode(id);
       this.nodes.set(id, node);
     }
     return node;

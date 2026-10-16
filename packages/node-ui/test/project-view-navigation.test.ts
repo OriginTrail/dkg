@@ -131,6 +131,7 @@ const memory = {
   loading: false,
   error: null as string | null,
   partial: false,
+  hasMore: false, canRetry: false, loadMore: vi.fn(), pageError: null, limitMessage: null,
   refresh: vi.fn(),
 };
 

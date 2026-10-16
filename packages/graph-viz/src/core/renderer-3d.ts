@@ -8,6 +8,7 @@ import type { ColorPalette } from './palette.js';
 import type { HexagonPainter } from './hexagon-painter.js';
 import type { StyleEngine } from './style-engine.js';
 import type { GraphEventEmitter } from './events.js';
+import { disposeIconSprite, type SpriteTexture } from './renderer-sprites.js';
 
 /** The lazy module's factory owns construction and initialization cleanup. */
 export async function createWebGL3DRenderer(config: RendererBackendConfig): Promise<RendererBackend> {
@@ -34,7 +35,7 @@ export class WebGL3DRenderer implements RendererBackend {
   private _graph: any = null;
   private _destroyed = false;
   private _fadeFrame: number | null = null;
-  private _iconSprites = new Map<string, { url: string; sprite: any }>();
+  private _iconSprites = new Map<string, { url: string; sprite: THREE.Sprite }>();
   private _hexPainter: HexagonPainter;
   private _styleEngine: StyleEngine;
   private _events: GraphEventEmitter;
@@ -48,15 +49,12 @@ export class WebGL3DRenderer implements RendererBackend {
     fx?: number | null;
     fy?: number | null;
   }>();
-  private _ForceGraph3D: any = null;
-  private _THREE: any = null;
-
   /** Texture cache for image URLs (shared across renders) */
-  private _textureCache = new Map<string, { texture: any; image?: HTMLImageElement }>();
-  private _textureLoader: any = null;
+  private _textureCache = new Map<string, SpriteTexture>();
+  private _textureLoader = new THREE.TextureLoader();
 
   /** Label sprites currently in the scene, keyed by node ID */
-  private _labelSprites = new Map<string, any>();
+  private _labelSprites = new Map<string, THREE.Sprite>();
 
   /** Timer for proximity label updates */
   private _labelTimer: ReturnType<typeof setInterval> | null = null;
@@ -93,14 +91,11 @@ export class WebGL3DRenderer implements RendererBackend {
     if (this._destroyed || this._graph) return;
     // This module is the lazy import boundary. Once loaded, initialization
     // is synchronous and the visualizer publishes only a ready backend.
-    this._ForceGraph3D = ForceGraph3D;
-    this._THREE = THREE;
-    this._textureLoader = new THREE.TextureLoader();
 
     const width = this._container.clientWidth || this._container.offsetWidth || 800;
     const height = this._container.clientHeight || this._container.offsetHeight || 600;
 
-    this._graph = this._ForceGraph3D()(this._container);
+    this._graph = ForceGraph3D()(this._container);
     this._graph
       .width(width)
       .height(height)
@@ -366,21 +361,11 @@ export class WebGL3DRenderer implements RendererBackend {
   // Icon sprites — only created for nodes with imageUrl
   // ──────────────────────────────────────────
 
-  private _disposeIcon(sprite: any): void {
-    sprite.parent?.remove(sprite);
-    const material = sprite.material;
-    material?.dispose();
-    // three-forcegraph disposes both material and map when retiring its
-    // owner. The renderer owns shared textures, so do not let that retirement
-    // dispose a texture that another live icon still uses (or dispose twice).
-    sprite.material = null;
-  }
-
   /** Sprites own materials; shared texture entries own pending image work. */
   private _retireIcons(nodes: Map<string, ForceNode>): void {
     for (const [id, icon] of this._iconSprites) {
       if (nodes.get(id)?._graphNode?.imageUrl === icon.url) continue;
-      this._disposeIcon(icon.sprite);
+      disposeIconSprite(icon.sprite);
       this._iconSprites.delete(id);
     }
     const used = new Set([...nodes.values()].map(node => node._graphNode?.imageUrl));
@@ -392,9 +377,8 @@ export class WebGL3DRenderer implements RendererBackend {
     }
   }
 
-  private _createIconSprite(node: GraphNode): any {
-    const THREE = this._THREE;
-    if (!THREE || !node.imageUrl) return undefined;
+  private _createIconSprite(node: GraphNode): THREE.Sprite | undefined {
+    if (!node.imageUrl) return undefined;
 
     const radius = this._hexPainter.getRadius(node);
     const size = Math.max(radius * 2.5, 6);
@@ -420,9 +404,7 @@ export class WebGL3DRenderer implements RendererBackend {
     return sprite;
   }
 
-  private _createSvgTexture(dataUri: string, node: GraphNode): { texture: any; image?: HTMLImageElement } {
-    const THREE = this._THREE;
-
+  private _createSvgTexture(dataUri: string, node: GraphNode): SpriteTexture {
     const canvas = document.createElement('canvas');
     const res = 64;
     canvas.width = res;
@@ -436,7 +418,7 @@ export class WebGL3DRenderer implements RendererBackend {
     ctx.fill();
 
     const img = new Image();
-    const entry = { texture: new THREE.CanvasTexture(canvas), image: img as HTMLImageElement | undefined };
+    const entry: SpriteTexture = { texture: new THREE.CanvasTexture(canvas), image: img };
     img.onload = () => {
       if (this._destroyed || this._textureCache.get(dataUri) !== entry) return;
       img.onload = null; img.onerror = null; entry.image = undefined;
@@ -454,8 +436,7 @@ export class WebGL3DRenderer implements RendererBackend {
   // ──────────────────────────────────────────
 
   private _updateProximityLabels(): void {
-    const THREE = this._THREE;
-    if (!this._graph || !THREE) return;
+    if (!this._graph) return;
 
     const camera = this._graph.camera();
     if (!camera) return;
@@ -541,16 +522,13 @@ export class WebGL3DRenderer implements RendererBackend {
     }
   }
 
-  private _disposeLabel(sprite: any): void {
+  private _disposeLabel(sprite: THREE.Sprite): void {
     sprite.parent?.remove(sprite);
     sprite.material.map?.dispose();
     sprite.material.dispose();
   }
 
-  private _createLabelSprite(text: string): any {
-    const THREE = this._THREE;
-    if (!THREE) return null;
-
+  private _createLabelSprite(text: string): THREE.Sprite | null {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;

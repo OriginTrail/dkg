@@ -58,7 +58,7 @@ beforeEach(async () => {
   memory = { entities, entityList: [...entities.values()], allTriples, graphTriples: page.triples,
     trustMap: new Map(), counts: { wm: entities.size, swm: 0, vm: 0, total: entities.size },
     loading: false, error: null, partial: false, layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
-    refresh: () => {}, hasMore: false, loadMore: () => {}, pageError: null, limitMessage: null };
+    refresh: () => {}, hasMore: false, canRetry: false, loadMore: () => {}, pageError: null, limitMessage: null };
   container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
 });
 afterEach(async () => {

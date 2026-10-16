@@ -237,21 +237,6 @@ export interface ViewConfig {
 
 // --- ViewConfig Applicator ---
 
-type NodeDecorations = Pick<GraphNode, 'imageUrl' | 'sizeMultiplier' | 'riskScore' | 'isHighRisk'>;
-const viewBaselines = new WeakMap<GraphNode, { data: NodeDecorations; imageOverridden: boolean }>();
-
-/** Record the current RDF-derived image without replacing an active view icon. */
-export function updateDataImageUrl(node: GraphNode, imageUrl: string | null): void {
-  const baseline = viewBaselines.get(node);
-  if (baseline) baseline.data.imageUrl = imageUrl;
-  if (!baseline?.imageOverridden) node.imageUrl = imageUrl;
-}
-
-function setViewImageUrl(node: GraphNode, imageUrl: string): void {
-  node.imageUrl = imageUrl;
-  viewBaselines.get(node)!.imageOverridden = true;
-}
-
 /**
  * Apply a ViewConfig to a loaded graph model.
  *
@@ -261,23 +246,14 @@ function setViewImageUrl(node: GraphNode, imageUrl: string): void {
  * Call this AFTER loading triples into the model, BEFORE refresh().
  */
 export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
-  // Decorations replace the previous view. Ingestion updates the data image
-  // baseline even when the current view masks it with an icon.
-  for (const node of model.nodes.values()) {
-    const baseline = viewBaselines.get(node);
-    if (baseline) {
-      Object.assign(node, baseline.data);
-      baseline.imageOverridden = false;
-    } else viewBaselines.set(node, { data: { imageUrl: node.imageUrl, sizeMultiplier: node.sizeMultiplier,
-      riskScore: node.riskScore, isHighRisk: node.isHighRisk }, imageOverridden: false });
-  }
+  for (const node of model.nodes.values()) node.viewOverrides = {};
   // 1. Focal entity
   if (config.focal) {
     const focalNode = findNodeAcrossNamespaces(model, config.focal.uri);
     if (focalNode) {
-      focalNode.sizeMultiplier = config.focal.sizeMultiplier ?? 1.5;
+      focalNode.viewOverrides.sizeMultiplier = config.focal.sizeMultiplier ?? 1.5;
       if (config.focal.image) {
-        setViewImageUrl(focalNode, config.focal.image);
+        focalNode.viewOverrides.imageUrl = config.focal.image;
       }
     }
   }
@@ -293,7 +269,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
       for (const edge of platformEdges) {
         const platformId = edge.target.split('/').pop() ?? '';
         if (config.platformIcons.icons[platformId]) {
-          setViewImageUrl(node, config.platformIcons.icons[platformId]);
+          node.viewOverrides.imageUrl = config.platformIcons.icons[platformId];
           break;
         }
       }
@@ -302,7 +278,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
       if (!node.imageUrl && config.platformIcons.urlFallbacks) {
         for (const [substr, platformKey] of Object.entries(config.platformIcons.urlFallbacks)) {
           if (node.id.includes(substr) && config.platformIcons.icons[platformKey]) {
-            setViewImageUrl(node, config.platformIcons.icons[platformKey]);
+            node.viewOverrides.imageUrl = config.platformIcons.icons[platformKey];
             break;
           }
         }
@@ -340,12 +316,12 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
         if (value < 0) {
           // Negative values: magnitude = risk (e.g. negative sentiment)
           const riskMagnitude = Math.abs(value);
-          node.riskScore = riskMagnitude;
+          node.viewOverrides.riskScore = riskMagnitude;
           score = riskMagnitude;
           include = invert ? (riskMagnitude <= threshold && riskMagnitude > 0) : (riskMagnitude >= threshold);
         } else {
           // Positive values: normal = high is risky, invert = low is risky
-          node.riskScore = value;
+          node.viewOverrides.riskScore = value;
           if (invert) {
             include = value <= threshold;
             score = include ? threshold - value : 0; // lower value → higher score (riskier)
@@ -377,7 +353,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
         const node = model.nodes.get(id);
         if (!node) continue;
 
-        node.isHighRisk = true;
+        node.viewOverrides.isHighRisk = true;
 
         // Don't override focal entity's sizeMultiplier
         if (node.sizeMultiplier) continue;
@@ -396,7 +372,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
           normalized = 1.0;
         }
 
-        node.sizeMultiplier = minSize + normalized * (maxSize - minSize);
+        node.viewOverrides.sizeMultiplier = minSize + normalized * (maxSize - minSize);
       }
     }
   }
@@ -441,7 +417,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
         }
 
         // Map to sizeMultiplier range: 0.5x (min) to 3x (max)
-        node.sizeMultiplier = 0.5 + normalized * 2.5;
+        node.viewOverrides.sizeMultiplier = 0.5 + normalized * 2.5;
       }
     }
   }
@@ -458,7 +434,7 @@ export function applyViewConfig(config: ViewConfig, model: GraphModel): void {
           || config.nodeTypes[`vocab:${shortType}`]
           || config.nodeTypes[shortType];
         if (typeConfig?.icon) {
-          setViewImageUrl(node, typeConfig.icon);
+          node.viewOverrides.imageUrl = typeConfig.icon;
           break;
         }
       }

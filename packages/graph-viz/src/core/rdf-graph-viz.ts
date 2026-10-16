@@ -11,7 +11,7 @@ import type {
 import type { GraphDataSource } from '../data-sources/types.js';
 import type { ViewConfig } from './view-config.js';
 import type { RendererBackend } from './renderer-backend.js';
-import { applyViewConfig, updateDataImageUrl } from './view-config.js';
+import { applyViewConfig } from './view-config.js';
 import { resolvePalette, injectPaletteCssVars } from './palette.js';
 import { ProvenanceResolver } from './provenance-resolver.js';
 import { TemporalFilter } from './temporal-filter.js';
@@ -645,11 +645,11 @@ export class RdfGraphViz {
   private _postIngest(): void {
     // Resolve image URLs for all nodes (direct and indirect)
     for (const node of this._model.nodes.values()) {
-      updateDataImageUrl(node, this._hexPainter.resolveImageUrl(
+      node.imageUrl = this._hexPainter.resolveImageUrl(
         node,
         (id) => this._model.getNode(id),
         (id) => this._model.getEdgesFrom(id)
-      ));
+      );
     }
 
     // Resolve labels

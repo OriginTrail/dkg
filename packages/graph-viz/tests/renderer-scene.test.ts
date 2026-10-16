@@ -18,7 +18,7 @@ describe('3D renderer with the real Three.js scene mapper', () => {
       styleEngine: {} as any,
     });
     const internal = renderer as any;
-    internal._THREE = THREE; internal._graph = scene;
+    internal._graph = scene;
     const texture = new THREE.Texture(); const disposeTexture = vi.spyOn(texture, 'dispose');
     const replacement = new THREE.Texture(); const disposeReplacement = vi.spyOn(replacement, 'dispose');
     internal._textureLoader = { load: (url: string) => url.endsWith('/icon.png') ? texture : replacement };
