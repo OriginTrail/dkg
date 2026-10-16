@@ -68,16 +68,29 @@ export function boundedResult(bindings: Array<Record<string, unknown>>, maxRows:
   return { ok: true as const, result };
 }
 
-export function finalizeBoundedQuery(policy: BoundedQueryPolicy, bindings: Array<Record<string, unknown>>) {
+export type BoundedQueryResponse = {
+  result: { type: 'bindings'; bindings: Array<Record<string, unknown>> };
+} & (
+  | { mode: 'complete'; resultComplete: true }
+  | { mode: 'page'; resultComplete: false; pageComplete: true; hasMore: boolean;
+      pagingLimitReached: boolean; offset: number; nextOffset: number | null }
+);
+
+export function finalizeBoundedQuery(
+  policy: BoundedQueryPolicy, bindings: Array<Record<string, unknown>>,
+): { ok: false; code: string } | { ok: true; response: BoundedQueryResponse } {
   const rows = policy.mode === 'page' ? bindings.slice(0, policy.maxRows) : bindings;
   const bounded = boundedResult(rows, policy.maxRows);
   if (!bounded.ok) return bounded;
+  if (policy.mode === 'complete') {
+    return { ok: true, response: { mode: 'complete', resultComplete: true, result: bounded.result } };
+  }
   const hasMore = bindings.length > policy.maxRows;
   const nextOffset = policy.offset + rows.length;
   const canContinue = nextOffset <= BOUNDED_QUERY_MAX_OFFSET;
-  return { ok: true as const, response: {
-    mode: policy.mode, resultComplete: policy.mode === 'complete', result: bounded.result,
-    ...(policy.mode === 'page' ? { pageComplete: true, hasMore, pagingLimitReached: hasMore && !canContinue,
-      offset: policy.offset, nextOffset: canContinue ? nextOffset : null } : {}),
+  return { ok: true, response: {
+    mode: 'page', resultComplete: false, result: bounded.result,
+    pageComplete: true, hasMore, pagingLimitReached: hasMore && !canContinue,
+    offset: policy.offset, nextOffset: canContinue ? nextOffset : null,
   } };
 }
