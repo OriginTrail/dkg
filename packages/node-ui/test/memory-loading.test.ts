@@ -10,6 +10,9 @@ let root: Root; let container: HTMLDivElement; let memory: MemoryData;
 const rows = (n: number, id: string) => Array.from({ length: n }, (_, i) => ({
   s: `urn:order:${i}`, p: 'http://schema.org/name', o: JSON.stringify(`Order ${i}`),
   g: `did:dkg:context-graph:${id}/_working_memory/0x1111111111111111111111111111111111111111/1`,
+  __g: `did:dkg:context-graph:${id}/_working_memory/0x1111111111111111111111111111111111111111/1`,
+  __s: `I:urn:order:${i}`, __p: 'http://schema.org/name', __kind: 'L', __o: `Order ${i}`,
+  __lang: '', __datatype: 'http://www.w3.org/2001/XMLSchema#string',
 }));
 const response = (bindings: unknown[]) => new Response(JSON.stringify({ result: { type: 'bindings', bindings } }));
 function Probe({ id }: { id: string }) {
@@ -24,6 +27,16 @@ afterEach(() => { act(() => root.unmount()); container.remove(); invalidateQuery
 const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); };
 
 describe('bounded graph reads', () => {
+  it('starts all three layer inventories without waiting for another layer response', async () => {
+    const pending: Array<(response: Response) => void> = [];
+    const fetch = vi.fn(() => new Promise<Response>(resolve => pending.push(resolve)));
+    vi.stubGlobal('fetch', fetch);
+    await act(async () => root.render(React.createElement(Probe, { id: 'parallel-layers' })));
+    expect(fetch).toHaveBeenCalledTimes(3); expect(memory.loading).toBe(true);
+    await act(async () => pending.forEach(resolve => resolve(response([]))));
+    expect(memory.loading).toBe(false);
+    expect(memory.layerStatus).toEqual({ wm: 'ok', swm: 'ok', vm: 'ok' });
+  });
   it('continues a clipped layer, retries the same failed page, and reuses reads after reopening', async () => {
     let pageFails = true;
     const fetch = vi.fn(async (_url: string, init: RequestInit) => {

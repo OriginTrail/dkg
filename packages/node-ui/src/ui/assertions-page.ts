@@ -1,3 +1,4 @@
+import { decodeAssertionIdentity } from './assertion-identity.js';
 import { sparqlIri } from '@origintrail-official/dkg-core/sparql-safe';
 import { executeQuery, type AssertionInfo } from './api.js';
 import { UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
@@ -11,23 +12,6 @@ export interface AssertionsPage {
 const DKG = 'http://dkg.io/ontology/';
 const value = (term: unknown): string => typeof term === 'string' ? term
   : String((term as { value?: unknown } | undefined)?.value ?? '');
-
-function identity(g: string, contextGraphId: string): { name: string; subGraph?: string } | undefined {
-  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-  const urn = `urn:dkg:assertion:${contextGraphId}:`;
-  if (g.startsWith(prefix)) {
-    const segments = g.slice(prefix.length).split('/');
-    if (segments.length === 3 && segments[0] === 'assertion') return { name: segments[2] };
-    if (segments.length === 4 && segments[1] === 'assertion') return { name: segments[3], subGraph: segments[0] };
-  }
-  if (g.startsWith(urn)) {
-    const rest = g.slice(urn.length);
-    const root = /^(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-    if (root) return { name: root[2] };
-    const scoped = /^([^:]+):(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-    if (scoped) return { name: scoped[3], subGraph: scoped[1] };
-  }
-}
 
 /** Page membership metadata first, then count only the visible KAs' data graphs. */
 export async function listAssertionsPage(
@@ -65,7 +49,7 @@ export async function listAssertionsPage(
   const visible = rows.slice(0, size);
   const items = visible.flatMap(row => {
     const graphUri = value(row.g);
-    const parsed = identity(graphUri, contextGraphId);
+    const parsed = decodeAssertionIdentity(graphUri, contextGraphId);
     if (!parsed || (parsed.subGraph === 'meta' && !(options.includeQueryCatalog && parsed.name.startsWith('query-catalog-')))) return [];
     return [{ ...parsed, graphUri, reservedUal: decodeRdfStringLiteral(value(row.ual)) || undefined, dataGraphUri: value(row.dg) || undefined }];
   });

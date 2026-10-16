@@ -1,8 +1,7 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { invalidateQueryCache } from '../api.js';
-import { readMemoryGraphPage, wmSparql, swmSparql, vmSparql, queryCatalogLayerSparql, WM_LIMIT, MEMORY_LIMIT_MESSAGE, isUri, canonicalEntityUri, type LayerResult } from './memory-graph-query.js';
+import { useMemo } from 'react';
+import { useMemoryPages } from './useMemoryPages.js';
+import { isUri, canonicalEntityUri } from './memory-graph-query.js';
 export { canonicalEntityUri, rdfBindingValue, subGraphOf, readMemoryGraphPage, fetchMemoryEntity } from './memory-graph-query.js';
-import { useMemoryGraphEvents } from './useNodeEvents.js';
 import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
 import { decodeRdfStringLiteral } from '../../rdf-literal.js';
 
@@ -416,154 +415,11 @@ export function isFirstClassEntity(e: MemoryEntity): boolean {
   return e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0;
 }
 
-const LOADING_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
-  wm: 'loading',
-  swm: 'loading',
-  vm: 'loading',
-};
-
 export function useMemoryEntities(
   contextGraphId: string,
   opts?: { signalErrors?: boolean; includeQueryCatalog?: boolean },
 ): MemoryData {
-  // Off by default: every existing caller (ProjectView/MemoryStackView/
-  // AgentProfilePage) keeps the original "failed query → empty, never a
-  // hard error" behavior. Only the dashboard opts in so it alone gets
-  // the failed-vs-empty distinction it needs (Codex).
-  const signalErrors = opts?.signalErrors ?? false;
-  const includeQueryCatalog = opts?.includeQueryCatalog ?? false;
-  const [layeredTriples, setLayeredTriples] = useState<LayeredTriple[]>([]);
-  const [loadedKey, setLoadedKey] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [partial, setPartial] = useState(false);
-  const [layerStatus, setLayerStatus] = useState<Record<MemoryLayerKey, MemoryLayerStatus>>(
-    LOADING_LAYER_STATUS,
-  );
-  const versionRef = useRef(0);
-
-  const [hasMore, setHasMore] = useState(false);
-  const [pageError, setPageError] = useState<string | null>(null);
-  const activeRef = useRef(true);
-  const requestRef = useRef<{ key: string; promise: Promise<void>; again: boolean } | null>(null);
-  const pagesRef = useRef<Array<{ sparql: string; layer: TrustLevel; result: LayerResult }>>([]);
-  const depthRef = useRef({ contextGraphId, depths: new Map<string, number>() });
-  const key = JSON.stringify([contextGraphId, includeQueryCatalog, signalErrors]);
-
-  const fetchAll = useCallback((force = false): Promise<void> => {
-    if (!contextGraphId) return Promise.resolve();
-    if (force) invalidateQueryCache(contextGraphId);
-    const running = requestRef.current;
-    if (running?.key === key) {
-      running.again = true;
-      return running.promise;
-    }
-    const version = ++versionRef.current;
-    const isCurrent = () => activeRef.current && version === versionRef.current;
-    setLoading(true);
-    setError(null);
-    setPageError(null);
-    setLayerStatus(LOADING_LAYER_STATUS);
-    const entry = { key, promise: Promise.resolve(), again: false };
-    if (depthRef.current.contextGraphId !== contextGraphId) depthRef.current = { contextGraphId, depths: new Map() };
-    const definitions: Array<{ sparql: string; layer: TrustLevel }> = [
-      { sparql: wmSparql(contextGraphId), layer: 'working' },
-      { sparql: swmSparql(contextGraphId), layer: 'shared' },
-      { sparql: vmSparql(contextGraphId), layer: 'verified' },
-      ...(includeQueryCatalog ? [
-        { sparql: queryCatalogLayerSparql(contextGraphId, 'wm'), layer: 'working' as const },
-        { sparql: queryCatalogLayerSparql(contextGraphId, 'swm'), layer: 'shared' as const },
-      ] : []),
-    ];
-    entry.promise = (async () => {
-      const results = await Promise.all(definitions.map(async definition => {
-        const depth = depthRef.current.depths.get(definition.sparql) ?? 1;
-        let result = await readMemoryGraphPage(definition.sparql, contextGraphId,
-          { includeContextGraphPartitions: true, layerLimit: WM_LIMIT, isCurrent });
-        for (let page = 1; page < depth && result.ok && result.truncated && isCurrent(); page++) {
-          const next = await readMemoryGraphPage(definition.sparql, contextGraphId,
-            { includeContextGraphPartitions: true, layerLimit: WM_LIMIT, cursor: result.cursor, isCurrent });
-          if (!next.ok) { result = { ...result, ok: false, incomplete: result.incomplete || next.incomplete }; break; }
-          result = { ...next, incomplete: result.incomplete || next.incomplete,
-            triples: [...result.triples, ...next.triples], rowCount: result.rowCount + next.rowCount };
-        }
-        return result;
-      }));
-      if (version !== versionRef.current || !activeRef.current) return;
-      pagesRef.current = definitions.map((definition, index) => ({ ...definition, result: results[index] }));
-      const triples = pagesRef.current.flatMap(page => page.result.triples.map(triple => ({ ...triple, layer: page.layer })));
-      setLayeredTriples(triples);
-      setLoadedKey(key);
-      const status = (layer: TrustLevel): MemoryLayerStatus => pagesRef.current.filter(page => page.layer === layer).every(page => page.result.ok) ? 'ok' : 'error';
-      const statuses = { wm: status('working'), swm: status('shared'), vm: status('verified') };
-      const failed = Object.values(statuses).filter(value => value === 'error').length;
-      const more = results.some(result => result.truncated);
-      setLayerStatus(statuses);
-      setHasMore(more);
-      setPartial(failed > 0 || more || results.some(result => result.incomplete));
-      setError(signalErrors && failed === 3 ? 'Failed to load memory data' : null);
-    })().finally(() => {
-      if (version === versionRef.current && activeRef.current) setLoading(false);
-      if (requestRef.current !== entry) return;
-      requestRef.current = null;
-      if (entry.again && activeRef.current) void fetchAll(false);
-    });
-    requestRef.current = entry;
-    return entry.promise;
-  }, [contextGraphId, includeQueryCatalog, signalErrors, key]);
-
-  const loadMore = useCallback((): Promise<void> => {
-    if (requestRef.current) return requestRef.current.promise;
-    const pages = pagesRef.current.filter(page => page.result.truncated);
-    if (!pages.length) return Promise.resolve();
-    const version = ++versionRef.current;
-    const isCurrent = () => activeRef.current && version === versionRef.current;
-    const entry = { key, promise: Promise.resolve(), again: false };
-    setLoading(true);
-    setPageError(null);
-    entry.promise = (async () => {
-      const results = await Promise.all(pages.map(page => readMemoryGraphPage(page.sparql, contextGraphId, {
-        includeContextGraphPartitions: true, layerLimit: WM_LIMIT, cursor: page.result.cursor, isCurrent,
-      })));
-      if (version !== versionRef.current || !activeRef.current) return;
-      const added: LayeredTriple[] = [];
-      for (const [index, result] of results.entries()) {
-        if (!result.ok) {
-          if (result.incomplete) pages[index].result = { ...pages[index].result, incomplete: true, truncated: false };
-          setPageError(result.incomplete ? MEMORY_LIMIT_MESSAGE : 'Could not load more graph data. Retry to continue from the last loaded page.');
-          continue;
-        }
-        depthRef.current.depths.set(pages[index].sparql, (depthRef.current.depths.get(pages[index].sparql) ?? 1) + 1);
-        pages[index].result = { ...result, incomplete: pages[index].result.incomplete || result.incomplete };
-        added.push(...result.triples.map(triple => ({ ...triple, layer: pages[index].layer })));
-      }
-      setLayeredTriples(previous => [...previous, ...added]);
-      const more = pagesRef.current.some(page => page.result.truncated);
-      setHasMore(more);
-      setPartial(more || pagesRef.current.some(page => !page.result.ok || page.result.incomplete));
-    })().finally(() => {
-      if (version === versionRef.current && activeRef.current) setLoading(false);
-      if (requestRef.current !== entry) return;
-      requestRef.current = null;
-      if (entry.again && activeRef.current) void fetchAll(false);
-    });
-    requestRef.current = entry;
-    return entry.promise;
-  }, [contextGraphId, key, fetchAll]);
-
-  useMemoryGraphEvents(contextGraphId, () => { void fetchAll(false); });
-  useEffect(() => {
-    activeRef.current = true;
-    void fetchAll(false);
-    return () => {
-      activeRef.current = false;
-      versionRef.current++;
-      requestRef.current = null;
-      pagesRef.current = [];
-    };
-  }, [fetchAll]);
-
-  const visibleTriples = useMemo(() => loadedKey === key ? layeredTriples : [], [loadedKey, key, layeredTriples]);
+  const { triples: visibleTriples, error, ...paging } = useMemoryPages(contextGraphId, opts?.includeQueryCatalog ?? false);
   const entities = useMemo(() => buildMemoryEntities(visibleTriples), [visibleTriples]);
 
   const entityList = useMemo(() =>
@@ -607,8 +463,6 @@ export function useMemoryEntities(
     return { wm, swm, vm, total: entityList.length };
   }, [entityList]);
 
-  const refresh = useCallback(() => { void fetchAll(true); }, [fetchAll]);
-  const nextPage = useCallback(() => { void loadMore(); }, [loadMore]);
   return {
     entities,
     entityList,
@@ -616,14 +470,7 @@ export function useMemoryEntities(
     graphTriples,
     trustMap,
     counts,
-    loading: loading || loadedKey !== key,
-    error,
-    partial,
-    layerStatus,
-    refresh,
-    hasMore: loadedKey === key && hasMore,
-    loadMore: nextPage,
-    pageError,
-    limitMessage: loadedKey === key && pagesRef.current.some(page => page.result.incomplete) ? MEMORY_LIMIT_MESSAGE : null,
+    ...paging,
+    error: opts?.signalErrors ? error : null,
   };
 }

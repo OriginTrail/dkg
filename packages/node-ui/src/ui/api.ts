@@ -1,3 +1,4 @@
+import { decodeAssertionIdentity } from './assertion-identity.js';
 import { randomUUID } from './lib/randomUUID.js';
 import { executeQuery, postQueryDeduped, invalidateQueryCache, fetchContextGraphs } from './query-api.js';
 export * from './query-api.js';
@@ -1158,8 +1159,6 @@ export async function listAssertions(
     // data-graph-URI marker forms, dedupe by (subGraph, name), and exclude the
     // reserved `meta` sub-graph.
     const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-    const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
-    const urnPrefix = `urn:dkg:assertion:${contextGraphId}:`;
     // Exclude assertions already PUBLISHED to VM. Publish records a
     // `dkg:vmCurrentAssertion` pointer but (a backend gap — the
     // generateAssertionPublishedMetadata flip's SPARQL gate never matches the
@@ -1185,31 +1184,9 @@ export async function listAssertions(
       const g = typeof b.g === 'string' ? b.g : b.g?.value;
       if (!g) continue;
       const vm = typeof b.vm === 'string' ? b.vm : b.vm?.value;
-      let subGraph: string | undefined;
-      let name: string | undefined;
-      if (g.startsWith(cgPrefix)) {
-        const segments = g.slice(cgPrefix.length).split('/');
-        if (segments.length === 3 && segments[0] === 'assertion') {
-          name = segments[2];
-        } else if (segments.length === 4 && segments[1] === 'assertion') {
-          subGraph = segments[0];
-          name = segments[3];
-        } else {
-          continue;
-        }
-      } else if (g.startsWith(urnPrefix)) {
-        const rest = g.slice(urnPrefix.length);
-        let m = /^(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-        if (m) {
-          name = m[2];
-        } else {
-          m = /^([^:]+):(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-          if (m) { subGraph = m[1]; name = m[3]; }
-        }
-      } else {
-        continue;
-      }
-      if (!name) continue;
+      const identity = decodeAssertionIdentity(g, contextGraphId);
+      if (!identity) continue;
+      const { name, subGraph } = identity;
       if (!shouldIncludeMetaAssertion(subGraph, name)) continue;
       const key = `${subGraph ?? ''} ${name}`;
       rows.push({ key, name, subGraph, g });
@@ -1377,7 +1354,6 @@ export async function listAssertions(
   // fully promotable. Accept BOTH forms and dedupe by (subGraph, name).
   const result: AssertionInfo[] = [];
   const seen = new Set<string>();
-  const urnPrefix = `urn:dkg:assertion:${contextGraphId}:`;
   // Data-URI rows first: the triple-count badge is keyed on the data graph in
   // `countByGraph`, so preferring that form when both are present keeps the count.
   const ordered = [...bindings].sort((a, b) => {
@@ -1388,34 +1364,9 @@ export async function listAssertions(
   for (const b of ordered) {
     const g = typeof b.g === 'string' ? b.g : b.g?.value;
     if (!g) continue;
-    let subGraph: string | undefined;
-    let name: string | undefined;
-    if (g.startsWith(cgPrefix)) {
-      const segments = g.slice(cgPrefix.length).split('/');
-      if (segments.length === 3 && segments[0] === 'assertion') {
-        name = segments[2];
-      } else if (segments.length === 4 && segments[1] === 'assertion') {
-        subGraph = segments[0];
-        name = segments[3];
-      } else {
-        continue;
-      }
-    } else if (g.startsWith(urnPrefix)) {
-      // `<agent>` is a 0x EVM address (no colons); `<name>` MAY contain ':'.
-      // Peel the agent deterministically — whatever precedes it (if anything)
-      // is the sub-graph segment, the greedy remainder is the name.
-      const rest = g.slice(urnPrefix.length);
-      let m = /^(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-      if (m) {
-        name = m[2];
-      } else {
-        m = /^([^:]+):(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-        if (m) { subGraph = m[1]; name = m[3]; }
-      }
-    } else {
-      continue;
-    }
-    if (!name) continue;
+    const identity = decodeAssertionIdentity(g, contextGraphId);
+    if (!identity) continue;
+    const { name, subGraph } = identity;
     // Defense-in-depth for the meta-namespace exclusion above: the reserved
     // `meta` sub-graph (`<cg>/meta/assertion/…` profile/query-catalog drafts)
     // is UI configuration, not user knowledge, and must never reach the

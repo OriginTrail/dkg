@@ -58,8 +58,9 @@ function bindingsForLayer(sparql: string, contextGraphId: string, revision: numb
   );
 }
 
+let memory: ReturnType<typeof useMemoryEntities>;
 function Probe({ contextGraphId }: { contextGraphId: string }) {
-  const memory = useMemoryEntities(contextGraphId);
+  memory = useMemoryEntities(contextGraphId);
   return React.createElement(
     'div',
     {
@@ -159,5 +160,53 @@ describe('useMemoryEntities live updates', () => {
 
     expect(fetch).toHaveBeenCalledTimes(5);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
+  });
+
+  it.each(['initial', 'continuation'])('retains one event refresh during a pending %s read', async mode => {
+    const graphNames = Array.from({ length: 6 }, (_, i) =>
+      `did:dkg:context-graph:project-a/_working_memory/0x1111111111111111111111111111111111111111/${i}`);
+    let release: (() => void) | undefined;
+    let held = false;
+    let normalReads = 0;
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const { sparql } = JSON.parse(String(init?.body));
+      let bindings: unknown[] = [];
+      const working = !sparql.includes('_verifiable_memory_meta') && !sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
+      if (working && sparql.includes('SELECT DISTINCT')) {
+        bindings = graphNames.filter(graph => !sparql.includes(`> ${JSON.stringify(graphNames[4])}`) || graph > graphNames[4])
+          .map(g => ({ g }));
+      } else if (working && sparql.includes('FILTER(!isBlank')) {
+        normalReads++;
+        const visible = graphNames.filter(graph => sparql.includes(`<${graph}>`));
+        bindings = visible.map(graph => tripleBinding(`urn:version:${revision}:${graphNames.indexOf(graph)}`, graph));
+        const shouldHold = mode === 'initial' || visible.includes(graphNames[5]);
+        if (!held && shouldHold) {
+          held = true;
+          await new Promise<void>(resolve => { release = resolve; });
+        }
+      }
+      return new Response(JSON.stringify({ result: { type: 'bindings', bindings } }));
+    });
+    await act(async () => root.render(React.createElement(Probe, { contextGraphId: 'project-a' })));
+    if (mode === 'continuation') {
+      expect(memory.counts.total).toBe(5);
+      await act(async () => memory.loadMore?.());
+    }
+    expect(release).toBeTypeOf('function');
+    const before = normalReads;
+    revision = 2;
+    await act(async () => {
+      for (let i = 0; i < 20; i++) MockEventSource.instances[0].emit('memory_graph_changed', {
+        contextGraphId: 'project-a', layers: ['wm'], operation: 'assertion_written',
+      });
+      vi.advanceTimersByTime(350);
+    });
+    expect(normalReads).toBe(before);
+    await act(async () => release!()); await flush();
+    expect(memory.loading).toBe(false);
+    expect(memory.counts.total).toBe(mode === 'initial' ? 5 : 6);
+    expect(memory.allTriples.every(triple => triple.subject.startsWith('urn:version:2:'))).toBe(true);
+    expect(normalReads).toBe(mode === 'initial' ? 2 : 4);
+    expect(memory.pageError).toBeNull();
   });
 });

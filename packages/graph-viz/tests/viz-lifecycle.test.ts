@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const renderers = vi.hoisted(() => ({ two: [] as any[], three: [] as any[], init: undefined as (() => Promise<void>) | undefined }));
 vi.mock('../src/core/renderer.js', () => ({ Canvas2DRenderer: class {
-  render = vi.fn(); resize = vi.fn(); destroy = vi.fn();
+  render = vi.fn(); resize = vi.fn(); destroy = vi.fn(); applyAnimation = vi.fn();
   constructor() { renderers.two.push(this); }
 } }));
 vi.mock('../src/core/renderer-3d.js', () => ({ WebGL3DRenderer: class {
-  render = vi.fn(); resize = vi.fn(); destroy = vi.fn();
+  render = vi.fn(); resize = vi.fn(); destroy = vi.fn(); applyAnimation = vi.fn();
   constructor() { renderers.three.push(this); }
   init() { return renderers.init?.() ?? Promise.resolve(); }
 } }));
@@ -94,8 +94,11 @@ describe('visualizer lifecycle', () => {
     await vi.waitFor(() => expect(renderers.three).toHaveLength(1));
     resolve(); await flush();
     expect(renderers.three[0].autoFitDisabled).toBe(true);
-    viz.applyView({ name: 'animated view', animation: { fadeIn: true } } as any);
-    viz.destroy(); await flush();
+    const view = { name: 'animated view', animation: { fadeIn: true } } as any;
+    viz.applyView(view); await flush();
+    expect(renderers.three[0].applyAnimation).toHaveBeenCalledExactlyOnceWith(view.animation);
+    viz.applyView(view); viz.destroy(); await flush();
+    expect(renderers.three[0].applyAnimation).toHaveBeenCalledTimes(1);
     expect(renderers.three[0].destroy).toHaveBeenCalledOnce();
   });
 

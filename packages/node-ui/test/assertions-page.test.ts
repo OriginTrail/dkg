@@ -6,6 +6,7 @@ import { generateAssertionCreatedMetadata } from '../../publisher/dist/metadata.
 import { listAssertionsPage, fetchAssertionPageCounts } from '../src/ui/assertions-page.js';
 import { invalidateQueryCache } from '../src/ui/api.js';
 import { fetchMemoryEntity, readMemoryGraphPage } from '../src/ui/hooks/useMemoryEntities.js';
+import { memoryQueryDefinitions } from '../src/ui/hooks/memory-query-definition.js';
 
 const owner = '0x1111111111111111111111111111111111111111';
 const cg = `${owner}/jpb-data`;
@@ -71,16 +72,34 @@ describe('assertion pages against the native scoped query engine', () => {
     expect(page.items).toEqual([{ name: 'standard', graphUri: id, dataGraphUri: graph, reservedUal: ual }]);
     expect(page.nextCursor).toBe(id);
   });
+  it('uses projected SPARQL JSON cursor keys without reinterpreting their lexical quotes', async () => {
+    const graph = content('lexical-cursor');
+    const literal = (value: string) => ({ type: 'literal', value });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ result: { bindings: [{ g: { type: 'uri', value: graph } }] } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ result: { bindings: [{
+        g: { type: 'uri', value: graph }, s: { type: 'uri', value: 'urn:cursor' },
+        p: { type: 'uri', value: 'urn:value' }, o: literal('"quoted"'),
+        __g: literal(graph), __s: literal('I:urn:cursor'), __p: literal('urn:value'),
+        __kind: literal('L'), __o: literal('"quoted"'), __lang: literal(''),
+        __datatype: literal('http://www.w3.org/2001/XMLSchema#string'),
+      }] } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ result: { bindings: [] } })));
+    const page = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { layerLimit: 1 });
+    expect(page.ok).toBe(true);
+    expect(page.cursor).toEqual({ kind: 'row', graph,
+      termKey: ['I:urn:cursor', 'urn:value', 'L', '"quoted"', '', 'http://www.w3.org/2001/XMLSchema#string'] });
+    expect(page.triples[0].object).toBe(JSON.stringify('"quoted"'));
+  });
   it.each(['$&', '$$', '$`', "$'", '$1'])('preserves %s in literal keyset cursors', async token => {
     const graph = content('replacement-cursor');
     await store.insert([
       { subject: iri('replacement-cursor'), predicate: dkg + 'assertionGraph', object: graph, graph: meta },
       ...[token, 'a', 'z'].map(value => ({ subject: 'urn:cursor', predicate: 'urn:value', object: JSON.stringify(value), graph })),
     ]);
-    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
     const seen: string[] = []; let cursor;
     for (let page = 0; page < 5; page++) {
-      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 1, cursor });
+      const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 1, cursor });
       expect(result.ok).toBe(true); seen.push(...result.triples.map(triple => triple.object));
       if (!result.truncated) break;
       cursor = result.cursor;
@@ -101,10 +120,9 @@ describe('assertion pages against the native scoped query engine', () => {
   });
   it('preserves replacement tokens in graph VALUES and graph-boundary continuation', async () => {
     for (const name of ['00', '01', '02', '03', '04$&', '04a', '04z']) await assertion(name);
-    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
     const seen: string[] = []; let cursor;
     for (let page = 0; page < 3; page++) {
-      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 100, cursor });
+      const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 100, cursor });
       expect(result.ok).toBe(true); seen.push(...result.triples.map(triple => triple.subject));
       if (!result.truncated) break;
       cursor = result.cursor;
@@ -119,11 +137,10 @@ describe('assertion pages against the native scoped query engine', () => {
       { subject: `_:subject${i}`, predicate: 'urn:value', object: `"value ${i}"`, graph },
       { subject: 'urn:parent', predicate: 'urn:child', object: `_:subject${i}`, graph },
     ]).flat());
-    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
     const triples: Array<{ subject: string; predicate: string; object: string }> = [];
     let cursor;
     for (let page = 0; page < 20; page++) {
-      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 20, cursor });
+      const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 20, cursor });
       expect(result.ok).toBe(true);
       triples.push(...result.triples);
       if (!result.truncated) break;
@@ -152,8 +169,7 @@ describe('assertion pages against the native scoped query engine', () => {
     await store.insert(Array.from({ length: 5001 }, (_, i) => ({
       subject: `_:large${i}`, predicate: 'urn:value', object: `"${i}"`, graph: content('large-blank'),
     })));
-    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
-    const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true });
+    const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true });
     expect(result.ok).toBe(true); expect(result.incomplete).toBe(true);
     expect(result.triples.length).toBeLessThanOrEqual(5000);
     expect(requests.filter(request => request.sparql.includes('FILTER(isBlank(?s) || isBlank(?o))')).every(request => /LIMIT\s+5000\s*$/.test(request.sparql))).toBe(true);
@@ -166,10 +182,9 @@ describe('assertion pages against the native scoped query engine', () => {
       const name = `mix-${i}`; await assertion(name);
       await store.insert([{ subject: `_:blank${i}`, predicate: 'urn:blank', object: `"${i}"`, graph: content(name) }]);
     }
-    const query = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ${JSON.stringify(root + '/_working_memory/')})) }`;
     const triples = []; let cursor; let incomplete = false;
     for (let i = 0; i < 10; i++) {
-      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
+      const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
       expect(result.ok).toBe(true); expect(result.triples.length).toBeLessThanOrEqual(2);
       incomplete ||= result.incomplete ?? false; triples.push(...result.triples);
       if (!result.truncated) break;
@@ -181,10 +196,9 @@ describe('assertion pages against the native scoped query engine', () => {
   });
   it('continues across bounded graph-inventory pages even when a triple page is not full', async () => {
     for (let i = 0; i < 12; i++) await assertion(`graph-${String(i).padStart(2, '0')}`);
-    const query = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ' + JSON.stringify(root + '/_working_memory/') + ')) }';
     const sizes: number[] = []; const seen: string[] = []; let cursor;
     for (let page = 0; page < 5; page++) {
-      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 100, cursor });
+      const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 100, cursor });
       expect(result.ok).toBe(true); sizes.push(result.triples.length);
       seen.push(...result.triples.map(triple => triple.subject));
       if (!result.truncated) break;
@@ -201,11 +215,10 @@ describe('assertion pages against the native scoped query engine', () => {
       { subject: 'urn:seek', predicate: 'urn:value', object: '"1"@en', graph: content('seek') },
       { subject: 'urn:seek', predicate: 'urn:value', object: '"1"@fr', graph: content('seek') },
     ]);
-    const query = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ' + JSON.stringify(root + '/_working_memory/') + ')) }';
     const triples: Array<{ subject: string; predicate: string; object: string }> = [];
     let cursor;
     for (let page = 0; page < 5; page++) {
-      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
+      const result = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
       expect(result.ok).toBe(true);
       triples.push(...result.triples);
       if (!result.truncated) break;

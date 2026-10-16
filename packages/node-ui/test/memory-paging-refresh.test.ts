@@ -132,6 +132,30 @@ describe('memory continuation and refresh with the scoped native store', () => {
     await act(async () => root.render(React.createElement(Probe, { catalog: true })));
     expect(memory.entityList).toHaveLength(7); expect(memory.partial).toBe(false);
   });
+  it('retains a coherent loaded preview if depth replay fails and recovers at that depth', async () => {
+    await seed(cg, 6);
+    await act(async () => root.render(React.createElement(Probe)));
+    await act(async () => memory.loadMore?.());
+    const previous = memory.graphTriples;
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      const { sparql } = JSON.parse(String(init?.body));
+      if (sparql.includes(`> "did:dkg:context-graph:${cg}/_working_memory/`)) {
+        return new Response('Temporarily unavailable', { status: 503 });
+      }
+      return original(url, init);
+    });
+    await seed(cg, 7);
+    await act(async () => memory.refresh());
+    expect(memory.layerStatus.wm).toBe('error');
+    expect(memory.graphTriples).toEqual(previous);
+    expect(memory.partial).toBe(true);
+    vi.mocked(fetch).mockImplementation(original);
+    await act(async () => memory.refresh());
+    expect(memory.layerStatus.wm).toBe('ok'); expect(memory.partial).toBe(false);
+    expect(memory.entityList).toHaveLength(7);
+    expect(new Set(memory.graphTriples.map(triple => JSON.stringify(triple))).size).toBe(memory.graphTriples.length);
+  });
   it('ignores a pending old page after switching context graphs', async () => {
     await seed(cg, 6); const next = `${owner}/new`; await seed(next, 1);
     await act(async () => root.render(React.createElement(Probe)));
