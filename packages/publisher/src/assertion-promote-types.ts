@@ -36,4 +36,3 @@ export type AssertionPromoteResult = {
   promotedAllRoots: boolean;
   shareOperationId?: string;
 };
-

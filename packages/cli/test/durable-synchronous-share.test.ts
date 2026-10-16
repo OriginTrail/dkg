@@ -122,7 +122,7 @@ describe('durable synchronous share ownership', () => {
   it('fails before content mutation when atomic queue persistence is refused', async () => {
     const { store, agent, finalized } = await setup();
     const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
-    vi.spyOn(store, 'replaceSubject').mockRejectedValue(new UnsupportedTripleStoreCapabilityError('replaceSubject')); 
+    vi.spyOn(store, 'replaceSubject').mockRejectedValue(new UnsupportedTripleStoreCapabilityError('replaceSubject'));
     await expect(agent.promoteQueue.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...bound }, 'inline')).rejects.toMatchObject({ code: 'SHARE_ADMISSION_UNCERTAIN' });
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
     expect(await store.countQuads(finalized.graphUri)).toBe(1);
