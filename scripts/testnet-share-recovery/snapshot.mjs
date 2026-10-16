@@ -41,6 +41,7 @@ for (const a of rows.applied) {
   catalogs.push({ head, rows: catalogRows, objects });
 }
 save('catalogs', catalogs); db.close();
+// sparql-scan-allow: R2 -- Offline full-evidence export of the isolated campaign namespace (436 eight-triple KAs plus one restart probe); only before/after timed traffic, never a daemon request.
 const query = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "did:dkg:context-graph:${cg}/")) } ORDER BY ?g ?s ?p ?o`;
 const r = await fetch(cfg.store.options.url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/sparql-results+json' }, body: new URLSearchParams({ query }), signal: AbortSignal.timeout(120000) });
 if (!r.ok) throw new Error('RDF snapshot failed: ' + r.status);

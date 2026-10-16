@@ -36,6 +36,10 @@ write('summary.json', {key: value for key, value in verification.items() if key 
 })
 write('environment.json', read('environment.json'))
 write('protocol.json', read('protocol.json'))
+write('starting-set-proof.json', read('starting-set-proof.json'))
+write('descriptor-audit.json', [{key: row.get(key) for key in ['name', 'startedAt', 'status', 'error']} for row in read('descriptor-proof.json')])
+if (root / 'post-convergence-observations.jsonl').exists():
+    write('deadline-observations.json', [json.loads(line) for line in (root / 'post-convergence-observations.jsonl').read_text().splitlines()])
 write('traffic-end.json', read('traffic-end.json'))
 write('chain-events.json', read('chain-proof.json'))
 write('fault-identity-proof.json', read('fault-identity-proof.json'))
