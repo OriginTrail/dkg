@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import Database from 'better-sqlite3';
 import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
-import { OxigraphStore, SparqlHttpStore, SharedMemoryLiteralBlobStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, SparqlHttpStore, SharedMemoryLiteralBlobStore, StoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import { EntityGraphReader, indexKey, parseSpec } from '../src/entity-search/documents.js';
 import { parseIndexRequest, parseSearchRequest, parseReadinessRequest } from '../src/entity-search/requests.js';
@@ -569,4 +569,26 @@ it('materializes only ranked winners and keeps deterministic cosine tie order', 
   parse.mockRestore();
   expect(f.store.rank(id, [0, 1], 2, AbortSignal.timeout(1000), performance.now() + 1000)
     .map(row => row.document.entityUri)).toEqual(['urn:entity:1', 'urn:entity:2']);
+});
+
+it.each(['index', 'search'] as const)('keeps the document hydration bound out of subgraph metadata during %s', async mode => {
+  const f = await fixture(1, 100_000, false, true);
+  if (mode === 'search') await f.index();
+  const meta = 'did:dkg:context-graph:catalog/_meta';
+  const names = Array.from({ length: 300 }, (_, i) => 's' + String(i).padStart(3, '0') + 'x'.repeat(60));
+  expect(names.reduce((n, name) => n + Buffer.byteLength(JSON.stringify(name)), 0)).toBe(19_800);
+  await f.graph.insert(names.flatMap(name => [
+    { graph: meta, subject: 'urn:sub:' + name, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph' },
+    { graph: meta, subject: 'urn:sub:' + name, predicate: 'http://schema.org/name', object: JSON.stringify(name) },
+  ]));
+  if (mode === 'index') expect(await f.index()).toMatchObject({ indexedEntities: 1, scanComplete: true });
+  else expect(await f.search()).toMatchObject({ staleCandidates: 0, entities: [{ entityUri: 'urn:entity:0' }] });
+});
+
+it('does not classify an internal metadata overflow as an oversized entity document', async () => {
+  const f = await fixture(1);
+  f.agent.query.mockResolvedValueOnce({ bindings: [{ chars: '10' }] });
+  f.agent.query.mockRejectedValueOnce(new StoreResponseTooLargeError(8 * 1024 * 1024, 8 * 1024 * 1024 + 1));
+  await expect(f.reader.document(spec, { sourceGraph: partition, entityUri: 'urn:entity:0' },
+    AbortSignal.timeout(5000), performance.now() + 5000)).rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
 });
