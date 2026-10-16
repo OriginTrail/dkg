@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EntityIndexStore, type IndexState } from '../src/entity-search/store.js';
-import { documentKey } from '../src/entity-search/documents.js';
+import { documentKey } from '../src/entity-search/identity.js';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const stop of cleanup.splice(0).reverse()) stop(); });
