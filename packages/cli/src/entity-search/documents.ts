@@ -41,11 +41,11 @@ function selection(spec: EntityIndexSpec, graphOperand: string): string {
 }
 export class EntityGraphReader {
   constructor(private agent: { query: OmitThisParameter<DKGAgent['query']> }, readonly callerAgentAddress?: string, private priority: 'normal' | 'background' = 'normal') {}
-  async query(spec: EntityReadSpec, sparql: string, signal: AbortSignal, deadline: number, maxResponseBytes = 256 * 1024) {
+  async query(spec: EntityReadSpec, sparql: string, signal: AbortSignal, deadline: number, maxResponseBytes = 256 * 1024, maxLiteralHydrationBytes?: number) {
     checkDeadline(signal, deadline);
     const result = await this.agent.query(sparql, { contextGraphId: spec.contextGraphId, view: spec.view,
       includeContextGraphPartitions: true, callerAgentAddress: this.callerAgentAddress,
-      accessDenied: 'error', redactQuery: true, chainEvidenceMode: spec.chainEvidenceMode, signal, source: 'api.entities', priority: this.priority, maxResponseBytes });
+      accessDenied: 'error', redactQuery: true, chainEvidenceMode: spec.chainEvidenceMode, signal, source: 'api.entities', priority: this.priority, maxResponseBytes, maxLiteralHydrationBytes });
     checkDeadline(signal, deadline);
     return result.bindings;
   }
@@ -80,10 +80,12 @@ export class EntityGraphReader {
       chars += size;
     }
     if (sizes.length > MAX_DOCUMENT_ROWS || chars > 16384) throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
+    // Transport includes RDF term metadata and JSON escaping. Keep that bounded
+    // independently of the unchanged text and disk-backed literal budgets.
     let rows;
     try {
       rows = await this.query(spec, `SELECT DISTINCT ?p ?value WHERE {
-        ${selected} } ORDER BY ?p ?value LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline, 16_384);
+        ${selected} } ORDER BY ?p ?value LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline, 256 * 1024, 16_384);
     } catch (error) {
       if ((error as { code?: string })?.code === 'STORE_RESPONSE_TOO_LARGE')
         throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);

@@ -1,6 +1,6 @@
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ContextGraphReadAuthorityUnavailableError,
   contextGraphReadAuthorityDependencyOf,
@@ -234,5 +234,37 @@ describe('read-authority dependency attribution (#2834)', () => {
     expect(decision).not.toHaveProperty('detailCode');
     if (decision.outcome !== 'unavailable') throw new Error('expected an unavailable decision');
     expect(new ContextGraphReadAuthorityUnavailableError('cg-2834', decision).detailCode).toBeUndefined();
+  });
+});
+
+
+describe('canonical authority dependency cancellation', () => {
+  const stages = ['getRegisteredAuthority', 'isPrivateLocalGraph', 'getAllowedPeers',
+    'getLocalAgentGate', 'getLegacyParticipants', 'getLocalIdentityId'] as const;
+  it.each(stages)('fences replacement providers after abort in %s', async stage => {
+    const stop = new AbortController();
+    const reads = input({ signal: stop.signal, getLegacyParticipants: async () => ['42'] });
+    const calls: string[] = [];
+    for (const name of stages) {
+      const original = reads[name];
+      Object.assign(reads, { [name]: vi.fn(async () => {
+        calls.push(name);
+        const value = await original();
+        if (name === stage) stop.abort(new Error('authority cancelled'));
+        return value;
+      }) });
+    }
+    const pending = resolveContextGraphReadAuthorityDecision(reads);
+    if (stage === 'getLocalIdentityId') await expect(pending).rejects.toThrow('authority cancelled');
+    else expect((await pending).outcome).toBe('unavailable');
+    expect(calls).toEqual(stages.slice(0, stages.indexOf(stage) + 1));
+  });
+  it('starts no dependency for an already cancelled caller', async () => {
+    const stop = new AbortController(); stop.abort();
+    const getRegisteredAuthority = vi.fn(async () => ({ kind: 'unregistered' as const }));
+    expect((await resolveContextGraphReadAuthorityDecision(input({
+      signal: stop.signal, getRegisteredAuthority,
+    }))).outcome).toBe('unavailable');
+    expect(getRegisteredAuthority).not.toHaveBeenCalled();
   });
 });
