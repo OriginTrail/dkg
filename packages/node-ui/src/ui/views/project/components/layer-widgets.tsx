@@ -193,7 +193,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
       async () => {
         // The share route seals and transfers each complete KA atomically. It is
         // off-chain, so no client-side CG pre-registration is needed.
-        const assertions = await listAssertions(contextGraphId, 'wm');
+        const assertions = await listAssertions(contextGraphId, 'wm', { includeCounts: false });
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
@@ -224,13 +224,12 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
 
   if (count === 0) return null;
   const color = '#f59e0b';
-  const noun = layerNoun('wm', count).toLowerCase();
 
   return (
     <LayerActionShell
       title="Share complete Knowledge Assets"
       footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
-      context={<>{count} eligible {noun} will be shared through their complete owning Knowledge Assets for collaborative review.</>}
+      context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets outside the loaded preview.</>}
       result={result}
       error={error}
     >
@@ -272,7 +271,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         // per-assertion vm/publish path. No pre-register: the daemon runs preconditions first
         // and only auto-registers on its CG_NOT_REGISTERED retry, so a doomed publish never
         // burns gas.
-        const assertions = await listAssertions(contextGraphId, 'swm');
+        const assertions = await listAssertions(contextGraphId, 'swm', { includeCounts: false });
         // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
         const r = await publishAssertionsToVm(contextGraphId, assertions);
         const unknownNote = outcomeUnknownPublishNote(r);
@@ -295,13 +294,12 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
   }, [contextGraphId, run, gate.blocked]);
 
   if (count === 0) return null;
-  const noun = layerNoun('swm', count).toLowerCase();
 
   return (
     <LayerActionShell
       title="Publish"
-      footnote={`Moves ${noun} from this layer to Verifiable Memory.`}
-      context={<>{count} {noun} in this layer can be published to Verifiable Memory on-chain.</>}
+      footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this context graph on-chain."
+      context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets outside the loaded preview. On-chain publishing incurs a cost.</>}
       result={result}
       error={error}
       extras={

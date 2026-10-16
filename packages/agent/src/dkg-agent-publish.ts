@@ -5564,7 +5564,7 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
 
-    const localFinalizationComplete = await finalizeQueuedKnowledgeAssetVmPublish({
+    const finalized = await finalizeQueuedKnowledgeAssetVmPublish({
       request, seal, result, operationPlan, effectiveAuthor: agentAddress,
       snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
     }, {
@@ -5573,12 +5573,7 @@ export class PublishMethods extends DKGAgentBase {
       onPostConfirmationStep: opts?.onPostConfirmationStep,
     });
 
-    // Override any upstream marker: only this complete queued lifecycle can certify its tail.
-    if (localFinalizationComplete === true && result.status === 'confirmed' && result.onChainResult) {
-      return { ...result, assertionUri, seal, status: 'confirmed',
-        onChainResult: result.onChainResult, localFinalizationComplete: true };
-    }
-    return { ...result, assertionUri, seal, localFinalizationComplete: undefined };
+    return { ...finalized, assertionUri, seal };
   }
 
   async publishFromFinalizedAssertion(this: DKGAgent,
