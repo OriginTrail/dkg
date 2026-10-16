@@ -100,18 +100,23 @@ export class EntityIndexStore {
     })();
   }
   rank(id: string, query: number[], limit: number, signal: AbortSignal, deadline: number) {
-    const best: Array<{ document: EntityDocument; score: number }> = [];
+    const best: Array<{ entityKey: string; serializedDocument: string; score: number }> = [];
     const normalized = unitVector(query, query.length);
     for (const raw of this.db.prepare(this.candidates).iterate({ id })) {
       checkDeadline(signal, deadline);
-      const row = raw as { document: string; vector: string };
+      const row = raw as { entity_key: string; document: string; vector: string };
       const vector = unitVector(JSON.parse(row.vector), query.length);
       const score = Math.max(-1, Math.min(1, vector.reduce((sum, n, i) => sum + n * normalized[i], 0)));
-      best.push({ document: JSON.parse(row.document), score });
-      best.sort((a, b) => b.score - a.score || documentKey(a.document).localeCompare(documentKey(b.document)));
+      best.push({ entityKey: row.entity_key, serializedDocument: row.document, score });
+      best.sort((a, b) => b.score - a.score || a.entityKey.localeCompare(b.entityKey));
       if (best.length > limit) best.pop();
     }
-    return best;
+    return best.map(({ serializedDocument, score }) => {
+      checkDeadline(signal, deadline);
+      const document = JSON.parse(serializedDocument) as EntityDocument;
+      checkDeadline(signal, deadline);
+      return { document, score };
+    });
   }
   close(): void { this.db.close(); }
 }

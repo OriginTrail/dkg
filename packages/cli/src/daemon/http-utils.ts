@@ -582,10 +582,11 @@ export function jsonResponse(
   corsOrigin?: string | null,
   extraHeaders?: Record<string, string>,
 ): void {
-  const origin =
-    corsOrigin !== undefined
-      ? corsOrigin
-      : (((res as any).__corsOrigin as string | null) ?? null);
+  sendSerializedJsonResponse(res, status, serializeJsonResponse(status, data), corsOrigin, extraHeaders);
+}
+
+/** The body {@link jsonResponse} sends, for a route that must finish its answer before it decides to send it. */
+export function serializeJsonResponse(status: number, data: unknown): string {
   const scrubbed = scrubResponseBody(data);
   const rawBody = JSON.stringify(scrubbed, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,
@@ -664,7 +665,7 @@ export function jsonResponse(
   // the CodeQL silence on the flagged sink while making
   // success-path payload corruption impossible.
   const isErrorResponse = status >= 400;
-  const body = isErrorResponse
+  return isErrorResponse
     ? rawBody
         .replace(/\\n\s+at [^"\n]+/g, "")
         .replace(
@@ -673,6 +674,17 @@ export function jsonResponse(
         )
         .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "")
     : rawBody;
+}
+
+/** Sends a body {@link serializeJsonResponse} made. */
+export function sendSerializedJsonResponse(
+  res: ServerResponse,
+  status: number,
+  body: string,
+  corsOrigin?: string | null,
+  extraHeaders?: Record<string, string>,
+): void {
+  const origin = corsOrigin !== undefined ? corsOrigin : (((res as any).__corsOrigin as string | null) ?? null);
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),
