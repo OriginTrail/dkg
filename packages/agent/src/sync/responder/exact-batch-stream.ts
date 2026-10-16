@@ -123,7 +123,7 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         // becomes private. This never enters the private/member join lane.
         await requirePublicAuthority(request.contextGraphId, session.signal);
         let started = performance.now();
-        const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
+        const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal, readPriority: 'normal',
           signal: session.signal,
           // A definitive policy change during an already prepared export is
           // fenced by the cache as a changed source, before ASSET_END.

@@ -1,3 +1,4 @@
+import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
 import { parseIntTerm, stripIri, stripLiteral } from "./changelog-terms.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { randomUUID } from 'node:crypto';
@@ -258,9 +259,11 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
    */
   private reconcilePending = false;
 
+  readonly graphEnumerationVisibility;
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !this.isReservedGraph(graph));
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);

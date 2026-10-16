@@ -1,7 +1,9 @@
+import { withAdmittedReadCancellation, type AdmittedReadDeadline } from '../admitted-read-cancellation.js';
 import { executeReceiptConfirmedPublication } from '../receipt-confirmed-execution.js';
 import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { performance } from 'node:perf_hooks';
+import { QueryReadAdmission } from '../query-read-admission.js';
 import type {
   TripleStore,
   BoundedQueryResponseCapability,
@@ -53,7 +55,7 @@ import {
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
-import type { StoreOperation, StoreOperationOutcome } from '../store-operation-outcome.js';
+import { isReadOnlyStoreOperation, type StoreOperation, type StoreOperationOutcome } from '../store-operation-outcome.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
   RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1,
@@ -112,11 +114,8 @@ export interface BlazegraphStoreOptions {
   scheduler?: StorePriorityScheduler;
 }
 
-interface StoreOperationDeadline {
-  readonly signal: AbortSignal;
+interface StoreOperationDeadline extends AdmittedReadDeadline {
   markStarted(): void;
-  waitFor<T>(work: Promise<T>): Promise<T>;
-  check(): void;
   dispose(): void;
 }
 
@@ -240,7 +239,14 @@ function createStoreOperationDeadline(
  * plus Blazegraph's N-Quads bulk-insert endpoint.
  */
 export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability {
+  private readonly queryAdmission = new QueryReadAdmission<AdmittedReadDeadline>();
+
+  withQueryReadAdmission<T>(work: () => Promise<T>, options?: QueryOptions): Promise<T> {
+    if (this.queryAdmission.active) return Promise.reject(new Error('Nested query read admission is not supported'));
+    return this.runStoreWork('query', options, deadline => this.queryAdmission.run(deadline, work));
+  }
   readonly queryResponseLimitMode = 'pre-materialization' as const;
+  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
@@ -304,8 +310,11 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   private runStoreWork<T>(
     operation: StoreOperation,
     options: QueryOptions | undefined,
-    work: (deadline: StoreOperationDeadline) => Promise<T>,
+    work: (deadline: AdmittedReadDeadline) => Promise<T>,
   ): Promise<T> {
+    if (this.queryAdmission.active && isReadOnlyStoreOperation(operation)) {
+      return this.queryAdmission.read(deadline => withAdmittedReadCancellation(deadline, options?.signal, work));
+    }
     return this.withStoreAdmission(operation, options, async deadline => {
       const result = await work(deadline);
       deadline.check();
@@ -319,6 +328,9 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     options: QueryOptions | undefined,
     work: (deadline: StoreOperationDeadline) => Promise<T>,
   ): Promise<T> {
+    if (this.queryAdmission.active) {
+      return Promise.reject(new Error('Mutations are not allowed inside a query read admission'));
+    }
     const deadline = createStoreOperationDeadline(
       this.operationTimeoutMs,
       options?.signal,
@@ -616,6 +628,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     // shared scanner so graph-producing queries still negotiate N-Quads
     // instead of being sent with the SELECT/ASK JSON Accept header.
     const operation = classifySparqlOperation(trimmed);
+    if (this.queryAdmission.active && operation.kind !== 'read') throw new Error('Mutations are not allowed inside a query read admission');
     const isAsk = operation.kind === 'read' && operation.form === 'ASK';
     const isConstruct = operation.kind === 'read'
       && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
@@ -670,7 +683,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   private async postReadQuery(
     sparql: string,
     accept: string,
-    deadline: StoreOperationDeadline,
+    deadline: AdmittedReadDeadline,
     errorResponseByteCeiling: number | undefined,
     failureLabel: 'query' | 'construct',
   ): Promise<Response> {
@@ -688,7 +701,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   private async postReadRequest(
     sparql: string,
     accept: string,
-    deadline: StoreOperationDeadline,
+    deadline: AdmittedReadDeadline,
   ): Promise<Response> {
     return deadline.waitFor(fetch(this.url, {
       method: 'POST',
@@ -704,7 +717,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 
   private async queryConstruct(
     sparql: string,
-    deadline: StoreOperationDeadline,
+    deadline: AdmittedReadDeadline,
     options?: TripleStoreQueryOptions,
   ): Promise<ConstructResult> {
     const res = await this.postReadQuery(
@@ -748,7 +761,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     if (r.type !== 'bindings') return [];
     return r.bindings
       .map((b) => b.g)
-      .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+      .filter(this.graphEnumerationVisibility);
   }
 
   // -------------------------------------------------------------------
@@ -804,7 +817,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   private async postWriteRequest(
     body: string,
     contentType: string,
-    deadline: StoreOperationDeadline,
+    deadline: AdmittedReadDeadline,
     responsePolicy: 'insert' | 'update' | 'bulk group',
   ): Promise<void> {
     deadline.check();

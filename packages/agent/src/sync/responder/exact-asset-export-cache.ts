@@ -1,6 +1,7 @@
 import { createEncodedResponseLease } from './encoded-response-lease.js';
 import type { PreparedContentCache } from './prepared-content-cache.js';
-import { EXACT_EXPORT_METADATA_OPERATION, retryExactMetadataAdmission } from './exact-metadata-admission.js';
+import { EXACT_EXPORT_METADATA_OPERATION, EXACT_EXPORT_PAYLOAD_OPERATION,
+  retryExactMetadataAdmission, retryExactPayloadAdmission, type ExactExportReadPriority } from './exact-metadata-admission.js';
 import { assertSafeIri, compareCodePoint } from '@origintrail-official/dkg-core';
 import {
   StoreResponseTooLargeError,
@@ -76,9 +77,11 @@ export interface ExactAssetEncodedExportLease {
 }
 
 export type ExactAssetExportStage = 'export-metadata-before' | 'export-metadata-admission-retry' | 'export-store-payload-query'
-  | 'export-canonical-preparation-root' | 'export-metadata-after';
+  | 'export-payload-admission-retry' | 'export-canonical-preparation-root' | 'export-metadata-after';
 
 export interface ExactAssetExportRequest {
+  /** Local admitted exports use normal capacity; other readers remain background. */
+  readonly readPriority?: ExactExportReadPriority;
   readonly contextGraphId: string;
   readonly assetUal: string;
   readonly graph: string;
@@ -294,9 +297,9 @@ export function createBoundedExactAssetExportCache(params: {
         GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(request.assetUal)}> ?predicate ?object }
       } LIMIT ${METADATA_MAX_ROWS + 1}
     `, {
-      source: EXACT_EXPORT_METADATA_OPERATION, priority: 'background',
+      source: EXACT_EXPORT_METADATA_OPERATION, priority: request.readPriority ?? 'background',
       signal: request.signal, maxResponseBytes: METADATA_MAX_BYTES,
-    }), request.signal, waitMs => observeExactBatch(() => request.onStage?.('export-metadata-admission-retry', waitMs))); } catch (error) {
+    }), request.signal, waitMs => observeExactBatch(() => request.onStage?.('export-metadata-admission-retry', waitMs)), request.readPriority); } catch (error) {
       if (error instanceof StoreResponseTooLargeError) {
         if (expected?.expectedIdentity !== undefined) throw changed();
         return refuse('metadata-profile', request);
@@ -417,7 +420,7 @@ export function createBoundedExactAssetExportCache(params: {
       let retained = false;
       try {
         stageStarted = performance.now();
-        const payload = await readBoundedGraphPayload(store, request.graph, {
+        const payload = await retryExactPayloadAdmission(() => readBoundedGraphPayload(store, request.graph, {
           expectedQuadCount: request.expectedRows, outputGraph: request.graph, canonicalGraph: '',
           profile: {
             maxRows: EXACT_ASSET_EXPORT_MAX_ROWS, maxResponseBytes: EXACT_ASSET_EXPORT_MAX_STORE_BYTES,
@@ -425,14 +428,14 @@ export function createBoundedExactAssetExportCache(params: {
             rowOverheadBytes: 160, heapAccounting: 'output-graph',
           },
           queryOptions: {
-            source: 'sync.responder.exactAssetExport.payload', priority: 'background', signal: request.signal,
+            source: EXACT_EXPORT_PAYLOAD_OPERATION, priority: request.readPriority ?? 'background', signal: request.signal,
           },
           onQuerySettled: () => {
             // Includes scheduler wait, HTTP/body settlement and JSON decoding.
             observeStage('export-store-payload-query', stageStarted);
             stageStarted = performance.now();
           },
-        });
+        }), request.signal, ms => observeExactBatch(() => request.onStage?.('export-payload-admission-retry', ms)), request.readPriority);
         throwIfAborted(request.signal);
         if (payload.status === 'refused') return refuse(payload.reason, request);
         const { heapBytes } = payload;
@@ -543,8 +546,11 @@ export function createBoundedExactAssetExportCache(params: {
         encodedCacheEntries: encodedCache.size, encodedCacheBytes,
         fallbacks: Object.freeze({ ...fallbacks }) });
     },
-    acquire: acquireRows,
-    async acquireEncoded(scope) {
+    acquire: request => acquireRows({ ...request, readPriority: request.readPriority ?? 'background' }),
+    async acquireEncoded(input) {
+      // Capture scheduling policy so later lease callbacks do not depend on
+      // the caller's async scope or subsequent mutation of its request object.
+      const scope = { ...input, readPriority: input.readPriority ?? 'background' };
       throwIfAborted(scope.signal);
       if (!canReadWholeAsset) return refuse('store-capability', scope);
       const started = performance.now();

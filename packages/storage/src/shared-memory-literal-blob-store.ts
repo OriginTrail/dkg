@@ -57,6 +57,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   readonly innerStore: TripleStore;
+  readonly graphEnumerationVisibility;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
@@ -71,6 +72,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
     this.inner = inner;
     this.innerStore = inner;
+    this.graphEnumerationVisibility = inner.graphEnumerationVisibility?.bind(inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
     this.blobWrites = new ContentAddressedBlobSingleFlight({

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash } from 'node:crypto';
 import { BULK_GRAPH_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
-  createOperationContext, registerBulkGraphResponder, type ProtocolRouter, type BulkGraphSession } from '@origintrail-official/dkg-core';
+  createOperationContext, registerBulkGraphResponder, type ProtocolRouter, type BulkGraphSession, type DuplexStreamOptions } from '@origintrail-official/dkg-core';
 import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson, encodeBulkRefusal, encodeBulkChunkEnd,
   validateBulkGraphRequest, type BulkGraphRequest, type BulkAssetHeader } from '../bulk-graph-contract.js';
 import type { PublicAssetResponderOptions, PublicAssetServingOptions } from './public-asset-responder.js';
@@ -9,7 +9,8 @@ import type { PublicAssetResponderOptions, PublicAssetServingOptions } from './p
 import { observeExactBatch as observe } from '../exact-batch-observation.js';
 const EMPTY = new Uint8Array();
 /** Public-only, shares the existing responder admission and verified prepared-content cache. */
-export function registerPublicBulkGraph(router: ProtocolRouter, options: PublicAssetResponderOptions): void {
+export function registerPublicBulkGraph(router: ProtocolRouter,
+  options: PublicAssetResponderOptions & Pick<DuplexStreamOptions, 'onInboundFailure'>): void {
   registerBulkGraphResponder(router, async (bytes, peer, signal) => {
     const request = validateBulkGraphRequest(readBulkJson(bytes));
     return options.admission.withPreAuthorizationAdmission(peer, signal, async () => {
@@ -23,7 +24,7 @@ export function registerPublicBulkGraph(router: ProtocolRouter, options: PublicA
       signal.throwIfAborted(); return request;
     });
   }, (request, session, peer) => options.admission.withAuthorizedResponseAdmission(peer, request.contextGraphId,
-    session.signal, () => servePublicBulkChunk(request, session, options)));
+    session.signal, () => servePublicBulkChunk(request, session, options)), options);
 }
 
 export async function servePublicBulkChunk(request: BulkGraphRequest, session: Pick<BulkGraphSession, 'signal' | 'next' | 'send'>, options: PublicAssetServingOptions): Promise<void> {
@@ -48,7 +49,7 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: P
     if (options.servingWithheld?.(request.contextGraphId)
       || !await options.isPublicContextGraph(request.contextGraphId, session.signal)) throw new Error('Bulk graph public authority changed');
     const started = performance.now();
-    const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
+    const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal, readPriority: 'normal',
       signal: session.signal, authorizeMissingAccessPolicy: () => options.isPublicContextGraph(request.contextGraphId, session.signal),
       onStage: (stage, ms) => observe(() => options.onStage?.(stage, index, ms, context)),
       onFallback: (reason, budgetReason) => observe(() => options.onFallback?.(reason, index, context, budgetReason)) });

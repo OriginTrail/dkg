@@ -14,6 +14,7 @@ export function resolveDraftAccessPolicy(options?: {
 interface ContentPartitionScope {
   readonly graph: string;
   readonly subGraphName?: string;
+  readonly broadScopeEligible: boolean;
 }
 export type ContentPartition = ContentPartitionScope & (
   // Null explicitly represents a registered historical draft without an owner segment.
@@ -24,7 +25,7 @@ export type ContentPartition = ContentPartitionScope & (
 export function selectContentPartitions(partitions: readonly ContentPartition[],
   draftAccess: DraftAccessPolicy, subGraphName?: string): string[] {
   return partitions.filter(partition => {
-    if (subGraphName && partition.subGraphName !== subGraphName) return false;
+    if (subGraphName ? partition.subGraphName !== subGraphName : !partition.broadScopeEligible) return false;
     if (partition.kind !== 'draft' || draftAccess.kind === 'all') return true;
     const owner = partition.draftOwner;
     return draftAccess.kind === 'owners' && owner !== null

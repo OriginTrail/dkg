@@ -14,8 +14,11 @@ export function classifyScopedContentGraph(
   knownChildContextGraphs: Set<string>,
 ): ContentPartition | undefined {
   const root = contextGraphDataUri(contextGraphId);
+  const scope = (subGraphName?: string) => ({ graph,
+    broadScopeEligible: subGraphName === undefined || registeredSubGraphs.has(subGraphName),
+    ...(subGraphName ? { subGraphName } : {}) });
   const admit = (kind: Exclude<ContentPartition['kind'], 'draft'>, subGraphName?: string): ContentPartition =>
-    Object.freeze({ graph, kind, ...(subGraphName ? { subGraphName } : {}) });
+    Object.freeze({ ...scope(subGraphName), kind });
   if (graph === root) return admit('content');
   if (!graph.startsWith(`${root}/`)) return undefined;
   if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return undefined;
@@ -37,7 +40,7 @@ export function classifyScopedContentGraph(
   let subGraphName: string | undefined;
   const first = tail.split('/', 1)[0];
   if (!first.startsWith('_') && first !== 'assertion') {
-    if (!registeredSubGraphs.has(first) || !validateSubGraphName(first).valid) return undefined;
+    if (!validateSubGraphName(first).valid) return undefined;
     subGraphName = first;
     partition = tail.length === first.length ? '' : tail.slice(first.length + 1);
   }
@@ -45,8 +48,7 @@ export function classifyScopedContentGraph(
   if (partition.startsWith('_shared_memory/')) return admit('shared', subGraphName);
   if (partition.startsWith('_verifiable_memory/')) return admit('verified', subGraphName);
   if (isDraft(partition) && isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs)) {
-    return Object.freeze({ graph, kind: 'draft', draftOwner: partition.split('/')[1] ?? null,
-      ...(subGraphName ? { subGraphName } : {}) });
+    return Object.freeze({ ...scope(subGraphName), kind: 'draft', draftOwner: partition.split('/')[1] ?? null });
   }
   return undefined;
 }

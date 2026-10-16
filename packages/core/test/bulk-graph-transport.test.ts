@@ -3,8 +3,8 @@ import type { Stream } from '@libp2p/interface';
 import type { DKGNode } from '../src/node.js';
 import type { Network } from '../src/network/network.js';
 import { ProtocolRouter } from '../src/protocol-router.js';
-import { BulkGraphSession, bulkGraphTransportOptions, exchangeBulkGraph } from '../src/bulk-graph-transport.js';
-import { BULK_GRAPH_KIND as K, encodeBulkGraphFrame } from '../src/bulk-graph-wire.js';
+import { BulkGraphSession, bulkGraphTransportOptions, exchangeBulkGraph, registerBulkGraphResponder } from '../src/bulk-graph-transport.js';
+import { BULK_GRAPH_KIND as K, BULK_GRAPH_PROTOCOL, encodeBulkGraphFrame, type BulkGraphFrame } from '../src/bulk-graph-wire.js';
 
 const PEER = '12D3KooWBzj7Hg2cKCdsKL6QcjC5UbLztKTvzCZQHaT4P4ZyJEAA';
 const frame = { kind: K.DATA, index: 0, sequence: 0, payload: new Uint8Array([1]) };
@@ -25,9 +25,9 @@ class ControlledStream extends EventTarget {
     this.pending?.reject(error); this.pending = undefined;
     this.drain?.reject(error); this.drain = undefined;
   });
-  deliver() {
+  deliver(value: BulkGraphFrame = frame) {
     if (!this.pending) throw new Error('Expected a pending stream read');
-    this.pending.resolve({ done: false, value: encodeBulkGraphFrame(frame) });
+    this.pending.resolve({ done: false, value: encodeBulkGraphFrame(value) });
     this.pending = undefined;
   }
   async *[Symbol.asyncIterator]() {
@@ -139,5 +139,55 @@ describe('bulk graph read-idle and original total deadlines', () => {
     expect(stream.close).not.toHaveBeenCalled();
     expect(stream.returned).toHaveBeenCalledOnce();
     expect(stream.pending).toBeUndefined();
+  });
+});
+
+describe('bulk graph responder registration', () => {
+  it('forwards failure diagnostics without accepting transport-limit overrides', () => {
+    const registerDuplexStream = vi.fn(), onInboundFailure = vi.fn();
+    const diagnostics = { onInboundFailure, timeoutMs: 9_000_000, maxRequestBytes: 9_000_000 };
+    registerBulkGraphResponder({ registerDuplexStream } as unknown as ProtocolRouter,
+      async () => undefined, async () => undefined, diagnostics);
+    expect(registerDuplexStream.mock.calls[0]![3]).toEqual({ ...bulkGraphTransportOptions(3_600_000), onInboundFailure });
+  });
+  /** What the responder hands the router; the router's own stream lifecycle has its own tests. */
+  function registered() {
+    const registerDuplexStream = vi.fn();
+    const authorize = vi.fn(async (bytes: Uint8Array, peer: string) => ({ bytes, peer }));
+    const respond = vi.fn(async () => undefined);
+    registerBulkGraphResponder({ registerDuplexStream } as unknown as ProtocolRouter, authorize, respond);
+    const [protocol, readRequest, handle, options] = registerDuplexStream.mock.calls[0]!;
+    return { protocol, readRequest, handle, options, authorize, respond };
+  }
+
+  it('reads the request frame, then authorizes and answers on the same session', async () => {
+    const { stream } = fixture();
+    const { protocol, readRequest, handle, options, authorize, respond } = registered();
+    expect(protocol).toBe(BULK_GRAPH_PROTOCOL);
+    expect(options).toEqual(bulkGraphTransportOptions(3_600_000));
+    const signal = new AbortController().signal;
+    const request = readRequest(stream, signal);
+    await vi.advanceTimersByTimeAsync(1);
+    stream.deliver({ kind: K.REQUEST, index: 0, sequence: 0, payload: new Uint8Array([7]) });
+    const read = await request;
+    expect(read.requestData).toEqual(new Uint8Array([7]));
+    await handle({ ...read, peerId: PEER, stream, signal });
+    expect(authorize).toHaveBeenCalledWith(new Uint8Array([7]), PEER, signal);
+    expect(respond).toHaveBeenCalledWith({ bytes: new Uint8Array([7]), peer: PEER }, read.continuation, PEER);
+    await read.dispose();
+    expect(stream.returned).toHaveBeenCalledOnce();
+    expect(stream.abort).not.toHaveBeenCalled();
+  });
+
+  it('aborts the stream and disposes its session when the first frame is not the request', async () => {
+    const { stream } = fixture();
+    const { readRequest, authorize } = registered();
+    const request = expect(readRequest(stream, new AbortController().signal)).rejects.toThrow('Bulk graph request missing');
+    await vi.advanceTimersByTimeAsync(1);
+    stream.deliver();
+    await request;
+    expect(stream.abort).toHaveBeenCalledOnce();
+    expect(stream.returned).toHaveBeenCalledOnce();
+    expect(authorize).not.toHaveBeenCalled();
   });
 });

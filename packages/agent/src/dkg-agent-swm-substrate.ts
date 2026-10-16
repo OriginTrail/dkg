@@ -10,7 +10,6 @@ import { resolvePrivateRootLegacyLaneAdmission, type PrivateRootLegacyLaneAdmiss
  */
 import type { ContextGraphSubscriptionRollbackSlotRelease } from './context-graph-subscription-authority-recovery.js';
 import { isLocalPrivateMember } from './internal/local-private-member.js';
-import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,

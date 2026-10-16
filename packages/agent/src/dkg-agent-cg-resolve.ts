@@ -1683,8 +1683,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical authority for a registered context graph.
-   *
+   * Canonical registered-graph authority.
    * All security-sensitive consumers use this discriminant so an authority
    * outage cannot be confused with an unregistered graph and fall through to
    * local/RFC-64 policy. Mutation, encryption rosters, subscription admission,
@@ -1747,6 +1746,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       {
         signal: options.signal,
         registrationTimeoutMs: options.registrationTimeoutMs,
+        retainFinalizedSnapshot: options.authorityReadMode === 'finalized-index',
         ...(options.durableSubscriptionBinding === undefined
           ? {}
           : { durableSubscriptionBinding: options.durableSubscriptionBinding }),
@@ -1774,6 +1774,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       const finalized = await resolveFinalizedOnChainAccessPolicyState(
         {
           indexReader: this.chain.contextGraphAuthorityIndexRevisionReader,
+          registrationSnapshot: registration.finalizedSnapshot,
           authorityReads: this.rfc64AuthorityReadCoordinatorV1,
           readSnapshot: (id, readOptions) => this.readFinalizedContextGraphAuthoritySnapshotV1(id, readOptions),
           requestTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,

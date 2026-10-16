@@ -14,7 +14,7 @@ describe('normalized content partition scope', () => {
       const graph = tail ? `${base}/${tail}` : base;
       const registered = new Set([`${base}/assertion/agent-a/draft`, `${base}/_working_memory/agent-a/draft`]);
       expect(classifyScopedContentGraph(graph, 'team/graph', new Set(['code']), registered, new Set()))
-        .toEqual({ graph, kind, ...(sub ? { subGraphName: sub } : {}), ...(draftOwner ? { draftOwner } : {}) });
+        .toEqual({ graph, kind, broadScopeEligible: true, ...(sub ? { subGraphName: sub } : {}), ...(draftOwner ? { draftOwner } : {}) });
     }
   });
   it.each(['_meta', '_private/a', '_rules/x', '_verifiable_memory/staging/x', '_working_memory/stranger/draft'])
@@ -32,7 +32,7 @@ describe('normalized content partition scope', () => {
       const graph = `${root}/${sub ? `${sub}/` : ''}${tail}`;
       const partition = classifyScopedContentGraph(graph, 'team/graph', new Set(['code']),
         new Set([graph]), new Set());
-      expect(partition).toEqual({ graph, kind: 'draft', draftOwner: null,
+      expect(partition).toEqual({ graph, kind: 'draft', draftOwner: null, broadScopeEligible: true,
         ...(sub ? { subGraphName: sub } : {}) });
       expect(Object.isFrozen(partition)).toBe(true);
       const partitions = [partition!];

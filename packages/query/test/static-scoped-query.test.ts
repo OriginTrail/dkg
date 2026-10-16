@@ -55,6 +55,19 @@ describe('static scoped query admission', () => {
     } finally { await store.close(); }
   });
 
+  it.each([false, true])('preserves scoped result exclusions (combined=%s)', async combined => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{ subject: 'urn:item', predicate: SCHEMA_NAME, object: `${GRAPH}/value`, graph: META }]);
+      const result = await new DKGQueryEngine(store).query(
+        `SELECT ?name WHERE { GRAPH <${META}> { ?s <${SCHEMA_NAME}> ?name } }`,
+        { contextGraphId: CONTEXT_GRAPH, includeSharedMemory: combined, excludeGraphPrefixes: [GRAPH] },
+      );
+      // Combined execution retains its established merge behavior; single routes filter results.
+      expect(result.bindings).toEqual(combined ? [{ name: `${GRAPH}/value` }] : []);
+    } finally { await store.close(); }
+  });
+
   it.each([
     { graph: `${GRAPH}/_private`, options: {} },
     { graph: META, options: { graphSuffix: '_shared_memory' as const } },

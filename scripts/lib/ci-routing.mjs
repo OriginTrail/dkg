@@ -104,6 +104,7 @@ export const WORKSPACE_RULES = Object.freeze({
   },
   'packages/query': {
     lanes: [
+      'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
       'bura_cli',
