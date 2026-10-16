@@ -248,19 +248,19 @@ export function admissionPolicyProblem(admission) {
 // A node writes an admission's log line as soon as the admission starts; this
 // allows for a busy event loop between the two.
 const LOG_LAG_MS = 250;
-// A reading identifies an admission only when its answer came this soon.
-const IDENTIFYING_LATENCY_MS = 250;
-// How far a later reading of the same admission can place its start from the
-// identifying one (that reading's own latency, and clock drift in a window).
-const SAME_START_MS = 250;
-// A reading identifies an admission only once it has run this long, longer
-// than two starts can be told apart: work admitted after it ended started
-// later than that, so no reading of such work can pass for it.
-const IDENTIFYING_AGE_MS = 1000;
+// A reading dates the running work only when its answer came this soon.
+const DATING_LATENCY_MS = 250;
+// What held the slot when a report arrived is read from the first reading
+// taken at or after that moment, when it came this soon.
+const RECEIPT_READING_MS = 2000;
 
 const isDurable = operation => typeof operation?.operation === 'string' && operation.operation.split(':', 1)[0] === 'durable'
   && Number.isFinite(operation.oldestAgeMs);
 const overlaps = (a, b) => a.from <= b.to && b.from <= a.to;
+const lineTime = line => {
+  const head = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) \S+ (\S+) /.exec(line);
+  return head ? { at: new Date(`${head[1]}T${head[2]}`).getTime(), ctx: head[3] } : null;
+};
 
 /**
  * When the durable work a reading of the node's `sync-global` scheduler shows
@@ -280,80 +280,66 @@ export function durableStart(reading) {
 }
 
 /**
- * The large transfer in the slot, as one reading and the log can name it: the
- * reading shows durable work that has run long enough and came soon enough to
- * date its start, and the general-slot admissions of the log that can have
- * started then are all of the transfer (`isTransfer`, by label). Returns {
- * transfer: { from, to, label, ctx, limit, queueLimit } } or { why }.
+ * What one reading shows in the node's general sync slot: { state:
+ * 'transfer', admission } when it shows durable work that started when a
+ * general-slot admission of the large transfer did (`isTransfer`, by label)
+ * and no other durable admission started then; 'other' (durable work of
+ * another admission, or none); 'unclear' (the answer came too slowly to date
+ * the work, or the log names no admission, or several, that it can be); or
+ * 'unreadable'.
  */
-export function identifyTransfer(reading, admissions, isTransfer) {
-  if (!reading) return { why: 'no reading of its sync slots yet' };
-  if (reading.unreadable) return { why: `its sync slots could not be read (${reading.unreadable})` };
+export function slotHolder(reading, admissions, isTransfer) {
+  if (!reading || reading.unreadable) return { state: 'unreadable' };
   const start = durableStart(reading);
-  if (!start) return { why: 'no durable work held its general sync slot' };
-  if (start.to - start.from > IDENTIFYING_LATENCY_MS) return { why: 'no reading came soon enough to date the running work' };
-  if (start.age < IDENTIFYING_AGE_MS) return { why: `the running work had run for less than ${IDENTIFYING_AGE_MS / 1000} s` };
+  if (!start) return { state: 'other' };
+  if (start.to - start.from > DATING_LATENCY_MS) return { state: 'unclear' };
   const candidates = admissions.filter(admission => !admission.reserved && admission.label.startsWith('durable:')
     && overlaps(start, { from: admission.at - LOG_LAG_MS, to: admission.at + 999 }));
-  if (candidates.length === 0) return { why: 'its log shows no durable admission that started when the running work did' };
-  if (!candidates.some(isTransfer)) return { why: `its slot was held by other work (${candidates[0].label})` };
-  if (!candidates.every(isTransfer)) return { why: 'its log cannot tell the transfer from other durable work admitted at about the same time' };
-  const [admission] = candidates;
-  return { transfer: { from: start.from, to: start.to, label: admission.label, ctx: admission.ctx, limit: admission.limit, queueLimit: admission.queueLimit } };
+  if (candidates.length === 0) return { state: 'unclear' };
+  if (!candidates.some(isTransfer)) return { state: 'other', admission: candidates[0] };
+  if (!candidates.every(isTransfer)) return { state: 'unclear' };
+  return { state: 'transfer', admission: candidates[0] };
 }
 
 /**
- * Whether a later reading shows the identified transfer still running: 'same'
- * (durable work that started when it did), 'other' (other durable work, or
- * none), or 'unclear' (the answer came too slowly to tell).
+ * The large transfer's life on the node, from its log: from its first
+ * general-slot admission to the last line of any operation that ran one of
+ * its admissions (each line counts with its whole second). A transfer of many
+ * assets is many short admissions, one or a few assets each, so the slot is
+ * free for moments within that life. Returns { from, to, admissions } or null.
  */
-export function sameTransfer(reading, transfer) {
-  const start = durableStart(reading);
-  if (!start) return 'other';
-  const window = { from: transfer.from - SAME_START_MS, to: transfer.to + SAME_START_MS };
-  if (!overlaps(start, window)) return 'other';
-  return start.from < window.from || start.to > window.to ? 'unclear' : 'same';
-}
-
-/**
- * How long the transfer held the node's only general sync slot from `from`,
- * the start of the window of the writes and their checks, and whether that
- * reached `until`, the window's end. `readings` are the node's slot readings,
- * also those taken after `until`. From the window's start each reading must
- * show the transfer (sameTransfer); one admission holds its slot without a
- * break, so between two such readings it held it throughout, and after the
- * last one nothing is known. The evidence ends at a reading of other work or
- * of none, at one that could not be read, and at a gap longer than `maxGapMs`;
- * a reading that came too slowly to tell proves nothing either way. Returns {
- * held, provenUntil (the earliest moment the last reading of the transfer can
- * have been taken), reason }.
- */
-export function transferHeldThrough({ transfer, readings, from, until, maxGapMs = 5000 }) {
-  if (!transfer) return { held: false, reason: 'no transfer of it was identified in a sync slot', provenUntil: null };
-  const window = readings.filter(reading => reading.at >= from).sort((a, b) => a.at - b.at);
-  let previous = from;
-  let provenUntil = null;
-  let slow = 0;
-  const gap = (ms, last = '') => `no reading of the sync slot for ${last}${secs(ms)} s${slow ? ` (${slow} more came too slowly to tell)` : ''}`;
-  const ended = reason => ({ held: false, reason, provenUntil });
-  for (const reading of window) {
-    if (reading.at - previous > maxGapMs) return ended(gap(reading.at - previous));
-    if (reading.unreadable) return ended(`the sync slot could not be read (${reading.unreadable})`);
-    const same = sameTransfer(reading, transfer);
-    if (same === 'other') return ended(durableStart(reading) ? 'the slot was held by other durable work' : 'the transfer had left the slot');
-    if (same === 'unclear') {
-      slow += 1;
-      continue;
-    }
-    previous = reading.at;
-    provenUntil = Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at;
-    slow = 0;
-    if (provenUntil >= until) return { held: true, provenUntil };
+export function transferLifetime(logText, admissions, isTransfer) {
+  const own = admissions.filter(admission => !admission.reserved && isTransfer(admission));
+  if (own.length === 0) return null;
+  const operations = new Set(own.map(admission => admission.ctx));
+  let to = own.at(-1).at + 999;
+  for (const line of String(logText ?? '').split('\n')) {
+    const time = lineTime(line);
+    if (time && operations.has(time.ctx)) to = Math.max(to, time.at + 999);
   }
-  if (until - previous > maxGapMs) return ended(gap(until - previous, 'the last '));
-  if (provenUntil === null) return ended(gap(until - from));
-  return ended('no reading was taken at or after the end of the window');
+  return { from: own[0].at, to, admissions: own.length };
 }
 
-/** Whether a report found at `receivedAt` arrived while the transfer still held the slot (`busy` from transferHeldThrough). */
-export const receivedWhileHeld = (receivedAt, busy) => busy.provenUntil !== null && receivedAt <= busy.provenUntil;
+/**
+ * Whether the large transfer held the node's only general slot when a report
+ * arrived at `receivedAt`: the first reading taken at or after that moment
+ * (and soon enough) shows the transfer, through an admission that started in
+ * a log second wholly before `receivedAt`. One admission holds its slot
+ * without a break, so it held it at `receivedAt`. Returns { held, why }.
+ */
+export function transferHeldAt(receivedAt, readings, admissions, isTransfer) {
+  const after = readings.filter(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= receivedAt).sort((a, b) => a.at - b.at)[0];
+  if (!after || after.at - receivedAt > RECEIPT_READING_MS) return { held: false, why: 'no reading of the slot right after it' };
+  const { state, admission } = slotHolder(after, admissions, isTransfer);
+  if (state !== 'transfer') {
+    return { held: false, why: { other: 'the slot held other work or none', unclear: 'the reading after it could not tell which work held the slot', unreadable: 'the slot could not be read' }[state] };
+  }
+  if (admission.at + 999 >= receivedAt) return { held: false, why: 'the transfer\'s admission in the slot started only then' };
+  return { held: true, why: null };
+}
+
+/** How many readings within [from, until] show the transfer in the general slot: { transfer, total }. */
+export function transferOccupancy({ readings, admissions, isTransfer, from, until }) {
+  const window = readings.filter(reading => reading.at >= from && reading.at <= until);
+  return { transfer: window.filter(reading => slotHolder(reading, admissions, isTransfer).state === 'transfer').length, total: window.length };
+}

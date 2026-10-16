@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, identifyTransfer, inVerifiedScope, judgeGone,
-  memberPublishOutcome, pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, receivedWhileHeld,
-  sameTransfer, transferHeldThrough, verifiedScope,
+  admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, inVerifiedScope, judgeGone, memberPublishOutcome,
+  pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, slotHolder, transferHeldAt, transferLifetime,
+  transferOccupancy, verifiedScope,
 } from '../qa/one-graph-promotion.mjs';
 import { DEAD_DIRECT_ADDRESS, edgeEnv, edgeOverrides, inheritedDkgEnv, OVERRIDE_ENV, PROFILE_CONFIG, PROFILE_ENV, PROFILE_NAMES } from '../one-graph/profile.mjs';
 
@@ -205,7 +205,7 @@ test('log lines are counted within a window, each with its whole second', () => 
   assert.equal(countLogLines(LOG, 'Sync backpressure running ', { from: 0, until: at('2026-10-16T01:16:27') }), 2);
 });
 
-// A transfer admitted in the second 01:16:26 (log), read 2.5 s later.
+// A transfer admission in the log second 01:16:26, its work dated by readings.
 const T0 = new Date('2026-10-16T01:16:26.300').getTime();
 const reading = (sentAt, latency, operations) => ({ sentAt, at: sentAt + latency, operations });
 const durable = age => ({ lane: 'durable', operation: 'durable:catchup-foreground', oldestAgeMs: age });
@@ -217,61 +217,71 @@ test('a reading dates the running durable work; shared-memory work beside it is 
   assert.deepEqual(durableStart(reading(T0 + 2500, 20, [durable(2500), { operation: 'shared-memory:x', oldestAgeMs: 100 }])), { from: T0 - 1, to: T0 + 20, age: 2500 });
 });
 
-test('the transfer is identified only when the log ties the running durable work to it and to nothing else', () => {
+test('a reading shows the transfer in the slot only when the log ties its durable work to the transfer and nothing else', () => {
   const admissions = parseAdmissions(LOG);
-  const found = identifyTransfer(reading(T0 + 2500, 20, [durable(2500)]), admissions, isTransfer);
-  assert.equal(found.transfer.label, 'durable:0xabc/one-graph-large-1:QP4sWZbL');
-  assert.deepEqual([found.transfer.limit, found.transfer.queueLimit], [1, 0]);
-  assert.match(identifyTransfer(undefined, admissions, isTransfer).why, /no reading/);
-  assert.match(identifyTransfer({ at: T0, unreadable: 'HTTP 0' }, admissions, isTransfer).why, /could not be read/);
-  assert.match(identifyTransfer(reading(T0 + 2500, 20, []), admissions, isTransfer).why, /no durable work/);
-  assert.match(identifyTransfer(reading(T0 + 2500, 400, [durable(2500)]), admissions, isTransfer).why, /soon enough/);
-  assert.match(identifyTransfer(reading(T0 + 500, 20, [durable(500)]), admissions, isTransfer).why, /less than 1 s/);
-  assert.match(identifyTransfer(reading(T0 + 9000, 20, [durable(1500)]), admissions, isTransfer).why, /no durable admission/);
-  // Other durable work admitted in the same second: nothing is identified.
+  const shown = slotHolder(reading(T0 + 2500, 20, [durable(2500)]), admissions, isTransfer);
+  assert.equal(shown.state, 'transfer');
+  assert.equal(shown.admission.label, 'durable:0xabc/one-graph-large-1:QP4sWZbL');
+  assert.equal(slotHolder(undefined, admissions, isTransfer).state, 'unreadable');
+  assert.equal(slotHolder({ at: T0, unreadable: 'HTTP 0' }, admissions, isTransfer).state, 'unreadable');
+  assert.equal(slotHolder(reading(T0 + 2500, 20, []), admissions, isTransfer).state, 'other');
+  assert.equal(slotHolder(reading(T0 + 2500, 400, [durable(2500)]), admissions, isTransfer).state, 'unclear');
+  // Durable work the log names no admission for (its line not written yet).
+  assert.equal(slotHolder(reading(T0 + 9000, 20, [durable(1500)]), admissions, isTransfer).state, 'unclear');
+  // Other durable work admitted in the same second: nothing is told.
   const rival = [...admissions, { ...admissions[0], label: 'durable:control-plane', ctx: 'x' }];
-  assert.match(identifyTransfer(reading(T0 + 2500, 20, [durable(2500)]), rival, isTransfer).why, /cannot tell/);
+  assert.equal(slotHolder(reading(T0 + 2500, 20, [durable(2500)]), rival, isTransfer).state, 'unclear');
   const other = [{ ...admissions[0], label: 'durable:0xabc/one-graph-main-1:QP4sWZbL' }];
-  assert.match(identifyTransfer(reading(T0 + 2500, 20, [durable(2500)]), other, isTransfer).why, /held by other work \(durable:0xabc\/one-graph-main-1/);
-  // A reserved shared-memory admission is never the slot's durable holder.
-  const reserved = [{ ...admissions[0], reserved: true }];
-  assert.match(identifyTransfer(reading(T0 + 2500, 20, [durable(2500)]), reserved, isTransfer).why, /no durable admission/);
+  assert.equal(slotHolder(reading(T0 + 2500, 20, [durable(2500)]), other, isTransfer).state, 'other');
+  // A reserved shared-memory admission never holds the general slot.
+  assert.equal(slotHolder(reading(T0 + 2500, 20, [durable(2500)]), [{ ...admissions[0], reserved: true }], isTransfer).state, 'unclear');
 });
 
-test('a later reading shows the same transfer, other work, or too little to tell', () => {
-  const { transfer } = identifyTransfer(reading(T0 + 2500, 20, [durable(2500)]), parseAdmissions(LOG), isTransfer);
-  assert.equal(sameTransfer(reading(T0 + 30_000, 30, [durable(30_000)]), transfer), 'same');
-  assert.equal(sameTransfer(reading(T0 + 30_000, 30, [durable(10_000)]), transfer), 'other');
-  assert.equal(sameTransfer(reading(T0 + 30_000, 30, []), transfer), 'other');
-  assert.equal(sameTransfer(reading(T0 + 30_000, 600, [durable(30_000)]), transfer), 'unclear');
+const TRANSFER_LOG = [
+  '2026-10-16 01:16:26 sync aaaa [DKGAgent] Sync backpressure running durable:0xabc/one-graph-large-1:QP4sWZbL (global inflight=1/1, queued=0/0)',
+  '2026-10-16 01:16:29 sync aaaa [DKGAgent] Sync complete: 3011 verified triples from 12D3KooW',
+  '2026-10-16 01:16:31 sync bbbb [DKGAgent] Sync backpressure running durable:control-plane (global inflight=1/1, queued=0/0)',
+  '2026-10-16 01:16:33 sync cccc [DKGAgent] Sync backpressure running durable:0xabc/one-graph-large-1:EJfXkbMM (global inflight=1/1, queued=0/0)',
+  '[2026-10-16T01:16:40.000Z] sync cccc [DKGAgent] Sync page timing (a debug line in another form) [DEBUG]',
+  '2026-10-16 01:16:37 sync cccc [DKGAgent]   data: 3000 triples fetched',
+  '2026-10-16 01:16:50 sync dddd [DKGAgent] unrelated work',
+].join('\n');
+
+test('the transfer lives from its first admission to the last line of its admissions\' work', () => {
+  const admissions = parseAdmissions(TRANSFER_LOG);
+  assert.deepEqual(transferLifetime(TRANSFER_LOG, admissions, isTransfer), {
+    from: new Date('2026-10-16T01:16:26').getTime(), to: new Date('2026-10-16T01:16:37').getTime() + 999, admissions: 2,
+  });
+  assert.equal(transferLifetime(TRANSFER_LOG, admissions, () => false), null);
+  assert.equal(transferLifetime('', [], isTransfer), null);
 });
 
-test('the transfer holds the slot through a window only with readings of it all the way', () => {
-  const { transfer } = identifyTransfer(reading(T0 + 2500, 20, [durable(2500)]), parseAdmissions(LOG), isTransfer);
-  const from = T0 + 3000;
-  const until = T0 + 8000;
-  const series = (count, step = 1000, start = from, make = t => [durable(t - T0)]) => Array.from({ length: count }, (_, i) => reading(start + i * step, 20, make(start + i * step)));
-  const through = transferHeldThrough({ transfer, readings: series(7), from, until });
-  assert.deepEqual(through, { held: true, provenUntil: T0 + 8000 });
-  assert.equal(receivedWhileHeld(T0 + 7000, through), true);
-  // The transfer left the slot at the fourth reading.
-  const left = transferHeldThrough({ transfer, readings: series(7, 1000, from, t => (t >= from + 3000 ? [] : [durable(t - T0)])), from, until });
-  assert.deepEqual(left, { held: false, reason: 'the transfer had left the slot', provenUntil: from + 2000 });
-  assert.equal(receivedWhileHeld(from + 2500, left), false);
-  assert.equal(receivedWhileHeld(from + 2000, left), true);
-  // Other durable work in the slot.
-  const other = transferHeldThrough({ transfer, readings: series(7, 1000, from, t => [durable(t >= from + 2000 ? 100 : t - T0)]), from, until });
-  assert.equal(other.reason, 'the slot was held by other durable work');
-  // A gap in the readings ends the evidence.
-  const gap = transferHeldThrough({ transfer, readings: [reading(from + 500, 20, [durable(from + 500 - T0)]), reading(from + 7000, 20, [durable(from + 7000 - T0)])], from, until });
-  assert.match(gap.reason, /no reading of the sync slot for 7 s/);
-  // An unreadable reading ends it; a slow one proves nothing but does not end it.
-  const unreadable = transferHeldThrough({ transfer, readings: [reading(from, 20, [durable(from - T0)]), { at: from + 1000, unreadable: 'HTTP 503' }], from, until });
-  assert.equal(unreadable.reason, 'the sync slot could not be read (HTTP 503)');
-  const slow = [...series(2), reading(from + 2000, 900, [durable(from + 2000 - T0)]), ...series(4, 1000, from + 3000)];
-  assert.deepEqual(transferHeldThrough({ transfer, readings: slow, from, until }), { held: true, provenUntil: T0 + 8000 });
-  // No reading at or after the window's end.
-  assert.equal(transferHeldThrough({ transfer, readings: series(5), from, until }).reason, 'no reading was taken at or after the end of the window');
-  assert.deepEqual(transferHeldThrough({ transfer: undefined, readings: [], from, until }), { held: false, reason: 'no transfer of it was identified in a sync slot', provenUntil: null });
-  assert.equal(receivedWhileHeld(from, { provenUntil: null }), false);
+test('a receipt counts as made while the transfer held the slot only with a reading right after it that shows an older admission of it', () => {
+  const admissions = parseAdmissions(TRANSFER_LOG);
+  const second33 = new Date('2026-10-16T01:16:33.400').getTime();
+  const holding = [reading(second33 + 4000, 20, [durable(4000)])];
+  assert.deepEqual(transferHeldAt(second33 + 3500, holding, admissions, isTransfer), { held: true, why: null });
+  // No reading soon enough after the receipt.
+  assert.match(transferHeldAt(second33 + 1500, holding, admissions, isTransfer).why, /no reading of the slot right after it/);
+  // The admission in the slot started in the receipt's own second.
+  assert.match(transferHeldAt(second33 - 200, [reading(second33 + 100, 20, [durable(700)])], admissions, isTransfer).why, /started only then/);
+  // Control-plane work in the slot, or none.
+  const second31 = new Date('2026-10-16T01:16:31.500').getTime();
+  assert.match(transferHeldAt(second31 + 1000, [reading(second31 + 1200, 20, [durable(1200)])], admissions, isTransfer).why, /other work or none/);
+  assert.match(transferHeldAt(second31 + 1000, [reading(second31 + 1200, 20, [])], admissions, isTransfer).why, /other work or none/);
+  assert.match(transferHeldAt(second31, [{ at: second31 + 500, unreadable: 'HTTP 503' }], admissions, isTransfer).why, /could not be read/);
+  assert.match(transferHeldAt(second33 + 3500, [reading(second33 + 4000, 600, [durable(4000)])], admissions, isTransfer).why, /could not tell/);
+});
+
+test('the window\'s readings are counted by whether they show the transfer in the general slot', () => {
+  const admissions = parseAdmissions(TRANSFER_LOG);
+  const second26 = new Date('2026-10-16T01:16:26.400').getTime();
+  const readings = [
+    reading(second26 + 1000, 20, [durable(1000)]),
+    reading(second26 + 2000, 20, [durable(2000)]),
+    reading(second26 + 5500, 20, []),
+    reading(second26 + 9000, 20, [durable(2000)]),
+  ];
+  assert.deepEqual(transferOccupancy({ readings, admissions, isTransfer, from: second26, until: second26 + 9100 }), { transfer: 3, total: 4 });
+  assert.deepEqual(transferOccupancy({ readings, admissions, isTransfer, from: second26 + 3000, until: second26 + 6000 }), { transfer: 0, total: 1 });
 });

@@ -59,6 +59,14 @@
 //     graph as synced. It must also hold the graph's definition within 90 s,
 //     or its own writes are refused.
 //
+// A subscriber without the definition at that deadline fails the check, and
+// then gets the remedy a client has, so that the later cases can run: it
+// dials the curator through its relay (a subscriber asks only the peers it is
+// connected to for the graph's declaration, and the curator may be the only
+// one that holds it) and subscribes again with an explicit catch-up
+// (`forceCatchup`). Its bounds then count from that second subscribe, and the
+// run notes it.
+//
 // Cases (each line of the report names the case, the report, the node and
 // what did not hold):
 //   1  every Edge runs the profile: the build the devnet runs reads every
@@ -79,9 +87,11 @@
 //      the curator publishes) while edgeA shares a report and the curator
 //      promotes the report of case 3. edgeB must hold the new report, and the
 //      promoted one in Verified Memory and not in shared memory, within the
-//      bound, and its own evidence must show the transfer in its general slot
-//      until then (scripts/lib/one-graph/busy-transfer.mjs); a check passed
-//      after the transfer left the slot fails as not exercised
+//      bound and while the transfer still runs. The transfer is many short
+//      admissions (`durable:<graph>:<peer>`, one or a few assets each), so a
+//      check passed after the last of them ended fails as not exercised, and
+//      whether one of them held the slot at the moment of each receipt is
+//      reported with it (scripts/lib/one-graph/busy-transfer.mjs)
 //   7  the late Edge recovers both layers within ONE_GRAPH_RECOVERY_SECS, then
 //      shares a report that every other Edge must hold
 //   8  the synced flag: every subscriber lists the graph as synced within
@@ -276,6 +286,49 @@ async function catalogStatus(node) {
   return JSON.stringify({ enabled, finalizedRowHeal, authorCatalogCapacity }).slice(0, 400);
 }
 
+/** Polls a node's listing until it holds the graph's definition, for at most DEFINITION_MS. */
+const holdsDefinition = (node, graph) => waitFor(async () => {
+  const listed = await io.listingEntry(node, graph);
+  return { ok: listed.readable && listed.defined };
+}, DEFINITION_MS, 2000);
+
+/**
+ * The remedy for a subscriber that holds no definition of a graph: without it
+ * the node refuses its own writes into the graph, so the cases after it need
+ * it. The node does what a client can: it dials the curator through its relay
+ * (only the curator holds the graph's declaration, and a subscriber asks only
+ * the peers it is connected to for it) and subscribes again with an explicit
+ * catch-up. Resolves to when it subscribed again.
+ */
+async function ensureDefinition(node, graph, caseId) {
+  if (node !== edges.curator) {
+    try {
+      await edges.dialOwner(node);
+    } catch (error) {
+      note(`case ${caseId}: ${node.label} could not dial the curator: ${error?.message ?? error}`);
+    }
+  }
+  const again = await graphs.subscribe(node, graph, { forceCatchup: true });
+  const held = await holdsDefinition(node, graph);
+  note(`case ${caseId}: ${node.label} dialed the curator through its relay and subscribed to ${graph.key} again with an explicit catch-up: ${held.ok ? `it held the definition ${seconds(Date.now() - again)} s later` : `it still held none ${seconds(DEFINITION_MS)} s later`}`);
+  return again;
+}
+
+/**
+ * A subscribe as a client makes it, with the observer of its definition and
+ * synced flag, each against its deadline from this subscribe. A node that
+ * holds no definition at the definition's deadline (the observer fails that
+ * check) gets ensureDefinition, so that the later cases can write. Resolves
+ * to { observer, from, fromWhat }: the moment the node's bounds count from,
+ * the second subscribe when there was one.
+ */
+async function subscribeWithDefinition(node, graph, caseId) {
+  const at = await graphs.subscribe(node, graph);
+  const observer = io.observeSubscription(node, graph, at);
+  if ((await holdsDefinition(node, graph)).ok) return { observer, from: at, fromWhat: `${node.role} subscribed` };
+  return { observer, from: await ensureDefinition(node, graph, caseId), fromWhat: `${node.role} subscribed again` };
+}
+
 /** A settled subscription: a missing definition under `definitionCase`, the synced flag under case 8. */
 function reportSubscription(handle, observation, definitionCase) {
   if (!observation) return fail(definitionCase, `${handle.node.label}: its subscription to ${handle.graph.key} was not observed`);
@@ -320,11 +373,9 @@ async function run() {
   await checkProfile([curator, edgeA, edgeB]);
   await precondition(1, 'once the Edges are up');
 
-  // The graph; edgeA and edgeB subscribe. Their subscriptions settle while
-  // the first reports go out: a missing definition shows as refused writes.
+  // The graph; edgeA and edgeB subscribe, and write once they hold its definition.
   const main = await graphs.createGraph(curator, 'main', { publishPolicy: 0, sub: SUB });
-  const observers = [];
-  for (const member of [edgeA, edgeB]) observers.push(io.observeSubscription(member, main, await graphs.subscribe(member, main)));
+  const subscriptions = await Promise.all([edgeA, edgeB].map(member => subscribeWithDefinition(member, main, 2)));
   say(`edgeA and edgeB subscribed (${elapsed()})`);
 
   // Case 2: reports, live; every other running Edge must hold each.
@@ -342,7 +393,7 @@ async function run() {
     }
   }
   await settle(live);
-  for (const handle of observers) reportSubscription(handle, await handle.done, 2);
+  for (const { observer } of subscriptions) reportSubscription(observer, await observer.done, 2);
 
   // Case 3: edgeA publishes its second report itself.
   const [a1, a2] = byAuthor.get(edgeA);
@@ -409,7 +460,7 @@ async function run() {
     large = null;
   }
   if (large && await precondition(6, 'before the large transfer')) {
-    const busy = await busyEdge({ devnet, edges, graphs, io, report, caseId: 6, boundMs: BOUND_MS }, main, large,
+    const busy = await busyEdge({ devnet, edges, graphs, io, report, caseId: 6, boundMs: BOUND_MS, stamp: STAMP, ensureDefinition }, main, large,
       a2.error || promoted.has(a2) ? null : a2);
     if (busy.shared) shared.push(busy.shared);
     if (busy.promoted) promoted.add(a2);
@@ -420,10 +471,9 @@ async function run() {
   say(`late Edge up (${elapsed()})`);
   await checkProfile([late]);
   await precondition(7, 'once the late Edge is up');
-  const subscribedAt = await graphs.subscribe(late, main);
-  const lateObserver = io.observeSubscription(late, main, subscribedAt);
-  await settle([io.watch(placementPairs(7, shared, promoted, [late], { from: subscribedAt, fromWhat: 'late Edge subscribed', bound: RECOVERY_MS }))]);
-  reportSubscription(lateObserver, await lateObserver.done, 7);
+  const recovery = await subscribeWithDefinition(late, main, 7);
+  await settle([io.watch(placementPairs(7, shared, promoted, [late], { from: recovery.from, fromWhat: recovery.fromWhat, bound: RECOVERY_MS }))]);
+  reportSubscription(recovery.observer, await recovery.observer.done, 7);
   const fromLate = await io.share(late, main, 'late report');
   shared.push(fromLate);
   await settle([io.watch(io.pairs(7, fromLate, others(late), 'swm'))]);

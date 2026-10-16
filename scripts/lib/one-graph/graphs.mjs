@@ -35,9 +35,13 @@ export function createGraphs(devnet, { stamp, say }) {
     return { key, id, resolved, registered: true, onChainId: created.json.onChainId ?? null };
   }
 
-  /** An Edge subscribes to a public graph with its shared memory, as a client does; resolves to when. */
-  async function subscribe(node, graph) {
-    const answer = await api(node, 'POST', '/api/context-graph/subscribe', { contextGraphId: graph.id, includeSharedMemory: true });
+  /**
+   * An Edge subscribes to a public graph with its shared memory, as a client
+   * does, and with `forceCatchup` an explicit catch-up; resolves to when.
+   */
+  async function subscribe(node, graph, { forceCatchup = false } = {}) {
+    const answer = await api(node, 'POST', '/api/context-graph/subscribe',
+      { contextGraphId: graph.id, includeSharedMemory: true, ...(forceCatchup ? { forceCatchup: true } : {}) });
     if (answer.status !== 200) throw new Error(`${node.label} could not subscribe to ${graph.key}: ${brief(answer)}`);
     return Date.now();
   }

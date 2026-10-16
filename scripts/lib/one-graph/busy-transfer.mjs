@@ -7,19 +7,26 @@
 //
 // The evidence is edgeB's own. Its log names each admission to its sync slots
 // with the general pool's policy (`Sync backpressure running <label> (global
-// inflight=1/1, queued=0/0)`); a transfer of the large graph is
-// `durable:<graph>:<peer>`. Its diagnostics (/api/diagnostics/backpressure,
-// read every second) name the running operations and their age, never a
-// graph: a reading dates the running durable work's start, and the log ties
-// that start to the transfer's admission and to no other. Durable work never
-// takes the reserved shared-memory slot beside the general one, so under one
-// general slot the durable work a reading shows is the slot's holder.
+// inflight=1/1, queued=0/0)`); the transfer of the large graph is many short
+// admissions `durable:<graph>:<peer>`, one or a few assets each. Its
+// diagnostics (/api/diagnostics/backpressure, read every second) name the
+// running operations and their age, never a graph: a reading dates the
+// running durable work's start, and the log ties that start to an admission
+// of the transfer and to no other. Durable work never takes the reserved
+// shared-memory slot beside the general one, so under one general slot the
+// durable work a reading shows holds that slot. A check counts as exercised
+// when the report arrived within the transfer's life (its first admission to
+// the last line of its admissions' work); whether an admission of it held the
+// slot at that very moment is reported with it. The readings are kept in the
+// run's folder.
 
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { brief, sleep, waitFor } from '../member-sharing/devnet.mjs';
 import { heldAt } from '../member-sharing/observation.mjs';
 import {
-  admissionPolicyProblem, countLogLines, identifyTransfer, pairOutcome, parseAdmissions, promotionOutcome, receivedWhileHeld,
-  transferHeldThrough,
+  admissionPolicyProblem, countLogLines, pairOutcome, parseAdmissions, promotionOutcome, slotHolder, transferHeldAt,
+  transferLifetime, transferOccupancy,
 } from '../qa/one-graph-promotion.mjs';
 import { describe } from '../qa/member-sharing.mjs';
 import { settled } from './reports.mjs';
@@ -56,11 +63,13 @@ function readSlots(devnet, node) {
 }
 
 /**
- * The case. `ctx` is { devnet, edges, graphs, io, report, caseId, boundMs };
- * `main` is the graph, `large` the large graph (published), `promote` the
- * report the curator promotes while the transfer holds the slot (or null).
- * Returns the record of the report shared in the window and whether `promote`
- * was promoted, for the cases after it: { shared, promoted }.
+ * The case. `ctx` is { devnet, edges, graphs, io, report, caseId, boundMs,
+ * stamp, ensureDefinition }; `main` is the graph, `large` the large graph
+ * (published), `promote` the report the curator promotes while the transfer
+ * runs (or null). `ensureDefinition(node, graph, caseId)` is the suite's
+ * remedy for a subscriber that holds no definition of a graph. Returns the
+ * record of the report shared in the window and whether `promote` was
+ * promoted, for the cases after it: { shared, promoted }.
  */
 export async function busyEdge(ctx, main, large, promote) {
   const { devnet, edges, graphs, io, report, caseId } = ctx;
@@ -69,20 +78,28 @@ export async function busyEdge(ctx, main, large, promote) {
   const slots = readSlots(devnet, edgeB);
   const subscribedAt = await graphs.subscribe(edgeB, large);
   const isTransfer = admission => admission.label.startsWith(`durable:${large.id}:`);
-  const identified = await waitFor(async () => {
-    const reading = slots.readings.at(-1);
-    const found = identifyTransfer(reading, parseAdmissions(devnet.logSince(edgeB, offset)), isTransfer);
-    return { ok: Boolean(found.transfer), ...found };
+  const admissions = () => parseAdmissions(devnet.logSince(edgeB, offset));
+  const started = () => waitFor(async () => {
+    const holder = slotHolder(slots.readings.at(-1), admissions(), isTransfer);
+    return { ok: holder.state === 'transfer', ...holder };
   }, 90_000, 500);
-  if (!identified.ok) {
+  let seen = await started();
+  if (!seen.ok) {
+    const listed = await io.listingEntry(edgeB, large);
+    if (listed.readable && !listed.defined) {
+      report.note(`case ${caseId}: no transfer of the large graph in ${edgeB.label}'s general slot within 90 s of its subscribe, and it holds no definition of that graph`);
+      await ctx.ensureDefinition(edgeB, large, caseId);
+      seen = await started();
+    }
+  }
+  if (!seen.ok) {
     await slots.stop();
-    report.fail(caseId, `not exercised: ${edgeB.label}'s transfer of the large graph was not seen in its general sync slot within 90 s of the subscribe (${identified.why}); raise ONE_GRAPH_LARGE_ASSETS / ONE_GRAPH_LARGE_TRIPLES`);
+    report.fail(caseId, `not exercised: ${edgeB.label}'s transfer of the large graph was never seen in its general sync slot (last reading: ${seen.state}); raise ONE_GRAPH_LARGE_ASSETS / ONE_GRAPH_LARGE_TRIPLES`);
     return { shared: null, promoted: false };
   }
-  const { transfer } = identified;
-  const policy = admissionPolicyProblem(transfer);
-  if (policy) report.fail(caseId, `${edgeB.label} does not run the profile's sync policy: ${policy} (its admission ${transfer.label})`);
-  report.note(`case ${caseId}: ${edgeB.label} runs the transfer ${transfer.label} in its general sync slot, admitted ${secs(transfer.to - subscribedAt)} s after it subscribed to the large graph`);
+  const policy = admissionPolicyProblem(seen.admission);
+  if (policy) report.fail(caseId, `${edgeB.label} does not run the profile's sync policy: ${policy} (its admission ${seen.admission.label})`);
+  report.note(`case ${caseId}: ${edgeB.label} runs ${seen.admission.label} in its general sync slot, ${secs(seen.admission.at - subscribedAt)} s after it subscribed to the large graph`);
 
   const from = Date.now();
   const handles = [];
@@ -103,23 +120,32 @@ export async function busyEdge(ctx, main, large, promote) {
   }
   const pairs = await settled(handles);
   const until = Date.now();
-  // One reading taken after the last check, so that the evidence can reach the window's end.
+  // One reading taken after the last check, so that the evidence reaches the window's end.
   await waitFor(() => ({ ok: slots.readings.some(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= until) }), 10_000, 200);
   await slots.stop();
-  const busy = transferHeldThrough({ transfer, readings: slots.readings, from, until });
+  const kept = join(devnet.dir, 'one-graph-promotion', ctx.stamp);
+  mkdirSync(kept, { recursive: true });
+  writeFileSync(join(kept, `node${edgeB.number}-${edgeB.role}.slot-readings.jsonl`), slots.readings.map(reading => JSON.stringify(reading)).join('\n'));
+
+  const log = devnet.logSince(edgeB, offset);
+  const all = parseAdmissions(log);
+  const life = transferLifetime(log, all, isTransfer);
   for (const pair of pairs) {
+    const result = pairOutcome(pair, { boundMs: ctx.boundMs });
     const received = pair.node === edgeB ? heldAt(pair) : null;
-    if (received !== null && !receivedWhileHeld(received, busy)) {
-      report.fail(caseId, `${describe(pair.record)} at ${edgeB.label}: shown ${secs(received - pair.from)} s after the ${pair.fromWhat ?? 'share'}, later than the last reading that showed the transfer in the slot (${busy.reason ?? 'no reading'}): not exercised`);
+    if (result.outcome !== 'pass' || received === null) {
+      (result.outcome === 'pass' ? report.pass : report.fail)(caseId, result.text);
       continue;
     }
-    const result = pairOutcome(pair, { boundMs: ctx.boundMs });
-    if (result.outcome === 'pass') report.pass(caseId, result.text);
-    else report.fail(caseId, result.text);
+    if (!life || received > life.to) {
+      report.fail(caseId, `${result.text}; not exercised: the transfer of the large graph had ended by then`);
+      continue;
+    }
+    const at = transferHeldAt(received, slots.readings, all, isTransfer);
+    report.pass(caseId, `${result.text}, within the transfer's life (${at.held ? 'an admission of it held the slot then' : `its admissions left the slot then: ${at.why}`})`);
   }
-  const log = devnet.logSince(edgeB, offset);
-  const window = { from, until };
-  const reserved = parseAdmissions(log).filter(admission => admission.reserved && admission.label.startsWith(`shared-memory:${main.id}:`) && admission.at >= from - 1000 && admission.at <= until);
-  report.note(`case ${caseId}: the transfer held ${edgeB.label}'s general slot ${busy.held ? `through every check (${secs(until - from)} s)` : `for ${busy.provenUntil === null ? 0 : secs(busy.provenUntil - from)} s of ${secs(until - from)} s (then ${busy.reason})`}; meanwhile its log shows ${countLogLines(log, 'Sync backpressure rejected ', window)} sync admission(s) refused and ${reserved.length} pull(s) of the graph in the reserved shared-memory slot`);
+  const occupancy = transferOccupancy({ readings: slots.readings, admissions: all, isTransfer, from, until });
+  const reserved = all.filter(admission => admission.reserved && admission.label.startsWith(`shared-memory:${main.id}:`) && admission.at >= from - 1000 && admission.at <= until);
+  report.note(`case ${caseId}: the transfer ran ${life ? `${life.admissions} admission(s) from ${secs(life.from - subscribedAt)} s to ${secs(life.to - subscribedAt)} s after the subscribe` : 'no admission'}; in the window of ${secs(until - from)} s, ${occupancy.transfer} of ${occupancy.total} slot readings show it in the general slot; ${countLogLines(log, 'Sync backpressure rejected ', { from, until })} sync admission(s) refused, ${reserved.length} pull(s) of the graph in the reserved shared-memory slot`);
   return { shared, promoted };
 }
