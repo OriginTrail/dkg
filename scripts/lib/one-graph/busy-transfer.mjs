@@ -14,21 +14,25 @@
 // running durable work's start, and the log ties that start to an admission
 // of the transfer and to no other. Durable work never takes the reserved
 // shared-memory slot beside the general one, so under one general slot the
-// durable work a reading shows holds that slot. An edgeB receipt counts only
-// when an admission of the transfer held the slot at that moment: the first
-// reading after it shows an admission that started before it. Because the
-// transfer leaves the slot for moments between admissions, edgeA shares again,
-// up to SHARE_ATTEMPTS times, until a receipt lands inside one. A receipt
-// outside the transfer's admissions leaves the case not exercised. The
-// readings are kept in the run's folder.
+// durable work a reading shows holds that slot. A report reaches edgeB through
+// gossip and counts only when an admission of the transfer held the slot at
+// that moment: the first reading after it shows an admission that started
+// before it. Because the transfer leaves the slot for moments between
+// admissions, edgeA shares again, up to SHARE_ATTEMPTS times, until a receipt
+// lands inside one. A promotion reaches edgeB through edgeB's own sync work,
+// which needs the slot itself, so its receipt counts when the transfer held
+// the slot at some reading between the promotion and the receipt: the
+// delivery contended with it. Either receipt must fall within the transfer's
+// life; one that does not, or lacks that evidence, leaves the case not
+// exercised. The readings are kept in the run's folder.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { brief, sleep, waitFor } from '../member-sharing/devnet.mjs';
 import { heldAt } from '../member-sharing/observation.mjs';
 import {
-  admissionPolicyProblem, busyReceiptOutcome, countLogLines, pairOutcome, parseAdmissions, slotHolder, transferHeldAt,
-  transferLifetime, transferOccupancy,
+  admissionPolicyProblem, busyReceiptOutcome, countLogLines, pairOutcome, parseAdmissions, slotHolder, transferContended,
+  transferHeldAt, transferLifetime, transferOccupancy,
 } from '../qa/one-graph-promotion.mjs';
 import { settled } from './reports.mjs';
 
@@ -169,8 +173,13 @@ export async function busyEdge(ctx, main, large, promotions) {
       continue;
     }
     const received = heldAt(pair);
-    const held = received === null ? undefined : transferHeldAt(received, slots.readings, all, isTransfer);
-    const verdict = busyReceiptOutcome(result, { received, life, held });
+    // A report must land under a transfer admission; a promotion's delivery, which needs the slot itself, must have contended with the transfer for it.
+    const delivery = pair.kind !== 'swm';
+    let held;
+    if (received !== null) {
+      held = delivery ? transferContended(pair.from, received, slots.readings, all, isTransfer) : transferHeldAt(received, slots.readings, all, isTransfer);
+    }
+    const verdict = busyReceiptOutcome(result, { received, life, held, delivery });
     if (pair.kind === 'swm' && pair !== lastAttempt) report.note(`case ${caseId}: an earlier share: ${verdict.text}`);
     else (verdict.outcome === 'pass' ? report.pass : report.fail)(caseId, verdict.text);
   }

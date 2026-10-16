@@ -111,13 +111,16 @@
 //      the curator publishes) while edgeA shares a report and the curator
 //      promotes edgeA's report of case 3 and its own second report. edgeB
 //      must hold the new report, and each promoted one in Verified Memory and
-//      not in shared memory, within the bound, and each receipt must land
-//      while an admission of the transfer holds its general slot, as edgeB's
-//      log and diagnostics show. The transfer is many short admissions
-//      (`durable:<graph>:<peer>`, one or a few assets each), so edgeA shares
-//      again, up to 6 times while the transfer runs, until a receipt lands
-//      inside one; a receipt outside the transfer's admissions fails as not
-//      exercised (scripts/lib/one-graph/busy-transfer.mjs)
+//      not in shared memory, within the bound and within the transfer's life,
+//      with edgeB's log and diagnostics as the evidence of the busy slot. The
+//      transfer is many short admissions (`durable:<graph>:<peer>`, one or a
+//      few assets each). A report, which arrives through gossip, must land
+//      while one of them holds the slot, so edgeA shares again, up to 6 times
+//      while the transfer runs, until one does. A promotion, whose delivery
+//      needs the slot itself, must have contended with the transfer: a
+//      reading between the promotion and the receipt shows it in the slot.
+//      A receipt without that evidence fails as not exercised
+//      (scripts/lib/one-graph/busy-transfer.mjs)
 //   7  the late Edge: its subscription checks as in case 2; it recovers both
 //      layers within ONE_GRAPH_RECOVERY_SECS, then shares a report that every
 //      other Edge must hold

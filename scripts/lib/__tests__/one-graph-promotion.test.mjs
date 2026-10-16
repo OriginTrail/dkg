@@ -3,7 +3,7 @@ import test from 'node:test';
 import {
   admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, inVerifiedScope, judgeGone, memberPublishOutcome,
   pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, slotHolder, transferHeldAt, transferLifetime,
-  transferOccupancy, verifiedScope, writeRetryable, busyReceiptOutcome, promotionResult, subGraphWriteResult,
+  transferOccupancy, verifiedScope, writeRetryable, busyReceiptOutcome, promotionResult, subGraphWriteResult, transferContended,
 } from '../qa/one-graph-promotion.mjs';
 import { freshSubscription, sharedMemoryScope, subscriptionResults } from '../qa/member-sharing.mjs';
 import { classify, KNOWN_GAPS } from '../qa/known-gaps.mjs';
@@ -474,4 +474,33 @@ test('an expected failure of a known gap does not fail its case, and the summary
   assert.ok(lines.some(line => line.startsWith('  [XFAIL] case 4: the curator could not promote') && line.includes('expected failure: #3294')), lines.join('\n'));
   assert.ok(lines.some(line => line.includes('known gap #3293') && line.includes('1 check(s) failed as expected')), lines.join('\n'));
   assert.ok(lines.some(line => line.includes('every case passed, apart from the expected failures of known gaps')), lines.join('\n'));
+});
+
+test('a promotion\'s delivery to the busy Edge counts once the transfer held the slot between the promotion and the receipt', () => {
+  const admissions = parseAdmissions(TRANSFER_LOG);
+  const life = transferLifetime(TRANSFER_LOG, admissions, isTransfer);
+  const promotedAt = new Date('2026-10-16T01:16:30.000').getTime();
+  const receivedAt = new Date('2026-10-16T01:16:36.800').getTime();
+  // The slot held by the second admission at 35.5, between the promotion and the receipt; the receipt itself
+  // right after edgeB's own sync work (other durable work, or none).
+  const readings = [
+    reading(promotedAt + 500, 20, []),
+    reading(new Date('2026-10-16T01:16:35.500').getTime(), 20, [durable(2100)]),
+    reading(receivedAt + 300, 20, []),
+  ];
+  const contended = transferContended(promotedAt, receivedAt, readings, admissions, isTransfer);
+  assert.deepEqual(contended, { held: true, why: null });
+  const result = { outcome: 'pass', text: '"c (2)" by node7 (curator) in main/reports at node9 (edgeB): in Verified Memory 7 s after the promotion' };
+  assert.deepEqual(busyReceiptOutcome(result, { received: receivedAt, life, held: contended, delivery: true }),
+    { outcome: 'pass', text: `${result.text}, after contending with the transfer for the general slot` });
+  // At the receipt itself the slot was not the transfer's: the strict rule would not have counted it.
+  assert.equal(transferHeldAt(receivedAt, readings, admissions, isTransfer).held, false);
+  // No reading in the window shows the transfer: not exercised.
+  const idle = transferContended(promotedAt, promotedAt + 2000, readings, admissions, isTransfer);
+  assert.deepEqual(idle, { held: false, why: 'none of the 1 reading(s) between them shows the transfer in the slot' });
+  assert.match(busyReceiptOutcome(result, { received: promotedAt + 2000, life, held: idle, delivery: true }).text,
+    /; not exercised: the transfer never held the general slot between the promotion and the receipt \(none of the 1 reading\(s\) between them shows the transfer in the slot\)$/);
+  assert.deepEqual(transferContended(promotedAt, promotedAt + 100, readings, admissions, isTransfer), { held: false, why: 'no reading was taken between them' });
+  // After the transfer's life, even with contention before.
+  assert.match(busyReceiptOutcome(result, { received: life.to + 5, life, held: contended, delivery: true }).text, /had ended by then$/);
 });

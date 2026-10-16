@@ -369,21 +369,40 @@ export function transferOccupancy({ readings, admissions, isTransfer, from, unti
 }
 
 /**
- * The busy Edge's check of one receipt: its pair result (pairOutcome), when
- * the report reached the Edge, the transfer's life (transferLifetime) and
- * whether an admission of the transfer held the general slot at that moment
- * (transferHeldAt). It passes only when the transfer held the slot then. A
- * receipt after the transfer ended, one between its admissions, or one the
- * readings cannot place leaves the case not exercised and fails. A result
- * that failed, or a pair that was never received, is returned as it is.
+ * Whether the transfer held the node's general slot at some moment between
+ * `since` and `until`: a reading taken in that window shows it there. A
+ * promotion's Verified Memory reaches a node through the node's own sync
+ * work, which needs that slot, so its receipt never lands under a transfer
+ * admission; what shows the busy slot is that the delivery had to contend
+ * with the transfer for it. Returns { held, why }.
  */
-export function busyReceiptOutcome(result, { received, life, held }) {
+export function transferContended(since, until, readings, admissions, isTransfer) {
+  const window = readings.filter(reading => reading.at >= since && (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) <= until);
+  if (window.some(reading => slotHolder(reading, admissions, isTransfer).state === 'transfer')) return { held: true, why: null };
+  return { held: false, why: window.length ? `none of the ${window.length} reading(s) between them shows the transfer in the slot` : 'no reading was taken between them' };
+}
+
+/**
+ * The busy Edge's check of one receipt: its pair result (pairOutcome), when
+ * the report reached the Edge, the transfer's life (transferLifetime), and
+ * the slot evidence `held`: for a report, whether an admission of the
+ * transfer held the general slot at that moment (transferHeldAt); for a
+ * promotion (`delivery`), whether the transfer held it at some moment between
+ * the promotion and the receipt (transferContended). It passes only with that
+ * evidence and a receipt within the transfer's life. A receipt after the
+ * transfer ended, one without that evidence, or one whose readings cannot be
+ * placed leaves the case not exercised and fails. A result that failed, or a
+ * pair that was never received, is returned as it is.
+ */
+export function busyReceiptOutcome(result, { received, life, held, delivery = false }) {
   if (result.outcome !== 'pass' || received === null || received === undefined) return result;
   if (!life || received > life.to) return { outcome: 'fail', text: `${result.text}; not exercised: the transfer of the large graph had ended by then` };
   if (!held?.held) {
-    return { outcome: 'fail', text: `${result.text}; not exercised: no reading shows the transfer holding the general slot at that moment (${held?.why ?? 'no reading'})` };
+    const missing = delivery ? 'the transfer never held the general slot between the promotion and the receipt' : 'no reading shows the transfer holding the general slot at that moment';
+    return { outcome: 'fail', text: `${result.text}; not exercised: ${missing} (${held?.why ?? 'no reading'})` };
   }
-  return { outcome: 'pass', text: `${result.text}, while an admission of the transfer held the general slot` };
+  const how = delivery ? 'after contending with the transfer for the general slot' : 'while an admission of the transfer held the general slot';
+  return { outcome: 'pass', text: `${result.text}, ${how}` };
 }
 
 /**
