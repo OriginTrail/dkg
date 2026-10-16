@@ -137,7 +137,7 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
       });
     };
     const result = await readFirstProviderWithTransientRetry(this.providers, readOne, {
-      signal, retryDelayMs: 250, isRetryable: isContractViewRetryable,
+      signal, retryDelayMs: 250, isRetryable: isContractViewRetryable, awaitPhysicalSettlement: true,
     });
     if (!result) throw new Error("Public snapshot unavailable");
     return result;

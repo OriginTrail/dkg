@@ -15,6 +15,7 @@ import type {
 import {
   sanitizeRfc64AuthorCatalogCapacityV1,
   sanitizeRfc64CatalogShadowExecutionStatusV1,
+  sanitizeRfc64FinalizedRowHealV1,
   sanitizeRfc64FinalizedPrivatePlacementQueueV1,
   sanitizeRfc64CatalogHeadDeliveryStatusV1,
 } from './rfc64-status-contract.js';
@@ -44,14 +45,16 @@ export interface Rfc64StatusReaderV1 {
 const NO_SUPERVISOR_AGGREGATES_V1 = Object.freeze({
   finalizedPrivatePlacementQueue: null,
   authorCatalogCapacity: null,
+  finalizedRowHeal: null,
 });
 
 /**
- * GH#3081, GH#3134 — only two aggregates leave the supervisor status, each through its own
- * allow-list: the finalized-private queue view and the author-catalog capacity counts. The
- * per-author repairs never do. The supervisor is read once. A provider that throws (for example
- * before the supervisor is bound) reads as null for both rather than failing the route, and one
- * aggregate in another shape, or missing, is null on its own.
+ * GH#3081, GH#3134 — only three aggregates leave the supervisor status, each through its own
+ * allow-list: the finalized-private queue view, the author-catalog capacity counts and the sweep
+ * counts of finalized assets' inventory rows. The per-author repairs never do. The supervisor is
+ * read once. A provider that throws (for example before the supervisor is bound) reads as null for
+ * all of them rather than failing the route, and one aggregate in another shape, or missing, is
+ * null on its own.
  */
 function readRfc64ProjectionSupervisorAggregatesV1(agent: Rfc64StatusReaderV1) {
   try {
@@ -60,6 +63,7 @@ function readRfc64ProjectionSupervisorAggregatesV1(agent: Rfc64StatusReaderV1) {
       finalizedPrivatePlacementQueue:
         sanitizeRfc64FinalizedPrivatePlacementQueueV1(supervisor?.finalizedPrivatePlacement),
       authorCatalogCapacity: sanitizeRfc64AuthorCatalogCapacityV1(supervisor?.authorCatalogCapacity),
+      finalizedRowHeal: sanitizeRfc64FinalizedRowHealV1(supervisor?.finalizedRowHeal),
     };
   } catch {
     return NO_SUPERVISOR_AGGREGATES_V1;
@@ -219,7 +223,7 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
         agent.readRfc64CatalogShadowExecutionStatusV1(),
       )
     : null;
-  const { finalizedPrivatePlacementQueue, authorCatalogCapacity } = catalogActivation.enabled
+  const { finalizedPrivatePlacementQueue, authorCatalogCapacity, finalizedRowHeal } = catalogActivation.enabled
     ? readRfc64ProjectionSupervisorAggregatesV1(agent)
     : NO_SUPERVISOR_AGGREGATES_V1;
   const selectedPublicContextGraphs = new Set(
@@ -321,6 +325,7 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
       shadowExecution,
       finalizedPrivatePlacementQueue,
       authorCatalogCapacity,
+      finalizedRowHeal,
       configuration,
       autoPublishEnabled: catalogActivation.autoPublish !== undefined,
       rollout,

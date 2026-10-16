@@ -343,7 +343,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   private async hydrateQueryResult(result: QueryResult, options?: QueryOptions): Promise<QueryResult> {
     if (result.type === 'boolean') return result;
     const cache = new Map<string, Promise<string>>();
-    const budget = new LiteralHydrationBudget(options?.maxResponseBytes);
+    const budget = new LiteralHydrationBudget(options?.maxLiteralHydrationBytes ?? options?.maxResponseBytes);
 
     const map = async <T, R>(values: T[], hydrate: (value: T) => Promise<R>): Promise<R[]> => {
       if (budget.limit === undefined) return Promise.all(values.map(hydrate));

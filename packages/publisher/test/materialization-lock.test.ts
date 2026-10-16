@@ -326,3 +326,26 @@ describe('group materialization locks', () => {
     expect(order).toEqual(['group', 'released', 'single', 'reverse']);
   });
 });
+
+it('finishes opposite-order groups contending on a held singleton member', async () => {
+  const { withMaterializationLocks } = await import('../src/materialization-lock-group.js');
+  const a = { metaGraph: 'urn:interleaved-group-lock', ual: 'a' }, b = { ...a, ual: 'b' };
+  const stop = new AbortController();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const order: string[] = [];
+  const single = withMaterializationLock(b.metaGraph, b.ual, async () => { order.push('single'); await held; });
+  const reversed = withMaterializationLocks([b, a], async () => { order.push('reversed'); }, { signal: stop.signal });
+  const forward = withMaterializationLocks([a, b], async () => { order.push('forward'); }, { signal: stop.signal });
+  const completed = Promise.all([single, reversed, forward]);
+  const deadline = setTimeout(() => stop.abort(new Error('group lock deadline')), 1000);
+  try {
+    expect(order).toEqual(['single']);
+    release();
+    await completed;
+    expect(order).toEqual(['single', 'reversed', 'forward']);
+  } finally {
+    clearTimeout(deadline); stop.abort(); release();
+    await Promise.allSettled([single, reversed, forward]);
+  }
+});

@@ -117,6 +117,8 @@ export interface QueryOptions {
    * and reject above this bound before JSON/N-Quads materialization.
    */
   maxResponseBytes?: number;
+  /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
+  maxLiteralHydrationBytes?: number;
 }
 
 export type TripleStoreQueryOptions = QueryOptions;
