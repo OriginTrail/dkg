@@ -10,20 +10,23 @@ import { type ExactAssetFetchSessionPolicy, type ExactDurableFetchDisposition } 
 import { type SyncAdmissionSource } from './sync/policy.js';
 import { type DurableSyncResult } from './dkg-agent-types.js';
 
-export type ExactKnowledgeAssetSyncOptions = DurableRecoveryInput & {
+export type ExactRecoveryOptions = {
   onWorkStarted?: () => void;
   signal?: AbortSignal;
   isCurrent?: () => boolean;
-  forceFreshExactSession?: boolean;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   totalTimeoutMs?: number;
+};
+
+export type ExactKnowledgeAssetSyncOptions = DurableRecoveryInput & ExactRecoveryOptions & {
+  forceFreshExactSession?: boolean;
 };
 
 export type ExactKnowledgeAssetRefreshSyncOptions = ExactKnowledgeAssetSyncOptions & {
   exactFetchPurpose?: 'vm-update-refresh';
 };
 
-export type DurableSyncOptions = DurableRecoveryInput & {
+export type DurableRecoveryOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   /**
    * Outer wall-clock budget for the complete legacy durable operation.
@@ -54,12 +57,8 @@ export type DurableSyncOptions = DurableRecoveryInput & {
    * settlement boundary, not a generic progress callback.
    */
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
-  /** Atomic VM-recovery selection; challenge-pinned assets cannot omit their pins. */
-  exactAssetSelection?: ExactAssetSelection;
   /** Selection-bound requester policy; a refresh always identifies its exact assets. */
   exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
-  /** @deprecated Use a selection-bound exactAssetFetchPolicy for VM refreshes. */
-  forceFreshExactSession?: boolean;
   /** Internal transport decision; required streams never replay an enlarged selection. */
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   /** Owner-private retained META prefix for bounded durable recovery. */
@@ -80,6 +79,15 @@ export type DurableSyncOptions = DurableRecoveryInput & {
    */
   source?: SyncAdmissionSource;
 };
+
+type LegacyExactAssetFetchOptions = {
+  /** @deprecated Use the selection-bound exactAssetFetchPolicy. */
+  exactAssetSelection?: ExactAssetSelection;
+  /** @deprecated Use the vm-update-refresh exactAssetFetchPolicy. */
+  forceFreshExactSession?: boolean;
+};
+
+export type DurableSyncOptions = DurableRecoveryInput & DurableRecoveryOptions & LegacyExactAssetFetchOptions;
 
 export interface ExactKnowledgeAssetSyncResult {
   readonly admission: DurableSyncAdmissionOutcome;
@@ -106,7 +114,7 @@ export type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
   readonly admission: DurableSyncAdmissionOutcome;
 };
 
-export type LegacyDurableContextGraphOptions = DurableRecoveryInput & {
+export type DurableGraphOptions = {
   onPhase?: PhaseCallback;
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   onAccessDenied?: (contextGraphId: string) => void;
@@ -115,10 +123,6 @@ export type LegacyDurableContextGraphOptions = DurableRecoveryInput & {
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
   exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
-  /** @deprecated Use the selection-bound exactAssetFetchPolicy. */
-  exactAssetSelection?: ExactAssetSelection;
-  /** @deprecated Use the vm-update-refresh exactAssetFetchPolicy. */
-  forceFreshExactSession?: boolean;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
@@ -128,3 +132,5 @@ export type LegacyDurableContextGraphOptions = DurableRecoveryInput & {
   durableMetaContinuation?: DurableMetaContinuation;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
 };
+
+export type LegacyDurableContextGraphOptions = DurableRecoveryInput & DurableGraphOptions & LegacyExactAssetFetchOptions;
