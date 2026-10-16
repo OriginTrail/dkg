@@ -5389,14 +5389,6 @@ export class PublishMethods extends DKGAgentBase {
         `Queued seal reservedKaId ${seal.reservedKaId} does not match UAL-derived kaId ${packedKaId}`,
       );
     }
-    const sharedMemoryScope: SharedMemoryGraphScope = {
-      kind: 'named-lifecycle',
-      identity: {
-        agentAddress: graphScope.agentAddress,
-        kaNumber: BigInt(graphScope.kaNumber),
-      },
-    };
-
     let result: PublishResult;
     const onChainCapable =
       typeof this.chain.getEvmChainId === 'function' &&
