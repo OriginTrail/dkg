@@ -38,6 +38,7 @@ interface Admission {
   lane: SyncSchedulerLane;
   source: SyncAdmissionSource;
   priority?: number;
+  reservedSlotOnly?: boolean;
   logInfo?: (opCtx: unknown, message: string) => void;
 }
 
@@ -67,19 +68,33 @@ function sharedMemoryPull(
   };
 }
 
-/** Admit work that keeps its slot until `release()`; `started` resolves when it runs. */
+/** The Edge safety-net pull of a public graph in use, which asks for a reserved slot only. */
+function safetyNetPull(policy: SyncGlobalBackpressurePolicy, contextGraphId: string): Admission {
+  return { ...sharedMemoryPull(policy, contextGraphId), source: 'reconcile', reservedSlotOnly: true };
+}
+
+/**
+ * Admit work that keeps its slot until `release()`; `started` resolves when it
+ * runs. Work released while still queued ends as soon as it starts, so a test
+ * that fails early leaves no slot held for the tests after it.
+ */
 function hold(admission: Admission) {
   let release: (() => void) | undefined;
+  let released = false;
   let markStarted!: () => void;
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const done = withGlobalSyncBackpressure(admission, () => new Promise<void>((resolve) => {
     release = resolve;
     markStarted();
+    if (released) resolve();
   }));
   return {
     started,
     done,
-    release: () => release?.(),
+    release: () => {
+      released = true;
+      release?.();
+    },
     isRunning: () => release !== undefined,
   };
 }
@@ -188,6 +203,33 @@ describe('reserved shared-memory slot (#3251)', () => {
     }
   });
 
+  it('carries a reserved-slot-only request through the agent admission path', async () => {
+    const messages: string[] = [];
+    const agentLike = {
+      config: { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+      node: { stopSignal: undefined },
+      log: {
+        info: (_ctx: unknown, message: string) => { messages.push(message); },
+        warn: () => {},
+        debug: () => {},
+      },
+    };
+    const pulled = await LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+      agentLike as never,
+      ctx,
+      'urn:cg:in-use',
+      'shared_memory',
+      'shared-memory:urn:cg:in-use:peer',
+      async () => 'pulled',
+      { source: 'reconcile', reservedSlotOnly: true },
+    );
+    expect(pulled).toBe('pulled');
+    expect(messages).toEqual([
+      'Sync backpressure running shared-memory:urn:cg:in-use:peer in a reserved shared-memory slot '
+        + '(global inflight=0/1, queued=0/0, reserved shared-memory inflight=1/1, queued=0/16)',
+    ]);
+  });
+
   it('queues a shared-memory pull behind a busy reserved slot instead of refusing it', async () => {
     const policy = oneSlotNoQueue();
     const transfer = hold(largeTransfer(policy));
@@ -289,6 +331,89 @@ describe('reserved shared-memory slot (#3251)', () => {
       reservedPull.release();
       transfer.release();
       await Promise.all([reservedPull.done, transfer.done]);
+    }
+  });
+
+  it('runs a reserved-slot-only pull in the reserved slot and leaves the free general slot to a transfer', async () => {
+    // A node that keeps its one sync slot for large transfers (no queue): a
+    // pull that took the free general slot would refuse the transfer for as
+    // long as the pull reads the graph's shared memory.
+    const policy = oneSlotNoQueue();
+    const messages: string[] = [];
+    const pull = hold({
+      ...safetyNetPull(policy, 'urn:cg:in-use'),
+      logInfo: (_ctx, message) => { messages.push(message); },
+    });
+    await pull.started;
+    expect(messages).toEqual([
+      'Sync backpressure running shared-memory:urn:cg:in-use:peer in a reserved shared-memory slot '
+        + '(global inflight=0/1, queued=0/0, reserved shared-memory inflight=1/1, queued=0/16)',
+    ]);
+
+    const transfer = hold(largeTransfer(policy));
+    try {
+      // A refusal rejects `done` at once; `started` never resolves then.
+      await Promise.race([transfer.started, transfer.done]);
+      expect(pull.isRunning()).toBe(true);
+      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+    } finally {
+      pull.release();
+      transfer.release();
+      await Promise.all([pull.done, transfer.done]);
+    }
+  });
+
+  it('queues a reserved-slot-only pull for the reserved slot while the general slot is free, holding up no one', async () => {
+    const policy = oneSlotNoQueue();
+    const first = hold(safetyNetPull(policy, 'urn:cg:first'));
+    await first.started;
+    const messages: string[] = [];
+    const second = hold({
+      ...safetyNetPull(policy, 'urn:cg:second'),
+      logInfo: (_ctx, message) => { messages.push(message); },
+    });
+    const held = [first, second];
+
+    try {
+      await tick();
+      expect(second.isRunning()).toBe(false);
+      expect(messages).toEqual([
+        'Sync backpressure queued shared-memory:urn:cg:second:peer for a reserved shared-memory slot '
+          + '(global inflight=0/1, queued=0/0, reserved shared-memory inflight=1/1, queued=1/16)',
+      ]);
+
+      // The waiting pull holds up nothing that the free general slot can run.
+      const transfer = hold(largeTransfer(policy));
+      held.push(transfer);
+      await Promise.race([transfer.started, transfer.done]);
+      first.release();
+      await first.done;
+      await second.started;
+      expect(transfer.isRunning()).toBe(true);
+    } finally {
+      for (const work of held) work.release();
+      await Promise.all(held.map((work) => work.done));
+    }
+  });
+
+  it('admits a reserved-slot-only pull like any other shared-memory pull where no reserve applies', async () => {
+    process.env[RESERVE_ENV] = '0';
+    const policy = oneSlotNoQueue();
+    const messages: string[] = [];
+    const pull = hold({
+      ...safetyNetPull(policy, 'urn:cg:in-use'),
+      logInfo: (_ctx, message) => { messages.push(message); },
+    });
+    try {
+      await Promise.race([pull.started, pull.done]);
+      expect(messages).toEqual([
+        'Sync backpressure running shared-memory:urn:cg:in-use:peer (global inflight=1/1, queued=0/0)',
+      ]);
+      await expect(withGlobalSyncBackpressure(largeTransfer(policy), async () => undefined))
+        .rejects.toMatchObject({ reason: 'queue_full' });
+    } finally {
+      pull.release();
+      await pull.done;
     }
   });
 

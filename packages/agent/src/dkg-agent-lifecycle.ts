@@ -652,6 +652,8 @@ interface SharedMemorySyncFromPeerOptions {
   source?: SyncAdmissionSource;
   /** Read the peer's state at the call: never join a sync of the same scope already running. */
   freshSnapshot?: boolean;
+  /** Admit each graph's pull to a reserved shared-memory slot only, never a general one. */
+  reservedSlotOnly?: boolean;
 }
 
 interface OrdinarySharedMemorySyncFromPeerOptions extends SharedMemorySyncFromPeerOptions {
@@ -1301,6 +1303,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       source?: SyncAdmissionSource;
       /** Admit the selected graph-complete RFC-64 SWM transfer into its reserved slot. */
       selectedSwmPriority?: boolean;
+      /** A shared-memory pull that may run only in a reserved shared-memory slot. */
+      reservedSlotOnly?: boolean;
       /** Runs only inside the acquired capacity boundary, before physical work. */
       onWorkStarted?: () => void;
     } = {},
@@ -1418,6 +1422,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           priorityClass: syncPriorityClass(priority),
           source,
           selectedSwmPriority,
+          reservedSlotOnly: admission.reservedSlotOnly,
           signal: admissionBoundary.signal,
           logInfo: (opCtx, message) => this.log.info(opCtx, message),
         },
@@ -6270,6 +6275,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               priorityOverride: selectedPublicWork ? options?.priority : undefined,
               source: options?.source,
               selectedSwmPriority: selectedPublicWork,
+              reservedSlotOnly: options?.reservedSlotOnly,
             },
           );
         },
@@ -6350,6 +6356,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             priorityOverride: options?.priority,
             source: options?.source,
             selectedSwmPriority: true,
+            reservedSlotOnly: options?.reservedSlotOnly,
           },
         ),
         merge: mergeSamePeerSharedMemoryDiagnostics,
