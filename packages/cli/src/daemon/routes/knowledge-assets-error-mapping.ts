@@ -6,7 +6,7 @@ import {
   ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
 } from '@origintrail-official/dkg-core';
-import { PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE } from '@origintrail-official/dkg-publisher';
+import { PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE, SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
 import {
   isPayloadTooLargeError,
   jsonResponse,
@@ -77,6 +77,8 @@ const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
   ['ASSERTION_EMPTY', 409],
   ['KA_WM_LIFECYCLE_REQUIRED', 409],
   ['KA_WM_LIFECYCLE_CORRUPT', 500],
+  // A write into a sub-graph that neither this node nor the graph's peers it asked hold (#3293).
+  [SUB_GRAPH_NOT_FOUND_CODE, 400],
 ]);
 
 /** Shared typed lifecycle classification; callers retain route-specific recovery. */
