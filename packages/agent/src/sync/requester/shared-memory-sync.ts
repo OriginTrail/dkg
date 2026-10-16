@@ -61,6 +61,7 @@ import {
   type RecoveryExecutionGuard,
 } from './recovery-execution-guard.js';
 import { canonicalQuadKey } from './quad-key.js';
+import { storedVersionOutranksDescriptor } from './swm-stored-head-proof.js';
 
 const sharedMemorySyncFetchSharingIdentity = createSyncFetchSharingIdentity();
 const directSnapshotWalkFetchSharingIdentity = createSyncFetchSharingIdentity();
@@ -429,21 +430,6 @@ export interface SharedMemorySyncContext {
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
-}
-
-
-/**
- * True when the locally stored head version outranks the descriptor we are
- * about to materialize. BigInt-compared when both parse; anything unparseable
- * is treated as OUTRANKING — failing safe means never destroying local state
- * whose ordering we cannot establish.
- */
-function storedVersionOutranksDescriptor(stored: string, descriptorVersion: string): boolean {
-  try {
-    return BigInt(stored) > BigInt(descriptorVersion);
-  } catch {
-    return true;
-  }
 }
 
 export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(async context => {
@@ -1008,6 +994,19 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         }
         await insertVerifiedDescriptorMeta(descriptor);
       };
+      /**
+       * A newer stored head is kept either way; it makes the asset held only
+       * with its own content in the store. Without it the asset is missing.
+       */
+      const supersededAssetIsHeld = async (descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean> => {
+        if (await snapshotMaterializer!.isNewerStoredHeadMaterialized(pid, descriptor)) {
+          summary.alreadyHeldAssets += 1;
+          return true;
+        }
+        summary.supersededUnprovenAssets += 1;
+        logWarn(ctx, `SWM sync for "${pid}": the stored head of ${descriptor.kaUal} is newer, but its content is not here`);
+        return false;
+      };
       // Graph-backed legacy descriptors do not enter the immutable snapshot
       // manifest: their source bytes travel in the aggregate data phase. An
       // already-materialized root can nevertheless predate late-boundary
@@ -1040,7 +1039,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                 snapshotCommit.suppressRows(descriptor.metadataQuads.filter(
                   (quad) => quad.subject === descriptor.headSubject,
                 ));
-                summary.alreadyHeldAssets += 1;
+                await supersededAssetIsHeld(descriptor);
                 return;
               }
               let exactGraph = await snapshotMaterializer!
@@ -1218,8 +1217,12 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                   snapshotCommit.suppressRows(descriptor.metadataQuads.filter(
                     (quad) => quad.subject === descriptor.headSubject,
                   ));
+                  if (!(await supersededAssetIsHeld(descriptor))) {
+                    // Neither version's content is here: the ref stays unresolved.
+                    refMaterialized = false;
+                    return;
+                  }
                   materializedKeys.add(graphKey);
-                  summary.alreadyHeldAssets += 1;
                   logDebug(ctx, `SWM sync for "${pid}": snapshot ${snapshotRef} superseded by `
                     + `stored version ${storedHead.version} (descriptor ${descriptor.assertionVersion}); skipping`);
                   return;

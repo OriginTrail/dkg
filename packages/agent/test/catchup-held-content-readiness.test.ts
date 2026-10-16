@@ -93,6 +93,7 @@ describe('the inline catch-up of a member that already holds the graph (#3296)',
 
   it.each([
     ['left a root asset to the catalog lane', heldRound({ catalogDeferredAssets: 1 })],
+    ['kept a newer stored head without its content', heldRound({ supersededUnprovenAssets: 1 })],
     ['left a ref of its manifest unwritten', heldRound({ swmCoverage: coverage(2) })],
     ['failed a phase', heldRound({ failedPhases: 1 })],
     ['served no asset', heldRound({ alreadyHeldAssets: 0, swmCoverage: undefined })],

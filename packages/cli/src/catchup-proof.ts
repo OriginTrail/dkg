@@ -13,9 +13,13 @@ export interface CatchupPhaseProgress extends DurableProgressSummary {
   insertedDataTriples?: number;
   metaOnlyResponses?: number;
   verifiedPrivateOnlyResponses?: number;
-  /** Shared memory only: assets the round found already held, or left to the catalog lane. */
+  /**
+   * Shared memory only: assets the round found already held, left to the
+   * catalog lane, or left missing under a newer stored head without its content.
+   */
   alreadyHeldAssets?: number;
   catalogDeferredAssets?: number;
+  supersededUnprovenAssets?: number;
   swmCoverage?: SwmSnapshotCoverage;
 }
 

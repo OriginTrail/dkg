@@ -292,6 +292,9 @@ describe('a member that already holds the graph is proven synced by a catch-up t
       ['a round left a root asset to the catalog lane', () => publicMember(
         PUBLIC_UNREGISTERED, (peerId) => heldPublicRound(peerId, { catalogDeferredAssets: 1 }),
       )],
+      ['a round kept a newer stored head without its content', () => publicMember(
+        PUBLIC_UNREGISTERED, (peerId) => heldPublicRound(peerId, { supersededUnprovenAssets: 1 }),
+      )],
       ['the peers served metadata and no asset', () => publicMember(
         PUBLIC_UNREGISTERED, (peerId) => heldPublicRound(peerId, { alreadyHeldAssets: 0, swmCoverage: undefined }),
       )],
