@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+import { createUalOnlyExactAssetSelection } from './sync/exact-assets.js';
+import { exactAssetFetchSessionPolicy } from './sync/requester/exact-durable-fetch.js';
 import * as exactRecovery from './exact-recovery-execution.js';
-import { createDurableRecoveryHost } from './durable-recovery-host.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -134,11 +135,11 @@ export class PublicSnapshotMethods extends DKGAgentBase {
               const remaining = batch.filter(ual => !committed.has(ual));
               if (!remaining.length) break;
               const result = await exactRecovery.runExactRecovery({
-                host: createDurableRecoveryHost(this),
+                host: DKGAgentBase.createDurableRecoveryCapabilities(this),
                 ctx: createOperationContext('sync'),
-                remotePeerId: peer, contextGraphId, selectionInput: remaining, authority: evidence,
+                remotePeerId: peer, contextGraphId, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection(remaining), 'vm-update-refresh'), authority: evidence,
                 options: {
-                  signal, isCurrent, forceFreshExactSession: true,
+                  signal, isCurrent,
                   exactRecoveryTransportMode: transport,
                   totalTimeoutMs: 120_000,
                 },
