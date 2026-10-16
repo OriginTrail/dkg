@@ -433,6 +433,73 @@ describe('a member\'s first write into a sub-graph of a registered public graph 
     expect(member.fetchSyncPages).toHaveBeenCalledTimes(names.length + 1);
   });
 
+  it('finds the sub-graph a write names however many the owner registered, past the per-snapshot limit', async () => {
+    const names = Array.from({ length: PEER_SUB_GRAPH_REGISTRATION_LIMIT + 1 }, (_, i) => `s${String(i).padStart(4, '0')}`);
+    const owner = await peerNode([...OWNER_DECLARATION, ...names.flatMap((name) => subGraphRegistration(name))]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    const publisher = await memberPublisher(member);
+    const last = names.at(-1)!;
+
+    await expect(firstWrite(publisher, 'report-last', last)).resolves.toBeUndefined();
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, last)).resolves.toBe(true);
+    // Bulk learning stays bounded: the requested name took one of the slots.
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, names.at(-2)!)).resolves.toBe(false);
+  });
+
+  it('never runs two fresh metadata fetches from one peer for one graph at once', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH), ...subGraphRegistration('drafts')]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    const serve = member.fetchSyncPages.getMockImplementation()!;
+    let active = 0;
+    let most = 0;
+    member.fetchSyncPages.mockImplementation(async (...args) => {
+      active += 1;
+      most = Math.max(most, active);
+      try {
+        // Long enough for every other fetch to start if nothing kept them apart.
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return await serve(...args);
+      } finally {
+        active -= 1;
+      }
+    });
+
+    // Two writes into two sub-graphs and the definition pull, all at once: each
+    // would open a fresh session at the owner, and a second one supersedes the first.
+    const [reports, drafts, definition] = await Promise.all([
+      resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH),
+      resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, 'drafts'),
+      bootstrap(member),
+    ]);
+
+    expect(reports).toEqual({ registered: true });
+    expect(drafts).toEqual({ registered: true });
+    expect(definition).toBe('fetched');
+    expect(most).toBe(1);
+  });
+
+  it('settles within its budget while a registration of the sub-graph holds the lock', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    let release!: () => void;
+    member.writeLocks.set(
+      `${contextGraphId}\0${SUB_GRAPH}\0sub-graph-registration`,
+      new Promise<void>((resolve) => { release = resolve; }),
+    );
+    try {
+      const started = Date.now();
+      await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 50 }))
+        .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      release();
+    }
+    // The registration it started finishes once the lock is free; the next write finds it.
+    await vi.waitFor(async () => {
+      await expect(member.agent.resolveSubGraphRegistration(contextGraphId, SUB_GRAPH)).resolves.toEqual({ registered: true });
+    });
+  }, 10_000);
+
   it('runs one resolution of a sub-graph at a time and lets concurrent writes share it', async () => {
     const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
     const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));

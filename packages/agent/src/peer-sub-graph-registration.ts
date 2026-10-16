@@ -48,10 +48,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { stripLiteral } from './dkg-agent-utils.js';
-import { hasSyncAdmissionSource } from './sync/attempt-telemetry.js';
-import type { SyncPhase } from './sync/auth/request-build.js';
-import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
-import type { SyncPageFetchOptions, SyncPageResult } from './sync/requester/page-fetch.js';
+import { fetchFreshContextGraphMeta, type FreshMetaFetchAgent } from './sync/requester/fresh-meta-fetch.js';
 import { isKnownContextGraphUri } from './sync/requester/swm-target-executor.js';
 
 /** The most sub-graph registrations taken from one peer's `_meta`. */
@@ -105,41 +102,25 @@ export interface PeerSubGraphRegistrationPorts {
 }
 
 /** What a resolution needs of the agent besides that. */
-interface PeerSubGraphResolutionAgent extends PeerSubGraphRegistrationPorts {
+interface PeerSubGraphResolutionAgent extends PeerSubGraphRegistrationPorts, FreshMetaFetchAgent {
   readonly peerId: string;
   readonly localContextGraphProvenance: { hasLocalCreate(contextGraphId: string): boolean };
   readonly subscribedContextGraphs: ReadonlyMap<string, { readonly subscribed?: boolean }>;
-  readonly syncCheckpoints: Pick<SyncCheckpointStore, 'delete'>;
   resolveCuratorPeerId(contextGraphId: string, options: { signal?: AbortSignal }): Promise<string | undefined>;
   resolveRfc64UnregisteredAuthoritySeedPeersV1(options: { contextGraphId?: string }): readonly string[];
-  fetchSyncPages(
-    ctx: OperationContext,
-    remotePeerId: string,
-    contextGraphId: string,
-    includeSharedMemory: boolean,
-    phase: SyncPhase,
-    graphUri: string,
-    deadline: number,
-    options?: SyncPageFetchOptions,
-  ): Promise<SyncPageResult>;
-  runContextGraphSyncWithBackpressure<T>(
-    ctx: OperationContext,
-    contextGraphId: string,
-    lane: 'durable',
-    label: string,
-    work: () => Promise<T>,
-    admission: { operationSignal?: AbortSignal; source: 'control-plane' },
-  ): Promise<T>;
 }
 
 /**
  * The sub-graph registrations of `contextGraphId` in `quads`, a peer's copy of
  * the graph's `_meta`: subject `<graph>/<name>` typed `dkg:SubGraph` and named
- * `<name>`, in name order, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT}.
+ * `<name>`, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT}. `options.first`
+ * (the sub-graph a write names) is taken first when the snapshot holds it, so
+ * the limit never leaves it out; the rest follow in name order.
  */
 export function readPeerSubGraphRegistrations(
   contextGraphId: string,
   quads: readonly Quad[],
+  options: { readonly first?: string } = {},
 ): PeerSubGraphRegistration[] {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
@@ -152,7 +133,12 @@ export function readPeerSubGraphRegistrations(
     rowsByName.set(name, rows);
   }
   const found: PeerSubGraphRegistration[] = [];
-  for (const name of [...rowsByName.keys()].sort()) {
+  const names = [...rowsByName.keys()].sort();
+  if (options.first !== undefined && rowsByName.has(options.first)) {
+    names.splice(names.indexOf(options.first), 1);
+    names.unshift(options.first);
+  }
+  for (const name of names) {
     if (found.length >= PEER_SUB_GRAPH_REGISTRATION_LIMIT) break;
     if (name.length > MAX_PEER_SUB_GRAPH_NAME_LENGTH || !validateSubGraphName(name).valid) continue;
     const rows = rowsByName.get(name)!;
@@ -312,6 +298,29 @@ export function resolveUnregisteredSubGraphFromPeers(
   return resolution;
 }
 
+const OUT_OF_TIME = Symbol('out of time');
+
+/**
+ * `work`'s outcome, or {@link OUT_OF_TIME} when `budget` ends first. `work`
+ * goes on to its end either way (a rejection after that is still handled).
+ */
+async function withinBudget<T>(work: Promise<T>, budget: AbortSignal): Promise<T | typeof OUT_OF_TIME> {
+  if (budget.aborted) {
+    work.catch(() => undefined);
+    return OUT_OF_TIME;
+  }
+  let onAbort!: () => void;
+  const ended = new Promise<typeof OUT_OF_TIME>((resolve) => {
+    onAbort = () => resolve(OUT_OF_TIME);
+    budget.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([work, ended]);
+  } finally {
+    budget.removeEventListener('abort', onAbort);
+  }
+}
+
 async function resolveFromPeers(
   agent: PeerSubGraphResolutionAgent,
   state: PeerSubGraphResolutionState,
@@ -322,41 +331,57 @@ async function resolveFromPeers(
 ): Promise<UnregisteredSubGraphResolution> {
   const ctx = createOperationContext('sync');
   const deadline = Date.now() + timeoutMs;
-  // One budget for the whole resolution: the wait for sync capacity, the
-  // owner's lookup and every fetch. Its end is an answer, not an error.
+  // One budget for the whole resolution: the owner's lookup, the wait for sync
+  // capacity and for a peer's turn, every fetch and the registrations. Its end
+  // is an answer, not an error; what it cut short goes on without the caller.
   const budget = AbortSignal.timeout(timeoutMs);
-  const peerIds = await resolutionPeers(agent, contextGraphId, budget);
+  const peerIds = await withinBudget(resolutionPeers(agent, contextGraphId, budget), budget);
   let answered = 0;
-  let lastFailure: string | undefined;
-  for (const peerId of peerIds) {
+  let lastFailure = 'out of time';
+  let outOfTime = peerIds === OUT_OF_TIME;
+  for (const peerId of peerIds === OUT_OF_TIME ? [] : peerIds) {
     if (budget.aborted) {
-      lastFailure = 'out of time';
+      outOfTime = true;
       break;
     }
-    let quads: readonly Quad[] | undefined;
+    let quads: readonly Quad[] | undefined | typeof OUT_OF_TIME;
     try {
-      quads = await fetchPeerMeta(agent, ctx, peerId, contextGraphId, deadline, budget);
+      quads = await withinBudget(fetchPeerMeta(agent, ctx, peerId, contextGraphId, deadline, budget), budget);
     } catch (error) {
-      lastFailure = budget.aborted ? 'out of time' : error instanceof Error ? error.message : String(error);
+      if (budget.aborted) {
+        outOfTime = true;
+        break;
+      }
+      lastFailure = error instanceof Error ? error.message : String(error);
       continue;
+    }
+    if (quads === OUT_OF_TIME) {
+      outOfTime = true;
+      break;
     }
     if (quads === undefined) {
       lastFailure = `peer ${peerId.slice(-8)} sent an incomplete answer`;
       continue;
     }
     answered += 1;
-    await registerPeerSubGraphs(agent, contextGraphId, readPeerSubGraphRegistrations(contextGraphId, quads), peerId, ctx);
+    const found = readPeerSubGraphRegistrations(contextGraphId, quads, { first: subGraphName });
+    if (await withinBudget(registerPeerSubGraphs(agent, contextGraphId, found, peerId, ctx), budget) === OUT_OF_TIME) {
+      outOfTime = true;
+      break;
+    }
     if (await hasSubGraphRegistration(agent.store, contextGraphId, subGraphName)) {
       state.misses.delete(key);
       return { registered: true };
     }
   }
-  if (answered > 0) {
+  if (outOfTime) lastFailure = 'out of time';
+  else if (answered > 0) {
     const detail = `none of the ${answered} peer(s) of the context graph asked holds it`;
     rememberMiss(state, key, { at: Date.now(), forMs: SUB_GRAPH_RESOLUTION_MISS_COOLDOWN_MS, detail });
     return { registered: false, detail };
+  } else if (peerIds !== OUT_OF_TIME && peerIds.length === 0) {
+    return { registered: false, detail: 'no peer of the context graph was there to ask' };
   }
-  if (peerIds.length === 0) return { registered: false, detail: 'no peer of the context graph was there to ask' };
   const detail = `no peer of the context graph could be asked: ${lastFailure}`;
   rememberMiss(state, key, { at: Date.now(), forMs: SUB_GRAPH_RESOLUTION_FAILURE_COOLDOWN_MS, detail });
   agent.log.warn(ctx, `Could not look up sub-graph "${subGraphName}" of context graph "${contextGraphId}": ${lastFailure}`);
@@ -391,10 +416,9 @@ async function resolutionPeers(
 }
 
 /**
- * The peer's complete `_meta` of the graph, from offset 0 in a fresh session,
- * or undefined when its answer was incomplete. Admitted like the curator
- * metadata refresh: through the node's sync scheduler, unless the caller
- * already runs inside an admitted operation.
+ * The peer's complete `_meta` of the graph in a fresh session
+ * ({@link fetchFreshContextGraphMeta}, the curator metadata refresh's fetch),
+ * or undefined when its answer was incomplete.
  */
 async function fetchPeerMeta(
   agent: PeerSubGraphResolutionAgent,
@@ -404,18 +428,7 @@ async function fetchPeerMeta(
   deadline: number,
   signal: AbortSignal,
 ): Promise<readonly Quad[] | undefined> {
-  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  agent.syncCheckpoints.delete(getSyncCheckpointKey(peerId, contextGraphId, false, 'meta'));
-  const fetchMeta = () => agent.fetchSyncPages(ctx, peerId, contextGraphId, false, 'meta', metaGraph, deadline, {
-    signal,
-    forceFreshSession: true,
-  });
-  const result = await (hasSyncAdmissionSource()
-    ? fetchMeta()
-    : agent.runContextGraphSyncWithBackpressure(ctx, contextGraphId, 'durable', 'durable:control-plane', fetchMeta, {
-      operationSignal: signal,
-      source: 'control-plane',
-    }));
+  const result = await fetchFreshContextGraphMeta(agent, ctx, peerId, contextGraphId, { deadline: () => deadline, signal });
   agent.syncCheckpoints.delete(result.checkpointKey);
   return result.completed && result.resumedFromOffset === 0 ? result.quads : undefined;
 }
