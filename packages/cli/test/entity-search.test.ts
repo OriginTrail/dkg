@@ -540,3 +540,33 @@ it('revalidates graph membership after registration removal while retaining RDF 
   expect(await f.search()).toMatchObject({ staleCandidates: 1, entities: [{ entityUri: 'urn:entity:0' }] });
   expect(f.store.count(indexed.indexId)).toBe(2);
 });
+
+it('indexes and revalidates allowed 256-row documents through HTTP serialization overhead', async () => {
+  const f = await fixture(0, 100_000, true);
+  const literals = Array.from({ length: 256 }, (_, i) => `v${String(i).padStart(3, '0')}${'x'.repeat(36)}`);
+  await f.graph.insert([
+    ...literals.map(value => ({ graph: partition, subject: 'urn:boundary', predicate: 'urn:description', object: JSON.stringify(value) })),
+    { graph: partition, subject: 'urn:boundary', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:Topic' },
+  ]);
+  expect(Buffer.byteLength(literals.map(value => `urn:description: ${JSON.stringify(value)}`).join('\n'))).toBe(15_359);
+  const response = await fetch(f.endpoint!.queryEndpoint, {
+    method: 'POST', headers: { 'content-type': 'application/sparql-query', accept: 'application/sparql-results+json' },
+    body: `SELECT ?p ?value WHERE { GRAPH <${partition}> { <urn:boundary> ?p ?value FILTER(isLiteral(?value)) } }`,
+  });
+  expect(response.ok).toBe(true);
+  expect(Buffer.byteLength(await response.text())).toBeGreaterThan(16_384);
+  expect(await f.index()).toMatchObject({ scanComplete: true, indexedEntities: 1 });
+  expect(await f.search()).toMatchObject({ staleCandidates: 0, entities: [{ entityUri: 'urn:boundary' }] });
+});
+
+it('materializes only ranked winners and keeps deterministic cosine tie order', async () => {
+  const f = await fixture(3); await f.index();
+  const id = indexKey(parseSpec(spec), f.embedder.fingerprint);
+  const parse = vi.spyOn(JSON, 'parse');
+  const result = f.store.rank(id, [1, 0], 1, AbortSignal.timeout(1000), performance.now() + 1000);
+  expect(result.map(row => row.document.entityUri)).toEqual(['urn:entity:0']);
+  expect(parse.mock.calls.filter(([value]) => String(value).includes('contentHash'))).toHaveLength(1);
+  parse.mockRestore();
+  expect(f.store.rank(id, [0, 1], 2, AbortSignal.timeout(1000), performance.now() + 1000)
+    .map(row => row.document.entityUri)).toEqual(['urn:entity:1', 'urn:entity:2']);
+});
