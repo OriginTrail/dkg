@@ -3,6 +3,7 @@ import {
   catchupPlaneCompletedWithoutFailure,
   catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
+  catchupPlaneProvenByHeldContent,
   catchupPlaneProvenBySelectedScope,
   catchupPlaneProvenByUnanimousEmpty,
   catchupPlaneReady,
@@ -65,6 +66,7 @@ function catchupPlaneReadinessThisRun(input: {
   if (completion) {
     const provenPositively = catchupPlaneProvenByData(completion)
       || catchupPlaneProvenBySelectedScope(completion)
+      || catchupPlaneProvenByHeldContent(completion)
       || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options);
     const unanimousEmpty = catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
     return {

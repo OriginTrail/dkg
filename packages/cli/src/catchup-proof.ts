@@ -1,6 +1,8 @@
 import {
   classifyDurableProgress,
+  sharedMemoryRoundFoundNothingMissing,
   type DurableProgressSummary,
+  type SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
 
 /** Progress fields shared by durable and shared-memory catch-up proof producers. */
@@ -11,6 +13,10 @@ export interface CatchupPhaseProgress extends DurableProgressSummary {
   insertedDataTriples?: number;
   metaOnlyResponses?: number;
   verifiedPrivateOnlyResponses?: number;
+  /** Shared memory only: assets the round found already held, or left to the catalog lane. */
+  alreadyHeldAssets?: number;
+  catalogDeferredAssets?: number;
+  swmCoverage?: SwmSnapshotCoverage;
 }
 
 export function catchupPlaneCompletedWithoutFailure(
@@ -31,6 +37,15 @@ export interface CatchupPlaneCompletionEvidence {
    * graph-complete proof tied to the accepted provider policy.
    */
   selectedScopeCompletePeers?: number;
+  /**
+   * Peers that cleanly completed this plane, served Knowledge Assets, and found
+   * every one already held here: the node received those writes earlier (by
+   * gossip, by another lane, before a restart), so the round inserted nothing.
+   * As strong as `verifiedDataPeers`, which proves the same of a peer whose
+   * content arrived in this round; kept apart so it never counts as data
+   * received. Shared memory only.
+   */
+  heldContentPeers?: number;
   emptyPeers: number;
   /**
    * The metadata-resolved curator cleanly completed this plane while hosting
@@ -171,6 +186,7 @@ export function catchupPeerPlaneEvidence(
   return {
     verifiedDataPeers: (plane.insertedDataTriples ?? 0) > 0 ? 1 : 0,
     verifiedPrivateOnlyPeers: (plane.verifiedPrivateOnlyResponses ?? 0) > 0 ? 1 : 0,
+    heldContentPeers: options.plane === 'shared-memory' && sharedMemoryRoundFoundNothingMissing(plane) ? 1 : 0,
     emptyPeers: (plane.emptyResponses ?? 0) > 0 ? 1 : 0,
     authorityEmptyPeers: options.fromAuthority && carriedNoData && answered ? 1 : 0,
   };
@@ -189,6 +205,9 @@ export function addCatchupPlaneEvidence(
   if (peer.selectedScopeCompletePeers) {
     total.selectedScopeCompletePeers = (total.selectedScopeCompletePeers ?? 0)
       + peer.selectedScopeCompletePeers;
+  }
+  if (peer.heldContentPeers) {
+    total.heldContentPeers = (total.heldContentPeers ?? 0) + peer.heldContentPeers;
   }
   total.emptyPeers += peer.emptyPeers;
   if (peer.authorityEmptyPeers) {
@@ -224,6 +243,20 @@ export function catchupPlaneProvenBySelectedScope(
   completion: CatchupPlaneCompletionEvidence | undefined,
 ): boolean {
   return (completion?.selectedScopeCompletePeers ?? 0) > 0;
+}
+
+/**
+ * Positive proof without new data: some peer cleanly completed this plane and
+ * every Knowledge Asset it served was already held here, none left to another
+ * lane and none of its manifest unwritten (issue #3296). A node that received
+ * the writes before its catch-up ran holds what that peer holds exactly as a
+ * node does after a round that inserted them; without this it could never be
+ * proven synced, because readiness counted only inserted data.
+ */
+export function catchupPlaneProvenByHeldContent(
+  completion: CatchupPlaneCompletionEvidence | undefined,
+): boolean {
+  return (completion?.heldContentPeers ?? 0) > 0;
 }
 
 /**
@@ -395,6 +428,7 @@ export function catchupPlaneReady(
 ): boolean {
   return catchupPlaneProvenByData(completion)
     || catchupPlaneProvenBySelectedScope(completion)
+    || catchupPlaneProvenByHeldContent(completion)
     || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options)
     || catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
 }

@@ -975,14 +975,6 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
        * the round's bulk append re-stacks it onto the repaired head.
        */
       /**
-       * The ONE preserve step: withholding the losing descriptor id from
-       * every later write this round (per-KA meta insert AND the bulk append)
-       * is inseparable from the decision to preserve — a caller that decided
-       * without withholding would let the bulk append re-stack the rejected
-       * id onto the head it just protected. Both preserve paths below go
-       * through here.
-       */
-      /**
        * The ONE preserve operation: DECIDING is WITHHOLDING. When a stored
        * identity wins, the losing descriptor id row is suppressed from every
        * later write this round (per-KA meta insert AND the bulk append) in
@@ -1034,6 +1026,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                 && ordinaryRootSnapshotApplyAllowed?.(pid) === false;
               if (ordinaryDenied()) {
                 snapshotCommit.suppressRows(descriptor.metadataQuads);
+                summary.catalogDeferredAssets += 1;
                 return;
               }
               const storedHead = await snapshotMaterializer!.readStoredHead(descriptor);
@@ -1047,6 +1040,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                 snapshotCommit.suppressRows(descriptor.metadataQuads.filter(
                   (quad) => quad.subject === descriptor.headSubject,
                 ));
+                summary.alreadyHeldAssets += 1;
                 return;
               }
               let exactGraph = await snapshotMaterializer!
@@ -1069,6 +1063,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
               }
               if (ordinaryDenied()) {
                 snapshotCommit.suppressRows(descriptor.metadataQuads);
+                summary.catalogDeferredAssets += 1;
                 return;
               }
               // `admitAsyncMutation` proves currency only when this callback
@@ -1085,6 +1080,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
               if (companion === undefined) {
                 if (!materializedNewGraph) {
                   await repairOrReplaceHead(descriptor);
+                  summary.alreadyHeldAssets += 1;
                   return;
                 }
                 await snapshotMaterializer!.replaceGraph(
@@ -1104,6 +1100,8 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                 materializedQuads += exactGraph.length;
                 summary.insertedTriples += exactGraph.length;
                 summary.insertedDataTriples += exactGraph.length;
+              } else {
+                summary.alreadyHeldAssets += 1;
               }
             },
           ));
@@ -1157,6 +1155,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                   snapshotCommit.suppressRows(descriptor.metadataQuads);
                   materializedKeys.add(graphKey);
                   deferredToCatalogAuthority = true;
+                  summary.catalogDeferredAssets += 1;
                   logDebug(ctx, `SWM sync for "${pid}": deferred root snapshot `
                     + `${snapshotRef} to RFC-64 catalog authority`);
                   return true;
@@ -1220,6 +1219,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                     (quad) => quad.subject === descriptor.headSubject,
                   ));
                   materializedKeys.add(graphKey);
+                  summary.alreadyHeldAssets += 1;
                   logDebug(ctx, `SWM sync for "${pid}": snapshot ${snapshotRef} superseded by `
                     + `stored version ${storedHead.version} (descriptor ${descriptor.assertionVersion}); skipping`);
                   return;
@@ -1324,6 +1324,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                   // while this lock is held. The bulk append owns no head rows.
                   await insertVerifiedDescriptorMeta(descriptor);
                   materializedKeys.add(graphKey);
+                  summary.alreadyHeldAssets += 1;
                   return;
                 }
                 const asset = await materializeGraphScopedSwmRecoveryAsset({

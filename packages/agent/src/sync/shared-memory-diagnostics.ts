@@ -63,6 +63,14 @@ interface SharedMemorySyncDiagnosticsShape {
   readonly continuationStopReason?: CatchupPassDecisionReason;
   readonly replayPhaseBytesReceived?: number;
   readonly snapshotPhaseBytesReceived?: number;
+  /**
+   * Graph-scoped Knowledge Assets the round served that the local store already
+   * held, at the served version or a newer one. Received earlier (by gossip, by
+   * another lane, before a restart), so nothing was inserted for them.
+   */
+  readonly alreadyHeldAssets?: number;
+  /** Root assets the round left to the RFC-64 catalog lane instead of writing them. */
+  readonly catalogDeferredAssets?: number;
 }
 
 type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
@@ -88,6 +96,8 @@ export type SharedMemorySyncAggregate = SharedMemorySyncResult & {
 /** Canonical constructors always initialize structured attribution. */
 type SharedMemorySyncAccumulator = SharedMemorySyncAggregate & {
   localYieldFailedPhases: number;
+  alreadyHeldAssets: number;
+  catalogDeferredAssets: number;
   [PHASE_FAILURE_ATTRIBUTION]: SharedMemoryPhaseFailureAttribution;
 };
 
@@ -154,7 +164,29 @@ export function emptySharedMemorySyncResult(failedPeers = 0): SharedMemorySyncAc
     resolvedMetadataContinuationYields: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
+    alreadyHeldAssets: 0,
+    catalogDeferredAssets: 0,
   };
+}
+
+/**
+ * The round served Knowledge Assets and found none of them missing here: each
+ * one was already held, none was left to another lane, and no ref of the
+ * peer's complete manifest stayed unwritten. Pair it with the round's clean
+ * completion; on its own it says nothing about failures.
+ */
+export function sharedMemoryRoundFoundNothingMissing(
+  result: Pick<SharedMemorySyncDiagnostics, 'alreadyHeldAssets' | 'catalogDeferredAssets' | 'swmCoverage'>,
+): boolean {
+  const coverage = result.swmCoverage;
+  return (result.alreadyHeldAssets ?? 0) > 0
+    && (result.catalogDeferredAssets ?? 0) === 0
+    && (coverage === undefined || (
+      coverage.manifestComplete
+      && coverage.descriptorsAuthoritative !== false
+      && coverage.missingCount === 0
+      && coverage.materializationFailures === 0
+    ));
 }
 
 function emptyPhaseFailureAttribution(): SharedMemoryPhaseFailureAttribution {
@@ -293,6 +325,8 @@ function mergeSharedMemoryDiagnostics(
     resolvedMetadataContinuationYields: sum('resolvedMetadataContinuationYields'),
     replayPhaseBytesReceived: sum('replayPhaseBytesReceived'),
     snapshotPhaseBytesReceived: sum('snapshotPhaseBytesReceived'),
+    alreadyHeldAssets: sum('alreadyHeldAssets'),
+    catalogDeferredAssets: sum('catalogDeferredAssets'),
     ...(swmCoverage === undefined ? {} : { swmCoverage }),
     ...(b.continuationStopReason === undefined && a.continuationStopReason === undefined
       ? {}

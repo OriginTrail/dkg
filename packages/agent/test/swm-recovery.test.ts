@@ -802,6 +802,63 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     }
   });
 
+  it('reports every asset of a recovery the node already holds as held (#3296)', async () => {
+    // A member that received the private graph's writes before its catch-up
+    // ran: the second recovery from the curator finds its one asset present.
+    const store = new OxigraphStore();
+    stores.push(store);
+    const assertionGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const operationId = 'held-recovery-op';
+    const operationSubject = `urn:dkg:share:${CG}:${operationId}`;
+    const headSubject = `${UAL}#dkg-swm-head`;
+    const payload: Quad[] = [{ subject: 'urn:held:a', predicate: STATUS, object: '"held"', graph: '' }];
+    const digest = workspacePublicQuadsDigest(payload);
+    const sourceMeta: Quad[] = [
+      ...generateKnowledgeAssetShareMetadata({
+        shareOperationId: operationId,
+        contextGraphId: CG,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicTripleCount: payload.length,
+        privateTripleCount: 0,
+        publisherPeerId: 'peer-source',
+        timestamp: new Date(0),
+      }, WS_META),
+      { subject: operationSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: WS_META },
+      { subject: headSubject, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`, graph: WS_META },
+      { subject: headSubject, predicate: `${DKG}kaUal`, object: UAL, graph: WS_META },
+      { subject: headSubject, predicate: `${DKG}assertionVersion`, object: `"1"^^<${XSD_INTEGER}>`, graph: WS_META },
+      { subject: headSubject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: WS_META },
+      { subject: headSubject, predicate: `${DKG}shareOperationId`, object: `"${operationId}"`, graph: WS_META },
+    ];
+    const recover = () => recoverContextGraphSwm({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => (
+        page(phase === 'meta' ? sourceMeta : phase === 'snapshot' ? payload : [])
+      ),
+      processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
+        verifiedData: [], verifiedMeta: metaQuads, entityCreators: [], droppedDataTriples: 0,
+      }),
+      ...completeApplyDeps(store),
+      store,
+      publicSnapshotStore: new MemorySnapshotStore(),
+      ensureContextGraph: async () => {},
+      setCheckpoint: () => {},
+      deleteCheckpoint: () => {},
+    });
+
+    expect(await recover()).toMatchObject({ completed: true, alreadyHeldGraphs: 0 });
+
+    expect(await recover()).toMatchObject({ completed: true, alreadyHeldGraphs: 1 });
+  });
+
   it('rejects a corrupt rootless snapshot before replacing the existing exact graph', async () => {
     const store = new OxigraphStore();
     stores.push(store);
