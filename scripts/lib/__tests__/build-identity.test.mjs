@@ -26,6 +26,8 @@ function fixture(t) {
   writeFileSync(join(dir, '.gitignore'), 'bin/\npackages/cli/build-info.json\npackages/cli/dist/\n');
   writeFileSync(join(dir, 'source.txt'), 'A\n');
   run('git', ['init', '-q'], dir);
+  // From Git 2.54 a commit here starts a detached repack that can still be writing .git when the fixture is removed.
+  run('git', ['config', 'maintenance.auto', 'false'], dir);
   run('git', ['add', '.'], dir);
   run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'A'], dir);
   writeFileSync(join(dir, 'bin/tsc'), '#!/bin/sh\nmkdir -p dist\ncp ../../source.txt dist/source.txt\n', { mode: 0o755 });
