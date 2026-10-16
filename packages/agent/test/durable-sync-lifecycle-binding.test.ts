@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import * as recoveryGraph from '../src/durable-recovery-graph.js';
 import * as recoveryExecution from '../src/durable-recovery-execution.js';
 import * as recoveryAuthority from '../src/durable-recovery-authority.js';
@@ -212,7 +213,7 @@ async function captureGraphScopedStore(
     contextGraphBindingState: new ContextGraphBindingState(),
     wireIdToLocalCgId: new Map(),
     graphScopedStoreClosed: false,
-    graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+    workLifetime: new AgentWorkLifetime(),
     bindSubscriptionOnChainId: vi.fn(),
     persistContextGraphSyncStateStrict: vi.fn(),
     processDurableBatchInWorker: async () => ({}),
@@ -1240,7 +1241,7 @@ describe('durable sync lifecycle chain binding', () => {
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
-      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+      workLifetime: new AgentWorkLifetime(),
       bindSubscriptionOnChainId,
       persistContextGraphSyncStateStrict,
       processDurableBatchInWorker: async () => ({}),
@@ -1887,7 +1888,7 @@ describe('durable sync lifecycle chain binding', () => {
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
-      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+      workLifetime: new AgentWorkLifetime(),
       bindSubscriptionOnChainId: vi.fn(
         (_localId: string, sub: typeof subscription, onChainId: string) => {
           sub.onChainId = onChainId;
@@ -2035,7 +2036,7 @@ describe('durable sync lifecycle chain binding', () => {
     const chain = {
       chainId: 'otp:2043',
       getLatestMerkleRoot: async () => {
-        physicalRunsSeenByAdapter = agentLike.graphScopedStorePhysicalRuns.size;
+        physicalRunsSeenByAdapter = agentLike.workLifetime.physicalRuns.size;
         return root;
       },
       getMerkleRootCount: async () => 2n,
@@ -2058,10 +2059,10 @@ describe('durable sync lifecycle chain binding', () => {
       graphScopedAsset(root),
       Date.now() + 120_000,
     ));
-    expect(agentLike.graphScopedStorePhysicalRuns.size).toBe(1);
+    expect(agentLike.workLifetime.physicalRuns.size).toBe(1);
     await expect(pending).resolves.toBe('applied');
     expect(physicalRunsSeenByAdapter).toBe(1);
-    expect(agentLike.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(agentLike.workLifetime.physicalRuns.size).toBe(0);
   });
 
   it('rejects an ordinary durable asset when its subscription rebinds during authentication', async () => {
@@ -2101,7 +2102,7 @@ describe('durable sync lifecycle chain binding', () => {
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
-      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+      workLifetime: new AgentWorkLifetime(),
       bindSubscriptionOnChainId,
       persistContextGraphSyncStateStrict,
       processDurableBatchInWorker: async () => ({}),

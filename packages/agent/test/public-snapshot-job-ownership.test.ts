@@ -216,8 +216,7 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
         throw new Error('Snapshot completed before the held write');
       })]);
       expect(authority.isRegisteredPublic(CG)).toBe(true);
-      expect(a.workLifetime.physicalRuns.size).toBe(1);
-      expect(a.graphScopedStorePhysicalRuns.size).toBeGreaterThan(0);
+      expect(a.workLifetime.physicalRuns.size).toBe(2); // Snapshot and its physical materialization.
       if (change === 'caller') caller.abort(new Error('caller canceled snapshot'));
       else a.contextGraphBindingState.invalidate(CG);
       expect(authority.isRegisteredPublic(CG)).toBe(false);
@@ -237,7 +236,6 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
       expect(recover).toHaveBeenCalledTimes(1);
       expect(a.chain.readPublicGraphSnapshot).toHaveBeenCalledTimes(1);
       expect(a.workLifetime.physicalRuns.size).toBe(0);
-      expect(a.graphScopedStorePhysicalRuns.size).toBe(0);
       expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
     } finally { release(); await outcome; }
   });

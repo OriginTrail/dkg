@@ -1,7 +1,8 @@
 // daemon/context-graph-readiness-repeat.ts
 //
 // Repeats the catch-up job of a public Context Graph that is not registered on
-// chain, while a subscription has left it unproven.
+// chain, while a subscription has left it unproven; and of a registered public
+// graph while its jobs ran before its RFC-64 authority was in place.
 //
 // A subscription reports `synced` only once a catch-up job has proven its
 // requested planes, and the subscribe route runs exactly one job per call. For
@@ -22,6 +23,13 @@
 // The sequence alone owns the count, the timer, the caller's context and the
 // cancellation; each attempt is one ordinary job. A newer subscribe call's
 // sequence replaces the graph's older one, wherever that one is.
+//
+// A registered public graph can be left unproven the same way. A member's
+// first job, or the job that catches up its subscription after a restart, can
+// walk its peers before the node has accepted the graph's RFC-64 authority:
+// the graph's selected shared-memory lane is not active yet, so the walk asks
+// no peer anything, and the authority arrives seconds later. Such a graph is
+// repeated too, for as long as its attempts find the lane not active.
 
 import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
 import {
@@ -85,15 +93,16 @@ export function cancelContextGraphReadinessRepeats(): void {
 }
 
 /**
- * Admission of a public graph that is not registered on chain, the only kind
- * that repeats: a registered graph has its durable plane and its curator's
- * word, and a private graph has proofs of its own (the member catalog, the
- * empty-VM proof).
+ * Admission of a graph that repeats: a public graph that is not registered on
+ * chain, or a registered public graph whose last attempt found its selected
+ * shared-memory lane not active. A registered graph otherwise has its durable
+ * plane and its curator's word, and a private graph has proofs of its own (the
+ * member catalog, the empty-VM proof).
  */
-function admitsRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
+function admitsRepeat(authority: ContextGraphReadAuthorityDecision, laneFoundInactive: boolean): boolean {
   return authority.outcome === 'allowed'
     && authority.grantScope === 'public'
-    && authority.registration === 'unregistered';
+    && (authority.registration === 'unregistered' || laneFoundInactive);
 }
 
 /** The repeats that follow one subscribe call's job for one graph. */
@@ -104,6 +113,8 @@ class ReadinessRepeatSequence {
   #repeatsRun = 0;
   #timer: unknown;
   #ended = false;
+  /** The last attempt found the graph's selected shared-memory lane not active. */
+  #laneFoundInactive = false;
 
   constructor(caller: ContextGraphReadinessRepeatCaller) {
     this.#caller = caller;
@@ -130,8 +141,9 @@ class ReadinessRepeatSequence {
     if (this.#ended) return;
     try {
       const subscription = this.#caller.agent.getSubscribedContextGraphs().get(this.#caller.contextGraphId);
+      this.#laneFoundInactive = job.selectedLaneFoundInactive === true;
       const unproven = this.#caller.includeSharedMemory
-        && admitsRepeat(authority)
+        && admitsRepeat(authority, this.#laneFoundInactive)
         && job.status !== 'denied'
         // A job that continued under another id (a resolved name) left this graph.
         && job.resolvedContextGraphId === undefined
@@ -200,13 +212,14 @@ class ReadinessRepeatSequence {
         return;
       }
       // No await from here to the mint, as on the subscribe route.
-      if (!this.#wanted() || !admitsRepeat(admission.authority)) {
+      if (!this.#wanted() || !admitsRepeat(admission.authority, this.#laneFoundInactive)) {
         this.cancel();
         return;
       }
       console.log(
         `[catchup] repeating the catch-up of "${caller.contextGraphId}" (${this.#repeatsRun} of `
-          + `${CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS.length}): the graph is not proven synced yet`,
+          + `${CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS.length}): the graph is not proven synced yet`
+          + (this.#laneFoundInactive ? '; the last attempt ran before its RFC-64 authority was in place' : ''),
       );
       const started = startContextGraphCatchupJob({
         agent: caller.agent,

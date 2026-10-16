@@ -33,7 +33,6 @@ export interface GraphScopedPhysicalOperationFenceOptions<T, Subscription> {
   bindingChangedError(): Error;
   asAbortError(reason: unknown): Error;
   track(run: Promise<unknown>): void;
-  untrack(run: Promise<unknown>): void;
   operation(control: GraphScopedPhysicalOperationControl<Subscription>): Promise<T>;
 }
 
@@ -46,7 +45,6 @@ export interface GraphScopedPhysicalOperationFenceHost<Subscription> {
   assertLifecycleCurrent(): void;
   asAbortError(reason: unknown): Error;
   track(run: Promise<unknown>): void;
-  untrack(run: Promise<unknown>): void;
 }
 
 export interface BoundGraphScopedPhysicalOperationOptions<T, Subscription> {
@@ -104,12 +102,9 @@ export function runGraphScopedPhysicalOperation<T, Subscription>(
       ) subscription = current;
     },
     assertCurrent,
-  }));
+  })).finally(() => { active = false; });
   options.track(physicalRun);
-  return physicalRun.finally(() => {
-    active = false;
-    options.untrack(physicalRun);
-  });
+  return physicalRun;
 }
 
 /** Capture lifecycle-stable wiring once; individual operations supply only ownership-specific work. */
@@ -128,7 +123,6 @@ export function createGraphScopedPhysicalOperationFence<Subscription>(
       assertLifecycleCurrent: host.assertLifecycleCurrent,
       asAbortError: host.asAbortError,
       track: host.track,
-      untrack: host.untrack,
     })
   );
 }
