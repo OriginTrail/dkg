@@ -16,15 +16,13 @@ import { emptySharedMemorySyncResult } from '@origintrail-official/dkg-agent';
 import { createIncompleteDurableSyncResult } from '@origintrail-official/dkg-agent/dist/sync/durable-progress.js';
 import { recordSharedMemoryPhaseFailure } from '@origintrail-official/dkg-agent/dist/sync/shared-memory-diagnostics.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
 import type { CatchupRunner } from '../src/catchup-runner.js';
-import { CG, PEERS, PUBLIC_UNREGISTERED, memberEdge, waitUntil } from './_helpers/readiness-member-edge.js';
-import { requestAuthentication } from './_helpers/request-authentication.js';
+import { CG, PEERS, PUBLIC_UNREGISTERED, memberEdge } from './_helpers/readiness-member-edge.js';
+import { emptyCatchupTracker, nextFinishedJob, startReadinessRoutes } from './_helpers/readiness-subscribe-routes.js';
 
 await import('../src/catchup-runner-worker-impl.js');
 const { createCatchupRunner } = await import('../src/catchup-runner.js');
-const { handleContextGraphRoutes } = await import('../src/daemon/routes/context-graph.js');
 const { daemonState } = await import('../src/daemon/state.js');
 const { readinessRepeatTimers, cancelContextGraphReadinessRepeats } =
   await import('../src/daemon/context-graph-readiness-repeat.js');
@@ -124,8 +122,6 @@ function yieldedPublicRound(peerId: string) {
   return round;
 }
 
-type Tracker = { jobs: Map<string, any>; latestByContextGraph: Map<string, string> };
-
 describe('a member that already holds the graph is proven synced by a catch-up that finds nothing missing', () => {
   const previousRunner = daemonState.catchupRunner;
   const originalTimers = { set: readinessRepeatTimers.set, clear: readinessRepeatTimers.clear };
@@ -187,40 +183,8 @@ describe('a member that already holds the graph is proven synced by a catch-up t
     return member;
   }
 
-  async function subscribe(member: Member): Promise<any> {
-    const catchupTracker: Tracker = { jobs: new Map(), latestByContextGraph: new Map() };
-    const server = createServer(async (req, res) => {
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      await handleContextGraphRoutes({
-        req,
-        res,
-        agent: member.agent,
-        dashDb: member.store,
-        catchupTracker,
-        url,
-        path: url.pathname,
-        authentication: requestAuthentication({ kind: 'nodeOperator' }),
-      } as any);
-      if (!res.writableEnded) {
-        res.statusCode = 404;
-        res.end();
-      }
-    });
-    servers.push(server);
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const { port } = server.address() as AddressInfo;
-    const response = await fetch(`http://127.0.0.1:${port}/api/context-graph/subscribe`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contextGraphId: CG, includeSharedMemory: true }),
-    });
-    expect(response.status).toBe(200);
-    const { jobId } = ((await response.json()) as { catchup: { jobId: string } }).catchup;
-    return waitUntil(() => {
-      const job = catchupTracker.jobs.get(jobId);
-      return job?.finishedAt ? job : undefined;
-    }, `job ${jobId}`);
-  }
+  /** Subscribe `member`; resolves with the job once it has finished. */
+  const subscribe = async (member: Member) => (await startReadinessRoutes(member, servers)).subscribe();
 
   it.each([
     ['registered on chain', REGISTERED_PUBLIC],
@@ -230,8 +194,8 @@ describe('a member that already holds the graph is proven synced by a catch-up t
 
     const job = await subscribe(member);
 
-    expect(job.result.sharedMemorySynced).toBe(0);
-    expect(job.result.cleanPlaneCompletions.sharedMemory)
+    expect(job.result?.sharedMemorySynced).toBe(0);
+    expect(job.result?.cleanPlaneCompletions?.sharedMemory)
       .toMatchObject({ verifiedDataPeers: 0, emptyPeers: 0, heldContentPeers: PEERS.length });
     expect(member.subscription()).toMatchObject({ subscribed: true, synced: true, sharedMemorySynced: true });
     expect(member.readiness()).toMatchObject({ version: 1, sharedMemoryVerified: true });
@@ -244,8 +208,8 @@ describe('a member that already holds the graph is proven synced by a catch-up t
 
     const job = await subscribe(member);
 
-    expect(job.result.dataSynced).toBe(0);
-    expect(job.result.cleanPlaneCompletions.sharedMemory).toMatchObject({ heldContentPeers: PEERS.length });
+    expect(job.result?.dataSynced).toBe(0);
+    expect(job.result?.cleanPlaneCompletions?.sharedMemory).toMatchObject({ heldContentPeers: PEERS.length });
     expect(member.subscription()).toMatchObject({ subscribed: true, synced: true, sharedMemorySynced: true });
     expect(member.readiness()).toMatchObject({ version: 1, durableVerified: false, sharedMemoryVerified: true });
   });
@@ -255,15 +219,12 @@ describe('a member that already holds the graph is proven synced by a catch-up t
     member.restore({
       subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: true, syncMode: 'always-on',
     });
-    const catchupTracker: Tracker = { jobs: new Map(), latestByContextGraph: new Map() };
+    const catchupTracker = emptyCatchupTracker();
     stops.push(startActivationCatchups({
       agent: member.agent, store: member.store, catchupTracker, log: () => {},
     }));
 
-    await waitUntil(() => {
-      const latest = catchupTracker.latestByContextGraph.get(CG);
-      return latest !== undefined && catchupTracker.jobs.get(latest)?.finishedAt ? true : undefined;
-    }, 'the restored subscription\'s job');
+    await nextFinishedJob(catchupTracker);
 
     expect(member.subscription()).toMatchObject({ subscribed: true, synced: true, sharedMemorySynced: true });
   });
