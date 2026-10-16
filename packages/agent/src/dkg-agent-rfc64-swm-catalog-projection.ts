@@ -1,3 +1,4 @@
+import { catalogAuthoringApplicability } from './internal/catalog-authoring-applicability.js';
 import { SwmCatalogAuthorityNotReady } from './internal/swm-inventory-write.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -325,26 +326,11 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }, placement);
   }
 
-  /** Configuration exclusion shared with admission; readiness cannot erase an obligation. */
-  isRfc64PublicOnlyAuthoringExcludedV1(this: DKGAgent, contextGraphId: string, privatePolicy: boolean): boolean {
-    const policy = this.config.rfc64CatalogAuthoringPolicy;
-    return privatePolicy && policy?.publicDefault !== undefined && policy.byContextGraph[contextGraphId] === undefined;
-  }
-
   requiresRfc64ShareInventoryV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined): boolean {
-    const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-    if (subGraphName || authority.mode === 'legacy' || authority.killSwitchActive) return false;
-    const policy = this.config.rfc64CatalogAuthoringPolicy;
-    if (policy?.publicDefault === undefined || policy.byContextGraph[contextGraphId] !== undefined) return true;
-    // An ambiguous public-only fallback must wait before admission. A request's
-    // workspace policy is not authority to waive its catalog obligation.
-    assertContextGraphIdV1(contextGraphId, 'durable share catalog contextGraphId');
-    const networkId = this.config.rfc64CatalogDeploymentProfile?.networkId ?? this.config.networkIdentity?.chainId;
-    const service = this.rfc64PublicCatalogServiceV1;
-    if (service === undefined) throw new SwmCatalogAuthorityNotReady('service-unavailable');
-    const accepted = networkId === undefined ? null : service.acceptedPolicySnapshot(networkId as NetworkIdV1, contextGraphId);
-    if (accepted === null) throw new SwmCatalogAuthorityNotReady('policy-not-accepted');
-    return !this.isRfc64PublicOnlyAuthoringExcludedV1(contextGraphId, accepted.policy.accessPolicy === 1);
+    const decision = catalogAuthoringApplicability({ authority: this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+      config: this.config, service: this.rfc64PublicCatalogServiceV1 }, contextGraphId, subGraphName);
+    if (decision.status === 'unavailable') throw decision.error;
+    return decision.status === 'required';
   }
 
   /** Canonical selected-CG admission shared by inventory and projection. */
@@ -600,15 +586,14 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     contextGraphId: string,
     subGraphName: string | null | undefined,
   ): Rfc64CatalogAuthoringLaneDecisionV1 {
-    if (!this.resolveRfc64CatalogReceiverAuthorityV1(
-      contextGraphId,
-    ).authoringAllowed) return Object.freeze({ status: 'inactive' });
+    const applicability = catalogAuthoringApplicability({ authority: this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+      config: this.config, service: this.rfc64PublicCatalogServiceV1 }, contextGraphId, subGraphName);
+    if (applicability.status === 'excluded') return Object.freeze({ status: 'inactive' });
+    if (applicability.status === 'unavailable') return applicability;
+    if (!applicability.authority.authoringAllowed) return Object.freeze({ status: 'inactive' });
     const authoringPolicy = this.config.rfc64CatalogAuthoringPolicy;
     const exactControl = authoringPolicy?.byContextGraph[contextGraphId];
     const publicDefault = authoringPolicy?.publicDefault;
-    if (
-      subGraphName !== undefined && subGraphName !== null
-    ) return Object.freeze({ status: 'inactive' });
     assertContextGraphIdV1(contextGraphId, 'RFC-64 catalog authoring contextGraphId');
     const networkId = (this.config.rfc64CatalogDeploymentProfile?.networkId
       ?? this.config.networkIdentity?.chainId) as NetworkIdV1 | undefined;
@@ -631,14 +616,6 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         status: 'unavailable',
         error: new SwmCatalogAuthorityNotReady('policy-not-accepted'),
       });
-    }
-    if (
-      this.isRfc64PublicOnlyAuthoringExcludedV1(contextGraphId, acceptedPolicy.policy.accessPolicy === 1)
-    ) {
-      // The compatibility fallback is intentionally public-only. A private
-      // policy in the same bootstrap manifest is neither an authoring failure
-      // nor an invitation to reinterpret that fallback as private authority.
-      return Object.freeze({ status: 'inactive' });
     }
     const defaultPeers = Object.freeze([...new Set(
       this.node.libp2p.getConnections()

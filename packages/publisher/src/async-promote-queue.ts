@@ -26,6 +26,7 @@ export {
   PROMOTE_JOB_STATES,
   PromoteAdmissionUncertainError,
   PromoteJobConflictError,
+  PromoteJobCancellationConflictError,
   PromoteJobLeaseError,
 } from './async-promote-queue-types.js';
 export { TripleStoreAsyncPromoteQueue } from './async-promote-queue-impl.js';

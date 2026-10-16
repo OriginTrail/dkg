@@ -4,7 +4,7 @@
 
 The synchronous share path can commit sealed content and lose its lifecycle/catalog tail without a durable retry owner. Manual replay validates and resumes the immutable operation, but neither the HTTP error nor restart creates a worker obligation. Establish a live baseline on the optimized publisher before changing production code, then add durable ownership of this narrowly validated recovery path. The principal risk is replaying a different asset version, bypassing authority, or repeating uncertain side effects.
 
-Status: original baseline/candidate pair preserved (0/2 versus 2/2 automatic recoveries); PR #3300 under third review round. A clean merged-base baseline is observing its fixed deadline before final-candidate validation. Actual process restart remains required. Single implementation owner: this chat. Independent remote review is required before completion; initial plan review uses separate self-review passes.
+Status: original baseline/candidate pair preserved (0/2 versus 2/2 automatic recoveries), and clean merged-base baseline completed (0/2). PR #3300 is in review response round 8. Candidate2 through candidate6 are explicitly preparation-only. Final matched candidate and actual process-exit/ordinary-lease recovery remain required. Single implementation owner: this chat. Independent remote review and required human approval remain outstanding.
 
 ## Sources and branch
 
@@ -203,3 +203,7 @@ New review on 9180f2222 found that a bound VM no-op can acknowledge success with
 ### Round 7 refinement
 
 Preserve the legacy public-only authoring exclusion using accepted policy, never request-supplied policy; reject ambiguous fallback admission before SWM mutation. Bind strict handoff parameters to the original recovery binding alone. Keep the throwing confirmed-removal result separate from observer accounting and preserve upstream typed SPARQL HTTP contracts. Candidate5 remains preparation-only with exact starting-state and nonce reconciliation evidence. The next clean candidate must still complete the frozen six-wallet comparison and process-exit regression. The existing foreground supervisor automatically respawns an exited worker; observe its actual PID replacement and normal 15-minute lease recovery without manually restarting or replaying HTTP.
+
+### Round 8 refinement
+
+Use a typed queue cancellation conflict and preserve ordinary cancellation. Consolidate deliberate catalog exclusions into one applicability decision, leaving runtime readiness in lane resolution. Classify each one-shot share failure once into response, recovery observation and continuation disposition; preserve terminal 207 accumulation and VM continuation. Proven typed read transport failures must retain bound retry ownership even when upstream diagnostic prose resembles a payload limit. Validate real queue HTTP cancellation, all partial-response states, mixed-policy/native catalog behavior and actual daemon routes. Preserve candidate6 preparation evidence, then use a fresh isolated clean revision for the unchanged measured workload and automatic supervisor restart proof.

@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import { StoreReadTransportFailure, StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
   CuratorRejectedError, CuratorUnconfirmedError,
   createPromotePostCommitFailure,
@@ -372,3 +372,12 @@ describe('classifyPromoteError', () => {
     expect(classifyPromoteError(undefined).classification).toBe('fatal');
   });
 });
+
+// A typed read remains safe even when a dependency returns cap-like diagnostic text.
+it.each(['payload too large', 'gossip limit', 'promoted assertion too large'])(
+  'retains bound recovery for proven read failure: %s', message => {
+    expect(classifyPromoteError(new StoreReadTransportFailure(new Error(message)), { boundRecovery: true }))
+      .toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError(new Error(message), { boundRecovery: true }).retryable).toBe(false);
+  },
+);

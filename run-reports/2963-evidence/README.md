@@ -16,3 +16,5 @@ See the [self-contained report](../2026-10-16-2963-share-recovery.md) for interp
 
 
 `baseline3/` contains the same full evidence set for clean merged base `2aba84de35754e5663b52018f9781a6e6c8b948d`: 0/2 automatic recoveries, exactly 434/436 catalog entries and descriptors, 48/48 publications, all original content/identities preserved and all 98 transactions accounted for. It is the baseline for the final review-fixed candidate, not a replacement for the original pair.
+
+`candidate2-preparation-only/` through `candidate6-preparation-only/` preserve superseded startup/preparation outcomes separately. Each records one natural startup 503 and its original automatic recovery, exact preparation denominators, zero measured publications, settled nonce accounting and owned-process shutdown. None is a performance sample or a replacement for the final matched candidate.

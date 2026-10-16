@@ -29,7 +29,7 @@ import { isSafeJobId } from './job-id.js';
 import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
-  PromoteJobConflictError,
+  PromoteJobConflictError, PromoteJobCancellationConflictError,
   PromoteAdmissionUncertainError,
   type BoundPromoteRequest, type BoundPromoteJob,
   PromoteJobLeaseError,
@@ -215,10 +215,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     await this.withMutationLock(async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
-      if (job.request.recoveryBinding) throw new Error('An unfinished durable share obligation cannot be cancelled');
+      if (job.request.recoveryBinding) throw new PromoteJobCancellationConflictError(jobId, 'an unfinished durable share obligation must retain its recovery owner');
       if (job.state !== 'queued') {
-        throw new Error(
-          `Cannot cancel job in state '${job.state}'. Only 'queued' jobs can be cancelled.`,
+        throw new PromoteJobCancellationConflictError(
+          jobId, `state '${job.state}'; only ordinary queued jobs can be cancelled`,
         );
       }
       const cancelled: PromoteJob = {

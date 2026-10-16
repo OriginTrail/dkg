@@ -106,6 +106,12 @@ export function classifyPromoteError(err: unknown, options: { boundRecovery?: bo
     return publisherDisposition;
   }
 
+  // A proven read cannot mutate content. Upstream prose cannot revoke that
+  // typed replay-safety fact for a durable owner.
+  if (options.boundRecovery && isStoreReadTransportFailure(err)) {
+    return { classification: 'transient', retryable: true };
+  }
+
   const raw = err instanceof Error ? err.message : String(err);
   // Strip a leading diagnostic tag before substring classification. A step
   // label must not inject a classifier keyword into the producer's message.

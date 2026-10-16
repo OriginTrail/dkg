@@ -444,6 +444,7 @@ export {
   PROMOTE_JOB_STATES,
   PromoteAdmissionUncertainError,
   PromoteJobConflictError,
+  PromoteJobCancellationConflictError,
   PromoteJobLeaseError,
   type AsyncPromoteQueue,
   type AsyncPromoteQueueConfig,

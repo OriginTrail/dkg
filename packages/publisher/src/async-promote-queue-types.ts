@@ -350,6 +350,14 @@ export class PromoteJobConflictError extends Error {
   }
 }
 
+/** Cancellation conflicts with a queue-owned lifecycle obligation or active lease. */
+export class PromoteJobCancellationConflictError extends Error {
+  override readonly name = 'PromoteJobCancellationConflictError';
+  constructor(readonly jobId: string, reason: string) {
+    super(`Cannot cancel job ${jobId}: ${reason}`);
+  }
+}
+
 /**
  * Thrown when a worker calls heartbeat / succeed / fail / recordCommitMarker
  * with a `claimToken` that no longer matches the job's current lease.

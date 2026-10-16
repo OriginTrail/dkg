@@ -99,7 +99,7 @@ export function classifyAssertionError(e: any, context?: PromoteRecoveryContext)
   if (e?.code === "OVERSIZED_RDF_LITERAL") return { status: 400, body: oversizedRdfLiteralResponseBody(e) };
   if (isPayloadTooLargeError(e)) return { status: 413, body: payloadTooLargeResponseBody(e) };
   const store = classifyStoreUnavailable(e);
-  if (store) return { status: 503, body: store.body, headers: { 'Retry-After': '1' } };
+  if (store) return { status: 503, partialDisposition: 'unavailable', body: store.body, headers: { 'Retry-After': '1' } };
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
     return { status: 409, body: {
       error: e.message, code: "ASSERTION_NOT_PERSISTED", contextGraphId: e.contextGraphId,

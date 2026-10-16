@@ -1,0 +1,58 @@
+{
+  "recordedAt": "2026-10-16T20:54:25.191948+00:00",
+  "productRevision": "89c53083f21f5feb6e702449404a3d2947101866",
+  "measuredTrafficStarted": false,
+  "reason": "Round 8 review and a reproduced typed-read precedence defect arrived before measured traffic; preserve preparation only.",
+  "manualRepairs": 0,
+  "startupRecovery": {
+    "phase": "preparation, excluded from measured 256-share denominator",
+    "initialHttpStatus": 503,
+    "initialErrorCode": "PROMOTE_RETRYABLE_FAILURE",
+    "jobId": "18256716-2d33-4b7f-9f37-c3e341cf8839",
+    "state": "succeeded",
+    "attempts": 2,
+    "enqueuedAt": "2026-10-16T20:42:32.511Z",
+    "finishedAt": "2026-10-16T20:43:29.586Z",
+    "admissionToCompletionMs": 57075,
+    "firstObservedSuccessAt": "2026-10-16T20:43:43.663Z",
+    "manualRepairs": 0,
+    "sharePostAttempts": 1,
+    "protocol": {
+      "observedFrom": "2026-10-16T20:42:43.493Z",
+      "deadline": "2026-10-16T21:02:43.494Z",
+      "jobId": "18256716-2d33-4b7f-9f37-c3e341cf8839",
+      "manualRepairs": 0
+    },
+    "postFailureSnapshot": {
+      "arm": "candidate6",
+      "cg": "0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-candidate6-20261016",
+      "label": "startup-failed",
+      "observedAt": "2026-10-16T20:42:44.667Z",
+      "inventoryRows": 0,
+      "catalogRows": 0
+    },
+    "limitation": "Readback was after the HTTP failure, not at the failed call; the precise dependency boundary was not instrumented."
+  },
+  "preparation": {
+    "initialRequests": 179,
+    "initial201": 179,
+    "draftRequests": 256,
+    "draft201": 256,
+    "inventoryRows": 180,
+    "catalogRows": 180
+  },
+  "shutdown": {
+    "at": "2026-10-16T20:54:25.191948+00:00",
+    "ownedPidsAbsent": [
+      62860,
+      62866
+    ],
+    "containerStopped": true,
+    "publicationJobs": 0,
+    "allNoncesSettled": true,
+    "accountedTransactions": 2,
+    "shareJobsSucceeded": 180,
+    "measuredTrafficStarted": false
+  },
+  "limitation": "The natural startup event has a post-failure readback, not instrumentation at its exact failing dependency. Preparation overlaps local checks and is not a performance sample."
+}

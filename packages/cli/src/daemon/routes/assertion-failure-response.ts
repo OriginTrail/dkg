@@ -2,5 +2,7 @@
 export interface AssertionFailureResponse {
   status: number;
   body: Record<string, unknown>;
+  /** Store unavailability must interrupt a partially completed one-shot request. */
+  partialDisposition?: 'unavailable';
   headers?: Record<string, string>;
 }

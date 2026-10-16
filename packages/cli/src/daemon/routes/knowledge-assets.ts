@@ -1,4 +1,4 @@
-import { durableRecoveryDetails, partialDurableShareFailure, classifySynchronousShareFailure, isDurableSharePartialUnavailable } from './durable-share-response.js';
+import { partialDurableShareFailure, classifySynchronousShareFailure, synchronousShareFailureDecision } from './durable-share-response.js';
 import { durableSynchronousShare, synchronousShareSuccessBody } from './durable-synchronous-share.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { classifyKaIdentifier, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
@@ -1042,13 +1042,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "promoted", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
           }
         } catch (e: any) {
-          if (isDurableSharePartialUnavailable(e)) {
-            const failure = classifySynchronousShareFailure(e, { contextGraphId: resolvedContextGraphId, name, subGraphName, phase: 'swm-share' });
+          const decision = synchronousShareFailureDecision(e, { contextGraphId: resolvedContextGraphId, name, subGraphName, phase: 'swm-share' });
+          if (decision.partialDisposition === 'respond') {
+            const failure = decision.response;
             return jsonResponse(res, failure.status, partialDurableShareFailure(result, failure.body, name), undefined, failure.headers);
           }
-          Object.assign(result, durableRecoveryDetails(e));
-          if (respondWithPartialStoreFailure(e, 'swm-share')) return;
-          errors.push({ phase: "swm-share", error: sanitizeRpcMessage(e?.message ?? String(e)) });
+          Object.assign(result, decision.recovery);
+          errors.push({ phase: "swm-share", error: decision.message });
         }
       }
       if (alsoPublishVm === true || (typeof alsoPublishVm === "object" && alsoPublishVm !== null)) {
