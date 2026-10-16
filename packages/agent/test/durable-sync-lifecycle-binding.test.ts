@@ -214,7 +214,6 @@ async function captureGraphScopedStore(
     wireIdToLocalCgId: new Map(),
     graphScopedStoreClosed: false,
     workLifetime: new AgentWorkLifetime(),
-      reconcileAfterGraphScopedMaterialization: LifecycleSyncMethods.prototype.reconcileAfterGraphScopedMaterialization,
     bindSubscriptionOnChainId: vi.fn(),
     persistContextGraphSyncStateStrict: vi.fn(),
     processDurableBatchInWorker: async () => ({}),
@@ -236,7 +235,6 @@ async function captureGraphScopedStore(
   agentLike.retireFinalizedSwmTwinCandidate = (
     LifecycleSyncMethods.prototype as any
   ).retireFinalizedSwmTwinCandidate;
-  agentLike.reconcileAfterGraphScopedMaterialization = LifecycleSyncMethods.prototype.reconcileAfterGraphScopedMaterialization;
   options.onAgentLike?.(agentLike);
 
   await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
@@ -1244,7 +1242,6 @@ describe('durable sync lifecycle chain binding', () => {
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       workLifetime: new AgentWorkLifetime(),
-      reconcileAfterGraphScopedMaterialization: LifecycleSyncMethods.prototype.reconcileAfterGraphScopedMaterialization,
       bindSubscriptionOnChainId,
       persistContextGraphSyncStateStrict,
       processDurableBatchInWorker: async () => ({}),
@@ -1892,7 +1889,6 @@ describe('durable sync lifecycle chain binding', () => {
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       workLifetime: new AgentWorkLifetime(),
-      reconcileAfterGraphScopedMaterialization: LifecycleSyncMethods.prototype.reconcileAfterGraphScopedMaterialization,
       bindSubscriptionOnChainId: vi.fn(
         (_localId: string, sub: typeof subscription, onChainId: string) => {
           sub.onChainId = onChainId;
@@ -2107,7 +2103,6 @@ describe('durable sync lifecycle chain binding', () => {
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       workLifetime: new AgentWorkLifetime(),
-      reconcileAfterGraphScopedMaterialization: LifecycleSyncMethods.prototype.reconcileAfterGraphScopedMaterialization,
       bindSubscriptionOnChainId,
       persistContextGraphSyncStateStrict,
       processDurableBatchInWorker: async () => ({}),

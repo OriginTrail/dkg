@@ -6,7 +6,7 @@ import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
 import type { DurableSyncContext, DurableSyncFetchRequest } from './sync/requester/durable-sync.js';
 import type { ExactBatchStreamDriverPorts } from './sync/requester/exact-batch-stream-driver.js';
 import type { DurableRecoveryAuthority, DurableRecoveryInput } from './durable-recovery-authority.js';
-import type { RecoveryMaterialization, RecoveryMaterializationScope } from './durable-recovery-materialization.js';
+import type { RecoveryMaterialization, RecoveryMaterializationScope, RecoveryMaterializationPorts } from './durable-recovery-materialization.js';
 
 export { createDurableRecoveryHost } from './dkg-agent-recovery.js';
 
@@ -46,6 +46,7 @@ export interface DurableRecoveryHost {
     readonly processBatch: DurableSyncContext['processDurableBatchInWorker'];
     readonly parseAndFilter: ExactBatchStreamDriverPorts['verification']['parseAndFilter'];
   };
+  readonly reconcile: RecoveryMaterializationPorts['reconcile'];
   readonly checkpoints: Pick<DurableSyncContext, 'deleteCheckpoint' | 'setCheckpoint'>;
   readonly log: {
     readonly info: DurableSyncContext['logInfo'];
