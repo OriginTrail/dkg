@@ -1,11 +1,15 @@
 import type { GraphNode, NodeDecorations, RdfValue } from './types.js';
 
 function effectiveDecoration<K extends keyof NodeDecorations>(node: GraphNode, key: K): NodeDecorations[K] {
-  const override = node.viewOverrides[key];
-  return override === undefined ? node.dataDecorations[key] : override;
+  const highlight = node.highlightOverrides[key];
+  if (highlight !== undefined) return highlight;
+  const view = node.viewOverrides[key];
+  if (view !== undefined) return view;
+  const application = node.applicationOverrides[key];
+  return application === undefined ? node.dataDecorations[key] : application;
 }
 
-/** Stable model identity with explicit data and view layers; no copied effective state. */
+/** Each producer owns its layer; effective values never become another layer's baseline. */
 export class GraphModelNode implements GraphNode {
   types: string[] = [];
   label: string;
@@ -14,18 +18,20 @@ export class GraphModelNode implements GraphNode {
   degree = 0;
   isBoundary = false;
   dataDecorations: NodeDecorations = { imageUrl: null };
+  applicationOverrides: Partial<NodeDecorations> = {};
   viewOverrides: Partial<NodeDecorations> = {};
+  highlightOverrides: Partial<NodeDecorations> = {};
 
   constructor(public id: string) { this.label = id; }
 
-  // Existing property readers see the effective value. Application assignments
-  // update data; applying a view writes only the explicit override layer.
+  // Public assignments belong to the application; RDF ingestion, declarative
+  // views and transient highlighting each update their own explicit layer.
   get imageUrl() { return effectiveDecoration(this, 'imageUrl'); }
-  set imageUrl(value: string | null) { this.dataDecorations.imageUrl = value; }
+  set imageUrl(value: string | null) { this.applicationOverrides.imageUrl = value; }
   get riskScore() { return effectiveDecoration(this, 'riskScore'); }
-  set riskScore(value: number | undefined) { this.dataDecorations.riskScore = value; }
+  set riskScore(value: number | undefined) { this.applicationOverrides.riskScore = value; }
   get isHighRisk() { return effectiveDecoration(this, 'isHighRisk'); }
-  set isHighRisk(value: boolean | undefined) { this.dataDecorations.isHighRisk = value; }
+  set isHighRisk(value: boolean | undefined) { this.applicationOverrides.isHighRisk = value; }
   get sizeMultiplier() { return effectiveDecoration(this, 'sizeMultiplier'); }
-  set sizeMultiplier(value: number | undefined) { this.dataDecorations.sizeMultiplier = value; }
+  set sizeMultiplier(value: number | undefined) { this.applicationOverrides.sizeMultiplier = value; }
 }

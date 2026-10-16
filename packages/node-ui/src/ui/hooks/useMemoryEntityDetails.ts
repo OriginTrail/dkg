@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useFetch } from '../hooks.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
 import { buildMemoryEntities, fetchMemoryEntity, type LayeredTriple, type MemoryData, type MemoryLayerKey } from './useMemoryEntities.js';
 import type { MemoryEntityRead } from './memory-graph-query.js';
 import { dedupeTriplesBySpo } from '../views/project/entity-detail.js';
 
-const EMPTY_READ: MemoryEntityRead = { triples: [], partial: false, blankGraphs: [] };
 const TRUST = { wm: 'working', swm: 'shared', vm: 'verified' } as const;
 
 function mergeDetails(preview: LayeredTriple[], detail: MemoryEntityRead): LayeredTriple[] {
@@ -25,38 +24,33 @@ export function useMemoryEntityDetails(
   memory: MemoryData,
 ) {
   const scope = JSON.stringify([contextGraphId, layer, includeQueryCatalog]);
-  const requestScope = JSON.stringify([scope, uri]);
   const blank = uri?.startsWith('_:') ?? false;
-  const [captured, setCaptured] = useState<{
-    scope: string; preview: LayeredTriple[]; read: MemoryEntityRead;
-  } | null>(null);
-  // Retain only the last IRI response (bounded by the resource read limit).
-  // A new context, layer, or preview generation invalidates its blank facts.
-  const candidate = captured?.scope === scope && captured.preview === memory.allTriples ? captured.read : EMPTY_READ;
-  const owned = blank && !candidate.triples.some(triple => triple.subject === uri || triple.object === uri) ? EMPTY_READ : candidate;
-  const preview = useMemo(() => mergeDetails(memory.allTriples, owned), [memory.allTriples, owned]);
-  const read = useFetch(() => uri
-    ? fetchMemoryEntity(contextGraphId, uri, layer ?? undefined, includeQueryCatalog,
-      { triples: preview, partial: memory.partial || owned.partial })
-    : Promise.resolve(EMPTY_READ),
-  [requestScope, blank ? preview : null, blank ? memory.partial : null],
-  0, { scope: requestScope, retention: 'scope' });
-
-  useEffect(() => {
-    if (uri && !blank && read.data) setCaptured({ scope, preview: memory.allTriples, read: read.data });
-  }, [read.data, scope, uri, blank]);
-  useMemoryGraphEvents(contextGraphId, () => { if (uri) read.refresh(); });
-
+  const iri = blank ? null : uri;
+  const [request, setRequest] = useState({ scope, preview: memory.allTriples, uri: iri });
+  // The request identity follows IRIs and preview generations, not local blank
+  // navigation. useFetch alone retains the response, including warm failures.
+  if (request.scope !== scope || request.preview !== memory.allTriples
+    || (iri !== null && request.uri !== iri) || (uri === null && request.uri !== null)) {
+    setRequest({ scope, preview: memory.allTriples, uri: iri });
+  }
+  const read = useFetch(() => fetchMemoryEntity(contextGraphId, request.uri!, layer ?? undefined, includeQueryCatalog),
+    [request], 0, { scope: request, retention: 'scope', enabled: request.uri !== null });
+  // An old preview blank label belongs to that preview, never to another
+  // query's response. Navigate either dataset without issuing a label query.
+  const detail = !blank || read.data?.triples.some(triple => triple.subject === uri || triple.object === uri)
+    ? read.data : null;
+  const refresh = useCallback(() => { if (!blank || detail) read.refresh(); }, [blank, detail, read.refresh]);
+  useMemoryGraphEvents(contextGraphId, () => { if (uri) refresh(); });
   const facts = useMemo(() => {
-    const merged = mergeDetails(preview, read.data ?? EMPTY_READ);
+    const merged = detail ? mergeDetails(memory.allTriples, detail) : memory.allTriples;
     return layer ? merged.filter(triple => triple.layer === TRUST[layer]) : merged;
-  }, [preview, read.data, layer]);
+  }, [memory.allTriples, detail, layer]);
   const triples = useMemo(() => dedupeTriplesBySpo(facts), [facts]);
-  const entities = useMemo(() => layer || read.data || owned !== EMPTY_READ
-    ? buildMemoryEntities(facts) : memory.entities, [facts, layer, read.data, owned, memory.entities]);
+  const entities = useMemo(() => layer || detail
+    ? buildMemoryEntities(facts) : memory.entities, [facts, layer, detail, memory.entities]);
   const fallback = uri ? memory.entities.get(uri) : undefined;
   const entity = uri ? entities.get(uri) ?? (fallback && (!layer || fallback.layers.has(TRUST[layer])) ? fallback : null) : null;
 
-  return { entity, entities, triples, loading: read.loading, error: read.error,
-    partial: read.data?.partial ?? false, refresh: read.refresh };
+  return { entity, entities, triples, loading: !blank && read.loading, error: !blank || detail ? read.error : null,
+    partial: detail?.partial ?? (blank && memory.partial), refresh };
 }

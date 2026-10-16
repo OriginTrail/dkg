@@ -97,6 +97,27 @@ describe('bounded graph reads', () => {
 });
 
 describe('pending tab reads', () => {
+  it('retains one opaque request scope while paused and never fetches without an enabled target', async () => {
+    const fetcher = vi.fn().mockResolvedValue('owned response');
+    let read!: ReturnType<typeof useFetch<string>>;
+    function FetchProbe({ scope, enabled }: { scope: object; enabled: boolean }) {
+      read = useFetch(fetcher, [], 1000, { scope, enabled, retention: 'scope' });
+      return React.createElement('div', null, read.data);
+    }
+    const scope = {};
+    await act(async () => root.render(React.createElement(FetchProbe, { scope, enabled: false })));
+    expect(read.loading).toBe(false); expect(fetcher).not.toHaveBeenCalled();
+    await act(async () => read.refresh());
+    expect(fetcher).not.toHaveBeenCalled();
+    await act(async () => root.render(React.createElement(FetchProbe, { scope, enabled: true })));
+    expect(read.data).toBe('owned response'); expect(fetcher).toHaveBeenCalledOnce();
+    await act(async () => root.render(React.createElement(FetchProbe, { scope, enabled: false })));
+    expect(read.data).toBe('owned response'); expect(read.loading).toBe(false);
+    await act(async () => read.refresh());
+    expect(fetcher).toHaveBeenCalledOnce();
+    await act(async () => root.render(React.createElement(FetchProbe, { scope: {}, enabled: false })));
+    expect(read.data).toBeNull(); expect(read.loading).toBe(false);
+  });
   it('retains the current scope during refresh but hides previous selection data and errors immediately', async () => {
     const pending = new Map<string, (value: string) => void>();
     let read!: ReturnType<typeof useFetch<string>>;

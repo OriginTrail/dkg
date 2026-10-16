@@ -401,12 +401,8 @@ export class RdfGraphViz {
 
   // --- Highlight ---
 
-  /** Saved visual state for highlighted nodes, used by clearHighlight() to revert */
-  private _highlightState = new Map<string, {
-    riskScore?: number;
-    isHighRisk?: boolean;
-    sizeMultiplier?: number;
-  }>();
+  /** Only this highlight operation owns the transient decoration layer. */
+  private _highlightState = new Set<string>();
 
   /**
    * Visually emphasize a set of nodes without modifying underlying data.
@@ -431,18 +427,8 @@ export class RdfGraphViz {
 
     for (const [id, node] of this._model.nodes) {
       if (idSet.has(id)) {
-        // Save current state for revert
-        this._highlightState.set(id, {
-          riskScore: node.riskScore,
-          isHighRisk: node.isHighRisk,
-          sizeMultiplier: node.sizeMultiplier,
-        });
-
-        // Apply highlight emphasis
-        node.isHighRisk = true;
-        if (!node.sizeMultiplier || node.sizeMultiplier < 2.0) {
-          node.sizeMultiplier = 2.0;
-        }
+        this._highlightState.add(id);
+        node.highlightOverrides = { isHighRisk: true, sizeMultiplier: Math.max(node.sizeMultiplier ?? 1, 2) };
       }
     }
 
@@ -454,12 +440,10 @@ export class RdfGraphViz {
   clearHighlight(): void {
     if (this._highlightState.size === 0) return;
 
-    for (const [id, saved] of this._highlightState) {
+    for (const id of this._highlightState) {
       const node = this._model.nodes.get(id);
       if (node) {
-        node.riskScore = saved.riskScore;
-        node.isHighRisk = saved.isHighRisk;
-        node.sizeMultiplier = saved.sizeMultiplier;
+        node.highlightOverrides = {};
       }
     }
 
@@ -645,7 +629,7 @@ export class RdfGraphViz {
   private _postIngest(): void {
     // Resolve image URLs for all nodes (direct and indirect)
     for (const node of this._model.nodes.values()) {
-      node.imageUrl = this._hexPainter.resolveImageUrl(
+      node.dataDecorations.imageUrl = this._hexPainter.resolveImageUrl(
         node,
         (id) => this._model.getNode(id),
         (id) => this._model.getEdgesFrom(id)

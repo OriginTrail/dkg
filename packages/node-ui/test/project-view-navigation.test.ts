@@ -542,6 +542,21 @@ describe('ProjectView entity detail navigation', () => {
     expect(document.body.textContent).not.toContain('Obsolete fetched resource');
   });
 
+  it.each([1000, 1001])('shows the incomplete detail warning only above the %i-relationship boundary', async count => {
+    const uri = 'urn:remote:bounded';
+    fetchMemoryEntityMock.mockResolvedValueOnce({ partial: count > 1000, blankGraphs: [], triples:
+      Array.from({ length: Math.min(count, 1000) }, (_, i) => ({
+        subject: uri, predicate: 'urn:links', object: `urn:part:${i}`, layer: 'working',
+      })),
+    });
+    await act(async () => window.dispatchEvent(new CustomEvent('v10:open-entity', {
+      detail: { contextGraphId: 'cg-test', entityUri: uri },
+    })));
+    await flush();
+    expect(query('entity-detail').dataset.connections).toBe('1000');
+    expect(document.body.textContent!.includes('The resource detail read reached its limit. Some relationships may be missing.')).toBe(count > 1000);
+  });
+
   it('restores layer, subtab, and scroll when entity detail closes', async () => {
     await click('switch-swm');
     await click('layer-tab-graph');

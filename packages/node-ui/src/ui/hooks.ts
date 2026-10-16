@@ -22,23 +22,24 @@ function markReloadedFor401(): boolean {
   }
 }
 
-/** Fetch data on mount and optionally on a polling interval. */
+/** Fetch on mount or an interval. A scope may be a string or a stable opaque request identity. */
 export function useFetch<T>(
   fetcher: () => Promise<T>,
   deps: unknown[] = [],
   intervalMs = 0,
-  options: { scope?: string; retention?: 'keep' | 'scope' } = {},
+  options: { scope?: unknown; retention?: 'keep' | 'scope'; enabled?: boolean } = {},
 ): { data: T | null; loading: boolean; error: string | null; refresh: () => void } {
-  const { scope, retention = 'keep' } = options;
-  const [data, setData] = useState<{ scope?: string; value: T } | null>(null);
+  const { scope, retention = 'keep', enabled = true } = options;
+  const [data, setData] = useState<{ scope?: unknown; value: T } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<{ scope?: string; message: string } | null>(null);
+  const [error, setError] = useState<{ scope?: unknown; message: string } | null>(null);
   const startedScope = useRef(scope);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
   const inFlightRef = useRef<number | null>(null);
 
   const load = useCallback(async (force = true) => {
+    if (!enabled) return;
     // A slow poll must still be allowed to publish its result. Interval ticks
     // coalesce while it runs; explicit refreshes may supersede an old read.
     if (!force && inFlightRef.current !== null) return;
@@ -72,17 +73,17 @@ export function useFetch<T>(
       if (mountedRef.current && generation === generationRef.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, ...deps]);
+  }, [enabled, scope, ...deps]);
 
   useEffect(() => {
     generationRef.current++;
     mountedRef.current = true;
     startedScope.current = scope;
-    setLoading(true);
-    load();
+    setLoading(enabled);
+    if (enabled) load();
     let timer: ReturnType<typeof setInterval> | null = null;
     const startTimer = () => {
-      if (intervalMs <= 0 || timer) return;
+      if (!enabled || intervalMs <= 0 || timer) return;
       timer = setInterval(() => { void load(false); }, intervalMs);
     };
     const stopTimer = () => {
@@ -102,7 +103,7 @@ export function useFetch<T>(
       else { void load(false); startTimer(); }
     };
     if (typeof document === 'undefined' || !document.hidden) startTimer();
-    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
+    if (enabled && typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
     return () => {
       generationRef.current++;
       inFlightRef.current = null;
@@ -116,7 +117,7 @@ export function useFetch<T>(
   // selection's data or error, including the render before effects run.
   return {
     data: retention === 'scope' && data?.scope !== scope ? null : data?.value ?? null,
-    loading: loading || (retention === 'scope' && startedScope.current !== scope),
+    loading: enabled && (loading || (retention === 'scope' && startedScope.current !== scope)),
     error: retention === 'scope' && error?.scope !== scope ? null : error?.message ?? null,
     refresh: load,
   };

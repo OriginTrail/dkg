@@ -6,7 +6,7 @@ vi.mock('3d-force-graph', () => ({ default: () => graph.factory }));
 import { Canvas2DRenderer } from '../src/core/renderer.js';
 import { WebGL3DRenderer, createWebGL3DRenderer } from '../src/core/renderer-3d.js';
 import { GraphEventEmitter } from '../src/core/events.js';
-import { Texture } from 'three';
+import { Sprite, SpriteMaterial, Texture } from 'three';
 const config = () => ({ container: document.createElement('div'), events: new GraphEventEmitter(),
   hexPainter: { setImageLoadCallback: vi.fn(), setMaxDegree: vi.fn(), getRadius: () => 28 } as any,
   styleEngine: { config: {} } as any });
@@ -63,8 +63,9 @@ describe('renderer hit regions and resources', () => {
   it('prunes removed icons/textures and disposes all remaining resources and animation frames', () => {
     const renderer = new WebGL3DRenderer(config()); const internal = renderer as any;
     internal._graph = graph.chain;
-    const sprite = label(); const texture = { dispose: vi.fn() };
+    const sprite = new Sprite(new SpriteMaterial()); const texture = { dispose: vi.fn() };
     const removedMaterial = sprite.material;
+    vi.spyOn(removedMaterial, 'dispose');
     internal._iconSprites.set('urn:gone', { url: 'gone.png', sprite });
     internal._textureCache.set('gone.png', { texture });
     renderer.render(new Map(), new Map());

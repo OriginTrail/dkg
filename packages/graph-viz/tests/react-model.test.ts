@@ -64,13 +64,59 @@ describe('React wrapper with the real graph model', () => {
       person.riskScore = 4; person.sizeMultiplier = 1.25;
       viz.applyView({ name: 'Focus', focal: { uri: person.id, image: 'focus.png', sizeMultiplier: 3 } });
       expect(person.imageUrl).toBe('focus.png'); expect(person.sizeMultiplier).toBe(3);
-      expect(person.dataDecorations).toEqual({ imageUrl: null, riskScore: 4, sizeMultiplier: 1.25 });
+      expect(person.dataDecorations).toEqual({ imageUrl: null });
+      expect(person.applicationOverrides).toEqual({ riskScore: 4, sizeMultiplier: 1.25 });
       person.imageUrl = 'latest-data.png';
       expect(person.imageUrl).toBe('focus.png');
       viz.applyView({ name: 'Default' });
       expect(viz.model.nodes.get(person.id)).toBe(person);
       expect(person.imageUrl).toBe('latest-data.png'); expect(person.riskScore).toBe(4);
       expect(person.sizeMultiplier).toBe(1.25); expect(person.viewOverrides).toEqual({});
+    } finally { viz.destroy(); }
+  });
+  it('preserves application images across unrelated ingestion while still clearing removed RDF images', () => {
+    const viz = new RdfGraphViz(container);
+    try {
+      const image = { subject: 'urn:person', predicate: 'https://schema.org/image', object: 'https://example.test/rdf photo.png' };
+      const unrelated = { subject: 'urn:other', predicate: 'urn:name', object: 'Other' };
+      viz.loadTriples([{ subject: 'urn:person', predicate: 'urn:name', object: 'Person' }, image]);
+      const person = viz.getNode('urn:person')!;
+      person.imageUrl = 'application.png';
+      viz.addTriples([unrelated]);
+      expect(person.imageUrl).toBe('application.png');
+      viz.removeTriples([image, unrelated]);
+      expect(person.imageUrl).toBe('application.png');
+      // A different node with only an RDF image must lose it when that fact is removed.
+      const rdfOnly = { ...image, subject: 'urn:other' };
+      viz.addTriples([unrelated, rdfOnly]);
+      expect(viz.getNode('urn:other')!.imageUrl).toBe(image.object);
+      viz.removeTriples([rdfOnly]);
+      expect(viz.getNode('urn:other')!.imageUrl).toBeNull();
+      person.imageUrl = null;
+      viz.addTriples([image]);
+      expect(person.imageUrl).toBeNull();
+    } finally { viz.destroy(); }
+  });
+  it('temporarily highlights above view sizing without copying view values into application data', () => {
+    const viz = new RdfGraphViz(container);
+    try {
+      viz.loadTriples([{ subject: 'urn:person', predicate: 'urn:name', object: 'Person' }]);
+      const person = viz.getNode('urn:person')!;
+      person.sizeMultiplier = 1.25; person.isHighRisk = false; person.riskScore = 4;
+      viz.applyView({ name: 'Focus', focal: { uri: person.id, sizeMultiplier: 1.5 } });
+      viz.highlightNodes([person.id]);
+      expect(person.sizeMultiplier).toBe(2); expect(person.isHighRisk).toBe(true);
+      viz.clearHighlight();
+      expect(person.sizeMultiplier).toBe(1.5); expect(person.isHighRisk).toBe(false);
+      viz.applyView({ name: 'Default' });
+      expect(person.sizeMultiplier).toBe(1.25); expect(person.riskScore).toBe(4);
+      viz.highlightNodes([person.id]);
+      person.sizeMultiplier = 1.75;
+      viz.applyView({ name: 'Other focus', focal: { uri: person.id, sizeMultiplier: 3 } });
+      viz.clearHighlight();
+      expect(person.sizeMultiplier).toBe(3);
+      viz.applyView({ name: 'Default' });
+      expect(person.sizeMultiplier).toBe(1.75);
     } finally { viz.destroy(); }
   });
   it('replaces and removes view decorations while preserving model identity and data images', async () => {

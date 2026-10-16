@@ -58,10 +58,14 @@ export interface GraphNode extends NodeDecorations {
   label: string;
   /** Literal properties: predicate URI → values */
   properties: Map<string, RdfValue[]>;
-  /** Application/RDF decorations, independent of the currently selected view. */
+  /** Source/RDF decorations, independent of application assignments and views. */
   dataDecorations: NodeDecorations;
+  /** Public property assignments survive unrelated source ingestion. */
+  applicationOverrides: Partial<NodeDecorations>;
   /** Replaced as a unit when a different declarative view is applied. */
   viewOverrides: Partial<NodeDecorations>;
+  /** Temporary emphasis, cleared independently of both application data and views. */
+  highlightOverrides: Partial<NodeDecorations>;
   /** Extracted metadata properties (provenance, timestamps, etc.) */
   metadata: Map<string, RdfValue[]>;
   /** Number of edges connected to this node (in + out) */

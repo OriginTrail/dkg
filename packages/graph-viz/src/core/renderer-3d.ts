@@ -8,7 +8,7 @@ import type { ColorPalette } from './palette.js';
 import type { HexagonPainter } from './hexagon-painter.js';
 import type { StyleEngine } from './style-engine.js';
 import type { GraphEventEmitter } from './events.js';
-import { disposeIconSprite, type SpriteTexture } from './renderer-sprites.js';
+import { retireIconSprite, type SpriteTexture } from './renderer-sprites.js';
 
 /** The lazy module's factory owns construction and initialization cleanup. */
 export async function createWebGL3DRenderer(config: RendererBackendConfig): Promise<RendererBackend> {
@@ -347,7 +347,8 @@ export class WebGL3DRenderer implements RendererBackend {
       this._pulseTimer = null;
     }
     if (this._graph) {
-      this._graph._destructor?.();
+      if (this._graph._destructor) this._graph._destructor();
+      else this._graph.graphData({ nodes: [], links: [] });
       this._graph = null;
     }
     this._currentNodes.clear();
@@ -361,11 +362,11 @@ export class WebGL3DRenderer implements RendererBackend {
   // Icon sprites — only created for nodes with imageUrl
   // ──────────────────────────────────────────
 
-  /** Sprites own materials; shared texture entries own pending image work. */
+  /** Retire icons through their scene owner; the cache owns textures and pending image work. */
   private _retireIcons(nodes: Map<string, ForceNode>): void {
     for (const [id, icon] of this._iconSprites) {
       if (nodes.get(id)?._graphNode?.imageUrl === icon.url) continue;
-      disposeIconSprite(icon.sprite);
+      retireIconSprite(icon.sprite);
       this._iconSprites.delete(id);
     }
     const used = new Set([...nodes.values()].map(node => node._graphNode?.imageUrl));
