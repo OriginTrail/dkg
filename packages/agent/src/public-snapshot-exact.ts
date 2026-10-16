@@ -1,4 +1,6 @@
-import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
+import * as exactRecovery from './exact-recovery-execution.js';
+import { createDurableRecoveryHost } from './durable-recovery-host.js';
+import { createOperationContext } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
 import type { DKGAgent } from './dkg-agent.js';
 import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
@@ -12,10 +14,14 @@ export async function recoverPublicSnapshotExact(agent: DKGAgent, options: Publi
       assertCurrent();
       const remaining = batch.filter(ual => !committed.has(ual));
       if (!remaining.length) break;
-      const result = await LifecycleSyncMethods.recoverSnapshotExactAssets(agent, peer, contextGraphId, remaining, evidence, {
-        signal, isCurrent, forceFreshExactSession: true,
-        exactRecoveryTransportMode: transport,
-        totalTimeoutMs: 120_000,
+      const result = await exactRecovery.runExactRecovery({
+        host: createDurableRecoveryHost(agent), ctx: createOperationContext('sync'),
+        remotePeerId: peer, contextGraphId, selectionInput: remaining, authority: evidence,
+        options: {
+          signal, isCurrent, forceFreshExactSession: true,
+          exactRecoveryTransportMode: transport,
+          totalTimeoutMs: 120_000,
+        },
       });
       for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
     }

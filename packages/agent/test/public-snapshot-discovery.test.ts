@@ -1,4 +1,4 @@
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import * as exactRecovery from '../src/exact-recovery-execution.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter, sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
@@ -43,7 +43,7 @@ describe('snapshot admission racing historical graph discovery', () => {
     const { agent, snapshot } = await fixture();
     if (mode === 'core-cache') vi.spyOn(agent.router, 'send').mockImplementation(async () => Buffer.from(JSON.stringify(snapshot())));
     if (existing) agent.subscribeToContextGraph(graph, { onChainId: '1', syncMode: 'on-demand' });
-    const fetch = vi.spyOn(LifecycleSyncMethods, 'recoverSnapshotExactAssets').mockImplementation(async (_agent, _peer, _graph, uals, _authority, options) => {
+    const fetch = vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ selectionInput: uals, options }) => {
       await agent.discoverContextGraphsFromStorage();
       return { applied: 0, committedExactAssetUals: options?.isCurrent?.() ? uals : [] } as Awaited<ReturnType<typeof agent.syncExactKnowledgeAssetsFromPeerDetailed>>;
     });
@@ -55,7 +55,7 @@ describe('snapshot admission racing historical graph discovery', () => {
 
   it.each(['unsubscribe', 'resubscribe', 'rebind'] as const)('still cancels on %s during a batch', async change => {
     const { agent } = await fixture();
-    vi.spyOn(LifecycleSyncMethods, 'recoverSnapshotExactAssets').mockImplementation(async () => {
+    vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async () => {
       if (change === 'rebind') agent.subscribeToContextGraph(graph, { onChainId: '2', syncMode: 'on-demand' });
       else {
         agent.unsubscribeFromContextGraph(graph);

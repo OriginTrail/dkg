@@ -1,4 +1,6 @@
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import * as exactRecovery from '../src/exact-recovery-execution.js';
+import { createDurableRecoveryHost } from '../src/durable-recovery-host.js';
+import { createOperationContext } from '@origintrail-official/dkg-core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { BULK_GRAPH_KIND, BULK_GRAPH_PROTOCOL } from '@origintrail-official/dkg-core';
@@ -67,9 +69,9 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     receiver.recordCgWireId(graph, null);
     // Cold-start enumeration can finish while the first snapshot batch is
     // arriving. Use the real discovery/subscription path at that boundary.
-    const recover = LifecycleSyncMethods.recoverSnapshotExactAssets;
+    const recover = exactRecovery.runExactRecovery;
     let discoveredDuringRecovery = false;
-    vi.spyOn(LifecycleSyncMethods, "recoverSnapshotExactAssets").mockImplementation(async (...args) => {
+    vi.spyOn(exactRecovery, "runExactRecovery").mockImplementation(async (...args) => {
       if (!discoveredDuringRecovery) {
         discoveredDuringRecovery = true;
         await receiver.discoverContextGraphsFromStorage();
@@ -336,8 +338,12 @@ describe("public snapshot recovery over live local nodes and chain", () => {
           checkpointKey:`malicious:${phase}`,completed:true,timedOut:false};
       });
     }
-    const rejected = await LifecycleSyncMethods.recoverSnapshotExactAssets(sink, supplier.peerId, graph, [ual], evidence, {
+    const rejected = await exactRecovery.runExactRecovery({
+      host: createDurableRecoveryHost(sink), ctx: createOperationContext('sync'),
+      remotePeerId: supplier.peerId, contextGraphId: graph, selectionInput: [ual], authority: evidence,
+      options: {
       forceFreshExactSession: true, exactRecoveryTransportMode: transport, totalTimeoutMs: 15000,
+      },
     });
     expect(await rows()).toEqual(beforeRows);
     if (scenario === 'legacy-envelope') {

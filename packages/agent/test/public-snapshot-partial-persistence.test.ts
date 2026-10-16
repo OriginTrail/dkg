@@ -1,4 +1,5 @@
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import * as exactRecovery from '../src/exact-recovery-execution.js';
+
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -40,7 +41,7 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only') {
   };
   // Stub only the already-verified transport boundary. The actual job owns the
   // trust marker, evidence authentication, failure and real atomic store writes.
-  a.recoverSnapshotExactAssets=vi.spyOn(LifecycleSyncMethods, 'recoverSnapshotExactAssets').mockImplementation(async (_agent, _peer, _graph, uals, authority) => {
+  a.recoverSnapshotExactAssets=vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ host: _agent, remotePeerId: _peer, contextGraphId: _graph, selectionInput: uals, authority }) => {
     await expect(query(store,graph)).rejects.toThrow('core-trusted');
     const committed:string[]=[];
     for(const ual of uals) {
