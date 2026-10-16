@@ -1,5 +1,7 @@
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
+import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
-import { createDurableRecoveryHost } from '../src/durable-recovery-host.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 
 import { normalizePublicGraphSnapshot } from '@origintrail-official/dkg-chain';
@@ -406,8 +408,8 @@ describe("public snapshot recovery over live local nodes and chain", () => {
             checkpointKey:`malicious:${phase}`,completed:true,timedOut:false};
         });
       }
-      const rejected = await exactRecovery.runExactRecovery({ host: createDurableRecoveryHost(sink), ctx: createOperationContext('sync'), remotePeerId: supplier.peerId, contextGraphId: graph, selectionInput: [ual], authority: evidence, options: {
-        forceFreshExactSession:true,exactRecoveryTransportMode:transport,totalTimeoutMs:15000,
+      const rejected = await exactRecovery.runExactRecovery({ host: (DKGAgentBase as any).createDurableRecoveryCapabilities(sink), ctx: createOperationContext('sync'), remotePeerId: supplier.peerId, contextGraphId: graph, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection([ual]), 'vm-update-refresh'), authority: evidence, options: {
+        exactRecoveryTransportMode:transport,totalTimeoutMs:15000,
       } });
       expect(await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o")).toEqual(beforeRows);
       if (scenario === "legacy-envelope") {

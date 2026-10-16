@@ -1,9 +1,9 @@
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import * as recoveryGraph from '../src/durable-recovery-graph.js';
 import * as recoveryExecution from '../src/durable-recovery-execution.js';
 import * as recoveryAuthority from '../src/durable-recovery-authority.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
-import { createDurableRecoveryHost } from '../src/durable-recovery-host.js';
 import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -560,6 +560,38 @@ describe('durable sync lifecycle chain binding', () => {
     });
   });
 
+  it.each(['durable', 'graph'] as const)('normalizes selection and freshness once before the %s executor', async entry => {
+    const selected = createUalOnlyExactAssetSelection([ual]);
+    const explicit = exactAssetFetchSessionPolicy(selected);
+    const refreshed = exactAssetFetchSessionPolicy(selected, 'vm-update-refresh');
+    const execute = vi.spyOn(recoveryExecution, 'runDurableRecovery')
+      .mockResolvedValue({ admission: 'work-started', result: {} as any });
+    const graphExecute = vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph')
+      .mockResolvedValue({ result: {} as any });
+    const signal = new AbortController().signal;
+    for (const [input, expected] of [
+      [{ exactAssetFetchPolicy: explicit, exactAssetSelection: createUalOnlyExactAssetSelection([ual.replace('/1', '/2')]), forceFreshExactSession: true }, explicit],
+      [{ exactAssetSelection: selected, forceFreshExactSession: true }, refreshed],
+      [{ exactAssetSelection: selected }, explicit],
+    ] as const) {
+      const options = { ...input, signal };
+      if (entry === 'durable') {
+        await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+          {} as any, ctx, 'peer', [contextGraphId], undefined, undefined, undefined, options,
+        );
+      } else {
+        await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(
+          {} as any, ctx, 'peer', contextGraphId, 1, options,
+        );
+      }
+      const forwarded = entry === 'durable' ? execute.mock.calls.at(-1)![0].options : graphExecute.mock.calls.at(-1)![0].options;
+      expect(forwarded).toMatchObject({ signal, exactAssetFetchPolicy: expected });
+      expect(forwarded).not.toHaveProperty('exactAssetSelection');
+      expect(forwarded).not.toHaveProperty('forceFreshExactSession');
+      expect(forwarded).not.toHaveProperty('registeredPublicEvidence');
+    }
+  });
+
   it('resolves ordinary authority once and shares the internal executor with snapshot recovery', async () => {
     const ordinaryAuthority = { coalescing: 'allowed' } as any;
     const snapshotAuthority = { coalescing: 'owner-only' } as any;
@@ -574,7 +606,7 @@ describe('durable sync lifecycle chain binding', () => {
     await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
       agentLike, 'fixture-peer', contextGraphId, [ual], { registeredPublicEvidence, signal },
     );
-    await exactRecovery.runExactRecovery({ host: createDurableRecoveryHost(agentLike), ctx: createOperationContext('sync'), remotePeerId: 'fixture-peer', contextGraphId: contextGraphId, selectionInput: [ual], authority: snapshotAuthority, options: { signal } });
+    await exactRecovery.runExactRecovery({ host: (DKGAgentBase as any).createDurableRecoveryCapabilities(agentLike), ctx: createOperationContext('sync'), remotePeerId: 'fixture-peer', contextGraphId: contextGraphId, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection([ual])), authority: snapshotAuthority, options: { signal } });
     expect(resolve).toHaveBeenCalledOnce();
     expect(resolve.mock.calls[0][1]).toEqual({ registeredPublicEvidence });
     expect(execute).toHaveBeenCalledTimes(2);
