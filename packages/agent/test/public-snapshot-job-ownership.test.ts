@@ -32,7 +32,7 @@ function fixture() {
     chain: { chainId: 'evm:31337', deploymentId: 'test', readPublicGraphSnapshot: vi.fn(async () => snapshot()) },
     store: { insert: vi.fn(async () => {}) },
     router: { send: vi.fn(async () => Buffer.from(JSON.stringify(snapshot()))) },
-    syncExactKnowledgeAssetsFromPeerDetailed: vi.fn(),
+    recoverSnapshotExactAssets: vi.spyOn(LifecycleSyncMethods, 'recoverSnapshotExactAssets'),
     persistContextGraphSubscriptionState: vi.fn(async () => {}),
     subscribeToContextGraph: vi.fn((_id: string, binding: object) => { generation++; a.subscribedContextGraphs.set(graph, { subscribed: true, ...binding }); }),
     bindSubscriptionOnChainId: (_id: string, row: any, id: string) => { row.onChainId = id; },
@@ -90,7 +90,7 @@ describe('public snapshot job ownership', () => {
     a.subscribedContextGraphs.set(graph, { subscribed: true, onChainId: '1', onChainHash: ethers.id('different-graph') });
     await expect(run(a, 'rpc-only')).rejects.toThrow('Graph name binding differs');
     expect(a.setContextGraphSubscription).not.toHaveBeenCalled();
-    expect(a.syncExactKnowledgeAssetsFromPeerDetailed).not.toHaveBeenCalled();
+    expect(a.recoverSnapshotExactAssets).not.toHaveBeenCalled();
   });
   it('releases caller and node lifetime listeners after an empty job settles', async () => {
     const { a } = fixture(), caller = new AbortController();
@@ -136,7 +136,7 @@ describe('public snapshot job ownership', () => {
     else { a.workLifetime.close(); a.workLifetime.open(); }
     release(snapshot()); await rejected;
     expect(a.subscribeToContextGraph).not.toHaveBeenCalled(); expect(a.store.insert).not.toHaveBeenCalled();
-    expect(a.syncExactKnowledgeAssetsFromPeerDetailed).not.toHaveBeenCalled(); expect(a.workLifetime.physicalRuns.size).toBe(0);
+    expect(a.recoverSnapshotExactAssets).not.toHaveBeenCalled(); expect(a.workLifetime.physicalRuns.size).toBe(0);
   });
   it.each(['core-cache', 'rpc-only'] as const)('keeps completed snapshot separate from changed current coverage in %s mode', async mode => {
     const {a} = fixture();
@@ -186,10 +186,10 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
     let authority!: import('../src/durable-recovery-authority.js').DurableRecoveryAuthority;
     // Only transport/chain responses are fixtures. Exercise the real receive
     // worker, job evidence authentication, physical fence and atomic store path.
-    a.syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async (_peer, _graph, uals, options) => {
-      authority = options.recoveryAuthority;
-      return LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(a, ctx, 'fixture-source', CG, 1, {
-        ...options, exactAssetSelection: createUalOnlyExactAssetSelection(uals),
+    const recover = vi.spyOn(LifecycleSyncMethods, 'recoverSnapshotExactAssets').mockImplementation(async (_agent, _peer, _graph, uals, policy, options) => {
+      authority = policy;
+      return LifecycleSyncMethods.prototype['runAdmittedLegacyDurableContextGraph'].call(a, ctx, 'fixture-source', CG, 1, {
+        ...options, recoveryAuthority: policy, exactAssetSelection: createUalOnlyExactAssetSelection(uals),
         fetchTimeoutMs: 120000, authenticationTimeoutMs: 30000,
       });
     });
@@ -230,7 +230,7 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
       expect(await storedRows(f.store, f.items[0]!.graph)).toBe(1);
       expect(await storedRows(f.store, f.items[1]!.graph)).toBe(0);
       expect(writes).toHaveBeenCalledTimes(1);
-      expect(a.syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(1);
+      expect(recover).toHaveBeenCalledTimes(1);
       expect(a.chain.readPublicGraphSnapshot).toHaveBeenCalledTimes(1);
       expect(a.workLifetime.physicalRuns.size).toBe(0);
       expect(a.graphScopedStorePhysicalRuns.size).toBe(0);
