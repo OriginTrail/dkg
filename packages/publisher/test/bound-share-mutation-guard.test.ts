@@ -1,3 +1,4 @@
+import { literal, uniquenessKey, PROMOTE_UNIQUENESS_KEY, PROMOTE_STATE, PROMOTE_PAYLOAD } from '../src/async-promote-queue-utils.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
@@ -47,6 +48,28 @@ describe('bound ownership extends the publisher lifecycle mutation fence', () =>
     await expect(publisher.admitPreparedAssertionShare(request,()=>queue.enqueueAndClaim(request,'inline')))
       .rejects.toMatchObject({code:'KA_PROMOTE_RECOVERY_BINDING_CONFLICT'});
     expect(await queue.list()).toEqual([]);
+  });
+  it('ignores ownership predicates in untrusted user content but refuses unreadable trusted ownership', async () => {
+    const {publisher,queue,request,store} = await setup();
+    const quads = [
+      {subject:'urn:attacker',predicate:PROMOTE_UNIQUENESS_KEY,object:literal(uniquenessKey(request)),graph:'urn:other-author:working-memory'},
+      {subject:'urn:attacker',predicate:PROMOTE_STATE,object:'"queued"',graph:'urn:other-author:working-memory'},
+      {subject:'urn:attacker',predicate:PROMOTE_PAYLOAD,object:literal('{}'),graph:'urn:other-author:working-memory'},
+    ];
+    const attacker = `0x${'22'.repeat(20)}`;
+    await publisher.assertionCreate(CG,'attacker',attacker);
+    await publisher.assertionWrite(CG,'attacker',attacker,quads.map(q=>({subject:q.subject,predicate:q.predicate,object:q.object})));
+    await publisher.assertionPromote(CG,NAME,AUTHOR,{recoveryBinding:request.recoveryBinding});
+    expect(await publisher.assertionPullFrom(CG,NAME,AUTHOR,'swm')).toMatchObject({seeded:1});
+    await store.insert(quads.map(q=>({...q,graph:'urn:test:bound-control'})));
+    await expect(publisher.assertionWrite(CG,NAME,AUTHOR,triples)).rejects.toMatchObject({code:'KA_PROMOTE_RECOVERY_REQUIRED'});
+    await expect(queue.enqueue(request)).rejects.toThrow('ownership record is unreadable');
+  });
+  it('does not block a different storage author lane with a genuine bound owner', async () => {
+    const {publisher,queue,request} = await setup();
+    await queue.enqueueAndClaim({...request,agentAddress:`0x${'22'.repeat(20)}`},'other-author');
+    await publisher.assertionPromote(CG,NAME,AUTHOR,{recoveryBinding:request.recoveryBinding});
+    expect(await publisher.assertionPullFrom(CG,NAME,AUTHOR,'swm')).toMatchObject({seeded:1});
   });
   it('does not extend bound ownership rules to an ordinary queued job', async () => {
     const {publisher,queue,request} = await setup();

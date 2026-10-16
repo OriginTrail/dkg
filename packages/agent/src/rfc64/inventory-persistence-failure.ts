@@ -10,3 +10,19 @@ export function inventoryPersistenceFailure<T extends Error>(error: T): T {
 export function isInventoryPersistenceFailure(error: unknown): error is PersistenceFailure {
   return error instanceof Error && (error as Partial<PersistenceFailure>)[persistenceFailure] === true;
 }
+
+/** Called by native persistence adapters, never by promotion or user-message classifiers. */
+export function inheritInventoryPersistenceFailure<T extends Error>(error: T, cause: unknown): T {
+  if (isInventoryPersistenceFailure(cause) || isNativeStorageUnavailable(cause)) return inventoryPersistenceFailure(error);
+  return error;
+}
+function isNativeStorageUnavailable(cause: unknown): boolean {
+  if (!(cause instanceof Error)) return false;
+  const native = cause as Error & { code?: unknown; errcode?: unknown; syscall?: unknown };
+  // SQLite extended result codes retain the primary result in their low byte.
+  if (native.code === 'ERR_SQLITE_ERROR' && typeof native.errcode === 'number') {
+    return [5, 6, 7, 10, 13, 14].includes(native.errcode & 255);
+  }
+  return typeof native.syscall === 'string' && typeof native.code === 'string'
+    && ['EIO', 'EBUSY', 'EAGAIN', 'EMFILE', 'ENFILE', 'ENOSPC'].includes(native.code);
+}

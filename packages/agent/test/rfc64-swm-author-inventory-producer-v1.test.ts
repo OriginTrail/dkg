@@ -1,3 +1,4 @@
+import { InventoryV1OpenError } from '../src/rfc64/inventory-v1/open-error.js';
 import { DatabaseSync } from 'node:sqlite';
 import { isInventoryPersistenceFailure } from '../src/rfc64/inventory-persistence-failure.js';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
@@ -634,3 +635,38 @@ async function signedSuccessor(
   }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
   return Object.freeze({ head, rows: Object.freeze([...rows]) });
 }
+
+it.each(['busy', 'filesystem-io', 'integrity'] as const)('retains only storage provenance after failed native reopen: %s', async failure => {
+  const inventory = await createInventory(), directory = directories.at(-1)!;
+  const request = input(ROW_A), exec = DatabaseSync.prototype.exec, prepare = DatabaseSync.prototype.prepare;
+  let writing = false, reopening = false;
+  const execSpy = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function(this: DatabaseSync, sql: string) {
+    if (sql.trim().toUpperCase() === 'BEGIN IMMEDIATE') writing = true;
+    if (writing && sql.trim().toUpperCase() === 'COMMIT') {
+      reopening = true;
+      throw Object.assign(new Error('lost commit outcome'), {code:'ERR_SQLITE_ERROR',errcode:10});
+    }
+    return exec.call(this, sql);
+  });
+  const prepareSpy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function(this: DatabaseSync, sql: string) {
+    if (reopening) {
+      if (failure === 'busy') throw Object.assign(new Error('reopen busy'), {code:'ERR_SQLITE_ERROR',errcode:5});
+      if (failure === 'filesystem-io') throw Object.assign(new Error('reopen I/O unavailable'), {code:'EIO',syscall:'open'});
+      throw new InventoryV1OpenError('newer-schema', 'incompatible schema');
+    }
+    return prepare.call(this, sql);
+  });
+  try {
+    const error = await maintainRfc64SwmAuthorInventoryV1(inventory, request).catch(e => e);
+    expect(reopening).toBe(true);
+    expect(inventory.closed).toBe(true);
+    expect(isInventoryPersistenceFailure(error)).toBe(failure !== 'integrity');
+    const unavailable = await maintainRfc64SwmAuthorInventoryV1(inventory, request).catch(e => e);
+    expect(isInventoryPersistenceFailure(unavailable)).toBe(failure !== 'integrity');
+  } finally { execSpy.mockRestore(); prepareSpy.mockRestore(); inventory.close(); }
+  const healthy = await openInventoryV1(directory); foundations.push(healthy);
+  const result = await maintainRfc64SwmAuthorInventoryV1(healthy, request);
+  expect(result.status).toBe('applied');
+  expect(result.snapshot.rows).toHaveLength(1);
+  expect(result.snapshot.head.payload.version).toBe('0');
+});

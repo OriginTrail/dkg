@@ -1,3 +1,4 @@
+import { registerPromoteControlGraph, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
 import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob, persistPromoteJob } from './bound-promote-job.js';
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
@@ -53,11 +54,9 @@ import {
 import {
   ACTIVE_PROMOTE_STATES,
   DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
-  PROMOTE_ASSERTION_NAME,
   PROMOTE_CONTEXT_GRAPH_ID,
   PROMOTE_PAYLOAD,
   PROMOTE_STATE,
-  PROMOTE_UNIQUENESS_KEY,
   classifyJobPayload,
   comparePromoteJobs,
   createDefaultPromoteBackoff,
@@ -71,17 +70,8 @@ import {
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
   uniquenessKey,
-  uniquenessLookupKeys,
   type PromoteUniquenessInput,
 } from './async-promote-queue-utils.js';
-
-type PromoteConflictLookup = {
-  request: PromoteUniquenessInput;
-  lookupQuery:
-    | { kind: 'uniquenessKeys'; keys: string[] }
-    | { kind: 'assertionWildcard' };
-  laneScope: ReturnType<typeof promoteLaneConflictScope>;
-};
 
 export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteTerminalJobClearer {
   /**
@@ -115,6 +105,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     config: AsyncPromoteQueueConfig = {},
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_PROMOTE_CONTROL_GRAPH_URI;
+    registerPromoteControlGraph(store, this.graphUri);
     this.maxRetries = config.maxRetries ?? DEFAULT_PROMOTE_RETRY_TUNING.maxRetries;
     this.effectiveLeaseMs = config.leaseMs ?? TripleStoreAsyncPromoteQueue.DEFAULT_LEASE_MS;
     this.now = config.now ?? (() => Date.now());
@@ -215,7 +206,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     await this.withMutationLock(async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
-      if (job.request.recoveryBinding) throw new PromoteJobCancellationConflictError(jobId, 'an unfinished durable share obligation must retain its recovery owner');
+      if (hasUnfinishedBoundObligation(job)) throw new PromoteJobCancellationConflictError(jobId, 'an unfinished durable share obligation must retain its recovery owner');
       if (job.state !== 'queued') {
         throw new PromoteJobCancellationConflictError(
           jobId, `state '${job.state}'; only ordinary queued jobs can be cancelled`,
@@ -735,7 +726,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (!(PROMOTE_JOB_STATES as readonly string[]).includes(job.state)) {
         return { outcome: 'rejected', reason: 'unknown' };
       }
-      if (job.request.recoveryBinding && job.state !== 'succeeded') return { outcome: 'rejected', reason: 'nonterminal' };
+      if (hasUnfinishedBoundObligation(job)) return { outcome: 'rejected', reason: 'nonterminal' };
       if (!isTerminalPromoteJobState(job.state as PromoteJobState)) return { outcome: 'rejected', reason: 'nonterminal' };
       // The recovery sweep owns this replay-safe tail until its budget is spent.
       // A failed row is temporarily parked between sweeps, not eligible for clear.
@@ -782,24 +773,9 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     lookup: PromoteConflictLookup,
     excludeJobId?: string,
   ): Promise<PromoteJob | null> {
-    const result = lookup.lookupQuery.kind === 'assertionWildcard'
-      ? await this.store.query(
-          `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_CONTEXT_GRAPH_ID}> ${literal(lookup.request.contextGraphId)} ; <${PROMOTE_ASSERTION_NAME}> ${literal(lookup.request.assertionName)} ; <${PROMOTE_PAYLOAD}> ?payload . } }`,
-          { source: 'publisher.asyncPromote.findActiveConflict' },
-        )
-      : await this.store.query(
-          `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_UNIQUENESS_KEY}> ?key ; <${PROMOTE_PAYLOAD}> ?payload . FILTER (?key IN (${lookup.lookupQuery.keys.map((key) => literal(key)).join(', ')})) } }`,
-          { source: 'publisher.asyncPromote.findActiveConflict' },
-        );
-    const rows = expectBindings(result);
-    for (const row of rows) {
-      const job = parseJobPayload(row['payload']);
-      if (!job) throw new Error('Conflicting share ownership record is unreadable; inspection required');
-      if (job?.jobId === excludeJobId) continue;
-      if ((ACTIVE_PROMOTE_STATES.includes(job.state) || (job.request.recoveryBinding && job.state !== 'succeeded'))
-        && this.jobConflictsWithRequest(job, lookup)) return job;
-    }
-    return null;
+    const jobs = await readPromoteOwnershipCandidates(this.store, this.graphUri, lookup);
+    return jobs.find(job => job.jobId !== excludeJobId
+      && (ACTIVE_PROMOTE_STATES.includes(job.state) || hasUnfinishedBoundObligation(job))) ?? null;
   }
 
   private jobsShareClaimLane(active: PromoteJob, candidate: PromoteJob): boolean {
@@ -818,28 +794,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   private buildConflictLookup(request: PromoteUniquenessInput, missingLaneMatchesAnyLane: boolean): PromoteConflictLookup {
-    return {
-      request,
-      lookupQuery: missingLaneMatchesAnyLane
-        ? { kind: 'assertionWildcard' }
-        : { kind: 'uniquenessKeys', keys: uniquenessLookupKeys(request) },
-      laneScope: promoteLaneConflictScope(request, {
-        missingAgentAddressMatchesAnyLane: missingLaneMatchesAnyLane,
-      }),
-    };
-  }
-
-  private jobConflictsWithRequest(job: PromoteJob, lookup: PromoteConflictLookup): boolean {
-    return promoteLaneScopesConflict(
-      this.laneConflictScopeForStoredJob(job),
-      lookup.laneScope,
-    );
+    return promoteOwnershipLookup(request, missingLaneMatchesAnyLane);
   }
 
   private laneConflictScopeForStoredJob(job: PromoteJob): ReturnType<typeof promoteLaneConflictScope> {
-    return promoteLaneConflictScope(job.request, {
-      missingAgentAddressMatchesAnyLane: this.usesLegacyWildcardLane(job),
-    });
+    return storedPromoteLaneScope(job);
   }
 
   private usesLegacyWildcardLane(job: PromoteJob): boolean {
