@@ -84,7 +84,7 @@ export async function observeDurableSwmPromotionV1(
           'RFC-64 SWM inventory authority did not settle after bounded post-commit retries',
         );
       }
-      if (result.retryablePreparationRead === true) return 'retry-preparation-read';
+      if (result.failurePhase === 'preparation-read') return 'retry-preparation-read';
       if (result.status === 'applied' || result.status === 'existing') {
         const projection = {
           contextGraphId: params.contextGraphId as ContextGraphIdV1,

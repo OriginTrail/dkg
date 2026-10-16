@@ -51,15 +51,26 @@ function inventoryLaneKeyV1(lane: Readonly<Rfc64SwmInventoryAuthorLaneV1>): stri
 }
 export const RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1 = 4_096;
 
-export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Readonly<{
-  status: 'dormant' | 'applied' | 'existing' | 'absent' | 'failed';
-  action: 'upsert' | 'remove';
+type Rfc64SwmInventoryShadowResultDetailsV1 = Readonly<{
   attempts: number;
   headObjectDigest: string | null;
   error: string | null;
-  retryablePreparationRead?: true;
   dormantReason?: 'inactive-lane' | 'authority-transition' | 'vm-confirmed' | 'policy-mismatch';
 }>;
+
+/** A definitely-not-started query refusal before any inventory mutation was attempted. */
+export type Rfc64SwmInventoryPreparationReadFailureV1 = Rfc64SwmInventoryShadowResultDetailsV1 & Readonly<{
+  status: 'failed';
+  action: 'upsert';
+  failurePhase: 'preparation-read';
+}>;
+
+export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Rfc64SwmInventoryPreparationReadFailureV1
+  | (Rfc64SwmInventoryShadowResultDetailsV1 & Readonly<{
+    status: 'dormant' | 'applied' | 'existing' | 'absent' | 'failed';
+    action: 'upsert' | 'remove';
+    failurePhase?: never;
+  }>);
 
 export interface Rfc64SwmAuthorInventoryShadowStatusV1 {
   readonly attemptedUpserts: number;

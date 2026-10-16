@@ -917,7 +917,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         // This phase only reads evidence. Never extend retry classification across inventory writes.
         if (!isStoreSchedulerBusyError(cause) || !isStoreOperationNotStarted(cause, 'query')) throw cause;
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1({
-          ...this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause), retryablePreparationRead: true,
+          ...this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause),
+          status: 'failed', action: 'upsert', failurePhase: 'preparation-read',
         }, params.contextGraphId, null);
       }
       if (prepared.status === 'stale') {
