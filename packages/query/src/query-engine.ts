@@ -1,3 +1,4 @@
+import type { DraftAccessPolicy } from './content-partition-policy.js';
 import type { Quad, StoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
@@ -10,6 +11,10 @@ export interface QueryResult {
 export interface QueryOptions {
   contextGraphId?: string;
   timeout?: number;
+  /** Reject compatibility routing that would omit selected graphs. */
+  requireCompleteGraphScope?: boolean;
+  /** Bound HTTP store responses before parsing; embedded stores remain post-checked. */
+  maxResponseBytes?: number;
   /** Cancel queued and in-flight store work when the caller goes away. */
   signal?: AbortSignal;
   /** Store admission lane. External/API reads should use `background`. */
@@ -30,6 +35,8 @@ export interface QueryOptions {
    * to their selected graph set unless this is true.
    */
   includeContextGraphPartitions?: boolean;
+  /** Internal draft policy derived from caller identity; never accept from HTTP input. */
+  draftAccess?: DraftAccessPolicy;
   /**
    * Opt-in: allow the scoped query to explicitly reference the context
    * graph's own `_private` partition (`<cg>/_private`, or the sub-graph

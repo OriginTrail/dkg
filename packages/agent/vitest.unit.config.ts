@@ -18,6 +18,7 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/query-local-authority-cancellation.test.ts",
       "test/assertion-write-history.test.ts",
       "test/authority-index-snapshot-runtime.test.ts",
       "test/authority-index-snapshot-service.test.ts",

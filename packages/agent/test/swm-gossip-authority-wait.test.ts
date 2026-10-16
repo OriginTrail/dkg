@@ -25,6 +25,9 @@ import {
   type GossipSubManager,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
+import type { PrivateRootLegacyLaneAdmission } from '../src/swm-read-admission.js';
+import type { ContextGraphMetadataConfirmation } from '../src/context-graph-meta-confirmation.js';
+import type { ContextGraphReadAuthorityDecision } from '../src/context-graph-read-authority.js';
 
 const NETWORK_ID = 'otp:20430';
 const CG = '0x0000000000000000000000000000000000000001/swm-gossip-authority-wait';
@@ -41,12 +44,12 @@ interface Internals {
   subscribedContextGraphs: Map<string, Record<string, unknown>>;
   resolveRfc64CatalogReceiverAuthorityV1(contextGraphId: string): unknown;
   rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId: string): string | null;
-  rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId: string): Promise<boolean>;
-  hasConfirmedSharedMemoryMetaState(contextGraphId: string): Promise<boolean>;
-  canReadContextGraph(contextGraphId: string, options: unknown): Promise<boolean>;
+  resolvePrivateRootSwmLegacyLaneV1(contextGraphId: string): Promise<PrivateRootLegacyLaneAdmission>;
+  resolveMetadataConfirmation(contextGraphId: string): Promise<ContextGraphMetadataConfirmation>;
+  resolveContextGraphReadAuthority(contextGraphId: string, options: unknown): Promise<ContextGraphReadAuthorityDecision>;
   canUseSharedMemoryForContextGraph(
     contextGraphId: string,
-    options?: { onAuthorityWait?: (wait: unknown) => void },
+    options?: { signal?: AbortSignal; onAuthorityWait?: (wait: unknown) => void },
   ): Promise<boolean>;
   reconcileSwmHostModeSubscription(contextGraphId: string): Promise<void>;
   reconcileSharedMemoryGossipSubscription(contextGraphId: string): Promise<void>;
@@ -263,13 +266,13 @@ describe('shared-memory gossip and sync of a graph whose RFC-64 authority is not
   it('takes a "no" given before the policy was accepted as a wait, though it is accepted before the check ends', async () => {
     // The check's member-lane read is out when the refresh accepts the graph's
     // policy: the "no" was given without one.
-    let resolveLane!: (onLane: boolean) => void;
-    const lane = vi.spyOn(internals, 'rfc64PrivateRootSwmOnLegacyLaneV1')
+    let resolveLane!: (admission: PrivateRootLegacyLaneAdmission) => void;
+    const lane = vi.spyOn(internals, 'resolvePrivateRootSwmLegacyLaneV1')
       .mockReturnValueOnce(new Promise((resolve) => { resolveLane = resolve; }));
     const pass = reconcile();
     await vi.waitFor(() => expect(lane).toHaveBeenCalledTimes(1));
     acceptPublicPolicy();
-    resolveLane(false);
+    resolveLane({ outcome: 'denied' });
     await pass;
     expect(subscribed()).toBe(false);
     expect(gossipLines('warn')).toEqual([]);
@@ -281,17 +284,34 @@ describe('shared-memory gossip and sync of a graph whose RFC-64 authority is not
     expect(gossipLines('info')).toEqual([waits(NOT_ACCEPTED, 'not subscribed yet'), made]);
   });
 
+  it('does not report a wait after the typed admission read is cancelled', async () => {
+    const controller = new AbortController();
+    const heard = vi.fn();
+    let resolveLane!: (admission: PrivateRootLegacyLaneAdmission) => void;
+    const lane = vi.spyOn(internals, 'resolvePrivateRootSwmLegacyLaneV1')
+      .mockReturnValueOnce(new Promise((resolve) => { resolveLane = resolve; }));
+    const pending = internals.canUseSharedMemoryForContextGraph(CG, {
+      signal: controller.signal, onAuthorityWait: heard,
+    });
+    const rejected = expect(pending).rejects.toThrow('admission cancelled');
+    await vi.waitFor(() => expect(lane).toHaveBeenCalledTimes(1));
+    controller.abort(new Error('admission cancelled'));
+    resolveLane({ outcome: 'denied' });
+    await rejected;
+    expect(heard).not.toHaveBeenCalled();
+  });
+
   it('says the subscription is in place when another pass made it during the wait', async () => {
-    let resolveLane!: (onLane: boolean) => void;
-    vi.spyOn(internals, 'rfc64PrivateRootSwmOnLegacyLaneV1')
+    let resolveLane!: (admission: PrivateRootLegacyLaneAdmission) => void;
+    vi.spyOn(internals, 'resolvePrivateRootSwmLegacyLaneV1')
       .mockReturnValueOnce(new Promise((resolve) => { resolveLane = resolve; }));
     const waiting = reconcile();
-    await vi.waitFor(() => expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(internals.resolvePrivateRootSwmLegacyLaneV1).toHaveBeenCalledTimes(1));
     // A second event reconciles the graph after the policy is accepted.
     acceptPublicPolicy();
     await reconcile();
     expect(subscribed()).toBe(true);
-    resolveLane(false);
+    resolveLane({ outcome: 'denied' });
     await waiting;
     expect(gossipLines('info')).toEqual([waits(NOT_ACCEPTED, 'not subscribed yet')]);
 
@@ -328,9 +348,9 @@ describe('shared-memory gossip and sync of a graph whose RFC-64 authority is not
   it('keeps a refusal by the legacy checks a warning while the RFC-64 authority is not in place', async () => {
     // A private member by the graph's own metadata keeps the legacy member
     // lane (#2858); there the legacy read check refuses.
-    vi.spyOn(internals, 'rfc64PrivateRootSwmOnLegacyLaneV1').mockResolvedValue(true);
-    vi.spyOn(internals, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
-    const canRead = vi.spyOn(internals, 'canReadContextGraph').mockResolvedValue(false);
+    vi.spyOn(internals, 'resolvePrivateRootSwmLegacyLaneV1').mockResolvedValue({ outcome: 'allowed' });
+    vi.spyOn(internals, 'resolveMetadataConfirmation').mockResolvedValue({ outcome: 'confirmed' });
+    const canRead = vi.spyOn(internals, 'resolveContextGraphReadAuthority').mockResolvedValue({ outcome: 'denied', source: 'legacy-local', reason: 'no-read-authority', metadataBootstrap: 'forbidden', grantScope: 'none' });
     await reconcile();
     expect(canRead).toHaveBeenCalledTimes(1);
     expect(subscribed()).toBe(false);

@@ -1,3 +1,5 @@
+import { observedReadAuthorityDecision } from './internal/context-graph-authority/unanswered-authority-read.js';
+import { resolveSharedMemoryAdmission, sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed, type SwmReadAdmission } from './swm-read-admission.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { startRecentSharedMemoryPullsIfEnabled } from './recent-shared-memory-pull-runtime.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
@@ -206,6 +208,8 @@ import {
 } from './configured-context-graph-metadata-reconciliation.js';
 import {
   confirmContextGraphMetadataV1,
+  resolveContextGraphMetadataConfirmationV1, confirmedMetadataBoolean,
+  type ContextGraphMetadataConfirmation,
   type ConfirmContextGraphMetadataInput,
 } from './context-graph-meta-confirmation.js';
 import {
@@ -11205,24 +11209,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }, contextGraphId);
   }
 
-  async hasConfirmedMetaState(this: DKGAgent,
+  async hasConfirmedMetaState(this: DKGAgent, contextGraphId: string,
+    options: ConfirmContextGraphMetadataInput & { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    return confirmedMetadataBoolean(await this.resolveMetadataConfirmation(contextGraphId, options));
+  }
+
+  async resolveMetadataConfirmation(this: DKGAgent,
     contextGraphId: string,
     options: ConfirmContextGraphMetadataInput & {
       /**
-       * Caller deadline for the chain proof. An aborted proof is `unknown`,
-       * which confirms nothing, so the answer fails closed.
+       * Caller deadline covers the confirmation; cancellation propagates.
        */
       readonly signal?: AbortSignal;
     } = {},
-  ): Promise<boolean> {
-    return confirmContextGraphMetadataV1({
-      chain: this.chain,
+  ): Promise<ContextGraphMetadataConfirmation> {
+    return resolveContextGraphMetadataConfirmationV1({
+      chain: this.chain, signal: options.signal,
       resolveActivePublicChainProof: () => this.resolveActivePublicContextGraphChainProof(
         contextGraphId,
         createOperationContext('sync'),
         options.signal,
       ),
-      isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
+      isPrivateContextGraph: (id) => this.isPrivateContextGraph(id, { signal: options.signal }),
       localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
       peerId: this.peerId,
       store: this.store,
@@ -11285,61 +11294,49 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return this.hasConfirmedMetaState(contextGraphId);
   }
 
-  async canUseSharedMemoryForContextGraph(this: DKGAgent,
-    contextGraphId: string,
-    opts: {
-      callerAgentAddress?: string;
-      readAuthority?: ContextGraphReadAuthorityDecision;
-      /**
-       * Receives what the "no" waits for when no accepted RFC-64 policy
-       * governs the graph yet, for a caller that has to tell that wait from a
-       * refusal. Not called for a refusal or a "yes".
-       */
-      onAuthorityWait?: SharedMemoryAuthorityWaitSink;
-    } = {},
+  async canUseSharedMemoryForContextGraph(this: DKGAgent, contextGraphId: string,
+    opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision;
+      onAuthorityWait?: SharedMemoryAuthorityWaitSink } = {},
   ): Promise<boolean> {
-    const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
-      contextGraphId,
-      opts,
-    );
-    // The accepted snapshot is itself finalized, name-bound authority for a
-    // catalog-owned graph. It replaces both the legacy registration read and
-    // its metadata-bootstrap proof at this internal transport boundary.
-    if (acceptedRfc64Authority === true) return true;
-    // A private graph whose RFC-64 authority is not active keeps the legacy
-    // member checks below (#2858); a refusal by an active authority stands.
-    // Without an accepted policy governing the graph, the "no" only waits for
-    // one. That is read in the turn the "no" was given: the policy can be
-    // accepted at the next await.
-    const rfc64Wait = acceptedRfc64Authority === false && opts.onAuthorityWait !== undefined
-      ? rfc64SharedMemoryAuthorityWaitV1(this, contextGraphId)
-      : undefined;
-    if (
-      acceptedRfc64Authority === false
-      && !(await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId))
-    ) {
-      if (rfc64Wait !== undefined) opts.onAuthorityWait?.(rfc64Wait);
+    const admission = await this.resolveSharedMemoryReadAdmission(contextGraphId, opts);
+    opts.signal?.throwIfAborted();
+    // Existing lifecycle boolean callers fail closed while observations retain outages.
+    if (admission.outcome === 'unavailable' && admission.source === 'read-authority' && opts.readAuthority === undefined) {
+      observedReadAuthorityDecision(contextGraphId, admission.decision);
       return false;
     }
-    if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
-      return false;
-    }
-    // Whether to host, sync, or serve SWM for a selected graph is a read-only
-    // authorization decision: the finalized, name-bound snapshot answers it
-    // whenever the index has one, and only a graph the index has no snapshot
-    // for, or a private roster the reader could not serve fresh, reaches the
-    // current-state read. Encryption and roster mutations keep their live
-    // reads elsewhere.
-    return opts.readAuthority !== undefined
-      ? opts.readAuthority.outcome === 'allowed'
-      : withRpcUsageSite(
-          CG_AUTH_RPC_SITES.sharedMemoryRead,
-          () => this.canReadContextGraph(contextGraphId, {
-            callerAgentAddress: opts.callerAgentAddress,
-            allowSubscriptionFallback: false,
-            authorityReadMode: 'finalized-index-or-live',
-          }),
-        );
+    if (admission.outcome === 'unavailable' && !sharedMemoryAdmissionFailsClosed(admission)) throw sharedMemoryAdmissionError(contextGraphId, admission);
+    return admission.outcome === 'allowed';
+  }
+
+  async resolveSharedMemoryReadAdmission(this: DKGAgent, contextGraphId: string,
+    opts: { callerAgentAddress?: string; signal?: AbortSignal; readAuthority?: ContextGraphReadAuthorityDecision;
+      onAuthorityWait?: SharedMemoryAuthorityWaitSink } = {},
+  ): Promise<SwmReadAdmission> {
+    try {
+      opts.signal?.throwIfAborted();
+      const acceptedAuthority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId, opts);
+      // Capture the wait before an await can accept a policy for this graph.
+      const authorityWait = acceptedAuthority === false && opts.onAuthorityWait !== undefined
+        ? rfc64SharedMemoryAuthorityWaitV1(this, contextGraphId) : undefined;
+      return await resolveSharedMemoryAdmission({
+        signal: opts.signal,
+        acceptedAuthority,
+        legacyLane: async () => {
+          const admission = await this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, opts);
+          opts.signal?.throwIfAborted();
+          if (admission.outcome !== 'allowed' && authorityWait !== undefined) opts.onAuthorityWait?.(authorityWait);
+          return admission;
+        },
+        confirmedMetadata: () => this.resolveMetadataConfirmation(contextGraphId, opts),
+        // Reuse the caller's fresh authority, or retain the finalized-index/live policy.
+        readAuthority: async () => opts.readAuthority !== undefined ? opts.readAuthority
+          : withRpcUsageSite(CG_AUTH_RPC_SITES.sharedMemoryRead, () => this.resolveContextGraphReadAuthority(contextGraphId, {
+            callerAgentAddress: opts.callerAgentAddress, signal: opts.signal,
+            allowSubscriptionFallback: false, authorityReadMode: 'finalized-index-or-live',
+          })),
+      });
+    } finally { opts.signal?.throwIfAborted(); }
   }
 
   async verifySyncedDataInWorker(this: DKGAgent,

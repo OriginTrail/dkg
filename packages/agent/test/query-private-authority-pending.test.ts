@@ -831,7 +831,9 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
       .resolves.toEqual({ bindings: [] });
     expect(queryExecution).not.toHaveBeenCalled();
-    expect(readAuthority).toHaveBeenCalledWith(lastPrivateId);
+    expect(readAuthority).toHaveBeenCalledWith(lastPrivateId, {
+      signal: expect.any(AbortSignal),
+    });
 
     const owner = await agent.query(markerQuery(lastPrivatePrefix), { callerAgentAddress: OWNER });
     expect(owner.bindings).toEqual([{ g: contextGraphMetaGraphUri(lastPrivateId), s: PRIVATE_MARKER }]);
