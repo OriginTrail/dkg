@@ -76,14 +76,16 @@ const SUB_GRAPH_UNREGISTERED = {
  * author's seal never reaches the curator, so the publish route answers HTTP
  * 409 ASSERTION_AUTHOR_NOT_RESIDENT although the report is in the curator's
  * shared memory. It covers the one-graph promotion suite's promotion of a
- * report whose author is not the curator (`member-promotion`). A failure is
- * the gap only with evidence: that code, and the curator holding the report
- * in its shared memory before the promotion.
+ * report whose author is not the curator (`member-promotion`), and the check
+ * that depends on it, the author sharing again after that promotion
+ * (`post-promotion-share`, not exercised without it). A failure is the gap
+ * only with evidence: that code, and the curator holding the report in its
+ * shared memory before the promotion.
  */
 const MEMBER_PROMOTION = {
   issue: '#3294',
   what: 'the curator cannot promote a report another Edge authored: the author\'s seal never reaches it',
-  covers: ({ check, evidence }) => check === 'member-promotion' && evidence?.authorIsCurator === false,
+  covers: ({ check, evidence }) => ['member-promotion', 'post-promotion-share'].includes(check) && evidence?.authorIsCurator === false,
   isTheGap: ({ check }) => check === 'member-promotion',
   failure({ evidence }) {
     if (evidence.heldByCurator !== true) return { expected: false, because: 'the curator never held the report, so this is not #3294' };

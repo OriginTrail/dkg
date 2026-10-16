@@ -147,7 +147,7 @@ export async function busyEdge(ctx, main, large, promotions) {
     const log = devnet.logSince(edgeB, offset);
     const all = parseAdmissions(log);
     if (transferHeldAt(received, slots.readings, all, isTransfer).held) break;
-    const life = transferLifetime(log, all, isTransfer);
+    const life = transferLifetime(log, all, isTransfer, slots.readings);
     if (!life || received > life.to) break;
   }
   const { promoted, pairs: promotionPairs } = await promoting;
@@ -161,7 +161,7 @@ export async function busyEdge(ctx, main, large, promotions) {
 
   const log = devnet.logSince(edgeB, offset);
   const all = parseAdmissions(log);
-  const life = transferLifetime(log, all, isTransfer);
+  const life = transferLifetime(log, all, isTransfer, slots.readings);
   // Every edgeB receipt counts only while an admission of the transfer held its
   // slot (busyReceiptOutcome). Of the shares, the last decides; an earlier one
   // is noted. The other Edges' pairs are ordinary delivery checks.

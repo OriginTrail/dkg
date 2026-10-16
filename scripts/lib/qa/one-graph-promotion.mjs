@@ -83,9 +83,10 @@ function readDetail(read) {
  * both reads showed what it waits for within its bound. A pair that waits for
  * the report's absence keeps reading until its bound has passed, and reads
  * once more after that (`pair.confirm`): a report seen back in the layer at
- * any of those readings (`pair.reappeared`, or the confirmation) fails it; a
- * reading that failed tells nothing. A report that was never written fails
- * every pair of it.
+ * any of those readings (`pair.reappeared`, or the confirmation) fails it,
+ * and so does a confirmation that could not be read, since the absence is
+ * then not known to the end of the bound. A report that was never written
+ * fails every pair of it.
  */
 export function pairOutcome(pair, { boundMs }) {
   const { record, kind } = pair;
@@ -108,6 +109,10 @@ export function pairOutcome(pair, { boundMs }) {
       const back = ['view', 'partitions'].filter(read => pair.confirm?.[read]?.satisfied === false && !pair.confirm[read].error);
       if (back.length) {
         return { outcome: 'fail', text: `${what}: ${first}, then was in ${back.map(read => `${names[read]}${readDetail(pair.confirm[read])}`).join(' and in ')} again when the ${bound} s had passed` };
+      }
+      const unknown = ['view', 'partitions'].filter(read => pair.confirm?.[read]?.satisfied !== true);
+      if (unknown.length) {
+        return { outcome: 'fail', text: `${what}: ${first}, but ${unknown.map(read => `${names[read]}${readDetail(pair.confirm?.[read])}`).join(' and ')} could not be read when the ${bound} s had passed, so the absence to the end is not known` };
       }
       return { outcome: 'pass', text: `${what}: ${first}, and out of it to the end of the ${bound} s` };
     }
@@ -331,13 +336,16 @@ export function slotHolder(reading, admissions, isTransfer) {
 }
 
 /**
- * The large transfer's life on the node, from its log: from its first
- * general-slot admission to the last line of any operation that ran one of
- * its admissions (each line counts with its whole second). A transfer of many
- * assets is many short admissions, one or a few assets each, so the slot is
- * free for moments within that life. Returns { from, to, admissions } or null.
+ * The large transfer's life on the node: from its first general-slot
+ * admission to the last evidence that it was still at work, the last line of
+ * any operation that ran one of its admissions (each line counts with its
+ * whole second) or, for an admission at work quietly, the last reading
+ * (`readings`, when it was sent) that shows it in the slot. A transfer of
+ * many assets is many short admissions, one or a few assets each, so the
+ * slot is free for moments within that life. Returns { from, to, admissions }
+ * or null.
  */
-export function transferLifetime(logText, admissions, isTransfer) {
+export function transferLifetime(logText, admissions, isTransfer, readings = []) {
   const own = admissions.filter(admission => !admission.reserved && isTransfer(admission));
   if (own.length === 0) return null;
   const operations = new Set(own.map(admission => admission.ctx));
@@ -345,6 +353,9 @@ export function transferLifetime(logText, admissions, isTransfer) {
   for (const line of String(logText ?? '').split('\n')) {
     const time = lineTime(line);
     if (time && operations.has(time.ctx)) to = Math.max(to, time.at + 999);
+  }
+  for (const reading of readings) {
+    if (slotHolder(reading, admissions, isTransfer).state === 'transfer') to = Math.max(to, Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at);
   }
   return { from: own[0].at, to, admissions: own.length };
 }
@@ -415,20 +426,27 @@ export function busyReceiptOutcome(result, { received, life, held, delivery = fa
 /**
  * A subscriber's write into the graph's sub-graph before it registers the
  * sub-graph itself, as a check with the evidence known gap #3293 takes:
- * `record` is the report (written, or refused with `error`), `listed` whether
- * the writer's listing named the sub-graph, and the writer held the
- * definition. A refusal's HTTP status and wording come from the refusal.
+ * `record` is the report (written, or refused with `error` and its
+ * structured `refusal`), `listed` whether the writer's listing named the
+ * sub-graph, and the writer held the definition. The evidence is the
+ * refusal's own: the create's HTTP status, and the server's error, whose
+ * wording is all that names the unregistered sub-graph (it carries no code),
+ * never the message the suite prints.
  */
 export function subGraphWriteResult({ node, graph, record, listed }) {
   const evidence = { definitionHeld: true, subGraphListed: listed };
   const where = `${graph.key}/${record.sub}`;
   if (!record.error) return { check: 'sub-graph-write', outcome: 'pass', text: `${node.label} wrote into ${where} before registering the sub-graph itself`, evidence };
-  const status = /HTTP (\d{3})/.exec(record.error);
+  const refusal = record.refusal ?? {};
   return {
     check: 'sub-graph-write',
     outcome: 'fail',
     text: `${node.label} could not write into ${where} before registering the sub-graph itself (${listed ? 'its listing names it' : 'its listing does not name it'}): ${record.error}`,
-    evidence: { ...evidence, httpStatus: status ? Number(status[1]) : null, unregisteredSubGraph: /has not been registered in context graph/.test(record.error) },
+    evidence: {
+      ...evidence,
+      httpStatus: refusal.phase === 'create' && Number.isInteger(refusal.status) ? refusal.status : null,
+      unregisteredSubGraph: refusal.phase === 'create' && /has not been registered in context graph/.test(String(refusal.error ?? '')),
+    },
   };
 }
 
@@ -446,5 +464,24 @@ export function promotionResult({ record, curator, outcome, answer, heldByCurato
     outcome: outcome.ok ? 'pass' : 'fail',
     text: outcome.ok ? `the curator promoted ${describe(record)}: ${outcome.ual ?? 'no UAL'}` : `the curator could not promote ${describe(record)}: ${outcome.why}`,
     evidence: { authorIsCurator, heldByCurator: heldByCurator === true, code: answer?.json?.code, httpStatus: answer?.status },
+  };
+}
+
+/**
+ * Case 5's check of an author that shares again after its report was
+ * promoted. It runs only when the author's report was promoted (`promoted`);
+ * otherwise the check is not exercised and fails, with the evidence of the
+ * promotion's refusal (`promotion`, the promotion check's result), so that a
+ * refusal of known gap #3294 is reported as that gap. Returns null when the
+ * check runs, else its result.
+ */
+export function postPromotionCheck({ author, report, promoted, promotion }) {
+  if (promoted) return null;
+  const why = !report || report.error ? 'its report was never written' : promotion ? 'its report was never promoted' : 'no promotion of its report was attempted';
+  return {
+    check: 'post-promotion-share',
+    outcome: 'fail',
+    text: `${author.label}: not exercised: ${why}, so no share of it follows a promotion${promotion?.text ? ` (${promotion.text})` : ''}`,
+    evidence: promotion?.evidence ?? { authorIsCurator: false, heldByCurator: false },
   };
 }

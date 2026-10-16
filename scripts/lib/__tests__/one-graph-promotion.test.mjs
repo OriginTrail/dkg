@@ -3,7 +3,7 @@ import test from 'node:test';
 import {
   admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, inVerifiedScope, judgeGone, memberPublishOutcome,
   pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, slotHolder, transferHeldAt, transferLifetime,
-  transferOccupancy, verifiedScope, writeRetryable, busyReceiptOutcome, promotionResult, subGraphWriteResult, transferContended,
+  transferOccupancy, verifiedScope, writeRetryable, busyReceiptOutcome, promotionResult, subGraphWriteResult, transferContended, postPromotionCheck,
 } from '../qa/one-graph-promotion.mjs';
 import { freshSubscription, sharedMemoryScope, subscriptionResults } from '../qa/member-sharing.mjs';
 import { classify, KNOWN_GAPS } from '../qa/known-gaps.mjs';
@@ -111,7 +111,7 @@ test('a pair that did not hold names each read that missed it and what that read
   assert.match(pairOutcome(different, { boundMs: 60_000 }).text, /holds another value: "other"\) nor in the cross-partition read \(never read\) 60 s after the share$/);
 });
 
-test('a report back in shared memory after it had left fails, at any reading or at the last; a reading that failed does not', () => {
+test('a report back in shared memory after it had left fails, at any reading or at the last, and so does a last check that could not be read', () => {
   const back = pairOf('gone', { view: 2000, partitions: 3000 }, { fromWhat: 'promotion', confirm: { view: { satisfied: false, found: 1 }, partitions: { satisfied: true } } });
   const result = pairOutcome(back, { boundMs: 60_000 });
   assert.equal(result.outcome, 'fail');
@@ -122,8 +122,13 @@ test('a report back in shared memory after it had left fails, at any reading or 
   });
   assert.equal(pairOutcome(between, { boundMs: 60_000 }).text,
     '"edgeA report 1 (1)" by node8 (edgeA) in main/reports at node9 (edgeB): left shared memory 3 s after the promotion, then was in the cross-partition read (2 row(s) of it) again 10 s after it');
-  const unreadable = pairOf('gone', { view: 2000, partitions: 3000 }, { confirm: { view: { satisfied: false, error: 'HTTP 0 timeout' }, partitions: { satisfied: true } } });
-  assert.equal(pairOutcome(unreadable, { boundMs: 60_000 }).outcome, 'pass');
+  const unreadable = pairOf('gone', { view: 2000, partitions: 3000 }, { fromWhat: 'promotion', confirm: { view: { satisfied: false, error: 'HTTP 0 timeout' }, partitions: { satisfied: true } } });
+  assert.deepEqual(pairOutcome(unreadable, { boundMs: 60_000 }), {
+    outcome: 'fail',
+    text: '"edgeA report 1 (1)" by node8 (edgeA) in main/reports at node9 (edgeB): left shared memory 3 s after the promotion, but the shared-working-memory view of reports (HTTP 0 timeout) could not be read when the 60 s had passed, so the absence to the end is not known',
+  });
+  // No check after the bound at all (the watch was cancelled): not known either.
+  assert.equal(pairOutcome(pairOf('gone', { view: 2000, partitions: 3000 }), { boundMs: 60_000 }).outcome, 'fail');
 });
 
 test('a report that was never written fails each pair of it', () => {
@@ -410,7 +415,11 @@ test('a busy Edge\'s receipt passes only while an admission of the transfer held
 
 const curatorNode = { label: 'node7 (curator)', agentAddress: '0x00000000000000000000000000000000000000cc' };
 const subGraphRefusal = 'the author refused the asset: HTTP 500 {"error":"Sub-graph \\"reports\\" has not been registered in context graph \\"0xabc/one-graph-main-1\\". Register it first via DKGAgent.createSubGraph() or by inserting the sub-graph registration"}';
-const probeOf = error => ({ author, graph: { key: 'main' }, sub: 'reports', value: 'edgeA write before its sub-graph (3)', error });
+const serverRefusal = 'Sub-graph "reports" has not been registered in context graph "0xabc/one-graph-main-1". Register it first via DKGAgent.createSubGraph() or by inserting the sub-graph registration';
+// A probe record as share() leaves it: the printed message, and the refusal's structured evidence.
+const probeOf = (error, refusal = error ? { phase: 'create', status: 500, error: serverRefusal } : undefined) => ({
+  author, graph: { key: 'main' }, sub: 'reports', value: 'edgeA write before its sub-graph (3)', error, ...(refusal ? { refusal } : {}),
+});
 const verdictOf = result => classify(result).verdict;
 const gapOf = result => classify(result).gap?.issue ?? null;
 
@@ -424,10 +433,17 @@ test('#3293: a write into the sub-graph refused with HTTP 500 for the unregister
   const listedRefused = subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(subGraphRefusal), listed: true });
   assert.equal(verdictOf(listedRefused), 'fail');
   assert.match(classify(listedRefused).text, /the writer lists the sub-graph, so this is not #3293$/);
-  // Another refusal: another status, or a 500 that names no unregistered sub-graph.
-  for (const error of ['the author refused the asset: HTTP 404 {"code":"CONTEXT_GRAPH_NOT_FOUND"}', 'the author refused the asset: HTTP 500 {"error":"store unavailable"}', 'the share job ended failed: null']) {
-    assert.equal(verdictOf(subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(error), listed: false })), 'fail', error);
-  }
+  // Another refusal: another status, a 500 that names no unregistered sub-graph, or a share job that failed.
+  for (const [error, refusal] of [
+    ['the author refused the asset: HTTP 404 {"code":"CONTEXT_GRAPH_NOT_FOUND"}', { phase: 'create', status: 404, error: 'Unknown contextGraphId', code: 'CONTEXT_GRAPH_NOT_FOUND' }],
+    ['the author refused the asset: HTTP 500 {"error":"store unavailable"}', { phase: 'create', status: 500, error: 'store unavailable' }],
+    ['the share job ended failed: null', { phase: 'share' }],
+    // The printed message names the refusal, but the evidence does not: the message is never read.
+    [subGraphRefusal, { phase: 'share' }],
+  ]) assert.equal(verdictOf(subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(error, refusal), listed: false })), 'fail', error);
+  // The evidence decides, whatever the printed message looks like.
+  const reworded = subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf('create refused (500)', { phase: 'create', status: 500, error: serverRefusal }), listed: false });
+  assert.deepEqual([verdictOf(reworded), gapOf(reworded)], ['xfail', '#3293']);
   // The write went through: the gap's check held.
   const written = subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(null), listed: false });
   assert.deepEqual([written.outcome, verdictOf(written), gapOf(written)], ['pass', 'xpass', '#3293']);
@@ -548,4 +564,80 @@ test('an absence watch fails a report whose value left the layer but whose body 
   const handle = io.watch(io.pairs(4, report, [node], 'gone', { from: started, fromWhat: 'promotion', bound: 300 }));
   await handle.done;
   assert.match(pairOutcome(handle.pairs[0], { boundMs: 300 }).text, /: STILL in the shared-working-memory view of reports \(1 row\(s\) of it\) and in the cross-partition read \(1 row\(s\) of it\) 0 s after the promotion$/);
+});
+
+test('an absence watch whose reads fail after the first absence does not pass', async () => {
+  const started = Date.now();
+  const cg = '0xabc/one-graph-main-1';
+  const devnet = {
+    api: async () => (Date.now() - started < 60
+      ? { status: 200, json: null, text: JSON.stringify({ result: { type: 'bindings', bindings: [] } }) }
+      : { status: 503, json: { error: 'store unavailable' }, text: '{"error":"store unavailable"}' }),
+  };
+  const io = createReports(devnet, { stamp: 'S', sub: 'reports', predicate: LABEL, type: 'urn:one-graph:Report', boundMs: 400, definitionMs: 1000, syncedMs: 1000, pollMs: 30 });
+  const report = { author, graph: { key: 'main', id: cg, resolved: cg }, sub: 'reports', subject: 'urn:one-graph:S:1', value: 'r (1)', doneAt: started, error: null };
+  const handle = io.watch(io.pairs(4, report, [node], 'gone', { from: started, fromWhat: 'promotion', bound: 400 }));
+  await handle.done;
+  const [pair] = handle.pairs;
+  assert.notEqual(pair.progress.view, null);
+  const result = pairOutcome(pair, { boundMs: 400 });
+  assert.equal(result.outcome, 'fail');
+  assert.match(result.text, /could not be read when the 0 s had passed, so the absence to the end is not known$/);
+});
+
+test('a refused create keeps its HTTP status and the server\'s own error, through createReports.share', async () => {
+  const devnet = {
+    api: async (_node, method, path) => (method === 'POST' && path === '/api/knowledge-assets'
+      ? { status: 500, json: { error: serverRefusal }, text: JSON.stringify({ error: serverRefusal }) }
+      : { status: 404, json: null, text: 'not used' }),
+  };
+  const io = createReports(devnet, { stamp: 'S', sub: 'reports', predicate: LABEL, type: 'urn:one-graph:Report', boundMs: 400, definitionMs: 1000, syncedMs: 1000, pollMs: 30 });
+  const record = await io.share(author, { key: 'main', id: '0xabc/one-graph-main-1' }, 'edgeA write before its sub-graph');
+  assert.match(record.error, /^the author refused the asset: HTTP 500 /);
+  assert.deepEqual(record.refusal, { phase: 'create', status: 500, error: serverRefusal, code: undefined });
+  assert.equal(verdictOf(subGraphWriteResult({ node, graph: { key: 'main' }, record, listed: false })), 'xfail');
+});
+
+test('a quiet admission the readings show at work keeps the transfer alive; a transfer that ended does not', () => {
+  // One admission at 01:16:26, no later line of its work; readings show it in the slot until 01:16:40.
+  const log = '2026-10-16 01:16:26 sync aaaa [DKGAgent] Sync backpressure running durable:0xabc/one-graph-large-1:QP4sWZbL (global inflight=1/1, queued=0/0)';
+  const admissions = parseAdmissions(log);
+  const start = new Date('2026-10-16T01:16:26.300').getTime();
+  const quiet = [10_000, 14_000].map(age => reading(start + age, 20, [durable(age)]));
+  const byLog = transferLifetime(log, admissions, isTransfer);
+  assert.equal(byLog.to, new Date('2026-10-16T01:16:26').getTime() + 999);
+  const alive = transferLifetime(log, admissions, isTransfer, quiet);
+  assert.equal(alive.to, start + 14_000);
+  // Received a second before the last reading, as the suite reads the slot every second.
+  const receivedAt = start + 13_000;
+  const held = transferHeldAt(receivedAt, quiet, admissions, isTransfer);
+  const result = { outcome: 'pass', text: 'r at node9 (edgeB): in shared memory 1 s after the share' };
+  assert.equal(busyReceiptOutcome(result, { received: receivedAt, life: alive, held }).outcome, 'pass');
+  // Judged by its log alone, the same receipt would have been called after the transfer.
+  assert.match(busyReceiptOutcome(result, { received: receivedAt, life: byLog, held }).text, /had ended by then$/);
+  // After the last reading of it the transfer is over: a later receipt is not exercised.
+  assert.match(busyReceiptOutcome(result, { received: start + 20_000, life: alive, held }).text, /had ended by then$/);
+});
+
+test('case 5 runs only for an author whose report was promoted; a refused promotion leaves it not exercised', () => {
+  const first = { author, graph: { key: 'main' }, sub: 'reports', value: 'edgeA report 1 (3)', error: null };
+  assert.equal(postPromotionCheck({ author, report: first, promoted: true, promotion: undefined }), null);
+  const refusedAnswer = { status: 409, json: { code: 'ASSERTION_AUTHOR_NOT_RESIDENT', error: 'x' } };
+  const refused = promotionResult({ record: first, curator: curatorNode, outcome: promotionOutcome(refusedAnswer, { authorAddress: author.agentAddress }), answer: refusedAnswer, heldByCurator: true });
+  const dependent = postPromotionCheck({ author, report: first, promoted: false, promotion: refused });
+  assert.equal(dependent.check, 'post-promotion-share');
+  assert.equal(dependent.outcome, 'fail');
+  assert.match(dependent.text, /^node8 \(edgeA\): not exercised: its report was never promoted, so no share of it follows a promotion \(the curator could not promote/);
+  assert.deepEqual([verdictOf(dependent), gapOf(dependent)], ['xfail', '#3294']);
+  // A refusal for another reason, or no promotion at all: a failure, never a pass.
+  const other = { status: 502, json: { status: 'tentative' }, text: 'did not confirm' };
+  const failed = promotionResult({ record: first, curator: curatorNode, outcome: promotionOutcome(other, { authorAddress: author.agentAddress }), answer: other, heldByCurator: true });
+  assert.equal(verdictOf(postPromotionCheck({ author, report: first, promoted: false, promotion: failed })), 'fail');
+  assert.equal(verdictOf(postPromotionCheck({ author, report: { ...first, error: 'refused' }, promoted: false, promotion: undefined })), 'fail');
+  // Through the report: with both authors' promotions refused, case 5 has no check that held.
+  const lines = [];
+  const caseReport = createReport({ 5: 'shares after promotion' }, { print: line => lines.push(line) });
+  caseReport.record(5, dependent);
+  caseReport.record(5, postPromotionCheck({ author: { label: 'node9 (edgeB)' }, report: first, promoted: false, promotion: failed }));
+  assert.deepEqual(caseReport.summary('Results'), ['5']);
 });

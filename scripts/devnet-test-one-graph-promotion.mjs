@@ -104,8 +104,11 @@
 //      own included (each promotion is a check); every Edge, the author
 //      included, holds it in Verified Memory and no longer in shared memory,
 //      and every report not promoted stays in shared memory
-//   5  an author whose report was promoted still shares: edgeA and edgeB
-//      share one more report each, and every other Edge must hold it
+//   5  an author whose report was promoted still shares: edgeA and edgeB,
+//      each once its report of case 4 was promoted, share one more report,
+//      and every other Edge must hold it. An author whose report was not
+//      promoted leaves the check not exercised (#3294 when its promotion was
+//      refused as not resident)
 //   6  edgeB's only sync slot is held by a large Verified Memory transfer of
 //      another graph (ONE_GRAPH_LARGE_ASSETS x ONE_GRAPH_LARGE_TRIPLES, which
 //      the curator publishes) while edgeA shares a report and the curator
@@ -175,8 +178,8 @@ import { brief, openDevnet, waitFor } from './lib/member-sharing/devnet.mjs';
 import { createReport } from './lib/member-sharing/report.mjs';
 import { describe, subscriptionResults } from './lib/qa/member-sharing.mjs';
 import {
-  admissionPolicyProblem, memberPublishOutcome, pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, promotionResult,
-  subGraphWriteResult,
+  admissionPolicyProblem, memberPublishOutcome, pairOutcome, parseAdmissions, postPromotionCheck, profileStatusProblems, promotionOutcome,
+  promotionResult, subGraphWriteResult,
 } from './lib/qa/one-graph-promotion.mjs';
 import { busyEdge } from './lib/one-graph/busy-transfer.mjs';
 import { OneGraphEdges } from './lib/one-graph/edges.mjs';
@@ -260,6 +263,8 @@ async function settle(handles) {
   return pairs;
 }
 
+// Each promotion's check result, by report: what case 5 depends on.
+const promotionResults = new Map();
 // The reports the curator held in its shared memory before a promotion: the
 // evidence known gap #3294 takes. Its own reports, and every report a check
 // showed in its shared memory.
@@ -398,9 +403,11 @@ async function subscribeChecked(node, graph, caseId) {
  * `caseId` (known gap #3293); then it registers the sub-graph (POST
  * /api/sub-graph/create) and must list it. `onSubscribed(from)` runs as soon
  * as the second subscribe was accepted, so that a watch timed from it starts
- * at once. Resolves to { from (the second subscribe: the node's later bounds
- * count from it), probe (the record of that write, a report like the others
- * once written) }.
+ * at once. A write that went through is a report like the others, and the
+ * watch of its delivery to every other running Edge starts as soon as its
+ * share ended. Resolves to { from (the second subscribe: the node's later
+ * bounds count from it), probe (the record of that write), probeWatch (the
+ * watch of its delivery, or null) }.
  */
 async function remedy(node, graph, caseId, { onSubscribed } = {}) {
   const { dialError, from, held, heldAfterMs } = await rejoin(node, graph, onSubscribed);
@@ -409,16 +416,18 @@ async function remedy(node, graph, caseId, { onSubscribed } = {}) {
   if (held) pass(10, `${node.label} holds the definition of ${graph.key} ${seconds(heldAfterMs)} s after it subscribed again with forceCatchup`);
   else fail(10, `${node.label} holds no definition of ${graph.key} ${seconds(DEFINITION_MS)} s after it subscribed again with forceCatchup`);
   let probe = null;
+  let probeWatch = null;
   if (graph.sub && held) {
     const listed = await listsSubGraph(node, graph);
     probe = await shareReport(caseId, node, graph, `${node.role} write before its sub-graph`, from + SYNCED_MS);
+    if (!probe.error) probeWatch = io.watch(io.pairs(caseId, probe, edges.running.filter(other => other !== node), 'swm'));
     report.record(caseId, subGraphWriteResult({ node, graph, record: probe, listed: listed.ok }));
     const made = await devnet.api(node, 'POST', '/api/sub-graph/create', { contextGraphId: graph.id, subGraphName: graph.sub });
     const after = await listsSubGraph(node, graph);
     if (made.json?.created === graph.sub && after.ok) pass(10, `${node.label} registered the sub-graph ${graph.sub} of ${graph.key} and lists it`);
     else fail(10, `${node.label} could not register the sub-graph ${graph.sub} of ${graph.key}: ${made.json?.created === graph.sub ? after.why : brief(made)}`);
   }
-  return { from, probe };
+  return { from, probe, probeWatch };
 }
 
 /**
@@ -430,7 +439,9 @@ async function promoteChecked(caseId, record) {
   const { curator } = edges;
   const { answer, at } = await io.promote(curator, record);
   const outcome = promotionOutcome(answer, { authorAddress: record.author.agentAddress });
-  report.record(caseId, promotionResult({ record, curator, outcome, answer, heldByCurator: record.author === curator || heldByCurator.has(record) }));
+  const result = promotionResult({ record, curator, outcome, answer, heldByCurator: record.author === curator || heldByCurator.has(record) });
+  promotionResults.set(record, result);
+  report.record(caseId, result);
   return outcome.ok ? at : null;
 }
 
@@ -514,13 +525,13 @@ async function run() {
   // Each subscriber has until its synced deadline to take writes.
   const readyBy = new Map([edgeA, edgeB].map((member, i) => [member, subscriptions[i].from + SYNCED_MS]));
   const live = [];
-  // A write made before the sub-graph that went through (#3293 fixed) is a report like the others.
-  [edgeA, edgeB].forEach((member, i) => {
-    const { probe } = subscriptions[i];
-    if (!probe || probe.error) return;
+  // A write made before the sub-graph that went through (#3293 fixed) is a
+  // report like the others; the remedy started the watch of its delivery.
+  for (const { probe, probeWatch } of subscriptions) {
+    if (!probeWatch) continue;
     shared.push(probe);
-    live.push(io.watch(io.pairs(2, probe, others(member), 'swm')));
-  });
+    live.push(probeWatch);
+  }
   for (const author of [curator, edgeA, edgeB]) {
     for (const n of [1, 2]) {
       const record = await shareReport(2, author, main, `${author.role} report ${n}`, readyBy.get(author));
@@ -571,10 +582,17 @@ async function run() {
     note(`case 4: on its author, ${describe(record)} has the record ${await io.lifecycle(record.author, record)}; the author's catalog status: ${await catalogStatus(record.author)}`);
   }
 
-  // Case 5: the authors share again.
+  // Case 5: an author whose report was promoted shares again. Only an author
+  // whose report was promoted exercises it; for the other the check is not
+  // exercised, with its promotion's refusal as the evidence (#3294).
   await precondition(5, 'before the authors share again');
   const again = [];
-  for (const author of [edgeA, edgeB]) {
+  for (const [author, first] of [[edgeA, a1], [edgeB, b1]]) {
+    const unexercised = postPromotionCheck({ author, report: first, promoted: promoted.has(first), promotion: promotionResults.get(first) });
+    if (unexercised) {
+      report.record(5, unexercised);
+      continue;
+    }
     const record = await io.share(author, main, `${author.role} after its promotion`);
     shared.push(record);
     again.push(io.watch(io.pairs(5, record, others(author), 'swm')));
@@ -611,9 +629,9 @@ async function run() {
     onSubscribed: from => { recoveryWatch = io.watch(placementPairs(7, shared, promoted, [late], { from, fromWhat: 'late subscribed again', bound: RECOVERY_MS })); },
   });
   await settle([recoveryWatch]);
-  if (recovery.probe && !recovery.probe.error) {
+  if (recovery.probeWatch) {
     shared.push(recovery.probe);
-    await settle([io.watch(io.pairs(7, recovery.probe, others(late), 'swm'))]);
+    await settle([recovery.probeWatch]);
   }
   const fromLate = await shareReport(7, late, main, 'late report', recovery.from + SYNCED_MS);
   shared.push(fromLate);

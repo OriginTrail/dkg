@@ -27,8 +27,19 @@ export function createReports(devnet, config) {
   const { api } = devnet;
   const { stamp, sub, predicate, type, boundMs, definitionMs, syncedMs, pollMs = 2000 } = config;
   // The client-like write, the listing and the subscription observer of the
-  // member-sharing suite; its own watches are not used here.
-  const base = createObservation(devnet, { boundMs, definitionMs, syncedMs, stamp, predicate });
+  // member-sharing suite; its own watches are not used here. Its API calls go
+  // through a tap that keeps each create's answer by asset name, so that a
+  // refused create keeps its HTTP status and the server's own error.
+  const createAnswers = new Map();
+  const tapped = {
+    ...devnet,
+    api: async (node, method, path, body, options) => {
+      const answer = await api(node, method, path, body, options);
+      if (method === 'POST' && path === '/api/knowledge-assets' && typeof body?.name === 'string') createAnswers.set(body.name, answer);
+      return answer;
+    },
+  };
+  const base = createObservation(tapped, { boundMs, definitionMs, syncedMs, stamp, predicate });
   let sequence = 0;
 
   /** A report's triples: its class, its value, and a body of about 200 bytes. */
@@ -42,10 +53,13 @@ export function createReports(devnet, config) {
    * One report, written with its seal and shared into the sub-graph's shared
    * memory by `author`: the record every pair of it uses. Resolves once the
    * share job ended; `doneAt` is when (the start of a pair's bound), or
-   * `error` says why the report was not written. A create refused the way a
-   * client retries (writeRetryable: the graph not yet synced for writes, say)
-   * is made again every `pollMs` until `retryUntil`; `refused` then says how
-   * often and how long, and `doneAt` still counts from the share that ended.
+   * `error` says why the report was not written, and `refusal` keeps that
+   * failure's evidence: { phase: 'create', status, error (the server's own),
+   * code } for a create refused, { phase: 'share' } for a share job that did
+   * not succeed. A create refused the way a client retries (writeRetryable:
+   * the graph not yet synced for writes, say) is made again every `pollMs`
+   * until `retryUntil`; `refused` then says how often and how long, and
+   * `doneAt` still counts from the share that ended.
    */
   async function share(author, graph, what, { retryUntil = 0 } = {}) {
     sequence += 1;
@@ -66,6 +80,10 @@ export function createReports(devnet, config) {
       }
       if (!writeRetryable(outcome) || Date.now() >= retryUntil) {
         record.error = outcome.error;
+        const answer = createAnswers.get(record.name);
+        record.refusal = answer && (answer.status < 200 || answer.status >= 300)
+          ? { phase: 'create', status: answer.status, error: typeof answer.json?.error === 'string' ? answer.json.error : answer.text, code: answer.json?.code }
+          : { phase: 'share' };
         break;
       }
       record.refused = { code: outcome.code, times: (record.refused?.times ?? 0) + 1 };
@@ -135,8 +153,9 @@ export function createReports(devnet, config) {
    * the report's absence keeps reading to the end of the bound, and a
    * reading that shows the report back after it was absent is kept
    * (`pair.reappeared`). Such a pair is read once more when its bound has
-   * passed (`pair.confirm`). Returns a handle { pairs, done, cancel }, not a
-   * promise, so that whoever starts a watch does not wait.
+   * passed (`pair.confirm`, each read retried up to three times while it
+   * fails). Returns a handle { pairs, done, cancel }, not a promise, so that
+   * whoever starts a watch does not wait.
    */
   function watch(list) {
     for (const pair of list) {
@@ -160,11 +179,18 @@ export function createReports(devnet, config) {
         await sleep(Math.min(pollMs, Math.max(0, pair.from + pair.boundMs - Date.now())));
       }
     };
+    // The check after the bound: each read until one answers, up to three times.
     const confirm = async pair => {
       await sleep(Math.max(0, pair.from + pair.boundMs - Date.now()));
       if (cancelled) return;
       pair.confirm = {};
-      for (const which of READS) pair.confirm[which] = await read(which, pair.kind, pair.node, pair.record);
+      for (const which of READS) {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (attempt > 0) await sleep(pollMs);
+          pair.confirm[which] = await read(which, pair.kind, pair.node, pair.record);
+          if (!pair.confirm[which].error) break;
+        }
+      }
     };
     const settle = async pair => {
       await Promise.all(READS.map(which => poll(pair, which)));
