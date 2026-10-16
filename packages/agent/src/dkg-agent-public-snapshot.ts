@@ -1,3 +1,5 @@
+import { createDurableRecoveryHost } from './dkg-agent-recovery.js';
+import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
 import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
@@ -125,8 +127,13 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           assertCurrent();
           const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
           const recovery = { contextGraphId, peers, uals, evidence, signal, assertCurrent };
-          const { committed, bulkChunks } = await (transport === 'bulk'
-            ? recoverPublicSnapshotBulk(this, { ...recovery,
+          let recovered: PublicSnapshotRecoveryResult;
+          if (transport === 'bulk') {
+            const { verification, reconcile } = createDurableRecoveryHost(this);
+            recovered = await recoverPublicSnapshotBulk({
+              store: this.store, router: this.router, verification, reconcile,
+              ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
+            }, { ...recovery,
               deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
               shouldQuarantineCommitted: () => {
                 const current = this.subscribedContextGraphs.get(contextGraphId);
@@ -134,8 +141,9 @@ export class PublicSnapshotMethods extends DKGAgentBase {
               },
               onCommitted: () => this.invalidateListContextGraphsCache(),
               log: message => this.log.info(createOperationContext('sync'), message),
-            })
-            : recoverPublicSnapshotExact(this, recovery));
+            });
+          } else recovered = await recoverPublicSnapshotExact(this, recovery);
+          const { committed, bulkChunks } = recovered;
 
           // A new inventory/root comparison is required before claiming current coverage.
           const fresh = await read(true);

@@ -4,6 +4,7 @@ import type { DKGAgent } from './dkg-agent.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
+import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
 
 /** Agent access boundary. Consumers receive operations; mutable fields remain agent-owned. */
@@ -13,6 +14,14 @@ export class RecoveryHostMethods extends DKGAgentBase {
   }
 
   protected createDurableRecoveryCapabilities(this: DKGAgent): DurableRecoveryHost {
+    const cleanup: Parameters<typeof reconcileAfterMaterialization>[0] = {
+      store: this.store, writeLocks: this.writeLocks, log: this.log,
+      invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+      retireFinalizedSwmTwinCandidate: (candidate, ctx) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+      retireLegacySwmAfterVerifiedVmTwin: params => this.retireLegacySwmAfterVerifiedVmTwin(params),
+    };
+    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
+      reconcileAfterMaterialization(cleanup, asset, ctx);
     const materialization = new RecoveryMaterializationOwner({
       chain: () => this.chain,
       store: () => this.store,
@@ -25,15 +34,11 @@ export class RecoveryHostMethods extends DKGAgentBase {
       persistSubscription: (id, subscription, reason, isCurrent) => this.persistContextGraphSyncStateStrict(id, subscription, reason, isCurrent),
       bindSubscription: (id, subscription, onChainId) => this.bindSubscriptionOnChainId(id, subscription, onChainId),
       recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
-      cleanup: () => ({
-        store: this.store, writeLocks: this.writeLocks, log: this.log,
-        invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-        retireFinalizedSwmTwinCandidate: (candidate, ctx) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
-        retireLegacySwmAfterVerifiedVmTwin: params => this.retireLegacySwmAfterVerifiedVmTwin(params),
-      }),
+      reconcile,
     });
     return {
       owner: this,
+      reconcile,
       policy: () => ({
         syncAgentsMeta: this.config.syncAgentsMeta,
         syncContextGraphPriorities: this.config.syncContextGraphPriorities,

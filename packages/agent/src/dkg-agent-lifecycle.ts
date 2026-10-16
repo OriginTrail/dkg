@@ -8,7 +8,6 @@ import { runSyncSingleFlight, syncSingleFlightKey } from './sync-single-flight.j
 import { DURABLE_RECOVERY_HARD_TIMEOUT_MS } from './durable-recovery-scheduling.js';
 import type { ExactKnowledgeAssetSyncOptions, ExactKnowledgeAssetRefreshSyncOptions, DurableSyncOptions, ExactKnowledgeAssetSyncResult, PhysicalDurableSyncResult, AdmittedDurableSyncResult, LegacyDurableContextGraphOptions } from './durable-recovery-types.js';
 export type { DurableSyncOptions, ExactKnowledgeAssetSyncResult } from './durable-recovery-types.js';
-import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import { registerPublicBulkGraph } from './sync/responder/bulk-graph-stream.js';
 import { createAbortError as asSyncFetchAbortError } from './bounded-operation.js';
 
@@ -75,7 +74,6 @@ import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelo
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
 
 import {
-  type VerifiedGraphScopedAsset,
 } from './sync/requester/graph-scoped-materialization.js';
 import {
   type FinalizedSwmTwinRetirement,
@@ -1214,14 +1212,6 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
-  async reconcileAfterGraphScopedMaterialization(this: DKGAgent, asset: VerifiedGraphScopedAsset, ctx: OperationContext): Promise<void> {
-    await reconcileAfterMaterialization({ store: this.store, writeLocks: this.writeLocks, log: this.log,
-      invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-      retireFinalizedSwmTwinCandidate: (candidate, context) => this.retireFinalizedSwmTwinCandidate(candidate, context),
-      retireLegacySwmAfterVerifiedVmTwin: params => this.retireLegacySwmAfterVerifiedVmTwin(params),
-    }, asset, ctx);
-  }
-
   async retireLegacySwmAfterVerifiedVmTwin(
     this: DKGAgent,
     input: Readonly<{

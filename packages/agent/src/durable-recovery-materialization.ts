@@ -6,7 +6,7 @@ import { createAbortError as asSyncFetchAbortError } from './bounded-operation.j
 import { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
 import { memoizeRecoveryBindingProof, type DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import { materializeVerifiedGraphScopedAsset, type GraphScopedMaterializationOutcome } from './sync/requester/graph-scoped-materialization.js';
-import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
+import type { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import { createGraphScopedPhysicalOperationFence } from './sync/requester/graph-scoped-operation-fence.js';
 import { contextGraphSubscriptionSyncPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 import type { ChallengeExactAssetFetchContext, DurableSyncContext } from './sync/requester/durable-sync.js';
@@ -24,7 +24,7 @@ export interface RecoveryMaterializationPorts {
   persistSubscription(id: string, subscription: ContextGraphSub, reason: 'on-chain id binding', isCurrent: () => boolean): Promise<void>;
   bindSubscription(id: string, subscription: ContextGraphSub, onChainId: string): void;
   recordDrops: NonNullable<MaterializationOptions['oversizeHooks']>['recordDrops'];
-  cleanup(): Parameters<typeof reconcileAfterMaterialization>[0];
+  reconcile(asset: Parameters<typeof reconcileAfterMaterialization>[1], ctx: OperationContext): Promise<void>;
 }
 export interface RecoveryMaterializationScope {
   readonly ctx: OperationContext;
@@ -181,7 +181,7 @@ export class RecoveryMaterializationOwner {
               recordDrops: (drops, seam) => ports.recordDrops(drops, seam),
             },
           });
-          if (outcome === 'applied') await reconcileAfterMaterialization(ports.cleanup(), authentication.asset, ctx);
+          if (outcome === 'applied') await ports.reconcile(authentication.asset, ctx);
           return outcome;
         },
       }),
