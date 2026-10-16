@@ -1,4 +1,5 @@
 import { isPublicSnapshotMode, type PublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
+import type { SelectResult } from '@origintrail-official/dkg-storage';
 import { prepareSparql, prepareSparqlQuery, boundPreparedSelect } from '@origintrail-official/dkg-rdf-utils/sparql';
 
 export const BOUNDED_QUERY_VERSION = 1;
@@ -63,7 +64,7 @@ export function boundSelect(sparql: unknown, maxRows: unknown, mode: 'complete' 
   return { sparql: boundPreparedSelect(query, maxRows + 1, offset), maxRows };
 }
 
-export function boundedResult(bindings: Array<Record<string, unknown>>, maxRows: number) {
+export function boundedResult(bindings: SelectResult['bindings'], maxRows: number) {
   if (bindings.length > maxRows) return { ok: false as const, code: 'QUERY_RESULT_TOO_LARGE' };
   const result = { type: 'bindings' as const, bindings };
   if (Buffer.byteLength(JSON.stringify(result)) > BOUNDED_QUERY_MAX_BYTES) {
@@ -73,7 +74,7 @@ export function boundedResult(bindings: Array<Record<string, unknown>>, maxRows:
 }
 
 export type BoundedQueryResponse = {
-  result: { type: 'bindings'; bindings: Array<Record<string, unknown>> };
+  result: Pick<SelectResult, 'type' | 'bindings'>;
 } & (
   | { mode: 'complete'; resultComplete: true }
   | { mode: 'page'; resultComplete: false; pageComplete: true; hasMore: boolean;
@@ -81,7 +82,7 @@ export type BoundedQueryResponse = {
 );
 
 export function finalizeBoundedQuery(
-  policy: BoundedQueryPolicy, bindings: Array<Record<string, unknown>>,
+  policy: BoundedQueryPolicy, bindings: SelectResult['bindings'],
 ): { ok: false; code: string } | { ok: true; response: BoundedQueryResponse } {
   const rows = policy.mode === 'page' ? bindings.slice(0, policy.maxRows) : bindings;
   const bounded = boundedResult(rows, policy.maxRows);
