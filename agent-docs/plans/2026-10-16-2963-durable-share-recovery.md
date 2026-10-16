@@ -67,3 +67,60 @@ Measure HTTP and durable-admission clocks separately, publication p50/p90 and fu
 - Baseline regression: 44 cases passed across real worker/queue and routes using CLI unit config. Initial default-config invocation unnecessarily started Hardhat setup and was stopped; its log retained. Recreated modern-allocator lifecycle deletion/insertion characterization passes 2 cases (typed not-started and untyped); explicit manual replay preserves identity/content and repairs descriptor. These are characterization, not automatic success.
 - C3 design refinement: synchronous route retains inline execution. Prepare/seal through existing agent semantics, capture an exact seal fingerprint through a publisher helper, then atomically enqueue-and-claim a version-gated recovery request. Run the existing worker attempt runner inline with the original request options; ordinary supervisor owns subsequent attempts. Publisher checks the pinned seal under its lifecycle lock before any mutation; recovery skips resealing. The existing durable intent is authoritative for operation ID/timestamp/policy; absent intent is permitted only on the unchanged sealed first-attempt path that has never claimed an operation. Re-run current authority and curator checks. Crash reclaim is enabled only for this explicit bound request format; legacy ambiguous jobs remain fail-closed. Cover standalone share and one-shot create. Require durable inventory handoff before success for bound requests, leaving catalog projection itself asynchronous. Do not clear/cancel a bound obligation that may have committed content. Remaining design checks: exact failure budget behavior, source-file size extraction, callback API/export compatibility, and strict observer handling of inactive versus temporarily unresolved authority.
 - C3–C6 implementation/validation/review remain pending. Next action: preserve first attempt outcomes, reconcile transactions, prepare fresh matched baseline with fail-closed readiness, then close baseline before production edits.
+
+## Design review before implementation
+
+The chosen queue binding must include the canonical author-seal digest **and the full immutable operation intent** (operation ID, timestamp, publisher peer, confirmation requirement, access policy and allowed peers). Pinning only the seal would leave a gap if the intent write were interrupted or later absent: a retry could recreate the same operation ID with a different envelope. Admission reads any existing intent under the publisher lifecycle lock; otherwise it constructs the exact future intent. Publisher replay checks the binding under that same lock, rejects mismatched/corrupt intent or seal, and uses the pinned intent on the first write. It never replaces a conflicting claim. Author sealing occurs before admission and is not repeated by the bound worker. Known completed-VM no-ops retain their existing behavior after identity validation.
+
+The queue will atomically admit and lease the inline attempt, so the supervisor cannot win between enqueue and the synchronous call. Version 4 bound records alone permit expired started attempts to re-enter the validated immutable operation; version 2/3 and unbound records retain current ambiguity rules. Storage-lane compatibility must remain pinned to its actual introduction in version 3, rather than comparing against a newly bumped current version. Unknown future formats and malformed bindings must fail closed. Retryable bound obligations remain durable beyond the ordinary attempt cap, with the existing capped backoff; permanent integrity/authority refusals remain visible and are not converted to transient successes. Cancellation/clear must not erase an unfinished bound obligation. Downgrading while these records remain is unsupported and must be documented.
+
+Catalog ownership transfers only after a successful/existing inventory CAS under current authority. The existing projection supervisor seeds work for selected local-author scopes on startup and reads the durable inventory. A bound share therefore need not wait for an entire signed catalog, but cannot acknowledge completion while only a detached observer owns its inventory row. Inactive legacy lanes and already confirmed public VM rows need explicit treatment; authority transition/read failure and failed inventory writes retain the obligation. Policy mismatch must fail closed.
+
+Implementation modules planned: a publisher binding helper, queue types/parser/admission/recovery policy, an extracted agent promotion helper, strict bound inventory handoff, an inline daemon attempt helper using the existing worker runner, the two synchronous route call sites, worker option propagation, and lifecycle documentation. Keep the existing publisher failure-disposition union intact; bound queue policy owns immediate post-commit requeue. Test with the actual queue and worker runner, including durable readback into new instances, stale claim rejection, current-authority denial, changed seal/intent refusal, repeated outage beyond budget, pointer failure and post-success bookkeeping ambiguity. A real daemon process-exit/restart scenario supplements those tests and the main live comparison.
+
+## Baseline attempt ledger
+
+- Attempt 0 (`baseline`) is invalid for controlled performance comparison because readiness was bypassed. Complete request denominator: 48/48 publication admissions and finalizations, 254/256 synchronous HTTP 200 and two injected 503s. Independent RPC reconciliation: 48 successful receipts, 48 distinct hashes and wallet/nonce pairs, all ten signer pending/latest counts equal. No manual repairs. Observation stopped early with its reason recorded; final snapshot had 434 inventory rows and 393 catalog rows while projection was still draining. These are retained failure/characterization results, not a fixed-deadline performance arm.
+- Owned daemon and container for attempt 0 were stopped, listeners/processes checked, and its matching claim released. A fresh claim owns `baseline2-home`; only the monotonically increasing KA-number floor was carried forward. Fresh graph subscription is persisted before startup. Baseline 2 uses the same six wallets, pinned store image/resources and unchanged production build; preparation and a fail-closed readiness controller precede measured traffic. The frozen harness includes identical 15-second descriptor observations of both injected assets for both future arms.
+
+### Proposed ownership flow
+
+Before:
+
+```mermaid
+sequenceDiagram
+  participant HTTP
+  participant Agent
+  participant Publisher
+  participant Store
+  HTTP->>Agent: synchronous share
+  Agent->>Publisher: promote sealed asset
+  Publisher->>Store: commit content and operation intent
+  Publisher->>Store: lifecycle / head / cleanup
+  Store--xPublisher: interruption
+  Agent-->>HTTP: 503; no retry owner
+```
+
+After (planned, not yet implemented):
+
+```mermaid
+sequenceDiagram
+  participant HTTP
+  participant Agent
+  participant Queue
+  participant Publisher
+  participant Inventory
+  participant Worker
+  HTTP->>Agent: prepare unchanged sealed asset and intent binding
+  HTTP->>Queue: durable admission + inline lease
+  HTTP->>Agent: inline bound promote
+  Agent->>Publisher: validate seal and intent under lifecycle lock
+  Publisher-->>Agent: same operation committed or repaired
+  Agent->>Inventory: durable authorized inventory handoff
+  HTTP->>Queue: settle success
+  Note over Queue,Worker: Failure or expired lease retains the bound obligation
+  Worker->>Queue: claim with fresh token after backoff / expiry
+  Worker->>Agent: replay original bound operation; no reseal
+```
+
+The main live protocol is frozen at baseline-2 traffic start. Preparation completed without failure; exact starting catalog/inventory both contain 180 entries. Read-only evidence reducers additionally compare every original seal predicate, exact payload graph sets, catalog identity/version/seal digests, all 48 transaction carriers, and decoded `KnowledgeAssetCreated` events. Attempt 0's 48/48 canonical chain identities and 436/436 original seals are independently verified; its readiness invalidity remains unchanged.
