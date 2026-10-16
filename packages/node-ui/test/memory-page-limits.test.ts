@@ -27,24 +27,29 @@ beforeEach(async () => {
 afterEach(async () => { vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 
 describe('memory read limits and response-local blank resources', () => {
+  // A real multi-megabyte transport read needs a finite integration deadline
+  // under coverage; its functional assertions are not a performance budget.
   it('shrinks literal-heavy pages under the real byte cap and eventually reads every row once', async () => {
-    await store.insert(Array.from({ length: 3000 }, (_, i) => ({
-      subject: `urn:chunk:${String(i).padStart(4, '0')}`, predicate: 'urn:content', object: JSON.stringify('x'.repeat(1500)), graph,
+    // Cross the real 8 MiB limit with fewer, wider rows. This exercises the
+    // same adaptive read without making coverage CI sort thousands of rows.
+    const rowCount = 128;
+    await store.insert(Array.from({ length: rowCount }, (_, i) => ({
+      subject: `urn:chunk:${String(i).padStart(4, '0')}`, predicate: 'urn:content', object: JSON.stringify('x'.repeat(32_768)), graph,
     })));
     const seen: string[] = []; let cursor: MemoryGraphCursor | undefined;
     for (let i = 0; i < 10; i++) {
-      const page = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, cursor });
+      const page = await readMemoryGraphPage(memoryQueryDefinitions(cg)[0], cg, { includeContextGraphPartitions: true, layerLimit: rowCount, cursor });
       if (!page.ok) throw new Error(page.reason);
       expect(page.omittedRelationships).toBe(false);
-      expect(page.triples.length).toBeLessThanOrEqual(5000);
+      expect(page.triples.length).toBeLessThanOrEqual(rowCount);
       seen.push(...page.triples.map(triple => triple.subject)); cursor = page.nextCursor;
       if (!cursor) break;
     }
-    expect(cursor).toBeUndefined(); expect(seen).toHaveLength(3000); expect(new Set(seen).size).toBe(3000);
+    expect(cursor).toBeUndefined(); expect(seen).toHaveLength(rowCount); expect(new Set(seen).size).toBe(rowCount);
     const rowReads = queries.filter(query => query.includes('SELECT ?s ?p ?o ?g ?__g'));
-    expect(rowReads.some(query => query.endsWith('LIMIT 5000'))).toBe(true);
-    expect(rowReads.some(query => query.endsWith('LIMIT 2500'))).toBe(true);
-  });
+    expect(rowReads.some(query => query.endsWith('LIMIT 128'))).toBe(true);
+    expect(rowReads.some(query => query.endsWith('LIMIT 64'))).toBe(true);
+  }, 15_000);
   it('reports a response-limit failure only after the single-row minimum fails', async () => {
     vi.mocked(fetch).mockImplementation(async (_url, init) => {
       const { sparql } = JSON.parse(String(init?.body)); queries.push(sparql);
