@@ -640,24 +640,17 @@ export function createBoundedExactAssetExportCache(params: {
         if (body.byteLength < 1 || body.byteLength > EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES
           || plainBytes > EXACT_SYNC_GZIP_MAX_INFLATED_BYTES) throw invalid();
         const encodingDurationMs = performance.now() - encodeStarted;
-        let retained = false, persistence: Promise<void> | undefined;
         const encoded = createEncodedResponseLease({ metadata: metaBytes, body, plainBytes, identity: rows.identity,
           wholePayloadExports: rows.wholePayloadExports ?? 1, encodingDurationMs }, {
           assertCurrent: () => rows.assertCurrent(), release: () => rows.release(),
+          publish: reusable ? () => {
+            retainEncoded(key, body, plainBytes, rows.identity);
+            // Disk publication must not alias the caller's mutable response buffer.
+            return params.preparedContentCache?.put(diskKey, { body: body.slice(), plainBytes });
+          } : undefined,
         }, { changed, invalid });
         transferred = true;
-        return Object.freeze({ ...encoded, async assertCurrent() {
-          await encoded.assertCurrent();
-          if (!reusable) return;
-          // All callers await the same publication while the response owns its bytes.
-          if (!retained) {
-            retainEncoded(key, body, plainBytes, rows.identity); retained = true;
-            // Publication may queue behind disk work. Its verified bytes must
-            // not alias the response buffer a caller can still mutate.
-            persistence = params.preparedContentCache?.put(diskKey, { body: body.slice(), plainBytes });
-          }
-          if (persistence) { await persistence; await encoded.assertCurrent(); }
-        } });
+        return encoded;
       } finally {
         // The physical encoder settles before its row/response charge ends.
         if (!transferred) rows.release();

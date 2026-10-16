@@ -2,16 +2,17 @@ import { stripSparqlLiteralValue } from './query-binding.js';
 import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { selectContentPartitions, resolveDraftAccessPolicy, type ContentPartition, type DraftAccessPolicy } from './content-partition-policy.js';
-import { storeOptions } from './query-store-options.js';
+import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
+import { QueryResultTooLargeError } from './query-result-size-error.js';
 import {
   asGraphWriteRevisionSource,
   isSparqlHttpResponseError,
+  StoreResponseTooLargeError,
 } from '@origintrail-official/dkg-storage';
 import type {
   TripleStore,
   Quad,
   QueryResult as StoreQueryResult,
-  QueryOptions as StoreQueryOptions,
 } from '@origintrail-official/dkg-storage';
 import {
   ExactGraphReadError,
@@ -88,58 +89,6 @@ export interface ViewResolution {
    * assertions) and verifiable-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
-}
-
-function sharedDiscoveryStoreOptions(
-  options: StoreQueryOptions | undefined,
-): StoreQueryOptions | undefined {
-  if (!options?.priority && !options?.source) return undefined;
-  return {
-    priority: options.priority,
-    source: options.source,
-  };
-}
-
-interface StoreReadLane {
-  query(sparql: string): Promise<StoreQueryResult>;
-  listGraphsByPrefix(prefix: string): Promise<string[]>;
-  listGraphFamily(rootGraph: string): Promise<string[]>;
-}
-
-interface QueryStoreReadContext extends StoreReadLane {
-  readonly signal: AbortSignal | undefined;
-  readonly shared: StoreReadLane & { readonly cacheKey: string };
-}
-
-function createStoreReadLane(
-  store: TripleStore,
-  options: StoreQueryOptions | undefined,
-): StoreReadLane {
-  return {
-    query: (sparql) => store.query(sparql, options),
-    listGraphsByPrefix: (prefix) => listGraphsByPrefix(store, prefix, options),
-    listGraphFamily: (rootGraph) => listGraphFamily(store, rootGraph, options),
-  };
-}
-
-function createQueryStoreReadContext(
-  store: TripleStore,
-  queryOptions: QueryOptions | undefined,
-): QueryStoreReadContext {
-  const options = storeOptions(queryOptions);
-  const lane = createStoreReadLane(store, options);
-  const sharedOptions = sharedDiscoveryStoreOptions(options);
-  return {
-    ...lane,
-    signal: options?.signal,
-    shared: {
-      ...createStoreReadLane(store, sharedOptions),
-      cacheKey: JSON.stringify([
-        sharedOptions?.priority ?? 'normal',
-        sharedOptions?.source ?? null,
-      ]),
-    },
-  };
 }
 
 /**
@@ -498,7 +447,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
               : contextGraphPrivateUri(effectiveContextGraphId),
             ...(await this.discoverGraphScopedPrivateGraphs(
               effectiveContextGraphId,
-              reads,
+              reads.catalog,
               subGraphName,
             )),
           ]
@@ -667,7 +616,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         contextGraphId,
         options.agentAddress,
         options.assertionName,
-        reads,
+        reads.catalog,
         options.subGraphName,
       );
     }
@@ -717,7 +666,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (!options.subGraphName && !options.verifiedGraph && !(view === 'working-memory' && options.assertionName)) {
       const subNames = await this.discoverRegisteredSubGraphNames(
         contextGraphId,
-        reads,
+        reads.catalog,
       );
       for (const sub of subNames) {
         const subResolution = resolveViewGraphs(view, contextGraphId, {
@@ -1235,6 +1184,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     try {
       return await reads.query(sparql);
     } catch (err) {
+      if (err instanceof StoreResponseTooLargeError) throw new QueryResultTooLargeError(err);
       if (isSparqlHttpResponseError(err) && MALFORMED_CALLER_QUERY_STATUSES.has(err.status)) {
         throw new CallerSparqlRejectedError(err.message, err.status, { cause: err });
       }
@@ -1436,28 +1386,6 @@ function parseCanonicalIntegerBinding(value: string | undefined): bigint | undef
   } catch {
     return undefined;
   }
-}
-
-async function listGraphsByPrefix(
-  store: TripleStore,
-  prefix: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix, options)
-    : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
-}
-
-async function listGraphFamily(
-  store: TripleStore,
-  rootGraph: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`, options);
-  if (await store.hasGraph(rootGraph, options)) {
-    graphs.unshift(rootGraph);
-  }
-  return graphs;
 }
 
 function mergeSharedMemoryAndDataResults(
