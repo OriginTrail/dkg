@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
-import { EntityGraphReader, indexKey, parseSpec } from '../src/entity-search/documents.js';
+import { EntityGraphReader } from '../src/entity-search/documents.js';
+import { indexKey } from '../src/entity-search/identity.js';
+import { parseSpec } from '../src/entity-search/requests.js';
 import { EntityIndexStore } from '../src/entity-search/store.js';
 import { EntitySearchService } from '../src/entity-search/service.js';
 import { LocalEntityEmbedder } from '../src/entity-search/embedding.js';
@@ -65,7 +67,7 @@ it.each(['index', 'search'] as const)('binds %s inference to the digest even whe
   replace = true;
   if (operation === 'index') {
     const upsert = vi.spyOn(f.store, 'upsert'); await f.index();
-    expect(upsert.mock.calls[0][2]).toEqual([1, 0]);
+    expect(upsert.mock.calls[0][1].vector).toEqual([1, 0]);
   } else expect((await f.search()).entities[0].score).toBe(1);
   expect(fetch.mock.calls.filter(([url]) => url.endsWith('/api/embed'))
     .every(([, init]) => JSON.parse(init!.body as string).model === `sha256:${digest}`)).toBe(true);
