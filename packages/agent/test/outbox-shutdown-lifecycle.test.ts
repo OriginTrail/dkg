@@ -32,6 +32,7 @@ import { Rfc64BackgroundWorkDispatcherV1 } from
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.chain = new MockChainAdapter();
+  agent.workLifetime = new AgentWorkLifetime();
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
@@ -447,10 +448,10 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
     const agent = syntheticShutdownAgent();
+    agent.workLifetime.track(physical);
     Object.assign(agent, {
       started: true,
       chainPoller: null,
-      workLifetime: Object.assign(new AgentWorkLifetime(), { physicalRuns: new Set([physical]) }),
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
@@ -492,10 +493,10 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
     const agent = syntheticShutdownAgent();
+    agent.workLifetime.track(physicalCommit);
     Object.assign(agent, {
       started: true,
       chainPoller: null,
-      graphScopedStorePhysicalRuns: new Set([physicalCommit]),
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },

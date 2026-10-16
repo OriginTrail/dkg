@@ -13,7 +13,9 @@ import { nonNegativeInteger, parseIntegerEnv } from './sync-switches.js';
  * of these reserved slots, which no durable or changelog work can take: the
  * limits of those transfers are unchanged, and a reserved pull does not count
  * against them. A pull that finds no slot waits in its own bounded queue
- * instead of being refused, and is deferred after the queue timeout.
+ * instead of being refused, and is deferred after the queue timeout. A pull
+ * admitted with `reservedSlotOnly` (the Edge safety-net pull) takes only a
+ * reserved slot, so it never holds a general one.
  *
  * Env DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT; 0 turns the reserve off.
  */

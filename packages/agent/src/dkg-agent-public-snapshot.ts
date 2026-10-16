@@ -98,7 +98,6 @@ export class PublicSnapshotMethods extends DKGAgentBase {
         bindingChangedError: () => new Error("Snapshot job ownership changed"),
         asAbortError: reason => new Error("Snapshot job ownership changed", { cause: reason }),
         track: run => { this.workLifetime.track(run); },
-        untrack: run => { this.workLifetime.physicalRuns.delete(run); },
         operation: async control => {
           const assertCurrent = control.assertCurrent;
           const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
