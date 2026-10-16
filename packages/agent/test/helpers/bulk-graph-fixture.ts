@@ -128,7 +128,7 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
     router.withDuplexStream = async (...args) => { await exchange(...args); throw new Error('physical close failed'); };
   }
   const cancellation = new AbortController();
-  const run = () => exchangeBulkGraphVerified(router,nodes[1]!.peerId,request,bulkGraphTransportOptions(20_000,cancellation.signal),
+  const run = (outbound: BulkGraphRequest = request) => exchangeBulkGraphVerified(router,nodes[1]!.peerId,outbound,bulkGraphTransportOptions(20_000,cancellation.signal),
     {stagingRoot:directory, onMetrics: hooks.observe,
       verification:{contextGraphId:cg,assetUals:uals,ctx:createOperationContext('sync'),
         parseAndFilter:worker.parseAndFilter.bind(worker),processDurableBatchInWorker:(data,meta,_ctx,accept,mode)=>worker.processDurableBatch(data,meta,accept,mode),
@@ -143,5 +143,5 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
         heaps.push(assets.flatMap(a => [...a.dataQuads, ...a.metadataQuads]).reduce((n, q) => n + estimateQuadHeapBytes(q), 0));
         return authenticated;
       }});
-  return {exportCache: resources.exportCache, responderErrors,run,cancellation,source,target,groups,heaps,exports,uals,router,worker,directory,byId, supplierPeer: nodes[1]!.peerId};
+  return {request,exportCache: resources.exportCache, responderErrors,run,cancellation,source,target,groups,heaps,exports,uals,router,worker,directory,byId, supplierPeer: nodes[1]!.peerId};
 }
