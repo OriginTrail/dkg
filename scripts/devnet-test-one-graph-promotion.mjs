@@ -65,7 +65,10 @@
 // connected to for the graph's declaration, and the curator may be the only
 // one that holds it) and subscribes again with an explicit catch-up
 // (`forceCatchup`). Its bounds then count from that second subscribe, and the
-// run notes it.
+// run notes it. Likewise a subscriber must know the sub-graph `reports`
+// within 30 s of holding the definition (its writes there are refused until
+// it does); one that does not fails that check and registers the sub-graph
+// itself.
 //
 // Cases (each line of the report names the case, the report, the node and
 // what did not hold):
@@ -315,18 +318,40 @@ async function ensureDefinition(node, graph, caseId) {
 }
 
 /**
+ * Whether a subscriber that holds the graph's definition knows its sub-graph:
+ * a write into a sub-graph its author has not registered is refused. It has
+ * CHECK_MS. A node that does not know it then fails the check and registers
+ * the sub-graph itself (POST /api/sub-graph/create), as a client can, so that
+ * the later cases can write.
+ */
+async function ensureSubGraph(node, graph, caseId) {
+  const listed = await waitFor(async () => {
+    const answer = await devnet.api(node, 'GET', `/api/sub-graph/list?contextGraphId=${encodeURIComponent(graph.id)}`);
+    const names = Array.isArray(answer.json?.subGraphs) ? answer.json.subGraphs.map(sub => sub?.name) : [];
+    return { ok: names.includes(graph.sub), why: answer.status === 200 ? `it lists ${names.length ? names.join(', ') : 'no sub-graph'}` : brief(answer) };
+  }, CHECK_MS, 2000);
+  if (listed.ok) return;
+  fail(caseId, `${node.label} does not know the sub-graph ${graph.sub} of ${graph.key} ${seconds(CHECK_MS)} s after it held the definition (${listed.why}): a write it makes there is refused`);
+  const made = await devnet.api(node, 'POST', '/api/sub-graph/create', { contextGraphId: graph.id, subGraphName: graph.sub });
+  note(`case ${caseId}: ${node.label} registered the sub-graph ${graph.sub} itself: ${made.json?.created === graph.sub ? 'accepted' : brief(made)}`);
+}
+
+/**
  * A subscribe as a client makes it, with the observer of its definition and
  * synced flag, each against its deadline from this subscribe. A node that
  * holds no definition at the definition's deadline (the observer fails that
- * check) gets ensureDefinition, so that the later cases can write. Resolves
+ * check) gets ensureDefinition, and one that does not know the graph's
+ * sub-graph gets ensureSubGraph, so that the later cases can write. Resolves
  * to { observer, from, fromWhat }: the moment the node's bounds count from,
  * the second subscribe when there was one.
  */
 async function subscribeWithDefinition(node, graph, caseId) {
   const at = await graphs.subscribe(node, graph);
   const observer = io.observeSubscription(node, graph, at);
-  if ((await holdsDefinition(node, graph)).ok) return { observer, from: at, fromWhat: `${node.role} subscribed` };
-  return { observer, from: await ensureDefinition(node, graph, caseId), fromWhat: `${node.role} subscribed again` };
+  const held = (await holdsDefinition(node, graph)).ok;
+  const from = held ? at : await ensureDefinition(node, graph, caseId);
+  if (graph.sub) await ensureSubGraph(node, graph, caseId);
+  return { observer, from, fromWhat: held ? `${node.role} subscribed` : `${node.role} subscribed again` };
 }
 
 /** A settled subscription: a missing definition under `definitionCase`, the synced flag under case 8. */

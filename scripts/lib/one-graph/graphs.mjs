@@ -32,7 +32,7 @@ export function createGraphs(devnet, { stamp, say }) {
       if (typeof made.json?.contextGraphId === 'string' && made.json.contextGraphId) resolved = made.json.contextGraphId;
     }
     say(`graph ${key}: ${id} (registered, on-chain id ${created.json.onChainId ?? 'not named'}, publish policy ${publishPolicy === 0 ? 'curated' : 'open'}${sub ? `, sub-graph ${sub}` : ''})`);
-    return { key, id, resolved, registered: true, onChainId: created.json.onChainId ?? null };
+    return { key, id, resolved, sub: sub ?? null, registered: true, onChainId: created.json.onChainId ?? null };
   }
 
   /**
