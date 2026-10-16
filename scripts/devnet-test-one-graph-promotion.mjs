@@ -76,20 +76,22 @@
 //      member and variable of the profile; each Edge's status shows its peer
 //      reconciler off and VM reconciliation on, and its log one general sync
 //      slot and no queue
-//   2  reports reach every other Edge, live: edgeA and edgeB share two
-//      reports each; the curator and the other author must hold each
+//   2  reports reach every other Edge, live: the curator, edgeA and edgeB
+//      share two reports each; every other Edge must hold each
 //   3  the publish policy holds: edgeA's own publish of its second report is
 //      refused, and no Edge holds that report in Verified Memory
-//   4  promotion: the curator promotes the first report of each author; every
-//      Edge, its author included, holds it in Verified Memory and no longer in
-//      shared memory, and every report not promoted stays in shared memory
+//   4  promotion: the curator promotes the first report of each Edge, its
+//      own included; every Edge, the author included, holds it in Verified
+//      Memory and no longer in shared memory, and every report not promoted
+//      stays in shared memory
 //   5  an author whose report was promoted still shares: edgeA and edgeB
 //      share one more report each, and every other Edge must hold it
 //   6  edgeB's only sync slot is held by a large Verified Memory transfer of
 //      another graph (ONE_GRAPH_LARGE_ASSETS x ONE_GRAPH_LARGE_TRIPLES, which
 //      the curator publishes) while edgeA shares a report and the curator
-//      promotes the report of case 3. edgeB must hold the new report, and the
-//      promoted one in Verified Memory and not in shared memory, within the
+//      promotes edgeA's report of case 3 and its own second report. edgeB
+//      must hold the new report, and each promoted one in Verified Memory and
+//      not in shared memory, within the
 //      bound and while the transfer still runs. The transfer is many short
 //      admissions (`durable:<graph>:<peer>`, one or a few assets each), so a
 //      check passed after the last of them ended fails as not exercised, and
@@ -407,9 +409,9 @@ async function run() {
   await precondition(2, 'before the reports');
   const others = author => edges.running.filter(node => node !== author);
   const shared = [];
-  const byAuthor = new Map([[edgeA, []], [edgeB, []]]);
+  const byAuthor = new Map([[curator, []], [edgeA, []], [edgeB, []]]);
   const live = [];
-  for (const author of [edgeA, edgeB]) {
+  for (const author of [curator, edgeA, edgeB]) {
     for (const n of [1, 2]) {
       const record = await io.share(author, main, `${author.role} report ${n}`);
       shared.push(record);
@@ -423,6 +425,7 @@ async function run() {
   // Case 3: edgeA publishes its second report itself.
   const [a1, a2] = byAuthor.get(edgeA);
   const [b1] = byAuthor.get(edgeB);
+  const [c1, c2] = byAuthor.get(curator);
   const promoted = new Set();
   if (a2.error) fail(3, `${describe(a2)} was not written, so its publish was not tried`);
   else {
@@ -437,10 +440,10 @@ async function run() {
     await settle([io.watch(io.pairs(3, a2, edges.running, own.refused ? 'unpublished' : 'vm', { from: at, fromWhat: `${edgeA.role}'s own publish` }))]);
   }
 
-  // Case 4: the curator promotes the first report of each author.
+  // Case 4: the curator promotes the first report of each Edge, its own included.
   await precondition(4, 'before the promotions');
   const promotions = [];
-  for (const record of [a1, b1]) {
+  for (const record of [a1, b1, c1]) {
     if (record.error) {
       fail(4, `${describe(record)} was not written, so it was not promoted`);
       continue;
@@ -486,9 +489,9 @@ async function run() {
   }
   if (large && await precondition(6, 'before the large transfer')) {
     const busy = await busyEdge({ devnet, edges, graphs, io, report, caseId: 6, boundMs: BOUND_MS, stamp: STAMP, ensureDefinition }, main, large,
-      a2.error || promoted.has(a2) ? null : a2);
+      [a2, c2].filter(record => !record.error && !promoted.has(record)));
     if (busy.shared) shared.push(busy.shared);
-    if (busy.promoted) promoted.add(a2);
+    for (const record of busy.promoted) promoted.add(record);
   }
 
   // Case 7: the late Edge starts, subscribes and recovers; then it shares.

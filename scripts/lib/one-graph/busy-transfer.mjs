@@ -2,8 +2,8 @@
 // (scripts/devnet-test-one-graph-promotion.mjs): edgeB subscribes to a large
 // graph whose Verified Memory the curator has published, and while that
 // transfer holds edgeB's only general sync slot, a report arrives in the
-// graph's sub-graph and the curator promotes another one. The judgements are
-// in ../qa/one-graph-promotion.mjs.
+// graph's sub-graph and the curator promotes others. The judgements are in
+// ../qa/one-graph-promotion.mjs.
 //
 // The evidence is edgeB's own. Its log names each admission to its sync slots
 // with the general pool's policy (`Sync backpressure running <label> (global
@@ -65,13 +65,13 @@ function readSlots(devnet, node) {
 /**
  * The case. `ctx` is { devnet, edges, graphs, io, report, caseId, boundMs,
  * stamp, ensureDefinition }; `main` is the graph, `large` the large graph
- * (published), `promote` the report the curator promotes while the transfer
- * runs (or null). `ensureDefinition(node, graph, caseId)` is the suite's
+ * (published), `promotions` the reports the curator promotes while the
+ * transfer runs. `ensureDefinition(node, graph, caseId)` is the suite's
  * remedy for a subscriber that holds no definition of a graph. Returns the
- * record of the report shared in the window and whether `promote` was
- * promoted, for the cases after it: { shared, promoted }.
+ * record of the report shared in the window and the reports promoted, for
+ * the cases after it: { shared, promoted }.
  */
-export async function busyEdge(ctx, main, large, promote) {
+export async function busyEdge(ctx, main, large, promotions) {
   const { devnet, edges, graphs, io, report, caseId } = ctx;
   const { curator, edgeA, edgeB } = edges;
   const offset = devnet.logSize(edgeB);
@@ -95,7 +95,7 @@ export async function busyEdge(ctx, main, large, promote) {
   if (!seen.ok) {
     await slots.stop();
     report.fail(caseId, `not exercised: ${edgeB.label}'s transfer of the large graph was never seen in its general sync slot (last reading: ${seen.state}); raise ONE_GRAPH_LARGE_ASSETS / ONE_GRAPH_LARGE_TRIPLES`);
-    return { shared: null, promoted: false };
+    return { shared: null, promoted: [] };
   }
   const policy = admissionPolicyProblem(seen.admission);
   if (policy) report.fail(caseId, `${edgeB.label} does not run the profile's sync policy: ${policy} (its admission ${seen.admission.label})`);
@@ -105,18 +105,18 @@ export async function busyEdge(ctx, main, large, promote) {
   const handles = [];
   const shared = await io.share(edgeA, main, 'edgeA while edgeB is busy');
   handles.push(io.watch(io.pairs(caseId, shared, [edgeB, curator], 'swm')));
-  let promoted = false;
-  if (promote) {
-    const { answer, at } = await io.promote(curator, promote);
-    const outcome = promotionOutcome(answer, { authorAddress: promote.author.agentAddress });
+  const promoted = [];
+  for (const record of promotions) {
+    const { answer, at } = await io.promote(curator, record);
+    const outcome = promotionOutcome(answer, { authorAddress: record.author.agentAddress });
     if (outcome.ok) {
-      promoted = true;
+      promoted.push(record);
       const options = { from: at, fromWhat: 'promotion' };
       handles.push(io.watch([
-        ...io.pairs(caseId, promote, [edgeB, curator, edgeA], 'vm', options),
-        ...io.pairs(caseId, promote, [edgeB, curator, edgeA], 'gone', options),
+        ...io.pairs(caseId, record, [edgeB, curator, edgeA], 'vm', options),
+        ...io.pairs(caseId, record, [edgeB, curator, edgeA], 'gone', options),
       ]));
-    } else report.fail(caseId, `the curator's promotion of ${describe(promote)} while ${edgeB.label} was busy failed: ${outcome.why}`);
+    } else report.fail(caseId, `the curator's promotion of ${describe(record)} while ${edgeB.label} was busy failed: ${outcome.why}`);
   }
   const pairs = await settled(handles);
   const until = Date.now();
