@@ -1,3 +1,4 @@
+import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
 import { completionTrace } from './async-lift-completion-trace.js';
 import { traceProcessNext } from './async-lift-claim-trace.js';
@@ -385,7 +386,7 @@ function liveChainRecoveryOrigin(job: LiftJobBroadcast | LiftJobIncluded): Chain
 
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: PersistedLiftJob) => Promise<AsyncPreparedPublishPayload | null>;
-  readonly process: (owner: JournalOperation, session: ActiveLiftJobClaimSession) => Promise<LiftJob>;
+  readonly process: (session: WorkerLiftJobClaimSession) => Promise<LiftJob>;
   readonly recoverInterrupted: (
     job: LiftJob,
     scope: LiftJobTransitionScope,
@@ -618,7 +619,7 @@ export class TripleStoreAsyncLiftPublisher
 
   private readonly rawLiftJobHandler: AsyncLiftJobHandler = {
     inspectPreparedPayload: (job) => this.inspectRawLiftPreparedPayload(job),
-    process: (owner, session) => this.processRawLift(owner, session),
+    process: (session) => this.processRawLift(session),
     recoverInterrupted: (job, scope, options) => this.recoverRawLiftInterrupted(job, scope, options),
     // GH#2270 PR-3 r1 — the same held predicate the named lane uses. It SUPERSETS the legacy
     // `retry_recovery` + live-broadcast gate: every job that gate admitted persists a txHash and
@@ -644,7 +645,7 @@ export class TripleStoreAsyncLiftPublisher
 
   private readonly knowledgeAssetVmPublishJobHandler: AsyncLiftJobHandler = {
     inspectPreparedPayload: async () => null,
-    process: (owner, session) => this.processKnowledgeAssetVmPublish(owner, session),
+    process: (session) => this.processKnowledgeAssetVmPublish(session),
     recoverInterrupted: (job, scope, options) =>
       this.recoverKnowledgeAssetVmPublishInterrupted(job, scope, options),
     // GH#2270 — the named lane used to answer `false` here, which is what made a held KA VM job
@@ -1013,7 +1014,7 @@ export class TripleStoreAsyncLiftPublisher
     return traceProcessNext(walletId, async () => {
       const outcome = await this.claimCoordinator.processClaim(
         walletId,
-        async (session, owner) => await this.jobHandlerFor(session.claim.request).process(owner, session),
+        async (session) => await this.jobHandlerFor(session.claim.request).process(session),
         (release) => this.onClaimProcessingReleased(release),
       );
       return outcome.kind === 'idle' ? null : outcome.job;
@@ -1047,7 +1048,7 @@ export class TripleStoreAsyncLiftPublisher
     }
   }
 
-  private async processRawLift(owner: JournalOperation, session: ActiveLiftJobClaimSession): Promise<LiftJob> {
+  private async processRawLift(session: WorkerLiftJobClaimSession): Promise<LiftJob> {
     const claim = session.claim;
     const claimed = claim;
     const walletId = claim.claim.walletId;
@@ -1104,12 +1105,12 @@ export class TripleStoreAsyncLiftPublisher
       return await session.recordExecutionFailure('validated', preparationAttempt.error);
     }
     const prepared = preparationAttempt.value;
-    if (!prepared) return await this.finalizeNoopPublish(owner, claim);
+    if (!prepared) return await this.finalizeNoopPublish(session);
 
     const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
     // GH#2270 — the same pre-send write-ahead KA VM publish has taken since #1864. The
     // executor's typed pre-send hook records the signed hash durably before it goes on the wire.
-    const broadcastRecorder = this.createPreSendBroadcastRecorder(owner, { claim, publicByteSize });
+    const broadcastRecorder = this.createPreSendBroadcastRecorder(session, { publicByteSize });
     const publishAttempt = await this.runBusinessOperation(() => this.publishExecutor!({
       walletId,
       publishOptions: {
@@ -1127,7 +1128,7 @@ export class TripleStoreAsyncLiftPublisher
     return await this.recordWorkerPublishResult(session, publishAttempt.value, { publicByteSize });
   }
 
-  private async processKnowledgeAssetVmPublish(owner: JournalOperation, session: ActiveLiftJobClaimSession): Promise<LiftJob> {
+  private async processKnowledgeAssetVmPublish(session: WorkerLiftJobClaimSession): Promise<LiftJob> {
     const claim = session.claim;
     const claimed = claim;
     const walletId = claim.claim.walletId;
@@ -1148,7 +1149,7 @@ export class TripleStoreAsyncLiftPublisher
       return await session.recordExecutionFailure('claimed', initialPreflight.error);
     }
     if (initialPreflight.value?.action === 'noop') {
-      return await this.finalizeKnowledgeAssetVmPublishNoop(owner, claim, snapshot, snapshotMetadata);
+      return await this.finalizeKnowledgeAssetVmPublishNoop(session, snapshot, snapshotMetadata);
     }
 
     const validationAttempt = await this.runBusinessOperation(async () => {
@@ -1186,8 +1187,7 @@ export class TripleStoreAsyncLiftPublisher
     const prepared = preparationAttempt.value;
 
     const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
-    const broadcastRecorder = this.createPreSendBroadcastRecorder(owner, {
-      claim,
+    const broadcastRecorder = this.createPreSendBroadcastRecorder(session, {
       merkleRoot: request.sealMerkleRoot,
       publicByteSize,
     });
@@ -1196,7 +1196,7 @@ export class TripleStoreAsyncLiftPublisher
       return await this.failKnowledgeAssetVmPublishExecution(session, finalPreflight.error, broadcastRecorder);
     }
     if (finalPreflight.value?.action === 'noop') {
-      return await this.finalizeKnowledgeAssetVmPublishNoop(owner, claim, snapshot, snapshotMetadata);
+      return await this.finalizeKnowledgeAssetVmPublishNoop(session, snapshot, snapshotMetadata);
     }
 
     const executionAttempt = await this.runBusinessOperation(async () => {
@@ -1239,7 +1239,7 @@ export class TripleStoreAsyncLiftPublisher
           // wallet lock deliberately remains owned by this tx-bearing job:
           // only chain proof may release it for another nonce.
           onBroadcastAccepted: async (record: PreBroadcastRecord) => {
-            await this.recordRpcAccepted(owner, claim, record);
+            await this.recordRpcAccepted(session, record);
             try {
               await inheritedBroadcastAccepted?.(record);
             } finally {
@@ -1355,11 +1355,11 @@ export class TripleStoreAsyncLiftPublisher
    * a crash remains ambiguous and therefore keeps the wallet reserved.
    */
   private async recordRpcAccepted(
-    owner: JournalOperation,
-    claim: ActiveLiftJobClaim,
+    session: WorkerLiftJobClaimSession,
     record: PreBroadcastRecord,
   ): Promise<void> {
-    await this.claimCoordinator.runOwnedCheckpointTransaction(owner, claim, async (checkpoint) => {
+    const claim = session.claim;
+    await session.checkpoint(async (checkpoint) => {
       const jobId = claim.jobId;
       if (checkpoint.kind === 'advanced') {
         // Independent reconciliation may have already advanced the exact transaction. This
@@ -3154,8 +3154,7 @@ export class TripleStoreAsyncLiftPublisher
    * merges it in. `LiftJobBroadcastMetadata.merkleRoot` is optional for exactly this reason —
    * the txHash is the evidence that matters here.
    */
-  private createPreSendBroadcastRecorder(owner: JournalOperation, params: {
-    claim: ActiveLiftJobClaim;
+  private createPreSendBroadcastRecorder(session: WorkerLiftJobClaimSession, params: {
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
   }): PreSendBroadcastRecorder {
@@ -3177,8 +3176,7 @@ export class TripleStoreAsyncLiftPublisher
     // publish transaction left this node".
     let writeAhead: Promise<void> | undefined;
     const onBeforeBroadcast = (record: PreBroadcastRecord): Promise<void> => {
-      writeAhead ??= this.recordBroadcastProgressBeforeSend(owner, {
-        claim: params.claim,
+      writeAhead ??= this.recordBroadcastProgressBeforeSend(session, {
         txHash: record.txHash as LiftJobHex,
         nonce: record.nonce,
         // r3 — the branch that signed, persisted with the hash it signed (see
@@ -3208,16 +3206,15 @@ export class TripleStoreAsyncLiftPublisher
     };
   }
 
-  private async recordBroadcastProgressBeforeSend(owner: JournalOperation, params: {
-    claim: ActiveLiftJobClaim;
+  private async recordBroadcastProgressBeforeSend(session: WorkerLiftJobClaimSession, params: {
     txHash: LiftJobHex;
     nonce?: number;
     operationKind?: 'create' | 'update';
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
   }): Promise<void> {
-    await this.claimCoordinator.runPreSendTransaction(owner, params.claim, async (current, scope, restoreValidated) => {
-      const jobId = params.claim.jobId;
+    await session.preSend(async (current, scope, restoreValidated) => {
+      const jobId = session.claim.jobId;
       if (current.status === 'broadcast') return;
       if (current.status !== 'validated') {
         throw new Error(
@@ -3226,7 +3223,7 @@ export class TripleStoreAsyncLiftPublisher
       }
       await this.recordDurableBroadcastBeforeSend(current, scope, restoreValidated, {
         txHash: params.txHash,
-        walletId: params.claim.claim.walletId,
+        walletId: session.claim.claim.walletId,
         nonce: params.nonce,
         operationKind: params.operationKind,
         merkleRoot: params.merkleRoot,
@@ -3618,8 +3615,8 @@ export class TripleStoreAsyncLiftPublisher
     return this.buildTransitionJob(job, 'failed', { failure });
   }
 
-  private async finalizeNoopPublish(owner: JournalOperation, claim: ActiveLiftJobClaim): Promise<LiftJob> {
-    return await this.claimCoordinator.transitionOwned(owner, claim, async (current, scope) => {
+  private async finalizeNoopPublish(session: WorkerLiftJobClaimSession): Promise<LiftJob> {
+    return await session.transition(async (current, scope) => {
       const finalized = this.buildTransitionJob(current, 'finalized', {
         finalization: {
           mode: 'noop',
@@ -3632,12 +3629,11 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async finalizeKnowledgeAssetVmPublishNoop(
-    owner: JournalOperation,
-    claim: ActiveLiftJobClaim,
+    session: WorkerLiftJobClaimSession,
     request: LiftPublishSnapshotRequest,
     metadata: LiftPublishRequestMetadata,
   ): Promise<LiftJob> {
-    return await this.claimCoordinator.transitionOwned(owner, claim, async (current, scope) => {
+    return await session.transition(async (current, scope) => {
       let next = current;
       if (!next.validation) {
         next = this.buildTransitionJob(next, 'validated', {

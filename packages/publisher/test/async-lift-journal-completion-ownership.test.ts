@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AsyncLiftJournalCompletion } from '../src/async-lift-journal-completion.js';
-import type { LiftJobTransitionScope } from '../src/lift-job-transition-scope.js';
+import type { AsyncLiftJournalCompletion, JournalOperation } from '../src/async-lift-journal-completion.js';
+import type { LiftJobTransitionScope, WorkerLiftJobClaimSession } from '../src/lift-job-transition-scope.js';
 import { AsyncLiftRunner } from '../src/async-lift-runner.js';
 import type { AsyncLiftClaimCoordinator, AsyncLiftClaimProcessingOutcome } from '../src/async-lift-claim-session.js';
-import type { AsyncKnowledgeAssetVmPublishExecutionResult } from '../src/async-lift-publisher-types.js';
+import type { ActiveLiftJobClaim, AsyncKnowledgeAssetVmPublishExecutionResult } from '../src/async-lift-publisher-types.js';
 import { completionTrace } from '../src/async-lift-completion-trace.js';
 import { createLiftJobFailureMetadata } from '../src/lift-job-failures.js';
 import { kaVmPublishRequest, stageKnowledgeAssetShareSnapshot, KA_VM_EXECUTOR_TX_HASH, KA_VM_VALIDATION,
@@ -11,6 +11,72 @@ import { kaVmPublishRequest, stageKnowledgeAssetShareSnapshot, KA_VM_EXECUTOR_TX
 import { completeResult, completesWithin, fixture, gate, observe } from './_helpers/journal-completion.js';
 
 describe('journal completion retains operation ownership', () => {
+  it.each(['transition', 'pre-send', 'checkpoint'] as const)('keeps %s work inside the worker journal lifetime', async (kind) => {
+    const f = fixture(); const publisher = f.create();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const coordinator = (publisher as unknown as { claimCoordinator: AsyncLiftClaimCoordinator }).claimCoordinator;
+    const journal = gate(); const handler = gate();
+    let transitioned = false;
+    const processing = observe(coordinator.processClaim('wallet-1', async (worker) => {
+      await worker.update('validated', { validation: KA_VM_VALIDATION });
+      if (kind === 'checkpoint') await worker.update('broadcast', { broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-1' } });
+      const journalKind = kind === 'checkpoint' ? 'rpc-accepted' : 'broadcast';
+      f.hooks.insert = (entry) => entry.kind === journalKind ? journal.wait() : Promise.resolve();
+      const commit = async (current: import('../src/lift-job.js').LiftJob, scope: LiftJobTransitionScope) => {
+        await scope.commit({ ...current, status: 'broadcast',
+          broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-1' },
+          ...(kind === 'checkpoint' ? { timestamps: { ...current.timestamps, rpcAcceptedAt: 1_000 } } : {}),
+        } as import('../src/lift-job.js').LiftJob, journalKind);
+      };
+      if (kind === 'transition') await worker.transition(commit);
+      else if (kind === 'pre-send') await worker.preSend(commit);
+      else await worker.checkpoint(async (checkpoint) => {
+        if (checkpoint.kind !== 'owned') throw new Error('Expected owned checkpoint');
+        await commit(checkpoint.current, checkpoint.scope);
+      });
+      transitioned = true;
+      await handler.wait();
+      return worker.claim;
+    }));
+    try {
+      expect(await completesWithin(journal.reached)).toBe(true);
+      expect(await completesWithin(handler.reached)).toBe(true);
+      expect(transitioned).toBe(true);
+      expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+      expect(coordinator.isProcessing(jobId)).toBe(true);
+      handler.release();
+      expect(await completesWithin(processing.promise, 30)).toBe(false);
+      expect(coordinator.isProcessing(jobId)).toBe(true);
+    } finally { journal.release(); handler.release(); await processing.promise; }
+    expect(coordinator.isProcessing(jobId)).toBe(false);
+  });
+
+  it.each([true, false])('rejects retained specialized operations before effects after worker completion (journal=%s)', async (journalWrites) => {
+    const f = fixture(); const publisher = f.create({ journalWrites });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const coordinator = (publisher as unknown as { claimCoordinator: AsyncLiftClaimCoordinator }).claimCoordinator;
+    const entered = vi.fn(async () => {});
+    let operations!: Array<() => Promise<unknown>>;
+    await coordinator.processClaim('wallet-1', async (worker) => {
+      await worker.update('validated', { validation: KA_VM_VALIDATION });
+      operations = [
+        () => worker.transition(entered),
+        () => worker.preSend(async (_current, _scope, restore) => { entered(); await restore(); }),
+        () => worker.checkpoint(entered),
+      ];
+      return worker.claim;
+    });
+    const before = await publisher.getStatus(jobId);
+    const read = vi.spyOn(f.inner, 'query');
+    const primary = vi.spyOn(f.inner, 'replaceSubjectAndInsert');
+    const wallet = vi.spyOn(f.inner, 'replaceSubject');
+    try {
+      for (const operation of operations) await expect(Promise.resolve().then(operation)).rejects.toThrow('operation is closed');
+      expect(entered).not.toHaveBeenCalled(); expect(read).not.toHaveBeenCalled();
+      expect(primary).not.toHaveBeenCalled(); expect(wallet).not.toHaveBeenCalled();
+    } finally { read.mockRestore(); primary.mockRestore(); wallet.mockRestore(); }
+    expect(await publisher.getStatus(jobId)).toEqual(before);
+  });
   it.each(['public', 'worker'] as const)('gives %s session transitions their declared journal settlement boundary', async (kind) => {
     const f = fixture();
     const publisher = f.create();
@@ -54,7 +120,9 @@ describe('journal completion retains operation ownership', () => {
     let restoreValidated!: () => Promise<void>;
     const stillOpen = gate();
     const operation = completion.runPublicOperation(async (owner) => {
-      await coordinator.runPreSendTransaction(owner, claim, async (_job, scope, restore) => { captured = scope; restoreValidated = restore; });
+      await (coordinator as unknown as {
+        openWorkerSession(owner: JournalOperation, claim: ActiveLiftJobClaim): WorkerLiftJobClaimSession;
+      }).openWorkerSession(owner, claim).preSend(async (_job, scope, restore) => { captured = scope; restoreValidated = restore; });
       await stillOpen.wait();
     });
     const primary = vi.spyOn(f.inner, 'replaceSubjectAndInsert');

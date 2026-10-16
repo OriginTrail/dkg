@@ -1,3 +1,4 @@
+import type { ActiveLiftJobClaimSession } from './async-lift-publisher-types.js';
 import type { JournalKind, LiftJob, LiftJobAccepted, LiftJobCompatibility } from './lift-job.js';
 
 export interface ActiveLiftJobClaimTransitionBoundary {
@@ -32,3 +33,27 @@ export type LiftJobTransaction =
     readonly current: LiftJobCompatibility;
     readonly scope: LiftJobRecoveryTransitionScope;
   };
+
+/**
+ * A worker checkpoint may observe proof advancing its exact claim before the callback runs.
+ * Advanced records are deliberately read-only: only a still-owned record receives commit scope.
+ */
+export type ActiveLiftJobCheckpoint =
+  | {
+    readonly kind: 'advanced';
+    readonly current: Extract<LiftJob, { readonly status: 'included' | 'finalized' }>;
+  }
+  | {
+    readonly kind: 'owned';
+    readonly current: LiftJob;
+    readonly scope: LiftJobTransitionScope;
+  };
+
+/** Internal worker authority bound to one claim and its processing lifetime. */
+export interface WorkerLiftJobClaimSession extends ActiveLiftJobClaimSession {
+  transition<T>(run: (current: LiftJob, scope: LiftJobTransitionScope) => Promise<T>): Promise<T>;
+  preSend<T>(run: (
+    current: LiftJob, scope: LiftJobTransitionScope, restoreValidated: () => Promise<void>,
+  ) => Promise<T>): Promise<T>;
+  checkpoint<T>(run: (checkpoint: ActiveLiftJobCheckpoint) => Promise<T>): Promise<T>;
+}

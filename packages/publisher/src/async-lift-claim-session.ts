@@ -43,8 +43,8 @@ import {
   type StructurallyValidLiftJobPayload,
 } from './lift-job-payload-codec.js';
 
-import type { ActiveLiftJobClaimTransitionBoundary, LiftJobRecoveryTransitionScope, LiftJobTransitionScope, LiftJobTransaction } from './lift-job-transition-scope.js';
-export type { ActiveLiftJobClaimTransitionBoundary, LiftJobRecoveryTransitionScope, LiftJobTransitionScope, LiftJobTransaction } from './lift-job-transition-scope.js';
+import type { ActiveLiftJobCheckpoint, WorkerLiftJobClaimSession, ActiveLiftJobClaimTransitionBoundary, LiftJobRecoveryTransitionScope, LiftJobTransitionScope, LiftJobTransaction } from './lift-job-transition-scope.js';
+export type { ActiveLiftJobCheckpoint, ActiveLiftJobClaimTransitionBoundary, LiftJobRecoveryTransitionScope, LiftJobTransitionScope, LiftJobTransaction } from './lift-job-transition-scope.js';
 
 /** Diagnostic read variants exposed only to the targeted terminal-clear operation. */
 export type ClassifiedLiftJobClearTransaction =
@@ -77,21 +77,6 @@ type DecodedLiftJobTransaction =
   };
 
 type LiftJobTransactionLockMode = 'job' | 'claim-job';
-
-/**
- * A worker checkpoint may observe proof advancing its exact claim before the callback runs.
- * Advanced records are deliberately read-only: only a still-owned record receives commit scope.
- */
-export type ActiveLiftJobCheckpoint =
-  | {
-    readonly kind: 'advanced';
-    readonly current: Extract<LiftJob, { readonly status: 'included' | 'finalized' }>;
-  }
-  | {
-    readonly kind: 'owned';
-    readonly current: LiftJob;
-    readonly scope: LiftJobTransitionScope;
-  };
 
 export interface ActiveLiftJobClaimMutations {
   update(
@@ -319,7 +304,7 @@ export class AsyncLiftClaimCoordinator {
   /** Claim, process, classify stale ownership, recover unchanged claims, and always clear marker. */
   async processClaim(
     walletId: string,
-    handler: (session: ActiveLiftJobClaimSession, owner: JournalOperation) => Promise<LiftJob>,
+    handler: (session: WorkerLiftJobClaimSession) => Promise<LiftJob>,
     onProcessingReleased?: (release: AsyncLiftClaimProcessingRelease) => void,
   ): Promise<AsyncLiftClaimProcessingOutcome> {
     let claim: ActiveLiftJobClaim | null = null;
@@ -331,7 +316,7 @@ export class AsyncLiftClaimCoordinator {
         claim = await this.claimNextInternal(owner, walletId, true);
         if (!claim) return;
         try {
-          const job = await handler(this.openWorkerSession(owner, claim), owner);
+          const job = await handler(this.openWorkerSession(owner, claim));
           outcome = { kind: 'processed', job };
           release = outcome;
         } catch (error) {
@@ -374,10 +359,16 @@ export class AsyncLiftClaimCoordinator {
     );
   }
 
-  private openWorkerSession(owner: JournalOperation, claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession {
-    return new DefaultActiveLiftJobClaimSession(claim, {
-      run: (transition) => this.transitionOwned(owner, claim, transition),
-    }, this.dependencies.mutations);
+  private openWorkerSession(owner: JournalOperation, claim: ActiveLiftJobClaim): WorkerLiftJobClaimSession {
+    const transition: WorkerLiftJobClaimSession['transition'] = (run) => this.transitionOwned(owner, claim, run);
+    const specialized: Pick<WorkerLiftJobClaimSession, 'transition' | 'preSend' | 'checkpoint'> = {
+      transition,
+      preSend: (run) => this.runPreSendTransaction(owner, claim, run),
+      checkpoint: (run) => this.runOwnedCheckpointTransaction(owner, claim, run),
+    };
+    return Object.assign(new DefaultActiveLiftJobClaimSession(claim, {
+      run: transition,
+    }, this.dependencies.mutations), specialized);
   }
 
   isProcessing(jobId: string): boolean {
@@ -613,7 +604,7 @@ export class AsyncLiftClaimCoordinator {
   }
 
   /** Canonical worker transition boundary: lock, re-read, fence, and reject ended authority. */
-  transitionOwned<T>(
+  private transitionOwned<T>(
     owner: JournalOperation,
     claim: ActiveLiftJobClaim,
     transition: (current: LiftJob, scope: LiftJobTransitionScope) => Promise<T>,
@@ -622,7 +613,7 @@ export class AsyncLiftClaimCoordinator {
   }
 
   /** Only pre-send work can restore its exact captured validated record after a durability failure. */
-  runPreSendTransaction<T>(
+  private runPreSendTransaction<T>(
     owner: JournalOperation,
     claim: ActiveLiftJobClaim,
     transition: (current: LiftJob, scope: LiftJobTransitionScope, restoreValidated: () => Promise<void>) => Promise<T>,
@@ -657,7 +648,7 @@ export class AsyncLiftClaimCoordinator {
    * Worker checkpoint boundary for a callback that can be made obsolete by chain proof. The exact
    * claim fence is checked in both branches, while only a still-active owner receives write access.
    */
-  async runOwnedCheckpointTransaction<T>(
+  private async runOwnedCheckpointTransaction<T>(
     owner: JournalOperation,
     claim: ActiveLiftJobClaim,
     operation: (checkpoint: ActiveLiftJobCheckpoint) => Promise<T>,
