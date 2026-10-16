@@ -1,3 +1,4 @@
+import { isPublicSnapshotMode, type PublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
 import { isSafeIri, sparqlIri } from '@origintrail-official/dkg-core';
 import { EntitySearchError, type EntityOperation, type EntityIndexSpec, type NormalizedIndexRequest,
   type NormalizedReadinessRequest, type NormalizedSearchRequest } from './types.js';
@@ -34,6 +35,11 @@ function body(raw: unknown): Record<string, unknown> {
     || (value.restart !== undefined && typeof value.restart !== 'boolean')) return invalid();
   return value;
 }
+function evidenceMode(value: Record<string, unknown>): PublicSnapshotMode {
+  if (value.chainEvidenceMode === undefined) return 'rpc-only';
+  if (!isPublicSnapshotMode(value.chainEvidenceMode)) return invalid();
+  return value.chainEvidenceMode;
+}
 function timeout(value: Record<string, unknown>, preparation: boolean): number {
   const ms = value.timeoutMs ?? (preparation ? 30_000 : 2_000);
   if (typeof ms !== 'number' || !Number.isInteger(ms) || ms < 1 || ms > (preparation ? 30_000 : 5_000)) return invalid();
@@ -46,17 +52,17 @@ function identity(value: Record<string, unknown>): { contextGraphId: string; ind
 }
 export function parseIndexRequest(raw: unknown): NormalizedIndexRequest {
   const value = body(raw);
-  return { ...parseSpec(value), restart: value.restart === true, timeoutMs: timeout(value, true) };
+  return { ...parseSpec(value), chainEvidenceMode: evidenceMode(value), restart: value.restart === true, timeoutMs: timeout(value, true) };
 }
 export function parseReadinessRequest(raw: unknown): NormalizedReadinessRequest {
   const value = body(raw);
-  return { ...identity(value), warmup: value.warmup === true, timeoutMs: timeout(value, value.warmup === true) };
+  return { ...identity(value), chainEvidenceMode: evidenceMode(value), warmup: value.warmup === true, timeoutMs: timeout(value, value.warmup === true) };
 }
 export function parseSearchRequest(raw: unknown): NormalizedSearchRequest {
   const value = body(raw), limit = value.limit ?? 5;
   if (typeof value.query !== 'string' || !value.query.trim() || value.query.length > 6000
     || typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 20) return invalid();
-  return { ...identity(value), query: value.query, limit, timeoutMs: timeout(value, false) };
+  return { ...identity(value), chainEvidenceMode: evidenceMode(value), query: value.query, limit, timeoutMs: timeout(value, false) };
 }
 export function parseEntityOperation(kind: EntityOperation['kind'], raw: unknown): EntityOperation {
   switch (kind) {

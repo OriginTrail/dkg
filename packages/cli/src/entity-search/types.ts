@@ -1,3 +1,4 @@
+import type { PublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
 /** Derived entity indexes are discovery aids; the graph remains authoritative. */
 export interface EntityIndexSpec {
   contextGraphId: string;
@@ -5,10 +6,12 @@ export interface EntityIndexSpec {
   textPredicates: string[];
   types: string[];
 }
-export interface EntityIndexRequest extends EntityIndexSpec { restart?: boolean; timeoutMs?: number }
-export interface EntityReadinessRequest { contextGraphId: string; indexId: string; warmup?: boolean; timeoutMs?: number }
-export interface EntitySearchRequest { contextGraphId: string; indexId: string; query: string; limit?: number; timeoutMs?: number }
-export type NormalizedIndexRequest = EntityIndexSpec & { restart: boolean; timeoutMs: number };
+interface EntityReadPolicy { chainEvidenceMode?: PublicSnapshotMode }
+export type EntityReadSpec = EntityIndexSpec & EntityReadPolicy;
+export interface EntityIndexRequest extends EntityIndexSpec, EntityReadPolicy { restart?: boolean; timeoutMs?: number }
+export interface EntityReadinessRequest extends EntityReadPolicy { contextGraphId: string; indexId: string; warmup?: boolean; timeoutMs?: number }
+export interface EntitySearchRequest extends EntityReadPolicy { contextGraphId: string; indexId: string; query: string; limit?: number; timeoutMs?: number }
+export type NormalizedIndexRequest = EntityIndexSpec & Required<EntityReadPolicy> & { restart: boolean; timeoutMs: number };
 export type NormalizedReadinessRequest = Required<EntityReadinessRequest>;
 export type NormalizedSearchRequest = Required<EntitySearchRequest>;
 export type EntityOperation =

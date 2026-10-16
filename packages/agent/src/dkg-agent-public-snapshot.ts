@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: Apache-2.0
+import { createUalOnlyExactAssetSelection } from './sync/exact-assets.js';
+import { exactAssetFetchSessionPolicy } from './sync/requester/exact-durable-fetch.js';
+import * as exactRecovery from './exact-recovery-execution.js';
+import { createOperationContext } from '@origintrail-official/dkg-core';
+
+import { DKGAgentBase } from './dkg-agent-base.js';
+import { PublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
+import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
+import {
+  PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
+} from "@origintrail-official/dkg-chain";
+import { startRequestAbortLifecycle, buildKnowledgeAssetUalFromOnChainIdV1 } from "@origintrail-official/dkg-core";
+import { runGraphScopedPhysicalOperation } from "./sync/requester/graph-scoped-operation-fence.js";
+import type { DKGAgent } from "./dkg-agent.js";
+import {
+  PublicSnapshotEvidence,
+  markCoreTrustedGraph,
+} from "./public-snapshot-evidence.js";
+
+import { createPublicSnapshotReader, PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from "./public-snapshot-reader.js";
+export { PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from "./public-snapshot-reader.js";
+const encoder = new TextEncoder();
+const jobs = new WeakSet<DKGAgent>();
+import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export class PublicSnapshotMethods extends DKGAgentBase {
+  startPublicGraphSnapshots(this: DKGAgent): void {
+    if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
+      return;
+    const runtime = new PublicSnapshotServingRuntime(
+      (id, onChainId, signal) => this.chain.readPublicGraphSnapshot!(id, onChainId, { signal }),
+      this.workLifetime,
+    );
+    this.router.register(
+      PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
+      async (data, peer) => {
+        try {
+          const request = decodePublicGraphSnapshotRequest(data);
+          if (
+            !(this.subscribedContextGraphs.get(request.contextGraphId)?.subscribed
+              || this.subscribedContextGraphs.get(request.contextGraphId)?.coreHosted)
+          )
+            throw new Error("Unavailable");
+          const generation = this.contextGraphBindingState.capture(request.contextGraphId);
+          const lifetime = this.workLifetime.generation;
+          const snapshot = await runtime.get(
+            peer.toString(),
+            request.contextGraphId,
+            request.onChainId,
+            request.refresh,
+          );
+          if (lifetime !== this.workLifetime.generation
+            || !this.contextGraphBindingState.isGenerationCurrent(request.contextGraphId, generation)
+            || !(this.subscribedContextGraphs.get(request.contextGraphId)?.subscribed
+              || this.subscribedContextGraphs.get(request.contextGraphId)?.coreHosted)) throw new Error("Unavailable");
+          const response = encoder.encode(JSON.stringify(snapshot));
+          if (response.length > PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES)
+            throw new Error("Response too large");
+          return response;
+        } catch {
+          // Private, missing, overloaded and RPC-unavailable graphs have one refusal.
+          return encoder.encode('{"unavailable":true}');
+        }
+      },
+      { maxReadBytes: PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES },
+    );
+  }
+  /** Explicit foreground job. The existing background reconciler's trust policy is unchanged. */
+  async syncPublicGraphSnapshot(
+    this: DKGAgent,
+    options: PublicSnapshotSyncOptions,
+  ) {
+    const normalized = normalizePublicSnapshotSyncOptions(options);
+    const { contextGraphId, onChainId, mode, trustedCorePeerIds: peers } = normalized;
+    if (jobs.has(this)) throw new Error("A snapshot job is already running");
+    if (!this.started || this.workLifetime.closed) throw new Error("Node is stopping");
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    if (subscription && (!subscription.subscribed && !subscription.coreHosted))
+      throw new Error("Graph subscription is inactive");
+    if (subscription?.onChainId && subscription.onChainId !== onChainId)
+      throw new Error("Graph binding differs from requested snapshot");
+    const lifetime = this.workLifetime.generation;
+    jobs.add(this);
+    const startedAt = Date.now();
+    const lifecycle = startRequestAbortLifecycle(3_600_000, [
+      this.workLifetime.signal, options.signal,
+    ]);
+    const { signal } = lifecycle;
+    try {
+      return await runGraphScopedPhysicalOperation({
+        contextGraphId, signal,
+        isClosed: () => !this.started || this.workLifetime.closed,
+        captureSubscription: () => this.subscribedContextGraphs.get(contextGraphId),
+        captureBindingGeneration: () => this.contextGraphBindingState.capture(contextGraphId),
+        isBindingGenerationCurrent: generation => this.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation),
+        assertLifecycleCurrent: () => { if (lifetime !== this.workLifetime.generation) throw new Error("Snapshot job ownership changed"); },
+        closedError: () => new Error("Node is stopping"),
+        bindingChangedError: () => new Error("Snapshot job ownership changed"),
+        asAbortError: reason => new Error("Snapshot job ownership changed", { cause: reason }),
+        track: run => { this.workLifetime.track(run); },
+        operation: async control => {
+          const assertCurrent = control.assertCurrent;
+          const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
+          const expected = {
+            chainId: this.chain.chainId,
+            deploymentId: this.chain.deploymentId!,
+            contextGraphId,
+            onChainId,
+          };
+          const read = createPublicSnapshotReader({ mode, chain:this.chain, router:this.router,
+            peers, signal, expected, assertCurrent });
+          const initial = await read();
+          const snapshot = initial.snapshot;
+          assertCurrent();
+          const evidence = new PublicSnapshotEvidence(initial, isCurrent);
+          // A validated public snapshot admits this job without scheduling the
+          // daemon's separate legacy subscribe/catch-up pipeline.
+          if (!subscription?.subscribed || !subscription.onChainId) {
+            control.admitSubscription(() => this.subscribeToContextGraph(contextGraphId, {
+              onChainId,
+              syncMode: "on-demand",
+              trackSyncScope: false,
+              deferSharedMemoryGossipSubscribe: true,
+            }));
+          }
+          assertCurrent();
+          if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
+          assertCurrent();
+          const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
+          const committed = new Set<string>();
+          const recover = async (batch: string[], transport: "stream-preferred" | "legacy") => {
+            for (const peer of peers) {
+              assertCurrent();
+              const remaining = batch.filter(ual => !committed.has(ual));
+              if (!remaining.length) break;
+              const result = await exactRecovery.runExactRecovery({
+                host: DKGAgentBase.createDurableRecoveryCapabilities(this),
+                ctx: createOperationContext('sync'),
+                remotePeerId: peer, contextGraphId, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection(remaining), 'vm-update-refresh'), authority: evidence,
+                options: {
+                  signal, isCurrent,
+                  exactRecoveryTransportMode: transport,
+                  totalTimeoutMs: 120_000,
+                },
+              });
+              for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
+            }
+            return batch.filter(ual => !committed.has(ual));
+          };
+          for (let offset = 0; offset < uals.length; offset += 10) {
+            const batch = uals.slice(offset, offset + 10);
+            const remaining = await recover(batch, "stream-preferred");
+            // The stream profile excludes private commitments. Only missing assets
+            // use the bounded singleton transport, with identical authentication.
+            for (const ual of remaining) await recover([ual], "legacy");
+            if (batch.some(ual => !committed.has(ual)))
+              throw new Error(`Snapshot recovery incomplete: ${committed.size}/${uals.length} committed`);
+          }
+          // A new inventory/root comparison is required before claiming current coverage.
+          const fresh = await read(true);
+          assertCurrent();
+          const current =
+            fresh.snapshot.inventoryDigest === snapshot.inventoryDigest &&
+            fresh.snapshot.assetStorage === snapshot.assetStorage &&
+            fresh.snapshot.contextGraphStorage === snapshot.contextGraphStorage &&
+            BigInt(fresh.snapshot.blockNumber) >= BigInt(snapshot.blockNumber);
+          return {
+            mode,
+            sourceCore: initial.sourceCore,
+            coverageSourceCore: fresh.sourceCore,
+            snapshotDigest: snapshot.snapshotDigest,
+            blockNumber: snapshot.blockNumber,
+            blockHash: snapshot.blockHash,
+            inventoryDigest: snapshot.inventoryDigest,
+            assets: uals.length,
+            committed: committed.size,
+            completeAsOfSnapshot: true,
+            current,
+            startedAt,
+            finishedAt: Date.now(),
+            elapsedMs: Date.now() - startedAt,
+          };
+        },
+      });
+    } finally {
+      lifecycle.release();
+      jobs.delete(this);
+    }
+  }
+}

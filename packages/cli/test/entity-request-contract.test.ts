@@ -26,3 +26,11 @@ describe('normalized entity operation contracts', () => {
     expect(() => parseIndexRequest({ ...spec, timeoutMs: 30_001 })).toThrow('ENTITY_INVALID_REQUEST');
   });
 });
+
+it('normalizes evidence mode without adding it to the persisted index specification', () => {
+  expect(parseIndexRequest(spec).chainEvidenceMode).toBe('rpc-only');
+  for (const parse of [parseIndexRequest, parseSearchRequest, parseReadinessRequest]) {
+    expect(parse({ ...spec, ...read, chainEvidenceMode: 'core-cache' }).chainEvidenceMode).toBe('core-cache');
+    expect(() => parse({ ...spec, ...read, chainEvidenceMode: 'cached-authority' })).toThrow('ENTITY_INVALID_REQUEST');
+  }
+});

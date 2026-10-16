@@ -23,7 +23,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
       version: BOUNDED_QUERY_VERSION, maxRows: BOUNDED_QUERY_MAX_ROWS,
       maxResultBytes: BOUNDED_QUERY_MAX_BYTES, maxTimeoutMs: BOUNDED_QUERY_MAX_TIMEOUT_MS,
       coverage: 'local-only', truncation: 'error',
-      paging: 'offset',
+      paging: 'offset', chainEvidenceModes: ['rpc-only', 'core-cache'],
     });
     return;
   }
@@ -45,7 +45,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
   try {
     const options = {
       contextGraphId: parsed.contextGraphId, callerAgentAddress, view: query.view,
-      includeContextGraphPartitions: query.includeContextGraphPartitions,
+      includeContextGraphPartitions: query.includeContextGraphPartitions, chainEvidenceMode: query.chainEvidenceMode,
       excludeWorkingMemoryPartitions: true, requireCompleteGraphScope: true,
       signal, priority: lifecycle.priority, source: lifecycle.source,
       accessDenied: 'error' as const, redactQuery: true, maxResponseBytes: BOUNDED_QUERY_MAX_BYTES,
@@ -64,7 +64,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
     // Bindings are caller data: error-shaped variable names must stay byte-exact.
     const body = JSON.stringify({
       version: BOUNDED_QUERY_VERSION, queryId: randomUUID(), observedAt: new Date().toISOString(),
-      contextGraphId: parsed.contextGraphId, coverage: 'local-only', ...bounded.response,
+      contextGraphId: parsed.contextGraphId, coverage: 'local-only', chainEvidenceMode: query.chainEvidenceMode ?? 'rpc-only', ...bounded.response,
     });
     if (performance.now() >= deadlineAt) throw new DOMException("Query deadline exceeded", "TimeoutError");
     sendSerializedJsonResponse(res, 200, body);

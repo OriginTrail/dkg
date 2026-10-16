@@ -192,6 +192,22 @@ it('rejects synchronous store results completed after the absolute deadline', as
   } finally { await store.close(); }
 });
 
+it('forwards explicit core trust, labels the result and refuses unknown modes', async () => {
+  const agent = { query: vi.fn(async () => ({bindings:[]})) };
+  const read = context(agent, {chainEvidenceMode:'core-cache'});
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(agent.query.mock.calls[0][1].chainEvidenceMode).toBe('core-cache');
+  expect(JSON.parse(read.res.body).chainEvidenceMode).toBe('core-cache');
+  const invalid = context(agent, {chainEvidenceMode:'auto'});
+  await handleBoundedQueryRoutes(invalid.ctx);
+  expect(invalid.res.statusCode).toBe(400);
+  agent.query.mockRejectedValueOnce(Object.assign(new Error('trust required'),{code:'CORE_CACHE_QUERY_TRUST_REQUIRED'}));
+  const strict = context(agent);
+  await handleBoundedQueryRoutes(strict.ctx);
+  expect(strict.res.statusCode).toBe(409);
+  expect(JSON.parse(strict.res.body).code).toBe('CORE_CACHE_QUERY_TRUST_REQUIRED');
+});
+
 // The route serializes a result twice: to measure it against the byte bound,
 // then to send it. Either can outlast the deadline while timers cannot run.
 it.each([1, 2])('rejects a valid result whose serialization %i ends after the deadline', async late => {
@@ -412,7 +428,7 @@ it('forwards the authenticated caller and response ceiling through scoped agent 
     grantScope: options.callerAgentAddress === 'member' ? 'caller' : 'none',
     source: 'registered-chain', reason: 'private-roster', metadataBootstrap: 'forbidden',
   }));
-  const agent = composedAgent({ queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+  const agent = composedAgent({ store, queryEngine: engine, log: { info() {} }, peerId: 'fixture',
     resolveContextGraphReadAuthority: authority, subscribedContextGraphs: new Map() });
   const routeAgent = agent;
   try {
@@ -511,7 +527,7 @@ it.each(['complete', 'page'] as const)('never claims a complete %s result after 
     await store.insert([{ subject: 'urn:vm-only', predicate: 'urn:p', object: '"match"',
       graph: 'did:dkg:context-graph:test/_verifiable_memory/a' }]);
     const engine = new DKGQueryEngine(store);
-    const agent = composedAgent({ queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+    const agent = composedAgent({ store, queryEngine: engine, log: { info() {} }, peerId: 'fixture',
       resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public',
         source: 'registered-chain', reason: 'fixture', metadataBootstrap: 'eligible' }),
       subscribedContextGraphs: new Map() });
@@ -535,8 +551,9 @@ it.each(['unknown', 'thrown', 'ontology'] as const)('preserves metadata chain-pr
       if (proof === 'thrown') throw new Error('RPC unavailable');
       return { state: 'unknown', reason: 'rpc-failure' };
     },
-    store: { query: async (_sparql: string, options: { source: string }) => ({ type: 'boolean',
-      value: proof === 'ontology' && options.source.endsWith('ontologyDeclaration') }) },
+    store: { query: async (sparql: string, options: { source: string }) => sparql.startsWith('SELECT ?mode')
+      ? { type: 'bindings', bindings: [] }
+      : { type: 'boolean', value: proof === 'ontology' && options.source.endsWith('ontologyDeclaration') } },
     chain: {}, localApprovedAgentByCG: new Map(), subscribedContextGraphs: new Map(),
     isPrivateContextGraph: async () => false,
   });

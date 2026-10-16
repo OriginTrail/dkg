@@ -1,4 +1,6 @@
-import { classifyScopedContentGraph } from './scoped-content-partition.js';
+import { stripSparqlLiteralValue } from './query-binding.js';
+import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
+import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { selectContentPartitions, resolveDraftAccessPolicy, type ContentPartition, type DraftAccessPolicy } from './content-partition-policy.js';
 import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
@@ -696,8 +698,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       )));
     }
 
-    // De-dup so a sub-graph never gets unioned twice.
-    const dedupedGraphs = [...new Set(allGraphs)];
+    // Parent authorization never grants access to a registered child context graph.
+    const children = await this.discoverKnownChildContextGraphUris(contextGraphId, reads.catalog);
+    const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
     allGraphs.length = 0;
     allGraphs.push(...dedupedGraphs);
 
@@ -1098,20 +1101,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     reads: StoreReadLane,
   ): Promise<Set<string>> {
     const names = new Set<string>();
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const result = await reads.query(
-      `SELECT ?name WHERE {
-        GRAPH <${assertSafeIri(metaGraph)}> {
-          ?subGraph a <http://dkg.io/ontology/SubGraph> ;
-                    <http://schema.org/name> ?name .
-        }
-      }`,
-    );
+    const result = await reads.query(`SELECT ?name WHERE { ${registeredSubGraphPattern(contextGraphId)} }`);
     if (result.type !== 'bindings') return names;
 
     for (const row of result.bindings) {
-      const name = stripSparqlLiteralValue(row['name']);
-      if (validateSubGraphName(name).valid) {
+      const name = decodeRegisteredSubGraphName(row['name']);
+      if (name !== undefined) {
         names.add(name);
       }
     }
@@ -1381,10 +1376,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
 }
 
-function stripSparqlLiteralValue(value: string | undefined): string {
-  if (!value) return '';
-  return value.replace(/^"/, '').replace(/"(?:\^\^<[^>]+>|@[a-zA-Z-]+)?$/, '');
-}
+
 
 function parseCanonicalIntegerBinding(value: string | undefined): bigint | undefined {
   const lexical = stripSparqlLiteralValue(value);

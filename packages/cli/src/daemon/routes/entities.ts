@@ -6,6 +6,7 @@ import { EntitySearchError, checkDeadline } from '../../entity-search/types.js';
 import { jsonResponse, readBody, safeParseJson, SMALL_BODY_BYTES, validateRequiredContextGraphId,
   respondIfStoreUnavailable, respondIfContextGraphReadAuthorityUnavailable } from '../http-utils.js';
 import { createStoreQueryRequestLifecycle, isApiQueryCallerDisconnected } from '../store-query-lifecycle.js';
+import { respondToQueryFailure } from './query-error.js';
 import type { RequestContext } from './context.js';
 
 export async function handleEntityRoutes(ctx: RequestContext): Promise<void> {
@@ -38,12 +39,13 @@ export async function handleEntityRoutes(ctx: RequestContext): Promise<void> {
       case 'search': reply = await entitySearch.search(operation.request, reader, signal, deadline); break;
     }
     checkDeadline(signal, deadline);
-    jsonResponse(res, 200, { version: 1, ...reply });
+    jsonResponse(res, 200, { version: 1, ...reply, chainEvidenceMode: operation.request.chainEvidenceMode });
   } catch (error) {
     if (lifecycle.signal.aborted || isApiQueryCallerDisconnected(error)) return;
     if (signal.aborted || performance.now() >= deadline) { jsonResponse(res, 503, { code: 'QUERY_DEADLINE_EXCEEDED' }); return; }
     if (error instanceof EntitySearchError) { jsonResponse(res, error.status, { code: error.code }); return; }
     if ((error as { code?: string })?.code === 'QUERY_ACCESS_DENIED') { jsonResponse(res, 403, { code: 'QUERY_ACCESS_DENIED' }); return; }
+    if (respondToQueryFailure(res, error)) return;
     if (respondIfStoreUnavailable(res, error) !== null || respondIfContextGraphReadAuthorityUnavailable(res, error)) return;
     jsonResponse(res, 503, { code: 'ENTITY_SEARCH_UNAVAILABLE' });
   } finally { lifecycle.dispose(); }

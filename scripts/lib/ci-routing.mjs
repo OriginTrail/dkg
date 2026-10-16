@@ -450,6 +450,7 @@ export const PATH_TRIGGERS = Object.freeze([
     // reads these sources and asserts their authority RPC call sites.
     patterns: [
       /^packages\/agent\/src\/dkg-agent-(?:cg-registry|context-graph|join|lifecycle|query)\.ts$/,
+      /^packages\/agent\/src\/remote-query-handler\.ts$/,
       /^packages\/publisher\/src\/workspace-handler\.ts$/,
       /^packages\/cli\/src\/daemon\/routes\/(?:memory|query-catalog)\.ts$/,
     ],

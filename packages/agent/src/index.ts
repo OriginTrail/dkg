@@ -1,3 +1,6 @@
+export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
+export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 export {
   QueryResultTooLargeError,
   isQueryResultTooLargeError,

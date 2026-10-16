@@ -1,16 +1,22 @@
-import type { GetView, TrustLevel, OperationContext } from '@origintrail-official/dkg-core';
-
+// SPDX-License-Identifier: Apache-2.0
+import type {
+  GetView,
+  TrustLevel,
+  OperationContext,
+} from "@origintrail-official/dkg-core";
+import type { PublicSnapshotMode } from "./public-snapshot-evidence.js";
 export interface AgentQueryOptions {
   contextGraphId?: string;
-  /** Security consumers must distinguish a denied dataset from no matches. */
-  accessDenied?: 'empty' | 'error';
+  accessDenied?: "empty" | "error";
+  /** Require routing to preserve every selected graph. */
   requireCompleteGraphScope?: boolean;
-  /** Suppress caller-supplied query text in normal query diagnostics. */
   redactQuery?: boolean;
   maxResponseBytes?: number;
-  /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
+  /** Independent literal hydration limit; defaults to the response cap. */
   maxLiteralHydrationBytes?: number;
-  graphSuffix?: '_shared_memory';
+  /** Explicit acceptance of configured-core chain evidence for this graph. */
+  chainEvidenceMode?: PublicSnapshotMode;
+  graphSuffix?: "_shared_memory";
   includeSharedMemory?: boolean;
   /** @deprecated Use includeSharedMemory */
   includeWorkspace?: boolean;
@@ -30,7 +36,7 @@ export interface AgentQueryOptions {
   /** Cancel the underlying store request when the outer caller disconnects. */
   signal?: AbortSignal;
   /** Store admission lane used by the query engine. */
-  priority?: import('@origintrail-official/dkg-storage').StoreWorkPriority;
+  priority?: import("@origintrail-official/dkg-storage").StoreWorkPriority;
   /** Store diagnostics / slow-query attribution label. */
   source?: string;
   operationCtx?: OperationContext;

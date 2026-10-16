@@ -87,11 +87,11 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
 
   protected prepareVmReconcileSweep(this: DKGAgent) {
     if (this.started && !this.vmReconcileRuntimeReady) return;
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const lifecycleSignal = this.workLifetime?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
       && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+      && this.workLifetime.generation === lifecycleGeneration;
     const scheduling = this.vmReconcileScheduling;
     if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !scheduling) return;
     return { scheduling, isLifecycleCurrent, lifecycleSignal, ...this.selectVmReconcileTargets() };
