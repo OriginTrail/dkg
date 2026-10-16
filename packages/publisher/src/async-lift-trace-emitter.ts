@@ -1,42 +1,36 @@
 import { createHash } from 'node:crypto';
 
-export interface TraceSources {
+export interface TraceSink {
   enabled(): boolean;
-  clock(): number;
-  monotonicNs?(): bigint;
-  wallClock(): number;
   write(line: string): void;
+}
+
+export interface TraceClockSnapshot {
+  readonly monotonicMs: number;
+  readonly wallTimeMs: number;
+  readonly hrtimeNs?: string;
 }
 
 export type TraceFields = Readonly<Record<string, string | number | boolean | undefined>>;
 
-export function isTraceEnabled(source: Pick<TraceSources, 'enabled'>): boolean {
+export function isTraceEnabled(source: Pick<TraceSink, 'enabled'>): boolean {
   try { return source.enabled(); } catch { return false; }
 }
 
 /** One fail-open emission boundary; event owners retain sequencing and duration semantics. */
 export function emitTrace(
-  source: TraceSources,
+  source: TraceSink,
   prefix: string,
-  clockOrder: 'wall-first' | 'native-first',
   event: string,
+  sampleClocks: () => TraceClockSnapshot,
   fields: (monotonicMs: number) => TraceFields,
   walletId?: string,
   claimToken?: string,
 ): number | undefined {
   try {
     if (!isTraceEnabled(source)) return undefined;
-    const monotonicMs = source.clock();
-    // Preserve each existing stream's sampling order, including optional native-clock omission.
-    let wallTimeMs: number;
-    let hrtimeNs: string | undefined;
-    if (clockOrder === 'wall-first') {
-      wallTimeMs = source.wallClock();
-      hrtimeNs = source.monotonicNs?.().toString();
-    } else {
-      hrtimeNs = source.monotonicNs!().toString();
-      wallTimeMs = source.wallClock();
-    }
+    // Each stream owns its clock requirements and sampling order inside this fail-open boundary.
+    const { monotonicMs, wallTimeMs, hrtimeNs } = sampleClocks();
     source.write(`${prefix}${JSON.stringify({
       schemaVersion: 1, processId: process.pid, event, wallTimeMs, monotonicMs, hrtimeNs,
       ...fields(monotonicMs),

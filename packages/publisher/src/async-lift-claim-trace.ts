@@ -1,10 +1,14 @@
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import { withClaimDomainLock, type ClaimLockKind, type ClaimLockQueue } from './async-lift-claim-lock.js';
 
-import { emitTrace, type TraceFields, type TraceSources } from './async-lift-trace-emitter.js';
+import { emitTrace, type TraceClockSnapshot, type TraceFields, type TraceSink } from './async-lift-trace-emitter.js';
 
 export type { ClaimLockKind } from './async-lift-claim-lock.js';
-export type ClaimTraceSources = TraceSources;
+export interface ClaimTraceSources extends TraceSink {
+  clock(): number;
+  wallClock(): number;
+  monotonicNs?(): bigint;
+}
 const logger = new Logger('AsyncLiftPublisher');
 const sources: ClaimTraceSources = {
   enabled: () => process.env.DKG_ASYNC_PUBLISH_TRACE === '1',
@@ -20,7 +24,13 @@ export class ClaimTrace {
   constructor(private readonly source: ClaimTraceSources = sources) {}
 
   emit(event: string, fields: TraceFields = {}, walletId?: string, claimToken?: string): number | undefined {
-    return emitTrace(this.source, 'async_publish_claim_trace ', 'wall-first', event, (monotonicMs) => ({
+    const source = this.source;
+    return emitTrace(source, 'async_publish_claim_trace ', event, (): TraceClockSnapshot => {
+      const monotonicMs = source.clock();
+      const wallTimeMs = source.wallClock();
+      const hrtimeNs = source.monotonicNs?.().toString();
+      return { monotonicMs, wallTimeMs, hrtimeNs };
+    }, (monotonicMs) => ({
       ...fields,
       ...(typeof fields.acquiredAtMs === 'number' ? { holdMs: monotonicMs - fields.acquiredAtMs } : {}),
     }), walletId, claimToken);

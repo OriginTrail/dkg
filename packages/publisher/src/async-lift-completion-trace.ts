@@ -1,11 +1,17 @@
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
-import { emitTrace, isTraceEnabled, type TraceSources } from './async-lift-trace-emitter.js';
+import { emitTrace, isTraceEnabled, type TraceClockSnapshot, type TraceSink } from './async-lift-trace-emitter.js';
 
 type CompletionEvent = 'accepted_primary_committed' | 'terminal_primary_committed'
   | 'terminal_operation_settled' | 'wallet_ownership_released' | 'finality_observed';
 
-export interface CompletionTraceSources extends TraceSources {
+export interface CompletionTraceSources extends TraceSink {
+  clock(): number;
   monotonicNs(): bigint;
+  wallClock(): number;
+}
+
+interface CompletionClockSnapshot extends TraceClockSnapshot {
+  readonly hrtimeNs: string;
 }
 
 const logger = new Logger('AsyncLiftPublisher');
@@ -40,7 +46,13 @@ export class AsyncLiftCompletionTrace {
     jobId: string,
     context: { txHash?: string; walletId?: string; claimToken?: string } = {},
   ): void {
-    emitTrace(this.source, 'async_publish_completion_trace ', 'native-first', event, () => ({
+    const source = this.source;
+    emitTrace(source, 'async_publish_completion_trace ', event, (): CompletionClockSnapshot => {
+      const monotonicMs = source.clock();
+      const hrtimeNs = source.monotonicNs().toString();
+      const wallTimeMs = source.wallClock();
+      return { monotonicMs, wallTimeMs, hrtimeNs };
+    }, () => ({
       sequence: ++this.sequence, jobId,
       ...(context.txHash === undefined ? {} : { txHash: context.txHash }),
     }), context.walletId, context.claimToken);
