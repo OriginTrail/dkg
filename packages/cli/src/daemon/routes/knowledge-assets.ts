@@ -1,5 +1,5 @@
-import { durableRecoveryDetails, partialDurableShareFailure } from './durable-share-response.js';
-import { durableSynchronousShare, durableShareFailureBody, synchronousShareSuccessBody } from './durable-synchronous-share.js';
+import { durableRecoveryDetails, partialDurableShareFailure, classifySynchronousShareFailure, isDurableSharePartialUnavailable } from './durable-share-response.js';
+import { durableSynchronousShare, synchronousShareSuccessBody } from './durable-synchronous-share.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { classifyKaIdentifier, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
@@ -1042,8 +1042,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "promoted", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
           }
         } catch (e: any) {
-          const recovery = durableShareFailureBody(e);
-          if (recovery) return jsonResponse(res, 503, partialDurableShareFailure(result, recovery, name), undefined, { 'Retry-After': '1' });
+          if (isDurableSharePartialUnavailable(e)) {
+            const failure = classifySynchronousShareFailure(e, { contextGraphId: resolvedContextGraphId, name, subGraphName, phase: 'swm-share' });
+            return jsonResponse(res, failure.status, partialDurableShareFailure(result, failure.body, name), undefined, failure.headers);
+          }
           Object.assign(result, durableRecoveryDetails(e));
           if (respondWithPartialStoreFailure(e, 'swm-share')) return;
           errors.push({ phase: "swm-share", error: sanitizeRpcMessage(e?.message ?? String(e)) });
@@ -1391,21 +1393,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
         return jsonResponse(res, 200, synchronousShareSuccessBody(share));
       } catch (e: any) {
-        const recovery = durableShareFailureBody(e);
-        if (recovery) return jsonResponse(res, 503, recovery, undefined, { 'Retry-After': '1' });
-        if (respondIfStoreUnavailable(res, e)) return;
-        // A full share that cannot seal fails closed with WM preserved.
-        if (e?.code === "UNSEALED_SHARE_BLOCKED") {
-          return jsonResponse(res, 409, { code: "UNSEALED_SHARE_BLOCKED", error: e.message, recovery: e.recovery, ...durableRecoveryDetails(e) });
-        }
-        if (e?.code === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
-          return jsonResponse(res, 409, {
-            code: "KA_NAMED_GRAPH_SHARE_UNSUPPORTED", ...durableRecoveryDetails(e),
-            error: e.message,
-            namedGraphs: Array.isArray(e.namedGraphs) ? e.namedGraphs : undefined,
-          });
-        }
-        throw e;
+        const failure = classifySynchronousShareFailure(e, { contextGraphId, name, subGraphName, phase: 'swm-share' });
+        return jsonResponse(res, failure.status, failure.body, undefined, failure.headers);
       }
     }
 

@@ -5,6 +5,13 @@ import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 import { prepareAssertionPromote } from './assertion-promote-precommit.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../../dkg-agent-publish.js';
 
+function assertCompatibleAcknowledgement(required: boolean, requested?: boolean): void {
+  if (requested === true && !required) {
+    throw Object.assign(new Error('The existing immutable share operation did not require curator acknowledgement; an explicit stronger acknowledgement request cannot reuse that operation.'),
+      { code: 'KA_PROMOTE_ACK_REQUIREMENT_CONFLICT' });
+  }
+}
+
 async function prepareShareSeal(agent: DKGAgent, contextGraphId: string, name: string,
   promoteAgentAddress: string, opts?: AssertionPromoteOptions): Promise<void> {
   if (opts?.skipSeal) {
@@ -70,6 +77,7 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
       completedResult: { promotedCount: 0, sealed: true, publishReady: false,
         ...(recoveryBinding.completedResult.shareOperationId ? { shareOperationId: recoveryBinding.completedResult.shareOperationId } : {}) } };
   }
+  assertCompatibleAcknowledgement(recoveryBinding.intent.confirmationRequired, opts?.awaitCuratorAck);
   return { agentAddress: storageLane, recoveryBinding, completedResult: undefined };
 }
 
@@ -81,6 +89,7 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
       throw new Error('Bound recovery requires a sealed, complete Knowledge Asset');
     }
     const binding = validatePromoteRecoveryBinding(opts.recoveryBinding);
+    assertCompatibleAcknowledgement(binding.intent.confirmationRequired, opts.awaitCuratorAck);
     opts = { ...opts, recoveryBinding: binding, awaitCuratorAck: binding.intent.confirmationRequired,
       accessPolicy: binding.intent.accessPolicy, allowedPeers: [...binding.intent.allowedPeers] };
   }

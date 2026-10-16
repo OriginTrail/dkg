@@ -13,3 +13,6 @@ See the [self-contained report](../2026-10-16-2963-share-recovery.md) for interp
 - `invalid-attempt/`: retained request denominator and correctness evidence from the readiness-invalid first attempt; excluded from the controlled performance comparison.
 
 `candidate/` contains the same complete evidence set for the first candidate at `7dfc334200bb2a716e7dc11cf25ec7a033cd9481`: 2/2 automatic recoveries, 436/436 exact catalog entries and descriptors, with higher publication latency in this pair. Both arms use the corrected whole-graph content audit. Final review-fixed runtime and actual restart evidence are still pending. No manual repair counts as automatic recovery.
+
+
+`baseline3/` contains the same full evidence set for clean merged base `2aba84de35754e5663b52018f9781a6e6c8b948d`: 0/2 automatic recoveries, exactly 434/436 catalog entries and descriptors, 48/48 publications, all original content/identities preserved and all 98 transactions accounted for. It is the baseline for the final review-fixed candidate, not a replacement for the original pair.

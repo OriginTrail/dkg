@@ -3,6 +3,7 @@ import { createOperationContext, canonicalGraphScopedAuthorSealFromAssertionSeal
 import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
 import { commitDurableShareInventory } from '../../agent/src/internal/promote/durable-share-inventory.js';
 import { AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, NETWORK_ID, seedDurableWorkspaceAssetV1, startRepairAgentV1 } from '../../agent/test/support/rfc64-local-catalog-repair-fixture.js';
+import { rfc64SwmInventoryShadowRuntimeV1 } from '../../agent/src/rfc64/swm-inventory-shadow-runtime-v1.js';
 import { runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
 
 describe('bound worker owns the real inventory CAS', () => {
@@ -50,4 +51,43 @@ describe('bound worker owns the real inventory CAS', () => {
     expect(snapshot?.rows).toHaveLength(1);
     expect(snapshot?.rows[0]).toMatchObject({ kaUal: seeded.seal.kaUal, assertionCoordinate: seeded.assertionCoordinate });
   });
+
+  it('serializes a prepared bound handoff before public VM inventory removal', async () => {
+    const agent = await startRepairAgentV1({ name: 'bound-confirmation-race' });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    agent.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+    await agent.whenRfc64CatalogResponsibilitiesIdleV1();
+    await agent.whenRfc64CatalogSupervisorsIdleV1();
+    const seeded = await seedDurableWorkspaceAssetV1(agent, 'confirmation-race', 92n);
+    let resume!: () => void, prepared!: () => void;
+    const paused = new Promise<void>(resolve => { prepared = resolve; });
+    const release = new Promise<void>(resolve => { resume = resolve; });
+    const original = (agent as any).prepareRfc64SwmAuthorInventoryRowV1.bind(agent);
+    vi.spyOn(agent as any, 'prepareRfc64SwmAuthorInventoryRowV1').mockImplementationOnce(async (...args) => {
+      const row = await original(...args); prepared(); await release; return row;
+    });
+    const params = { contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seeded.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR, shareOperationId: seeded.shareOperationId, ctx: createOperationContext('share') };
+    const handoff = commitDurableShareInventory(agent, params);
+    await paused;
+    const runtime = rfc64SwmInventoryShadowRuntimeV1(agent);
+    const handoffTracked = runtime.hasInventoryWrites({ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR });
+    let removed = false;
+    const confirmation = agent.observeRfc64ConfirmedVmV1({ contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: seeded.assertionCoordinate, shareOperationId: seeded.shareOperationId,
+      seal: seeded.seal, assertionUri: 'urn:confirmed:race',
+      ctx: createOperationContext('publish'), publicationLabel: 'queued publish' }).then(result => { removed = true; return result; });
+    try {
+      expect(handoffTracked).toBe(true);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(removed).toBe(false);
+    } finally {
+      resume();
+    }
+    await handoff;
+    expect(await confirmation).toBe(true);
+    expect(agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR })?.rows ?? []).toHaveLength(0);
+    expect(runtime.hasInventoryWrites({ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR })).toBe(false);
+  });
+
 });

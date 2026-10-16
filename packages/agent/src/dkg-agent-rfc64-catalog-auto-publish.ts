@@ -596,10 +596,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
    * boundary: a storage failure proven never to have started keeps its raw type
    * (the queue retries it directly), anything else becomes a post-commit
    * failure, and a replay of the same committed operation repairs both. The
-   * RFC-64 shadow observer is scheduled regardless and sits OUTSIDE that
-   * boundary: it is admitted to a bounded detached scheduler that cannot throw,
-   * so it cannot delay an already-committed user operation, and it does not
-   * depend on the pointer.
+   * Bound synchronous jobs await the authorized inventory CAS under the asset
+   * write lock before completion. Other callers retain the detached RFC-64
+   * shadow observer, scheduled even when the pointer stamp fails.
    */
   async afterDurableSwmPromotionV1(
     this: DKGAgent,

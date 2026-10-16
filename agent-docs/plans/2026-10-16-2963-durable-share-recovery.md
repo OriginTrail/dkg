@@ -4,14 +4,14 @@
 
 The synchronous share path can commit sealed content and lose its lifecycle/catalog tail without a durable retry owner. Manual replay validates and resumes the immutable operation, but neither the HTTP error nor restart creates a worker obligation. Establish a live baseline on the optimized publisher before changing production code, then add durable ownership of this narrowly validated recovery path. The principal risk is replaying a different asset version, bypassing authority, or repeating uncertain side effects.
 
-Status: controlled baseline preserved; implementation and local regressions underway. Single implementation owner: this chat. Independent remote review is required before completion; initial plan review uses separate self-review passes.
+Status: original baseline/candidate pair preserved (0/2 versus 2/2 automatic recoveries); PR #3300 under third review round. A clean merged-base baseline is observing its fixed deadline before final-candidate validation. Actual process restart remains required. Single implementation owner: this chat. Independent remote review is required before completion; initial plan review uses separate self-review passes.
 
 ## Sources and branch
 
 - [Issue and acceptance criteria](https://github.com/OriginTrail/dkg/issues/2963).
 - [Live partial commit and manual recovery](https://github.com/OriginTrail/dkg/issues/2963#issuecomment-6217273362): original failing store call unknown. Missing lifecycle state is consistent with delete/insert interruption, not proof of that exact original call.
 - [Related investigation](https://github.com/OriginTrail/dkg/issues/3252).
-- [Performance PR](https://github.com/OriginTrail/dkg/pull/3253) remains open, head `9436b5c927f9fc8e5eb0cd5523da785dfa1cdd75`; target `codex/3252-async-publisher-performance`. Our branch is `codex/2963-durable-share-recovery`. Recheck before PR creation and retarget to `testnet-canary` after parent merge. Never merge either PR.
+- [Performance PR](https://github.com/OriginTrail/dkg/pull/3253) merged at 2026-10-16T18:08:57Z, original tested head `9436b5c927f9fc8e5eb0cd5523da785dfa1cdd75`. Our separate [PR #3300](https://github.com/OriginTrail/dkg/pull/3300), branch `codex/2963-durable-share-recovery`, was retargeted from the parent branch to `testnet-canary` and merged base `2aba84de35754e5663b52018f9781a6e6c8b948d`. Never merge either PR ourselves.
 - Baseline includes diagnosticCode, requeued retryable flags, clear protection and post-commit 503 mapping already. Verify rather than duplicate them.
 
 ## Inspected architecture and causal chain
@@ -145,3 +145,22 @@ Self-review identified a completed pre-intent SWM case that the new admission bi
 #3253 merged as 8aa7b3ab82ff8ebac3771d7898bafb69e570ea26 while review response was underway. Retarget #3300 to testnet-canary and merge its current head 2aba84de3 (do not rebase). The base also includes substantial v14 sync/storage work, so the prior 9436b5c baseline / 7dfc334 candidate comparison remains preserved but cannot isolate the recovery fix on that new runtime. Run an additional clean baseline from 2aba84de3 in a separate managed worktree before running the integrated candidate. Use the frozen 48-publication/256-share workload and identical two faults, resources, six wallets, fresh home/namespace, exact starting set and fixed deadlines. Carry only allocator floors; release/reclaim batch ownership after complete quiescence. No prior failures are removed from the report.
 
 After the new baseline, run the integrated candidate and normal-lease actual process-exit/restart regression. Report both matched pairs separately and all exact revisions. Re-run runtime builds and affected integration regressions for the merged base. Keep the unresolved original incident call-site gap and CI/review status explicit.
+
+
+## Round 3 review changes (unvalidated source, baseline 3 remains isolated)
+
+- Serialize strict inventory preparation and CAS with the existing per-asset inventory boundary and author-lane accounting, so concurrent public VM confirmation cannot remove first and then be resurrected. A real inventory/confirmation race regression pauses after preparation.
+- Reject `awaitCuratorAck: true` with `KA_PROMOTE_ACK_REQUIREMENT_CONFLICT` when an existing immutable intent did not require acknowledgement; do not rewrite the intent or silently downgrade the caller. Test the real agent/queue admission and HTTP 409 contract.
+- Use one typed seal/lifecycle/operation evidence reader for ordinary and bound promotion. Operation decoding remains deferred until after stale-marker cleanup, preserving legacy no-op and typed corruption behavior. Update the two-process claim race barrier to intercept the shared evidence read.
+- Classify HTTP failures into status/body/headers once, then add observation metadata at the synchronous share boundary. Preserve permanent statuses, store uncertainty, curator fields, sanitized transport errors and one-shot partial results.
+- Register the Python full-graph evidence regressions in the repository test inventory; the remote build gate failed on this missing route, not on compilation.
+- Strengthen the separate process-exit evidence reducer to compare exact RDF terms and cardinality, complete lifecycle/pointer and WM cleanup, and the identical daemon revision/peer across restart. No crash test has run yet.
+
+Validation is deliberately deferred until baseline 3's fixed observation deadline (2026-10-16T18:50:43.016Z) and preserved readback. No heavy build or test may compete with that measured arm.
+
+
+## Baseline 3 closure and round 3 local verification
+
+Baseline 3's deadline readback retained exactly the two injected incomplete assets: 434/436 catalog, inventory and descriptors; zero share jobs; 0/2 automatic and zero manual recoveries. All 436 seals/full payloads, all 48 publication identities/carriers and the complete 98-transaction nonce interval passed. Daemon and container stopped; matching claim released after reconciliation. A fresh candidate2 claim owns a new home/namespace and the same six wallets; only the monotonic author allocator floor was carried forward.
+
+The third-round source fixes passed full runtime build, 257 HTTP/worker tests, nine agent tests, 105 publisher lifecycle tests, 153 queue/intent/replay tests, 74 actual-daemon tests, four Python evidence tests, test inventory, lint and file-size checks. One stale parser reference failed the initial build and was corrected to use the shared literal decoder. Next: push this substantive review round, freeze a clean build, complete the matched candidate and the normal-lease process-exit/restart proof, then drive current-head remote review. Restart findings remain open until real evidence exists.

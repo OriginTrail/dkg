@@ -305,6 +305,18 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
   });
 
+  it('preserves a stronger acknowledgement conflict as 409 with recovery ownership', async () => {
+    await startWith({ promote: async () => {
+      throw Object.assign(new Error('Existing operation cannot satisfy stronger acknowledgement'),
+        { code: 'KA_PROMOTE_ACK_REQUIREMENT_CONFLICT' });
+    } });
+    const res = await post('swm/share', { contextGraphId: CG_ID, awaitCuratorAck: true });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'KA_PROMOTE_ACK_REQUIREMENT_CONFLICT',
+      recoveryState: 'inspection-required', retryable: false });
+    expect(res.body.recoveryJobId).toEqual(expect.any(String));
+  });
+
   it.each([false, true])('exposes permanent share recovery ownership (one-shot=%s)', async oneShot => {
     await startWith({
       history: async () => null, create: async () => {}, write: async () => {},

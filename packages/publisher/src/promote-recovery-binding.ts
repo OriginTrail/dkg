@@ -1,6 +1,6 @@
+import { readAssertionPromoteEvidence } from './assertion-promote-evidence.js';
 import {
-  assertionLifecycleUri, assertSafeIri, contextGraphAssertionUri, contextGraphMetaUri,
-  parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1, type AssertionSeal,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -35,40 +35,15 @@ export function validatePromoteRecoveryBinding(value: unknown): PromoteRecoveryB
 }
 
 export type PromoteRecoveryAdmission = PromoteRecoveryBinding | { completedResult: AssertionPromoteResult };
-type PersistedOperation = { kind: 'absent' } | { kind: 'legacy'; operationId: string }
-  | { kind: 'complete'; intent: PromoteOperationIntent };
-
 /** Read-only stored evidence; never constructs an admission or an operation ID. */
 async function readPromoteRecoveryEvidence(
   store: TripleStore, contextGraphId: string, name: string, agentAddress: string,
   opts?: PublisherAssertionPromoteOptions,
-): Promise<{ seal: AssertionSeal; sealDigest: string; layer?: string; operation: PersistedOperation }> {
-  const subject = assertSafeIri(contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName));
-  const lifecycle = assertSafeIri(assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName));
-  const graph = assertSafeIri(contextGraphMetaUri(contextGraphId));
-  const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> {
-    VALUES ?s { <${subject}> <${lifecycle}> } ?s ?p ?o
-  } }`);
-  if (result.type !== 'quads') throw recoveryBindingConflict('Cannot read the original seal and operation safely');
-  const seal = parseAssertionSealQuads(result.quads, subject);
+) {
+  const evidence = await readAssertionPromoteEvidence(store, contextGraphId, name, agentAddress, opts?.subGraphName);
+  const seal = evidence.seal;
   if (!seal) throw recoveryBindingConflict('Durable sharing requires a complete finalized seal');
-  const readLiteral = (predicate: string): string | undefined => {
-    const rows = result.quads.filter(q => q.subject === lifecycle && q.predicate === predicate);
-    if (rows.length > 1) throw recoveryBindingConflict('Conflicting durable share operation metadata');
-    if (!rows.length) return undefined;
-    let value: unknown;
-    try { value = JSON.parse(rows[0]!.object); } catch { /* Refuse corrupt literals below. */ }
-    if (typeof value !== 'string' || !value) throw recoveryBindingConflict('Corrupt durable share operation metadata');
-    return value;
-  };
-  const operationId = readLiteral('http://dkg.io/ontology/shareOperationId');
-  const rawIntent = readLiteral('http://dkg.io/ontology/promoteOperationIntent');
-  if (rawIntent && !operationId) throw recoveryBindingConflict('The existing share intent lacks its operation ID');
-  const operation: PersistedOperation = operationId
-    ? rawIntent ? { kind: 'complete', intent: parsePromoteOperationIntent(rawIntent, operationId) }
-      : { kind: 'legacy', operationId }
-    : { kind: 'absent' };
-  return { seal, operation, layer: readLiteral('http://dkg.io/ontology/memoryLayer'),
+  return { ...evidence, seal,
     sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seal)) };
 }
 
@@ -78,7 +53,10 @@ export async function preparePromoteRecoveryBinding(
   opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean,
   verifyCompleted?: (seal: AssertionSeal, operationId?: string) => Promise<AssertionPromoteResult | null>,
 ): Promise<PromoteRecoveryAdmission> {
-  const { seal, sealDigest, operation, layer } = await readPromoteRecoveryEvidence(store, contextGraphId, name, agentAddress, opts);
+  const evidence = await readPromoteRecoveryEvidence(store, contextGraphId, name, agentAddress, opts);
+  const { seal, sealDigest } = evidence;
+  const layer = evidence.readLayer();
+  const operation = evidence.readOperation();
   if ((operation.kind === 'legacy' || (operation.kind === 'absent' && layer === 'VM')) && verifyCompleted) {
     const completedResult = await verifyCompleted(seal, operation.kind === 'legacy' ? operation.operationId : undefined);
     if (completedResult) return { completedResult };
@@ -99,9 +77,10 @@ export async function assertPromoteRecoveryBinding(
   const binding = validatePromoteRecoveryBinding(opts.recoveryBinding);
   const current = await readPromoteRecoveryEvidence(store, contextGraphId, name, agentAddress, opts);
   if (current.sealDigest !== binding.sealDigest) throw recoveryBindingConflict('The sealed asset changed after durable share admission');
-  if (current.operation.kind === 'legacy') throw recoveryBindingConflict('The original share operation lost its immutable intent');
-  if (current.operation.kind === 'complete'
-    && serializePromoteOperationIntent(current.operation.intent) !== serializePromoteOperationIntent(binding.intent)) {
+  const operation = current.readOperation();
+  if (operation.kind === 'legacy') throw recoveryBindingConflict('The original share operation lost its immutable intent');
+  if (operation.kind === 'complete'
+    && serializePromoteOperationIntent(operation.intent) !== serializePromoteOperationIntent(binding.intent)) {
     throw recoveryBindingConflict('The immutable share operation changed after durable admission');
   }
   return current;

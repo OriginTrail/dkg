@@ -1,0 +1,102 @@
+{
+  "arm": "baseline3",
+  "snapshot": {
+    "arm": "baseline3",
+    "cg": "0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-baseline3-20261016",
+    "label": "fixed-deadline",
+    "observedAt": "2026-10-16T18:51:03.541Z",
+    "inventoryRows": 434,
+    "catalogRows": 434
+  },
+  "requests": 256,
+  "httpStatuses": {
+    "200": 254,
+    "503": 2
+  },
+  "natural": {
+    "denominator": 254,
+    "http200": 254
+  },
+  "injected": {
+    "denominator": 2,
+    "results": [
+      {
+        "label": "share:catalog-140",
+        "route": "/api/knowledge-assets/catalog-140/swm/share",
+        "startedAt": "2026-10-16T18:27:47.234Z",
+        "durationMs": 8454.402166999964,
+        "status": 503,
+        "value": {
+          "error": "Store scheduler queue wait timeout (normal: test.2963.lifecyclePromotedInsert)",
+          "code": "STORE_SCHEDULER_BUSY",
+          "reason": "queue_wait_timeout",
+          "priority": "normal",
+          "retryable": true,
+          "outcome": "not_started"
+        }
+      },
+      {
+        "label": "share:catalog-141",
+        "route": "/api/knowledge-assets/catalog-141/swm/share",
+        "startedAt": "2026-10-16T18:27:55.689Z",
+        "durationMs": 5765.388124999998,
+        "status": 503,
+        "value": {
+          "code": "PROMOTE_POST_COMMIT_FAILURE",
+          "error": "A promote post-commit step failed after Shared Memory was committed",
+          "retryAction": "resume_existing_knowledge_asset",
+          "retryPhase": "swm-share",
+          "contextGraphId": "0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-baseline3-20261016",
+          "retryKnowledgeAssetName": "catalog-141",
+          "retryable": true
+        }
+      }
+    ]
+  },
+  "publications": {
+    "admissions": 48,
+    "admitted": 48,
+    "states": {
+      "finalized": 48
+    },
+    "latencyP50Ms": 178085,
+    "latencyP90Ms": 323891,
+    "fullCohortMakespanMs": 360794.0,
+    "fullCohortPerSecond": 0.13303990642859914
+  },
+  "inventory": {
+    "actual": 434,
+    "expected": 436,
+    "missing": [
+      "catalog-140",
+      "catalog-141"
+    ],
+    "extra": [],
+    "duplicates": []
+  },
+  "catalog": {
+    "actual": 434,
+    "expected": 436,
+    "missing": [
+      "catalog-140",
+      "catalog-141"
+    ],
+    "extra": [],
+    "duplicates": []
+  },
+  "sealChanged": [],
+  "missingLifecycle": [
+    "catalog-140",
+    "catalog-141"
+  ],
+  "manualRepairs": 0,
+  "graphAudit": {
+    "materializedGraphsExact": {
+      "did:dkg:context-graph:0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-baseline3-20261016/context/802": true
+    },
+    "materializedGraphPresent": true,
+    "unexpectedPayloadGraphs": []
+  },
+  "contentErrors": [],
+  "exactCatalogIdentityErrors": []
+}

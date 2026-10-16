@@ -25,6 +25,7 @@ describe('durable inventory handoff', () => {
       requestRfc64SwmCatalogProjectionV1: vi.fn(() => false) };
     const pending = commitDurableShareInventory(agent as any, params);
     expect(agent.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(finish).toEqual(expect.any(Function)));
     finish({ status: 'existing' }); await pending;
     expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledWith(expect.objectContaining({
       shareOperationId: 'original-operation', lifecycleAgentAddress: params.lifecycleAgentAddress,

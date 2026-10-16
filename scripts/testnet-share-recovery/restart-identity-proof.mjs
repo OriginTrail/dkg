@@ -1,6 +1,6 @@
 // Read-only proof around the separately requested process-crash regression.
 import fs from 'node:fs';
-import {ASSERTION_SEAL_PREDICATES} from '../../packages/core/dist/index.js';
+import {ASSERTION_SEAL_PREDICATES, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer} from '../../packages/core/dist/index.js';
 import {createRequire} from 'node:module';
 const require=createRequire(new URL('../../packages/cli/package.json',import.meta.url));
 const {JsonRpcProvider}=require('ethers');
@@ -27,14 +27,33 @@ if(mode==='before'){
  const before=JSON.parse(fs.readFileSync(`${dir}/before-raw-job.json`));
  const fault=JSON.parse(fs.readFileSync(home+'/2963-fault-restart-recovery.json'));
  const rows=JSON.parse(fs.readFileSync(`${root}/restart-readback/rdf.json`)).results.bindings;
- const value=term=>term.startsWith('"')?JSON.parse(term.match(/^("(?:[^"\\]|\\.)*")/)[1]):term;
+ const term = value => value.type === 'uri' ? value.value : JSON.stringify(value.value)
+   + (value.datatype ? `^^<${value.datatype}>` : value['xml:lang'] ? `@${value['xml:lang']}` : '');
  const identityPredicates=new Set([...Object.values(ASSERTION_SEAL_PREDICATES),'http://dkg.io/ontology/shareOperationId','http://dkg.io/ontology/promoteOperationIntent']);
  const originalFields=fault.metadataAtFault.quads.filter(q=>identityPredicates.has(q.predicate));
- const originalSealAndIntent=originalFields.every(q=>rows.some(r=>r.s.value===q.subject&&r.p.value===q.predicate&&r.o.value===value(q.object)));
+ const identitySubjects=new Set(originalFields.map(q=>q.subject));
+ const canonical = values => JSON.stringify(values.sort());
+ const originalSealAndIntent = canonical(originalFields.map(q=>JSON.stringify([q.subject,q.predicate,q.object])))
+   === canonical(rows.filter(r=>identitySubjects.has(r.s.value)&&identityPredicates.has(r.p.value))
+     .map(r=>JSON.stringify([r.s.value,r.p.value,term(r.o)])));
  const graph=fault.intendedMetadataInsert.find(q=>q.predicate==='http://dkg.io/ontology/assertionGraph')?.object;
  if(!graph)throw Error('Missing exact crash graph');
  const publicRows=rows.filter(r=>r.g.value===graph);
- const exactContent=publicRows.length===8&&fault.contentAtFault.quads.every(q=>publicRows.some(r=>r.s.value===q.subject&&r.p.value===q.predicate&&r.o.value===value(q.object)));
+ const exactContent=publicRows.length===8 && canonical(fault.contentAtFault.quads.map(q=>JSON.stringify([q.subject,q.predicate,q.object])))
+   === canonical(publicRows.map(r=>JSON.stringify([r.s.value,r.p.value,term(r.o)])));
+ const dkg='http://dkg.io/ontology/';
+ const lifecycle=fault.intendedMetadataInsert.find(q=>q.predicate===dkg+'state')?.subject;
+ const lifecycleValues=predicate=>rows.filter(r=>r.s.value===lifecycle&&r.p.value===dkg+predicate).map(r=>r.o.value);
+ const lifecycleComplete=canonical(lifecycleValues('state'))===canonical(['promoted'])
+   && canonical(lifecycleValues('memoryLayer'))===canonical(['SWM'])
+   && canonical(lifecycleValues('swmShareComplete'))===canonical(['true'])
+   && canonical(lifecycleValues('swmCurrentAssertion'))===canonical([
+     rows.find(r=>identitySubjects.has(r.s.value)&&r.p.value===dkg+'assertionMerkleRoot')?.o.value,
+   ]);
+ const sealValue=predicate=>rows.find(r=>identitySubjects.has(r.s.value)&&r.p.value===dkg+predicate)?.o.value;
+ const scope=createGraphKnowledgeAssetScope(sealValue('kaUal'),sealValue('assertionVersion'));
+ const wm=knowledgeAssetLayerGraphUri(cg,MemoryLayer.WorkingMemory,scope);
+ const wmCleared=!rows.some(r=>r.g.value===wm||r.g.value.startsWith(wm+'/'));
  const catalogs=JSON.parse(fs.readFileSync(`${root}/restart-readback/catalogs.json`)).flatMap(c=>c.rows);
  const publications=JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-publisher-jobs.json`)).value.jobs;
  const mainPublications=JSON.parse(fs.readFileSync(`${root}/fixed-deadline/-api-publisher-jobs.json`)).value.jobs;
@@ -42,10 +61,13 @@ if(mode==='before'){
  const provider=new JsonRpcProvider('https://sepolia.base.org',84532,{staticNetwork:true});const nonces=[];
  for(const old of receipts.wallets){await new Promise(r=>setTimeout(r,500));const latest=await provider.getTransactionCount(old.address,'latest'),pending=await provider.getTransactionCount(old.address,'pending');nonces.push({address:old.address,before:old.latest,latest,pending,unchanged:latest===old.latest&&pending===latest});}
  provider.destroy();
- const result={observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
+ const runtimeBefore=JSON.parse(fs.readFileSync(`${dir}/runtime-before.json`));
+ const runtimeAfter=JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-status.json`)).value;
+ const sameRuntime=['version','commit','peerId'].every(key=>runtimeBefore[key]===runtimeAfter[key]);
+ const result={sameRuntime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
  originalBinding:JSON.stringify(job.request)===JSON.stringify(before.request),state:job.state,attempts:job.attempt.count,
- originalSealAndIntent,exactContent,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate==='restart-recovery').length,
+ originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate==='restart-recovery').length,
  noAdditionalPublicationEffects:publications.length===48&&publications.every(j=>mainPublications.some(old=>old.jobId===j.jobId&&old.finalization.txHash===j.finalization.txHash)),nonces,manualRepairs:0};
  fs.writeFileSync(`${dir}/identity-proof.json`,JSON.stringify(result,null,2));console.log(result);
- if(!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||catalogs.length!==437||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
+ if(!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==437||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
 }else throw Error('Expected before or after');

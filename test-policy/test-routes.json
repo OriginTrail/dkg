@@ -152,5 +152,16 @@
     "reason": "Long-running operator soak drivers for isolated devnets; prerequisites are documented by each script",
     "cadence": "manual",
     "command": "bash {file}"
+  },
+  {
+    "pattern": "scripts/testnet-share-recovery/test_*.py",
+    "lane": "python",
+    "reason": "Exact full-graph evidence verifier regressions for the testnet share-recovery campaign",
+    "cadence": "manual",
+    "command": "python3 -m unittest discover -s scripts/testnet-share-recovery -p test_payload_evidence.py",
+    "layer": "evidence validation",
+    "prerequisites": [
+      "Python 3.9 or newer"
+    ]
   }
 ]

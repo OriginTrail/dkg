@@ -1,3 +1,4 @@
+import { readAssertionPromoteEvidence, parsePromoteLifecycleLiteral } from './assertion-promote-evidence.js';
 import { verifyCompletedLegacyPromote } from './completed-legacy-promote.js';
 import { snapshotPublisherPromoteOptions, type PublisherAssertionPromoteOptions, type AssertionPromoteResult } from './assertion-promote-types.js';
 export type { PublisherAssertionPromoteOptions } from './assertion-promote-types.js';
@@ -39,7 +40,6 @@ import { finalizeCommittedAssertionPromote } from './assertion-promote-finalizat
 import {
   createShareOperationId,
   createPromoteOperationIntent,
-  parsePromoteOperationIntent,
   serializePromoteOperationIntent,
 } from './promote-operation-intent.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
@@ -8469,14 +8469,10 @@ export class DKGPublisher implements Publisher {
       opts?.subGraphName,
     );
     const promoteMetaGraph = contextGraphMetaUri(contextGraphId);
-    const sealResult = boundEvidence ? undefined : await this.store.query(
-      `CONSTRUCT { <${assertSafeIri(sealSubject)}> ?p ?o } WHERE {
-        GRAPH <${assertSafeIri(promoteMetaGraph)}> { <${assertSafeIri(sealSubject)}> ?p ?o }
-      }`,
+    const evidence = boundEvidence ?? await readAssertionPromoteEvidence(
+      this.store, contextGraphId, name, agentAddress, opts?.subGraphName,
     );
-    const seal = boundEvidence?.seal ?? parseAssertionSealQuads(
-      sealResult?.type === 'quads' ? sealResult.quads : [], sealSubject,
-    );
+    const seal = evidence.seal;
     if (!seal) {
       throw Object.assign(
         new Error('Graph-scoped KA sharing requires a finalized v2 assertion seal'),
@@ -8541,46 +8537,9 @@ export class DKGPublisher implements Publisher {
       'assertionScopedQuads',
       () => this.assertionScopedQuads(graphUri),
     );
-    const parsePlainLiteral = (raw: string | undefined, code: string): string | undefined => {
-      if (raw === undefined) return undefined;
-      try {
-        const value: unknown = JSON.parse(raw);
-        if (typeof value === 'string' && value.length > 0) return value;
-      } catch {
-        // Fall through to the typed corruption error below.
-      }
-      throw Object.assign(
-        new Error(`Graph-scoped assertion lifecycle <${lifecycleSubject}> contains malformed state`),
-        { code },
-      );
-    };
-    // Read the layer first. On empty-WM recovery the exact SWM graph must be
-    // validated and any stale completion marker cleared before operation
-    // metadata is parsed: corrupt IDs/intents must never leave a publishable
-    // marker exposed.
-    const layerResult = boundEvidence
-      ? { type: 'bindings' as const, bindings: boundEvidence.layer ? [{ layer: JSON.stringify(boundEvidence.layer) }] : [] }
-      : await this.store.query(
-      `SELECT ?layer WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
-        <${assertSafeIri(lifecycleSubject)}> <http://dkg.io/ontology/memoryLayer> ?layer
-      } } LIMIT 2`,
-    );
-    if (layerResult.type !== 'bindings') {
-      throw Object.assign(
-        new Error(`Graph-scoped assertion lifecycle <${lifecycleSubject}> could not be read safely`),
-        { code: 'KA_LIFECYCLE_STATE_CORRUPT' },
-      );
-    }
-    if (layerResult.bindings.length > 1) {
-      throw Object.assign(
-        new Error(`Graph-scoped assertion lifecycle <${lifecycleSubject}> has conflicting memory layers`),
-        { code: 'KA_LIFECYCLE_LAYER_CONFLICT' },
-      );
-    }
-    const lifecycleLayer = parsePlainLiteral(
-      layerResult.bindings[0]?.['layer'],
-      'KA_LIFECYCLE_LAYER_CORRUPT',
-    );
+    // Decode the layer first. Corrupt operation metadata must not prevent
+    // cleanup of a stale completion marker or a seal-verified VM no-op.
+    const lifecycleLayer = evidence.readLayer();
     const hasCompletionMarker = await this.hasSwmShareComplete(
       contextGraphId,
       name,
@@ -8651,19 +8610,7 @@ export class DKGPublisher implements Publisher {
         // its complete durable tail is verified below; it cannot be replayed
         // because its original wire timestamp is unavailable.
         if (hasCompletionMarker) {
-          const intentPresence = await this.store.query(
-            `ASK { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
-              <${assertSafeIri(lifecycleSubject)}> <${PROMOTE_OPERATION_INTENT_PRED}> ?intent
-            } }`,
-          );
-          if (intentPresence.type !== 'boolean') {
-            await maintainMarker(false);
-            throw Object.assign(
-              new Error(`Graph-scoped assertion lifecycle <${lifecycleSubject}> could not be read safely`),
-              { code: 'KA_LIFECYCLE_STATE_CORRUPT' },
-            );
-          }
-          preserveLegacyCompletionMarker = !intentPresence.value;
+          preserveLegacyCompletionMarker = !evidence.hasPersistedIntent;
         }
         if (!preserveLegacyCompletionMarker) await maintainMarker(false);
         assertionQuads = existingSwmQuads;
@@ -8671,94 +8618,23 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    // Keep the operation cardinality checks separate and bounded. Combining
-    // OPTIONALs creates a Cartesian product on corrupt rows — precisely the
-    // sort of recovery path that should not double as an accidental OOM test.
-    const [operationIdResult, promoteIntentResult] = boundEvidence ? [
-      { type: 'bindings' as const, bindings: boundEvidence.operation.kind === 'complete'
-        ? [{ shareOperationId: JSON.stringify(boundEvidence.operation.intent.operationId) }] : [] },
-      { type: 'bindings' as const, bindings: boundEvidence.operation.kind === 'complete'
-        ? [{ promoteIntent: JSON.stringify(serializePromoteOperationIntent(boundEvidence.operation.intent)) }] : [] },
-    ] : await Promise.all([
-      this.store.query(
-        `SELECT ?shareOperationId WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
-          <${assertSafeIri(lifecycleSubject)}> <${SHARE_OPERATION_ID_PRED}> ?shareOperationId
-        } } LIMIT 2`,
-      ),
-      this.store.query(
-        `SELECT ?promoteIntent WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
-          <${assertSafeIri(lifecycleSubject)}> <${PROMOTE_OPERATION_INTENT_PRED}> ?promoteIntent
-        } } LIMIT 2`,
-      ),
-    ]);
+    let operation: ReturnType<typeof evidence.readOperation>;
+    try {
+      operation = evidence.readOperation();
+    } catch (error) {
+      if (preserveLegacyCompletionMarker) await maintainMarker(false);
+      throw error;
+    }
     if (preserveLegacyCompletionMarker) {
-      if (
-        operationIdResult.type === 'bindings'
-        && operationIdResult.bindings.length === 1
-        && promoteIntentResult.type === 'bindings'
-        && promoteIntentResult.bindings.length === 0
-      ) {
-        let legacyOperationId: string | undefined;
-        try {
-          legacyOperationId = parsePlainLiteral(
-            operationIdResult.bindings[0]?.['shareOperationId'],
-            'KA_SHARE_OPERATION_ID_CORRUPT',
-          );
-        } catch (error) {
-          await maintainMarker(false);
-          throw error;
-        }
-        if (legacyOperationId) {
-          const completed = await this.verifyCompletedAssertionPromote(
-            contextGraphId, name, agentAddress, seal, opts?.subGraphName, legacyOperationId);
-          if (completed) return completed;
-        }
+      if (operation.kind === 'legacy') {
+        const completed = await this.verifyCompletedAssertionPromote(
+          contextGraphId, name, agentAddress, seal, opts?.subGraphName, operation.operationId);
+        if (completed) return completed;
       }
-      // The shape was not a complete legacy commit. Remove the stale marker
-      // before the normal conflict/corruption path reports the exact reason.
       await maintainMarker(false);
     }
-    if (operationIdResult.type !== 'bindings' || promoteIntentResult.type !== 'bindings') {
-      throw Object.assign(
-        new Error(`Graph-scoped assertion lifecycle <${lifecycleSubject}> could not be read safely`),
-        { code: 'KA_LIFECYCLE_STATE_CORRUPT' },
-      );
-    }
-    if (operationIdResult.bindings.length > 1) {
-      throw Object.assign(
-        new Error(
-          `Graph-scoped assertion lifecycle <${lifecycleSubject}> has conflicting durable share operation IDs`,
-        ),
-        { code: 'KA_SHARE_OPERATION_ID_CONFLICT' },
-      );
-    }
-    if (promoteIntentResult.bindings.length > 1) {
-      throw Object.assign(
-        new Error(
-          `Graph-scoped assertion lifecycle <${lifecycleSubject}> has conflicting durable promote intent`,
-        ),
-        { code: 'KA_PROMOTE_OPERATION_INTENT_CONFLICT' },
-      );
-    }
-    const durableShareOperationId = parsePlainLiteral(
-      operationIdResult.bindings[0]?.['shareOperationId'],
-      'KA_SHARE_OPERATION_ID_CORRUPT',
-    );
-    const durablePromoteIntentValue = parsePlainLiteral(
-      promoteIntentResult.bindings[0]?.['promoteIntent'],
-      'KA_PROMOTE_OPERATION_INTENT_CORRUPT',
-    );
-    if (!durableShareOperationId && durablePromoteIntentValue) {
-      throw Object.assign(
-        new Error(
-          `Graph-scoped assertion lifecycle <${lifecycleSubject}> has promote intent without an operation ID`,
-        ),
-        { code: 'KA_PROMOTE_OPERATION_INTENT_CONFLICT' },
-      );
-    }
-    const durablePromoteIntent = durablePromoteIntentValue && durableShareOperationId
-      ? parsePromoteOperationIntent(durablePromoteIntentValue, durableShareOperationId)
-      : undefined;
+    const durablePromoteIntent = operation.kind === 'complete' ? operation.intent : undefined;
+    const durableShareOperationId = operation.kind === 'legacy' ? operation.operationId : durablePromoteIntent?.operationId;
     if (assertionQuads.length > 0 && durableShareOperationId) {
       // The exact SWM graph may have committed before a later snapshot/head
       // write failed, while WM is intentionally retained for retry. Recognize
@@ -9050,12 +8926,12 @@ export class DKGPublisher implements Publisher {
       ]);
       const claimedId = claimedIdsResult.type === 'bindings'
         && claimedIdsResult.bindings.length === 1
-        ? parsePlainLiteral(claimedIdsResult.bindings[0]?.['id'], 'KA_SHARE_OPERATION_ID_CORRUPT')
+        ? parsePromoteLifecycleLiteral(claimedIdsResult.bindings[0]?.['id'], lifecycleSubject, 'KA_SHARE_OPERATION_ID_CORRUPT')
         : undefined;
       const claimedIntent = claimedIntentsResult.type === 'bindings'
         && claimedIntentsResult.bindings.length === 1
-        ? parsePlainLiteral(
-            claimedIntentsResult.bindings[0]?.['intent'],
+        ? parsePromoteLifecycleLiteral(
+            claimedIntentsResult.bindings[0]?.['intent'], lifecycleSubject,
             'KA_PROMOTE_OPERATION_INTENT_CORRUPT',
           )
         : undefined;

@@ -1,3 +1,4 @@
+import { rfc64SwmInventoryShadowRuntimeV1 } from '../../rfc64/swm-inventory-shadow-runtime-v1.js';
 import { SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from '../swm-inventory-write.js';
 import type { ContextGraphIdV1, EvmAddressV1 } from '@origintrail-official/dkg-core';
 import { createPromoteRetryableFailure, runPromoteCommittedFinalization } from '@origintrail-official/dkg-publisher';
@@ -5,7 +6,16 @@ import type { DKGAgent } from '../../dkg-agent.js';
 import type { AfterDurableSwmPromotionParamsV1 } from '../../dkg-agent-rfc64-catalog-auto-publish.js';
 
 /** Queue completion transfers ownership to durable inventory, not a detached callback. */
-export async function commitDurableShareInventory(agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1): Promise<void> {
+export function commitDurableShareInventory(agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1): Promise<void> {
+  // The strict seal resolver enforces coordinate author == seal/UAL author.
+  // Use the same asset and author-lane boundary as confirmed VM removal.
+  return rfc64SwmInventoryShadowRuntimeV1(agent).runInventoryWriteExclusive({
+    contextGraphId: params.contextGraphId, subGraphName: params.subGraphName,
+    authorAddress: params.lifecycleAgentAddress, assertionCoordinate: params.assertionCoordinate,
+  }, () => commitInventoryUnderAssetLock(agent, params));
+}
+
+async function commitInventoryUnderAssetLock(agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1): Promise<void> {
   if (!params.shareOperationId) throw new Error('A durable SWM handoff requires the original operation ID');
   let result: SwmInventoryWriteOutcome;
   try { result = await agent.commitRfc64SwmAuthorInventoryV1({ ...params, shareOperationId: params.shareOperationId }); }

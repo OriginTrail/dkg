@@ -1834,12 +1834,12 @@ describe('Working Memory Assertion Lifecycle', () => {
     const bothClaimsInserted = new Promise<void>((resolve) => {
       releaseClaims = resolve;
     });
-    const shareOperationIdPredicateToken = `<${SHARE_OPERATION_ID_PREDICATE}>`;
     store.query = async (sparql) => {
       const result = await query(sparql);
       if (
-        sparql.includes('SELECT ?shareOperationId')
-        && sparql.split(/\s+/u).some((token) => token === shareOperationIdPredicateToken)
+        sparql.includes('CONSTRUCT { ?s ?p ?o }')
+        && sparql.includes('VALUES ?s')
+        && sparql.includes(assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME))
       ) {
         initialClaimReads += 1;
         if (initialClaimReads === 2) releaseInitialReads();

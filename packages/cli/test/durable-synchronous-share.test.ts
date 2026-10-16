@@ -128,6 +128,22 @@ describe('durable synchronous share ownership', () => {
     } finally { await supervisor.stop(); await store.close(); }
   });
 
+  it('rejects an explicit stronger acknowledgement request for an existing unconfirmed intent', async () => {
+    const { store, agent } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: false });
+    const original = await agent.promoteQueue.list({});
+    const confirmation = vi.fn(async () => ({ applied: false }));
+    agent.buildCuratorAckConfirmer = async () => confirmation;
+    const admit = vi.spyOn(agent.promoteQueue, 'enqueueAndClaim');
+    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true }))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_ACK_REQUIREMENT_CONFLICT' });
+    expect(admit).not.toHaveBeenCalled();
+    expect(confirmation).not.toHaveBeenCalled();
+    expect(await agent.promoteQueue.list({})).toEqual(original);
+    await store.close();
+  });
+
   it('keeps permanent curator rejection in an inspection hold', async () => {
     const { store, agent } = await setup();
     daemonState.promoteWorkerAvailable = true;
@@ -145,6 +161,25 @@ describe('durable synchronous share ownership', () => {
     agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode, killSwitchActive, active: false });
     const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
     expect(prepared.recoveryBinding.inventoryRequired).toBe(required);
+    await store.close();
+  });
+
+  it('completes a share with the actual effective kill-switch authority and no inventory obligation', async () => {
+    const { store, agent } = await setup();
+    // Use the real authority resolver/registry, not the fixture's legacy override.
+    delete agent.resolveRfc64CatalogReceiverAuthorityV1;
+    agent.config = { nodeRole: 'edge', rfc64CatalogExecutionPlan: {
+      killSwitchActive: true, responsibilityDefaultMode: 'catalog', selectedAuthority: {}, contextGraphModes: {},
+    } };
+    expect(agent.resolveRfc64CatalogReceiverAuthorityV1(CG)).toMatchObject({ killSwitchActive: true, authoringAllowed: false });
+    const inventory = vi.spyOn(agent, 'commitRfc64SwmAuthorInventoryV1');
+    daemonState.promoteWorkerAvailable = true;
+    const result = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR });
+    expect(result.promotedCount).toBe(1);
+    const jobs = await agent.promoteQueue.list({});
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ state: 'succeeded', request: { recoveryBinding: { inventoryRequired: false } } });
+    expect(inventory).not.toHaveBeenCalled();
     await store.close();
   });
 

@@ -19,6 +19,9 @@ async function get(route) {
 if (mode === 'start') {
   if (!fs.existsSync(`.tmp/2963/evidence/${arm}/${arm}-observation-complete.json`)) throw Error('Matched arm must finish before crash regression');
   if (fs.existsSync(`${dir}/request.json`)) throw Error('Crash request already recorded; never replay it');
+  const runtime = await get('/api/status');
+  if (runtime.status !== 200 || !runtime.value.commit) throw Error('Cannot pin running revision');
+  save('runtime-before', { version: runtime.value.version, commit: runtime.value.commit, peerId: runtime.value.peerId });
   const old = JSON.parse(fs.readFileSync(path.join(home,'2963-faults.json')));
   if (old.some(f=>f.name===name)) throw Error('Crash fault already armed');
   old.push({name,kind:'process-exit',contextGraphId:cg,agentAddress:'0x247B02C301B34E52e9021728F34C3457F81f2dFc'});
