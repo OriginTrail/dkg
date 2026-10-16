@@ -1,3 +1,4 @@
+import { classifyStoreReadTransport, StoreReadHttpResponseError } from '../store-read-transport-failure.js';
 import { withAdmittedReadCancellation, type AdmittedReadDeadline } from '../admitted-read-cancellation.js';
 import { executeReceiptConfirmedPublication } from '../receipt-confirmed-execution.js';
 import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
@@ -588,10 +589,10 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         { ...options, source: options?.source ?? 'blazegraph.rfc64AuthorCommitCasV1' },
         'rfc64AuthorCommitCasV1',
       ),
-      readReceipt: () => this.query(plan.receiptAsk, {
+      readReceipt: () => this.queryWithOperation(plan.receiptAsk, {
         ...options,
         source: 'blazegraph.rfc64AuthorCommitCasV1.receipt',
-      }),
+      }, 'rfc64AuthorCommitCasV1'),
       cleanup: () => this.sparqlUpdate(
         plan.cleanup,
         { ...cleanupOptions, source: 'blazegraph.rfc64AuthorCommitCasV1.cleanup' },
@@ -622,7 +623,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     const isAsk = operation.kind === 'read' && operation.form === 'ASK';
     const isConstruct = operation.kind === 'read'
       && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
-    return this.runStoreWork(
+    const result = this.runStoreWork(
       storeOperation ?? (isConstruct ? 'construct' : 'query'),
       options,
       async (deadline) => {
@@ -653,6 +654,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
       },
     );
+    return operation.kind === 'read' && (storeOperation === undefined || isReadOnlyStoreOperation(storeOperation)) ? classifyStoreReadTransport(result) : result;
   }
 
   /**
@@ -683,7 +685,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         ? res.text()
         : readResponseTextBounded(res, errorResponseByteCeiling)
       ).catch(() => ''));
-      throw new Error(`Blazegraph ${failureLabel} failed (${res.status}): ${text.slice(0, 300)}`);
+      throw new StoreReadHttpResponseError(res.status, `Blazegraph ${failureLabel} failed (${res.status}): ${text.slice(0, 300)}`);
     }
     return res;
   }

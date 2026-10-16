@@ -17,7 +17,7 @@ export class SwmInventoryWriteFailure extends Error {
 /** Local readiness only: accepted policy and catalog service may arrive after startup. */
 export class SwmCatalogAuthorityNotReady extends Error {
   readonly code = 'SWM_CATALOG_AUTHORITY_NOT_READY';
-  constructor(readonly reason: 'service-unavailable' | 'policy-not-accepted' | 'authoring-inactive' | 'finalized-policy-not-ready') {
+  constructor(readonly reason: 'service-unavailable' | 'policy-not-accepted') {
     super('Catalog authority prerequisites are not ready');
   }
 }

@@ -1,3 +1,5 @@
+import { isReadOnlyStoreOperation } from '../store-operation-outcome.js';
+import { classifyStoreReadTransport } from '../store-read-transport-failure.js';
 import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { prepareAtomicGraphReplace, prepareAtomicGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
@@ -1073,7 +1075,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     const isConstruct = operation.kind === 'read'
       && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
     const canonicalOperation = storeOperation ?? (isConstruct ? 'construct' : 'query');
-    return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal, work) => {
+    const result = this.runStoreWork(canonicalOperation, options, async (lifecycleSignal, work) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
         ...options,
         signal: lifecycleSignal,
@@ -1130,6 +1132,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         });
       }
     });
+    return operation.kind === 'read' && (storeOperation === undefined || isReadOnlyStoreOperation(storeOperation)) ? classifyStoreReadTransport(result) : result;
   }
 
   private async queryConstruct(

@@ -1,5 +1,5 @@
 import { repairConfirmedPlacement } from './internal/confirmed-placement-repair.js';
-import { SwmInventoryWriteFailure, SwmCatalogAuthorityNotReady, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
+import { SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
 import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -85,7 +85,7 @@ import {
 import { loadExactAppliedCatalogRowsV1 } from
   './rfc64/applied-catalog-authority-transition-v1.js';
 import type { CatalogPlacementAttemptV1 } from './internal/catalog-placement-timing.js';
-import { observeConfirmedVmCatalogV1 } from './internal/confirmed-vm-catalog-observer.js';
+import { transferConfirmedVmCatalogV1, observeConfirmedVmTransfer, ConfirmedVmOwnershipFailure, type ConfirmedVmOwnershipOutcome } from './internal/confirmed-vm-catalog-observer.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -216,8 +216,7 @@ export interface ObserveRfc64ConfirmedVmParamsV1 {
   readonly assertionUri: string;
   readonly ctx: OperationContext;
   readonly publicationLabel: 'publish' | 'queued publish';
-  /** Strict internal retry ownership; default observers remain best-effort. */
-  readonly requireDurableOwnership?: boolean;
+  /** The original workspace policy required by a bound share's admission. */
   readonly expectedWorkspaceAccessPolicy?: PromoteRecoveryBinding['intent']['accessPolicy'];
 }
 
@@ -669,34 +668,24 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /** Transfer confirmed catalog work to durable removal or a private-placement marker.
-   * Strict callers retain their existing recovery owner until this transfer succeeds. */
-  async observeRfc64ConfirmedVmV1(
-    this: DKGAgent,
-    params: ObserveRfc64ConfirmedVmParamsV1,
-  ): Promise<boolean> {
+  /** Legacy best-effort observer around the throwing ownership transfer. */
+  async observeRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<boolean> {
+    return observeConfirmedVmTransfer(this.log, params, () => this.transferRfc64ConfirmedVmV1(params));
+  }
+
+  async transferRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<ConfirmedVmOwnershipOutcome> {
     let lane: ReturnType<DKGAgent['resolveRfc64CatalogAuthoringLaneV1']>;
     try {
       lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName);
-    } catch (cause) {
-      if (params.requireDurableOwnership) throw new SwmInventoryWriteFailure('authority', params.seal.kaUal ?? null, cause);
-      this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`);
-      return false;
-    }
-    // Supported legacy recovery seals need no RFC-64 conversion when no lane owes catalog work.
-    if (lane === null) {
-      if (params.requireDurableOwnership) throw new SwmCatalogAuthorityNotReady('authoring-inactive');
-      return true;
-    }
-    if (params.requireDurableOwnership) {
+    } catch (cause) { throw new ConfirmedVmOwnershipFailure('authority', cause); }
+    if (lane === null) return 'inactive';
+    if (params.expectedWorkspaceAccessPolicy !== undefined) {
       if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, params.expectedWorkspaceAccessPolicy)) {
         throw Object.assign(new Error('Confirmed share catalog policy differs from its binding'), { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
       }
-      if (lane.kind === 'private' && !lane.acceptsFinalizedVmRepair) {
-        throw new SwmCatalogAuthorityNotReady('finalized-policy-not-ready');
-      }
+      if (lane.kind === 'private' && !lane.acceptsFinalizedVmRepair) return 'pending';
     }
-    return observeConfirmedVmCatalogV1({
+    return transferConfirmedVmCatalogV1({
       owner: this,
       log: this.log,
       finalizedPrivateScope: (_contextGraphId, _subGraphName, authorAddress) => (
@@ -708,7 +697,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         await this.rfc64PersistenceV1.finalizedPrivatePlacementRepairs.put(repair);
       },
       requestPlacement: (request, observer) => this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1(request, observer),
-      removeShadow: (request) => this.removeRfc64SwmAuthorInventoryShadowV1(request),
+      removeShadow: (request) => this.commitRfc64ConfirmedInventoryRemovalV1(request),
       requestProjection: (request) => this.requestRfc64SwmCatalogProjectionV1(request),
     }, params);
   }
@@ -938,42 +927,32 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     }
   }
 
-  /** Remove one pending SWM-inventory row after its lane-specific confirmation work. */
-  async removeRfc64SwmAuthorInventoryShadowV1(
-    this: DKGAgent,
-    params: RemoveRfc64SwmAuthorInventoryShadowParamsV1,
-  ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
-    let row: Readonly<{ scope: SwmAuthorInventoryScopeV1; expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 }>;
+  /** Throwing removal boundary used by durable confirmation ownership. */
+  async commitRfc64ConfirmedInventoryRemovalV1(this: DKGAgent, params: RemoveRfc64SwmAuthorInventoryShadowParamsV1): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+    let phase: SwmInventoryWriteFailure['phase'] = 'authority';
     try {
-      const lane = this.resolveRfc64CatalogAuthoringLaneV1(
-        params.contextGraphId,
-        params.subGraphName,
-      );
-      if (lane === null) {
-        return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-          shadowResult('dormant', 'remove', 0, null, null, 'inactive-lane'),
-          params.contextGraphId,
-          null,
-        );
-      }
+      const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName);
+      if (lane === null) return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        shadowResult('dormant', 'remove', 0, null, null, 'inactive-lane'), params.contextGraphId, null);
+      phase = 'preparation-read';
       assertContextGraphIdV1(params.contextGraphId, 'SWM inventory contextGraphId');
       const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
-      row = Object.freeze({
-        scope: Object.freeze({ ...lane.scopeBase, authorAddress: seal.authorAddress }) as SwmAuthorInventoryScopeV1,
-        expectedRow: Object.freeze({
-          assertionVersion: seal.assertionVersion,
-          kaUal: seal.kaUal,
-          sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
-        }),
-      });
-    } catch (cause) {
+      const scope = Object.freeze({ ...lane.scopeBase, authorAddress: seal.authorAddress }) as SwmAuthorInventoryScopeV1;
+      const expectedRow = Object.freeze({ assertionVersion: seal.assertionVersion, kaUal: seal.kaUal,
+        sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal) });
+      phase = 'inventory-commit';
+      const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({ scope, expectedRow });
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-        this.failRfc64SwmAuthorInventoryShadowV1('remove', cause),
-        params.contextGraphId,
-        null,
-      );
-    }
-    return this.removeRfc64SwmAuthorInventoryRowV1({ contextGraphId: params.contextGraphId, ...row });
+        shadowResult(removed.status, 'remove', removed.attempts, removed.snapshot?.head.objectDigest ?? null, null),
+        params.contextGraphId, seal.kaUal);
+    } catch (cause) { throw new SwmInventoryWriteFailure(phase, params.seal.kaUal ?? null, cause); }
+  }
+
+  /** Best-effort observation retains the legacy result and failure counters. */
+  async removeRfc64SwmAuthorInventoryShadowV1(this: DKGAgent, params: RemoveRfc64SwmAuthorInventoryShadowParamsV1): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+    try { return await this.commitRfc64ConfirmedInventoryRemovalV1(params); }
+    catch (cause) { return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+      this.failRfc64SwmAuthorInventoryShadowV1('remove', cause instanceof SwmInventoryWriteFailure ? cause.cause : cause), params.contextGraphId, params.seal.kaUal ?? null); }
   }
 
   /**

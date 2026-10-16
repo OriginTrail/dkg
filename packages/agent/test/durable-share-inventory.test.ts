@@ -1,3 +1,5 @@
+import { Rfc64SwmAuthorInventoryProducerErrorV1 } from '../src/rfc64/swm-author-inventory-producer-v1.js';
+import { InventoryV1CandidateError } from '../src/rfc64/inventory-v1/index.js';
 import { SwmCatalogAuthorityNotReady, SwmInventoryWriteFailure } from '../src/internal/swm-inventory-write.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
@@ -7,6 +9,17 @@ const params = { contextGraphId: 'cg', assertionCoordinate: 'asset', lifecycleAg
   shareOperationId: 'original-operation', durableInventory: true, ctx: createOperationContext('share') };
 
 describe('durable inventory handoff', () => {
+  it.each(['swm-inventory-producer-input', 'swm-inventory-producer-history', 'swm-inventory-producer-signer'] as const)('preserves typed permanent %s from the inventory phase', async code => {
+    const cause = new Rfc64SwmAuthorInventoryProducerErrorV1(code, 'invalid signed inventory');
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('inventory-commit', null, cause); }) };
+    await expect(commitDurableShareInventory(agent as any, params)).rejects.toBe(cause);
+  });
+  it('preserves a typed corrupt inventory database for inspection', async () => {
+    const cause = new InventoryV1CandidateError('applied-head-database-corrupt', 'invalid stored head');
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('inventory-commit', null, cause); }) };
+    await expect(commitDurableShareInventory(agent as any, params)).rejects.toBe(cause);
+  });
+
   it.each(['inactive-lane', 'authority-transition'])('retains the obligation while %s', async dormantReason => {
     const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'dormant', dormantReason })),
       requestRfc64SwmCatalogProjectionV1: vi.fn() };

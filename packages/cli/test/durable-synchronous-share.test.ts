@@ -3,7 +3,7 @@ import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { OxigraphStore, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, OxigraphStore, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, PromoteAdmissionUncertainError } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
@@ -106,6 +106,39 @@ describe('durable synchronous share ownership', () => {
       const prepared = await restarted.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
       expect(prepared.recoveryBinding).toEqual(failed.request.recoveryBinding);
     } finally { await supervisor.stop(); await store.close(); }
+  });
+
+  it('automatically resumes an original partial commit after a one-time replay read reset', async () => {
+    const { store, agent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    store.remaining = 1;
+    const first = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
+    const original = await agent.promoteQueue.getStatus(first.observation.jobId);
+    const query = store.query.bind(store);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const remoteRead = new BlazegraphStore('http://127.0.0.1:1/sparql');
+    let resets = 0;
+    vi.spyOn(store, 'query').mockImplementation((sparql, options) => {
+      if (!resets && sparql.includes('VALUES ?s') && sparql.includes(lifecycle)) {
+        resets++;
+        fetchSpy.mockRejectedValueOnce(new TypeError('fetch failed', {
+          cause: Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }),
+        }));
+        return remoteRead.query(sparql, options);
+      }
+      return query(sparql, options);
+    });
+    const supervisor = createPromoteWorkerSupervisor({ agent, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
+    try {
+      await supervisor.start();
+      await vi.waitFor(async () => expect((await agent.promoteQueue.getStatus(first.observation.jobId)).state).toBe('succeeded'));
+      const completed = await agent.promoteQueue.getStatus(first.observation.jobId);
+      expect(resets).toBe(1);
+      expect(completed.attempt.count).toBe(3);
+      expect(completed.request.recoveryBinding).toEqual(original.request.recoveryBinding);
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+      expect(await store.countQuads(finalized.graphUri)).toBe(0);
+    } finally { fetchSpy.mockRestore(); await supervisor.stop(); await remoteRead.close(); await store.close(); }
   });
 
   it('automatically retries curator non-confirmation with the original required acknowledgement', async () => {
@@ -235,12 +268,11 @@ describe('durable synchronous share ownership', () => {
     await store.insert(finalized.publicQuads.map(q => ({ ...q, graph: vm })));
     await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer' });
     await store.insert([{ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"VM"' }]);
-    const confirmed = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1').mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const confirmed = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1').mockResolvedValueOnce('pending').mockResolvedValueOnce('owned');
     await expect(agent.assertion.promote(CG, NAME, bound)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
     expect(await agent.assertion.promote(CG, NAME, bound)).toEqual({ promotedCount: 0, sealed: true, publishReady: false });
     expect(confirmed).toHaveBeenCalledTimes(2);
-    expect(confirmed.mock.calls[0][0]).toMatchObject({ requireDurableOwnership: true,
-      expectedWorkspaceAccessPolicy: bound.recoveryBinding.intent.accessPolicy,
+    expect(confirmed.mock.calls[0][0]).toMatchObject({ expectedWorkspaceAccessPolicy: bound.recoveryBinding.intent.accessPolicy,
       shareOperationId: bound.recoveryBinding.intent.operationId });
     expect(swmTail).toHaveBeenCalledTimes(1);
     expect(await store.countQuads(vm)).toBe(1);

@@ -1,3 +1,4 @@
+import { Wallet, getBytes } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext, canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-official/dkg-core';
 import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
@@ -62,6 +63,43 @@ describe('bound worker owns the real inventory CAS', () => {
     const snapshot = agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR });
     expect(snapshot?.rows).toHaveLength(1);
     expect(snapshot?.rows[0]).toMatchObject({ kaUal: seeded.seal.kaUal, assertionCoordinate: seeded.assertionCoordinate });
+  });
+
+  it('holds a real invalid predecessor signature for inspection before any inventory CAS', async () => {
+    const agent = await startRepairAgentV1({ name: 'bound-inventory-invalid-signature' });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    agent.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+    await agent.whenRfc64CatalogResponsibilitiesIdleV1();
+    const first = await seedDurableWorkspaceAssetV1(agent, 'predecessor', 94n);
+    await agent.commitRfc64SwmAuthorInventoryV1({ contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: first.assertionCoordinate, lifecycleAgentAddress: AUTHOR, shareOperationId: first.shareOperationId });
+    const next = await seedDurableWorkspaceAssetV1(agent, 'successor', 95n);
+    const persistence = agent.rfc64PersistenceV1!;
+    const inventory = persistence.swmAuthorInventory;
+    const snapshot = inventory.readSwmAuthorInventorySnapshotV1(first.scopeDigest, AUTHOR)!;
+    const wrongSignature = await new Wallet(`0x${'22'.repeat(32)}`).signMessage(getBytes(snapshot.head.objectDigest));
+    const compare = vi.fn(inventory.compareAndSwapSwmAuthorInventoryV1.bind(inventory));
+    (agent as any).rfc64PersistenceV1 = { ...persistence, swmAuthorInventory: { ...inventory,
+      readSwmAuthorInventorySnapshotV1: () => ({ ...snapshot, head: { ...snapshot.head, signature: wrongSignature } }),
+      compareAndSwapSwmAuthorInventoryV1: compare } };
+    const binding = { version: 1 as const, inventoryRequired: true,
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(next.seal)),
+      intent: { version: 1 as const, operationId: next.shareOperationId, timestampMs: Date.now(),
+        confirmationRequired: false, accessPolicy: 'public' as const, allowedPeers: [] } };
+    const queue = new TripleStoreAsyncPromoteQueue(agent.store, { backoff: () => 0 });
+    const job = await queue.enqueueAndClaim({ contextGraphId: CONTEXT_GRAPH_ID, assertionName: next.assertionCoordinate,
+      entities: 'all', agentAddress: AUTHOR, recoveryBinding: binding }, 'original');
+    try {
+      const result = await runPromoteJob({ job, queue, workerId: 'original', now: Date.now, heartbeatIntervalMs: 60_000, log: () => undefined,
+        runPromote: async (_request, started) => { await started(); await commitDurableShareInventory(agent, {
+          contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: next.assertionCoordinate,
+          lifecycleAgentAddress: AUTHOR, shareOperationId: next.shareOperationId, recoveryBinding: binding, ctx: createOperationContext('share'),
+        }); return { promotedCount: 0 }; } });
+      expect(result).toMatchObject({ outcome: 'failed_terminal', cause: { code: 'swm-inventory-producer-history' } });
+      expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+      expect(await queue.claimNext('automatic')).toBeNull();
+      expect(compare).not.toHaveBeenCalled();
+    } finally { (agent as any).rfc64PersistenceV1 = persistence; }
   });
 
   it('serializes a prepared bound handoff before public VM inventory removal', async () => {
