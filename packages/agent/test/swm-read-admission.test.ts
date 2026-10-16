@@ -1,3 +1,4 @@
+import { DKGAgent } from '../src/dkg-agent.js';
 import { resolveContextGraphMetadataConfirmationV1 } from '../src/context-graph-meta-confirmation.js';
 import { describe, expect, it } from 'vitest';
 import { resolvePrivateRootLegacyLaneAdmission, resolveSharedMemoryAdmission } from '../src/swm-read-admission.js';
@@ -9,10 +10,12 @@ describe('shared memory admission dependency outcomes', () => {
     const legacy = () => resolvePrivateRootLegacyLaneAdmission({ authorityId: () => '1',
       mergedMembership: fail, ownMembership: async () => true });
     await expect(legacy()).resolves.toEqual({ outcome: 'unavailable', source: 'legacy-membership', error });
-    const reads = { acceptedAuthority: () => undefined, legacyLane: legacy,
+    const reads = { acceptedAuthority: undefined, legacyLane: legacy,
       confirmedMetadata: async () => ({ outcome: 'confirmed' as const }), readAuthority: async () => ({ outcome: 'allowed' as const, grantScope: 'public' as const, source: 'system' as const, reason: 'fixture', metadataBootstrap: 'eligible' as const }) };
     await expect(resolveSharedMemoryAdmission({ ...reads, confirmedMetadata: fail })).rejects.toBe(error);
-    await expect(resolveSharedMemoryAdmission({ ...reads, acceptedAuthority: () => { throw error; } })).rejects.toBe(error);
+    const agent = Object.create(DKGAgent.prototype) as DKGAgent;
+    Object.defineProperty(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1', { value: () => { throw error; } });
+    await expect(agent.resolveSharedMemoryReadAdmission('fixture')).rejects.toBe(error);
     await expect(resolveSharedMemoryAdmission({ ...reads, readAuthority: fail })).rejects.toBe(error);
   });
 
@@ -21,7 +24,7 @@ describe('shared memory admission dependency outcomes', () => {
     const confirmation = { outcome: 'unavailable' as const, source: 'chain-proof' as const, proof };
     const decision = { outcome: 'unavailable' as const, source: 'registered-chain' as const,
       reason: 'fixture', dependency: 'chain' as const, metadataBootstrap: 'eligible' as const };
-    const reads = { acceptedAuthority: () => undefined, legacyLane: async () => ({ outcome: 'denied' as const }),
+    const reads = { acceptedAuthority: undefined, legacyLane: async () => ({ outcome: 'denied' as const }),
       confirmedMetadata: async () => confirmation, readAuthority: async () => decision };
     const metadata = await resolveSharedMemoryAdmission(reads);
     expect(metadata).toEqual({ outcome: 'unavailable', source: 'confirmed-metadata', confirmation });
@@ -33,7 +36,7 @@ describe('shared memory admission dependency outcomes', () => {
 
   it('preserves cancellation during a dependency failure as cancellation', async () => {
     const controller = new AbortController(), reason = new Error('cancelled');
-    await expect(resolveSharedMemoryAdmission({ acceptedAuthority: () => undefined,
+    await expect(resolveSharedMemoryAdmission({ acceptedAuthority: undefined,
       legacyLane: async () => ({ outcome: 'denied' }), signal: controller.signal,
       confirmedMetadata: async () => { controller.abort(reason); throw new Error('transport closed'); },
       readAuthority: async () => { throw new Error('not reached'); } })).rejects.toBe(reason);
@@ -50,4 +53,16 @@ it.each([false, true])('metadata dependencies preserve error identity and cancel
     isPrivateContextGraph: async () => false,
     store: { query: async () => { if (abort) controller.abort(reason); throw error; } } as never,
   }, 'metadata-error')).rejects.toBe(abort ? reason : error);
+});
+
+it.each([false, true])('keeps cancellation authoritative around synchronous accepted authority (pre-aborted=%s)', async preAborted => {
+  const controller = new AbortController(), reason = new Error('cancelled');
+  let calls = 0;
+  const agent = Object.create(DKGAgent.prototype) as DKGAgent;
+  Object.defineProperty(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1', { value: () => {
+    calls++; controller.abort(reason); throw new Error('dependency failed');
+  } });
+  if (preAborted) controller.abort(reason);
+  await expect(agent.resolveSharedMemoryReadAdmission('fixture', { signal: controller.signal })).rejects.toBe(reason);
+  expect(calls).toBe(preAborted ? 0 : 1);
 });
