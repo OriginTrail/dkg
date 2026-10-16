@@ -138,3 +138,10 @@ Implemented the version-4 bound queue design, atomic inline admission, pinned se
 ### Compatibility review during the fixed candidate observation
 
 Self-review identified a completed pre-intent SWM case that the new admission binding rejected although the existing publisher supports a non-mutating no-op. Add a read-only verification under the existing lifecycle lock, return the original operation ID without a queue job, and continue rejecting incomplete or changed pre-intent content. This is not permission to reconstruct a missing immutable intent. Verify complete/no-op, incomplete and changed-content cases through the real agent/queue entry point. The running measured candidate remains compiled at `7dfc334200bb2a716e7dc11cf25ec7a033cd9481`; source edits are not rebuilt into that live daemon. Any later runtime revision is identified separately and needs live validation before the final claim.
+
+
+## Base integration adjustment — 2026-10-16 18:09 UTC
+
+#3253 merged as 8aa7b3ab82ff8ebac3771d7898bafb69e570ea26 while review response was underway. Retarget #3300 to testnet-canary and merge its current head 2aba84de3 (do not rebase). The base also includes substantial v14 sync/storage work, so the prior 9436b5c baseline / 7dfc334 candidate comparison remains preserved but cannot isolate the recovery fix on that new runtime. Run an additional clean baseline from 2aba84de3 in a separate managed worktree before running the integrated candidate. Use the frozen 48-publication/256-share workload and identical two faults, resources, six wallets, fresh home/namespace, exact starting set and fixed deadlines. Carry only allocator floors; release/reclaim batch ownership after complete quiescence. No prior failures are removed from the report.
+
+After the new baseline, run the integrated candidate and normal-lease actual process-exit/restart regression. Report both matched pairs separately and all exact revisions. Re-run runtime builds and affected integration regressions for the merged base. Keep the unresolved original incident call-site gap and CI/review status explicit.

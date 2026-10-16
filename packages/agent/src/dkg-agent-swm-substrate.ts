@@ -1,18 +1,15 @@
+import { resolvePrivateRootLegacyLaneAdmission, type PrivateRootLegacyLaneAdmission } from './swm-read-admission.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
  * SWM substrate / shared-memory subsystem extracted from dkg-agent.ts as a
  * mixin holder: CG gossip subscription reconcile, SWM share-ACK handling and
  * quorum tracking, substrate top-up + fan-out bookkeeping/eviction, and the
- * lazily-constructed gossip/shared-memory/update/finalization handlers. 1:1
- * move; methods take `this: DKGAgent` so cross-calls resolve against the
- * composed class.
+ * lazily-constructed gossip/shared-memory/update/finalization handlers.
+ * Methods take `this: DKGAgent` and resolve cross-calls on the composed class.
  */
-
-
 import type { ContextGraphSubscriptionRollbackSlotRelease } from './context-graph-subscription-authority-recovery.js';
 import { isLocalPrivateMember } from './internal/local-private-member.js';
-import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -416,6 +413,8 @@ export interface ContextGraphSubscribeOptions {
   syncMode?: 'on-demand' | 'always-on';
   /** Authoritative numeric slot established by the admission owner. */
   onChainId?: string;
+  /** Authenticated name commitment belonging to the numeric slot. */
+  onChainHash?: string;
 }
 
 export class SwmSubstrateMethods extends DKGAgentBase {
@@ -486,6 +485,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (options?.onChainId !== undefined) {
         this.bindSubscriptionOnChainId(contextGraphId, next, options.onChainId);
       }
+      if (options?.onChainHash !== undefined) next.onChainHash = options.onChainHash;
       return next;
     };
     // Opening an already durable graph must never silently downgrade it to a
@@ -497,7 +497,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       requested: options?.syncMode,
       hasDormantDurableIntent: this.contextGraphSubscriptionDormancyById.has(contextGraphId),
     });
-    const persist = syncMode === 'on-demand' ? false : options?.persist;
+    const persist = options?.persist; // The canonical projection owns durable versus on-demand intent.
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
       // Preserve the user's durable selection and VM intent without installing
       // legacy publish/update/finalization authority. The 10.0.16 catalog owns
@@ -541,6 +541,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         !existing?.subscribed
         || existing.syncMode !== syncMode
         || (options?.onChainId !== undefined && existing.onChainId !== options.onChainId)
+        || (options?.onChainHash !== undefined && existing.onChainHash !== options.onChainHash)
       ) {
         return this.setContextGraphSubscription(
           contextGraphId,
@@ -797,32 +798,20 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * or accepted graphs, and nodes with private access-policy authority keep
    * their RFC-64 behaviour.
    */
-  async rfc64PrivateRootSwmOnLegacyLaneV1(
-    this: DKGAgent,
-    contextGraphId: string,
-  ): Promise<boolean> {
-    const authorityContextGraphId = this.rfc64PrivateRootLegacyLaneAuthorityIdV1(contextGraphId);
-    if (authorityContextGraphId === null) return false;
-    const localAgents = [
-      this.defaultAgentAddress,
-      ...this.listLocalAgents().map(({ agentAddress }) => agentAddress),
-    ];
-    // The cached merged projection only screens out the common case cheaply;
-    // it also holds replicated ONTOLOGY and AGENTS facts, so the decision is
-    // taken from the graph's own `_meta` alone.
-    try {
-      if (!isLocalPrivateMember(await this.getCgMeta(authorityContextGraphId), localAgents)) {
-        return false;
-      }
-      if (!isLocalPrivateMember(await this.getOwnCgMetaFacts(authorityContextGraphId), localAgents)) {
-        return false;
-      }
-    } catch {
-      return false;
-    }
-    // RFC-64 authority can change while the metadata is read: decide on the
-    // authority as it stands now, not as it stood before the reads.
-    return this.rfc64PrivateRootLegacyLaneAuthorityIdV1(contextGraphId) === authorityContextGraphId;
+  async rfc64PrivateRootSwmOnLegacyLaneV1(this: DKGAgent, contextGraphId: string,
+    options: { signal?: AbortSignal } = {}): Promise<boolean> {
+    return (await this.resolvePrivateRootSwmLegacyLaneV1(contextGraphId, options)).outcome === 'allowed';
+  }
+
+  async resolvePrivateRootSwmLegacyLaneV1(this: DKGAgent, contextGraphId: string,
+    options: { signal?: AbortSignal } = {}): Promise<PrivateRootLegacyLaneAdmission> {
+    const localAgents = [this.defaultAgentAddress, ...this.listLocalAgents().map(({ agentAddress }) => agentAddress)];
+    return resolvePrivateRootLegacyLaneAdmission({
+      signal: options.signal,
+      authorityId: () => this.rfc64PrivateRootLegacyLaneAuthorityIdV1(contextGraphId),
+      mergedMembership: async id => isLocalPrivateMember(await this.getCgMeta(id, options), localAgents),
+      ownMembership: async id => isLocalPrivateMember(await this.getOwnCgMetaFacts(id, options), localAgents),
+    });
   }
 
   /**

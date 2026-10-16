@@ -1,3 +1,4 @@
+import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -92,7 +93,7 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
-import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
+import type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 import type { AuthorityIndexConfig } from './authority-index-config.js';
 import type { ContextGraphStorageDiscoveryStore } from './context-graph-storage-discovery.js';
 
@@ -1409,14 +1410,7 @@ export interface Rfc64CatalogBootstrapConfigV1 {
   readonly retryIntervalMs?: number;
 }
 
-/**
- * Creates the durable finalization inbox for one agent data directory.
- * The factory must return a fresh, open store. The agent owns the returned
- * store and closes it during normal startup rollback or shutdown.
- */
-export type FinalizationRecoveryStoreFactory = (
-  dataDir: string,
-) => Promise<FinalizationRecoveryStore>;
+export type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 
 export interface DKGAgentConfig {
   name: string;
@@ -1634,6 +1628,8 @@ export interface DKGAgentConfig {
   syncAdmission?: SyncAdmissionConfig;
   /** Daemon-local retained responder snapshot row/estimated-byte policy. */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  /** Opt-in persistent verified public assertion bytes, never cached authority. */
+  preparedContentCache?: PreparedContentCacheConfig;
   /**
    * Local requester/responder priority by Context Graph ID. Higher runs first.
    * System Context Graphs default to a deprioritized priority so they run

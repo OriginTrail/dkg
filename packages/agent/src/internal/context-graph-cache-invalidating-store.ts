@@ -139,6 +139,20 @@ export function createMutationObservedStore(
             'replaceGraphAndSubject',
           )
       : undefined,
+    replaceAssetGroup: innerStore.replaceAssetGroup
+      ? (assets, options) => invalidateAfterMutation(
+          () => innerStore.replaceAssetGroup!(assets, options),
+          () => true,
+          {
+            removals: assets.flatMap(asset => [
+              { graph: asset.graphUri },
+              { graph: asset.metaGraphUri, subject: asset.metadataSubject },
+            ]),
+            quads: assets.flatMap(asset => [...asset.graphQuads, ...asset.metadataQuads]),
+          },
+          'replaceAssetGroup',
+        )
+      : undefined,
     // #1863 — the async-lift publisher persists a job transition via this atomic
     // single-subject replace. Preserve the optional capability through the agent
     // decorator just like replaceGraph/replaceGraphAndSubject/update; omitting it

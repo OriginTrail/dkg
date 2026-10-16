@@ -1,3 +1,4 @@
+import type { AtomicAssetReplacement } from '../atomic-asset-group.js';
 /**
  * The SPARQL statements the storage adapters build by string interpolation.
  *
@@ -36,6 +37,7 @@ export type SparqlQueryOperation = 'hasGraph' | 'countQuads';
  * datatype included. It builds nothing, so the write is unchanged.
  */
 export interface WriteIriChecks {
+  replaceAssetGroup(assets: readonly AtomicAssetReplacement[]): void;
   insert(quads: readonly Quad[]): void;
   replaceGraph(graphUri: string, quads: readonly Quad[]): void;
   replaceGraphAndSubject(
@@ -245,6 +247,15 @@ export function sparqlStatements(
     },
 
     checkIris: {
+      replaceAssetGroup: assets => {
+        for (const a of assets) {
+          const quads = [...a.graphQuads, ...a.metadataQuads];
+          checkIris('replaceAssetGroup', quads, [
+            { term: a.graphUri, position: 'graph' }, { term: a.metaGraphUri, position: 'graph' },
+            { term: a.metadataSubject, position: 'subject' },
+          ]);
+        }
+      },
       insert: (quads) => checkIris('insert', quads),
       replaceGraph: (graphUri, quads) =>
         checkIris('replaceGraph', quads, [{ term: graphUri, position: 'graph' }]),

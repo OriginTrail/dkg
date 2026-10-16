@@ -1,3 +1,6 @@
+import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
+import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import type { GraphSetMutationSource, TouchedGraphMutationSource, GraphSetRefreshSource, PendingFullRefreshSource, GraphSetMutationEvent, GraphSetDiagnosticEvent } from './graph-set-index-types.js';
 export type { GraphSetMutationSource, GraphSetMutationEvent } from './graph-set-index-types.js';
 import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
@@ -129,9 +132,11 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
    */
   private pendingFullRefresh: PendingFullRefreshSource | null = null;
 
+  readonly graphEnumerationVisibility;
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isAtomicGraphReplaceStagingGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(
@@ -321,6 +326,20 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       }
       return this.runReplacementMutation('replaceGraph', [graphUri], options,
         () => this.inner.replaceGraph!(graphUri, quads, options));
+    });
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'replaceAssetGroup', options, async options => {
+      if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+      try { await this.inner.replaceAssetGroup(assets, options); }
+      catch (error) {
+        if (!isStoreOperationNotStarted(error, 'replaceAssetGroup')) this.scheduleFullRefresh('replaceAssetGroup');
+        throw error;
+      }
+      if (!this.enabled) return;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))], 'replaceAssetGroup', options);
     });
   }
 
@@ -781,31 +800,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // Observability hooks must not make already-committed store writes fail.
     }
   }
-}
-
-function namedGraphsFromQuads(quads: Quad[]): string[] {
-  return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
-}
-
-function endsWithHighSurrogate(value: string): boolean {
-  if (value.length === 0) return false;
-  const lastCodeUnit = value.charCodeAt(value.length - 1);
-  return lastCodeUnit >= 0xD800 && lastCodeUnit <= 0xDBFF;
-}
-
-/** Filter falsy entries and de-duplicate a caller-supplied graph-URI hint list. */
-function normalizeGraphUris(graphs: readonly string[]): string[] {
-  return [...new Set(graphs.filter(Boolean))];
-}
-
-/**
- * Drop the update-only `touchedGraphs` hint, yielding the read-path `QueryOptions`
- * (source/priority/signal) to forward to index-maintenance reads (`hasGraph`) — so
- * the update-only field never crosses into a read call via structural assignability.
- */
-function queryOptionsFromUpdateOptions(options: UpdateOptions): QueryOptions {
-  const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
-  return readOptions;
 }
 
 function positiveFiniteMs(value: number | undefined, fallback: number): number {

@@ -313,7 +313,7 @@ export {
   type RetryOptions,
 } from './retry.js';
 export { resolveWithinAbort } from './abort-boundary.js';
-export { isTransportTimeoutError } from './request-abort-lifecycle.js';
+export { isTransportTimeoutError, startRequestAbortLifecycle, type RequestAbortLifecycle } from './request-abort-lifecycle.js';
 export {
   RetryQueue,
   type RetryEntry,
@@ -444,6 +444,10 @@ export {
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
   isRfc64LegacySwmBoundaryRetirementInProgressError,
+  QUERY_ACCESS_DENIED_CODE,
+  QUERY_ACCESS_DENIED_MESSAGE,
+  QueryAccessDeniedError,
+  isQueryAccessDeniedError,
   UNSCOPED_QUERY_INVALIDATED_CODE,
   UNSCOPED_QUERY_INVALIDATED_MESSAGE,
   messageIndicatesNoFundedPublisherWallet,
@@ -531,3 +535,6 @@ export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
 
 export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
+
+export * from './bulk-graph-wire.js';
+export * from './bulk-graph-transport.js';

@@ -15,6 +15,7 @@ export default defineConfig({
           'test/durable-synchronous-share.test.ts',
           'test/durable-inventory-worker.test.ts',
           'test/promote-route-not-persisted.test.ts',
+          'test/public-snapshot-job.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
@@ -51,6 +52,8 @@ export default defineConfig({
       'test/status-route-store-quads.test.ts',
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
+      'test/bounded-query.test.ts',
+      'test/entity-search.test.ts',
       'test/query-catalog-profile-route.test.ts',
           'test/context-graph-route-read-authority.test.ts',
           'test/knowledge-assets-local-curator-read.test.ts',
@@ -96,6 +99,9 @@ export default defineConfig({
           // A public graph its subscribe job left unproven gets the job again
           // (#3207). The real catch-up worker behind a fake thread; no hardhat.
           'test/context-graph-readiness-repeat.test.ts',
+          // So does a registered public graph whose job ran before its RFC-64
+          // authority was accepted (#3281). Same worker and fake thread.
+          'test/context-graph-readiness-repeat-authority.test.ts',
           // A persisted subscription restored unsynced gets a catch-up job
           // (#3251). Agent double and stub runner; no hardhat.
           'test/context-graph-activation-catchup.test.ts',
