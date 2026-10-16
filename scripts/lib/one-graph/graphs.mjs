@@ -4,7 +4,7 @@
 // subscribed to by the other Edges; and the large graph of the busy-slot case,
 // whose assets the curator publishes to Verified Memory.
 
-import { brief } from '../member-sharing/devnet.mjs';
+import { brief, sleep } from '../member-sharing/devnet.mjs';
 import { promotionOutcome } from '../qa/one-graph-promotion.mjs';
 
 /** `say` prints a line of the run. */
@@ -37,12 +37,25 @@ export function createGraphs(devnet, { stamp, say }) {
 
   /**
    * An Edge subscribes to a public graph with its shared memory, as a client
-   * does, and with `forceCatchup` an explicit catch-up; resolves to when.
+   * does, and with `forceCatchup` an explicit catch-up. A refusal the node
+   * marks retryable (HTTP 503, `retryable: true`) is retried every 3 s for up
+   * to 90 s, as a client does, and said in the run. Resolves to when the
+   * subscribe was accepted.
    */
   async function subscribe(node, graph, { forceCatchup = false } = {}) {
-    const answer = await api(node, 'POST', '/api/context-graph/subscribe',
-      { contextGraphId: graph.id, includeSharedMemory: true, ...(forceCatchup ? { forceCatchup: true } : {}) });
-    if (answer.status !== 200) throw new Error(`${node.label} could not subscribe to ${graph.key}: ${brief(answer)}`);
+    const started = Date.now();
+    const body = { contextGraphId: graph.id, includeSharedMemory: true, ...(forceCatchup ? { forceCatchup: true } : {}) };
+    let refused = null;
+    for (;;) {
+      const answer = await api(node, 'POST', '/api/context-graph/subscribe', body);
+      if (answer.status === 200) break;
+      if (answer.json?.retryable !== true || Date.now() - started > 90_000) {
+        throw new Error(`${node.label} could not subscribe to ${graph.key}: ${brief(answer)}`);
+      }
+      refused ??= answer;
+      await sleep(3000);
+    }
+    if (refused) say(`${node.label}'s subscribe to ${graph.key} was refused as retryable (${brief(refused).slice(0, 160)}); accepted ${Math.round((Date.now() - started) / 1000)} s later`);
     return Date.now();
   }
 
