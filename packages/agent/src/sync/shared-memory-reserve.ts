@@ -33,10 +33,10 @@ export function sharedMemoryReserve(): SyncReserve {
     pool: SHARED_MEMORY_QUEUE_POOL,
     maxInflight: nonNegativeInteger(parseIntegerEnv('DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT'))
       ?? DEFAULT_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT,
-    queueLimit: DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT,
-    queueTimeoutMs: DEFAULT_SYNC_SHARED_MEMORY_QUEUE_TIMEOUT_MS,
-    // Under partitions, shared-memory pulls are slow-lane work.
-    partition: 'slow',
+    queue: Object.freeze({
+      limit: DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT,
+      timeoutMs: DEFAULT_SYNC_SHARED_MEMORY_QUEUE_TIMEOUT_MS,
+    }),
   });
 }
 

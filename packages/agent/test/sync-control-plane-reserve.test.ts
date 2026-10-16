@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   backpressureRegistry,
   contextGraphDataGraphUri,
@@ -6,23 +6,21 @@ import {
   createOperationContext,
   DKG_ONTOLOGY,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import {
-  DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT,
-  DEFAULT_SYNC_CONTROL_PLANE_QUEUE_TIMEOUT_MS,
-} from '../src/sync/control-plane-reserve.js';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT } from '../src/sync/shared-memory-reserve.js';
 import {
   getSyncBackpressureSnapshot,
   resolveSyncGlobalBackpressure,
-  SyncBackpressureBusyError,
   syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
   type SyncGlobalBackpressurePolicy,
 } from '../src/sync/backpressure.js';
 import { runCuratorMetaRefreshFromPeer } from '../src/curator-meta-refresh.js';
+import { holdsAuthoritativePublicDefinitionV1 } from '../src/context-graph-meta-confirmation.js';
+import { buildAuthoritativePublicMetaQuads } from '../src/context-graph-public-meta-proof.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import type { SyncAdmissionSource, SyncSchedulerLane } from '../src/sync/policy.js';
+import { pageResult } from './_helpers/sync-requester-fixtures.js';
 
 // Issue #3280: a member configured with one sync slot and no queue
 // (`syncGlobalMaxInflight: 1`, `syncGlobalQueueLimit: 0`) refused every
@@ -33,6 +31,14 @@ import type { SyncAdmissionSource, SyncSchedulerLane } from '../src/sync/policy.
 
 const RESERVE_ENV = 'DKG_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT';
 const SHARED_MEMORY_RESERVE_ENV = 'DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT';
+/** Every variable that overrides the policies these tests resolve. */
+const SYNC_ENV = [
+  RESERVE_ENV,
+  SHARED_MEMORY_RESERVE_ENV,
+  'DKG_SYNC_GLOBAL_MAX_INFLIGHT',
+  'DKG_SYNC_GLOBAL_LIMIT',
+  'DKG_SYNC_GLOBAL_QUEUE_LIMIT',
+] as const;
 const ctx = createOperationContext('sync');
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const OWNER = '0x7171717171717171717171717171717171717171';
@@ -75,32 +81,6 @@ function metadataRefresh(policy: SyncGlobalBackpressurePolicy, contextGraphId: s
   };
 }
 
-/**
- * Admit work that keeps its slot until `release()`; `started` resolves when it
- * runs. Work released while still queued ends as soon as it starts, so a test
- * that fails early leaves no slot held for the tests after it.
- */
-function hold(admission: Admission) {
-  let release: (() => void) | undefined;
-  let released = false;
-  let markStarted!: () => void;
-  const started = new Promise<void>((resolve) => { markStarted = resolve; });
-  const done = withGlobalSyncBackpressure(admission, () => new Promise<void>((resolve) => {
-    release = resolve;
-    markStarted();
-    if (released) resolve();
-  }));
-  return {
-    started,
-    done,
-    release: () => {
-      released = true;
-      release?.();
-    },
-    isRunning: () => release !== undefined,
-  };
-}
-
 function sharedMemoryPull(policy: SyncGlobalBackpressurePolicy, contextGraphId: string): Admission {
   return {
     policy,
@@ -112,252 +92,245 @@ function sharedMemoryPull(policy: SyncGlobalBackpressurePolicy, contextGraphId: 
   };
 }
 
+interface Held {
+  /** Resolves when the work runs. */
+  started: Promise<void>;
+  /** Settles when the work has ended, or rejects when it was refused. */
+  done: Promise<unknown>;
+  release: () => void;
+}
+
+/**
+ * Admit work that keeps its slot until `release()`. Work released while still
+ * queued ends as soon as it starts.
+ */
+function holdWith(admit: (work: () => Promise<void>) => Promise<unknown>): Held {
+  let release: (() => void) | undefined;
+  let released = false;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const done = admit(() => new Promise<void>((resolve) => {
+    release = resolve;
+    markStarted();
+    if (released) resolve();
+  }));
+  return {
+    started,
+    done,
+    release: () => {
+      released = true;
+      release?.();
+    },
+  };
+}
+
+const hold = (admission: Admission) => holdWith((work) => withGlobalSyncBackpressure(admission, work));
+
+/** Wait until held work runs; a refusal fails the test at once instead of hanging it. */
+async function running(work: Held): Promise<void> {
+  await Promise.race([work.started, work.done]);
+}
+
+/**
+ * Run a test whose held work is always released, so a failed assertion never
+ * leaves a slot of the one sync-global scheduler held for the tests after it.
+ */
+async function withHolds(test: (keep: (work: Held) => Held) => Promise<void>): Promise<void> {
+  const held: Held[] = [];
+  try {
+    await test((work) => {
+      held.push(work);
+      return work;
+    });
+  } finally {
+    for (const work of held) work.release();
+    await Promise.allSettled(held.map((work) => work.done));
+  }
+}
+
 function published() {
   return backpressureRegistry.capture().schedulers.find(
     (scheduler) => scheduler.scheduler === 'sync-global',
   );
 }
 
+let savedEnv: Partial<Record<(typeof SYNC_ENV)[number], string>> = {};
+
+beforeEach(() => {
+  savedEnv = {};
+  for (const name of SYNC_ENV) {
+    if (process.env[name] !== undefined) savedEnv[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+
 afterEach(() => {
-  delete process.env[RESERVE_ENV];
-  delete process.env[SHARED_MEMORY_RESERVE_ENV];
-  vi.useRealTimers();
+  for (const name of SYNC_ENV) {
+    if (savedEnv[name] === undefined) delete process.env[name];
+    else process.env[name] = savedEnv[name];
+  }
   vi.restoreAllMocks();
 });
 
 describe('reserved control-plane slot (#3280)', () => {
-  it('runs a metadata refresh while a long transfer of another graph holds the only slot', async () => {
+  it('runs a metadata refresh while a long transfer of another graph holds the only slot', () => withHolds(async (keep) => {
     const policy = oneSlotNoQueue();
-    const transfer = hold(longTransfer(policy));
-    await transfer.started;
+    await running(keep(hold(longTransfer(policy))));
     const messages: string[] = [];
 
-    try {
-      let refreshed = false;
-      await withGlobalSyncBackpressure({
-        ...metadataRefresh(policy, 'urn:cg:private'),
-        logInfo: (_ctx, message) => { messages.push(message); },
-      }, async () => { refreshed = true; });
+    let refreshed = false;
+    await withGlobalSyncBackpressure({
+      ...metadataRefresh(policy, 'urn:cg:private'),
+      logInfo: (_ctx, message) => { messages.push(message); },
+    }, async () => { refreshed = true; });
 
-      expect(refreshed).toBe(true);
-      expect(transfer.isRunning()).toBe(true);
-      expect(messages).toEqual([
-        'Sync backpressure running durable:control-plane in a reserved control-plane slot '
-          + '(global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1, queued=0/16)',
-      ]);
-    } finally {
-      transfer.release();
-      await transfer.done;
-    }
-  });
+    expect(refreshed).toBe(true);
+    expect(messages).toEqual([
+      'Sync backpressure running durable:control-plane in a reserved control-plane slot '
+        + '(global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1)',
+    ]);
+    // The transfer kept the general slot throughout.
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+  }));
 
-  it('keeps large transfers bounded as before: the reserve is not theirs', async () => {
+  it('keeps large transfers bounded as before: the reserve is not theirs', () => withHolds(async (keep) => {
     const policy = oneSlotNoQueue();
-    const transfer = hold(longTransfer(policy));
-    await transfer.started;
-    const refresh = hold(metadataRefresh(policy, 'urn:cg:private'));
-    await refresh.started;
+    await running(keep(hold(longTransfer(policy))));
+    await running(keep(hold(metadataRefresh(policy, 'urn:cg:private'))));
 
-    try {
-      await expect(withGlobalSyncBackpressure(
-        longTransfer(policy, 'urn:cg:second-large'),
-        async () => undefined,
-      )).rejects.toMatchObject({
-        reason: 'queue_full',
-        message: 'Sync backpressure rejected durable:urn:cg:second-large:peer (global inflight=1/1, queued=0/0)',
-      });
-      await expect(withGlobalSyncBackpressure(
-        { policy, ctx, label: 'changelog:urn:cg:small', lane: 'changelog', source: 'reconcile' },
-        async () => undefined,
-      )).rejects.toMatchObject({ reason: 'queue_full' });
-      // Each reserve has its own slot: a shared-memory pull still runs.
-      await expect(withGlobalSyncBackpressure(
-        sharedMemoryPull(policy, 'urn:cg:small'),
-        async () => 'pulled',
-      )).resolves.toBe('pulled');
-      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
-    } finally {
-      refresh.release();
-      transfer.release();
-      await Promise.all([refresh.done, transfer.done]);
-    }
-  });
+    await expect(withGlobalSyncBackpressure(
+      longTransfer(policy, 'urn:cg:second-large'),
+      async () => undefined,
+    )).rejects.toMatchObject({
+      reason: 'queue_full',
+      message: 'Sync backpressure rejected durable:urn:cg:second-large:peer (global inflight=1/1, queued=0/0)',
+    });
+    await expect(withGlobalSyncBackpressure(
+      { policy, ctx, label: 'changelog:urn:cg:small', lane: 'changelog', source: 'reconcile' },
+      async () => undefined,
+    )).rejects.toMatchObject({ reason: 'queue_full' });
+    // Each reserve has its own slot: a shared-memory pull still runs.
+    await expect(withGlobalSyncBackpressure(
+      sharedMemoryPull(policy, 'urn:cg:small'),
+      async () => 'pulled',
+    )).resolves.toBe('pulled');
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+  }));
 
-  it('queues a refresh behind a busy reserved slot instead of refusing it', async () => {
+  it('refuses a second refresh at once, as before, while the reserved slot is busy too', () => withHolds(async (keep) => {
+    // No queue of its own: an inbound request's authorization, which holds a
+    // responder slot meanwhile, or a loop over peers gets its answer at once.
     const policy = oneSlotNoQueue();
-    const transfer = hold(longTransfer(policy));
-    await transfer.started;
-    const first = hold(metadataRefresh(policy, 'urn:cg:first'));
-    await first.started;
+    await running(keep(hold(longTransfer(policy))));
+    await running(keep(hold(metadataRefresh(policy, 'urn:cg:first'))));
+
+    expect(syncAdmissionWouldBeRefused(policy, metadataRefresh(policy, 'urn:cg:second'))).toBe(true);
+    await expect(withGlobalSyncBackpressure(
+      metadataRefresh(policy, 'urn:cg:second'),
+      async () => undefined,
+    )).rejects.toMatchObject({
+      reason: 'queue_full',
+      message: 'Sync backpressure rejected durable:control-plane '
+        + '(global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1)',
+    });
+    // Nothing waits for the general slot, so it goes to whatever asks next.
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+  }));
+
+  it('waits in the general queue where the node has one, and takes the reserved slot when it frees', () => withHolds(async (keep) => {
+    const policy = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 2 });
+    const transfer = keep(hold(longTransfer(policy)));
+    await running(transfer);
+    const first = keep(hold(metadataRefresh(policy, 'urn:cg:first')));
+    await running(first);
     const messages: string[] = [];
-    const second = hold({
+    const second = keep(hold({
       ...metadataRefresh(policy, 'urn:cg:second'),
       logInfo: (_ctx, message) => { messages.push(message); },
-    });
+    }));
+    const queuedTransfer = keep(hold(longTransfer(policy, 'urn:cg:queued-transfer')));
+    await tick();
 
-    try {
-      await tick();
-      expect(second.isRunning()).toBe(false);
-      expect(messages).toEqual([
-        'Sync backpressure queued durable:control-plane (global inflight=1/1, queued=0/0, '
-          + 'reserved control-plane inflight=1/1, queued=1/16)',
-      ]);
-      expect(syncAdmissionWouldBeRefused(policy, metadataRefresh(policy, 'urn:cg:third'))).toBe(false);
+    expect(messages).toEqual([
+      'Sync backpressure queued durable:control-plane '
+        + '(global inflight=1/1, queued=0/2, reserved control-plane inflight=1/1)',
+    ]);
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 2 });
 
-      first.release();
-      await first.done;
-      await second.started;
-      expect(transfer.isRunning()).toBe(true);
-      expect(messages[1]).toBe(
-        'Sync backpressure running durable:control-plane in a reserved control-plane slot '
-          + '(global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1, queued=0/16)',
-      );
-    } finally {
-      first.release();
-      second.release();
-      transfer.release();
-      await Promise.all([first.done, second.done, transfer.done]);
-    }
-  });
+    // The reserved slot frees: the waiting refresh takes it, and the waiting
+    // transfer still waits for the general slot.
+    first.release();
+    await first.done;
+    await running(second);
+    expect(messages[1]).toBe(
+      'Sync backpressure running durable:control-plane in a reserved control-plane slot '
+        + '(global inflight=1/1, queued=1/2, reserved control-plane inflight=1/1)',
+    );
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 1 });
 
-  it('refuses a queued refresh once it has waited the bounded time', async () => {
-    const policy = oneSlotNoQueue();
-    const transfer = hold(longTransfer(policy));
-    await transfer.started;
-    const first = hold(metadataRefresh(policy, 'urn:cg:first'));
-    await first.started;
+    transfer.release();
+    await transfer.done;
+    await running(queuedTransfer);
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+  }));
 
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    try {
-      let started = false;
-      const outcome = expect(withGlobalSyncBackpressure(
-        metadataRefresh(policy, 'urn:cg:waiting'),
-        async () => { started = true; },
-      )).rejects.toSatisfy((error: unknown) => (
-        error instanceof SyncBackpressureBusyError
-        && error.reason === 'queue_timeout'
-        && error.message === 'Sync backpressure timed out durable:control-plane after 60000 ms '
-          + 'waiting for a control-plane slot (global inflight=1/1, reserved control-plane inflight=1/1, '
-          + 'queued=0/16)'
-      ));
-      await vi.advanceTimersByTimeAsync(DEFAULT_SYNC_CONTROL_PLANE_QUEUE_TIMEOUT_MS - 1);
-      expect(getSyncBackpressureSnapshot(policy).queued).toBe(1);
-      await vi.advanceTimersByTimeAsync(1);
-      await outcome;
-      expect(started).toBe(false);
-      expect(getSyncBackpressureSnapshot(policy).queued).toBe(0);
-    } finally {
-      vi.useRealTimers();
-      first.release();
-      transfer.release();
-      await Promise.all([first.done, transfer.done]);
-    }
-  });
-
-  it('uses a general slot first and the reserve only under pressure, without narrowing general capacity', async () => {
+  it('uses a general slot first and the reserve only under pressure, without narrowing general capacity', () => withHolds(async (keep) => {
     const policy = oneSlotNoQueue();
     const messages: string[] = [];
-    const general = hold({
+    const general = keep(hold({
       ...metadataRefresh(policy, 'urn:cg:general'),
       logInfo: (_ctx, message) => { messages.push(message); },
-    });
-    await general.started;
+    }));
+    await running(general);
     expect(messages).toEqual([
-      'Sync backpressure running durable:control-plane (global inflight=1/1, queued=0/0, '
-        + 'reserved control-plane inflight=0/1, queued=0/16)',
+      'Sync backpressure running durable:control-plane '
+        + '(global inflight=1/1, queued=0/0, reserved control-plane inflight=0/1)',
     ]);
     // Unchanged: a transfer still waits for the general slot.
     await expect(withGlobalSyncBackpressure(longTransfer(policy), async () => undefined))
       .rejects.toMatchObject({ reason: 'queue_full' });
 
-    const reserved = hold(metadataRefresh(policy, 'urn:cg:reserved'));
-    await reserved.started;
+    await running(keep(hold(metadataRefresh(policy, 'urn:cg:reserved'))));
     general.release();
     await general.done;
 
     // The reserved refresh is outside the general count: the freed general
     // slot takes a transfer while that refresh still runs.
-    const transfer = hold(longTransfer(policy));
-    try {
-      await transfer.started;
-      expect(reserved.isRunning()).toBe(true);
-      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
-    } finally {
-      reserved.release();
-      transfer.release();
-      await Promise.all([reserved.done, transfer.done]);
-    }
-  });
+    await running(keep(hold(longTransfer(policy))));
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+  }));
 
-  it('keeps its own bounded queue: waiting refreshes fill neither the general nor the shared-memory queue', async () => {
-    const policy = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 });
-    const transfer = hold(longTransfer(policy));
-    await transfer.started;
-    const reserved = hold(metadataRefresh(policy, 'urn:cg:reserved'));
-    await reserved.started;
-    const waiting = Array.from(
-      { length: DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT },
-      (_, index) => hold(metadataRefresh(policy, `urn:cg:waiting-${index}`)),
-    );
-    const queuedDurable = hold(longTransfer(policy, 'urn:cg:queued-durable'));
-    await tick();
+  it('keeps the shared-memory reserve for a shared-memory pull, whatever its source', () => withHolds(async (keep) => {
+    const policy = oneSlotNoQueue();
+    await running(keep(hold(longTransfer(policy))));
+    const messages: string[] = [];
 
-    try {
-      expect(queuedDurable.isRunning()).toBe(false);
-      expect(getSyncBackpressureSnapshot(policy).queued).toBe(DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT + 1);
-      await expect(withGlobalSyncBackpressure(
-        metadataRefresh(policy, 'urn:cg:one-too-many'),
-        async () => undefined,
-      )).rejects.toMatchObject({
-        reason: 'queue_full',
-        message: `Sync backpressure rejected durable:control-plane (global inflight=1/1, `
-          + `queued=${DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT + 1}/1, reserved control-plane inflight=1/1, `
-          + `queued=${DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT}/${DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT})`,
-      });
-      await expect(withGlobalSyncBackpressure(
-        sharedMemoryPull(policy, 'urn:cg:small'),
-        async () => 'pulled',
-      )).resolves.toBe('pulled');
+    await withGlobalSyncBackpressure({
+      ...sharedMemoryPull(policy, 'urn:cg:small'),
+      source: 'control-plane',
+      logInfo: (_ctx, message) => { messages.push(message); },
+    }, async () => undefined);
 
-      // Waiters drain through the reserved slot while the transfer still runs.
-      reserved.release();
-      for (const waiter of waiting) {
-        await waiter.started;
-        expect(transfer.isRunning()).toBe(true);
-        waiter.release();
-        await waiter.done;
-      }
-      transfer.release();
-      await queuedDurable.started;
-    } finally {
-      reserved.release();
-      for (const waiter of waiting) waiter.release();
-      transfer.release();
-      queuedDurable.release();
-      await Promise.all([reserved.done, transfer.done, queuedDurable.done, ...waiting.map((waiter) => waiter.done)]);
-    }
-  });
+    expect(messages).toEqual([
+      'Sync backpressure running shared-memory:urn:cg:small:peer in a reserved shared-memory slot '
+        + '(global inflight=1/1, queued=0/0, reserved shared-memory inflight=1/1, queued=0/16)',
+    ]);
+  }));
 
-  it('restores the refusal when the reserve is switched off', async () => {
+  it('restores the refusal when the reserve is switched off', () => withHolds(async (keep) => {
     process.env[RESERVE_ENV] = '0';
     const policy = oneSlotNoQueue();
-    const transfer = hold(longTransfer(policy));
-    await transfer.started;
+    await running(keep(hold(longTransfer(policy))));
 
-    try {
-      expect(syncAdmissionWouldBeRefused(policy, metadataRefresh(policy, 'urn:cg:private'))).toBe(true);
-      await expect(withGlobalSyncBackpressure(
-        metadataRefresh(policy, 'urn:cg:private'),
-        async () => undefined,
-      )).rejects.toMatchObject({
-        reason: 'queue_full',
-        message: 'Sync backpressure rejected durable:control-plane (global inflight=1/1, queued=0/0)',
-      });
-    } finally {
-      transfer.release();
-      await transfer.done;
-    }
-  });
+    expect(syncAdmissionWouldBeRefused(policy, metadataRefresh(policy, 'urn:cg:private'))).toBe(true);
+    await expect(withGlobalSyncBackpressure(
+      metadataRefresh(policy, 'urn:cg:private'),
+      async () => undefined,
+    )).rejects.toMatchObject({
+      reason: 'queue_full',
+      message: 'Sync backpressure rejected durable:control-plane (global inflight=1/1, queued=0/0)',
+    });
+  }));
 
   it('leaves control-plane work to the fast partition under partitioned admission', async () => {
     const policy = resolveSyncGlobalBackpressure({ syncAdmission: {} });
@@ -376,47 +349,43 @@ describe('reserved control-plane slot (#3280)', () => {
     expect(messages).toEqual(['Sync backpressure running durable:control-plane (global inflight=1/10, queued=0/72)']);
   });
 
-  it('counts the reserve in the scheduler capacity it publishes', () => {
+  it('counts the reserve in the scheduler capacity it publishes: one slot more, no queue', () => {
     resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 });
     expect(published()).toMatchObject({
       capacityModel: 'shared',
-      totals: {
-        inflightLimit: 3,
-        queueLimit: DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT + DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT,
-      },
-    });
-
-    process.env[RESERVE_ENV] = '0';
-    resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 });
-    expect(published()).toMatchObject({
-      totals: { inflightLimit: 2, queueLimit: DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT },
+      totals: { inflightLimit: 3, queueLimit: DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT },
     });
 
     process.env[SHARED_MEMORY_RESERVE_ENV] = '0';
+    resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 });
+    expect(published()).toMatchObject({ totals: { inflightLimit: 2, queueLimit: 0 } });
+
+    process.env[RESERVE_ENV] = '0';
     resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 });
     expect(published()).toMatchObject({ totals: { inflightLimit: 1, queueLimit: 0 } });
   });
 });
 
-/** A public root `_meta` declaration as a serving peer holds it. */
+/** A public root `_meta` declaration of `OWNER`'s graph, as a serving peer holds it. */
 function servedPublicMetaQuads(contextGraphId: string): Quad[] {
-  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
   return [
-    { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
-    { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: metaGraph },
-    { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${OWNER}`, graph: metaGraph },
+    ...buildAuthoritativePublicMetaQuads(contextGraphId),
+    {
+      subject: contextGraphDataGraphUri(contextGraphId),
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+      object: `did:dkg:agent:${OWNER}`,
+      graph: contextGraphMetaGraphUri(contextGraphId),
+    },
   ];
 }
 
-async function rootMetaRows(store: TripleStore, contextGraphId: string): Promise<Array<{ p: string; o: string }>> {
-  const result = await store.query(
-    `SELECT ?p ?o WHERE { GRAPH <${contextGraphMetaGraphUri(contextGraphId)}> { `
-    + `<${contextGraphDataGraphUri(contextGraphId)}> ?p ?o } }`,
-  );
-  if (result.type !== 'bindings') throw new Error('expected _meta bindings');
-  return result.bindings.map((row) => ({ p: row['p']!, o: row['o']! }));
-}
+/** The refresh of the RFC-64 metadata bootstrap: a relayed public declaration. */
+const BOOTSTRAP_REFRESH = Object.freeze({
+  force: true,
+  requirePublicDefinition: true,
+  ignoreRegistrationBinding: true,
+  expectedCuratorAddress: OWNER,
+});
 
 /**
  * The member of the issue: one sync slot, no queue, and the production
@@ -436,14 +405,9 @@ function createOneSlotMember(store: OxigraphStore, contextGraphId: string) {
     },
     metaRefreshTimestamps: new Map<string, number>(),
     runContextGraphSyncWithBackpressure: LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure,
-    fetchSyncPages: async (_ctx: unknown, _peer: string, _cg: string, _swm: boolean, phase: string) => {
+    fetchSyncPages: async (_ctx: unknown, _peer: string, cg: string, _swm: boolean, phase: string) => {
       fetches.push(phase);
-      return {
-        quads: servedPublicMetaQuads(contextGraphId),
-        checkpointKey: 'one-slot-member-meta',
-        resumedFromOffset: 0,
-        completed: true,
-      };
+      return pageResult(cg, phase, { quads: servedPublicMetaQuads(contextGraphId) });
     },
     store,
     oversizeTombstoneLog: { record: noop },
@@ -453,45 +417,60 @@ function createOneSlotMember(store: OxigraphStore, contextGraphId: string) {
     syncCheckpoints: new Map<string, number>(),
     log,
   };
-  return { agent, fetches, log };
+  /** Admit work through this member's admission path, held until released. */
+  const admit = (otherGraphId: string, label: string, source: SyncAdmissionSource) => holdWith(
+    (work) => LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+      agent as never,
+      ctx,
+      otherGraphId,
+      'durable',
+      label,
+      work,
+      { source },
+    ),
+  );
+  return { agent, fetches, log, admit };
 }
 
 describe('metadata refresh on a node with one sync slot and no queue (#3280)', () => {
-  it('installs a graph\'s definition while a long transfer of another graph holds the only slot', async () => {
+  it('installs a graph\'s definition while a long transfer of another graph holds the only slot', () => withHolds(async (keep) => {
     const contextGraphId = `${OWNER}/one-slot-member`;
     const store = new OxigraphStore();
-    const member = createOneSlotMember(store, contextGraphId);
-    let releaseTransfer!: () => void;
-    const transfer = LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
-      member.agent as never,
-      ctx,
-      'urn:cg:other-verified',
-      'durable',
-      'durable:urn:cg:other-verified:peer',
-      () => new Promise<void>((resolve) => { releaseTransfer = resolve; }),
-      { source: 'on-connect' },
-    );
-    await vi.waitFor(() => expect(releaseTransfer).toBeTypeOf('function'));
-
     try {
-      // The RFC-64 metadata bootstrap's refresh: a relayed public declaration.
-      await expect(runCuratorMetaRefreshFromPeer(member.agent, contextGraphId, SERVING_PEER_ID, {
-        force: true,
-        requirePublicDefinition: true,
-        ignoreRegistrationBinding: true,
-        expectedCuratorAddress: OWNER,
-      })).resolves.toBe(true);
+      const member = createOneSlotMember(store, contextGraphId);
+      await running(keep(member.admit('urn:cg:other-verified', 'durable:urn:cg:other-verified:peer', 'on-connect')));
+
+      await expect(runCuratorMetaRefreshFromPeer(member.agent, contextGraphId, SERVING_PEER_ID, BOOTSTRAP_REFRESH))
+        .resolves.toBe(true);
 
       expect(member.fetches).toEqual(['meta']);
-      expect(await rootMetaRows(store, contextGraphId)).toContainEqual({
-        p: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-        o: '"public"',
-      });
+      await expect(holdsAuthoritativePublicDefinitionV1(store, contextGraphId)).resolves.toBe(true);
       expect(member.log.warn).not.toHaveBeenCalled();
     } finally {
-      releaseTransfer?.();
-      await transfer;
       await store.close();
     }
-  });
+  }));
+
+  it('fails at once, without waiting, while the reserved slot is busy too', () => withHolds(async (keep) => {
+    const contextGraphId = `${OWNER}/busy-member`;
+    const store = new OxigraphStore();
+    try {
+      const member = createOneSlotMember(store, contextGraphId);
+      await running(keep(member.admit('urn:cg:other-verified', 'durable:urn:cg:other-verified:peer', 'on-connect')));
+      await running(keep(member.admit('urn:cg:other-private', 'durable:control-plane', 'control-plane')));
+
+      await expect(runCuratorMetaRefreshFromPeer(member.agent, contextGraphId, SERVING_PEER_ID, BOOTSTRAP_REFRESH))
+        .resolves.toBe(false);
+
+      expect(member.fetches).toEqual([]);
+      expect(member.log.warn).toHaveBeenCalledWith(
+        expect.anything(),
+        `Meta refresh for "${contextGraphId}" failed: Sync backpressure rejected durable:control-plane `
+          + '(global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1)',
+      );
+      await expect(holdsAuthoritativePublicDefinitionV1(store, contextGraphId)).resolves.toBe(false);
+    } finally {
+      await store.close();
+    }
+  }));
 });

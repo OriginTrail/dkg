@@ -8,7 +8,6 @@ import {
   DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT,
   DEFAULT_SYNC_SHARED_MEMORY_QUEUE_TIMEOUT_MS,
 } from '../src/sync/shared-memory-reserve.js';
-import { DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT } from '../src/sync/control-plane-reserve.js';
 import {
   getSyncBackpressureSnapshot,
   resolveSyncGlobalBackpressure,
@@ -539,21 +538,16 @@ describe('reserved shared-memory slot (#3251)', () => {
     const published = () => backpressureRegistry.capture().schedulers.find(
       (scheduler) => scheduler.scheduler === 'sync-global',
     );
-    // Beside the reserved control-plane slot and its queue (#3280).
+    // Beside the reserved control-plane slot, which has no queue (#3280).
     resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 });
     expect(published()).toMatchObject({
       capacityModel: 'shared',
-      totals: {
-        inflightLimit: 3,
-        queueLimit: DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT + DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT,
-      },
+      totals: { inflightLimit: 3, queueLimit: DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT },
     });
 
     process.env[RESERVE_ENV] = '0';
     const off = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 });
-    expect(published()).toMatchObject({
-      totals: { inflightLimit: 2, queueLimit: DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT },
-    });
+    expect(published()).toMatchObject({ totals: { inflightLimit: 2, queueLimit: 0 } });
     const transfer = hold(largeTransfer(off));
     return transfer.started.then(async () => {
       expect(syncAdmissionWouldBeRefused(off, sharedMemoryPull(off, 'urn:cg:a'))).toBe(true);

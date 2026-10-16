@@ -14,30 +14,28 @@ import { nonNegativeInteger, parseIntegerEnv } from './sync-switches.js';
  * operation encloses, on the requester and on the responder side) therefore
  * take a general slot when one is free and otherwise this reserved slot,
  * which no transfer can take: the limits of transfers are unchanged, and a
- * reserved fetch does not count against them. A fetch that finds no slot
- * waits in its own bounded queue instead of being refused, and is refused
- * after the queue timeout. A refresh nested in an admitted sync runs inside
- * that admission and takes nothing here. Partitioned admission has no
- * control-plane reserve: its fast partition holds that work.
+ * reserved fetch does not count against them.
+ *
+ * The reserve adds room to run, not a queue. A fetch that finds this slot
+ * busy too waits where it waited before, in the general queue, and on a node
+ * without one it is refused at once as before. Its callers include the
+ * authorization of an inbound sync request, which holds a responder slot
+ * meanwhile, and loops that ask one peer after another, so a wait of their
+ * own would cost more than the refusal. A refresh nested in an admitted sync
+ * runs inside that admission and takes nothing here. Partitioned admission
+ * has no control-plane reserve: its fast partition holds this work.
  *
  * Env DKG_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT; 0 turns the reserve off.
  */
 export const DEFAULT_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT = 1;
-/** Control-plane fetches wait in their own queue, not in the global one. */
-export const DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT = 16;
-/** Longest wait of a queued control-plane fetch before it is refused. */
-export const DEFAULT_SYNC_CONTROL_PLANE_QUEUE_TIMEOUT_MS = 60_000;
-/** Queue pool and owner key of waiting control-plane fetches. */
-export const CONTROL_PLANE_QUEUE_POOL = 'control-plane';
+const CONTROL_PLANE_RESERVE = 'control-plane';
 
 /** The control-plane reserve of a shared sync policy, resolved like its other limits. */
 export function controlPlaneReserve(): SyncReserve {
   return Object.freeze({
-    pool: CONTROL_PLANE_QUEUE_POOL,
+    pool: CONTROL_PLANE_RESERVE,
     maxInflight: nonNegativeInteger(parseIntegerEnv('DKG_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT'))
       ?? DEFAULT_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT,
-    queueLimit: DEFAULT_SYNC_CONTROL_PLANE_QUEUE_LIMIT,
-    queueTimeoutMs: DEFAULT_SYNC_CONTROL_PLANE_QUEUE_TIMEOUT_MS,
   });
 }
 
@@ -46,5 +44,5 @@ export function controlPlaneReserveFor(
   policy: object,
   source: SyncAdmissionSource,
 ): SyncReserve | undefined {
-  return source === 'control-plane' ? syncReserveOf(policy, CONTROL_PLANE_QUEUE_POOL) : undefined;
+  return source === 'control-plane' ? syncReserveOf(policy, CONTROL_PLANE_RESERVE) : undefined;
 }

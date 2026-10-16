@@ -515,13 +515,15 @@ function syncAdmissionTerms(
   const queueTimeoutMs = isPartitionedPolicy(policy) && admissionClass === 'fast'
     ? policy.partitions.fast.queueTimeoutMs
     : undefined;
-  // A shared-memory pull or a control-plane fetch that cannot start waits in
-  // its reserve's bounded queue for a general or reserved slot, and is
-  // deferred after that queue's timeout.
-  const reserve = controlPlaneReserveFor(policy, normalizedSource)
-    ?? sharedMemoryReserveFor(policy, lane, admissionClass === 'fast');
+  // A shared-memory pull or a control-plane fetch may also run in a reserved
+  // slot. A pull that cannot start waits in its reserve's bounded queue and is
+  // deferred after that queue's timeout; a reserve without a queue of its own
+  // leaves its work to wait where it would wait without one.
+  const reserve = sharedMemoryReserveFor(policy, lane, admissionClass === 'fast')
+    ?? controlPlaneReserveFor(policy, normalizedSource);
+  const ownQueue = reserve?.queue && { pool: reserve.pool, ...reserve.queue };
   return {
-    queueTimeoutMs: reserve?.queueTimeoutMs ?? queueTimeoutMs,
+    queueTimeoutMs: ownQueue?.timeoutMs ?? queueTimeoutMs,
     queued: {
       payload: {
         policy,
@@ -535,20 +537,20 @@ function syncAdmissionTerms(
         source: normalizedSource,
         capacityClaim,
       } satisfies GlobalQueuePayload,
-      ownerKey: reserve?.pool ?? ownerKey,
-      ownerQueueLimit: reserve ? undefined : ownerQueueLimit,
-      queuePool: reserve?.pool,
+      ownerKey: ownQueue?.pool ?? ownerKey,
+      ownerQueueLimit: ownQueue ? undefined : ownerQueueLimit,
+      queuePool: ownQueue?.pool,
       lane: schedulerLane,
       priority: options.priority ?? 0,
       priorityClass: options.priorityClass ?? 'default',
       agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
-      queueLimit: reserve?.queueLimit ?? queueLimit,
+      queueLimit: ownQueue?.limit ?? queueLimit,
     },
   };
 }
 
 function reservedSlotState(reserve: SyncReserve | undefined): string {
-  return reservedSlots.describe(reserve, reserve ? queue.countOwner(reserve.pool) : 0);
+  return reserve ? reservedSlots.describe(reserve, queue.countOwner(reserve.pool)) : '';
 }
 
 function acquire(
@@ -576,9 +578,9 @@ function acquire(
         'displaced',
       ),
     createTimeoutError: () => new SyncBackpressureBusyError(
-      reserve === undefined
+      reserve?.queue === undefined
         ? `Sync backpressure timed out ${options.label} waiting for the fast partition`
-        : `Sync backpressure timed out ${options.label} after ${reserve.queueTimeoutMs} ms waiting for a `
+        : `Sync backpressure timed out ${options.label} after ${reserve.queue.timeoutMs} ms waiting for a `
           + `${reserve.pool} slot (global inflight=${capacityTracker.inflightCount}/${limit}`
           + `${reservedSlotState(reserve)})`,
       'queue_timeout',
