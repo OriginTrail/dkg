@@ -1,16 +1,18 @@
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 import { withPublicSnapshotQueryTrust } from '../src/public-snapshot-evidence.js';
 import { materializeVerifiedGraphScopedAsset, type VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 
+afterEach(() => vi.restoreAllMocks());
 const graph='partial-persistent-snapshot', address=`0x${'1'.repeat(40)}`;
 const meta=`did:dkg:context-graph:${graph}/_meta`, root=`0x${'b'.repeat(64)}`;
 function asset(n:number): VerifiedGraphScopedAsset {
@@ -37,17 +39,17 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only') {
   };
   // Stub only the already-verified transport boundary. The actual job owns the
   // trust marker, evidence authentication, failure and real atomic store writes.
-  a.syncExactKnowledgeAssetsFromPeerDetailed=vi.fn(async (_peer:string,_graph:string,uals:string[],options:any)=>{
+  a.recoverSnapshotExactAssets=vi.spyOn(LifecycleSyncMethods, 'recoverSnapshotExactAssets').mockImplementation(async (_agent, _peer, _graph, uals, authority) => {
     await expect(query(store,graph)).rejects.toThrow('core-trusted');
     const committed:string[]=[];
     for(const ual of uals) {
       const verified=assets.get(ual)!;
       if(verified.ual.endsWith('/11')) continue; // Second batch fails on both transports.
-      const authenticated=await options.recoveryAuthority.authenticate(verified);
+      const authenticated=await authority.authenticate(verified, performance.now() + 120000);
       expect(await materializeVerifiedGraphScopedAsset({store,asset:authenticated.asset})).toBe('applied');
       committed.push(ual);
     }
-    return {committedExactAssetUals:committed};
+    return {committedExactAssetUals:committed} as any;
   });
   return a;
 }
@@ -68,7 +70,7 @@ describe('partial public snapshot durable trust',()=>{
     try {
       const a=fixture(store,'core-cache');
       await expect(run(a,'core-cache')).rejects.toThrow('10/11 committed');
-      expect(a.syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(3);
+      expect(a.recoverSnapshotExactAssets).toHaveBeenCalledTimes(3);
       expect(a.workLifetime.physicalRuns.size).toBe(0);
       await checkGuard(store);
       await store.close();

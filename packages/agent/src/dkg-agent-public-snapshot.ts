@@ -1,3 +1,4 @@
+import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { PublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
 import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
@@ -130,10 +131,9 @@ export class PublicSnapshotMethods extends DKGAgentBase {
               assertCurrent();
               const remaining = batch.filter(ual => !committed.has(ual));
               if (!remaining.length) break;
-              const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(peer, contextGraphId, remaining, {
+              const result = await LifecycleSyncMethods.recoverSnapshotExactAssets(this, peer, contextGraphId, remaining, evidence, {
                 signal, isCurrent, forceFreshExactSession: true,
                 exactRecoveryTransportMode: transport,
-                recoveryAuthority: evidence,
                 totalTimeoutMs: 120_000,
               });
               for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
