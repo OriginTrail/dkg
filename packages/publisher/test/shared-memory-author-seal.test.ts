@@ -12,11 +12,14 @@ import {
   computeGossipSigningPayload,
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  createGraphKnowledgeAssetScope,
   encodeGossipEnvelope,
   encodeWorkspacePublishRequest,
   generateEd25519Keypair,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
   parseAssertionSealQuads,
   parseGraphScopedAssertionSealCandidate,
   type AssertionSeal,
@@ -24,7 +27,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { DKGPublisher, computeFlatKCRootV10 } from '../src/index.js';
+import { DKGPublisher, KA_ID_PRED, computeFlatKCRootV10 } from '../src/index.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 import {
   SWM_SHARE_COMPLETE_PRED,
@@ -171,6 +174,22 @@ async function hasShareCompleteMarker(store: OxigraphStore, author = AUTHOR.addr
   return result.type === 'boolean' && result.value;
 }
 
+/**
+ * The asset VM publish would mint under the author's name: the UAL of the kept
+ * seal, when the share-complete marker is set and the shared content of that
+ * UAL still has the seal's Merkle root, as the publish path checks.
+ */
+async function publishTarget(store: OxigraphStore): Promise<string | undefined> {
+  const candidate = await keptSeal(store);
+  if (!candidate || !(await hasShareCompleteMarker(store))) return undefined;
+  const scope = createGraphKnowledgeAssetScope(candidate.seal.kaUal!, candidate.seal.assertionVersion!);
+  const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope, SUB);
+  const shared = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+  const quads = shared.type === 'quads' ? shared.quads : [];
+  const root = computeFlatKCRootV10(quads.map((quad) => ({ ...quad, graph: '' })), []);
+  return ethers.hexlify(root) === ethers.hexlify(candidate.seal.merkleRoot) ? scope.ual : undefined;
+}
+
 describe('verifySharedMemoryAuthorSeal', () => {
   it('accepts the author\'s seal of exactly the shared content', async () => {
     const seal = await sealOf('one');
@@ -257,10 +276,10 @@ describe('sharedMemoryAuthorSealFields', () => {
 });
 
 describe('keepSharedMemoryAuthorSeal', () => {
-  async function verifiedOf(value: string, version = 1) {
+  async function verifiedOf(value: string, version = 1, number = 7n) {
     const verdict = verifySharedMemoryAuthorSeal(
-      sharedMemoryAuthorSealFields(NAME, await sealOf(value, { version })),
-      shareOf(value, { assertionVersion: String(version) }),
+      sharedMemoryAuthorSealFields(NAME, await sealOf(value, { version, number })),
+      shareOf(value, { assertionVersion: String(version), kaUal: ualOf(number) }),
     );
     if (verdict.kind !== 'verified') throw new Error(`fixture seal not verified: ${JSON.stringify(verdict)}`);
     return verdict.verified;
@@ -310,7 +329,7 @@ describe('keepSharedMemoryAuthorSeal', () => {
     });
     await store.insert(receipt);
 
-    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('two', 2))).toBe(true);
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('two', 2))).toEqual({ kind: 'kept' });
 
     expect(await rowsOf(store, lowerSubject)).toEqual([]);
     expect(await hasShareCompleteMarker(store, lower)).toBe(false);
@@ -322,6 +341,75 @@ describe('keepSharedMemoryAuthorSeal', () => {
     for (const quad of receipt) {
       expect(rows.some((row) => row.predicate === quad.predicate)).toBe(true);
     }
+  });
+
+  it('replaces the seal only with a seal of the same asset at the same or a newer version', async () => {
+    const store = new OxigraphStore();
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('two', 2))).toEqual({ kind: 'kept' });
+
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('other', 1, 8n))).toEqual({
+      kind: 'refused',
+      reason: `"${NAME}" is bound here to another asset, ${ualOf()}`,
+    });
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('one', 1))).toEqual({
+      kind: 'refused',
+      reason: 'version 1 is older than the kept version 2',
+    });
+    const kept = await keptSeal(store);
+    expect(kept?.seal.kaUal).toBe(ualOf());
+    expect(kept?.seal.assertionVersion).toBe('2');
+
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('two', 2))).toEqual({ kind: 'kept' });
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('three', 3))).toEqual({ kind: 'kept' });
+    const newer = await keptSeal(store);
+    expect(newer?.seal.assertionVersion).toBe('3');
+    expect(ethers.hexlify(newer!.seal.merkleRoot)).toBe(ethers.hexlify(rootOf('three')));
+    expect(await hasShareCompleteMarker(store)).toBe(true);
+  });
+
+  it('does not bind a name this node published when it holds no seal of it', async () => {
+    const store = new OxigraphStore();
+    await store.insert([{
+      subject: assertionLifecycleUri(CG, AUTHOR.address.toLowerCase(), NAME, SUB),
+      predicate: 'http://dkg.io/ontology/vmCurrentAssertion',
+      object: `"${ethers.hexlify(rootOf('one')).slice(2)}"`,
+      graph: META_GRAPH,
+    }]);
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('other', 1, 8n))).toEqual({
+      kind: 'refused',
+      reason: `"${NAME}" was published here and names no asset to compare with`,
+    });
+    expect(await keptSeal(store)).toBeUndefined();
+    expect(await hasShareCompleteMarker(store)).toBe(false);
+  });
+
+  it('records the lifecycle\'s KA number and name, which identifier reads match', async () => {
+    const store = new OxigraphStore();
+    await keepSharedMemoryAuthorSeal(store, await verifiedOf('one'));
+    // The lookup `resolveByKaId` runs: the lifecycle with the KA number, and its name.
+    const found = await store.query(`SELECT ?lifecycle ?name WHERE { GRAPH <${META_GRAPH}> {
+      ?lifecycle <${KA_ID_PRED}> ?n . FILTER(?n = 7)
+      ?lifecycle <http://dkg.io/ontology/assertionName> ?name } }`);
+    expect(found.type === 'bindings' ? found.bindings : []).toEqual([
+      { lifecycle: assertionLifecycleUri(CG, AUTHOR.address, NAME, SUB), name: `"${NAME}"` },
+    ]);
+    // No lifecycle state until this node publishes the asset, so it is not
+    // taken for a lifecycle of the author's own (the queued lane refuses it).
+    const state = await store.query(`ASK { GRAPH <${META_GRAPH}> { ?lifecycle <http://dkg.io/ontology/state> ?s } }`);
+    expect(state.type === 'boolean' && state.value).toBe(false);
+  });
+
+  it('keeps the asset its lifecycle names when the seal rows are gone', async () => {
+    const store = new OxigraphStore();
+    await keepSharedMemoryAuthorSeal(store, await verifiedOf('one'));
+    await store.deleteByPattern({ graph: META_GRAPH, subject: contextGraphAssertionUri(CG, AUTHOR.address, NAME, SUB) });
+
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('other', 1, 8n))).toEqual({
+      kind: 'refused',
+      reason: `"${NAME}" is bound here to another asset, KA number 7`,
+    });
+    expect(await keepSharedMemoryAuthorSeal(store, await verifiedOf('one'))).toEqual({ kind: 'kept' });
+    expect((await keptSeal(store))?.seal.kaUal).toBe(ualOf());
   });
 });
 
@@ -349,6 +437,34 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
     const candidate = await keptSeal(store);
     expect(candidate?.seal.assertionVersion).toBe('2');
     expect(ethers.hexlify(candidate!.seal.merkleRoot)).toBe(ethers.hexlify(rootOf('two')));
+    expect(await publishTarget(store)).toBe(ualOf());
+  });
+
+  it('keeps the newer seal when an older version is replayed and refused', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const first = await signed(shareMessage('one', await sealOf('one')));
+    await handler.handle(first, PEER_ID);
+    await handler.handle(await signed(shareMessage('two', await sealOf('two', { version: 2 }))), PEER_ID);
+
+    expect(await handler.handle(first, PEER_ID)).toMatchObject({ applied: false });
+    const candidate = await keptSeal(store);
+    expect(candidate?.seal.assertionVersion).toBe('2');
+    expect(ethers.hexlify(candidate!.seal.merkleRoot)).toBe(ethers.hexlify(rootOf('two')));
+    expect(await hasShareCompleteMarker(store)).toBe(true);
+  });
+
+  it('keeps the seal when a share of the same version with other content is refused', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    await handler.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID);
+
+    const conflicting = shareMessage('two', await sealOf('two'), { shareOperationId: 'op-conflicting' });
+    expect(await handler.handle(await signed(conflicting), PEER_ID)).toMatchObject({ applied: false });
+    const candidate = await keptSeal(store);
+    expect(candidate?.seal.assertionVersion).toBe('1');
+    expect(ethers.hexlify(candidate!.seal.merkleRoot)).toBe(ethers.hexlify(rootOf('one')));
+    expect(await hasShareCompleteMarker(store)).toBe(true);
   });
 
   it('applies the share but keeps no seal that is not the author\'s', async () => {
@@ -406,24 +522,37 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
     ['unsigned', (message: Uint8Array) => Promise.resolve(message)],
     ['signed by another peer', (message: Uint8Array) => signed(message, STRANGER)],
     ['signed by the author for another graph', (message: Uint8Array) => signed(message, AUTHOR, 'another-graph')],
-  ])('keeps the author\'s name bound when another asset\'s seal arrives %s', async (_how, deliver) => {
-    // The curator holds the author's "report-1", bound to KA 7. A peer that saw
-    // the author's valid seal and content of KA 8 shares KA 8 under that name.
+    ['signed by the author', (message: Uint8Array) => signed(message)],
+  ])('keeps the author\'s name bound to its asset when another asset\'s seal arrives %s', async (_how, deliver) => {
+    // The curator holds the author's unpublished "report-1", bound to KA 7. A
+    // valid seal and the content of the author's KA 8 arrive under that name.
     const store = new OxigraphStore();
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
     await handler.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID);
+    expect(await publishTarget(store)).toBe(ualOf());
+
     expect(await handler.handle(await deliver(await otherAssetShare()), PEER_ID)).toMatchObject({ applied: true });
     const candidate = await keptSeal(store);
     expect(candidate?.seal.kaUal).toBe(ualOf());
+    expect(candidate?.seal.reservedKaId).toBe((BigInt(AUTHOR.address) << 96n) | 7n);
     expect(ethers.hexlify(candidate!.seal.merkleRoot)).toBe(ethers.hexlify(rootOf('one')));
+    expect(await publishTarget(store)).toBe(ualOf());
   });
 
-  it('lets the author rebind its own name to another asset', async () => {
+  it('keeps the name bound to its asset when earlier shares are replayed late', async () => {
+    // KA 7 binds "report-1", the author then shares KA 8 under it, and both
+    // shares are delivered again later.
     const store = new OxigraphStore();
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
-    await handler.handle(await signed(shareMessage('one', await sealOf('one'))), PEER_ID);
-    await handler.handle(await signed(await otherAssetShare()), PEER_ID);
-    expect((await keptSeal(store))?.seal.kaUal).toBe(ualOf(8n));
+    const first = await signed(shareMessage('one', await sealOf('one')));
+    const other = await signed(await otherAssetShare());
+    await handler.handle(first, PEER_ID);
+    await handler.handle(other, PEER_ID);
+
+    expect(await handler.handle(first, PEER_ID)).toMatchObject({ applied: true });
+    expect(await handler.handle(other, PEER_ID)).toMatchObject({ applied: true });
+    expect((await keptSeal(store))?.seal.kaUal).toBe(ualOf());
+    expect(await publishTarget(store)).toBe(ualOf());
   });
 
   it('keeps the seal of the asset this node published under the name', async () => {

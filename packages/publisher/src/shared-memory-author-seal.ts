@@ -18,7 +18,8 @@
  * author's seal into a graph or bind it to one of the author's names. The
  * receiver then records the seal and the share-complete marker under the
  * author's coordinate in the graph's `_meta`, which is where VM publish looks
- * for them.
+ * for them. A coordinate keeps the asset it was first bound to: its seal is
+ * replaced only by a seal of the same asset at the same or a newer version.
  */
 
 import {
@@ -39,8 +40,10 @@ import {
   createGraphKnowledgeAssetScope,
   knowledgeAssetAgentAddressesEqual,
   parseCanonicalGraphScopedAuthorSealV1,
+  unwrapIri,
   validateAssertionName,
   type AssertionSeal,
+  type AssertionSealBuildArgs,
   type GossipEnvelopeMsg,
   type GraphKnowledgeAssetScope,
   type Logger,
@@ -50,7 +53,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { withKeyedLocks } from './keyed-lock.js';
 import { computeFlatKCRootV10 } from './merkle.js';
-import { VM_CURRENT_ASSERTION_PRED } from './metadata.js';
+import { KA_ID_PRED, VM_CURRENT_ASSERTION_PRED } from './metadata.js';
 
 /**
  * #1116 (review A1) — marker predicate stamped on the lifecycle URN when a KA
@@ -61,6 +64,10 @@ import { VM_CURRENT_ASSERTION_PRED } from './metadata.js';
  * was verified against the complete content the share stored.
  */
 export const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
+
+/** The lifecycle's name, which identifier reads (`resolveByKaId`) match with its `dkg:kaId`. */
+const ASSERTION_NAME_PRED = 'http://dkg.io/ontology/assertionName';
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 /** The two share-message fields that carry the author's seal. */
 export interface SharedMemoryAuthorSealFields {
@@ -104,13 +111,19 @@ export interface SharedMemoryAuthorSealShare {
   readonly merkleRoot: Uint8Array;
 }
 
+/** A complete graph-scoped seal, without the subject and graph it is written to. */
+export type GraphScopedAuthorSeal = Omit<
+  Extract<AssertionSealBuildArgs, { contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION }>,
+  'assertionUri' | 'metaGraph'
+>;
+
 /** A seal that recovers its author and commits to the share's content. */
 export interface VerifiedSharedMemoryAuthorSeal {
   readonly contextGraphId: string;
   readonly subGraphName?: string;
   readonly assertionName: string;
-  /** Graph-scoped v2 seal, its addresses in EIP-55 form. */
-  readonly seal: AssertionSeal;
+  /** Its addresses in EIP-55 form, its UAL and version canonical. */
+  readonly seal: GraphScopedAuthorSeal;
 }
 
 export type SharedMemoryAuthorSealVerdict =
@@ -204,7 +217,6 @@ export function verifySharedMemoryAuthorSeal(
             ? {}
             : { privateMerkleRoot: ethers.getBytes(payload.privateMerkleRoot) }),
           privateTripleCount: Number(payload.privateTripleCount),
-          rootEntities: [],
         },
       },
     };
@@ -215,20 +227,37 @@ export function verifySharedMemoryAuthorSeal(
 
 const SEAL_PREDICATES: ReadonlySet<string> = new Set(Object.values(ASSERTION_SEAL_PREDICATES));
 
+/** Whether a verified seal was recorded at its coordinate, and if not, why. */
+export type SharedMemoryAuthorSealKeepOutcome =
+  | { readonly kind: 'kept' }
+  | { readonly kind: 'refused'; readonly reason: string };
+
+/** The value of an `xsd:integer` literal as the store returns it. */
+function integerLiteralValue(term: string): bigint | undefined {
+  const match = /^"(\d+)"/.exec(term);
+  return match ? BigInt(match[1]!) : undefined;
+}
+
 /**
  * Record a verified seal and the share-complete marker under the author's
- * coordinate in `<cg>/_meta`, replacing an earlier seal of that coordinate.
- * Both address spellings are cleared, so one coordinate never holds two
- * seals. Other rows on these subjects, such as this node's own publish receipt
- * and VM pointer, are left alone. A coordinate whose asset this node already
- * published keeps that asset's seal: a seal of another asset under the same
- * name is refused (`false`), so the lifecycle and its seal stay one asset.
- * Callers serialize calls per coordinate.
+ * coordinate in `<cg>/_meta`, with the lifecycle's KA number and name, which
+ * identifier reads match once this node has published the asset.
+ *
+ * A coordinate keeps the asset it was first bound to, as its seal and its
+ * lifecycle's KA number name it. A stored seal is replaced only by a seal of
+ * the same asset (the same UAL) at the same or a newer version: a seal of
+ * another asset under the same name is refused, and so is an older version. A
+ * coordinate this node published, but which names no asset to compare with,
+ * is not bound again, so its VM pointer and its seal stay one asset. A
+ * replacement clears both address spellings, so one coordinate never holds
+ * two seals; other rows on these subjects, such as this node's own publish
+ * receipt and VM pointer, are left alone. Callers serialize calls per
+ * coordinate.
  */
 export async function keepSharedMemoryAuthorSeal(
   store: TripleStore,
   kept: VerifiedSharedMemoryAuthorSeal,
-): Promise<boolean> {
+): Promise<SharedMemoryAuthorSealKeepOutcome> {
   const { contextGraphId, subGraphName, assertionName, seal } = kept;
   const metaGraph = contextGraphMetaUri(contextGraphId);
   const author = seal.authorAddress;
@@ -246,41 +275,48 @@ export async function keepSharedMemoryAuthorSeal(
     { source: 'publisher.swm.authorSeal.current' },
   );
   const rows = current.type === 'quads' ? current.quads : [];
-  const holdsOtherAsset = rows.some((quad) => sealSubjects.includes(quad.subject)
-    && quad.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL
-    && quad.object.replace(/^<|>$/g, '') !== seal.kaUal);
-  const publishedHere = rows.some((quad) => lifecycleSubjects.includes(quad.subject)
-    && quad.predicate === VM_CURRENT_ASSERTION_PRED);
-  if (holdsOtherAsset && publishedHere) return false;
+  const sealRows = rows.filter((quad) => sealSubjects.includes(quad.subject));
+  const lifecycleRows = rows.filter((quad) => lifecycleSubjects.includes(quad.subject));
+  const incoming = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+  const boundAssets = [
+    ...sealRows
+      .filter((quad) => quad.predicate === ASSERTION_SEAL_PREDICATES.KA_UAL)
+      .map((quad) => ({ bound: unwrapIri(quad.object) === incoming.ual, name: unwrapIri(quad.object) })),
+    ...lifecycleRows
+      .filter((quad) => quad.predicate === KA_ID_PRED)
+      .map((quad) => integerLiteralValue(quad.object))
+      .map((number) => ({ bound: number === BigInt(incoming.kaNumber), name: `KA number ${number ?? '(unreadable)'}` })),
+  ];
+  const otherAsset = boundAssets.find((asset) => !asset.bound);
+  if (otherAsset !== undefined) {
+    return { kind: 'refused', reason: `"${assertionName}" is bound here to another asset, ${otherAsset.name}` };
+  }
+  const publishedHere = lifecycleRows.some((quad) => quad.predicate === VM_CURRENT_ASSERTION_PRED);
+  if (publishedHere && boundAssets.length === 0) {
+    return { kind: 'refused', reason: `"${assertionName}" was published here and names no asset to compare with` };
+  }
+  const incomingVersion = BigInt(seal.assertionVersion);
+  const newerVersion = sealRows
+    .filter((quad) => quad.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION)
+    .map((quad) => integerLiteralValue(quad.object))
+    .find((version) => version !== undefined && version > incomingVersion);
+  if (newerVersion !== undefined) {
+    return { kind: 'refused', reason: `version ${incomingVersion} is older than the kept version ${newerVersion}` };
+  }
   const stale: Quad[] = rows
     .filter((quad) => (sealSubjects.includes(quad.subject)
       ? SEAL_PREDICATES.has(quad.predicate)
       : quad.predicate === SWM_SHARE_COMPLETE_PRED))
     .map((quad) => ({ ...quad, graph: metaGraph }));
   if (stale.length > 0) await store.delete(stale);
+  const lifecycle = lifecycleSubjects[0]!;
   await store.insert([
-    ...buildAssertionSealQuads({
-      assertionUri: sealSubjects[0]!,
-      metaGraph,
-      merkleRoot: seal.merkleRoot,
-      authorAddress: author,
-      authorAttestationR: seal.authorAttestationR,
-      authorAttestationVS: seal.authorAttestationVS,
-      authorSchemeVersion: seal.authorSchemeVersion,
-      chainId: seal.chainId,
-      kav10Address: seal.kav10Address,
-      reservedKaId: seal.reservedKaId!,
-      finalizedAtIso: seal.finalizedAtIso,
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: seal.kaUal!,
-      assertionVersion: seal.assertionVersion!,
-      publicTripleCount: seal.publicTripleCount!,
-      ...(seal.privateMerkleRoot ? { privateMerkleRoot: seal.privateMerkleRoot } : {}),
-      privateTripleCount: seal.privateTripleCount!,
-    }),
-    { subject: lifecycleSubjects[0]!, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: metaGraph },
+    ...buildAssertionSealQuads({ ...seal, assertionUri: sealSubjects[0]!, metaGraph }),
+    { subject: lifecycle, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: metaGraph },
+    { subject: lifecycle, predicate: KA_ID_PRED, object: `"${incoming.kaNumber}"^^<${XSD_INTEGER}>`, graph: metaGraph },
+    { subject: lifecycle, predicate: ASSERTION_NAME_PRED, object: `"${assertionName}"`, graph: metaGraph },
   ]);
-  return true;
+  return { kind: 'kept' };
 }
 
 /** How a share reached this node: its gossip envelope, if any, and the bytes the envelope signs. */
@@ -398,16 +434,13 @@ export class SharedMemoryAuthorSealKeeper {
       verified.seal.authorAddress.toLowerCase(),
       verified.assertionName,
     ].join('\u0000');
-    const kept = await withKeyedLocks(
+    const outcome = await withKeyedLocks(
       this.coordinateLocks,
       [coordinate],
       () => keepSharedMemoryAuthorSeal(this.store, verified),
     );
-    if (!kept) {
-      this.log.warn(
-        ctx,
-        `SWM author seal for ${scope.ual} not kept: "${verified.assertionName}" is bound here to another, published asset`,
-      );
+    if (outcome.kind === 'refused') {
+      this.log.warn(ctx, `SWM author seal for ${scope.ual} not kept: ${outcome.reason}`);
       return;
     }
     this.log.info(

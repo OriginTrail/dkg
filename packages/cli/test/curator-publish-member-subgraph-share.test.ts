@@ -267,6 +267,16 @@ describe('a curator publishes a member\'s sub-graph share from shared memory (GH
     );
     expect(leftInCuratorSwm.bindings).toEqual([]);
 
+    // 5b. The curator reads it back by the identifiers the publish returned.
+    const byKaId = await curator.assertion.resolveByKaId(CG, BigInt(published.body.kaId), { subGraphName: SUB_GRAPH });
+    expect(byKaId).toMatchObject({ name: NAME, state: 'published' });
+    expect(byKaId?.agentAddress.toLowerCase()).toBe(memberAddress.toLowerCase());
+    const byUal = await curatorRoutes.get(
+      `/api/knowledge-assets/${encodeURIComponent(published.body.ual)}?contextGraphId=${CG}&subGraphName=${SUB_GRAPH}`,
+    );
+    expect(byUal.status, JSON.stringify(byUal.body)).toBe(200);
+    expect(byUal.body).toMatchObject({ name: NAME, state: 'published' });
+
     // 6. The member, the author, follows the publication like every other node.
     const inMemberVm = await pollUntil(
       () => member.query(
