@@ -1,3 +1,7 @@
+import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
+import { createRecoveryAuthority } from './durable-recovery-authority.js';
+import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
+import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
@@ -563,6 +567,107 @@ function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
  * subscription wiring applies the remaining process-local intents.
  */
 export class DKGAgentBase {
+  /** Assemble operation capabilities at the protected-field owner. */
+  protected static createDurableRecoveryCapabilities(agent: DKGAgent): DurableRecoveryHost {
+    const materialization = new RecoveryMaterializationOwner({
+      chain: () => agent.chain,
+      store: () => agent.store,
+      isClosed: () => agent.graphScopedStoreClosed,
+      subscription: id => agent.subscribedContextGraphs.get(id),
+      bindingGeneration: id => agent.contextGraphBindingState.capture(id),
+      isBindingGenerationCurrent: (id, generation) => agent.contextGraphBindingState.isGenerationCurrent(id, generation),
+      track: run => { agent.workLifetime.track(run); },
+      verifyBinding: (id, onChainId, ctx, signal) => agent.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+      persistSubscription: (id, subscription, reason, isCurrent) => agent.persistContextGraphSyncStateStrict(id, subscription, reason, isCurrent),
+      bindSubscription: (id, subscription, onChainId) => agent.bindSubscriptionOnChainId(id, subscription, onChainId),
+      recordDrops: (drops, seam) => agent.oversizeTombstoneLog.record(drops, seam),
+      cleanup: () => ({
+        store: agent.store, writeLocks: agent.writeLocks, log: agent.log,
+        invalidateListContextGraphsCache: () => agent.invalidateListContextGraphsCache(),
+        retireFinalizedSwmTwinCandidate: (candidate, ctx) => agent.retireFinalizedSwmTwinCandidate(candidate, ctx),
+        retireLegacySwmAfterVerifiedVmTwin: params => agent.retireLegacySwmAfterVerifiedVmTwin(params),
+      }),
+    });
+    return {
+      owner: agent,
+      policy: () => ({
+        syncAgentsMeta: agent.config.syncAgentsMeta,
+        syncContextGraphPriorities: agent.config.syncContextGraphPriorities,
+      }),
+      admission: {
+        run: <T>({ ctx, contextGraphId, lane, label, work, ...admission }: RecoveryAdmissionRequest<T>): Promise<T> =>
+          agent.runContextGraphSyncWithBackpressure(ctx, contextGraphId, lane, label, work, admission),
+      },
+      transport: {
+        fetchPages: (request, options) => {
+          const { ctx, remotePeerId, contextGraphId, phase, graphUri, fetchContext } = request;
+          return agent.fetchSyncPages(ctx, remotePeerId, contextGraphId, false, phase, graphUri, fetchContext.deadline, {
+            snapshotRef: request.snapshotRef, sinceBatchId: request.sinceBatchId,
+            signal: fetchContext.signal,
+            manifestDigest: request.manifestDigest,
+            manifestPrefixDigestAtOffset: request.manifestPrefixDigestAtOffset,
+            shouldStopAfterPage: request.shouldStopAfterPage,
+            returnAcceptedPrefixOnRetryableTransportFailure: request.returnAcceptedPrefixOnRetryableTransportFailure,
+            requesterScope: request.requesterScope,
+            ephemeralRequesterState: request.ephemeralRequesterState,
+            forceFreshSession: request.forceFreshSession || options.forceFreshSession,
+            assetUals: options.assetUals,
+            checkpointStore: options.checkpointStore,
+          });
+        },
+        stream: (ctx, remotePeerId, contextGraphId) => ({
+          router: agent.router, capabilityOwner: agent,
+          captureConnectionKey: () => agent.getSyncReconcilerConnectionKey(remotePeerId),
+          captureRefusalScope: () => agent.captureExperimentalExactBatchRefusalScope(contextGraphId),
+          isChainEnabled: () => agent.chain.chainId !== 'none',
+          getPeerProtocols: () => agent.getPeerProtocols(remotePeerId),
+          requestIdentity: () => ({
+            requesterPeerId: agent.peerId,
+            computeSyncDigest: (...args) => agent.computeSyncDigest(...args),
+            getIdentityId: () => agent.chain.getIdentityId(),
+            signMessage: typeof agent.chain.signMessage === 'function' ? agent.chain.signMessage.bind(agent.chain) : undefined,
+          }),
+          reconnect: async signal => {
+            try { await agent.ensurePeerConnected(remotePeerId, { signal }); }
+            catch { return false; }
+            return agent.node.libp2p.getConnections().some(connection => connection.remotePeer.toString() === remotePeerId);
+          },
+          logInfo: message => agent.log.info(ctx, message),
+        }),
+      },
+      verification: {
+        processBatch: (...args) => agent.processDurableBatchInWorker(...args),
+        parseAndFilter: (...args) => agent.getOrCreateSyncVerifyWorker().parseAndFilter(...args),
+      },
+      storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
+        priority: 'background', source: 'agent.durableSync.storeInsert', signal,
+      }),
+      materialization: scope => materialization.forOperation(scope),
+      checkpoints: {
+        deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),
+        setCheckpoint: (key, checkpoint) => {
+          if (checkpoint.binding) {
+            agent.syncCheckpoints.setManifestBoundOffset(key, checkpoint.offset, checkpoint.binding.manifestDigest,
+              Date.now(), checkpoint.binding.manifestPrefixDigest, checkpoint.binding.terminal, checkpoint.responderSessionOffset);
+          } else {
+            agent.syncCheckpoints.set(key, checkpoint.offset, Date.now(), checkpoint.responderSessionOffset);
+          }
+        },
+      },
+      log: {
+        info: (ctx, message) => agent.log.info(ctx, message),
+        warn: (ctx, message) => agent.log.warn(ctx, message),
+        debug: (ctx, message) => agent.log.debug(ctx, message),
+      },
+      resolveOrdinaryAuthority: (ctx, input) => createRecoveryAuthority({
+        chain: agent.chain,
+        verifyContextGraphBinding: (id, onChainId, signal) => agent.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+        resolveAuthority: (id, signal) => agent.resolveRegisteredContextGraphAuthority(id, { authorityReadMode: 'finalized-index-or-live', signal }),
+        warn: message => agent.log.warn(ctx, message),
+      }, input),
+    };
+  }
+
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
   readonly store: TripleStore;

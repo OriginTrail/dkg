@@ -1,4 +1,4 @@
-import type { DKGAgent } from '../src/index.js';
+import { DKGAgent } from '../src/index.js';
 import type { DurableRecoveryHost } from '../src/durable-recovery-host.js';
 
 declare const agent: DKGAgent;
@@ -15,3 +15,18 @@ void host.node;
 void host.subscribedContextGraphs;
 // @ts-expect-error Direct store access would bypass the authentication and lifecycle fences.
 void host.store;
+
+// @ts-expect-error The static assembler also remains inside the protected agent boundary.
+DKGAgent.createDurableRecoveryCapabilities(agent);
+
+declare const execution: import('../src/durable-recovery-execution.js').DurableRecoveryRequest;
+declare const graph: import('../src/durable-recovery-graph.js').DurableGraphRequest;
+declare const exact: import('../src/exact-recovery-execution.js').ExactRecoveryRequest;
+// @ts-expect-error Compatibility selection aliases are normalized before internal execution.
+void execution.options?.exactAssetSelection;
+// @ts-expect-error Internal graph execution consumes only the selection-bound policy.
+void graph.options.forceFreshExactSession;
+// @ts-expect-error Exact execution receives a policy, not another compatibility input.
+void exact.selectionInput;
+// @ts-expect-error Refresh purpose is bound into the canonical policy at entry.
+void exact.options.exactFetchPurpose;

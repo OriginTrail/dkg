@@ -8,8 +8,6 @@ import type { ExactBatchStreamDriverPorts } from './sync/requester/exact-batch-s
 import type { DurableRecoveryAuthority, DurableRecoveryInput } from './durable-recovery-authority.js';
 import type { RecoveryMaterialization, RecoveryMaterializationScope } from './durable-recovery-materialization.js';
 
-export { createDurableRecoveryHost } from './dkg-agent-recovery.js';
-
 export interface RecoveryAdmissionRequest<T> {
   readonly ctx: OperationContext;
   readonly contextGraphId: string;

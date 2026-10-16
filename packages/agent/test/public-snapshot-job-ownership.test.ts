@@ -1,6 +1,6 @@
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
 import * as recoveryGraph from '../src/durable-recovery-graph.js';
-import { createDurableRecoveryHost } from '../src/durable-recovery-host.js';
 
 vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
@@ -8,7 +8,6 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
 });
 import { exchangeExperimentalExactBatch } from '@origintrail-official/dkg-core';
 
-import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import { CG, ctx, createExactBatchHostFixture, storedRows } from './_helpers/exact-batch-host.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { getEventListeners } from 'node:events';
@@ -39,6 +38,39 @@ function fixture() {
 }
 const run = (a: any, mode: 'core-cache' | 'rpc-only') => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode});
 describe('public snapshot job ownership', () => {
+  it.each(['expired', 'graph', 'on-chain-id', 'chain', 'deployment'] as const)(
+    'rejects %s evidence from every core without RPC fallback or import side effects', async invalid => {
+      const { a } = fixture();
+      const raw = snapshot(true);
+      const malformed = sealPublicGraphSnapshot({ ...raw,
+        ...(invalid === 'expired' ? { observedAt: Date.now() - 600_000, expiresAt: Date.now() - 480_000 } : {}),
+        ...(invalid === 'graph' ? { contextGraphId: 'another-graph', nameHash: ethers.id('another-graph') } : {}),
+        ...(invalid === 'on-chain-id' ? { onChainId: '2' } : {}),
+        ...(invalid === 'chain' ? { chainId: 'evm:1' } : {}),
+        ...(invalid === 'deployment' ? { deploymentId: 'another-deployment' } : {}),
+      });
+      a.router.send.mockResolvedValue(Buffer.from(JSON.stringify(malformed)));
+      const recover = vi.spyOn(exactRecovery, 'runExactRecovery');
+      await expect(PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {
+        ...request, mode: 'core-cache', trustedCorePeerIds: ['core-a', 'core-b'],
+      })).rejects.toThrow('No configured core supplied a valid public snapshot');
+      expect(a.router.send.mock.calls.map((call: unknown[]) => call[0])).toEqual(['core-a', 'core-b']);
+      for (const call of a.router.send.mock.calls) {
+        expect(call[1]).toBe('/dkg/10.0.0/public-graph-snapshot/1');
+        expect(JSON.parse(new TextDecoder().decode(call[2]))).toEqual({
+          version: 1, contextGraphId: graph, onChainId: '1', refresh: false,
+        });
+      }
+      expect(a.chain.readPublicGraphSnapshot).not.toHaveBeenCalled();
+      expect(recover).not.toHaveBeenCalled();
+      expect(a.syncExactKnowledgeAssetsFromPeerDetailed).not.toHaveBeenCalled();
+      expect(a.subscribeToContextGraph).not.toHaveBeenCalled();
+      expect(a.store.insert).not.toHaveBeenCalled();
+      expect(a.subscribedContextGraphs.size).toBe(0);
+      expect(a.workLifetime.physicalRuns.size).toBe(0);
+    },
+  );
+
   it('releases caller and node lifetime listeners after an empty job settles', async () => {
     const { a } = fixture(), caller = new AbortController();
     const lifetime = a.workLifetime.signal;
@@ -133,10 +165,10 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
     let authority!: import('../src/durable-recovery-authority.js').DurableRecoveryAuthority;
     // Only transport/chain responses are fixtures. Exercise the real receive
     // worker, job evidence authentication, physical fence and atomic store path.
-    const recover = vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ host: _agent, remotePeerId: _peer, contextGraphId: _graph, selectionInput: uals, authority: policy, options }) => {
+    const recover = vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ host: _agent, remotePeerId: _peer, contextGraphId: _graph, policy: fetchPolicy, authority: policy, options }) => {
       authority = policy;
-      return recoveryGraph.runAdmittedDurableGraph({ host: createDurableRecoveryHost(a), ctx, remotePeerId: 'fixture-source', contextGraphId: CG, remainingContextGraphs: 1, authority: policy, options: {
-        ...options, exactAssetSelection: createUalOnlyExactAssetSelection(uals),
+      return recoveryGraph.runAdmittedDurableGraph({ host: (DKGAgentBase as any).createDurableRecoveryCapabilities(a), ctx, remotePeerId: 'fixture-source', contextGraphId: CG, remainingContextGraphs: 1, authority: policy, options: {
+        ...options, exactAssetFetchPolicy: fetchPolicy,
         fetchTimeoutMs: 120000, authenticationTimeoutMs: 30000,
       } });
     });
