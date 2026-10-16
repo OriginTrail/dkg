@@ -143,6 +143,51 @@ describe('SelectedLaneActivationWait', () => {
     await vi.advanceTimersByTimeAsync(50);
     expect(call.value).toBe(false);
   });
+
+  it('remembers, for the current job of a graph, whether a call found the lane not active', async () => {
+    // No accepted public policy yet: the call answers at once, and the job
+    // asked a peer nothing through the lane.
+    const { agent, wait, becomes } = waitingNode(NONE);
+    wait.begin('cg');
+    await expect(wait.untilActive(agent, 'cg')).resolves.toBe(false);
+    expect(wait.foundInactive('cg')).toBe(true);
+    expect(wait.foundInactive('cg-other')).toBe(false);
+
+    // The next job of the graph starts a record of its own; an active lane
+    // leaves nothing in it.
+    wait.begin('cg');
+    expect(wait.foundInactive('cg')).toBe(false);
+    becomes(ACTIVE);
+    await expect(wait.untilActive(agent, 'cg')).resolves.toBe(true);
+    expect(wait.foundInactive('cg')).toBe(false);
+
+    // An accepted policy whose lane is not activated within the window: only
+    // the end of the wait is a finding.
+    becomes(PENDING);
+    wait.begin('cg');
+    const timedOut = outcome(wait.untilActive(agent, 'cg'));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(wait.foundInactive('cg')).toBe(false);
+    await vi.advanceTimersByTimeAsync(501);
+    expect(timedOut.value).toBe(false);
+    expect(wait.foundInactive('cg')).toBe(true);
+
+    // A lane activated within the window leaves nothing.
+    wait.begin('cg');
+    const activated = outcome(wait.untilActive(agent, 'cg'));
+    await vi.advanceTimersByTimeAsync(100);
+    becomes(ACTIVE);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(activated.value).toBe(true);
+    expect(wait.foundInactive('cg')).toBe(false);
+
+    // A closing runner forgets what it found.
+    becomes(NONE);
+    await expect(wait.untilActive(agent, 'cg')).resolves.toBe(false);
+    expect(wait.foundInactive('cg')).toBe(true);
+    wait.close();
+    expect(wait.foundInactive('cg')).toBe(false);
+  });
 });
 
 describe('selected lane predicates', () => {
