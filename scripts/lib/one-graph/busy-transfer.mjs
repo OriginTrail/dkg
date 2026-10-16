@@ -24,7 +24,8 @@
 // after that window must show an admission that started before the window
 // opened. Because the transfer
 // leaves the slot for moments between admissions, edgeA shares again, up to
-// SHARE_ATTEMPTS times, until a receipt lands inside one. A promotion reaches
+// SHARE_ATTEMPTS times, until a receipt lands inside one; a receipt in such a
+// gap stops the attempts only when no further admission of the transfer comes. A promotion reaches
 // edgeB through edgeB's own sync work, which needs the slot itself, or edgeB
 // finalizes it locally from gossip, which does not. Its receipt counts when
 // the transfer held the slot at some reading between the promotion and the
@@ -48,6 +49,10 @@ const secs = ms => Math.round(ms / 1000);
 // How often edgeA shares a report during the transfer, at most, until edgeB
 // receives one while an admission of the transfer holds its slot.
 const SHARE_ATTEMPTS = 6;
+// The transfer is many short admissions, the slot free for moments between
+// them: after a receipt that does not count, how long edgeA waits for another
+// admission of the transfer before taking the transfer as ended (default).
+const TRANSFER_GAP_MS = 10_000;
 
 /**
  * One reading of a node's sync slots: the running operations of every lane
@@ -90,13 +95,16 @@ function readSlots(devnet, node) {
 }
 
 /**
- * The case. `ctx` is { devnet, edges, graphs, io, report, caseId, boundMs,
+ * The case. `ctx` is { devnet, edges, graphs, io, report, caseId, boundMs, transferGapMs,
  * stamp, ensureDefinition, promote }; `main` is the graph, `large` the large
  * graph (published), `promotions` the reports the curator promotes while the
  * transfer runs. `ensureDefinition(node, graph, caseId)` is the suite's
  * remedy for a subscriber that holds no definition of a graph, and
  * `promote(caseId, record)` its promotion check (which applies the known
- * gaps), resolving to when the promotion was confirmed, or null. Returns the
+ * gaps), resolving to when the promotion was confirmed, or null;
+ * `transferGapMs` is how long, after a receipt that does not count, edgeA
+ * waits for another admission of the transfer before taking it as ended
+ * (default TRANSFER_GAP_MS). Returns the
  * records of the reports shared in the window and the reports promoted, for
  * the cases after it: { shared, promoted }.
  */
@@ -172,6 +180,11 @@ export async function busyEdge(ctx, main, large, promotions) {
     const shared = [];
     const reportPairs = [];
     const readingAfter = moment => waitFor(() => ({ ok: slots.readings.some(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= moment) }), 5000, 200);
+    // Whether a reading sent after `moment` shows an admission of the transfer in the slot, within the gap allowed.
+    const transferResumes = moment => waitFor(() => {
+      const all = admissions();
+      return { ok: slots.readings.some(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= moment && slotHolder(reading, all, isTransfer).state === 'transfer') };
+    }, ctx.transferGapMs ?? TRANSFER_GAP_MS, 500);
     for (let attempt = 1; attempt <= SHARE_ATTEMPTS; attempt += 1) {
       if (attempt > 1) await sleep(1500);
       // The watches start before the report is created: it cannot be anywhere yet.
@@ -191,8 +204,10 @@ export async function busyEdge(ctx, main, large, promotions) {
       const log = devnet.logSince(edgeB, offset);
       const all = parseAdmissions(log);
       if (transferHeldThrough(window, slots.readings, all, isTransfer).held) break;
-      const life = transferLifetime(log, all, isTransfer, slots.readings);
-      if (!life || received > life.to) break;
+      // A receipt in a gap between two of the transfer's admissions is no sign
+      // that the transfer ended: share again once another admission holds the
+      // slot, and stop only when none does within the gap allowed.
+      if (!(await transferResumes(received)).ok) break;
     }
     const { promoted, pairs: promotionPairs } = await promoting;
     const until = Date.now();

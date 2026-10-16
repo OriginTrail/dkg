@@ -348,8 +348,8 @@ test('a promotion the busy Edge finalized locally while a transfer admission hel
     /; not exercised: the transfer never held the general slot between the promotion and the delivery \(no reading was taken between them; nor throughout its arrival: the slot held other work or none\)$/);
 });
 
-// A devnet for the busy case, from one script of when things happen: edgeB's sync slots (one transfer
-// admission from `transfer.from` to `transfer.until`) and its log, the client routes of a report, and
+// A devnet for the busy case, from one script of when things happen: edgeB's sync slots (the transfer's
+// admissions, each from `from` to `until`, the slot free between them) and its log, the client routes of a report, and
 // each node's reads of the reports. A report edgeA creates reaches edgeB `reportDelayMs` after its
 // create and the curator at once; an earlier report is in every node's shared memory until it is
 // promoted, and in Verified Memory from then on.
@@ -361,8 +361,8 @@ function busyDevnet({ dir, cg, large, edgeB, transfer, reportDelayMs }) {
   const api = async (node, method, path, body) => {
     const now = Date.now();
     if (path === '/api/diagnostics/backpressure') {
-      const running = now >= transfer.from && now < transfer.until;
-      const activeOperations = running ? [{ operation: 'durable:catchup-foreground', oldestAgeMs: now - transfer.from }] : [];
+      const running = transfer.find(admission => now >= admission.from && now < admission.until);
+      const activeOperations = running ? [{ operation: 'durable:catchup-foreground', oldestAgeMs: now - running.from }] : [];
       return ok({ schedulers: [{ scheduler: 'sync-global', lanes: [{ lane: 'durable', activeOperations }] }] });
     }
     if (method === 'POST' && path === '/api/knowledge-assets') {
@@ -391,9 +391,11 @@ function busyDevnet({ dir, cg, large, edgeB, transfer, reportDelayMs }) {
         : [...rows(swm, `${sharedMemoryScope(cg, 'reports')}/0xaa/1`), ...rows(vm, `did:dkg:context-graph:${cg}/reports/_verifiable_memory/1`)];
     return ok({ result: { type: 'bindings', bindings } });
   };
-  const admission = `${logStamp(transfer.from)} sync aaaa [DKGAgent] Sync backpressure running durable:${large.id}:QP4sWZbL (global inflight=1/1, queued=0/0)`;
+  // The log holds the line of each admission that has started by the time it is read.
+  const admissions = () => transfer.filter(admission => admission.from <= Date.now())
+    .map((admission, i) => `${logStamp(admission.from)} sync op${i} [DKGAgent] Sync backpressure running durable:${large.id}:Peer${i} (global inflight=1/1, queued=0/0)`).join('\n');
   return {
-    devnet: { dir, api, logSize: () => 0, logSince: node => (node === edgeB ? admission : '') },
+    devnet: { dir, api, logSize: () => 0, logSince: node => (node === edgeB ? admissions() : '') },
     // An earlier report of edgeA's, in every node's shared memory.
     earlier: (n, author) => {
       const subject = `urn:one-graph:E:${n}`;
@@ -409,7 +411,7 @@ function busyDevnet({ dir, cg, large, edgeB, transfer, reportDelayMs }) {
   };
 }
 
-function busyCase({ transfer, reportDelayMs, promotions = [], boundMs = 1500 }) {
+function busyCase({ transfer, reportDelayMs, promotions = [], boundMs = 1500, transferGapMs = 10_000 }) {
   const dir = mkdtempSync(join(tmpdir(), 'one-graph-busy-'));
   const cg = '0xabc/one-graph-main-1';
   const main = { key: 'main', id: cg, resolved: cg, sub: 'reports' };
@@ -424,7 +426,7 @@ function busyCase({ transfer, reportDelayMs, promotions = [], boundMs = 1500 }) 
   const records = promotions.map(({ n }) => ({ ...scripted.earlier(n, edgeA), graph: main }));
   const promoted = [];
   const ctx = {
-    devnet: scripted.devnet, edges: { curator, edgeA, edgeB }, graphs: { subscribe: async () => Date.now() }, io, report, caseId: 6, boundMs, stamp: 'S',
+    devnet: scripted.devnet, edges: { curator, edgeA, edgeB }, graphs: { subscribe: async () => Date.now() }, io, report, caseId: 6, boundMs, transferGapMs, stamp: 'S',
     ensureDefinition: async () => { throw new Error('the transfer was seen: no definition remedy expected'); },
     // The curator's promotion: refused, or edgeB finalizes it locally `deliveredAfterMs` after the request, before the answer comes.
     promote: async (_caseId, record) => {
@@ -442,7 +444,7 @@ function busyCase({ transfer, reportDelayMs, promotions = [], boundMs = 1500 }) 
 test('the busy case passes a report and a promotion that reached edgeB while the transfer held its slot, and leaves a refused promotion out', { timeout: 20_000 }, async () => {
   const now = Date.now();
   const scenario = busyCase({
-    transfer: { from: now - 300, until: now + 30_000 }, reportDelayMs: 300,
+    transfer: [{ from: now - 300, until: now + 30_000 }], reportDelayMs: 300,
     promotions: [{ n: 1, deliveredAfterMs: 150, answerAfterMs: 400 }, { n: 2, refused: true }],
   });
   try {
@@ -469,14 +471,31 @@ test('the busy case passes a report and a promotion that reached edgeB while the
 
 test('the busy case fails as not exercised when the report reached edgeB only after the transfer had ended', { timeout: 20_000 }, async () => {
   const now = Date.now();
-  // Delivered within its bound of 4 s, 2.5 s after the share; the transfer ended at 1.2 s.
-  const scenario = busyCase({ transfer: { from: now - 300, until: now + 1200 }, reportDelayMs: 2500, boundMs: 4000 });
+  // Delivered within its bound of 4 s, 2.5 s after the share; the transfer ended at 1.2 s, and no
+  // admission of it comes within the 2 s allowed for a gap.
+  const scenario = busyCase({ transfer: [{ from: now - 300, until: now + 1200 }], reportDelayMs: 2500, boundMs: 4000, transferGapMs: 2000 });
   try {
     await scenario.run();
     const failed = scenario.lines.filter(line => line.startsWith('  [FAIL] case 6: '));
     assert.equal(failed.length, 1, scenario.lines.join('\n'));
     assert.match(failed[0], /"edgeA while edgeB is busy 1 \(1\)" .* at node9 \(edgeB\): in shared memory \d+ s after the share; not exercised: the transfer of the large graph had ended by then$/);
     assert.deepEqual(scenario.report.summary('Results'), ['6']);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test('a receipt in a gap between the transfer\'s admissions does not end the attempts: a later one inside the next admission passes', { timeout: 30_000 }, async () => {
+  const now = Date.now();
+  // The first admission ends at 0.9 s, the next starts at 3.5 s; each report reaches edgeB 1.5 s after its create.
+  const scenario = busyCase({ transfer: [{ from: now - 300, until: now + 900 }, { from: now + 3500, until: now + 60_000 }], reportDelayMs: 1500, boundMs: 3000 });
+  try {
+    const { shared } = await scenario.run();
+    assert.deepEqual(shared.map(record => record.value), ['edgeA while edgeB is busy 1 (1)', 'edgeA while edgeB is busy 2 (2)']);
+    // The first receipt, in the gap, is only noted; the second counts.
+    assert.ok(scenario.lines.some(line => /\[NOTE\] case 6: an earlier share: "edgeA while edgeB is busy 1 \(1\)" .* at node9 \(edgeB\): in shared memory \d+ s after the share; not exercised: /.test(line)), scenario.lines.join('\n'));
+    assert.ok(scenario.lines.some(line => /\[PASS\] case 6: "edgeA while edgeB is busy 2 \(2\)" .* at node9 \(edgeB\): in shared memory \d+ s after the share, while an admission of the transfer held the general slot$/.test(line)), scenario.lines.join('\n'));
+    assert.deepEqual(scenario.report.summary('Results'), []);
   } finally {
     scenario.cleanup();
   }
