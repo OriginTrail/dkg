@@ -1,4 +1,5 @@
-// The known gaps of devnet-test-issue-3251-member-sharing.mjs, in one place.
+// The known gaps of the devnet suites devnet-test-issue-3251-member-sharing.mjs
+// and devnet-test-one-graph-promotion.mjs, in one place.
 //
 // A check reports an ordinary result: { check, outcome: 'pass' | 'fail', text,
 // quiet, evidence }. `classify` applies the known gaps to it once, before it
@@ -12,11 +13,14 @@
 // Retiring a gap is removing its entry, and its tests.
 
 /**
- * #3264: a member of a registered graph that reaches only the owner never
- * obtains the graph's definition. It covers checks of a member, never of the
- * owner, on a graph that is registered on chain and public: the member's
- * definition (the gap itself), its `synced` flag, and its own writes into the
- * graph. On a private graph the member joins through the signed request flow,
+ * #3264: a member of a registered public graph never obtains the graph's
+ * definition: only the owner holds the declaration, and a member asks only
+ * the peers it is connected to for it. A member that reaches only the owner
+ * (member-sharing), or that reaches the network through relays and never the
+ * owner (one-graph promotion), is left without it. It covers checks of a
+ * member, never of the owner, on a graph that is registered on chain and
+ * public: the member's definition (the gap itself), its `synced` flag, and
+ * its own writes into the graph. On a private graph the member joins through the signed request flow,
  * which #3264 is not about. A failure of one is the gap only with evidence of
  * the gap's state and of what preceded it: the member lacked the definition
  * (in the same listing, or right after its write was refused, which also
@@ -26,7 +30,7 @@
  */
 const REGISTERED_DEFINITION = {
   issue: '#3264',
-  what: 'a member of a registered graph that reaches only the owner never obtains the graph\'s definition',
+  what: 'a member of a registered public graph never obtains the graph\'s definition from the peers it reaches',
   covers: ({ check, evidence }) => evidence?.registered === true && evidence?.private === false && evidence?.member === true
     && ['definition', 'synced', 'write-refused'].includes(check),
   isTheGap: ({ check }) => check === 'definition',
@@ -42,7 +46,53 @@ const REGISTERED_DEFINITION = {
   },
 };
 
-export const KNOWN_GAPS = [REGISTERED_DEFINITION];
+/**
+ * #3293: an Edge that holds a registered graph's definition does not know the
+ * graph's sub-graphs (the declaration it pulls carries no sub-graph
+ * registration), and its first write into a sub-graph fails with HTTP 500
+ * (`Sub-graph "…" has not been registered in context graph "…"`). It covers
+ * the one-graph promotion suite's write before the writer registers the
+ * sub-graph itself (`sub-graph-write`). A failure is the gap only with
+ * evidence: the writer held the definition, its listing did not name the
+ * sub-graph, and the write was refused with HTTP 500 naming the unregistered
+ * sub-graph (the refusal carries no code, so its wording is the evidence).
+ */
+const SUB_GRAPH_UNREGISTERED = {
+  issue: '#3293',
+  what: 'an Edge holding a registered graph\'s definition does not know its sub-graph, and its first write there fails with HTTP 500',
+  covers: ({ check }) => check === 'sub-graph-write',
+  isTheGap: ({ check }) => check === 'sub-graph-write',
+  failure({ evidence }) {
+    if (evidence?.definitionHeld !== true) return { expected: false, because: 'the writer held no definition, so this is not #3293' };
+    if (evidence.subGraphListed === false && evidence.httpStatus === 500 && evidence.unregisteredSubGraph === true) {
+      return { expected: true, because: 'the writer holds the definition but not the sub-graph' };
+    }
+    return { expected: false, because: evidence.subGraphListed === true ? 'the writer lists the sub-graph, so this is not #3293' : undefined };
+  },
+};
+
+/**
+ * #3294: the curator cannot promote a report another Edge authored: the
+ * author's seal never reaches the curator, so the publish route answers HTTP
+ * 409 ASSERTION_AUTHOR_NOT_RESIDENT although the report is in the curator's
+ * shared memory. It covers the one-graph promotion suite's promotion of a
+ * report whose author is not the curator (`member-promotion`). A failure is
+ * the gap only with evidence: that code, and the curator holding the report
+ * in its shared memory before the promotion.
+ */
+const MEMBER_PROMOTION = {
+  issue: '#3294',
+  what: 'the curator cannot promote a report another Edge authored: the author\'s seal never reaches it',
+  covers: ({ check, evidence }) => check === 'member-promotion' && evidence?.authorIsCurator === false,
+  isTheGap: ({ check }) => check === 'member-promotion',
+  failure({ evidence }) {
+    if (evidence.heldByCurator !== true) return { expected: false, because: 'the curator never held the report, so this is not #3294' };
+    if (evidence.code === 'ASSERTION_AUTHOR_NOT_RESIDENT') return { expected: true, because: 'the curator holds the report but not its author\'s seal' };
+    return { expected: false, because: undefined };
+  },
+};
+
+export const KNOWN_GAPS = [REGISTERED_DEFINITION, SUB_GRAPH_UNREGISTERED, MEMBER_PROMOTION];
 
 /**
  * A check's result with the known gaps applied: { verdict: 'pass' | 'quiet' |

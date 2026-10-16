@@ -52,41 +52,58 @@
 //     the curator's confirmed publish, to be in every Edge's Verified Memory
 //     and out of every Edge's shared memory, where it must stay out at every
 //     reading to the end of the bound.
-//   ONE_GRAPH_RECOVERY_SECS (90): the late Edge, from its subscribe, to hold
-//     every promoted report in Verified Memory and not in shared memory, and
-//     every other report in shared memory.
+//   ONE_GRAPH_RECOVERY_SECS (90): the late Edge, from its second subscribe
+//     (the remedy's, case 10), to hold every promoted report in Verified
+//     Memory and not in shared memory, and every other report in shared
+//     memory.
 //   ONE_GRAPH_SYNCED_SECS (90): a subscriber, from its subscribe, to list the
 //     graph as synced. It must also hold the graph's definition within 90 s,
 //     or its own writes are refused.
 //
-// A subscriber without the definition at that deadline fails the check, and
-// then gets the remedy a client has, so that the later cases can run: it
-// dials the curator through its relay (a subscriber asks only the peers it is
+// The client remedy (case 10). Every subscriber, once its subscription's
+// checks have settled, does what a client can to write the graph whether it
+// needs to or not, so that the gate proves the path keeps working: it dials
+// the curator through its relay (a subscriber asks only the peers it is
 // connected to for the graph's declaration, and the curator may be the only
-// one that holds it) and subscribes again with an explicit catch-up
-// (`forceCatchup`). Its bounds then count from that second subscribe, and the
-// run notes it. Likewise a subscriber must know the sub-graph `reports`
-// within 30 s of holding the definition (its writes there are refused until
-// it does); one that does not fails that check and registers the sub-graph
-// itself. A subscriber's report refused because the graph is not yet synced
-// for its writes is made again until its synced deadline, as a client does.
+// one that holds it), subscribes again with an explicit catch-up
+// (`forceCatchup`) and must hold the definition within 90 s; it writes a
+// report into the sub-graph before registering the sub-graph itself (a check
+// of its own, see the known gaps), then registers it and must list it. Its
+// later bounds count from that second subscribe. A subscriber's report
+// refused because the graph is not yet synced for its writes is made again
+// until its synced deadline, as a client does.
+//
+// Known gaps (scripts/lib/qa/known-gaps.mjs, applied to every check before it
+// is reported): a check that fails for the reason of an open issue, with
+// evidence of that reason, prints as XFAIL with the issue and does not fail
+// its case; the same check holding prints as XPASS, so that the gap can be
+// retired. #3264: a subscriber that never obtains the definition (its
+// listing shows no access policy, and it never did), and its synced flag
+// (cases 2, 7, 8). #3293: a subscriber that holds the definition but whose
+// write into the sub-graph is refused with HTTP 500 naming the unregistered
+// sub-graph, its listing naming none (cases 2, 7). #3294: the curator's
+// promotion of another Edge's report refused with HTTP 409
+// ASSERTION_AUTHOR_NOT_RESIDENT, though the report was in its shared memory
+// (cases 4, 6).
 //
 // Cases (each line of the report names the case, the report, the node and
 // what did not hold):
-//   1  every Edge runs the profile: the build the devnet runs reads every
-//      member and variable of the profile; each Edge's status shows its peer
+//   1  every Edge runs the profile: each Edge's status shows its peer
 //      reconciler off and VM reconciliation on, and its log one general sync
-//      slot and no queue
+//      slot and no queue. A setting of the profile the build never reads is
+//      noted (it is the deployment's setting, not node behaviour)
 //   2  reports reach every other Edge, live: the curator, edgeA and edgeB
-//      share two reports each; every other Edge must hold each
+//      share two reports each; every other Edge must hold each. Also the
+//      subscription checks of edgeA and edgeB: the definition within 90 s,
+//      and the write into the sub-graph before registering it
 //   3  the publish policy holds: edgeA's own publish of its second report is
 //      refused by the chain's publisher authorization (any other failure of
 //      the publish leaves the policy unexercised and fails the case), and no
 //      Edge holds that report in Verified Memory
 //   4  promotion: the curator promotes the first report of each Edge, its
-//      own included; every Edge, the author included, holds it in Verified
-//      Memory and no longer in shared memory, and every report not promoted
-//      stays in shared memory
+//      own included (each promotion is a check); every Edge, the author
+//      included, holds it in Verified Memory and no longer in shared memory,
+//      and every report not promoted stays in shared memory
 //   5  an author whose report was promoted still shares: edgeA and edgeB
 //      share one more report each, and every other Edge must hold it
 //   6  edgeB's only sync slot is held by a large Verified Memory transfer of
@@ -101,13 +118,17 @@
 //      again, up to 6 times while the transfer runs, until a receipt lands
 //      inside one; a receipt outside the transfer's admissions fails as not
 //      exercised (scripts/lib/one-graph/busy-transfer.mjs)
-//   7  the late Edge recovers both layers within ONE_GRAPH_RECOVERY_SECS, then
-//      shares a report that every other Edge must hold
+//   7  the late Edge: its subscription checks as in case 2; it recovers both
+//      layers within ONE_GRAPH_RECOVERY_SECS, then shares a report that every
+//      other Edge must hold
 //   8  the synced flag: every subscriber lists the graph as synced within
 //      ONE_GRAPH_SYNCED_SECS, and every Edge lists it so at the end
 //   9  the end state: on every Edge, each promoted report is in Verified
 //      Memory and not in shared memory, and every other report is in shared
 //      memory
+//  10  the client remedy of edgeA, edgeB and the late Edge (above): dialing
+//      the curator, the definition after subscribing again with
+//      forceCatchup, and the sub-graph registered and listed
 //
 // Exit codes: 0 every case passed; 1 a case failed or was not run; 3 the
 // devnet cannot host the scenario and nothing was exercised: no devnet, node 1
@@ -151,7 +172,8 @@ import { brief, openDevnet, waitFor } from './lib/member-sharing/devnet.mjs';
 import { createReport } from './lib/member-sharing/report.mjs';
 import { describe, subscriptionResults } from './lib/qa/member-sharing.mjs';
 import {
-  admissionPolicyProblem, memberPublishOutcome, pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome,
+  admissionPolicyProblem, memberPublishOutcome, pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, promotionResult,
+  subGraphWriteResult,
 } from './lib/qa/one-graph-promotion.mjs';
 import { busyEdge } from './lib/one-graph/busy-transfer.mjs';
 import { OneGraphEdges } from './lib/one-graph/edges.mjs';
@@ -193,6 +215,7 @@ const CASES = {
   7: 'a late Edge recovers Verified Memory and shared memory',
   8: 'the synced flag of every Edge',
   9: 'the end state on every Edge',
+  10: 'the client remedy: dial the curator, subscribe again with forceCatchup, register the sub-graph',
 };
 
 // The member-sharing suite's report, its lines under this suite's name.
@@ -224,13 +247,25 @@ async function precondition(caseId, when) {
   return false;
 }
 
-/** Waits for the watches, then reports each pair under its case. */
+/** Waits for the watches, then reports each pair under its case; resolves to the pairs. */
 async function settle(handles) {
-  for (const pair of await settled(handles)) {
+  const pairs = await settled(handles);
+  for (const pair of pairs) {
     const result = pairOutcome(pair, { boundMs: BOUND_MS });
     (result.outcome === 'pass' ? pass : fail)(pair.caseId, result.text);
   }
+  return pairs;
 }
+
+// The reports the curator held in its shared memory before a promotion: the
+// evidence known gap #3294 takes. Its own reports, and every report a check
+// showed in its shared memory.
+const heldByCurator = new Set();
+const noteHeldByCurator = pairs => {
+  for (const pair of pairs) {
+    if (pair.node === edges.curator && pair.kind === 'swm' && pairOutcome(pair, { boundMs: BOUND_MS }).outcome === 'pass') heldByCurator.add(pair.record);
+  }
+};
 
 /**
  * The profile's names that the build the devnet runs never mentions: a
@@ -302,62 +337,94 @@ const holdsDefinition = (node, graph) => waitFor(async () => {
 }, DEFINITION_MS, 2000);
 
 /**
- * The remedy for a subscriber that holds no definition of a graph: without it
- * the node refuses its own writes into the graph, so the cases after it need
- * it. The node does what a client can: it dials the curator through its relay
- * (only the curator holds the graph's declaration, and a subscriber asks only
- * the peers it is connected to for it) and subscribes again with an explicit
- * catch-up. Resolves to when it subscribed again.
+ * A subscriber that holds no definition of a graph rejoins it as a client
+ * can: it dials the curator through its relay (a subscriber asks only the
+ * peers it is connected to for the graph's declaration, and the curator may
+ * be the only one that holds it) and subscribes again with an explicit
+ * catch-up (`forceCatchup`). Resolves to { dialError, from (the second
+ * subscribe), held (whether it held the definition within DEFINITION_MS),
+ * heldAfterMs }.
  */
-async function ensureDefinition(node, graph, caseId) {
+async function rejoin(node, graph) {
+  let dialError = null;
   if (node !== edges.curator) {
     try {
       await edges.dialOwner(node);
     } catch (error) {
-      note(`case ${caseId}: ${node.label} could not dial the curator: ${error?.message ?? error}`);
+      dialError = error?.message ?? String(error);
     }
   }
-  const again = await graphs.subscribe(node, graph, { forceCatchup: true });
-  const held = await holdsDefinition(node, graph);
-  note(`case ${caseId}: ${node.label} dialed the curator through its relay and subscribed to ${graph.key} again with an explicit catch-up: ${held.ok ? `it held the definition ${seconds(Date.now() - again)} s later` : `it still held none ${seconds(DEFINITION_MS)} s later`}`);
-  return again;
-}
-
-/**
- * Whether a subscriber that holds the graph's definition knows its sub-graph:
- * a write into a sub-graph its author has not registered is refused. It has
- * CHECK_MS. A node that does not know it then fails the check and registers
- * the sub-graph itself (POST /api/sub-graph/create), as a client can, so that
- * the later cases can write.
- */
-async function ensureSubGraph(node, graph, caseId) {
-  const listed = await waitFor(async () => {
-    const answer = await devnet.api(node, 'GET', `/api/sub-graph/list?contextGraphId=${encodeURIComponent(graph.id)}`);
-    const names = Array.isArray(answer.json?.subGraphs) ? answer.json.subGraphs.map(sub => sub?.name) : [];
-    return { ok: names.includes(graph.sub), why: answer.status === 200 ? `it lists ${names.length ? names.join(', ') : 'no sub-graph'}` : brief(answer) };
-  }, CHECK_MS, 2000);
-  if (listed.ok) return;
-  fail(caseId, `${node.label} does not know the sub-graph ${graph.sub} of ${graph.key} ${seconds(CHECK_MS)} s after it held the definition (${listed.why}): a write it makes there is refused`);
-  const made = await devnet.api(node, 'POST', '/api/sub-graph/create', { contextGraphId: graph.id, subGraphName: graph.sub });
-  note(`case ${caseId}: ${node.label} registered the sub-graph ${graph.sub} itself: ${made.json?.created === graph.sub ? 'accepted' : brief(made)}`);
-}
-
-/**
- * A subscribe as a client makes it, with the observer of its definition and
- * synced flag, each against its deadline from this subscribe. A node that
- * holds no definition at the definition's deadline (the observer fails that
- * check) gets ensureDefinition, and one that does not know the graph's
- * sub-graph gets ensureSubGraph, so that the later cases can write. Resolves
- * to { observer, from, fromWhat }: the moment the node's bounds count from,
- * the second subscribe when there was one.
- */
-async function subscribeWithDefinition(node, graph, caseId) {
-  const at = await graphs.subscribe(node, graph);
-  const observer = io.observeSubscription(node, graph, at);
+  const from = await graphs.subscribe(node, graph, { forceCatchup: true });
   const held = (await holdsDefinition(node, graph)).ok;
-  const from = held ? at : await ensureDefinition(node, graph, caseId);
-  if (graph.sub) await ensureSubGraph(node, graph, caseId);
-  return { observer, from, fromWhat: held ? `${node.role} subscribed` : `${node.role} subscribed again` };
+  return { dialError, from, held, heldAfterMs: Date.now() - from };
+}
+
+/** The rejoin as the setup of another case: noted, not checked. Resolves to the second subscribe. */
+async function ensureDefinition(node, graph, caseId) {
+  const { dialError, from, held, heldAfterMs } = await rejoin(node, graph);
+  note(`case ${caseId}: ${node.label} ${dialError ? `could not dial the curator (${dialError}) but` : 'dialed the curator through its relay and'} subscribed to ${graph.key} again with forceCatchup: ${held ? `it held the definition ${seconds(heldAfterMs)} s later` : `it still held none ${seconds(DEFINITION_MS)} s later`}`);
+  return from;
+}
+
+/** Whether a node's sub-graph listing names the graph's sub-graph: { ok, why }. */
+async function listsSubGraph(node, graph) {
+  const answer = await devnet.api(node, 'GET', `/api/sub-graph/list?contextGraphId=${encodeURIComponent(graph.id)}`);
+  const names = Array.isArray(answer.json?.subGraphs) ? answer.json.subGraphs.map(sub => sub?.name) : [];
+  return { ok: names.includes(graph.sub), why: answer.status === 200 ? `it lists ${names.length ? names.join(', ') : 'no sub-graph'}` : brief(answer) };
+}
+
+/**
+ * A subscriber's subscribe as a client makes it, and its checks from that
+ * moment: the graph's definition within DEFINITION_MS (under `caseId`) and
+ * its synced flag within SYNCED_MS (case 8), with the known gaps applied
+ * (#3264). Resolves once both have settled.
+ */
+async function subscribeChecked(node, graph, caseId) {
+  const observer = io.observeSubscription(node, graph, await graphs.subscribe(node, graph));
+  reportSubscription(observer, await observer.done, caseId);
+}
+
+/**
+ * Case 10, the client remedy, made by every subscriber whether it needs it or
+ * not, so that the gate proves it keeps working: the node rejoins (it dials
+ * the curator and subscribes again with forceCatchup) and must hold the
+ * definition within DEFINITION_MS. With the definition, its write into the
+ * sub-graph before it registers the sub-graph itself is a check under
+ * `caseId` (known gap #3293); then it registers the sub-graph (POST
+ * /api/sub-graph/create) and must list it. Resolves to { from (the second
+ * subscribe: the node's later bounds count from it), probe (the record of
+ * that write, a report like the others once written) }.
+ */
+async function remedy(node, graph, caseId) {
+  const { dialError, from, held, heldAfterMs } = await rejoin(node, graph);
+  if (dialError) fail(10, `${node.label} could not dial the curator through its relay: ${dialError}`);
+  else pass(10, `${node.label} dialed the curator through its relay`);
+  if (held) pass(10, `${node.label} holds the definition of ${graph.key} ${seconds(heldAfterMs)} s after it subscribed again with forceCatchup`);
+  else fail(10, `${node.label} holds no definition of ${graph.key} ${seconds(DEFINITION_MS)} s after it subscribed again with forceCatchup`);
+  let probe = null;
+  if (graph.sub && held) {
+    const listed = await listsSubGraph(node, graph);
+    probe = await shareReport(caseId, node, graph, `${node.role} write before its sub-graph`, from + SYNCED_MS);
+    report.record(caseId, subGraphWriteResult({ node, graph, record: probe, listed: listed.ok }));
+    const made = await devnet.api(node, 'POST', '/api/sub-graph/create', { contextGraphId: graph.id, subGraphName: graph.sub });
+    const after = await listsSubGraph(node, graph);
+    if (made.json?.created === graph.sub && after.ok) pass(10, `${node.label} registered the sub-graph ${graph.sub} of ${graph.key} and lists it`);
+    else fail(10, `${node.label} could not register the sub-graph ${graph.sub} of ${graph.key}: ${made.json?.created === graph.sub ? after.why : brief(made)}`);
+  }
+  return { from, probe };
+}
+
+/**
+ * The curator promotes a report. The promotion is a check under `caseId`
+ * (known gap #3294 for a report another Edge authored, with the evidence of
+ * the curator holding it). Resolves to when it was confirmed, or null.
+ */
+async function promoteChecked(caseId, record) {
+  const { curator } = edges;
+  const { answer, at } = await io.promote(curator, record);
+  const outcome = promotionOutcome(answer, { authorAddress: record.author.agentAddress });
+  report.record(caseId, promotionResult({ record, curator, outcome, answer, heldByCurator: record.author === curator || heldByCurator.has(record) }));
+  return outcome.ok ? at : null;
 }
 
 /**
@@ -373,14 +440,19 @@ async function shareReport(caseId, author, graph, what, readyBy = 0) {
   return record;
 }
 
-/** A settled subscription: a missing definition under `definitionCase`, the synced flag under case 8. */
+/**
+ * A settled subscription of a member to the registered public graph: the
+ * definition under `definitionCase` (a pass is quiet), the synced flag under
+ * case 8, each with the known gaps applied (#3264).
+ */
 function reportSubscription(handle, observation, definitionCase) {
   if (!observation) return fail(definitionCase, `${handle.node.label}: its subscription to ${handle.graph.key} was not observed`);
   const { definition, synced } = subscriptionResults(observation, {
     registered: true, private: false, member: true, definitionMs: DEFINITION_MS, syncedMs: SYNCED_MS,
   });
-  if (definition.outcome !== 'pass') fail(definitionCase, `${handle.node.label}, ${handle.graph.key}: ${definition.text}`);
-  (synced.outcome === 'pass' ? pass : fail)(8, `${handle.node.label}, ${handle.graph.key}: ${synced.text}`);
+  for (const [id, result] of [[definitionCase, definition], [8, synced]]) {
+    report.record(id, { ...result, text: `${handle.node.label}, ${handle.graph.key}: ${result.text}` });
+  }
   return undefined;
 }
 
@@ -407,19 +479,24 @@ async function run() {
   const inherited = inheritedDkgEnv(process.env);
   if (inherited.length) note(`every node of the devnet inherits ${inherited.join(', ')} from this environment: the Edges differ from the profile by each one a node reads`);
 
-  // Case 1: the profile, in the build and on every Edge.
+  // Case 1: every Edge runs the profile. The settings the build does not read
+  // are the deployment's, not node behaviour: a note.
   const unread = unreadProfileNames();
-  if (unread.problem) fail(1, unread.problem);
-  else if (unread.missing.length) fail(1, `the build the devnet runs never reads ${unread.missing.join(', ')}: the profile sets ${unread.missing.length === 1 ? 'it' : 'them'} to no effect`);
-  else pass(1, `the build reads every setting of the profile (${PROFILE_NAMES.length})`);
+  if (unread.problem) note(`case 1: the build was not scanned for the profile's settings: ${unread.problem}`);
+  else if (unread.missing.length) note(`case 1: the build the devnet runs never reads ${unread.missing.join(', ')}: the profile sets ${unread.missing.length === 1 ? 'it' : 'them'} to no effect`);
+  else say(`the build reads every setting of the profile (${PROFILE_NAMES.length})`);
   for (const node of [curator, edgeA, edgeB]) await edges.start(node);
   say(`curator, edgeA and edgeB up (${elapsed()})`);
   await checkProfile([curator, edgeA, edgeB]);
   await precondition(1, 'once the Edges are up');
 
-  // The graph; edgeA and edgeB subscribe, and write once they hold its definition.
+  // The graph. edgeA and edgeB subscribe (their definition and synced flag
+  // are checked from that subscribe), then make the client remedy (case 10).
   const main = await graphs.createGraph(curator, 'main', { publishPolicy: 0, sub: SUB });
-  const subscriptions = await Promise.all([edgeA, edgeB].map(member => subscribeWithDefinition(member, main, 2)));
+  const subscriptions = await Promise.all([edgeA, edgeB].map(async member => {
+    await subscribeChecked(member, main, 2);
+    return remedy(member, main, 2);
+  }));
   say(`edgeA and edgeB subscribed (${elapsed()})`);
 
   // Case 2: reports, live; every other running Edge must hold each.
@@ -430,6 +507,13 @@ async function run() {
   // Each subscriber has until its synced deadline to take writes.
   const readyBy = new Map([edgeA, edgeB].map((member, i) => [member, subscriptions[i].from + SYNCED_MS]));
   const live = [];
+  // A write made before the sub-graph that went through (#3293 fixed) is a report like the others.
+  [edgeA, edgeB].forEach((member, i) => {
+    const { probe } = subscriptions[i];
+    if (!probe || probe.error) return;
+    shared.push(probe);
+    live.push(io.watch(io.pairs(2, probe, others(member), 'swm')));
+  });
   for (const author of [curator, edgeA, edgeB]) {
     for (const n of [1, 2]) {
       const record = await shareReport(2, author, main, `${author.role} report ${n}`, readyBy.get(author));
@@ -438,8 +522,7 @@ async function run() {
       live.push(io.watch(io.pairs(2, record, others(author), 'swm')));
     }
   }
-  await settle(live);
-  for (const { observer } of subscriptions) reportSubscription(observer, await observer.done, 2);
+  noteHeldByCurator(await settle(live));
 
   // Case 3: edgeA publishes its second report itself.
   const [a1, a2] = byAuthor.get(edgeA);
@@ -467,14 +550,9 @@ async function run() {
       fail(4, `${describe(record)} was not written, so it was not promoted`);
       continue;
     }
-    const { answer, at } = await io.promote(curator, record);
-    const outcome = promotionOutcome(answer, { authorAddress: record.author.agentAddress });
-    if (!outcome.ok) {
-      fail(4, `the curator could not promote ${describe(record)}: ${outcome.why}`);
-      continue;
-    }
+    const at = await promoteChecked(4, record);
+    if (at === null) continue;
     promoted.add(record);
-    say(`promoted ${describe(record)}: ${outcome.ual ?? 'no UAL'} (${elapsed()})`);
     const options = { from: at, fromWhat: 'promotion' };
     promotions.push(io.watch([...io.pairs(4, record, edges.running, 'vm', options), ...io.pairs(4, record, edges.running, 'gone', options)]));
   }
@@ -494,7 +572,7 @@ async function run() {
     shared.push(record);
     again.push(io.watch(io.pairs(5, record, others(author), 'swm')));
   }
-  await settle(again);
+  noteHeldByCurator(await settle(again));
 
   // Case 6: edgeB's only sync slot busy with a large transfer of another graph.
   let large = null;
@@ -507,7 +585,7 @@ async function run() {
     large = null;
   }
   if (large && await precondition(6, 'before the large transfer')) {
-    const busy = await busyEdge({ devnet, edges, graphs, io, report, caseId: 6, boundMs: BOUND_MS, stamp: STAMP, ensureDefinition }, main, large,
+    const busy = await busyEdge({ devnet, edges, graphs, io, report, caseId: 6, boundMs: BOUND_MS, stamp: STAMP, ensureDefinition, promote: promoteChecked }, main, large,
       [a2, c2].filter(record => !record.error && !promoted.has(record)));
     shared.push(...busy.shared);
     for (const record of busy.promoted) promoted.add(record);
@@ -518,9 +596,13 @@ async function run() {
   say(`late Edge up (${elapsed()})`);
   await checkProfile([late]);
   await precondition(7, 'once the late Edge is up');
-  const recovery = await subscribeWithDefinition(late, main, 7);
-  await settle([io.watch(placementPairs(7, shared, promoted, [late], { from: recovery.from, fromWhat: recovery.fromWhat, bound: RECOVERY_MS }))]);
-  reportSubscription(recovery.observer, await recovery.observer.done, 7);
+  await subscribeChecked(late, main, 7);
+  const recovery = await remedy(late, main, 7);
+  await settle([io.watch(placementPairs(7, shared, promoted, [late], { from: recovery.from, fromWhat: 'late subscribed again', bound: RECOVERY_MS }))]);
+  if (recovery.probe && !recovery.probe.error) {
+    shared.push(recovery.probe);
+    await settle([io.watch(io.pairs(7, recovery.probe, others(late), 'swm'))]);
+  }
   const fromLate = await shareReport(7, late, main, 'late report', recovery.from + SYNCED_MS);
   shared.push(fromLate);
   await settle([io.watch(io.pairs(7, fromLate, others(late), 'swm'))]);

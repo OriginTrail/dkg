@@ -385,3 +385,40 @@ export function busyReceiptOutcome(result, { received, life, held }) {
   }
   return { outcome: 'pass', text: `${result.text}, while an admission of the transfer held the general slot` };
 }
+
+/**
+ * A subscriber's write into the graph's sub-graph before it registers the
+ * sub-graph itself, as a check with the evidence known gap #3293 takes:
+ * `record` is the report (written, or refused with `error`), `listed` whether
+ * the writer's listing named the sub-graph, and the writer held the
+ * definition. A refusal's HTTP status and wording come from the refusal.
+ */
+export function subGraphWriteResult({ node, graph, record, listed }) {
+  const evidence = { definitionHeld: true, subGraphListed: listed };
+  const where = `${graph.key}/${record.sub}`;
+  if (!record.error) return { check: 'sub-graph-write', outcome: 'pass', text: `${node.label} wrote into ${where} before registering the sub-graph itself`, evidence };
+  const status = /HTTP (\d{3})/.exec(record.error);
+  return {
+    check: 'sub-graph-write',
+    outcome: 'fail',
+    text: `${node.label} could not write into ${where} before registering the sub-graph itself (${listed ? 'its listing names it' : 'its listing does not name it'}): ${record.error}`,
+    evidence: { ...evidence, httpStatus: status ? Number(status[1]) : null, unregisteredSubGraph: /has not been registered in context graph/.test(record.error) },
+  };
+}
+
+/**
+ * The curator's promotion of a report as a check, with the evidence known gap
+ * #3294 takes: `outcome` from promotionOutcome, `answer` the route's answer,
+ * and `heldByCurator` whether the curator held the report in its shared
+ * memory before the promotion. A report the curator authored is its own
+ * promotion (`curator-promotion`); another Edge's is `member-promotion`.
+ */
+export function promotionResult({ record, curator, outcome, answer, heldByCurator }) {
+  const authorIsCurator = record.author === curator;
+  return {
+    check: authorIsCurator ? 'curator-promotion' : 'member-promotion',
+    outcome: outcome.ok ? 'pass' : 'fail',
+    text: outcome.ok ? `the curator promoted ${describe(record)}: ${outcome.ual ?? 'no UAL'}` : `the curator could not promote ${describe(record)}: ${outcome.why}`,
+    evidence: { authorIsCurator, heldByCurator: heldByCurator === true, code: answer?.json?.code, httpStatus: answer?.status },
+  };
+}

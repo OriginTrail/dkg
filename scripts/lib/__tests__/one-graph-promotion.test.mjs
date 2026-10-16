@@ -3,9 +3,11 @@ import test from 'node:test';
 import {
   admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, inVerifiedScope, judgeGone, memberPublishOutcome,
   pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, slotHolder, transferHeldAt, transferLifetime,
-  transferOccupancy, verifiedScope, writeRetryable, busyReceiptOutcome,
+  transferOccupancy, verifiedScope, writeRetryable, busyReceiptOutcome, promotionResult, subGraphWriteResult,
 } from '../qa/one-graph-promotion.mjs';
-import { sharedMemoryScope } from '../qa/member-sharing.mjs';
+import { freshSubscription, sharedMemoryScope, subscriptionResults } from '../qa/member-sharing.mjs';
+import { classify, KNOWN_GAPS } from '../qa/known-gaps.mjs';
+import { createReport } from '../member-sharing/report.mjs';
 import { createReports } from '../one-graph/reports.mjs';
 import { DEAD_DIRECT_ADDRESS, edgeEnv, edgeOverrides, inheritedDkgEnv, OVERRIDE_ENV, PROFILE_CONFIG, PROFILE_ENV, PROFILE_NAMES } from '../one-graph/profile.mjs';
 
@@ -394,4 +396,82 @@ test('a busy Edge\'s receipt passes only while an admission of the transfer held
   const missed = { outcome: 'fail', text: 'NOT in shared memory' };
   assert.equal(busyReceiptOutcome(missed, { received: inside, life, held: during }), missed);
   assert.equal(busyReceiptOutcome(held, { received: null, life, held: during }), held);
+});
+
+const curatorNode = { label: 'node7 (curator)', agentAddress: '0x00000000000000000000000000000000000000cc' };
+const subGraphRefusal = 'the author refused the asset: HTTP 500 {"error":"Sub-graph \\"reports\\" has not been registered in context graph \\"0xabc/one-graph-main-1\\". Register it first via DKGAgent.createSubGraph() or by inserting the sub-graph registration"}';
+const probeOf = error => ({ author, graph: { key: 'main' }, sub: 'reports', value: 'edgeA write before its sub-graph (3)', error });
+const verdictOf = result => classify(result).verdict;
+const gapOf = result => classify(result).gap?.issue ?? null;
+
+test('#3293: a write into the sub-graph refused with HTTP 500 for the unregistered sub-graph is the known gap; anything else is not', () => {
+  const refused = subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(subGraphRefusal), listed: false });
+  assert.equal(refused.check, 'sub-graph-write');
+  assert.deepEqual(refused.evidence, { definitionHeld: true, subGraphListed: false, httpStatus: 500, unregisteredSubGraph: true });
+  assert.match(refused.text, /^node9 \(edgeB\) could not write into main\/reports before registering the sub-graph itself \(its listing does not name it\): the author refused/);
+  assert.deepEqual([verdictOf(refused), gapOf(refused)], ['xfail', '#3293']);
+  // The sub-graph listed and the same refusal: not this gap.
+  const listedRefused = subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(subGraphRefusal), listed: true });
+  assert.equal(verdictOf(listedRefused), 'fail');
+  assert.match(classify(listedRefused).text, /the writer lists the sub-graph, so this is not #3293$/);
+  // Another refusal: another status, or a 500 that names no unregistered sub-graph.
+  for (const error of ['the author refused the asset: HTTP 404 {"code":"CONTEXT_GRAPH_NOT_FOUND"}', 'the author refused the asset: HTTP 500 {"error":"store unavailable"}', 'the share job ended failed: null']) {
+    assert.equal(verdictOf(subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(error), listed: false })), 'fail', error);
+  }
+  // The write went through: the gap's check held.
+  const written = subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(null), listed: false });
+  assert.deepEqual([written.outcome, verdictOf(written), gapOf(written)], ['pass', 'xpass', '#3293']);
+});
+
+test('#3294: the curator\'s promotion of another Edge\'s report refused as not resident is the known gap only with the report in its shared memory', () => {
+  const notResident = { status: 409, json: { code: 'ASSERTION_AUTHOR_NOT_RESIDENT', error: 'selected author 0xaa has no finalized knowledge asset with this name' }, text: '{}' };
+  const memberReport = { author, graph: { key: 'main' }, sub: 'reports', value: 'edgeA report 1 (3)' };
+  const refused = (heldByCurator, answer = notResident) => promotionResult({
+    record: memberReport, curator: curatorNode, outcome: promotionOutcome(answer, { authorAddress: author.agentAddress }), answer, heldByCurator,
+  });
+  const gap = refused(true);
+  assert.equal(gap.check, 'member-promotion');
+  assert.deepEqual(gap.evidence, { authorIsCurator: false, heldByCurator: true, code: 'ASSERTION_AUTHOR_NOT_RESIDENT', httpStatus: 409 });
+  assert.match(gap.text, /^the curator could not promote "edgeA report 1 \(3\)" by node8 \(edgeA\) in main\/reports: HTTP 409 /);
+  assert.deepEqual([verdictOf(gap), gapOf(gap)], ['xfail', '#3294']);
+  assert.match(classify(refused(false)).text, /the curator never held the report, so this is not #3294$/);
+  assert.equal(verdictOf(refused(false)), 'fail');
+  assert.equal(verdictOf(refused(true, { status: 502, json: { status: 'tentative' }, text: 'did not confirm' })), 'fail');
+  // A member's report promoted: the gap's check held.
+  const confirmed = { status: 200, json: { status: 'confirmed', ual: 'did:dkg:evm:31337/0xaa/1', authorAddress: author.agentAddress } };
+  const held = refused(true, confirmed);
+  assert.deepEqual([held.outcome, verdictOf(held), gapOf(held)], ['pass', 'xpass', '#3294']);
+  assert.equal(held.text, 'the curator promoted "edgeA report 1 (3)" by node8 (edgeA) in main/reports: did:dkg:evm:31337/0xaa/1');
+  // The curator's own report is no member's: never this gap, either way.
+  const own = { author: curatorNode, graph: { key: 'main' }, sub: 'reports', value: 'curator report 1 (1)' };
+  const ownResult = answer => promotionResult({ record: own, curator: curatorNode, outcome: promotionOutcome(answer, { authorAddress: curatorNode.agentAddress }), answer, heldByCurator: true });
+  assert.equal(ownResult(confirmed).check, 'curator-promotion');
+  assert.equal(verdictOf(ownResult({ status: 200, json: { status: 'confirmed', ual: 'u' } })), 'pass');
+  assert.equal(verdictOf(ownResult(notResident)), 'fail');
+});
+
+test('#3264 covers this suite\'s subscription checks of a member that never obtains the definition', () => {
+  const deadline = { readable: true, defined: false, entry: { id: 'g', subscribed: true, synced: false } };
+  const observation = { ...freshSubscription(), atDefinitionDeadline: deadline, atSyncedDeadline: deadline, done: true };
+  const { definition, synced } = subscriptionResults(observation, { registered: true, private: false, member: true, definitionMs: 90_000, syncedMs: 90_000 });
+  assert.deepEqual([verdictOf(definition), gapOf(definition)], ['xfail', '#3264']);
+  assert.deepEqual([verdictOf(synced), gapOf(synced)], ['xfail', '#3264']);
+  // Held in time: the gap's check held.
+  const timely = subscriptionResults({ ...freshSubscription(), definedAt: 2000, syncedAt: 3000, done: true }, { registered: true, private: false, member: true, definitionMs: 90_000, syncedMs: 90_000 });
+  assert.equal(verdictOf(timely.definition), 'xpass');
+  assert.ok(KNOWN_GAPS.every(gap => typeof gap.what === 'string' && gap.what.length > 0));
+});
+
+test('an expected failure of a known gap does not fail its case, and the summary names the gap', () => {
+  const lines = [];
+  const report = createReport({ 2: 'subscriptions', 4: 'promotion' }, { print: line => lines.push(line) });
+  report.record(2, subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(subGraphRefusal), listed: false }));
+  report.pass(2, 'a report held');
+  const answer = { status: 409, json: { code: 'ASSERTION_AUTHOR_NOT_RESIDENT', error: 'x' } };
+  report.record(4, promotionResult({ record: { author, graph: { key: 'main' }, sub: 'reports', value: 'v' }, curator: curatorNode, outcome: promotionOutcome(answer, { authorAddress: author.agentAddress }), answer, heldByCurator: true }));
+  assert.deepEqual(report.summary('Results'), []);
+  assert.ok(lines.some(line => line.startsWith('  [XFAIL] case 2: node9 (edgeB) could not write into main/reports') && line.includes('expected failure: #3293')), lines.join('\n'));
+  assert.ok(lines.some(line => line.startsWith('  [XFAIL] case 4: the curator could not promote') && line.includes('expected failure: #3294')), lines.join('\n'));
+  assert.ok(lines.some(line => line.includes('known gap #3293') && line.includes('1 check(s) failed as expected')), lines.join('\n'));
+  assert.ok(lines.some(line => line.includes('every case passed, apart from the expected failures of known gaps')), lines.join('\n'));
 });

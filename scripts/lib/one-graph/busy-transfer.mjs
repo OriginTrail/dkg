@@ -27,10 +27,9 @@ import { join } from 'node:path';
 import { brief, sleep, waitFor } from '../member-sharing/devnet.mjs';
 import { heldAt } from '../member-sharing/observation.mjs';
 import {
-  admissionPolicyProblem, busyReceiptOutcome, countLogLines, pairOutcome, parseAdmissions, promotionOutcome, slotHolder,
-  transferHeldAt, transferLifetime, transferOccupancy,
+  admissionPolicyProblem, busyReceiptOutcome, countLogLines, pairOutcome, parseAdmissions, slotHolder, transferHeldAt,
+  transferLifetime, transferOccupancy,
 } from '../qa/one-graph-promotion.mjs';
-import { describe } from '../qa/member-sharing.mjs';
 import { settled } from './reports.mjs';
 
 const secs = ms => Math.round(ms / 1000);
@@ -69,10 +68,12 @@ function readSlots(devnet, node) {
 
 /**
  * The case. `ctx` is { devnet, edges, graphs, io, report, caseId, boundMs,
- * stamp, ensureDefinition }; `main` is the graph, `large` the large graph
- * (published), `promotions` the reports the curator promotes while the
+ * stamp, ensureDefinition, promote }; `main` is the graph, `large` the large
+ * graph (published), `promotions` the reports the curator promotes while the
  * transfer runs. `ensureDefinition(node, graph, caseId)` is the suite's
- * remedy for a subscriber that holds no definition of a graph. Returns the
+ * remedy for a subscriber that holds no definition of a graph, and
+ * `promote(caseId, record)` its promotion check (which applies the known
+ * gaps), resolving to when the promotion was confirmed, or null. Returns the
  * records of the reports shared in the window and the reports promoted, for
  * the cases after it: { shared, promoted }.
  */
@@ -112,12 +113,8 @@ export async function busyEdge(ctx, main, large, promotions) {
     const watches = [];
     const done = [];
     for (const record of promotions) {
-      const { answer, at } = await io.promote(curator, record);
-      const outcome = promotionOutcome(answer, { authorAddress: record.author.agentAddress });
-      if (!outcome.ok) {
-        report.fail(caseId, `the curator's promotion of ${describe(record)} while ${edgeB.label} was busy failed: ${outcome.why}`);
-        continue;
-      }
+      const at = await ctx.promote(caseId, record);
+      if (at === null) continue;
       done.push(record);
       const options = { from: at, fromWhat: 'promotion' };
       watches.push(io.watch([
