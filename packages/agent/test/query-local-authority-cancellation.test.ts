@@ -33,7 +33,7 @@ describe('query local authority cancellation', () => {
     await started;
     controller.abort(new Error('request deadline'));
     release();
-    await expect(result).resolves.toMatchObject({ outcome: 'unavailable' });
+    await expect(result).rejects.toBe(controller.signal.reason);
     expect(delayed).toHaveBeenCalledWith('legacy-private', { signal: controller.signal });
     for (const later of stages.slice(stages.indexOf(stage) + 1)) expect(host[later]).not.toHaveBeenCalled();
     expect(host.chain.getIdentityId).not.toHaveBeenCalled();
