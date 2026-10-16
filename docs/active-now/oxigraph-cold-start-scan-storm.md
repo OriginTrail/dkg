@@ -306,4 +306,8 @@ normal operation. Leave the sync limits at their defaults (10 jobs at once,
 `DKG_SYNC_GLOBAL_QUEUE_LIMIT=0`, one long Verified Memory transfer holds the
 only slot, and every other sync job is refused for as long as it runs (#3251).
 From 10.0.25, shared-memory pulls keep one reserved slot and a short queue of
-their own, so they still run beside such a transfer.
+their own, so they still run beside such a transfer. So do metadata refreshes
+(#3280), which bring a graph's definition and a private graph's member list:
+each reserve is one more running job and 16 more waiting ones, waiting at
+most 60 s. `DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT=0` and
+`DKG_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT=0` turn them off.
