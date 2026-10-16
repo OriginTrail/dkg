@@ -11,7 +11,6 @@ import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
-  SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 // The config loader must stay off the agent package ROOT at runtime: that entry
 // loads the whole agent runtime (libp2p, sync lanes, the process-wide
@@ -635,7 +634,7 @@ export interface LoggingConfig {
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -849,8 +848,6 @@ export interface DkgConfig {
   syncGlobalQueueLimit?: number;
   /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
   syncAdmission?: SyncAdmissionConfig;
-  /** Retained sync responder snapshot limits (rows and estimated bytes). */
-  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**
    * Local sync scheduling priority by Context Graph ID. Higher runs first.
    * System Context Graphs default to a deprioritized priority so they run

@@ -2477,15 +2477,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
       this.log.info(ctx, `[sync] pooled wire variant ${PROTOCOL_SYNC_POOLED} enabled`);
     }
-    registerSyncHandler({
+    this.syncResponderPreparedCacheOwner = registerSyncHandler({
       register: (protocol, handler) =>
         this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
       protocolSync: PROTOCOL_SYNC,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       syncPageSize: SYNC_PAGE_SIZE,
       sharedMemoryTtlMs: this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
-      store: this.store,
-      publicSnapshotStore: this.publicSnapshotStore,
+      store: this.store, publicSnapshotStore: this.publicSnapshotStore,
+      preparedContentCache: this.config.preparedContentCache, dataDir: this.config.dataDir,
       peerId: this.peerId,
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),

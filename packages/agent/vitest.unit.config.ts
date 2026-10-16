@@ -18,6 +18,8 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/prepared-content-cache.test.ts",
+      "test/sync-prepared-content-export.test.ts",
       "test/public-snapshot-evidence.test.ts",
       "test/public-snapshot-serving-runtime.test.ts",
       "test/public-snapshot-admission.test.ts",

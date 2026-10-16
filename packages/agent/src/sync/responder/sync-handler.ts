@@ -1,3 +1,4 @@
+import { preparedCacheFailureCause, createPreparedContentCache, resolvePreparedContentCacheConfig, type PreparedContentCacheConfig } from './prepared-content-cache.js';
 import {
   createOperationContext,
   DEFAULT_MAX_READ_BYTES,
@@ -107,6 +108,8 @@ interface RegisterSyncHandlerParams {
   sharedMemoryTtlMs: number;
   store: TripleStore;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  preparedContentCache?: PreparedContentCacheConfig;
+  dataDir?: string;
   peerId: string;
   parseSyncRequest: (data: Uint8Array) => SyncRequestEnvelope;
   authorizeSyncRequest: (
@@ -435,7 +438,7 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
   });
 }
 
-export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
+export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeAndDrain(): Promise<void> } {
   const {
     register,
     protocolSync,
@@ -496,7 +499,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
     responderSnapshotBudget,
   );
-  const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget });
+  const preparedOptions = resolvePreparedContentCacheConfig(params.preparedContentCache, params.dataDir);
+  let cacheWarned = false;
+  const preparedContentCache = preparedOptions ? createPreparedContentCache(preparedOptions, (error, operation) => {
+    if (cacheWarned) return;
+    cacheWarned = true;
+    params.logWarn(createOperationContext('sync'), `Prepared content cache ${operation} failed (${preparedCacheFailureCause(error)}); using verified export`);
+  }) : undefined;
+  const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget, preparedContentCache });
   const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
@@ -1088,4 +1098,5 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       throw preLimiterErr;
     }
   }));
+  return { closeAndDrain: () => preparedContentCache?.closeAndDrain() ?? Promise.resolve() };
 }

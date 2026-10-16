@@ -1882,11 +1882,11 @@ async function runDaemonInnerWithStartupOwnership(
     syncGlobalQueueLimit: config.syncGlobalQueueLimit,
     syncAdmission: config.syncAdmission,
     syncResponderSnapshotLimits: config.syncResponderSnapshotLimits,
+    preparedContentCache: config.preparedContentCache,
     syncContextGraphPriorities: config.syncContextGraphPriorities,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
-    // #1836 — forward the operator retry budget to the agent so its own
-    // publishAsync enqueue (EPCIS / Kafka) stamps publisher.maxRetries too.
+    // Forward the operator retry budget to publishAsync producers (#1836).
     publisherMaxRetries: config.publisher?.maxRetries,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
     queryAccess: config.queryAccess,

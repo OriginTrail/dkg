@@ -636,3 +636,36 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     );
   });
 });
+
+
+it.each([false, true])('drains the registered sync cache before teardown even when authority close fails=%s', async authorityFails => {
+  const agent = syntheticShutdownAgent();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const closeAndDrain = vi.fn(() => held), stopNode = vi.fn(async () => {}), closeStore = vi.fn(async () => {});
+  Object.assign(agent, {
+    started: true, chainPoller: null, coreHostRecordingsClosed: false,
+    drainCoreHostRecordings: vi.fn(async () => {}), messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+    clearStorageACKRegistrationRetry: vi.fn(), storageACKRegistrationRetryInFlight: false,
+    inFlightSubstrateFanOutCount: () => 0, router: { closePooling: vi.fn(async () => {}) },
+    node: { libp2p: { getPeers: () => [] }, stop: stopNode }, finalizationRuntime: new FinalizationRuntime(),
+    store: { close: closeStore }, log: { warn: vi.fn() }, syncResponderPreparedCacheOwner: { closeAndDrain },
+  });
+  if (authorityFails) agent.chain.contextGraphAuthorityIndexSnapshots = {
+    close: vi.fn(async () => { throw new Error('authority-close-fixture'); }),
+  };
+  let stopped = false;
+  const stopping = agent.stop().then(() => { stopped = true; });
+  try {
+    expect(closeAndDrain).toHaveBeenCalledOnce();
+    // Let every other shutdown await progress while the cache drain is held.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(stopped).toBe(false);
+    expect(stopNode).not.toHaveBeenCalled(); expect(closeStore).not.toHaveBeenCalled();
+    expect(agent.started).toBe(true);
+    await agent.start();
+    expect(agent.syncResponderPreparedCacheOwner.closeAndDrain).toBe(closeAndDrain);
+    expect(stopped).toBe(false);
+  } finally { release(); await stopping; }
+  expect(stopped).toBe(true); expect(closeStore).toHaveBeenCalledOnce();
+});
