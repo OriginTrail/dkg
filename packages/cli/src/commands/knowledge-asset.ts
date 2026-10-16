@@ -7,12 +7,11 @@ import {
   type KnowledgeAssetPublishResponse,
   type KnowledgeAssetShareJobState,
   type KnowledgeAssetShareResponse,
-  type KnowledgeAssetWritableQuad,
   type PreSignedAuthorAttestationPayload,
 } from '../api-client.js';
 import {
   formatQuadObject,
-  loadQuadsFromInput,
+  loadRdfFromInput,
   loadStructuredFile,
   type ActionOpts,
 } from '../cli-helpers.js';
@@ -53,20 +52,8 @@ function hasQuadInput(opts: ActionOpts): boolean {
   );
 }
 
-async function loadWritableQuads(opts: ActionOpts): Promise<KnowledgeAssetWritableQuad[]> {
-  const quads = await loadQuadsFromInput(
-    {
-      ...opts,
-      file: inputFilePath(opts),
-    },
-    '',
-  );
-  return quads.map((quad) => ({
-    subject: quad.subject,
-    predicate: quad.predicate,
-    object: quad.object,
-    graph: quad.graph ?? '',
-  }));
+async function loadWritableInput(opts: ActionOpts) {
+  return loadRdfFromInput({ ...opts, file: inputFilePath(opts) }, '');
 }
 
 function parsePreSignedAuthorAttestation(raw: unknown): PreSignedAuthorAttestationPayload | undefined {
@@ -243,7 +230,14 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   ))))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
-      const quads = hasQuadInput(opts) ? await loadWritableQuads(opts) : undefined;
+      const input = hasQuadInput(opts) ? await loadWritableInput(opts) : undefined;
+      const quads = input?.quads;
+      if (opts.finalize !== false && input?.sourceKind === 'jsonld' && quads?.some((quad) => quad.graph !== '')) {
+        throw new Error(
+          'JSON-LD named graphs cannot be finalized yet. Use ka create --no-finalize to keep them in Working Memory, '
+          + 'or rewrite the document into the default graph before finalizing or sharing.',
+        );
+      }
       if (opts.share === true && (!quads || quads.length === 0 || opts.finalize === false)) {
         throw new Error('--share requires non-empty payload quads and finalize enabled');
       }
@@ -279,7 +273,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   )))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
-      const quads = await loadWritableQuads(opts);
+      const { quads } = await loadWritableInput(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetWrite(contextGraphId, name, quads, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
