@@ -76,6 +76,12 @@ When the PCA is active, meets the governance commitment floor, and still has quo
 
 The same flow is available through `POST /api/context-graph/register` with `publishPolicy: 0` and `pcaAccountId`, and through MCP with `dkg_context_graph_register`.
 
+## Register Any Context Graph Without Liquid TRAC
+
+From `ContextGraphs` 10.0.5, the deposit waiver also covers graphs without a curator PCA: open graphs, and curated graphs with an EOA or Safe curator. For these, registration uses the PCA the signer is registered to as an agent, with the same eligibility checks and quota, and no `pcaAccountId` is needed. A PCA owner's wallet qualifies only if it is also registered as an agent of that PCA. The graph's publish policy and curator are unchanged. If the signer has no eligible PCA, the normal liquid-TRAC deposit applies.
+
+The quota belongs to the PCA and is shared by its owner and every registered agent, so any agent can use it up with graphs the agent owns. The owner controls who draws on it through the agent list: deregister a wallet to stop it from consuming the quota.
+
 ## API Routes
 
 | Route                                | Purpose              |
