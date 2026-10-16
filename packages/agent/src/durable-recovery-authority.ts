@@ -71,18 +71,9 @@ export function createRecoveryAuthority(
 }
 
 export function resolveOrdinaryRecoveryAuthority(request: {
-  host: Pick<DurableRecoveryHost, 'chain' | 'requireLocalCgMatchesOnChainSlot' | 'resolveRegisteredContextGraphAuthority' | 'log'>;
+  host: Pick<DurableRecoveryHost, 'resolveAuthority'>;
   ctx: OperationContext;
   input?: DurableRecoveryInput;
 }): DurableRecoveryAuthority {
-  const { host, ctx, input = {} } = request;
-
-  return createRecoveryAuthority({
-    chain: host.chain,
-    verifyContextGraphBinding: (id, onChainId, signal) =>
-      host.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
-    resolveAuthority: (id, signal) => host.resolveRegisteredContextGraphAuthority(id,
-      { authorityReadMode: 'finalized-index-or-live', signal }),
-    warn: message => host.log.warn(ctx, message),
-  }, input);
+  return request.host.resolveAuthority(request.ctx, request.input ?? {});
 }
