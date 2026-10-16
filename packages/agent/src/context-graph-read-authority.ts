@@ -235,6 +235,19 @@ export interface ContextGraphReadAuthorityResolution {
 export async function resolveContextGraphReadAuthorityResolution(
   input: ContextGraphReadAuthorityInput,
 ): Promise<ContextGraphReadAuthorityResolution> {
+  // Cancellation always rejects with the caller's reason at this boundary;
+  // domain-error classification below applies only to active requests.
+  input.signal?.throwIfAborted();
+  try {
+    return await resolveActiveContextGraphReadAuthority(input);
+  } finally {
+    input.signal?.throwIfAborted();
+  }
+}
+
+async function resolveActiveContextGraphReadAuthority(
+  input: ContextGraphReadAuthorityInput,
+): Promise<ContextGraphReadAuthorityResolution> {
   if (input.isSystemContextGraph) {
     return { decision: allowedDecision({ source: 'system', reason: 'system-context-graph', metadataBootstrap: 'eligible', grantScope: 'public' }) };
   }
@@ -412,7 +425,6 @@ async function resolveReadAuthorityFromRegistration(
     // Preserve the legacy decision: identity lookup failure does not turn a
     // positive participant or peer fact into a denial, but supplies no allow.
   }
-  input.signal?.throwIfAborted();
   if (localIdentityId > 0n && participants.includes(String(localIdentityId))) {
     return allowedDecision({ source: 'legacy-local', reason: 'legacy-local-identity-participant', metadataBootstrap: 'eligible', grantScope: 'node' });
   }
