@@ -11,33 +11,33 @@
  */
 export function isAbsoluteRfc3987IriV1(value: string): boolean {
   const schemeEnd = value.indexOf(':');
-  if (schemeEnd <= 0 || !isScheme(value.slice(0, schemeEnd))) return false;
+  if (schemeEnd <= 0 || !isSchemeRange(value, 0, schemeEnd)) return false;
 
-  const remainder = value.slice(schemeEnd + 1);
-  const fragmentAt = remainder.indexOf('#');
-  const beforeFragment = fragmentAt < 0
-    ? remainder
-    : remainder.slice(0, fragmentAt);
-  const fragment = fragmentAt < 0
-    ? undefined
-    : remainder.slice(fragmentAt + 1);
-  if (fragment !== undefined && !isIFragment(fragment)) return false;
+  const hierarchyStart = schemeEnd + 1;
+  const fragmentAt = value.indexOf('#', hierarchyStart);
+  const beforeFragmentEnd = fragmentAt < 0 ? value.length : fragmentAt;
+  if (
+    fragmentAt >= 0
+    && !scanICharsRange(value, fragmentAt + 1, value.length, '/?')
+  ) return false;
 
-  const queryAt = beforeFragment.indexOf('?');
-  const hierarchy = queryAt < 0
-    ? beforeFragment
-    : beforeFragment.slice(0, queryAt);
-  const query = queryAt < 0
-    ? undefined
-    : beforeFragment.slice(queryAt + 1);
-  if (query !== undefined && !isIQuery(query)) return false;
+  const queryAt = value.indexOf('?', hierarchyStart);
+  const hasQuery = queryAt >= 0 && queryAt < beforeFragmentEnd;
+  if (
+    hasQuery
+    && !scanICharsRange(value, queryAt + 1, beforeFragmentEnd, '/?', true)
+  ) return false;
 
-  return isIHierPart(hierarchy);
+  return isIHierPartRange(
+    value,
+    hierarchyStart,
+    hasQuery ? queryAt : beforeFragmentEnd,
+  );
 }
 
-function isScheme(value: string): boolean {
-  if (value.length === 0 || !isAsciiAlpha(value.charCodeAt(0))) return false;
-  for (let index = 1; index < value.length; index += 1) {
+function isSchemeRange(value: string, start: number, end: number): boolean {
+  if (start === end || !isAsciiAlpha(value.charCodeAt(start))) return false;
+  for (let index = start + 1; index < end; index += 1) {
     const code = value.charCodeAt(index);
     if (
       !isAsciiAlpha(code)
@@ -50,23 +50,21 @@ function isScheme(value: string): boolean {
   return true;
 }
 
-function isIHierPart(value: string): boolean {
-  if (value.startsWith('//')) {
-    const slashAt = value.indexOf('/', 2);
-    const authority = slashAt < 0
-      ? value.slice(2)
-      : value.slice(2, slashAt);
-    const path = slashAt < 0 ? '' : value.slice(slashAt);
-    return isIAuthority(authority) && scanIChars(path, '/');
+function isIHierPartRange(value: string, start: number, end: number): boolean {
+  if (value.startsWith('//', start)) {
+    const slashAt = value.indexOf('/', start + 2);
+    const authorityEnd = slashAt < 0 || slashAt >= end ? end : slashAt;
+    return isIAuthority(value.slice(start + 2, authorityEnd))
+      && scanICharsRange(value, authorityEnd, end, '/');
   }
-  if (value.length === 0) return true;
-  if (value[0] === '/') {
+  if (start === end) return true;
+  if (value[start] === '/') {
     // `//` is consumed by the authority branch. An authority-free absolute
     // path cannot start with an empty first segment.
-    return value.length === 1
-      || (value[1] !== '/' && scanIChars(value, '/'));
+    return end - start === 1
+      || (value[start + 1] !== '/' && scanICharsRange(value, start, end, '/'));
   }
-  return scanIChars(value, '/');
+  return scanICharsRange(value, start, end, '/');
 }
 
 function isIAuthority(value: string): boolean {
@@ -74,7 +72,7 @@ function isIAuthority(value: string): boolean {
   if (at >= 0) {
     if (
       value.indexOf('@') !== at
-      || !scanIChars(value.slice(0, at), '', false, true, false)
+      || !scanICharsRange(value, 0, at, '', false, true, false)
     ) {
       return false;
     }
@@ -95,7 +93,7 @@ function isIAuthority(value: string): boolean {
   const host = colon < 0 ? hostAndPort : hostAndPort.slice(0, colon);
   const port = colon < 0 ? undefined : hostAndPort.slice(colon + 1);
   if (host.includes(':') || host.includes('[') || host.includes(']')) return false;
-  return scanIChars(host, '', false, false, false)
+  return scanICharsRange(host, 0, host.length, '', false, false, false)
     && (port === undefined || isPort(port));
 }
 
@@ -175,40 +173,39 @@ function isIpv4Address(value: string): boolean {
   });
 }
 
-function isIQuery(value: string): boolean {
-  return scanIChars(value, '/?', true);
-}
-
-function isIFragment(value: string): boolean {
-  return scanIChars(value, '/?');
-}
-
-function scanIChars(
+function scanICharsRange(
   value: string,
+  start: number,
+  end: number,
   asciiExtra: string,
   allowPrivate = false,
   allowColon = true,
   allowAt = true,
 ): boolean {
-  for (let index = 0; index < value.length; index += 1) {
+  for (let index = start; index < end; index += 1) {
     const code = value.charCodeAt(index);
     if (code === 0x25) {
       if (
-        index + 2 >= value.length
+        index + 2 >= end
         || !isAsciiHex(value.charCodeAt(index + 1))
         || !isAsciiHex(value.charCodeAt(index + 2))
       ) return false;
       index += 2;
       continue;
     }
+    if (code <= 0x7f) {
+      if (
+        isAsciiUnreserved(code)
+        || isSubDelimiter(code)
+        || (allowColon && code === 0x3a)
+        || (allowAt && code === 0x40)
+        || includesAsciiCode(asciiExtra, code)
+      ) continue;
+      return false;
+    }
     const codePoint = value.codePointAt(index)!;
     if (
-      isAsciiUnreserved(codePoint)
-      || isSubDelimiter(codePoint)
-      || (allowColon && codePoint === 0x3a)
-      || (allowAt && codePoint === 0x40)
-      || asciiExtra.includes(String.fromCodePoint(codePoint))
-      || isUcsChar(codePoint)
+      isUcsChar(codePoint)
       || (allowPrivate && isIPrivate(codePoint))
     ) {
       if (codePoint > 0xffff) index += 1;
@@ -217,6 +214,13 @@ function scanIChars(
     return false;
   }
   return true;
+}
+
+function includesAsciiCode(characters: string, code: number): boolean {
+  for (let index = 0; index < characters.length; index += 1) {
+    if (characters.charCodeAt(index) === code) return true;
+  }
+  return false;
 }
 
 function isAsciiUnreserved(code: number): boolean {

@@ -305,6 +305,21 @@ describe('SyncSemanticStoreV1', () => {
       .toBeInstanceOf(Rfc64SemanticReadCapabilityResultErrorV1);
   });
 
+  it('classifies malformed managed TSV in the same semantic-result domain', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(
+      '?p\t?o\nnot-an-rdf-term\t"value"\n',
+      { status: 200, headers: { 'Content-Type': 'text/tab-separated-values' } },
+    ));
+    const error = await rejected(new SyncSemanticStoreV1(
+      createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+      }),
+    ).read(requestOf(FIXTURES[0]), { timeoutMs: 1_000 }));
+    expectGatewayResultError(error);
+    expect((error as Error & { cause: unknown }).cause)
+      .toBeInstanceOf(Rfc64SemanticReadCapabilityResultErrorV1);
+  });
+
   it('returns an explicit absent result without invoking the strict record decoder', async () => {
     const query = vi.fn(async (): Promise<QueryResult> => ({
       type: 'bindings',
