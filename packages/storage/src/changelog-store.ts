@@ -1,3 +1,6 @@
+import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
+import { parseIntTerm, stripIri, stripLiteral } from "./changelog-terms.js";
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
@@ -256,9 +259,11 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
    */
   private reconcilePending = false;
 
+  readonly graphEnumerationVisibility;
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !this.isReservedGraph(graph));
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
@@ -400,6 +405,15 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       options,
       execute: options => this.inner.replaceGraph!(graphUri, quads, options),
     });
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+    if (!this.enabled) return this.inner.replaceAssetGroup(assets, options);
+    const touchedGraphs = [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))];
+    for (const graph of touchedGraphs) this.assertNotReserved(graph, 'replaceAssetGroup');
+    await this.runAtomicMutation({ operation: 'replaceAssetGroup', touchedGraphs, options,
+      execute: options => this.inner.replaceAssetGroup!(assets, options) });
   }
 
   async replaceGraphAndSubject(
@@ -1092,28 +1106,6 @@ function collectChangeRecords(
     if (seq == null || !graph || (op !== 'upsert' && op !== 'drop')) continue;
     out.push({ seq, graph, op });
   }
-}
-
-/** Extract an integer from a binding term (`"42"^^<…integer>`, `42`, or `"42"`). */
-function parseIntTerm(term: string | undefined): number | null {
-  if (term == null) return null;
-  const m = term.match(/-?\d+/);
-  if (!m) return null;
-  const n = Number.parseInt(m[0], 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Bare IRI from a binding term (strip surrounding angle brackets if present). */
-function stripIri(term: string | undefined): string {
-  if (!term) return '';
-  return term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
-}
-
-/** Lexical value from a literal binding term (`"upsert"` → `upsert`). */
-function stripLiteral(term: string | undefined): string {
-  if (!term) return '';
-  const m = term.match(/^"((?:[^"\\]|\\.)*)"/);
-  return m ? m[1] : term;
 }
 
 /**

@@ -393,6 +393,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
     ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],
     ['packages/agent/src/dkg-agent-join.ts', 'tornado_core', 'the chain RPC-site census reads agent sources'],
+    ['packages/agent/src/remote-query-handler.ts', 'tornado_core', 'the chain RPC-site census reads the extracted remote query authority check'],
     ['packages/agent/src/sync/exact-assets.ts', 'tornado_agent', 'the Agent stream receiver loads exact asset parsing'],
     ['packages/agent/src/sync/exact-batch-stream-contract.ts', 'tornado_agent', 'the Agent stream tests load the proof contract'],
     ['packages/agent/src/sync/wire-compression.ts', 'tornado_agent', 'the Agent stream receiver loads wire compression'],
@@ -503,14 +504,17 @@ test('a document a test reads is a CI input; other documentation stays docs-only
   }
 });
 
-test('the Blazegraph lane follows the agent lane, whose live suites its job runs', () => {
+test('the Blazegraph lane covers agent live suites and scoped query catalogs', () => {
   // The Blazegraph job runs the agent's live Blazegraph suites, so every plan
   // that runs the agent lane selects the Blazegraph lane too: its output
   // starts the job, and the gate requires it.
   const job = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs['tornado-blazegraph'];
   assert.equal(job.if, "needs.changes.outputs.tornado_blazegraph == 'true'");
   assert.ok(job.steps.some(({ run = '' }) => run.includes('dkg-agent exec vitest run --config vitest.blazegraph.config.ts')));
+  assert.ok(job.steps.some(({ run = '' }) => run.includes('DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/scoped-catalog-backend.test.ts')));
   for (const filePath of [
+    'packages/query/src/scoped-content-graph-catalog.ts',
+    'packages/query/test/scoped-catalog-backend.test.ts',
     'packages/agent/test-live/rfc64-legacy-swm-boundary-v1.blazegraph.test.ts',
     'packages/agent/src/dkg-agent.ts',
     'packages/core/src/index.ts',

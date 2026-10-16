@@ -1,3 +1,5 @@
+import type { QueryOptions } from '../triple-store.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
@@ -60,6 +62,7 @@ type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
   readonly writeRevisionCoverage = 'all-writers' as const;
+  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
@@ -420,6 +423,15 @@ export class OxigraphStore implements TripleStore {
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    const plan = buildAtomicAssetGroupUpdate(assets);
+    statements.checkIris.replaceAssetGroup(assets);
+    options?.signal?.throwIfAborted();
+    this.store.update(plan.update);
+    this.scheduleFlush();
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: plan.graphs });
+  }
+
   async replaceGraphAndSubject(
     graphUri: string,
     graphQuads: DKGQuad[],
@@ -543,7 +555,7 @@ export class OxigraphStore implements TripleStore {
         const g = row.get('g');
         return g ? g.value : '';
       })
-      .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+      .filter(this.graphEnumerationVisibility);
   }
 
   async deleteBySubjectPrefix(

@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -316,6 +317,7 @@ describe('persistJoinApprovalStateStrict nesting', () => {
 function shutdownAgent(overrides: Record<string, unknown> = {}): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.chain = new MockChainAdapter();
+  agent.workLifetime = new AgentWorkLifetime();
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.gossipSession = new GossipSession();
   agent.lastSyncDisconnectedAt = new Map();
@@ -439,7 +441,7 @@ describe('DKGAgent.stop() subscription persistence drain', () => {
       await runGate.promise;
       await agent.enqueueContextGraphSubscriptionPersistWrite('cg', async () => { saved.push('cursor'); });
     })().then(() => { runOutcome = 'written'; }, (error: unknown) => { runOutcome = error; });
-    agent.graphScopedStorePhysicalRuns = new Set([run]);
+    agent.workLifetime.track(run);
 
     const stopping = agent.stop();
     await flush();

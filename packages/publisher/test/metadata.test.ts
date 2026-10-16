@@ -1,3 +1,5 @@
+import { createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from '../src/graph-knowledge-asset-metadata.js';
 import { describe, it, expect } from 'vitest';
 import {
   generateKCMetadata,
@@ -1123,4 +1125,24 @@ describe('generateAssertionPromotedMetadata pointer stamping', () => {
     });
     expect(insert.find(q => q.predicate === SWM_CURRENT_ASSERTION_PRED)).toBeUndefined();
   });
+});
+
+const ROUTE = `${DKG}authenticatedSubGraphName`;
+it('carries validated named routing and strips peer markers from tentative metadata', () => {
+  const assertionGraph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH, MemoryLayer.VerifiableMemory,
+    createGraphKnowledgeAssetScope(GRAPH_UAL, 1), 'code');
+  const meta = {...makeGraphMeta(), subGraphName: 'code', assertionGraph};
+  const base = generateGraphKnowledgeAssetMetadata(meta, {status: 'tentative'});
+  const forged = [...base, {subject: GRAPH_UAL, predicate: ROUTE, object: '"forged"', graph: META_GRAPH}];
+  const scope = {ual: GRAPH_UAL, metaGraph: META_GRAPH, receivedAt: new Date(), subGraphName: 'code'};
+  const confirmed = {status: 'confirmed', materializedVersion: {blockNumber: 1, txIndex: 0}, confirmation: {kind: 'finalized-materialization'}} as const;
+  expect(overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(forged, scope, {status:'tentative'}).filter(q => q.predicate === ROUTE)).toEqual([]);
+  expect(overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(forged, scope, confirmed)
+    .filter(q => q.predicate === ROUTE).map(q => q.object)).toEqual(['"code"']);
+  expect(generateGraphKnowledgeAssetMetadata(meta, {status: 'confirmed', confirmation: {
+    kind: 'finalized-materialization', provenance: {batchId: 1n, materializedVersion: {blockNumber: 1, txIndex: 0}},
+  }}).filter(q => q.predicate === ROUTE).map(q => q.object)).toEqual(['"code"']);
+  for (const invalidGraph of ['urn:wrong', assertionGraph.replace('/code/', '/other/'), assertionGraph.replace('_verifiable_memory', '_shared_memory')]) {
+    expect(() => generateGraphKnowledgeAssetMetadata({...meta, assertionGraph: invalidGraph}, {status: 'tentative'})).toThrow('canonical assertion graph');
+  }
 });

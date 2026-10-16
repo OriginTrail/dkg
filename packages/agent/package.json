@@ -23,6 +23,11 @@
       "import": "./dist/chain-authority-read-budgets.js",
       "default": "./dist/chain-authority-read-budgets.js"
     },
+    "./public-snapshot-mode": {
+      "types": "./dist/public-snapshot-mode.d.ts",
+      "import": "./dist/public-snapshot-mode.js",
+      "default": "./dist/public-snapshot-mode.js"
+    },
     "./package.json": "./package.json",
     "./dist/internal/*": null,
     "./dist/approved-private-replica.js": null,

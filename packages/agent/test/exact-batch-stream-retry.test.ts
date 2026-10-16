@@ -163,7 +163,7 @@ describe('experimental exact batch same-peer stream retry', () => {
       expect(requesterLogs(f, 'retry')).toEqual([
         expect.stringMatching(new RegExp(`^Exact batch requester retry reason=stream-interrupted committedAssets=${applied} outstandingAssets=${3 - applied} reconnectMs=\\d+$`)),
       ]);
-      expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+      expect(f.host.workLifetime.physicalRuns.size).toBe(0);
     });
 
     it('is opened again for the whole selection when it broke before applying anything', async () => {

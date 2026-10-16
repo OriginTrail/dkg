@@ -36,6 +36,8 @@ import {
   getManagedOxigraphRuntimeConstructionAuthorityV1,
 } from './managed-oxigraph-runtime-store.js';
 
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
+
 export interface Quad {
   subject: string;
   predicate: string;
@@ -115,6 +117,8 @@ export interface QueryOptions {
    * and reject above this bound before JSON/N-Quads materialization.
    */
   maxResponseBytes?: number;
+  /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
+  maxLiteralHydrationBytes?: number;
 }
 
 export type TripleStoreQueryOptions = QueryOptions;
@@ -166,6 +170,12 @@ export interface UpdateOptions extends QueryOptions {
 }
 
 export interface TripleStore {
+  /** Execute a fresh read plan in one admission, at the supplied priority and
+   * original deadline. Reads still go through this store's decorators; no
+   * authorization or results may be cached by this capability. Implementations
+   * serialize underlying reads and retain ownership through cancellation.
+   */
+  withQueryReadAdmission?<T>(work: () => Promise<T>, options?: QueryOptions): Promise<T>;
   readonly runLogicalMutation?: LogicalStoreMutationCapability['runLogicalMutation'];
   /** Present only when query response limits are enforced before decoding. */
   readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
@@ -234,6 +244,9 @@ export interface TripleStore {
    * and fail closed when it is unavailable.
    */
   replaceGraph?(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void>;
+  /** One transaction for distinct assertion/metadata pairs. Refusal must precede mutation. */
+  replaceAssetGroup?(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void>;
+
   /**
    * Atomically replace one complete named graph and every row for one subject
    * in a second named graph. Implementations MUST guarantee one commit boundary
@@ -282,6 +295,13 @@ export interface TripleStore {
     input: Rfc64AuthorCommitCasInputV1,
     options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1>;
+  /** Optional projection of a freshly queried nonempty graph inventory into
+   * this store's enumeration visibility. Every decorator must compose its own
+   * rules and its inner store's predicate; never unwrap to discover this capability.
+   * Absence requires normal filtered enumeration. Visibility changes must obey
+   * the same all-writers revision contract as enumeration when revisions exist.
+   */
+  readonly graphEnumerationVisibility?: (graph: string) => boolean;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
