@@ -115,6 +115,7 @@ export interface ProducerQuiescentTeardownSteps {
    * dependencies are still alive. The outer shutdown deadline bounds this. */
   closeServer: () => Promise<void>;
   /** Close the daemon-owned MCP child before the DKG agent/store retires. */
+  closeEntitySearch: () => Promise<void>;
   closeLocalLlm: () => Promise<void>;
   /** Grace period for retained catch-up jobs, WHILE THE WORKER IS ALIVE,
    *  followed by a terminal record for every job still owed one. */
@@ -159,6 +160,7 @@ export type TeardownStepName = keyof ProducerQuiescentTeardownSteps;
  */
 const TEARDOWN_ORDER = [
   'closeServer',
+  'closeEntitySearch',
   'closeLocalLlm',
   'drainCatchupJobs',
   'flushTelemetry',
@@ -335,6 +337,7 @@ export async function closeDaemonBackingStoresAfterTeardown(
 export interface ProducerQuiescentTeardownDeps {
   /** HTTP-layer operation that ends permanent streams, stops admission, and drains finite callbacks. */
   closeHttpServer: () => Promise<void>;
+  closeEntitySearch: () => Promise<void>;
   closeLocalLlm: () => Promise<void>;
   drainCatchupJobs: (budgetMs: number, log: (message: string) => void) => Promise<unknown>;
   flushTelemetry: (options: { log: (message: string) => void }) => Promise<void>;
@@ -358,6 +361,7 @@ export function buildProducerQuiescentTeardownSteps(
 ): ProducerQuiescentTeardownSteps {
   return {
     closeServer: () => deps.closeHttpServer(),
+    closeEntitySearch: () => deps.closeEntitySearch(),
     closeLocalLlm: () => deps.closeLocalLlm(),
     drainCatchupJobs: async () => {
       await deps.drainCatchupJobs(

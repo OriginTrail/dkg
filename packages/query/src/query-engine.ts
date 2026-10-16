@@ -15,6 +15,8 @@ export interface QueryOptions {
   requireCompleteGraphScope?: boolean;
   /** Bound HTTP store responses before parsing; embedded stores remain post-checked. */
   maxResponseBytes?: number;
+  /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
+  maxLiteralHydrationBytes?: number;
   /** Cancel queued and in-flight store work when the caller goes away. */
   signal?: AbortSignal;
   /** Store admission lane. External/API reads should use `background`. */

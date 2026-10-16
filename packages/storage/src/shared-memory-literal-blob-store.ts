@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { LiteralHydrationBudget, readLiteralBlobBounded } from './bounded-literal-hydration.js';
 import type {
   ConstructResult,
   Quad,
@@ -218,14 +219,14 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
       const result = await this.inner.query(sparql, options);
-      return this.hydrateQueryResult(result);
+      return this.hydrateQueryResult(result, options);
     }
 
     const [original, placeholder] = await Promise.all([
       this.inner.query(sparql, options),
       this.inner.query(rewritten, options),
     ]);
-    return this.hydrateQueryResult(mergeQueryResults(original, placeholder));
+    return this.hydrateQueryResult(mergeQueryResults(original, placeholder), options);
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
@@ -339,41 +340,38 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     return [pattern, placeholderPattern];
   }
 
-  private async hydrateQueryResult(result: QueryResult): Promise<QueryResult> {
+  private async hydrateQueryResult(result: QueryResult, options?: QueryOptions): Promise<QueryResult> {
     if (result.type === 'boolean') return result;
     const cache = new Map<string, Promise<string>>();
+    const budget = new LiteralHydrationBudget(options?.maxLiteralHydrationBytes ?? options?.maxResponseBytes);
 
+    const map = async <T, R>(values: T[], hydrate: (value: T) => Promise<R>): Promise<R[]> => {
+      if (budget.limit === undefined) return Promise.all(values.map(hydrate));
+      const hydrated: R[] = [];
+      for (const value of values) hydrated.push(await hydrate(value));
+      return hydrated;
+    };
+    const term = (value: string) => this.hydrateTerm(value, cache, budget, options?.signal);
     if (result.type === 'bindings') {
-      const bindings = await Promise.all(
-        result.bindings.map(async (row) => {
-          const hydrated: Record<string, string> = {};
-          for (const [key, value] of Object.entries(row)) {
-            hydrated[key] = await this.hydrateTerm(value, cache);
-          }
-          return hydrated;
-        }),
-      );
+      const bindings = await map(result.bindings, async row => Object.fromEntries(
+        await map(Object.entries(row), async ([key, value]) => [key, await term(value)]),
+      ));
       return { type: 'bindings', bindings } satisfies SelectResult;
     }
-
-    const quads = await Promise.all(
-      result.quads.map(async (quad) => ({
-        ...quad,
-        object: await this.hydrateTerm(quad.object, cache),
-      })),
-    );
+    const quads = await map(result.quads, async quad => ({ ...quad, object: await term(quad.object) }));
     return { type: 'quads', quads } satisfies ConstructResult;
   }
 
-  private async hydrateTerm(term: string, cache: Map<string, Promise<string>>): Promise<string> {
+  private async hydrateTerm(term: string, cache: Map<string, Promise<string>>, budget: LiteralHydrationBudget, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const hash = externalLiteralRefHash(term);
-    if (!hash) return term;
+    if (!hash) return budget.consume(term);
     let pending = cache.get(hash);
     if (!pending) {
-      pending = this.readBlob(hash);
+      pending = this.readBlob(hash, { maxBytes: budget.remaining, signal });
       cache.set(hash, pending);
     }
-    return pending;
+    return budget.consume(await pending);
   }
 
   private rewriteLargeLiteralConstants(sparql: string): string | undefined {
@@ -403,12 +401,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     await this.readBlob(hash);
   }
 
-  private async readBlob(hash: string): Promise<string> {
+  private async readBlob(hash: string, constraints?: { maxBytes?: number; signal?: AbortSignal }): Promise<string> {
     assertSha256Hex(hash);
     const path = this.blobPath(hash);
     let content: string;
     try {
-      content = await readFile(path, 'utf8');
+      constraints?.signal?.throwIfAborted();
+      content = constraints?.maxBytes === undefined
+        ? await readFile(path, { encoding: 'utf8', signal: constraints?.signal })
+        : await readLiteralBlobBounded(path, constraints.maxBytes, constraints.signal);
+      constraints?.signal?.throwIfAborted();
     } catch (err) {
       if (isNodeError(err, 'ENOENT')) {
         throw new Error(`SWM external literal blob missing for sha256:${hash} at ${path}`);

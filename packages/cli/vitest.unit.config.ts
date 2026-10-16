@@ -49,6 +49,7 @@ export default defineConfig({
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/bounded-query.test.ts',
+      'test/entity-search.test.ts',
       'test/query-catalog-profile-route.test.ts',
           'test/context-graph-route-read-authority.test.ts',
           'test/knowledge-assets-local-curator-read.test.ts',

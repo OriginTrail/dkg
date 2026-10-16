@@ -224,6 +224,7 @@ import {
 } from '../../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../extraction-status.js';
 import { FileStore } from '../file-store.js';
+import { createEntitySearch } from '../entity-search/runtime.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
@@ -3329,6 +3330,7 @@ async function runDaemonInnerWithStartupOwnership(
 
   // --- Vector Store (optional, for tri-modal memory) ---
   const vectorStore = new VectorStore(dkgDir());
+  const entitySearch = createEntitySearch(dkgDir(), config.entitySearch);
   let embeddingProvider: EmbeddingProvider | null = null;
   if (config.llm?.apiKey) {
     embeddingProvider = new OpenAIEmbeddingProvider({
@@ -3606,7 +3608,7 @@ async function runDaemonInnerWithStartupOwnership(
         extractionStatus,
         assertionImportLocks,
         vectorStore,
-        embeddingProvider,
+        embeddingProvider, entitySearch,
         validTokens,
         apiHost,
         apiPortRef,
@@ -3752,6 +3754,7 @@ async function runDaemonInnerWithStartupOwnership(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             closeHttpServer: () => closeDaemonHttpServer(server, detachedHttpResponses),
+            closeEntitySearch: async () => { entitySearch?.close(); },
             closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,

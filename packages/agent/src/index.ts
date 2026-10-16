@@ -1,3 +1,8 @@
+export {
+  QueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from '@origintrail-official/dkg-query';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
   authorityIndexTrustDomain,

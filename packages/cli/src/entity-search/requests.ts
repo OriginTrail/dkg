@@ -1,0 +1,67 @@
+import { isSafeIri, sparqlIri } from '@origintrail-official/dkg-core';
+import { EntitySearchError, type EntityOperation, type EntityIndexSpec, type NormalizedIndexRequest,
+  type NormalizedReadinessRequest, type NormalizedSearchRequest } from './types.js';
+
+export function iri(value: unknown): string {
+  if (typeof value !== 'string' || value.length > 2048 || !isSafeIri(value)) {
+    throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+  }
+  return sparqlIri(value);
+}
+export function parseSpec(raw: unknown): EntityIndexSpec {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !('contextGraphId' in raw)
+      || typeof raw.contextGraphId !== 'string' || !raw.contextGraphId || raw.contextGraphId.length > 256
+      || !('view' in raw) || (raw.view !== 'verifiable-memory' && raw.view !== 'shared-working-memory')
+      || !('textPredicates' in raw)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+  function terms(values: unknown, required: boolean): string[] {
+    if (!Array.isArray(values) || values.length > 16 || (required && !values.length)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+    const validated = values.map(value => {
+      if (typeof value !== 'string') throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+      iri(value); return value;
+    });
+    return [...new Set(validated)].sort();
+  }
+  return { contextGraphId: raw.contextGraphId, view: raw.view,
+    textPredicates: terms(raw.textPredicates, true), types: terms(('types' in raw ? raw.types : undefined) ?? [], false) };
+}
+
+function invalid(): never { throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400); }
+function body(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return invalid();
+  const value = raw as Record<string, unknown>;
+  if (typeof value.contextGraphId !== 'string' || !value.contextGraphId
+    || (value.warmup !== undefined && typeof value.warmup !== 'boolean')
+    || (value.restart !== undefined && typeof value.restart !== 'boolean')) return invalid();
+  return value;
+}
+function timeout(value: Record<string, unknown>, preparation: boolean): number {
+  const ms = value.timeoutMs ?? (preparation ? 30_000 : 2_000);
+  if (typeof ms !== 'number' || !Number.isInteger(ms) || ms < 1 || ms > (preparation ? 30_000 : 5_000)) return invalid();
+  return ms;
+}
+function identity(value: Record<string, unknown>): { contextGraphId: string; indexId: string } {
+  if (typeof value.indexId !== 'string' || !/^[a-f0-9]{64}$/.test(value.indexId)
+    || typeof value.contextGraphId !== 'string') return invalid();
+  return { contextGraphId: value.contextGraphId, indexId: value.indexId };
+}
+export function parseIndexRequest(raw: unknown): NormalizedIndexRequest {
+  const value = body(raw);
+  return { ...parseSpec(value), restart: value.restart === true, timeoutMs: timeout(value, true) };
+}
+export function parseReadinessRequest(raw: unknown): NormalizedReadinessRequest {
+  const value = body(raw);
+  return { ...identity(value), warmup: value.warmup === true, timeoutMs: timeout(value, value.warmup === true) };
+}
+export function parseSearchRequest(raw: unknown): NormalizedSearchRequest {
+  const value = body(raw), limit = value.limit ?? 5;
+  if (typeof value.query !== 'string' || !value.query.trim() || value.query.length > 6000
+    || typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 20) return invalid();
+  return { ...identity(value), query: value.query, limit, timeoutMs: timeout(value, false) };
+}
+export function parseEntityOperation(kind: EntityOperation['kind'], raw: unknown): EntityOperation {
+  switch (kind) {
+    case 'index': return { kind, request: parseIndexRequest(raw) };
+    case 'readiness': return { kind, request: parseReadinessRequest(raw) };
+    case 'search': return { kind, request: parseSearchRequest(raw) };
+  }
+}
