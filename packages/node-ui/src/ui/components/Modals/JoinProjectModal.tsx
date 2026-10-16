@@ -359,7 +359,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     cgId: string,
     fallback?: ContextGraph,
   ): Promise<ContextGraph | undefined> => {
-    const { contextGraphs: freshList } = await fetchContextGraphs();
+    const { contextGraphs: freshList } = await fetchContextGraphs({ fresh: true });
     const freshContextGraphs: ContextGraph[] = freshList ?? [];
     setContextGraphs(freshContextGraphs);
     const graph = freshContextGraphs.find((candidate) => candidate.id === cgId) ?? fallback;
