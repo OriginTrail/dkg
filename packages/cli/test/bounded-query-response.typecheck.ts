@@ -4,7 +4,7 @@ declare const response: BoundedQueryResponse;
 if (response.mode === 'page') {
   const complete: false = response.resultComplete;
   const page: true = response.pageComplete;
-  const offset: number | null = void response.nextOffset;
+  const offset: number | null = response.nextOffset;
   void [complete, page, offset];
 } else {
   const complete: true = response.resultComplete;
