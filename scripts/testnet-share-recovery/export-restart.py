@@ -1,0 +1,24 @@
+"""Allowlisted restart proof export; raw RDF/jobs and claim capabilities stay private."""
+import pathlib,json,sys
+arm=sys.argv[1];root=pathlib.Path('.tmp/2963/evidence')/arm;source=root/'restart-regression';out=pathlib.Path('run-reports/2963-evidence')/arm/'restart-regression';out.mkdir(parents=True,exist_ok=True)
+write=lambda name,value:(out/name).write_text(json.dumps(value,indent=2)+'\n')
+missing=[]
+for name in ['request.json','response.json','runtime-before.json','protocol.json','outcome.json','before-job.json','after-job.json','identity-proof.json','process-before.json','process-restart-proof.json']:
+ p=source/name
+ if p.exists():write(name,json.loads(p.read_text()))
+ else:missing.append(name)
+observations=[]
+for line in (source/'observations.jsonl').read_text().splitlines():
+ x=json.loads(line);job=x.get('job') or {};catalog=x.get('catalog') or {};descriptor=x.get('descriptor') or {}
+ observations.append({k:x.get(k) for k in ['requestStartedAt','at','completedWithinDeadline','succeededBeforeDeadline','error']}|{'job':{k:job.get(k) for k in ['jobId','state','attempts','enqueuedAt','finishedAt','nextRetryAt','lastError']},'descriptorStatus':descriptor.get('status'),'catalog':{k:catalog.get(k) for k in ['phase','appliedRowCount','legacyReadOnlyCount','authorityState','authorityFreshness']}})
+write('observations.json',observations)
+processes=source/'process-observations.jsonl'
+if processes.exists():write('process-observations.json',[json.loads(l) for l in processes.read_text().splitlines()])
+fault=pathlib.Path('.tmp/2963')/f'{arm}-home'/'2963-fault-restart-recovery.json'
+if fault.exists():write('fault.json',{k:v for k,v in json.loads(fault.read_text()).items() if k!='pid'})
+for name,keys in [('catalogs.json',['assertionCoordinate','kaId','assertionVersion','sealDigest']),('inventory.json',['assertion_coordinate','ka_ual','assertion_version_u64be','seal_digest'])]:
+ p=root/'restart-readback'/name
+ if p.exists():
+  x=json.loads(p.read_text());rows=[r for c in x for r in c['rows']] if name=='catalogs.json' else x['swm'];write(name,[{k:r[k] for k in keys} for r in rows])
+write('export-manifest.json',{'requestDenominator':1,'manualShareReplays':0,'manualProcessRestarts':0,'missingEvidence':missing,'osExitStatusCaptured':False,'note':'Process disappearance/replacement is witnessed; code 86 is the injected implementation, not captured OS exit status. The normal 900000 ms lease was not edited.'})
+print('Exported restart evidence with',len(observations),'observations; missing files:',missing)

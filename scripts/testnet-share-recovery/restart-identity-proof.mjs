@@ -77,10 +77,12 @@ if(mode==='before'){
  const runtimeBefore=JSON.parse(fs.readFileSync(`${dir}/runtime-before.json`));
  const runtimeAfter=JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-status.json`)).value;
  const sameRuntime=['version','commit','peerId'].every(key=>runtimeBefore[key]===runtimeAfter[key]);
- const result={sameRuntime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
+ const originalBuild=JSON.parse(fs.readFileSync(`${root}/startup-status.json`)).value;
+ const runtimeBuildTimeUnchanged=originalBuild.buildTime===runtimeAfter.buildTime;
+ const result={sameRuntime,runtimeBuildTimeUnchanged,runtimeBuildTime:runtimeAfter.buildTime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
  originalBinding:JSON.stringify(job.request)===JSON.stringify(before.request),state:job.state,attempts:job.attempt.count,
  originalBindingSeal,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate==='restart-recovery').length,
  noAdditionalPublicationEffects:publications.length===48&&publications.every(j=>mainPublications.some(old=>old.jobId===j.jobId&&old.finalization.txHash===j.finalization.txHash)),nonces,manualRepairs:0};
  fs.writeFileSync(`${dir}/identity-proof.json`,JSON.stringify(result,null,2));console.log(result);
- if(!originalBindingSeal||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==437||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
+ if(!runtimeBuildTimeUnchanged||!originalBindingSeal||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==437||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
 }else throw Error('Expected before or after');

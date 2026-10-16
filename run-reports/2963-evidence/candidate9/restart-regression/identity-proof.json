@@ -1,0 +1,105 @@
+{
+  "sameRuntime": true,
+  "runtimeBuildTimeUnchanged": true,
+  "runtimeBuildTime": "2026-10-16T21:49:42.655Z",
+  "runtime": {
+    "version": "10.0.25",
+    "commit": "f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7",
+    "peerId": "12D3KooWFbmm9yEFSNn7u7x48wPDoNnjVrFo4VBYT9r6tL6FtMta"
+  },
+  "observedAt": "2026-10-16T22:53:42.916Z",
+  "originalJob": true,
+  "originalBinding": true,
+  "state": "succeeded",
+  "attempts": 2,
+  "originalBindingSeal": true,
+  "identityTuples": {
+    "expectedCount": 437,
+    "catalogCount": 437,
+    "inventoryCount": 437,
+    "uniqueExpected": true,
+    "exactCatalogIdentity": true,
+    "exactInventoryIdentity": true,
+    "identityErrors": []
+  },
+  "originalSealAndIntent": true,
+  "exactContent": true,
+  "lifecycleComplete": true,
+  "wmCleared": true,
+  "catalogCount": 437,
+  "restartCatalogOccurrences": 1,
+  "noAdditionalPublicationEffects": true,
+  "nonces": [
+    {
+      "address": "0x247B02C301B34E52e9021728F34C3457F81f2dFc",
+      "before": 28,
+      "latest": 28,
+      "pending": 28,
+      "unchanged": true
+    },
+    {
+      "address": "0xD1Ff3DE51fc64d0297790688642317BE90aB9383",
+      "before": 0,
+      "latest": 0,
+      "pending": 0,
+      "unchanged": true
+    },
+    {
+      "address": "0x740Ba951b85C7DBD8B10D91D551805680e74cf94",
+      "before": 0,
+      "latest": 0,
+      "pending": 0,
+      "unchanged": true
+    },
+    {
+      "address": "0x0795194897aeC06dAFE61100ed478bA266c19038",
+      "before": 0,
+      "latest": 0,
+      "pending": 0,
+      "unchanged": true
+    },
+    {
+      "address": "0xAddff5D971ec77276Bd38D77AaD2822c41c72611",
+      "before": 114,
+      "latest": 114,
+      "pending": 114,
+      "unchanged": true
+    },
+    {
+      "address": "0x66a70B361C827Ef9B7939AD2Ec21E72bC8927240",
+      "before": 86,
+      "latest": 86,
+      "pending": 86,
+      "unchanged": true
+    },
+    {
+      "address": "0x1dFCC652dc4245C799c79B7984D1F1b7143B2429",
+      "before": 88,
+      "latest": 88,
+      "pending": 88,
+      "unchanged": true
+    },
+    {
+      "address": "0x093ADac4F2937ED691808a61A4297040fD1f45a7",
+      "before": 84,
+      "latest": 84,
+      "pending": 84,
+      "unchanged": true
+    },
+    {
+      "address": "0xBa7FeCe62cDD206323616eB8A05E264029786477",
+      "before": 78,
+      "latest": 78,
+      "pending": 78,
+      "unchanged": true
+    },
+    {
+      "address": "0x1a297f7780777cE38FA9C814bb1Ead1a55198e4A",
+      "before": 80,
+      "latest": 80,
+      "pending": 80,
+      "unchanged": true
+    }
+  ],
+  "manualRepairs": 0
+}

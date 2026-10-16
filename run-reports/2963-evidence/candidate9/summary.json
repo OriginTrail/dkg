@@ -1,0 +1,99 @@
+{
+  "arm": "candidate9",
+  "snapshot": {
+    "arm": "candidate9",
+    "cg": "0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-candidate9-20261016",
+    "label": "fixed-deadline",
+    "observedAt": "2026-10-16T22:28:21.543Z",
+    "inventoryRows": 436,
+    "catalogRows": 436
+  },
+  "requests": 256,
+  "httpStatuses": {
+    "200": 254,
+    "503": 2
+  },
+  "natural": {
+    "denominator": 254,
+    "http200": 254
+  },
+  "injected": {
+    "denominator": 2,
+    "results": [
+      {
+        "label": "share:catalog-140",
+        "route": "/api/knowledge-assets/catalog-140/swm/share",
+        "startedAt": "2026-10-16T22:05:10.621Z",
+        "durationMs": 5951.729125000013,
+        "status": 503,
+        "value": {
+          "error": "Store scheduler queue wait timeout (normal: test.2963.lifecyclePromotedInsert)",
+          "code": "STORE_SCHEDULER_BUSY",
+          "reason": "queue_wait_timeout",
+          "priority": "normal",
+          "retryable": true,
+          "outcome": "not_started",
+          "recoveryJobId": "9c8f809f-85f9-4194-880f-182d0f3c9623",
+          "recoveryState": "pending",
+          "recoveryStatusUrl": "/api/knowledge-assets/swm/share-jobs/9c8f809f-85f9-4194-880f-182d0f3c9623"
+        }
+      },
+      {
+        "label": "share:catalog-141",
+        "route": "/api/knowledge-assets/catalog-141/swm/share",
+        "startedAt": "2026-10-16T22:05:14.466Z",
+        "durationMs": 5318.729292000004,
+        "status": 503,
+        "value": {
+          "code": "PROMOTE_POST_COMMIT_FAILURE",
+          "error": "A promote post-commit step failed after Shared Memory was committed",
+          "retryAction": "resume_existing_knowledge_asset",
+          "retryPhase": "swm-share",
+          "contextGraphId": "0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-candidate9-20261016",
+          "retryKnowledgeAssetName": "catalog-141",
+          "retryable": true,
+          "recoveryJobId": "7527c5e6-bdc1-4fa9-ac19-a72a0ff00728",
+          "recoveryState": "pending",
+          "recoveryStatusUrl": "/api/knowledge-assets/swm/share-jobs/7527c5e6-bdc1-4fa9-ac19-a72a0ff00728"
+        }
+      }
+    ]
+  },
+  "publications": {
+    "admissions": 48,
+    "admitted": 48,
+    "states": {
+      "finalized": 48
+    },
+    "latencyP50Ms": 205458,
+    "latencyP90Ms": 348022,
+    "fullCohortMakespanMs": 385549.0,
+    "fullCohortPerSecond": 0.12449779405471159
+  },
+  "inventory": {
+    "actual": 436,
+    "expected": 436,
+    "missing": [],
+    "extra": [],
+    "duplicates": []
+  },
+  "catalog": {
+    "actual": 436,
+    "expected": 436,
+    "missing": [],
+    "extra": [],
+    "duplicates": []
+  },
+  "sealChanged": [],
+  "missingLifecycle": [],
+  "manualRepairs": 0,
+  "graphAudit": {
+    "materializedGraphsExact": {
+      "did:dkg:context-graph:0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-candidate9-20261016/context/812": true
+    },
+    "materializedGraphPresent": true,
+    "unexpectedPayloadGraphs": []
+  },
+  "contentErrors": [],
+  "exactCatalogIdentityErrors": []
+}

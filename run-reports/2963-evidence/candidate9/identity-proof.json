@@ -1,0 +1,9 @@
+{
+  "expectedCount": 436,
+  "catalogCount": 436,
+  "inventoryCount": 436,
+  "uniqueExpected": true,
+  "exactCatalogIdentity": true,
+  "exactInventoryIdentity": true,
+  "identityErrors": []
+}

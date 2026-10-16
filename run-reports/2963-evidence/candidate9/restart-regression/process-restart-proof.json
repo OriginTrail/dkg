@@ -1,0 +1,16 @@
+{
+  "observedAt": "2026-10-16T22:33:19.984629+00:00",
+  "faultAt": "2026-10-16T22:33:18.813Z",
+  "faultPid": 77074,
+  "originalDaemonPid": 77074,
+  "oldDaemonAbsent": true,
+  "sameSupervisorPid": 77072,
+  "supervisorAlive": true,
+  "replacementDaemonPids": [
+    78639
+  ],
+  "restartMechanism": "existing foreground supervisor, no manual restart or HTTP replay",
+  "faultImplementationExitCode": 86,
+  "osExitStatusCaptured": false,
+  "containerRunning": true
+}

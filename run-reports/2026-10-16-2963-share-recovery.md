@@ -2,9 +2,56 @@
 
 ## Executive summary
 
-Work in progress. The optimized publisher baseline commits the sealed SWM payload before separate lifecycle/head/cleanup and catalog-observer work. A synchronous request has no persistent share-job owner. Two deterministic live interruptions reproduced committed content with missing lifecycle fields and unavailable descriptors. The original incident's exact failing store call remains unknown. The recovery implementation is under validation. The first candidate automatically repaired both injected operations and passed its fixed-deadline 436/436 catalog/content/identity readback. Later review fixes and the merged v14 base require a second matched pair; that pair, actual process-restart evidence and current-head remote review remain pending.
+The final candidate automatically completed both interrupted synchronous shares without HTTP replay, preserving their original operation, seals, versions and payloads. The clean merged optimized-publisher baseline recovered neither interruption. All 48 publications completed in each arm; the candidate reached exactly 436 catalog/inventory identities and 436 available descriptors. The original incident’s exact failing store call remains unknown: the identical live injections characterize the documented partial-commit state, not that unknown call.
+
+The cause is missing durable ownership: a synchronous request could commit sealed SWM content before separate lifecycle/head/cleanup and catalog-observer work, then return an error with no async share job responsible for finishing it. The fix admits a sealed, immutable, leased recovery owner before mutation and lets the existing worker resume that same operation. Authorization, uncertain-write, claim and identity fences remain enforced. Error presentation alone would not close the gap.
+
+**Current status:** final matched live comparison and local regressions passed on `f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7`. The separate actual process-exit proof also passed; final-head remote CI/review remains outstanding. No merge is authorized. Historical sections below retain the status and failures at each earlier revision; they are not claims about the final candidate.
 
 The original baseline uses performance PR [#3253](https://github.com/OriginTrail/dkg/pull/3253) at `9436b5c927f9fc8e5eb0cd5523da785dfa1cdd75`; its scope is unchanged. That PR merged at 18:08:57 UTC. Separate [PR #3300](https://github.com/OriginTrail/dkg/pull/3300), branch `codex/2963-durable-share-recovery`, now targets `testnet-canary` and integrates base `2aba84de35754e5663b52018f9781a6e6c8b948d` without rebasing. See the [execution plan](../agent-docs/plans/2026-10-16-2963-durable-share-recovery.md) and [reproduction harness](../scripts/testnet-share-recovery/README.md).
+
+## Final matched comparison
+
+| Result | Clean merged baseline (`baseline3`) | Final candidate (`candidate9`) |
+| --- | --- | --- |
+| Tested runtime commit | `2aba84de35754e5663b52018f9781a6e6c8b948d` | `f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7` |
+| Runtime / build time UTC | 10.0.25 / 18:12:45.944 | 10.0.25 / 21:49:42.655 |
+| Traffic UTC, 2026-10-16 | 18:23:28.474–18:30:43.016 | 22:01:02.254–22:08:20.527 |
+| Synchronous request denominator | 256: 254 HTTP 200, 2 injected HTTP 503 | 256: 254 HTTP 200, 2 injected HTTP 503 |
+| Naturally successful requests | 254/254 | 254/254 |
+| Interrupted operations automatically completed | 0/2 | 2/2 |
+| Fault-to-durable-success times | Neither completed by deadline | 67.366 s, 70.612 s |
+| First original-author descriptor 200 response completion after fault | Neither available by deadline | 78.318 s, 75.466 s |
+| Publications finalized by fixed deadline | 48/48 | 48/48 |
+| Publication p50 / p90 | 178.085 s / 323.891 s | 205.458 s / 348.022 s |
+| Full-cohort makespan / throughput | 360.794 s / 0.133040 per s | 385.549 s / 0.124498 per s |
+| Exact final inventory / catalog / descriptor set | 434/436; only the injected two absent | 436/436 |
+| First complete catalog observation | Never by deadline | 22:13:25.329Z; 304.802 s after traffic end |
+| Fixed catalog deadline / full snapshot | 18:50:43.016 / 18:51:03.541 (+20.525 s) | 22:28:20.527 / 22:28:21.543 (+1.016 s) |
+| Original seals / whole-graph content preserved | 436/436 | 436/436 |
+| Unique creation events and exact publication carriers | 48/48 | 48/48 |
+| Complete successful signer nonce interval / gaps | 98 transactions / 0 | 98 transactions / 0 |
+| Manual repairs or share replays | 0 | 0 |
+
+All times are UTC on 2026-10-16. Descriptor times use response completion, not request start. The baseline full snapshot is 20.525 seconds late; bracketing polls at 18:50:37.279 and 18:50:52.317 both retained 434 rows, and the preserved two operations were still incomplete at readback. Candidate count convergence is followed by exact tuple/content proofs and continued observations through the fixed deadline. No builds or local regression suites ran during either measured workload or drain.
+
+Both arms started with exactly 180 catalog/inventory identities, 256 sealed drafts and no publication jobs. Candidate preparation necessarily leaves 180 succeeded synchronous recovery owners; the baseline has none. This product-induced queue-history difference is recorded in its environment artifact. Homes, namespaces, graph identities and monotonic allocator ranges differ to prevent contamination. Wallet count, resource limits, workload, faults and deadlines are the same. Frozen runner SHA-256: `80c72964a23a633cfa355589d0806d79628f87dc9a965b6027f96a49e697a682`; fault hook: `1aa663c1368f64da6454db1a2c2c4bab0f9575c2de90e25580ecc96f5e753c8c`; snapshot: `4b602b763eb633a0f8288b6573c105d3b633578f700f0ad17304a0a0a36ccbb5`.
+
+The candidate’s p50 is 15.37% higher, p90 7.45% higher and throughput 6.42% lower. This sequential public-testnet pair does not isolate causality or establish a performance improvement. [Follow-up #3310](https://github.com/OriginTrail/dkg/issues/3310) requests alternating replicated arms and attribution of chain, queue and catalog/store costs without weakening correctness. The performance parent’s scope remains unchanged.
+
+Candidate preparation also had one natural startup 503 which recovered automatically in 68.050 seconds after admission; one request, zero replays. Its first successful observation was 21:51:47.508Z. That preparation-only failure is retained separately from the 254 natural measured shares, and its exact dependency boundary was not instrumented. All 179 remaining initial-share requests and 256 draft requests returned 201. Earlier preparation-only candidates and the invalid first baseline remain in the evidence index.
+
+Reviewer artifacts: [baseline3](2963-evidence/baseline3/summary.json), [candidate9](2963-evidence/candidate9/summary.json), [candidate identity tuples](2963-evidence/candidate9/identity-proof.json), [all 304 requests](2963-evidence/candidate9/requests.csv), [fixed-window observations](2963-evidence/candidate9/deadline-observations.json), [nonce accounting](2963-evidence/candidate9/nonce-accounting.json).
+
+## Actual process-exit recovery
+
+A separate one-request scenario ran after the fixed matched workload, on the same `f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7` runtime/home/store. At `22:33:18.813Z`, the fsynced fault hook exited the daemon immediately after SWM content committed and before promoted lifecycle insertion. The request disconnected (`fetch failed`); it was never replayed. A read-only process witness observed the original child disappear and the same foreground supervisor replace it at `22:33:19.984629Z`, with Blazegraph still running. Exit code 86 belongs to the injected implementation; the witness does **not** capture an OS exit status.
+
+The persisted original job `97a1e29b-40f4-4ccf-968f-07851b0448f9` remained `running`, attempt 1, with its immutable binding and original lease expiry `22:48:17.575Z`. The normal 900000 ms lease was not shortened or edited. The ordinary replacement worker reclaimed it and completed attempt 2 at `22:48:20.327Z`: **901.514 seconds after the fault**. The first completed descriptor-200 observation was `22:48:34.166Z`; the first completed observation with job success, descriptor 200, 437 catalog rows and zero incomplete rows was `22:49:04.381Z` (**945.568 seconds after the fault**). Observation continued through the fixed deadline `22:53:18.813Z`, ending at `22:53:18.815Z`. All 79 observations are retained, including one read-only fetch failure during startup.
+
+Final readback at `22:53:42.916Z` verified the same original job and full binding, original seal/digest/intent/version, exact eight-triple content, completed lifecycle/SWM pointer and cleared WM. All **437/437** inventory and catalog tuples match, with one crash-asset entry. All 48 existing publication carriers and all ten signer nonces are unchanged. Runtime version, commit, build timestamp and peer identity are identical across replacement. Manual share replays: **0**; manual process restarts: **0**; manual repairs: **0**. Stopping owned processes after validation is separate cleanup, not recovery. All 437 share jobs were succeeded at final readback. Owned processes/store were then stopped, all ten signers reconciled, and the matching wallet claim released; [cleanup evidence](2963-evidence/candidate9/shutdown.json).
+
+See [deadline outcome](2963-evidence/candidate9/restart-regression/outcome.json), [process witness](2963-evidence/candidate9/restart-regression/process-restart-proof.json), [before owner](2963-evidence/candidate9/restart-regression/before-job.json), [after owner](2963-evidence/candidate9/restart-regression/after-job.json), [exact identity/content/nonces](2963-evidence/candidate9/restart-regression/identity-proof.json) and [all observations](2963-evidence/candidate9/restart-regression/observations.json). This scenario is separate from the 256-request matched denominator. A healthy ordinary supervisor and retained home/store are required; disabling workers suspends automatic recovery as documented.
 
 ## Evidence and interpretation
 
@@ -63,6 +110,15 @@ Sanitized baseline artifacts are [indexed here](2963-evidence/README.md), includ
 The definition of done is not met yet. Remaining work: live validation of the review fixes, actual process-crash/restart recovery, final regression/build checks and current-head remote review convergence. The complete first-candidate artifacts are preserved separately; they do not establish validation of later source changes. No merge is authorized.
 
 ## Implementation and acceptance mapping
+
+| #2963 acceptance item | Implemented contract and verification |
+| --- | --- |
+| Distinguishable and consistent post-commit job view | Additive `lastError.diagnosticCode` remains exposed; retrying rows retain the diagnostic and `retryable: true`. Real worker/queue and HTTP error-contract regressions cover it. |
+| Clear cannot race automatic recovery | Existing sweep-eligible unbound rows remain protected; all unfinished bound obligations also reject clear/cancel, including inspection holds. Real queue and HTTP cancellation cases pass. |
+| Decision on the failed window | Retain the legacy bounded startup/30-second sweep for unbound async jobs; bound synchronous post-commit failures go directly to `failed_retrying`. `async-promote-swm-pointer-recovery`, publisher-recovery and bookkeeping-recovery tests exercise the real worker/queue. |
+| Actionable synchronous status | Replay-safe post-commit cases return 503 with retry metadata and the durable recovery job/status URL. Permanent conflicts retain their status; uncertain admission is explicitly unconfirmed. Both live injected responses preserve this contract. |
+| Lifecycle documentation | [Async and durable synchronous recovery](../docs/use-dkg/knowledge-asset-lifecycle.md#async-share-recovery) documents leases, retry/inspection semantics, compatibility, downgrade limits and additive response fields. |
+| Additional durable synchronous recovery requirement | Matched live faults complete 2/2 automatically on the candidate versus 0/2 on the optimized baseline. Real native-reopen/worker regressions and separately reported actual supervisor restart cover persistence boundaries. |
 
 Synchronous HTTP requests now prepare the existing seal and original operation intent, then atomically persist a version-4 queue owner and inline lease before SWM mutation. The worker receives the original storage author, seal digest and complete immutable intent; it validates them again under the lifecycle lock and never reseals on replay. Existing authority/recipient checks run again, and the original curator-confirmation requirement cannot be weakened by a changed default. Queue writes require atomic replacement, expired started leases can reclaim only bound operations, and stale claim tokens remain fenced. Uncertain admission exposes an observation handle and never starts inline content mutation.
 
@@ -177,6 +233,6 @@ A second gap lost persistence provenance when verified native SQLite reopening f
 
 [Candidate8 preparation](2963-evidence/candidate8-preparation-only/summary.json) is preserved without measured submissions. Its single natural startup 503 recovered automatically in 65.000 seconds after admission, on attempt two, with no HTTP replay. All 435 subsequent preparation requests returned 201; all 180 share jobs succeeded and exact inventory/catalog identities reached 180/180. The daemon/store stopped, all ten nonces settled, and its two setup transactions were reconciled before the matching claim moved to candidate9. Source-only tests overlapped preparation, so these timings are excluded from performance comparison. An inherited nonce-report field initially included the preceding preparation interval; it was corrected from the preserved preceding shutdown snapshot, leaving exactly two setup transactions. No workload request was repeated or removed.
 
-Round-10 verification passed 59 inventory/latency/provenance cases, followed by 23 producer cases including filesystem-I/O reopening; 95 queue cases and five final ownership-fence cases; 109 worker/synchronous cases including the real persisted native-reopen worker; and 30 preparation/confirmation-observer cases. Native SQLite lifecycle verification passed 66 cases with four existing platform skips, including fresh-process SIGKILL/quarantine boundaries. Batches overlap and are not summed. Runtime/type/export build, lint, file-size limits, SPARQL checks and routing of 2,598 test files passed. An initial build rejected an overly narrow lifetime-predicate parameter and lint found an unused fixture field; both were corrected before the successful checks. Actual-daemon verification, final matched candidate and live process-exit evidence are still pending at this report revision.
+Round-10 verification passed 59 inventory/latency/provenance cases, followed by 23 producer cases including filesystem-I/O reopening; 95 queue cases and five final ownership-fence cases; 109 worker/synchronous cases including the real persisted native-reopen worker; and 30 preparation/confirmation-observer cases. Native SQLite lifecycle verification passed 66 cases with four existing platform skips, including fresh-process SIGKILL/quarantine boundaries. Batches overlap and are not summed. Runtime/type/export build, lint, file-size limits, SPARQL checks and routing of 2,598 test files passed. An initial build rejected an overly narrow lifetime-predicate parameter and lint found an unused fixture field; both were corrected before the successful checks. All 69 actual-daemon route cases also passed. The final matched candidate and actual process-exit proof are reported above; current-head remote review remains a separate requirement.
 
 The final round-10 actual-daemon suite subsequently passed all 69 route cases (155.24 seconds total), including token-scoped sharing and pulling from the original author lane. Candidate9 will use a clean committed build of these production changes. No live result is claimed by the local regression results.

@@ -1,0 +1,132 @@
+{
+  "runtimeRevision": "f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7",
+  "platform": "native macOS arm64 Node 22.23.3 pnpm 10.28.1",
+  "batchesOverlapDoNotSum": true,
+  "runtimeBuildPrecededLiveTraffic": true,
+  "noTestsDuringMeasuredWorkloadOrDrain": true,
+  "batches": [
+    {
+      "batch": "native-inventory",
+      "privateLogSha256": "d3a07ad3135ade427d78d833c710136fef40eb5931af294c0ae86a31f21b0a38",
+      "testSummary": [
+        "\n Test Files  3 passed (3)",
+        "      Tests  59 passed (59)",
+        "   Start at  23:41:25",
+        "   Duration  32.45s (transform 5.75s, setup 0ms, import 8.88s, tests 1.37s, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "native-provenance-final",
+      "privateLogSha256": "070a94908fb4b0148550e50f3eebd3e107cdedf412c40c24ae0ddea22248f09e",
+      "testSummary": [
+        "\n Test Files  1 passed (1)",
+        "      Tests  23 passed (23)",
+        "   Start at  23:45:46",
+        "   Duration  27.16s (transform 1.36s, setup 0ms, import 2.04s, tests 707ms, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "ownership",
+      "privateLogSha256": "9124733e6b7a419c517726185cc3bd48ad246238fa3748002a5eb2132ce22772",
+      "testSummary": [
+        "\n Test Files  2 passed (2)",
+        "      Tests  99 passed (99)",
+        "   Start at  23:41:26",
+        "   Duration  26.73s (transform 2.60s, setup 0ms, import 4.06s, tests 459ms, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "ownership-final",
+      "privateLogSha256": "fac47d7b037519ab749da870e9b746ed7b556e8b3829062dfc2856de95e11eb0",
+      "testSummary": [
+        "\n Test Files  1 passed (1)",
+        "      Tests  5 passed (5)",
+        "   Start at  23:42:33",
+        "   Duration  22.89s (transform 1.88s, setup 0ms, import 2.66s, tests 135ms, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "worker",
+      "privateLogSha256": "083b6703c7c2b7155a2f051fa33b492aa21739bc160355e461dc56ca9f173df3",
+      "testSummary": [
+        "\n Test Files  3 passed (3)",
+        "      Tests  109 passed (109)",
+        "   Start at  23:41:27",
+        "   Duration  34.89s (transform 7.19s, setup 0ms, import 11.00s, tests 1.71s, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "inventory-open-observer",
+      "privateLogSha256": "9600b656b16979147d62f27befc8d75646f4ce94dc2919f145002e8df83da4be",
+      "testSummary": [
+        "\n Test Files  2 passed (2)",
+        "      Tests  30 passed (30)",
+        "   Start at  23:43:55",
+        "   Duration  29.61s (transform 4.87s, setup 0ms, import 7.48s, tests 195ms, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "native-lifecycle",
+      "privateLogSha256": "a1eb6403090d8ba464f028b0f1549c7172ebc7e058f9be36a50d1c169e9a0b6a",
+      "testSummary": [
+        "\n Test Files  1 passed (1)",
+        "      Tests  66 passed | 4 skipped (70)",
+        "   Start at  23:44:35",
+        "   Duration  107.22s (transform 1.19s, setup 0ms, import 1.78s, tests 86.23s, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "actual-daemon",
+      "privateLogSha256": "4e9248ae95566fe3860129be85cd716893265acf7e9c7209cbdedbf924d8f64b",
+      "testSummary": [
+        "\n Test Files  1 passed (1)",
+        "      Tests  69 passed (69)",
+        "   Start at  23:46:16",
+        "   Duration  155.24s (transform 989ms, setup 0ms, import 1.54s, tests 134.09s, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "runtime-build-final",
+      "privateLogSha256": "2274d39664ca85147fbd13e6ae2e2d9cc82cafa8e660a1999f4bd425e5eff901",
+      "testSummary": [],
+      "passed": true
+    },
+    {
+      "batch": "lint-final",
+      "privateLogSha256": "25dae965b1be42d1bf2788cf4ab1ec67ab39397164f4193a4ab35f52840fb065",
+      "testSummary": [],
+      "passed": true
+    },
+    {
+      "batch": "size",
+      "privateLogSha256": "4d3ce4bd91b17fe7b1f1604bd70ba6caad460ed9ca65eaa17290614619e1a883",
+      "testSummary": [],
+      "passed": true
+    },
+    {
+      "batch": "sparql",
+      "privateLogSha256": "1ae662f355d5dbd157282ac1e8cde67cbb051ed804fcaa5c857021c29c8c297e",
+      "testSummary": [],
+      "passed": true
+    },
+    {
+      "batch": "test-inventory",
+      "privateLogSha256": "f223a1556cc753743685f5472c2ccf059292ed9eefe1fdfaec1ffb5c6f432e51",
+      "testSummary": [],
+      "passed": true
+    }
+  ],
+  "limitations": [
+    "Native persisted-worker fixture models a healthy reopen and chain confirmation; actual process-exit evidence is separate.",
+    "Native SQLite lifecycle suite has four existing platform skips.",
+    "Initial failed build/lint attempts retained privately, fixed before final build."
+  ]
+}

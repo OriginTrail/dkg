@@ -1,0 +1,17 @@
+{
+  "observedAt": "2026-10-16T22:33:08.590608+00:00",
+  "parentPid": 77072,
+  "originalDaemonPid": 77074,
+  "processes": [
+    {
+      "pid": 77072,
+      "ppid": 7762,
+      "executable": "node"
+    },
+    {
+      "pid": 77074,
+      "ppid": 77072,
+      "executable": "node"
+    }
+  ]
+}

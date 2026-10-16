@@ -1,0 +1,145 @@
+{
+  "recordedAt": "2026-10-16T21:49:26.404091+00:00",
+  "productRevision": "f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7",
+  "checkoutRevision": "f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7",
+  "productionSourceDiffFromParent": "Durable synchronous share recovery, review round 10; baseline clean merged optimized publisher 2aba84de35754e5663b52018f9781a6e6c8b948d",
+  "platform": "macOS-26.3-arm64-arm-64bit",
+  "node": "22.23.3 native arm64",
+  "pnpm": "10.28.1",
+  "hostCpus": 10,
+  "hostRamGiB": 32,
+  "dockerCpus": 10,
+  "dockerRamGiB": 8,
+  "storeCpuLimit": 4,
+  "storeMemoryGiB": 4,
+  "actualJvmMaxHeapGiB": 1,
+  "daemonMaxHeapMiB": 4096,
+  "storeImage": "islandora/blazegraph:6.4.3@sha256:015e308ae0a296cdb87c83c10da976ed970d2bfa971290aa1147593df8cf445d",
+  "configuration": {
+    "apiPort": 9298,
+    "listenPort": 0,
+    "nodeRole": "edge",
+    "contextGraphs": [
+      "0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-candidate9-20261016"
+    ],
+    "autoUpdate": {
+      "enabled": false,
+      "source": "npm"
+    },
+    "store": {
+      "backend": "blazegraph",
+      "options": {
+        "url": "http://127.0.0.1:9998/bigdata/namespace/2963-candidate9/sparql"
+      }
+    },
+    "publisher": {
+      "enabled": true,
+      "pollIntervalMs": 12000,
+      "errorBackoffMs": 5000,
+      "maxRetries": 10
+    }
+  },
+  "promoteQueueConfiguration": "repository defaults (enabled, 4 workers, 15-minute lease, 60-second heartbeat)",
+  "funding": "Same exclusively claimed batch-1; six publisher wallets, no PCA. Starting balances/nonces are the preceding reconciled quiescent interval.",
+  "startingCatalogRows": 180,
+  "startingPublicationJobHistory": 0,
+  "initialAssetsPublishedDuringMeasurement": 48,
+  "sealedCatalogDraftsBeforeMeasurement": 256,
+  "manualRepairs": 0,
+  "limitations": [
+    "Sequential public testnet; external chain load and host scheduling uncontrolled.",
+    "Additional merged-base pair after v14 integration; report separately from baseline2/candidate."
+  ],
+  "walletBalancesAndNoncesBeforeGraphRegistration": [
+    {
+      "address": "0x247B02C301B34E52e9021728F34C3457F81f2dFc",
+      "latest": 26,
+      "pending": 26,
+      "native": "0.01997138248399559",
+      "trac": "198700.0"
+    },
+    {
+      "address": "0xD1Ff3DE51fc64d0297790688642317BE90aB9383",
+      "latest": 0,
+      "pending": 0,
+      "native": "0.01",
+      "trac": "1000.0"
+    },
+    {
+      "address": "0x740Ba951b85C7DBD8B10D91D551805680e74cf94",
+      "latest": 0,
+      "pending": 0,
+      "native": "0.01",
+      "trac": "1000.0"
+    },
+    {
+      "address": "0x0795194897aeC06dAFE61100ed478bA266c19038",
+      "latest": 0,
+      "pending": 0,
+      "native": "0.001",
+      "trac": "10.0"
+    },
+    {
+      "address": "0xAddff5D971ec77276Bd38D77AaD2822c41c72611",
+      "latest": 98,
+      "pending": 98,
+      "native": "0.019619032693962766",
+      "trac": "9999.999999999999999775"
+    },
+    {
+      "address": "0x66a70B361C827Ef9B7939AD2Ec21E72bC8927240",
+      "latest": 70,
+      "pending": 70,
+      "native": "0.019807830673970525",
+      "trac": "9999.999999999999999943"
+    },
+    {
+      "address": "0x1dFCC652dc4245C799c79B7984D1F1b7143B2429",
+      "latest": 72,
+      "pending": 72,
+      "native": "0.019822627525969434",
+      "trac": "9999.99999999999999992"
+    },
+    {
+      "address": "0x093ADac4F2937ED691808a61A4297040fD1f45a7",
+      "latest": 68,
+      "pending": 68,
+      "native": "0.019832008789970261",
+      "trac": "9999.999999999999999944"
+    },
+    {
+      "address": "0xBa7FeCe62cDD206323616eB8A05E264029786477",
+      "latest": 62,
+      "pending": 62,
+      "native": "0.019846369375973459",
+      "trac": "9999.999999999999999969"
+    },
+    {
+      "address": "0x1a297f7780777cE38FA9C814bb1Ead1a55198e4A",
+      "latest": 64,
+      "pending": 64,
+      "native": "0.01984144288397401",
+      "trac": "9999.999999999999999968"
+    }
+  ],
+  "launchEnvironment": {
+    "DKG_NO_BLUE_GREEN": "1",
+    "NODE_OPTIONS": "--max-old-space-size=4096 --import=<checkout>/.tmp/2963/fault-hook.mjs"
+  },
+  "runtimeVersion": "10.0.25",
+  "runtimeBuild": {
+    "commit": "f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7",
+    "commitShort": "f7fdbdfa",
+    "buildTime": "2026-10-16T21:49:42.655Z",
+    "distTag": "monorepo",
+    "ciRun": null,
+    "dirty": false
+  },
+  "runtimeBuildTime": "2026-10-16T21:49:42.655Z",
+  "peerId": "12D3KooWFbmm9yEFSNn7u7x48wPDoNnjVrFo4VBYT9r6tL6FtMta",
+  "startingSynchronousRecoveryJobHistory": 180,
+  "startingSynchronousRecoveryJobStates": {
+    "succeeded": 180
+  },
+  "startingQueueDifference": "Baseline has no synchronous owners; candidate retains 180 completed preparation owners as an inherent effect of durable admission, not copied history."
+}
