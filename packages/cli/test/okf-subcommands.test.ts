@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, writeFile, mkdir, readdir, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, readdir, readFile, rm, symlink } from 'node:fs/promises';
+import { importBundle, parseDocument, quadsToNQuads, PROV_WAS_DERIVED_FROM } from '@origintrail-official/dkg-okf';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -17,6 +18,7 @@ import {
   startStub,
   subjectBelongsToOkfConcept,
   type StubHandler,
+  validatingDaemonHandler,
   writtenQuadsFor,
 } from './okf-test-helpers';
 
@@ -48,6 +50,25 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
   const env = () => ({ DKG_API_PORT: String(stub.port), DKG_HOME: dkgHome });
   const clear = () => {
     stub.calls.length = 0;
+  };
+  // Rows of verify's one scoped read: a `?s ?p ?o` binding per stored copy of a
+  // triple. IRIs come as SPARQL-JSON object cells, literals as the term strings
+  // the daemon sends.
+  const tripleRows = (triples: Array<[string, string, string]>) =>
+    triples.map(([s, p, o]) => ({ s: { value: s, type: 'uri' }, p: { value: p, type: 'uri' }, o: o.startsWith('"') ? o : { value: o, type: 'uri' } }));
+  // The (subject, object) pairs of each predicate in `quads`: the store's triples after a complete import.
+  const pairsByPredicate = (quads: Array<{ subject: string; predicate: string; object: string }>) => {
+    const out = new Map<string, Array<[string, string]>>();
+    for (const line of new Set(quadsToNQuads(quads).split('\n').filter(Boolean))) {
+      const [, s, p, o] = /^<([^>]+)> <([^>]+)> (.+) \.$/.exec(line)!;
+      out.set(p, [...(out.get(p) ?? []), [s, o.startsWith('<') ? o.slice(1, -1) : o]]);
+    }
+    return out;
+  };
+  // A store answering the read with its triples, every triple held in `copies` named graphs.
+  const storeHandler = (stored: Map<string, Array<[string, string]>>, copies: number): StubHandler => () => {
+    const triples = [...stored].flatMap(([p, pairs]) => pairs.map(([s, o]): [string, string, string] => [s, p, o]));
+    return { status: 200, body: { result: { bindings: tripleRows(Array.from({ length: copies }, () => triples).flat()) } } };
   };
 
   it('dry-run prints the mapping and NEVER contacts the node', async () => {
@@ -100,6 +121,31 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     const manifest = await manifestFor(bundle);
     expect(manifest.mode).toBe('per-concept');
     expect(manifest.stages).toEqual({ a: 'written', b: 'written' });
+  });
+
+  it('imports a concept with a malformed source URL, as a literal, and the concept after it', async () => {
+    // `https://example.org/%zz` has a malformed percent escape: as an IRI the
+    // daemon refuses the concept's write, which stopped the import there.
+    clear();
+    const dir = await mkdtemp(join(tmpdir(), 'okf-bundle-'));
+    await writeFile(join(dir, 'index.md'), '---\nokf_version: "0.2"\n---\n\n# Root\n');
+    await writeFile(join(dir, 'a.md'), "---\ntype: Metric\nsources: [{ resource: 'https://example.org/%zz' }]\n---\n\nbody\n");
+    await writeFile(join(dir, 'z.md'), '---\ntype: Metric\ntitle: Healthy\n---\n\nbody\n');
+    stub.setHandler(validatingDaemonHandler(okfDaemonHandler(createdCGs)));
+    try {
+      const r = await runCli(['okf', 'import', dir, '--context-graph-id', 'cg-iri', '--create-context-graph'], env());
+      expect(r.exitCode, r.stderr).toBe(0);
+      expect(knowledgeAssetCreateBodies(stub.calls).map((b) => b.name).sort()).toEqual(['a', 'z']);
+      const aQuads = writtenQuadsFor(stub.calls, 'a');
+      expect(aQuads.map((q) => q.object)).toContain('"https://example.org/%zz"');
+      expect(aQuads.some((q) => q.predicate === PROV_WAS_DERIVED_FROM)).toBe(false);
+      expect(writtenQuadsFor(stub.calls, 'z').length).toBeGreaterThan(0);
+    } finally {
+      stub.setHandler(okfDaemonHandler(createdCGs));
+    }
+    const dry = parseJsonTail((await runCli(['okf', 'import', dir, '--context-graph-id', 'cg-iri', '--dry-run'], env())).stdout);
+    const warnings = dry.warnings as Array<{ conceptId?: string; code: string; message: string }>;
+    expect(warnings).toContainEqual({ conceptId: 'a', code: 'invalid-iri', message: 'sources[0].resource "https://example.org/%zz" is not a valid IRI (RFC 3987); kept as a literal' });
   });
 
   it('import then import --share ADVANCES WM→SWM (does not skip finalize/share)', async () => {
@@ -198,6 +244,77 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(flat.some((f) => f.includes('genid') || f.includes('.well-known'))).toBe(false);
     await rm(outDir, { recursive: true, force: true });
     await mkdir(outDir, { recursive: true }).catch(() => {});
+  });
+
+  it('export rebuilds the v0.2 families from interleaved concept and family-node bindings', async () => {
+    clear();
+    const outDir = await mkdtemp(join(tmpdir(), 'okf-export-families-'));
+    // Two concepts whose verification / source / parameter nodes arrive
+    // interleaved and ahead of their roots — any order an un-ORDERed SELECT may
+    // return. Each node's payload must land in its own concept's frontmatter.
+    const imported = importBundle([
+      {
+        path: 'metrics/a.md',
+        content:
+          '---\ntype: Metric\ngenerated: { by: human:alice, at: 2026-06-30T14:00:00Z }\n' +
+          'verified:\n  - { by: human:alice, at: 2026-07-01T09:00:00Z }\n  - { by: process:nightly, at: 2026-07-02T02:00:00Z }\n' +
+          'sources:\n  - { id: pol, resource: /metrics/b.md, author: human:alice }\n  - { id: ext, resource: https://x.example/a, usage_count: 7 }\n' +
+          '---\n\nbody\n',
+      },
+      {
+        path: 'metrics/b.md',
+        content:
+          '---\ntype: Attested Computation\nruntime: bigquery\n' +
+          'parameters:\n  - { name: year, type: integer, required: true }\n  - { name: region, type: string, required: false }\n' +
+          'verified: { by: process:finance, at: 2026-07-03T00:00:00Z }\n---\n\nbody\n',
+      },
+    ]);
+    const rows = imported.quads.map((q) => ({ s: q.subject, p: q.predicate, o: q.object }));
+    const ownerOf = (subject: string) => subject.split('/.well-known/')[0];
+    const isNode = (b: { s: string }) => b.s.includes('/.well-known/genid/');
+    const nodesA = rows.filter((b) => isNode(b) && ownerOf(b.s) === 'urn:okf:metrics/a').reverse();
+    const nodesB = rows.filter((b) => isNode(b) && ownerOf(b.s) === 'urn:okf:metrics/b').reverse();
+    const bindings: typeof rows = [];
+    while (nodesA.length || nodesB.length) {
+      // strictly alternate owners, each owner's nodes in reverse index order
+      if (nodesA.length) bindings.push(nodesA.shift()!);
+      if (nodesB.length) bindings.push(nodesB.shift()!);
+    }
+    // the concept roots come last: every family node arrives before its owner
+    bindings.push(...rows.filter((b) => !isNode(b)).reverse());
+    expect(ownerOf(bindings[0].s)).not.toBe(ownerOf(bindings[1].s));
+    expect(isNode(bindings[0])).toBe(true);
+    stub.setHandler(() => ({ status: 200, body: { result: { bindings } } }));
+    const r = await runCli(['okf', 'export', 'cg-x', outDir], env());
+    stub.setHandler(okfDaemonHandler(createdCGs));
+    expect(r.exitCode).toBe(0);
+    expect(parseJsonTail(r.stdout).concepts).toBe(2);
+
+    const fmOf = async (path: string) => parseDocument(path, await readFile(join(outDir, path), 'utf-8')).frontmatter;
+    const a = await fmOf('metrics/a.md');
+    const b = await fmOf('metrics/b.md');
+    expect(a.generated).toEqual({ by: 'human:alice', at: '2026-06-30T14:00:00Z' });
+    expect(a.verified).toEqual([
+      { by: 'human:alice', at: '2026-07-01T09:00:00Z' },
+      { by: 'process:nightly', at: '2026-07-02T02:00:00Z' },
+    ]);
+    expect(a.sources).toEqual([
+      { id: 'pol', resource: '/metrics/b.md', author: 'human:alice' },
+      { id: 'ext', resource: 'https://x.example/a', usage_count: 7 },
+    ]);
+    expect(a.parameters).toBeUndefined();
+    expect(b.type).toBe('Attested Computation');
+    expect(b.parameters).toEqual([
+      { name: 'year', type: 'integer', required: true },
+      { name: 'region', type: 'string', required: false },
+    ]);
+    expect(b.verified).toEqual([{ by: 'process:finance', at: '2026-07-03T00:00:00Z' }]);
+    expect(b.sources).toBeUndefined();
+
+    const written = ((await readdir(outDir, { recursive: true } as { recursive: true })) as string[]).map(String);
+    expect(written.some((f) => f.includes('genid') || f.includes('.well-known'))).toBe(false);
+    expect(written.filter((f) => f.endsWith('.md') && !f.endsWith('index.md')).sort()).toEqual(['metrics/a.md', 'metrics/b.md']);
+    await rm(outDir, { recursive: true, force: true });
   });
 
   it('export refuses to write a subject that escapes the output directory', async () => {
@@ -315,7 +432,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     await rm(outDir, { recursive: true, force: true });
   });
 
-  it('verify gates on scoped per-predicate counts and normalizes object-form count cells', async () => {
+  it('verify gates on scoped per-predicate counts and reads object-form cells', async () => {
     clear();
     // Clean 2-concept bundle, no headings/links: predicates are rdf:type×2, schema:name×2.
     const dir = await mkdtemp(join(tmpdir(), 'okf-verify-'));
@@ -325,18 +442,15 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
 
     const TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
     const NAME = 'http://schema.org/name';
-    // COUNT(*) returned as a SPARQL-JSON OBJECT cell (exercises the cell() fix in verify).
+    // The stored pairs come back as SPARQL-JSON OBJECT cells (exercises the cell reading in verify).
     const issuedSparql: string[] = [];
     const countHandler =
       (counts: Record<string, number>): StubHandler =>
       (req, body) => {
         const sparql = String(JSON.parse(body || '{}').sparql ?? '');
         issuedSparql.push(sparql);
-        const pred = Object.keys(counts).find((p) => sparql.includes(`<${p}>`)) ?? '';
-        return {
-          status: 200,
-          body: { result: { bindings: [{ c: { value: String(counts[pred] ?? 0), type: 'literal' } }] } },
-        };
+        const triples = Object.entries(counts).flatMap(([p, n]) => Array.from({ length: n }, (_, i): [string, string, string] => [`urn:okf:c${i}`, p, `"v${i}"`]));
+        return { status: 200, body: { result: { bindings: tripleRows(triples) } } };
       };
 
     // All present → complete, zero missing, exit 0.
@@ -347,7 +461,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(okOut.complete).toBe(true);
     expect(okOut.totalMissingTriples).toBe(0);
 
-    // SCOPING CONTRACT: every COUNT must be filtered to subjects under the bundle's
+    // SCOPING CONTRACT: every count must be filtered to subjects under the bundle's
     // IRI prefix — otherwise unrelated pre-existing graph triples could mask (or
     // inflate) a real shortfall and report "complete" while concepts are missing.
     // A regression dropping the STRSTARTS filter fails here.
@@ -365,6 +479,69 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it('verify counts distinct triples: sources repeating a resource pass after a complete import', async () => {
+    clear();
+    // Four sources, two distinct resources. The lineage edge to each resource is
+    // one triple in the store however many sources name it.
+    const dir = await mkdtemp(join(tmpdir(), 'okf-verify-dup-'));
+    const files = [
+      { path: 'index.md', content: '---\nokf_version: "0.2"\n---\n# Root\n' },
+      {
+        path: 'm.md',
+        content:
+          '---\ntype: Metric\nsources:\n' +
+          '  - { id: a, resource: /p.md }\n  - { id: b, resource: p.md }\n' +
+          '  - { id: c, resource: https://x.example/doc }\n  - { id: d, resource: https://x.example/doc }\n---\n\nbody\n',
+      },
+      { path: 'p.md', content: '---\ntype: Policy\n---\n\nbody\n' },
+    ];
+    for (const f of files) await writeFile(join(dir, f.path), f.content);
+
+    // The store after a complete import: a SET of triples, each held in two named graphs.
+    const stored = pairsByPredicate(importBundle(files).quads);
+    stub.setHandler(storeHandler(stored, 2));
+    const r = await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-dup'], env());
+    stub.setHandler(okfDaemonHandler(createdCGs));
+    expect(r.exitCode).toBe(0);
+    const out = parseJsonTail(r.stdout);
+    expect(out.complete).toBe(true);
+    expect(out.totalMissingTriples).toBe(0);
+    const rows = out.predicates as Array<{ predicate: string; expected: number; actual: number; missing: number }>;
+    expect(rows.find((row) => row.predicate === PROV_WAS_DERIVED_FROM)).toMatchObject({ expected: 2, actual: 2, missing: 0 });
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('verify counts a triple held in several named graphs once, so a copy never hides a missing triple', async () => {
+    clear();
+    // tags: [a, a, b] is two triples. Two named graphs holding the `a` triple,
+    // and none holding `b`, leave one missing; with `b` there too it is complete.
+    const dir = await mkdtemp(join(tmpdir(), 'okf-verify-copies-'));
+    const files = [
+      { path: 'index.md', content: '---\nokf_version: "0.1"\n---\n# Root\n' },
+      { path: 'x.md', content: '---\ntype: Thing\ntags: [a, a, b]\n---\n\nbody\n' },
+    ];
+    for (const f of files) await writeFile(join(dir, f.path), f.content);
+    const KEYWORDS = 'http://schema.org/keywords';
+    const complete = pairsByPredicate(importBundle(files).quads);
+    const verifyWith = async (keywords: Array<[string, string]>) => {
+      stub.setHandler(storeHandler(new Map([...complete, [KEYWORDS, keywords]]), 1));
+      const r = await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-copies'], env());
+      stub.setHandler(okfDaemonHandler(createdCGs));
+      const out = parseJsonTail(r.stdout);
+      const row = (out.predicates as Array<{ predicate: string; expected: number; actual: number; missing: number }>).find((p) => p.predicate === KEYWORDS);
+      return { exitCode: r.exitCode, complete: out.complete, row };
+    };
+    const missingB = await verifyWith([['urn:okf:x', '"a"'], ['urn:okf:x', '"a"']]);
+    expect(missingB.exitCode).not.toBe(0);
+    expect(missingB.complete).toBe(false);
+    expect(missingB.row).toMatchObject({ expected: 2, actual: 1, missing: 1 });
+    const withCopies = await verifyWith([['urn:okf:x', '"a"'], ['urn:okf:x', '"a"'], ['urn:okf:x', '"b"']]);
+    expect(withCopies.exitCode).toBe(0);
+    expect(withCopies.complete).toBe(true);
+    expect(withCopies.row).toMatchObject({ expected: 2, actual: 2, missing: 0 });
+    await rm(dir, { recursive: true, force: true });
+  });
+
   it('verify --relate mirrors the import mapping (COUNTs the typed predicate, not schema:mentions)', async () => {
     clear();
     // A Dataset→Table link: default mapping → schema:mentions; --relate → schema:hasPart.
@@ -375,7 +552,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
 
     const countOne: StubHandler = () => ({
       status: 200,
-      body: { result: { bindings: [{ c: { value: '1', type: 'literal' } }] } },
+      body: { result: { bindings: tripleRows([['urn:okf:ds', 'http://schema.org/mentions', 'urn:okf:t']]) } },
     });
     const verifySparql = async (extra: string[]): Promise<string> => {
       const issued: string[] = [];

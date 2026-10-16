@@ -1,11 +1,18 @@
 /**
- * Small, dependency-free helpers shared by the mapper.
+ * Small helpers shared by the mapper.
  *
- * `isSafeIri` is replicated verbatim from `dkg-core`'s `sparql-safe.ts` so the
- * pure mapper has zero runtime cross-package dependency and stays unit-testable
- * in isolation (the package intentionally does not import the node at runtime).
- * A test pins the behaviour against the same inputs the node validates.
+ * Literal terms are written in the DKG's canonical RDF literal form, by the
+ * shared formatter in `dkg-rdf-utils` (a dependency-free leaf package), so the
+ * quads the mapper emits are the ones the stores return, and export reads both
+ * with the same parser. `isSafeIri` is replicated verbatim from `dkg-core`'s
+ * `sparql-safe.ts`, so the package never imports the node at runtime and stays
+ * unit-testable in isolation. A test pins it against the inputs the node
+ * validates. A value is written as an IRI only when the node's own write rule,
+ * also in `dkg-rdf-utils`, accepts it too (`isWritableIri`).
  */
+
+import { formatCanonicalRdfLiteralTerm, isAbsoluteRfc3987IriV1 } from '@origintrail-official/dkg-rdf-utils';
+import { yamlLexicalOf } from './yaml-lexical.js';
 
 const IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
 
@@ -15,14 +22,33 @@ export function isSafeIri(value: string): boolean {
   return IRI_SCHEME_RE.test(value);
 }
 
-/** N-Triples/quad-encoding of a plain string literal: `"escaped"`. */
-export function literalTerm(value: string): string {
-  return JSON.stringify(value);
+/**
+ * Whether `value` can be written as an IRI term: safe in SPARQL (`isSafeIri`)
+ * and an absolute RFC 3987 IRI, the rule the DKG write routes check every term
+ * against (`parseWritableRdfTerm`). Anything else is written as a literal: as
+ * an IRI, a malformed value (`https://example.org/%zz`) would make the node
+ * refuse the concept's whole write.
+ */
+export function isWritableIri(value: string): boolean {
+  return isSafeIri(value) && isAbsoluteRfc3987IriV1(value);
 }
 
-/** N-Triples/quad-encoding of a typed literal: `"lexical"^^<datatype>`. */
+/**
+ * Whether `value` is shaped like an IRI (`isSafeIri`) but the write rule
+ * refuses it: a field that holds a link warns for it.
+ */
+export function isMalformedIri(value: string): boolean {
+  return isSafeIri(value) && !isAbsoluteRfc3987IriV1(value);
+}
+
+/** N-Triples/quad-encoding of a plain string literal: `"escaped"`, in the canonical form. */
+export function literalTerm(value: string): string {
+  return formatCanonicalRdfLiteralTerm({ kind: 'plain', value });
+}
+
+/** N-Triples/quad-encoding of a typed literal: `"lexical"^^<datatype>`, in the canonical form. */
 export function typedLiteralTerm(lexical: string, datatypeIri: string): string {
-  return `${JSON.stringify(lexical)}^^<${datatypeIri}>`;
+  return formatCanonicalRdfLiteralTerm({ kind: 'typed', value: lexical, datatype: datatypeIri });
 }
 
 /**
@@ -56,4 +82,109 @@ export function camelCase(value: string): string {
 /** Stable blank-node label fragment from an arbitrary concept ID. */
 export function sanitizeForBlank(value: string): string {
   return value.replace(/[^A-Za-z0-9]+/g, '_');
+}
+
+/** A triple's identity by value: its subject, predicate and object, the named graph aside. */
+export function tripleKey(q: { subject: string; predicate: string; object: string }): string {
+  return `${q.subject}\u0000${q.predicate}\u0000${q.object}`;
+}
+
+/**
+ * Drop repeated quads, keeping the first occurrence (and so the emission
+ * order). An RDF store holds a set: two identical triples are one triple, so a
+ * mapper that emits a repeat (two `sources` naming the same resource → two
+ * identical `prov:wasDerivedFrom` edges; `tags: [a, a]`) overstates what the
+ * store will hold, and a completeness check built on that count can never pass.
+ */
+export function dedupeQuads<T extends { subject: string; predicate: string; object: string; graph?: string }>(
+  quads: T[],
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const q of quads) {
+    const key = `${tripleKey(q)}\u0000${q.graph ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  return out;
+}
+
+/** The last item, the one a single-valued field reads back when the graph holds several. */
+export function last<T>(items: readonly T[]): T | undefined {
+  return items[items.length - 1];
+}
+
+/** A YAML mapping (not a list, not a Date). */
+export function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);
+}
+
+/**
+ * `String(value)` that never throws. A YAML mapping can carry its own
+ * `toString` key (`{ toString: x }`), and `String()` of such an object throws
+ * because the key is not callable; one malformed optional field must not abort
+ * a whole bundle. Every value `String()` handles is returned exactly as
+ * `String()` returns it; the rest get the generic `[object Object]` form.
+ */
+export function safeString(value: unknown): string {
+  // An unquoted YAML timestamp reads as the text it was written as, not as
+  // `Date#toString()`, whose output depends on the machine's time zone.
+  const lexical = yamlLexicalOf(value);
+  if (lexical !== undefined) return lexical;
+  try {
+    return String(value);
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
+}
+
+/**
+ * A single YAML value: a string, number, boolean or timestamp — not a mapping
+ * or a list. Family fields that hold one value check this before coercing.
+ */
+export function isScalar(value: unknown): value is string | number | boolean | bigint | Date {
+  return (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint' ||
+    value instanceof Date
+  );
+}
+
+/** Absent, or a value whose string form is empty after trimming (the spec's "missing"). */
+export function isBlank(value: unknown): boolean {
+  return value === undefined || value === null || safeString(value).trim() === '';
+}
+
+/**
+ * An empty dictionary for arbitrary string keys. Producer-defined keys are
+ * arbitrary, and a plain object gets them wrong: it inherits `constructor`,
+ * `toString` and friends, and assigning `__proto__` runs a setter instead of
+ * storing the key. A dictionary has no prototype, so every key is an ordinary
+ * own property, read and written with plain `obj[key]`, `key in obj` and
+ * `Object.assign` into it. Every accumulator of arbitrary keys is one.
+ */
+export function dict<T = unknown>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+/**
+ * Distinct triples, first occurrence kept, the named graph ignored. A
+ * graph-wide read returns the same triple once per named graph that holds it
+ * (two sub-graphs of one Context Graph, say); for export that is one triple,
+ * and decoding the repeat would invent an extra source, verification or
+ * parameter.
+ */
+export function distinctTriples<T extends { subject: string; predicate: string; object: string }>(quads: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const q of quads) {
+    const key = tripleKey(q);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  return out;
 }

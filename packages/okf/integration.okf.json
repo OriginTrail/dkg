@@ -1,7 +1,7 @@
 {
   "slug": "okf",
   "name": "Open Knowledge Format (OKF) importer",
-  "description": "Ingest a Google Open Knowledge Format bundle (portable Markdown + YAML frontmatter + untyped cross-links) into the DKG as deterministic, owned, verifiable Knowledge Assets, reconstructing the bundle's cross-concept link graph. Provides the trust-and-permanence backend OKF deliberately omits.",
+  "description": "Ingest a Google Open Knowledge Format v0.2 bundle (portable Markdown + YAML frontmatter + untyped cross-links + provenance/trust/lifecycle/attestation families) into the DKG as deterministic, owned, verifiable Knowledge Assets, reconstructing the bundle's cross-concept link graph and its sources lineage. Provides the trust-and-permanence backend OKF deliberately omits.",
   "category": ["data-import", "knowledge-management", "interoperability"],
   "maintainer": { "github": "@OriginTrail/core-developers", "name": "OriginTrail Core Developers" },
   "repo": "https://github.com/OriginTrail/dkg",

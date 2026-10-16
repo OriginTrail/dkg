@@ -34,6 +34,14 @@ dkg okf import $BUNDLE --dry-run --print-nquads            # deterministic mappi
 Expect: 5 Knowledge Assets, 3 reserved `index.md` skipped, the reconstructed edge
 graph, both citation styles, byte-stable N-Quads. Run it twice — identical output.
 
+For the **v0.2 trust story**, dry-run Google's `acme_retail` reference bundle
+(`packages/okf/test/fixtures/acme_retail`): 9 Knowledge Assets, 8 reserved files
+skipped, `trustTiers: { humanReviewed: 8, unverified: 1 }`, 1 deprecated, 2
+Attested Computations, and `prov:wasDerivedFrom` lineage from every metric and
+computation back to the Finance policies. Every `verified` sign-off and every
+source's credibility signal is a queryable triple — and, once the assets are
+shared / promoted, an owned, provenanced one.
+
 ## 1. Launch the node on mainnet
 
 ```bash

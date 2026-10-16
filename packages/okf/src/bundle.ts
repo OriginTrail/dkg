@@ -1,19 +1,25 @@
 /**
- * Bundle-aware OKF import (the two passes from ADR 0005 / SPEC §3–§5).
+ * Bundle-aware OKF import (the passes from ADR 0005 / SPEC §3–§6).
  *
- * Pass 1 — index the bundle: classify concept vs. reserved files, parse each
- * concept's frontmatter, derive a deterministic subject IRI per concept ID, and
- * read `okf_version` from the root `index.md` if present.
+ * Pass 1 — read the bundle: classify concept vs. reserved files, parse each
+ * concept's frontmatter, and read `okf_version` from the root `index.md` if
+ * present.
  *
- * Pass 2 — extract + link: map each concept (frontmatter + body) to quads and
- * resolve its Markdown links against the Pass-1 map into untyped directed edges.
+ * Pass 2 — prepare and index: encode each concept's values and parse its body,
+ * without reading the index, under its deterministic subject IRI. Only a
+ * concept that prepares is indexed; one with a value no RDF term can hold is
+ * skipped and never enters the index.
+ *
+ * Pass 3 — resolve: read each prepared concept's path-valued fields and
+ * Markdown links against the complete index, into typed and untyped edges.
  *
  * Pure and deterministic: same `BundleFile[]` ⇒ identical quads and IRIs. No
  * filesystem, no network — `loadBundleDir` (loader.ts) is the only I/O surface.
  */
 
 import { parseDocument, OkfDocumentError } from './document.js';
-import { mapConcept } from './mapping.js';
+import { prepareConcept, resolveConcept, type PreparedConcept } from './mapping.js';
+import { OkfValueError } from './terms.js';
 import {
   isConceptFile,
   isReservedFile,
@@ -21,7 +27,8 @@ import {
   pathToConceptId,
   conceptIdToIri,
 } from './paths.js';
-import { DEFAULT_IRI_BASE, SCHEMA_MENTIONS } from './constants.js';
+import { DEFAULT_IRI_BASE, SCHEMA_MENTIONS, OKF_KNOWN_VERSIONS, OKF_TARGET_VERSION } from './constants.js';
+import { dict, isBlank, safeString } from './utils.js';
 import type {
   BundleFile,
   BundleImport,
@@ -45,10 +52,8 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
 
   const reservedSkipped = ordered.filter((f) => isReservedFile(f.path)).map((f) => f.path);
 
-  // --- Pass 1: index ---
+  // --- Pass 1: read ---
   const docs: OkfDocument[] = [];
-  const iriByConceptId: Record<string, string> = {};
-  const typeByConceptId: Record<string, string | undefined> = {};
   for (const f of ordered) {
     if (!isConceptFile(f.path)) continue;
     let doc: OkfDocument;
@@ -76,35 +81,65 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
       continue;
     }
     docs.push(doc);
-    iriByConceptId[doc.conceptId] = conceptIdToIri(doc.conceptId, iriBase);
-    typeByConceptId[doc.conceptId] =
-      doc.frontmatter.type != null ? String(doc.frontmatter.type) : undefined;
-    const type = doc.frontmatter.type;
-    if (type === undefined || type === null || String(type).trim() === '') {
+    if (isBlank(doc.frontmatter.type)) {
       warnings.push({
         conceptId: doc.conceptId,
         code: 'missing-type',
-        message: 'concept has no non-empty `type` (a hard §9 conformance requirement; the bundle will not validate)',
+        message: 'concept has no non-empty `type` (a hard §11 conformance requirement; the bundle will not validate)',
       });
     }
   }
 
-  // `okf_version` may be declared only in the bundle-root `index.md` (SPEC §11).
+  // `okf_version` may be declared only in the bundle-root `index.md` (SPEC §12).
   let okfVersion: string | null = null;
   const rootIndex = ordered.find((f) => f.path === 'index.md');
   if (rootIndex) {
     try {
       const parsed = parseDocument('index.md', rootIndex.content);
       const v = parsed.frontmatter.okf_version;
-      if (v !== undefined && v !== null) okfVersion = String(v);
+      if (v !== undefined && v !== null) okfVersion = safeString(v);
     } catch {
       // Reserved files need no frontmatter; ignore.
     }
   }
+  // A version this consumer does not know is consumed best-effort, never
+  // refused (SPEC §12). v0.1 bundles consume under the §13.1 fallbacks.
+  if (okfVersion !== null && !(OKF_KNOWN_VERSIONS as readonly string[]).includes(okfVersion)) {
+    warnings.push({
+      code: 'unsupported-version',
+      message: `root index.md declares okf_version "${okfVersion}"; this consumer targets OKF ${OKF_TARGET_VERSION} and consumes the bundle best-effort (SPEC §12)`,
+    });
+  }
 
-  // --- Pass 2: extract + link ---
-  const exists = (id: string): boolean =>
-    Object.prototype.hasOwnProperty.call(iriByConceptId, id);
+  // --- Pass 2: prepare and index ---
+  // Every concept is prepared once, before any reference is read, and only a
+  // concept that prepares enters the index. A concept whose value no RDF term
+  // can hold (`OkfValueError`) is skipped with a warning, so the index every
+  // concept then resolves against (once) names only imported concepts: a
+  // reference to a skipped concept is a broken link, never an edge. Any other
+  // exception is a defect and propagates.
+  // Dictionaries: a concept ID is a file path, and `__proto__.md` or
+  // `constructor.md` are valid concept files (§2), so a plain object would
+  // drop the first (prototype setter) and misread inherited names.
+  const iriByConceptId = dict<string>();
+  const typeByConceptId = dict<string | undefined>();
+  type Prepared = { doc: OkfDocument; prepared: PreparedConcept } | { doc: OkfDocument; failure: OkfWarning };
+  const prepared: Prepared[] = [];
+  for (const doc of docs) {
+    const iri = conceptIdToIri(doc.conceptId, iriBase);
+    try {
+      prepared.push({ doc, prepared: prepareConcept(doc, iri, opts) });
+    } catch (err) {
+      if (!(err instanceof OkfValueError)) throw err;
+      prepared.push({ doc, failure: { conceptId: doc.conceptId, code: 'unmappable-value', message: `could not be mapped (${err.message}); skipped` } });
+      continue;
+    }
+    iriByConceptId[doc.conceptId] = iri;
+    typeByConceptId[doc.conceptId] = doc.frontmatter.type != null ? safeString(doc.frontmatter.type) : undefined;
+  }
+
+  // --- Pass 3: resolve ---
+  const exists = (id: string): boolean => id in iriByConceptId;
   // Opt-in: retype cross-concept edges by their endpoints' OKF `type` pair
   // (deterministic; default keeps every edge as schema:mentions).
   const typeRelations = opts.typeRelations ?? [];
@@ -115,8 +150,13 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
 
   const concepts: ConceptMapping[] = [];
   const quads: Quad[] = [];
-  for (const doc of docs) {
-    const mapping = mapConcept(doc, iriByConceptId[doc.conceptId], exists, opts);
+  for (const p of prepared) {
+    if ('failure' in p) {
+      warnings.push(p.failure);
+      continue;
+    }
+    const { doc } = p;
+    const mapping = resolveConcept(p.prepared, exists);
     if (typeRelations.length > 0) {
       const fromType = typeByConceptId[doc.conceptId];
       for (const q of mapping.quads) {
@@ -128,22 +168,8 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     }
     concepts.push(mapping);
     quads.push(...mapping.quads);
-    for (const bl of mapping.brokenLinks) {
-      warnings.push({
-        conceptId: doc.conceptId,
-        code: 'broken-link',
-        message: `unresolved cross-link "${bl.raw}" (not in bundle — not an error, SPEC §5.3/§9)`,
-      });
-    }
-    if (!opts.includeCodeSpanLinks) {
-      for (const cs of mapping.codeSpanLinks) {
-        warnings.push({
-          conceptId: doc.conceptId,
-          code: 'code-span-link',
-          message: `link "${cs.raw}" sits inside an inline code span — treated as literal text per CommonMark, not an edge`,
-        });
-      }
-    }
+    // Every concept-level diagnostic comes from the mapper (prepare + resolve).
+    warnings.push(...mapping.warnings);
   }
 
   return { okfVersion, iriByConceptId, concepts, reservedSkipped, quads, warnings };

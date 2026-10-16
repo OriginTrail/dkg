@@ -1342,6 +1342,9 @@ importers:
 
   packages/okf:
     dependencies:
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       js-yaml:
         specifier: ^4.1.1
         version: 4.1.1

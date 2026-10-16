@@ -19,9 +19,59 @@
  * applies the §9 consumer rule.
  */
 
-import { load as loadYaml } from 'js-yaml';
+import * as jsYaml from 'js-yaml';
 import type { OkfDocument } from './types.js';
 import { pathToConceptId } from './paths.js';
+import { dateTimeLexical, isXsdDate, isXsdDateTime } from './timestamps.js';
+import { YamlTimestamp, yamlLexicalOf } from './yaml-lexical.js';
+
+/** js-yaml's built-in timestamp type (exported at runtime, absent from its type declarations). */
+const BUILTIN_TIMESTAMP = (jsYaml as unknown as {
+  types: { timestamp: { resolve(data: string): boolean; construct(data: string): Date } };
+}).types.timestamp;
+
+/**
+ * The YAML timestamp type, validated before conversion. js-yaml's own type
+ * builds a `Date` through `Date.UTC`, which rolls an impossible `2026-02-30`
+ * over to March 2 and reads an offset-less value as UTC, before any check can
+ * see the producer's text. Here an unquoted timestamp whose text is not a
+ * valid xsd:dateTime / xsd:date stays the string it was — exactly what the
+ * quoted form gives — and a valid one becomes a `YamlTimestamp`, the instant
+ * js-yaml reads with its original text (`yaml-lexical.ts`), so offset-less and
+ * date-only values are diagnosed and typed the same quoted or not. Valid
+ * values with an offset keep their usual UTC canonical form. The one place a
+ * `YamlTimestamp` is made.
+ */
+function constructTimestamp(data: string): YamlTimestamp | string {
+  return isXsdDateTime(data) || isXsdDate(data) ? new YamlTimestamp(data, BUILTIN_TIMESTAMP.construct(data)) : data;
+}
+
+const OKF_TIMESTAMP = new jsYaml.Type('tag:yaml.org,2002:timestamp', {
+  kind: 'scalar',
+  resolve: (data: string) => BUILTIN_TIMESTAMP.resolve(data),
+  construct: constructTimestamp,
+  instanceOf: Date,
+  // Written unquoted, as the text it carries (a value read from RDF carries
+  // its stored lexical), else in canonical form.
+  represent: (date: object) => yamlLexicalOf(date) ?? dateTimeLexical(date) ?? (date as Date).toISOString(),
+});
+
+/**
+ * js-yaml's default schema with the validated timestamp type in place of the
+ * built-in one, for reading frontmatter and for writing it on export.
+ */
+export const OKF_YAML_SCHEMA = jsYaml.DEFAULT_SCHEMA.extend({ implicit: [OKF_TIMESTAMP] });
+
+/**
+ * What the unquoted YAML scalar `text` reads as when it is a timestamp: the
+ * `YamlTimestamp` `parseDocument` builds for it, or `null` when YAML would
+ * read it as anything else.
+ */
+export function yamlTimestamp(text: string): YamlTimestamp | null {
+  if (!BUILTIN_TIMESTAMP.resolve(text)) return null;
+  const value = constructTimestamp(text);
+  return value instanceof YamlTimestamp ? value : null;
+}
 
 const DELIM = '---';
 
@@ -65,7 +115,7 @@ export function parseDocument(bundlePath: string, text: string): OkfDocument {
   const fmText = lines.slice(1, endIdx).join('\n');
   let parsed: unknown;
   try {
-    parsed = loadYaml(fmText) ?? {};
+    parsed = jsYaml.load(fmText, { schema: OKF_YAML_SCHEMA }) ?? {};
   } catch (err) {
     throw new OkfDocumentError(
       `Invalid YAML frontmatter in ${bundlePath}: ${(err as Error).message}`,

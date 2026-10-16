@@ -1,7 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import { fileURLToPath } from 'node:url';
-import { importBundle, loadBundleDir, validateBundle } from '../src/index.js';
-
+import {
+  exportBundle,
+  importBundle,
+  loadBundleDir,
+  parseDocument,
+  quadsToNQuads,
+  validateBundle,
+  DKG_HAS_SECTION,
+  GENID_TAGS,
+  OKF_STATUS,
+  OKF_VERIFICATION,
+  PROV_WAS_DERIVED_FROM,
+  RDF_JSON,
+} from '../src/index.js';
+import type { BundleFile, Quad } from '../src/index.js';
+import { objs, IDX_V02, bundle } from './helpers/okf-v02-fixtures.js';
 const links = loadBundleDir(fileURLToPath(new URL('./fixtures/synthetic_links', import.meta.url)));
 const edge = loadBundleDir(fileURLToPath(new URL('./fixtures/edge_cases', import.meta.url)));
 
@@ -105,4 +119,113 @@ describe('§9 conformance validation', () => {
     // no emitted subject IRI contains a space (the malformed-IRI symptom)
     expect(r.quads.every((q) => !q.subject.includes(' '))).toBe(true);
   });
+});
+
+describe('concept IDs are arbitrary file paths', () => {
+  it('imports `__proto__.md` and `constructor.md` as ordinary, linked concepts', () => {
+    const r = importBundle([
+      IDX_V02(),
+      { path: '__proto__.md', content: '---\ntype: Thing\ntitle: P\n---\n\nSee [c](constructor.md).\n' },
+      { path: 'constructor.md', content: '---\ntype: Thing\ntitle: C\n---\n\nSee [p](__proto__.md).\n' },
+    ]);
+    expect(r.concepts.map((c) => [c.conceptId, c.iri])).toEqual([
+      ['__proto__', 'urn:okf:__proto__'],
+      ['constructor', 'urn:okf:constructor'],
+    ]);
+    expect(Object.keys(r.iriByConceptId).sort()).toEqual(['__proto__', 'constructor']);
+    expect(r.concepts.map((c) => c.resolvedLinks.map((l) => l.targetConceptId))).toEqual([['constructor'], ['__proto__']]);
+    expect(r.quads.every((q) => typeof q.subject === 'string')).toBe(true);
+    expect(exportBundle(r).map((f) => f.path)).toEqual(['__proto__.md', 'constructor.md', 'index.md']);
+  });
+});
+
+describe('a malformed value never aborts the bundle', () => {
+  // A YAML mapping can carry its own `toString` key; String() of it throws.
+  const SIBLING: BundleFile = { path: 'sibling.md', content: '---\ntype: Thing\ntitle: Healthy\n---\n\nbody\n' };
+  const withSibling = (fm: string) => [...bundle(fm), SIBLING];
+  const strip = (quads: Quad[]) => quadsToNQuads(quads.filter((q) => !q.subject.includes(GENID_TAGS.section) && q.predicate !== DKG_HAS_SECTION));
+
+  it('a verifier given as a mapping names no verifier, warns, and leaves sibling concepts importing', () => {
+    const files = withSibling('type: Metric\nverified: { by: { toString: human:alice } }');
+    const r = importBundle(files);
+    expect(r.concepts.map((c) => c.conceptId).sort()).toEqual(['metrics/revenue', 'policies/revenue-recognition', 'sibling']);
+    const c = r.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(objs(c.quads, OKF_VERIFICATION)).toEqual([]);
+    expect(c.trust).toMatchObject({ tier: 'unverified', verifications: 0 });
+    expect(r.warnings.map((w) => w.message)).toContain('`verified[0].by` should be a single value, not a mapping or list (§5.2); the entry is skipped');
+    expect(validateBundle(files).warnings.join('\n')).toMatch(/verified\[0\]\.by` should be a single value/);
+  });
+
+  it('keeps any other family field given a mapping or list verbatim, with a warning, through export', () => {
+    const fm = [
+      'type: Attested Computation',
+      'status: { toString: x }',
+      'stale_after: [2026-12-31T00:00:00Z]',
+      'runtime: [bigquery]',
+      'computation: { file: x.sql }',
+      'generated: { by: { toString: g }, at: 2026-06-30T14:00:00Z }',
+      'sources:',
+      '  - { id: [a], resource: { href: https://x.example/s }, title: { toString: t }, author: { toString: a }, usage_count: [1, 2] }',
+      'parameters:',
+      '  - { name: [year], required: [true] }',
+      'executor: { resource: { toString: r }, receipt: [job_id, { k: 1 }] }',
+    ].join('\n');
+    const files = withSibling(fm);
+    const r = importBundle(files);
+    const messages = r.warnings.map((w) => w.message);
+    for (const label of ['status', 'stale_after', 'runtime', 'computation', 'generated.by', 'sources[0].id', 'sources[0].resource', 'sources[0].title', 'sources[0].author', 'sources[0].usage_count', 'parameters[0].name', 'parameters[0].required', 'executor.resource']) {
+      expect(messages.some((m) => m.startsWith(`\`${label}\` should be a single value`)), `warning for ${label}`).toBe(true);
+    }
+    expect(messages).toContain('`executor.receipt[1]` should be a single value, not a mapping or list (§10.2); kept verbatim');
+    const c = r.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(objs(c.quads, OKF_STATUS)).toEqual([`"{\\"toString\\":\\"x\\"}"^^<${RDF_JSON}>`]);
+    expect(objs(c.quads, PROV_WAS_DERIVED_FROM)).toEqual([]); // a mapping is not a resource IRI
+    expect(c.trust.generatedBy).toBeNull();
+    const exported = exportBundle(r);
+    const back = parseDocument('metrics/revenue.md', exported.find((f) => f.path === 'metrics/revenue.md')!.content).frontmatter;
+    expect(Object.getOwnPropertyDescriptor(back.status, 'toString')?.value).toBe('x');
+    expect(back.runtime).toEqual(['bigquery']);
+    expect((back.executor as Record<string, unknown>).receipt).toEqual(['job_id', { k: 1 }]);
+    expect(strip(importBundle(exported).quads)).toBe(strip(r.quads));
+  });
+
+  it('never throws on a malformed base field or type', () => {
+    const files = [IDX_V02(), { path: 'a.md', content: '---\ntype: Metric\ntitle: { toString: x }\ntags: [{ toString: t }]\nresource: { toString: r }\n---\n\nbody\n' }, { path: 'b.md', content: '---\ntype: { toString: x }\n---\n\nbody\n' }, SIBLING];
+    const r = importBundle(files);
+    expect(r.concepts.map((c) => c.conceptId)).toEqual(['a', 'b', 'sibling']);
+    expect(validateBundle(files).conformant).toBe(true);
+  });
+
+  it('skips only the concept whose value no RDF term can hold (a cyclic alias)', () => {
+    const files = [IDX_V02(), { path: 'a.md', content: '---\ntype: Metric\nowner: &x\n  self: *x\n---\n\nbody\n' }, SIBLING];
+    const r = importBundle(files);
+    expect(r.concepts.map((c) => c.conceptId)).toEqual(['sibling']);
+    expect(r.warnings.find((w) => w.conceptId === 'a')).toMatchObject({ code: 'unmappable-value' });
+    expect(r.warnings.find((w) => w.conceptId === 'a')!.message).toMatch(/^could not be mapped \(.*circular.*\); skipped$/);
+  });
+});
+
+describe('a skipped concept is not a link target', () => {
+  // The surviving concept names the skipped one through a source path and a
+  // body link; neither may become an edge, whichever file sorts first.
+  const CYCLIC = '---\ntype: Metric\nowner: &x\n  self: *x\n---\n\nbody\n';
+  const naming = (id: string) => `---\ntype: Metric\nsources:\n  - { id: s, resource: /${id}.md }\n---\n\nSee [it](/${id}.md).\n`;
+
+  for (const [survivor, skipped] of [['a', 'z'], ['z', 'a']]) {
+    it(`drops ${skipped}.md from the index so ${survivor}.md reports both references unresolved`, () => {
+      const r = importBundle([IDX_V02(), { path: `${survivor}.md`, content: naming(skipped) }, { path: `${skipped}.md`, content: CYCLIC }]);
+      expect(r.concepts.map((c) => c.conceptId)).toEqual([survivor]);
+      expect(Object.keys(r.iriByConceptId)).toEqual([survivor]);
+      const target = `urn:okf:${skipped}`;
+      expect(r.quads.filter((q) => q.object === target)).toEqual([]);
+      expect(r.concepts[0].trust.derivedFromConcepts).toEqual([]);
+      expect(r.warnings.map((w) => `${w.conceptId}|${w.code}|${w.message}`)).toEqual(
+        [
+          `${skipped}|unmappable-value|could not be mapped (value cannot be written as JSON: Converting circular structure to JSON); skipped`,
+          `${survivor}|broken-link|sources[0].resource "/${skipped}.md" does not resolve to a concept in the bundle (not an error, SPEC §6.1/§11)`,
+          `${survivor}|broken-link|unresolved cross-link "/${skipped}.md" (not in bundle — not an error, SPEC §6.1/§11)`,
+        ].sort((x, y) => (x.split('|')[0] < y.split('|')[0] ? -1 : x.split('|')[0] > y.split('|')[0] ? 1 : 0)),
+      );
+    });
+  }
 });

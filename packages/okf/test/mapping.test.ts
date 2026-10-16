@@ -1,14 +1,25 @@
 import { describe, it, expect } from 'vitest';
+import { load as loadYaml } from 'js-yaml';
 import {
   frontmatterQuads,
-  parseBody,
+  importBundle,
   mapConcept,
+  mapFrontmatter,
+  parseBody,
   parseDocument,
+  quadsToNQuads,
   DKG_HAS_SECTION,
+  GENID_TAGS,
+  OKF_RESOURCE,
+  OKF_SOURCE,
+  OKF_VERIFICATION,
+  PROV_WAS_DERIVED_FROM,
+  RDF_TYPE,
   SCHEMA_NAME,
+  SCHEMA_NS,
   SECTION_GENID_INFIX,
 } from '../src/index.js';
-
+import { IRI, objs, node, bundle, conceptOf } from './helpers/okf-v02-fixtures.js';
 const Q = (quads: { predicate: string; object: string }[], predicate: string) =>
   quads.filter((q) => q.predicate === predicate).map((q) => q.object);
 
@@ -168,5 +179,52 @@ describe('mapConcept section-name truncation (OT-RFC-56 §4.6)', () => {
     const mm = mapConcept(normal, 'urn:okf:a/b', () => false);
     const names = mm.quads.filter((q) => q.subject.includes('okfsec_') && q.predicate.includes('schema.org/name'));
     expect(names.some((q) => q.object === '"Short heading"')).toBe(true);
+  });
+});
+
+describe('each triple is emitted once (an RDF store holds a set)', () => {
+  const REPEATED = [
+    'type: Metric',
+    'tags: [finance, revenue, finance]',
+    'sources:',
+    '  - { id: a, resource: /policies/revenue-recognition.md }',
+    '  - { id: b, resource: policies/revenue-recognition.md }',
+    '  - { id: c, resource: https://x.example/doc }',
+    '  - { id: d, resource: https://x.example/doc }',
+  ].join('\n');
+
+  it('keeps one Source node per entry but one lineage edge per distinct resource', () => {
+    const { c } = conceptOf(bundle(REPEATED));
+    expect(objs(c.quads, OKF_SOURCE)).toHaveLength(4);
+    expect(objs(c.quads, PROV_WAS_DERIVED_FROM).sort()).toEqual(['https://x.example/doc', 'urn:okf:policies/revenue-recognition']);
+    expect(objs(c.quads, SCHEMA_NS + 'keywords')).toEqual(['"finance"', '"revenue"']);
+  });
+
+  it('never emits a duplicate quad, so the mapped count is the count the store holds', () => {
+    const r = importBundle(bundle(REPEATED));
+    for (const concept of r.concepts) {
+      const distinct = new Set(quadsToNQuads(concept.quads).split('\n').filter(Boolean));
+      expect(concept.quads).toHaveLength(distinct.size);
+    }
+    expect(r.quads).toHaveLength(new Set(quadsToNQuads(r.quads).split('\n').filter(Boolean)).size);
+  });
+});
+
+describe('frontmatterQuads without bundle context', () => {
+  it('still maps the families; bundle paths stay literals and node IRIs derive from the subject IRI', () => {
+    const quads = frontmatterQuads(IRI, {
+      type: 'Metric',
+      verified: { by: 'human:a', at: '2026-06-25T09:00:00Z' },
+      sources: [{ id: 'p', resource: 'policies/revenue-recognition.md' }],
+    });
+    expect(objs(quads, OKF_VERIFICATION)).toEqual([node(GENID_TAGS.verification, 0)]);
+    expect(objs(quads, OKF_RESOURCE, node(GENID_TAGS.source, 0))).toEqual(['"policies/revenue-recognition.md"']);
+    expect(objs(quads, PROV_WAS_DERIVED_FROM)).toEqual([]);
+    const m = mapFrontmatter(IRI, { type: 'Metric' });
+    expect(m).toEqual({ quads: [{ subject: IRI, predicate: RDF_TYPE, object: 'http://schema.org/Metric' }], derivedFromConcepts: [], warnings: [] });
+  });
+  it('is byte-stable', () => {
+    const fm = loadYaml('type: Metric\nverified: { by: human:a, at: 2026-06-25T09:00:00Z }\nsources:\n  - resource: https://x.example/a\n') as Record<string, unknown>;
+    expect(quadsToNQuads(frontmatterQuads(IRI, fm))).toBe(quadsToNQuads(frontmatterQuads(IRI, fm)));
   });
 });

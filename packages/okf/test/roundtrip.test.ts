@@ -1,33 +1,28 @@
 import { describe, it, expect } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import {
-  importBundle,
   exportBundle,
+  exportInputFromQuads,
+  importBundle,
   loadBundleDir,
+  parseDocument,
   quadsToNQuads,
   validateBundle,
   DKG_HAS_SECTION,
+  GENID_TAGS,
+  PROV_WAS_DERIVED_FROM,
+  RDF_TYPE,
+  SCHEMA_IS_PART_OF,
+  SCHEMA_NAME,
+  SCHEMA_URL,
   SECTION_GENID_INFIX,
+  XSD_DATE,
+  okfExtensionPredicate,
 } from '../src/index.js';
-import type { Quad } from '../src/index.js';
+import type { BundleFile, Quad } from '../src/index.js';
+import { objs, IDX_V02, bundle, exportedFrontmatter, DT, semantic, shuffled } from './helpers/okf-v02-fixtures.js';
 
 const files = loadBundleDir(fileURLToPath(new URL('./fixtures/crypto_bitcoin', import.meta.url)));
-
-/**
- * The semantic graph: concept-subject quads minus presentational `dkg:hasSection`
- * structure (the `hasSection` edges and the skolemized section nodes). Round-trip
- * equivalence is asserted over this projection (export is graph-faithful, not
- * byte-faithful — see export.ts).
- */
-function semantic(quads: Quad[]): string {
-  return quadsToNQuads(
-    quads.filter(
-      (q) =>
-        !q.subject.includes(SECTION_GENID_INFIX) &&
-        q.predicate !== DKG_HAS_SECTION,
-    ),
-  );
-}
 
 describe('round-trip: import → export → import (§4.2)', () => {
   const first = importBundle(files);
@@ -95,5 +90,427 @@ describe('round-trip preserves typed producer-key scalars (export fidelity)', ()
     for (const p of ['count', 'ratio', 'active', 'archived']) {
       expect(objFor(second, `http://schema.org/${p}`)).toBe(objFor(first, `http://schema.org/${p}`));
     }
+  });
+});
+
+describe('export only rewrites IRIs that are exported concepts', () => {
+  // With a custom iriBase the namespace alone does not identify a concept:
+  // an external https://example.org/docs/external must survive verbatim.
+  const BASE = 'https://example.org/';
+  const files: BundleFile[] = [
+    { path: 'index.md', content: '---\nokf_version: "0.2"\n---\n\n# Root\n' },
+    {
+      path: 'metric.md',
+      content: [
+        '---',
+        'type: Attested Computation',
+        'runtime: bigquery',
+        'computation: https://example.org/sql/revenue.sql',
+        'executor: { resource: https://example.org/skills/run.md }',
+        'attester: { resource: /policy.md }',
+        'sources:',
+        '  - { id: ext, resource: https://example.org/docs/external }',
+        '  - { id: pol, resource: /policy.md }',
+        '---',
+        '',
+        'body',
+        '',
+      ].join('\n'),
+    },
+    { path: 'policy.md', content: '---\ntype: Policy\n---\n\nbody\n' },
+  ];
+
+  it('keeps external IRIs under the namespace verbatim and writes real concepts as bundle paths', () => {
+    const first = importBundle(files, { iriBase: BASE });
+    const exported = exportBundle(first, { iriBase: BASE });
+    const fm = parseDocument('metric.md', exported.find((f) => f.path === 'metric.md')!.content).frontmatter;
+    expect(fm.sources).toEqual([
+      { id: 'ext', resource: 'https://example.org/docs/external' },
+      { id: 'pol', resource: '/policy.md' },
+    ]);
+    expect(fm.computation).toBe('https://example.org/sql/revenue.sql');
+    expect(fm.executor).toEqual({ resource: 'https://example.org/skills/run.md' });
+    expect(fm.attester).toEqual({ resource: '/policy.md' });
+  });
+
+  it('round-trips graph-equal, lineage edges included', () => {
+    const first = importBundle(files, { iriBase: BASE });
+    const second = importBundle(exportBundle(first, { iriBase: BASE }), { iriBase: BASE });
+    const metric = (r: typeof first) => r.concepts.find((c) => c.conceptId === 'metric')!;
+    expect(objs(metric(first).quads, PROV_WAS_DERIVED_FROM, BASE + 'metric').sort()).toEqual([
+      'https://example.org/docs/external',
+      'https://example.org/policy',
+    ]);
+    expect(quadsToNQuads(metric(second).quads)).toBe(quadsToNQuads(metric(first).quads));
+  });
+});
+
+describe('exportInputFromQuads: the package rebuilds concepts from a graph in any order', () => {
+  const BASE = 'https://example.org/';
+  const files: BundleFile[] = [
+    IDX_V02(),
+    {
+      path: 'a.md',
+      content: '---\ntype: Metric\nverified:\n  - { by: human:a }\n  - { by: process:b }\nsources:\n  - { id: s0, resource: /b.md }\n---\n\n# Notes\n\nbody\n',
+    },
+    { path: 'b.md', content: '---\ntype: Attested Computation\nruntime: dbt\nparameters:\n  - { name: year }\n  - { name: region }\n---\n\nbody\n' },
+  ];
+  const imported = importBundle(files, { iriBase: BASE });
+  const sectionNode = '/.well-known/genid/' + GENID_TAGS.section;
+  const semantic = (quads: Quad[]) =>
+    quadsToNQuads(quads.filter((q) => !q.subject.includes(sectionNode) && q.predicate !== DKG_HAS_SECTION));
+
+  it('selects typed roots under the base and attaches every node to its owner', () => {
+    const noise: Quad[] = [
+      { subject: `${BASE}untyped`, predicate: SCHEMA_NAME, object: '"no rdf:type"' },
+      { subject: 'urn:elsewhere:x', predicate: RDF_TYPE, object: 'http://schema.org/Thing' },
+    ];
+    const input = exportInputFromQuads([...noise, ...[...imported.quads].reverse()], { iriBase: BASE });
+    expect(input.concepts.map((c) => c.conceptId).sort()).toEqual(['a', 'b']);
+    for (const c of input.concepts) {
+      expect(c.iri).toBe(BASE + c.conceptId);
+      for (const q of c.quads) expect(q.subject === c.iri || q.subject.startsWith(`${c.iri}/.well-known/genid/`)).toBe(true);
+    }
+    const a = input.concepts.find((c) => c.conceptId === 'a')!;
+    expect(a.quads.some((q) => q.subject.includes(GENID_TAGS.verification))).toBe(true);
+    expect(a.quads.some((q) => q.subject.includes(GENID_TAGS.parameter))).toBe(false);
+  });
+
+  it('round-trips the semantic graph from shuffled quads under a custom base', () => {
+    const shuffledQuads = shuffled(imported.quads, 99);
+    const exported = exportBundle(exportInputFromQuads(shuffledQuads, { iriBase: BASE }), { iriBase: BASE });
+    expect(exported.some((f) => f.path.includes('.well-known'))).toBe(false);
+    expect(semantic(importBundle(exported, { iriBase: BASE }).quads)).toBe(semantic(imported.quads));
+  });
+});
+
+describe('arbitrary producer keys, prototype names included', () => {
+  // `key in obj` is true for inherited names, and plain assignment of
+  // `__proto__` runs the prototype setter; neither may drop a producer key.
+  const PROTO = [
+    'type: Metric',
+    'constructor: c0',
+    'toString: t0',
+    'generated: { by: human:a, constructor: c1, toString: t1, __proto__: p1 }',
+    'verified:',
+    '  - { by: human:a, constructor: c2, __proto__: p2 }',
+    'sources:',
+    '  - { id: s, resource: https://x.example/s, toString: t3, usage_window: { from: 2026-05-01T00:00:00Z, constructor: c4, __proto__: p4 } }',
+    'usage_window: { from: 2026-06-01T00:00:00Z, toString: t5 }',
+    'parameters:',
+    '  - { name: year, constructor: c6, __proto__: p6 }',
+    'executor: { resource: https://example.org/run, constructor: custom, toString: t7, __proto__: p7 }',
+    'attester: { resource: https://x.example/a, valueOf: v8 }',
+  ].join('\n');
+  const own = (obj: unknown, key: string) => Object.getOwnPropertyDescriptor(obj as object, key)?.value;
+
+  it('writes every key back in every family', () => {
+    const fm = exportedFrontmatter(bundle(PROTO));
+    expect([own(fm, 'constructor'), own(fm, 'toString')]).toEqual(['c0', 't0']);
+    expect(['constructor', 'toString', '__proto__'].map((k) => own(fm.generated, k))).toEqual(['c1', 't1', 'p1']);
+    const [v] = fm.verified as unknown[];
+    expect([own(v, 'constructor'), own(v, '__proto__')]).toEqual(['c2', 'p2']);
+    const [src] = fm.sources as Array<Record<string, unknown>>;
+    expect(own(src, 'toString')).toBe('t3');
+    expect([own(src.usage_window, 'constructor'), own(src.usage_window, '__proto__')]).toEqual(['c4', 'p4']);
+    expect(own(fm.usage_window, 'toString')).toBe('t5');
+    const [param] = fm.parameters as unknown[];
+    expect([own(param, 'constructor'), own(param, '__proto__')]).toEqual(['c6', 'p6']);
+    expect(['constructor', 'toString', '__proto__'].map((k) => own(fm.executor, k))).toEqual(['custom', 't7', 'p7']);
+    expect(own(fm.attester, 'valueOf')).toBe('v8');
+    // and no prototype was replaced along the way
+    expect(Object.getPrototypeOf(fm.executor)).toBe(Object.prototype);
+  });
+
+  it('round-trips the graph exactly', () => {
+    const first = importBundle(bundle(PROTO));
+    const second = importBundle(exportBundle(first));
+    const strip = (r: typeof first) => quadsToNQuads(r.quads.filter((q) => !q.subject.includes(GENID_TAGS.section) && q.predicate !== DKG_HAS_SECTION));
+    expect(strip(second)).toBe(strip(first));
+  });
+});
+
+describe('the same triple from several named graphs is one triple on export', () => {
+  const acme = loadBundleDir(fileURLToPath(new URL('./fixtures/acme_retail', import.meta.url)));
+  const bitcoin = loadBundleDir(fileURLToPath(new URL('./fixtures/crypto_bitcoin', import.meta.url)));
+
+  it('exports doubled rows byte-for-byte like the single graph', () => {
+    for (const files of [acme, bitcoin]) {
+      const imported = importBundle(files);
+      const single = exportBundle(exportInputFromQuads(imported.quads));
+      expect(single).toEqual(exportBundle(imported));
+      expect(exportBundle(exportInputFromQuads([...imported.quads, ...imported.quads]))).toEqual(single);
+      // a caller-built ExportInput with repeats is normalised as well
+      const repeated = { concepts: imported.concepts.map((c) => ({ ...c, quads: [...c.quads, ...c.quads] })) };
+      expect(exportBundle(repeated)).toEqual(single);
+    }
+  });
+
+  it('keeps distinct sources that name the same resource as separate entries', () => {
+    const files = bundle('type: Metric\nsources:\n  - { id: a, resource: /policies/revenue-recognition.md }\n  - { id: b, resource: /policies/revenue-recognition.md }');
+    const imported = importBundle(files);
+    const doubled = exportBundle(exportInputFromQuads([...imported.quads, ...imported.quads]));
+    const fm = parseDocument('metrics/revenue.md', doubled.find((f) => f.path === 'metrics/revenue.md')!.content).frontmatter;
+    expect(fm.sources).toEqual([
+      { id: 'a', resource: '/policies/revenue-recognition.md' },
+      { id: 'b', resource: '/policies/revenue-recognition.md' },
+    ]);
+  });
+});
+
+describe('rdf:type export', () => {
+  const TYPES: Array<[string, string]> = [
+    ['http://schema.org/toString', 'http://schema.org/toString'],
+    ['http://schema.org/constructor', 'http://schema.org/constructor'],
+    ['http://schema.org/__proto__', 'http://schema.org/__proto__'],
+    ['http://schema.org/foo-bar', 'http://schema.org/foo-bar'],
+    ['http://schema.org/thing', 'http://schema.org/thing'],
+    ['BigQuery Table', 'BigQueryTable'],
+    ['Attested Computation', 'Attested Computation'],
+    ['https://example.org/Custom', 'https://example.org/Custom'],
+  ];
+  const files: BundleFile[] = [IDX_V02(), ...TYPES.map(([type], i) => ({ path: `t${i}.md`, content: `---\ntype: ${type}\n---\n\nbody\n` }))];
+  const imported = importBundle(files);
+
+  it('writes a string for every type, and the full IRI when a bare local name would not map back', () => {
+    const exported = exportBundle(imported);
+    TYPES.forEach(([, expected], i) => {
+      const fm = parseDocument(`t${i}.md`, exported.find((f) => f.path === `t${i}.md`)!.content).frontmatter;
+      expect(typeof fm.type).toBe('string');
+      expect(fm.type).toBe(expected);
+    });
+  });
+
+  it('re-imports every concept with its original rdf:type', () => {
+    const exported = exportBundle(imported);
+    const typesOf = (r: typeof imported) => r.quads.filter((q) => q.predicate === RDF_TYPE).map((q) => `${q.subject} ${q.object}`).sort();
+    expect(typesOf(importBundle(exported))).toEqual(typesOf(imported));
+  });
+});
+
+describe('schema:isPartOf and schema:url on export', () => {
+  it('keeps an explicit isPartOf producer value', () => {
+    const files = [IDX_V02(), { path: 'reports/q.md', content: '---\ntype: Metric\nisPartOf: FY2026 reporting\n---\n\nbody\n' }];
+    const first = importBundle(files);
+    const exported = exportBundle(first);
+    expect(parseDocument('reports/q.md', exported.find((f) => f.path === 'reports/q.md')!.content).frontmatter.isPartOf).toBe('FY2026 reporting');
+    expect(quadsToNQuads(importBundle(exported).quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF))).toBe(
+      quadsToNQuads(first.quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF)),
+    );
+  });
+
+  it('omits only the folder edge emitFolderHierarchy infers, when told the graph used it', () => {
+    const files = [IDX_V02(), { path: 'reports/q.md', content: '---\ntype: Metric\nisPartOf: FY2026 reporting\n---\n\nbody\n' }];
+    const first = importBundle(files, { emitFolderHierarchy: true });
+    expect(objs(first.quads, SCHEMA_IS_PART_OF, 'urn:okf:reports/q').sort()).toEqual(['"FY2026 reporting"', 'urn:okf:reports']);
+    const exported = exportBundle(first, { emitFolderHierarchy: true });
+    expect(parseDocument('reports/q.md', exported.find((f) => f.path === 'reports/q.md')!.content).frontmatter.isPartOf).toBe('FY2026 reporting');
+    expect(quadsToNQuads(importBundle(exported, { emitFolderHierarchy: true }).quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF))).toBe(
+      quadsToNQuads(first.quads.filter((q) => q.predicate === SCHEMA_IS_PART_OF)),
+    );
+  });
+
+  it('keeps an explicit isPartOf that names the parent directory, with the folder hierarchy off', () => {
+    // Matching the parent's IRI does not make a value inferred: with default
+    // options nothing infers it, so it is the producer's and comes back.
+    const files = [IDX_V02(), { path: 'reports/q.md', content: '---\ntype: Metric\nisPartOf: urn:okf:reports\n---\n\nbody\n' }];
+    const first = importBundle(files);
+    expect(objs(first.quads, SCHEMA_IS_PART_OF, 'urn:okf:reports/q')).toEqual(['urn:okf:reports']);
+    const exported = exportBundle(first);
+    expect(parseDocument('reports/q.md', exported.find((f) => f.path === 'reports/q.md')!.content).frontmatter.isPartOf).toBe('urn:okf:reports');
+    expect(objs(importBundle(exported).quads, SCHEMA_IS_PART_OF, 'urn:okf:reports/q')).toEqual(['urn:okf:reports']);
+    // An export not told about the hierarchy keeps an inferred edge as an explicit value: the same triple either way.
+    const inferred = importBundle([IDX_V02(), { path: 'reports/r.md', content: '---\ntype: Metric\n---\n\nbody\n' }], { emitFolderHierarchy: true });
+    expect(objs(importBundle(exportBundle(inferred)).quads, SCHEMA_IS_PART_OF, 'urn:okf:reports/r')).toEqual(['urn:okf:reports']);
+  });
+
+  it('writes a resource that is not an IRI back by value, not as a quoted term', () => {
+    const files = [IDX_V02(), { path: 'a.md', content: '---\ntype: Metric\nresource: tables/orders\n---\n\nbody\n' }];
+    const first = importBundle(files);
+    const exported = exportBundle(first);
+    expect(parseDocument('a.md', exported.find((f) => f.path === 'a.md')!.content).frontmatter.resource).toBe('tables/orders');
+    expect(objs(importBundle(exported).quads, SCHEMA_URL, 'urn:okf:a')).toEqual(['"tables/orders"']);
+  });
+});
+
+describe('export depends only on which triples the graph holds', () => {
+  // A store returns rows in its own order; two nodes holding the same graph,
+  // on any backend, must export the same bundle.
+  const acme = loadBundleDir(fileURLToPath(new URL('./fixtures/acme_retail', import.meta.url)));
+  const mixed = bundle(
+    [
+      'type: Metric',
+      'title: Revenue',
+      'tags: [revenue, finance, headline]',
+      'zeta: last',
+      'alpha: first',
+      'authors: [human:b, human:a]',
+      'runtime: [second, first]',
+      'executor: { resource: https://x.example/run, retry: 2, backoff: linear }',
+    ].join('\n'),
+    '# Citations\n\n[1] [b](https://b.example/)\n[2] [a](https://a.example/)\n',
+  );
+  it('exports byte-identically from rows in any order', () => {
+    for (const bundleFiles of [files, acme, mixed]) {
+      const imported = importBundle(bundleFiles);
+      const direct = exportBundle(imported);
+      for (const seed of [7, 42, 2026]) {
+        expect(exportBundle(exportInputFromQuads(shuffled(imported.quads, seed)))).toEqual(direct);
+        expect(exportBundle(exportInputFromQuads([...imported.quads].reverse()))).toEqual(direct);
+      }
+    }
+  });
+
+  it('orders the collections RDF keeps no order for, and leaves a single JSON value as written', () => {
+    const fm = exportedFrontmatter(mixed);
+    expect(fm.tags).toEqual(['finance', 'headline', 'revenue']);
+    expect(fm.authors).toEqual(['human:a', 'human:b']);
+    // producer keys follow the known keys, in canonical order
+    const keys = Object.keys(fm);
+    expect(keys.indexOf('alpha')).toBeLessThan(keys.indexOf('zeta'));
+    expect(keys.indexOf('type')).toBeLessThan(keys.indexOf('alpha'));
+    // a family field kept verbatim as one JSON literal keeps its own order
+    expect(fm.runtime).toEqual(['second', 'first']);
+    // extension keys follow the family's own fields, in canonical order
+    expect(Object.keys(fm.executor as object)).toEqual(['resource', 'backoff', 'retry']);
+    const body = exportBundle(importBundle(mixed)).find((f) => f.path === 'metrics/revenue.md')!.content;
+    expect(body.indexOf('https://a.example/')).toBeLessThan(body.indexOf('https://b.example/'));
+  });
+
+  it('exports the same value for a single-valued field that holds two, whichever arrives first', () => {
+    const concept = (quads: Quad[]) => ({ concepts: [{ conceptId: 'x', iri: 'urn:okf:x', quads }] });
+    const typed: Quad = { subject: 'urn:okf:x', predicate: RDF_TYPE, object: 'http://schema.org/Thing' };
+    const a: Quad = { subject: 'urn:okf:x', predicate: SCHEMA_NAME, object: '"Alpha"' };
+    const b: Quad = { subject: 'urn:okf:x', predicate: SCHEMA_NAME, object: '"Beta"' };
+    const titleOf = (quads: Quad[]) => parseDocument('x.md', exportBundle(concept(quads)).find((f) => f.path === 'x.md')!.content).frontmatter.title;
+    expect(titleOf([typed, a, b])).toBe(titleOf([b, typed, a]));
+  });
+});
+
+describe('a skipped list entry leaves the family node IRIs unchanged by a round trip', () => {
+  // Export writes only the usable entries, so a node IRI must number the
+  // usable entries, not the positions as written, or re-import renames every
+  // node after a skipped one (and both graphs together hold duplicates).
+  const cases: Array<[string, string, string]> = [
+    ['verified', 'verified:\n  - { at: 2026-06-26T02:00:00Z }\n  - { by: human:a, at: 2026-06-27T02:00:00Z }\n  - { by: process:p }', GENID_TAGS.verification],
+    ['sources', 'sources:\n  - nope\n  - { id: s, resource: https://x.example/s }\n  - { id: p, resource: /policies/revenue-recognition.md }', GENID_TAGS.source],
+    ['parameters', 'parameters:\n  - 42\n  - { name: year, type: integer, required: true }\n  - { name: region, type: string }', GENID_TAGS.parameter],
+  ];
+  for (const [family, yaml, tag] of cases) {
+    it(`${family}: the usable entries are nodes 0 and 1, before and after export`, () => {
+      const files = bundle(`type: Attested Computation\nruntime: bigquery\n${yaml}`);
+      const first = importBundle(files);
+      const second = importBundle(exportBundle(first));
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      const nodes = (quads: Quad[]) => [...new Set(quads.map((q) => q.subject).filter((s) => s.includes(SECTION_GENID_INFIX + tag)))].sort();
+      expect(nodes(first.quads)).toEqual([0, 1].map((n) => `urn:okf:metrics/revenue${SECTION_GENID_INFIX}${tag}metrics_revenue_${n}`));
+      expect(nodes(second.quads)).toEqual(nodes(first.quads));
+      // A warning still names the skipped entry by its position as written.
+      expect(first.warnings.some((w) => w.message.includes(`${family}[0]`))).toBe(true);
+    });
+  }
+});
+
+describe('a typed date keeps its datatype through export and re-import', () => {
+  // Only a date field types its text on import; anywhere else (a family
+  // extension, a producer key, a nested value kept verbatim, an integer or
+  // boolean field given a date) YAML itself must say it is a date, so export
+  // writes it as an unquoted timestamp, exactly as stored.
+  const DAY = (lex: string) => `"${lex}"^^<${XSD_DATE}>`;
+  const files = bundle(
+    [
+      'type: Attested Computation',
+      'runtime: bigquery',
+      "executor: { resource: https://x.example/run, last_run: 2026-06-30T14:00:00Z, local: 2026-07-01T00:00:00, day: 2026-06-15, quoted: '2026-06-15' }",
+      'verified:',
+      '  - { by: human:a, at: 2026-06-30T14:00:00Z, until: 2026-12-31 }',
+      'sources:',
+      '  - { id: s, resource: https://x.example/s, usage_count: 2026-06-30, usage_window: 2026-06-30 }',
+      'parameters:',
+      '  - { name: year, required: 2026-06-30T00:00:00Z }',
+      'released: 2026-06-15',
+      "looks_like: '2026-06-30T14:00:00Z'",
+    ].join('\n'),
+  );
+  const first = importBundle(files);
+  const exported = exportBundle(first);
+  const second = importBundle(exported);
+
+  it('reproduces the graph exactly', () => {
+    expect(semantic(second.quads)).toBe(semantic(first.quads));
+  });
+
+  it('keeps each date typed, with or without an offset, and each quoted string plain', () => {
+    const ext = (key: string) => objs(second.quads, okfExtensionPredicate('executor', key));
+    expect(ext('last_run')).toEqual([DT('2026-06-30T14:00:00Z')]);
+    expect(ext('local')).toEqual([DT('2026-07-01T00:00:00')]);
+    expect(ext('day')).toEqual([DAY('2026-06-15')]);
+    expect(ext('quoted')).toEqual(['"2026-06-15"']);
+    expect(objs(second.quads, 'http://schema.org/released')).toEqual([DAY('2026-06-15')]);
+    expect(objs(second.quads, 'http://schema.org/looksLike')).toEqual(['"2026-06-30T14:00:00Z"']);
+    const typedDates = (quads: Quad[]) => quads.filter((q) => q.object.endsWith(`^^<${XSD_DATE}>`) || q.object.includes('XMLSchema#dateTime>')).length;
+    expect(typedDates(second.quads)).toBe(typedDates(first.quads));
+  });
+
+  it('writes those dates unquoted and every date-looking string quoted', () => {
+    const text = exported.find((f) => f.path === 'metrics/revenue.md')!.content;
+    for (const line of ['last_run: 2026-06-30T14:00:00Z', 'local: 2026-07-01T00:00:00', 'day: 2026-06-15', 'until: 2026-12-31', 'usage_count: 2026-06-30', 'usage_window: 2026-06-30', 'required: 2026-06-30T00:00:00Z', 'released: 2026-06-15']) {
+      expect(text).toContain(line);
+    }
+    expect(text).toContain("quoted: '2026-06-15'");
+    expect(text).toContain("looksLike: '2026-06-30T14:00:00Z'");
+    // a date field types its text on import, so it is written as text
+    expect(text).toContain("at: '2026-06-30T14:00:00Z'");
+  });
+});
+
+describe('a family value of the wrong shape is kept whole through export and re-import', () => {
+  // A list where a family expects a mapping is one rdf:JSON literal, never
+  // split into items, so a list holding one mapping never exports as a valid
+  // family, which would replace the kept triple and invent provenance the
+  // first import did not recognise.
+  const cases: Array<[string, string, (fm: Record<string, unknown>) => unknown]> = [
+    ['generated', 'generated: [{ by: human:alice }]', (fm) => fm.generated],
+    ['sources[].usage_window', 'sources:\n  - { id: s, resource: https://x.example/s, usage_window: [{ from: 2026-06-01T00:00:00Z }] }', (fm) => (fm.sources as Array<Record<string, unknown>>)[0].usage_window],
+    ['usage_window', 'usage_window: [{ from: 2026-06-01T00:00:00Z }]', (fm) => fm.usage_window],
+    ['attester', 'attester: [{ resource: https://x.example/a }]', (fm) => fm.attester],
+  ];
+  for (const [name, yaml, valueOf] of cases) {
+    it(`${name}: the same triples and the same shape warning come back, and the list stays a list`, () => {
+      const files = bundle(`type: Metric\n${yaml}`);
+      const first = importBundle(files);
+      const second = importBundle(exportBundle(first));
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      const shapeWarnings = (r: ReturnType<typeof importBundle>) => r.warnings.filter((w) => w.code === 'malformed-family').map((w) => w.message);
+      expect(shapeWarnings(first)).toHaveLength(1);
+      expect(shapeWarnings(second)).toEqual(shapeWarnings(first));
+      expect(Array.isArray(valueOf(exportedFrontmatter(files)))).toBe(true);
+    });
+  }
+
+  it('leaves a producer key on the same predicate as it was: a list item by item, a mapping as one object', () => {
+    for (const yaml of ['usageWindow: [a, b]', 'usageWindow: { a: 1 }']) {
+      const files = bundle(`type: Metric\n${yaml}`);
+      const first = importBundle(files);
+      expect(semantic(importBundle(exportBundle(first)).quads)).toBe(semantic(first.quads));
+      const fm = exportedFrontmatter(files);
+      expect(Object.keys(fm)).toEqual(['type', 'usageWindow']);
+      expect(first.warnings).toEqual([]);
+    }
+  });
+});
+
+describe('an Attested Computation typed by its full IRI is one before and after a round trip', () => {
+  it('counts the attestation and reports the missing runtime both times', () => {
+    const files = [IDX_V02(), { path: 'c.md', content: '---\ntype: http://schema.org/AttestedComputation\ntitle: C\n---\n\nbody\n' }];
+    const first = importBundle(files);
+    const second = importBundle(exportBundle(first));
+    const runtime = /`runtime` is required for an `Attested Computation`/;
+    for (const r of [first, second]) {
+      expect(r.concepts.map((c) => c.trust.attestedComputation)).toEqual([true]);
+      expect(r.warnings.some((w) => runtime.test(w.message))).toBe(true);
+    }
+    expect(validateBundle(files).warnings.some((w) => runtime.test(w))).toBe(true);
+    expect(semantic(second.quads)).toBe(semantic(first.quads));
   });
 });

@@ -12,12 +12,20 @@ import {
   conceptIdToKaName,
   DEFAULT_IRI_BASE,
   RDF_TYPE,
-  SCHEMA_NS,
-  SECTION_GENID_INFIX,
-  type BundleImport,
+  PROV_WAS_DERIVED_FROM,
+  OKF_VERIFICATION,
+  OKF_SOURCE,
+  OKF_TRUST_TIER,
   type Quad,
-  type TypeRelation,
 } from '@origintrail-official/dkg-okf';
+import {
+  bindingsOf,
+  distinctTripleCountsByPredicate,
+  exportInputFromBindings,
+  parseRelateRules,
+  quadsFromBindings,
+  summarizeOkfImport,
+} from './okf-helpers.js';
 import { batchEntityQuads, type PublishQuad } from '../batching.js';
 import { ApiClient } from '../api-client.js';
 import type { ActionOpts } from '../cli-helpers.js';
@@ -141,86 +149,12 @@ export function registerOkfCommand(program: Command): void {
     }
   }
 
-  // The daemon's /api/query returns SELECT results as `{ bindings: [...] }` —
-  // WITHOUT the `type: 'bindings'` discriminator the QueryResult union expects.
-  // Gating on `result.type === 'bindings'` therefore silently yields no rows
-  // (the bug that made `okf verify` report 0 for everything). Read `bindings`
-  // structurally instead.
-  function bindingsOf(result: unknown): Array<Record<string, unknown>> {
-    if (result && typeof result === 'object' && Array.isArray((result as { bindings?: unknown }).bindings)) {
-      return (result as { bindings: Array<Record<string, unknown>> }).bindings;
-    }
-    return [];
-  }
-
-  // A `/api/query` binding cell can arrive as a bare string OR a SPARQL-JSON
-  // object (`{ value, type, datatype? }`); calling `.startsWith()`/`.exec()` on
-  // the object form throws at runtime. Normalise every cell to its string value
-  // before use (mirrors the daemon's `bindingValue`). The static `QueryResult`
-  // type annotates cells as strings, but the runtime path can return objects.
-  const cell = (v: unknown): string => {
-    if (v === null || v === undefined) return '';
-    if (typeof v === 'string') return v;
-    if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
-      const raw = (v as { value?: unknown }).value;
-      return raw === null || raw === undefined ? '' : String(raw);
-    }
-    return String(v);
-  };
-
-  function summarize(imported: BundleImport): {
-    concepts: number;
-    reservedSkipped: number;
-    triples: number;
-    linksResolved: number;
-    linksBroken: number;
-    citations: number;
-  } {
-    let linksResolved = 0;
-    let linksBroken = 0;
-    let citations = 0;
-    for (const c of imported.concepts) {
-      linksResolved += new Set(c.resolvedLinks.map((l) => l.targetConceptId)).size;
-      linksBroken += c.brokenLinks.length;
-      citations += c.citations.length;
-    }
-    return {
-      concepts: imported.concepts.length,
-      reservedSkipped: imported.reservedSkipped.length,
-      triples: imported.quads.length,
-      linksResolved,
-      linksBroken,
-      citations,
-    };
-  }
-
   const okfCmd = program
     .command('okf')
     .description('Import / export Google Open Knowledge Format (OKF) bundles as Knowledge Assets');
 
   // Collector for repeatable options (commander passes (val, prev)).
   const collect = (val: string, prev: string[]): string[] => prev.concat([val]);
-
-  // Parse repeatable `--relate "<FromType>><ToType>=<predicate>"` rules into
-  // deterministic type-pair edge relations. The predicate is used as-is if it is
-  // a full IRI, otherwise resolved against schema.org (so `hasPart` → schema:hasPart).
-  function parseRelateRules(raw: string[]): TypeRelation[] {
-    return raw.map((rule) => {
-      const eq = rule.lastIndexOf('=');
-      const gt = rule.indexOf('>');
-      if (eq === -1 || gt === -1 || gt > eq) {
-        throw new Error(`Invalid --relate rule "${rule}". Expected "<FromType>><ToType>=<predicate>".`);
-      }
-      const from = rule.slice(0, gt).trim();
-      const to = rule.slice(gt + 1, eq).trim();
-      const predToken = rule.slice(eq + 1).trim();
-      if (!from || !to || !predToken) {
-        throw new Error(`Invalid --relate rule "${rule}". Expected "<FromType>><ToType>=<predicate>".`);
-      }
-      const predicate = predToken.includes('://') ? predToken : SCHEMA_NS + predToken;
-      return { from, to, predicate };
-    });
-  }
 
   // ─── dkg okf import <bundleDir> ─────────────────────────────────────
   okfCmd
@@ -279,7 +213,7 @@ export function registerOkfCommand(program: Command): void {
         }
         const conformance = validateBundle(files);
         const imported = importBundle(files, { iriBase, includeCodeSpanLinks, typeRelations });
-        const summary = summarize(imported);
+        const summary = summarizeOkfImport(imported);
 
         // The deterministic, offline portion — no node required.
         if (opts.dryRun) {
@@ -562,53 +496,8 @@ export function registerOkfCommand(program: Command): void {
 
         const bindings = bindingsOf(result);
 
-        // Daemon bindings are already in N-term form (literals as `"…"`/`"…"^^<dt>`,
-        // IRIs as raw or `<…>`). Strip IRI brackets so they match the mapper's
-        // raw-IRI quad-term convention; literals/blank nodes pass through.
-        const unwrapIri = (term: string): string =>
-          term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
-
-        const quadsBySubject = new Map<string, Quad[]>();
-        for (const b of bindings) {
-          const s = cell(b.s);
-          const p = cell(b.p);
-          const o = cell(b.o);
-          if (!s || !p || !o) continue;
-          const subject = unwrapIri(s);
-          const quad: Quad = { subject, predicate: unwrapIri(p), object: o };
-          if (!quadsBySubject.has(subject)) quadsBySubject.set(subject, []);
-          quadsBySubject.get(subject)!.push(quad);
-        }
-
-        // Rebuild a minimal BundleImport for the exporter. Keep only real concept
-        // roots: subjects under the IRI base that carry an OKF concept rdf:type.
-        // This excludes the skolemized `dkg:hasSection` nodes
-        // (`<conceptIri>/.well-known/genid/...`), which would otherwise be rebuilt
-        // as standalone `.well-known/genid/*.md` files that were never concepts.
-        const concepts = [...quadsBySubject.entries()]
-          .filter(
-            ([iri, quads]) =>
-              iri.startsWith(iriBase) &&
-              !iri.includes(SECTION_GENID_INFIX) &&
-              quads.some((q) => q.predicate === RDF_TYPE),
-          )
-          .map(([iri, quads]) => ({
-            conceptId: iri.slice(iriBase.length),
-            iri,
-            quads,
-            resolvedLinks: [],
-            brokenLinks: [],
-            codeSpanLinks: [],
-            citations: [],
-          }));
-        const imported: BundleImport = {
-          okfVersion: null,
-          iriByConceptId: Object.fromEntries(concepts.map((c) => [c.conceptId, c.iri])),
-          concepts,
-          reservedSkipped: [],
-          quads: concepts.flatMap((c) => c.quads),
-          warnings: [],
-        };
+        // Concept roots + their skolemized family / section nodes (okf-helpers.ts).
+        const { concepts } = exportInputFromBindings(bindings, iriBase);
 
         if (concepts.length === 0) {
           console.error(
@@ -617,7 +506,7 @@ export function registerOkfCommand(program: Command): void {
           process.exit(OKF_EXIT_CODES.NOT_FOUND);
         }
 
-        const outFiles = exportBundle(imported, { iriBase });
+        const outFiles = exportBundle({ concepts }, { iriBase });
         // Path-traversal guard: concept IDs come from graph subjects (untrusted),
         // so a subject like `urn:okf:../../escape` would otherwise write outside
         // outDir. Refuse any file that doesn't resolve under the output directory.
@@ -660,6 +549,11 @@ export function registerOkfCommand(program: Command): void {
     'http://schema.org/license',
     'http://schema.org/citation',
     'http://schema.org/mentions',
+    // OKF v0.2 provenance / trust families (SPEC §5)
+    OKF_SOURCE,
+    PROV_WAS_DERIVED_FROM,
+    OKF_VERIFICATION,
+    OKF_TRUST_TIER,
   ];
 
   okfCmd
@@ -701,29 +595,29 @@ export function registerOkfCommand(program: Command): void {
           includeCodeSpanLinks: Boolean(opts.includeCodeSpanLinks),
           typeRelations,
         });
-        const expectedByPred = new Map<string, number>();
-        for (const q of imported.quads) {
-          expectedByPred.set(q.predicate, (expectedByPred.get(q.predicate) ?? 0) + 1);
-        }
+        // Distinct triples per predicate: what the store can actually hold.
+        const expectedByPred = distinctTripleCountsByPredicate(imported.quads);
         const expectedConcepts = imported.concepts.length;
 
         const client = await ApiClient.connect();
         const queryOptions = opts.subGraphName
           ? { view: 'shared-working-memory' as const, subGraphName: String(opts.subGraphName) }
           : { includeSharedMemory: true };
-        const countFor = async (predicate: string): Promise<number> => {
-          // Scope the count to subjects under this bundle's IRI base. A graph-wide
-          // count would let unrelated pre-existing triples mask a real shortfall
-          // (or inflate it) and report "complete" when concepts are actually missing.
-          const sparql =
-            `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s <${predicate}> ?o ` +
-            `FILTER(STRSTARTS(STR(?s), "${iriBase}")) } }`;
-          const { result } = await client.query(sparql, contextGraphId, queryOptions);
-          const bindings = bindingsOf(result);
-          const raw = cell(bindings[0]?.c) || '0';
-          const m = /^"?(\d+)"?/.exec(raw);
-          return m ? parseInt(m[1], 10) : 0;
-        };
+        // One scoped read of the triples the bundle defines: the expected
+        // predicates, on subjects under this bundle's IRI base. A graph-wide read
+        // would let unrelated pre-existing triples mask a real shortfall (or
+        // inflate it) and report "complete" when concepts are actually missing.
+        // The stored triples are then counted as the expectation is, each
+        // distinct triple once (`distinctTripleCountsByPredicate`), so a triple
+        // held in several named graphs never stands in for a missing one.
+        const expectedPredicates = [...expectedByPred.keys()];
+        const stored = expectedPredicates.length === 0 ? [] : quadsFromBindings(bindingsOf((await client.query(
+          `SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o FILTER(STRSTARTS(STR(?s), "${iriBase}") && ` +
+            `?p IN (${expectedPredicates.map((p) => `<${p}>`).join(', ')})) } }`,
+          contextGraphId,
+          queryOptions,
+        )).result));
+        const actualByPred = distinctTripleCountsByPredicate(stored);
 
         // Verify EVERY predicate the bundle actually produced, not a fixed
         // allowlist — otherwise a shortfall in e.g. schema:hasPart (--relate),
@@ -737,18 +631,14 @@ export function registerOkfCommand(program: Command): void {
         for (const predicate of orderedPreds) {
           const expected = expectedByPred.get(predicate) ?? 0;
           if (expected === 0) continue; // predicate not used by this bundle
-          const actual = await countFor(predicate);
+          const actual = actualByPred.get(predicate) ?? 0;
           rows.push({ predicate, expected, actual, missing: Math.max(0, expected - actual) });
         }
 
-        // Best-effort concept-level diff (subjects present with rdf:type).
+        // Best-effort concept-level diff (subjects present with rdf:type), from the same read.
         let missingConcepts: string[] | undefined;
         if (opts.listMissing) {
-          const sparql = `SELECT DISTINCT ?s WHERE { GRAPH ?g { ?s <${RDF_TYPE}> ?o } }`;
-          const { result } = await client.query(sparql, contextGraphId, queryOptions);
-          const bindings = bindingsOf(result);
-          const unwrap = (t: string): string => (t.startsWith('<') && t.endsWith('>') ? t.slice(1, -1) : t);
-          const present = new Set(bindings.map((b) => unwrap(cell(b.s))));
+          const present = new Set(stored.filter((q) => q.predicate === RDF_TYPE).map((q) => q.subject));
           missingConcepts = imported.concepts
             .map((c) => c.iri)
             .filter((iri) => !present.has(iri))

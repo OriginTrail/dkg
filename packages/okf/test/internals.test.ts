@@ -1,16 +1,19 @@
 import { describe, it, expect } from 'vitest';
+import { ValueBuckets } from '../src/decode-terms.js';
 import {
+  exportBundle,
+  frontmatterQuads,
+  importBundle,
   isSafeIri,
   literalTerm,
-  typedLiteralTerm,
-  frontmatterQuads,
   quadsToNQuads,
-  exportBundle,
-  importBundle,
-  validateBundle,
   resolveLinkTarget,
+  typedLiteralTerm,
+  validateBundle,
+  RDF_JSON,
+  SCHEMA_NS,
 } from '../src/index.js';
-
+import { objs, bundle, conceptOf, exportedFrontmatter } from './helpers/okf-v02-fixtures.js';
 describe('term helpers', () => {
   it('isSafeIri requires a scheme and rejects unsafe chars', () => {
     expect(isSafeIri('https://x/y')).toBe(true);
@@ -47,7 +50,10 @@ describe('valueToTerms typing for producer-defined keys', () => {
     expect(obj('http://schema.org/note')).toEqual(['"plain"']);
     expect(obj('http://schema.org/homepage')).toEqual(['https://example.org/p']);
     expect(obj('http://schema.org/list')).toEqual(['"a"', '"b"']);
-    expect(obj('http://schema.org/nested')).toEqual(['"{\\"a\\":1}"']);
+    // Nested mappings are rdf:JSON literals so they round-trip as objects, not strings.
+    expect(obj('http://schema.org/nested')).toEqual([
+      '"{\\"a\\":1}"^^<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON>',
+    ]);
   });
 
   it('skips null/undefined values', () => {
@@ -138,5 +144,37 @@ describe('robustness', () => {
   it('rejects a link whose resolved segment is not a valid concept-ID segment', () => {
     expect(resolveLinkTarget('/-bad.md', 'a')).toBeNull();
     expect(resolveLinkTarget('/.hidden.md', 'a')).toBeNull();
+  });
+});
+
+describe('producer-defined keys', () => {
+  it('carries nested mappings as rdf:JSON so they round-trip as objects', () => {
+    const yaml = 'type: Metric\nnot:\n  - term: revenue minus product cost only\n    why: legacy\nowner: { team: finance, lead: human:a }';
+    const { c } = conceptOf(bundle(yaml));
+    expect(objs(c.quads, SCHEMA_NS + 'not')).toEqual([`"{\\"term\\":\\"revenue minus product cost only\\",\\"why\\":\\"legacy\\"}"^^<${RDF_JSON}>`]);
+    const fm = exportedFrontmatter(bundle(yaml));
+    expect(fm.not).toEqual({ term: 'revenue minus product cost only', why: 'legacy' });
+    expect(fm.owner).toEqual({ team: 'finance', lead: 'human:a' });
+  });
+  it('writes a v0.1 import back with the legacy timestamp key (generated needs a by)', () => {
+    const fm = exportedFrontmatter(bundle("type: Metric\ntimestamp: '2026-05-28T22:44:47+00:00'"));
+    expect(fm.timestamp).toBe('2026-05-28T22:44:47+00:00');
+    expect(fm.generated).toBeUndefined();
+  });
+});
+
+describe('ValueBuckets: one item per triple, materialised once', () => {
+  it('keeps a value that is itself a list apart from the list of a key read from several triples', () => {
+    const buckets = new ValueBuckets();
+    buckets.add('k', []);
+    buckets.add('k', 'a');
+    buckets.add('k', 'b');
+    buckets.add('one', ['x']);
+    buckets.add('__proto__', 1);
+    const out = buckets.toDict();
+    expect(out.k).toEqual([[], 'a', 'b']);
+    expect(out.one).toEqual(['x']);
+    expect(Object.keys(out)).toEqual(['k', 'one', '__proto__']);
+    expect(Object.getOwnPropertyDescriptor(out, '__proto__')?.value).toBe(1);
   });
 });
