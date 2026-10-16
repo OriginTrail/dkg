@@ -682,14 +682,22 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64ConfirmedVmParamsV1,
   ): Promise<boolean> {
+    let lane: ReturnType<DKGAgent['resolveRfc64CatalogAuthoringLaneV1']>;
+    try {
+      lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName);
+    } catch (cause) {
+      this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`);
+      return false;
+    }
+    // Supported legacy recovery seals need no RFC-64 conversion when no lane owes catalog work.
+    if (lane === null) return true;
     return observeConfirmedVmCatalogV1({
       owner: this,
       log: this.log,
-      finalizedPrivateScope: (contextGraphId, subGraphName, authorAddress) => {
-        const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, subGraphName);
-        return lane?.acceptsFinalizedVmRepair === true
-          ? Object.freeze({ ...lane.scopeBase, authorAddress }) as SwmAuthorInventoryScopeV1 : null;
-      },
+      finalizedPrivateScope: (_contextGraphId, _subGraphName, authorAddress) => (
+        lane.acceptsFinalizedVmRepair
+          ? Object.freeze({ ...lane.scopeBase, authorAddress }) as SwmAuthorInventoryScopeV1 : null
+      ),
       storeRepair: async (repair) => {
         if (this.rfc64PersistenceV1 === undefined) throw new Error('RFC-64 persistence is unavailable');
         await this.rfc64PersistenceV1.finalizedPrivatePlacementRepairs.put(repair);
