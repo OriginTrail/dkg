@@ -3,6 +3,7 @@
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
   deleteByPatternWithoutCount,
+  tryUpdateWithTouchedGraphs,
   describeRfc64AuthorCommitCasV1,
   isStoreOperationNotStarted,
   type Rfc64AuthorCommitCasInputV1,
@@ -12,6 +13,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
+import { buildNamedKaVmLifecycleMutation, registerNamedKaVmLifecycleExecutor } from './named-ka-vm-lifecycle-mutation.js';
 
 // A commit the canonical plan refuses is refused by the store before dispatch too; until it is,
 // it may change anything.
@@ -264,5 +266,18 @@ export function createListContextGraphsCacheInvalidatingStore(
       return innerStore.close();
     },
   };
+  if (typeof innerStore.update === 'function') {
+    registerNamedKaVmLifecycleExecutor(wrapper, async (input) => {
+      const plan = buildNamedKaVmLifecycleMutation(input);
+      return invalidateAfterMutation(
+        () => tryUpdateWithTouchedGraphs(innerStore, plan.sparql, [plan.graph], {
+          source: 'agent.publish.namedKaVmLifecycle',
+        }),
+        updated => updated,
+        plan.mutation,
+        'update',
+      );
+    });
+  }
   return wrapper;
 }
