@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
-import { EntitySearchError, checkDeadline, unitVector, type EntityDocument, type EntityIndexSpec, type EntityIdentity } from './types.js';
+import { EntitySearchError, checkDeadline, unitVector, type EntityCandidate, type EntityIndexSpec, type EntityIdentity } from './types.js';
 import { documentKey } from './documents.js';
 
 export interface IndexState {
@@ -27,8 +27,8 @@ export class EntityIndexStore {
   }
   private migrate(): void {
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version === 1) return;
-    if (version !== 0) throw new Error(`Unsupported entity index schema version: ${version}`);
+    if (version === 2) return;
+    if (version !== 0 && version !== 1) throw new Error(`Unsupported entity index schema version: ${version}`);
     // Version 0 covers the previously unversioned completed-only and split-scan
     // formats. Inspect and upgrade those shapes once, atomically with the marker.
     this.db.transaction(() => {
@@ -36,12 +36,22 @@ export class EntityIndexStore {
         && !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'entity_scan_documents'").get();
       this.db.exec(`CREATE TABLE IF NOT EXISTS entity_indexes (id TEXT PRIMARY KEY, state TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS entity_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
-          document TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(index_id, entity_key));
+          source_graph TEXT NOT NULL, entity_uri TEXT NOT NULL, content_hash TEXT NOT NULL,
+          vector TEXT NOT NULL, PRIMARY KEY(index_id, entity_key));
         CREATE TABLE IF NOT EXISTS entity_scan_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
-          document TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(index_id, entity_key));`);
+          source_graph TEXT NOT NULL, entity_uri TEXT NOT NULL, content_hash TEXT NOT NULL,
+          vector TEXT NOT NULL, PRIMARY KEY(index_id, entity_key));`);
       for (const table of ['entity_documents', 'entity_scan_documents']) {
         const columns = this.db.pragma(`table_info(${table})`) as Array<{ name: string }>;
-        if (columns.some(column => column.name === 'generation')) this.db.exec(`ALTER TABLE ${table} DROP COLUMN generation`);
+        if (columns.some(column => column.name === 'document')) {
+          this.db.exec(`CREATE TABLE ${table}_compact (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
+            source_graph TEXT NOT NULL, entity_uri TEXT NOT NULL, content_hash TEXT NOT NULL,
+            vector TEXT NOT NULL, PRIMARY KEY(index_id, entity_key));
+            INSERT INTO ${table}_compact SELECT index_id, entity_key,
+              json_extract(document, '$.sourceGraph'), json_extract(document, '$.entityUri'),
+              json_extract(document, '$.contentHash'), vector FROM ${table};
+            DROP TABLE ${table}; ALTER TABLE ${table}_compact RENAME TO ${table};`);
+        } else if (columns.some(column => column.name === 'generation')) this.db.exec(`ALTER TABLE ${table} DROP COLUMN generation`);
       }
       for (const row of this.db.prepare('SELECT state FROM entity_indexes').all() as Array<{ state: string }>) {
         const state = decodeState(row.state) as IndexState & { generation?: number };
@@ -51,7 +61,7 @@ export class EntityIndexStore {
         if (legacy && !state.scanComplete) state.cursor = null;
         this.save(state);
       }
-      this.db.pragma('user_version = 1');
+      this.db.pragma('user_version = 2');
     })();
   }
 
@@ -77,19 +87,19 @@ export class EntityIndexStore {
     return (this.db.prepare(`SELECT count(*) AS n FROM (${this.candidates})`).get({ id }) as { n: number }).n;
   }
   indexCount(): number { return (this.db.prepare('SELECT count(*) AS n FROM entity_indexes').get() as { n: number }).n; }
-  cached(id: string, key: string): { document: EntityDocument; vector: number[] } | undefined {
-    const row = this.db.prepare(`SELECT document, vector FROM (${this.candidates}) WHERE entity_key = @key`)
-      .get({ id, key }) as { document: string; vector: string } | undefined;
-    return row && { document: JSON.parse(row.document), vector: JSON.parse(row.vector) };
+  cached(id: string, key: string): EntityCandidate | undefined {
+    const row = this.db.prepare(`SELECT source_graph, entity_uri, content_hash, vector FROM (${this.candidates}) WHERE entity_key = @key`)
+      .get({ id, key }) as { source_graph: string; entity_uri: string; content_hash: string; vector: string } | undefined;
+    return row && { sourceGraph: row.source_graph, entityUri: row.entity_uri, contentHash: row.content_hash, vector: JSON.parse(row.vector) };
   }
-  upsert(state: IndexState, doc: EntityDocument, vector: number[]): void {
-    const key = documentKey(doc);
+  upsert(state: IndexState, candidate: EntityCandidate): void {
+    const key = documentKey(candidate);
     const count = (this.db.prepare('SELECT count(*) AS n FROM entity_scan_documents WHERE index_id = ?')
       .get(state.id) as { n: number }).n;
     if (count >= this.capacity && !this.db.prepare('SELECT 1 FROM entity_scan_documents WHERE index_id = ? AND entity_key = ?')
       .get(state.id, key)) throw new EntitySearchError('ENTITY_INDEX_CAPACITY', 422);
-    this.db.prepare('INSERT OR REPLACE INTO entity_scan_documents VALUES (?, ?, ?, ?)')
-      .run(state.id, key, JSON.stringify(doc), JSON.stringify(vector));
+    this.db.prepare('INSERT OR REPLACE INTO entity_scan_documents VALUES (?, ?, ?, ?, ?, ?)')
+      .run(state.id, key, candidate.sourceGraph, candidate.entityUri, candidate.contentHash, JSON.stringify(candidate.vector));
   }
   finish(state: IndexState): void {
     this.db.transaction(() => {
@@ -100,22 +110,20 @@ export class EntityIndexStore {
     })();
   }
   rank(id: string, query: number[], limit: number, signal: AbortSignal, deadline: number) {
-    const best: Array<{ entityKey: string; serializedDocument: string; score: number }> = [];
+    const best: Array<Omit<EntityCandidate, 'vector'> & { entityKey: string; score: number }> = [];
     const normalized = unitVector(query, query.length);
     for (const raw of this.db.prepare(this.candidates).iterate({ id })) {
       checkDeadline(signal, deadline);
-      const row = raw as { entity_key: string; document: string; vector: string };
+      const row = raw as { entity_key: string; source_graph: string; entity_uri: string; content_hash: string; vector: string };
       const vector = unitVector(JSON.parse(row.vector), query.length);
       const score = Math.max(-1, Math.min(1, vector.reduce((sum, n, i) => sum + n * normalized[i], 0)));
-      best.push({ entityKey: row.entity_key, serializedDocument: row.document, score });
+      best.push({ entityKey: row.entity_key, sourceGraph: row.source_graph, entityUri: row.entity_uri, contentHash: row.content_hash, score });
       best.sort((a, b) => b.score - a.score || a.entityKey.localeCompare(b.entityKey));
       if (best.length > limit) best.pop();
     }
-    return best.map(({ serializedDocument, score }) => {
+    return best.map(({ entityKey: _entityKey, ...candidate }) => {
       checkDeadline(signal, deadline);
-      const document = JSON.parse(serializedDocument) as EntityDocument;
-      checkDeadline(signal, deadline);
-      return { document, score };
+      return candidate;
     });
   }
   close(): void { this.db.close(); }

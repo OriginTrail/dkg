@@ -28,10 +28,10 @@ export class EntitySearchService {
         const doc = await reader.document(spec, entity, signal, deadline);
         if (!doc) continue;
         const cached = this.store.cached(id, documentKey(doc));
-        const vector = cached?.document.contentHash === doc.contentHash ? cached.vector : await this.embedder.embed(doc.text, 'document', signal);
+        const vector = cached?.contentHash === doc.contentHash ? cached.vector : await this.embedder.embed(doc.text, 'document', signal);
         const normalized = unitVector(vector, this.embedder.dimensions);
         checkDeadline(signal, deadline);
-        this.store.upsert(state, doc, normalized);
+        this.store.upsert(state, { entityUri: doc.entityUri, sourceGraph: doc.sourceGraph, contentHash: doc.contentHash, vector: normalized });
       }
       checkDeadline(signal, deadline);
       if (page.length) state.cursor = page[page.length - 1];
@@ -85,12 +85,12 @@ export class EntitySearchService {
       let staleCandidates = 0;
       for (const candidate of candidates) {
         let current: EntityDocument | null;
-        try { current = await reader.document(state.spec, candidate.document, signal, deadline); }
+        try { current = await reader.document(state.spec, candidate, signal, deadline); }
         catch (error) {
           if (!(error instanceof EntitySearchError) || error.code !== 'ENTITY_DOCUMENT_TOO_LARGE') throw error;
           staleCandidates++; continue;
         }
-        if (!current || current.contentHash !== candidate.document.contentHash) { staleCandidates++; continue; }
+        if (!current || current.contentHash !== candidate.contentHash) { staleCandidates++; continue; }
         entities.push({ ...current, score: candidate.score });
         if (entities.length === limit) break;
       }

@@ -23,6 +23,11 @@ export interface EntityDocument extends EntityIdentity {
   text: string;
   contentHash: string;
 }
+/** Persist only candidate metadata; authorized graph reads supply response text. */
+export interface EntityCandidate extends EntityIdentity {
+  contentHash: string;
+  vector: number[];
+}
 export interface EntityEmbedder {
   readonly fingerprint: string;
   readonly dimensions: number;
