@@ -306,6 +306,19 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     options: QueryOptions | undefined,
     work: (deadline: StoreOperationDeadline) => Promise<T>,
   ): Promise<T> {
+    return this.withStoreAdmission(operation, options, async deadline => {
+      const result = await work(deadline);
+      deadline.check();
+      return result;
+    });
+  }
+
+  /** Own physical admission independently of the bounded operation outcome. */
+  private withStoreAdmission<T>(
+    operation: StoreOperation,
+    options: QueryOptions | undefined,
+    work: (deadline: StoreOperationDeadline) => Promise<T>,
+  ): Promise<T> {
     const deadline = createStoreOperationDeadline(
       this.operationTimeoutMs,
       options?.signal,
@@ -319,9 +332,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         deadline.markStarted();
         try {
           deadline.check();
-          const result = await work(deadline);
-          deadline.check();
-          return result;
+          return await work(deadline);
         } finally {
           // The admitted transport/body promise has settled before this metric
           // and before the scheduler releases its slot.
@@ -462,42 +473,36 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
     statements.checkIris.replaceAssetGroup(assets);
-    let confirmed = false;
-    try {
-      await this.runStoreWork('replaceAssetGroup', options, async deadline => {
-        // Select the write strategy before dispatch, within one admission/deadline.
-        const bulk = buildBulkAssetGroupPlan(assets);
-        if (!bulk) return this.postWriteRequest(buildAtomicAssetGroupUpdate(assets).update,
-          SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group');
-        await executeReceiptConfirmedPublication({
-          publish: async () => {
-            await this.postWriteRequest(bulk.nquads, NQUADS_CONTENT_TYPE, deadline, 'bulk group');
-            await this.postWriteRequest(bulk.update, SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group');
-          },
-          readReceipt: async () => {
-            const response = await this.postReadQuery(bulk.receiptQuery,
-              'application/sparql-results+json', deadline, 64 * 1024, 'query');
-            const receipt = decodeSparqlJsonQueryResult(
-              await deadline.waitFor(readResponseTextBounded(response, 64 * 1024)), 'ask');
-            if (receipt.type !== 'boolean' || !receipt.value) throw new Error('Bulk group publication receipt missing');
-            confirmed = true;
-          },
-          cleanup: async () => {
-            // Reclamation owns a fresh bounded lifetime, even after publication
-            // expires or its caller cancels. Keep this physical scheduler slot;
-            // only owned staging is dropped, and publication is never retried.
-            const cleanupDeadline = createStoreOperationDeadline(this.operationTimeoutMs, undefined, 'replaceAssetGroup');
-            try {
-              await this.postWriteRequest(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE, cleanupDeadline, 'bulk group');
-            } finally { cleanupDeadline.dispose(); }
-          },
-        });
+    await this.withStoreAdmission('replaceAssetGroup', options, async deadline => {
+      // Choose the write strategy after admission. Receipt confirmation ends
+      // publication; reclamation drains under the same physical scheduler slot.
+      const bulk = buildBulkAssetGroupPlan(assets);
+      if (!bulk) return deadline.waitFor(this.postWriteRequest(buildAtomicAssetGroupUpdate(assets).update,
+        SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group'));
+      await executeReceiptConfirmedPublication({
+        publish: async () => {
+          await this.postWriteRequest(bulk.nquads, NQUADS_CONTENT_TYPE, deadline, 'bulk group');
+          await this.postWriteRequest(bulk.update, SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group');
+        },
+        readReceipt: async () => {
+          const response = await this.postReadQuery(bulk.receiptQuery,
+            'application/sparql-results+json', deadline, 64 * 1024, 'query');
+          const receipt = decodeSparqlJsonQueryResult(
+            await deadline.waitFor(readResponseTextBounded(response, 64 * 1024)), 'ask');
+          if (receipt.type !== 'boolean' || !receipt.value) throw new Error('Bulk group publication receipt missing');
+          deadline.check();
+        },
+        cleanup: async () => {
+          // The publication outcome has settled (success or failure). Detach its
+          // caller and timer before best-effort reclamation under a fresh bound.
+          deadline.dispose();
+          const cleanupDeadline = createStoreOperationDeadline(this.operationTimeoutMs, undefined, 'replaceAssetGroup');
+          try {
+            await this.postWriteRequest(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE, cleanupDeadline, 'bulk group');
+          } finally { cleanupDeadline.dispose(); }
+        },
       });
-    } catch (error) {
-      // Scope completion may report a deadline after cleanup. Never replay a
-      // publication whose durable receipt was already observed.
-      if (!confirmed) throw error;
-    }
+    });
   }
 
   async replaceGraphAndSubject(
