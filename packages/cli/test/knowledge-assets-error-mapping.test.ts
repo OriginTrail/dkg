@@ -225,6 +225,46 @@ describe('knowledge-assets mutation error mapping', () => {
       }]);
     });
 
+    it.each([
+      'transport-unavailable', 'transport-changed', 'revision-moved', 'recipient-set-changed',
+    ])('logs the closed recipient authority site %s without changing the response', (site) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { failure, cause } = shareRecipientOutage();
+      Object.assign(cause, { site });
+      const { record, res } = fakeResponse();
+      respondAssertionError(res, failure);
+      expect(loggedEvents(stderr)).toEqual([expect.objectContaining({ causeSite: site })]);
+      expect(record.status).toBe(503);
+      expect(record.headers['Retry-After']).toBe('1');
+      expect(record.body).not.toContain(site);
+    });
+
+    it.each([
+      ['an unknown plain token', { site: 'private-recipient-key' }],
+      ['raw dependency text', { site: 'https://rpc.example/SECRET' }],
+      ['a non-string', { site: 42 }],
+      ['a throwing getter', Object.defineProperty({}, 'site', { get() { throw new Error('SECRET'); } })],
+    ])('omits recipient site for %s', (_label, siteFields) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { failure, cause } = shareRecipientOutage();
+      Object.defineProperties(cause, Object.getOwnPropertyDescriptors(siteFields));
+      const { record, res } = fakeResponse();
+      respondAssertionError(res, failure);
+      expect(record.status).toBe(503);
+      expect(loggedEvents(stderr)[0]).not.toHaveProperty('causeSite');
+      expect(stderr.mock.calls.map(([line]) => String(line)).join('')).not.toContain('SECRET');
+      expect(record.body).not.toContain('SECRET');
+    });
+    it.each([undefined, 'STORE_SCHEDULER_BUSY'])('omits a recognized site for unrelated cause code %s', (code) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { failure, cause } = shareRecipientOutage();
+      Object.assign(cause, { code, site: 'revision-moved' });
+      const { record, res } = fakeResponse();
+      respondAssertionError(res, failure);
+      expect(record.status).toBe(503);
+      expect(loggedEvents(stderr)[0]).not.toHaveProperty('causeSite');
+      expect(record.body).not.toContain('revision-moved');
+    });
     it('reports an untagged or non-text message as an unknown step', () => {
       const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const { record, res } = fakeResponse();

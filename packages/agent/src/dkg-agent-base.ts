@@ -1,3 +1,4 @@
+import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
@@ -566,6 +567,7 @@ export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
   readonly store: TripleStore;
+  protected readonly storageAckLedgerTimestampWriter: StorageAckLedgerTimestampWriter;
   protected readonly publishedNamedKaVmLifecycleWriter: PublishedNamedKaVmLifecycleWriter;
   readonly publisher: DKGPublisher;
   readonly queryEngine: DKGQueryEngine;
@@ -1975,11 +1977,13 @@ export class DKGAgentBase {
     writeLocks: Map<string, Promise<void>>,
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
     publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
+    ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
   ) {
     this.config = config;
     this.wallet = wallet;
     this.node = node;
     this.store = store;
+    this.storageAckLedgerTimestampWriter = ledgerTimestampWriter ?? applyStorageAckLedgerTimestamp(store);
     this.publishedNamedKaVmLifecycleWriter = publishedLifecycleWriter
       ?? (input => applyPublishedNamedKaVmLifecycle(store, input));
     this.contextGraphMetaProjection = new ContextGraphMetaProjection(store);

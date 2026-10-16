@@ -1,3 +1,5 @@
+import { createStorageAckLedgerTimestampWriter } from '../src/internal/storage-ack-ledger-timestamp-writer.js';
+import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +17,8 @@ import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publishe
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
+import { VmPromotionMethods } from '../src/dkg-agent-vm-promotion.js';
+import { STORAGE_ACK_LEDGER_GRAPH, STORAGE_ACK_LEDGER_PREDICATES } from '@origintrail-official/dkg-publisher';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
 import {
@@ -240,6 +244,34 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     expect(resolution.recipients).toHaveLength(count);
   };
 
+  it('keeps exact private recipients while real ACK-ledger timestamp marks run in every window', async () => {
+    let marks = 0;
+    const { host, ready, context } = churningHost({
+      seed: profileKeys,
+      during: async (read, ctx) => {
+        if (read === 1) return;
+        marks += 1;
+        await VmPromotionMethods.prototype.markStorageAckLedger.call(
+          { store: ctx.store, storageAckLedgerTimestampWriter: createStorageAckLedgerTimestampWriter(
+            ctx.stack.innerStore, createObservedStoreMutation(() => {}, createProjectionMutationObserver(() => ctx.stack.projection)),
+          ) } as never,
+          'urn:dkg:share:test:storage-ack-stable', STORAGE_ACK_LEDGER_PREDICATES.registeredAt,
+          Date.UTC(2026, 0, 1, 0, 0, marks),
+        );
+      },
+    });
+    await ready;
+    const before = await context.stack.innerStore.query(`SELECT ?s ?p ?o WHERE { GRAPH <${PROFILE_GRAPH}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`);
+    let error: unknown;
+    const result = await resolve(host).catch(cause => { error = cause; return undefined; });
+    expect(await context.stack.innerStore.query(`SELECT ?s ?p ?o WHERE { GRAPH <${PROFILE_GRAPH}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`)).toEqual(before);
+    const ledger = await context.store.query(`SELECT ?at WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { <urn:dkg:share:test:storage-ack-stable> <${STORAGE_ACK_LEDGER_PREDICATES.registeredAt}> ?at } }`);
+    expect(ledger.type === 'bindings' && ledger.bindings.length).toBe(1);
+    if (error) expect(error).toMatchObject({ code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE', site: 'revision-moved' });
+    expect(marks).toBeGreaterThan(0);
+    expect(error).toBeUndefined();
+    expectRecipients(result!, 2);
+  });
   const REVISION_MOVED = { ...TRANSPORT_CHANGED, site: 'revision-moved' };
 
   const allowedPeerQuad = (peerId: string): Quad => ({

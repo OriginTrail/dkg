@@ -53,6 +53,7 @@ export default defineConfig({
       "test/publish-foreign-author-resolution.test.ts",
       "test/finalize-version-after-abandoned-update.test.ts",
       "test/named-ka-vm-lifecycle.test.ts",
+      "test/storage-ack-ledger-timestamp-writer.test.ts",
       "test/named-ka-vm-lifecycle-construction.test.ts",
       "test/observed-store-mutation.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",

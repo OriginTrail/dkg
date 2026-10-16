@@ -1,3 +1,4 @@
+import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 
 import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
@@ -816,6 +817,7 @@ export class DKGAgent extends DKGAgentBase {
     node: DKGNode,
     store: TripleStore,
     publishedLifecycleWriter: PublishedNamedKaVmLifecycleWriter,
+    ledgerTimestampWriter: StorageAckLedgerTimestampWriter,
     publisher: DKGPublisher,
     queryEngine: DKGQueryEngine,
     eventBus: TypedEventBus,
@@ -837,6 +839,7 @@ export class DKGAgent extends DKGAgentBase {
       writeLocks,
       publicSnapshotStore,
       publishedLifecycleWriter,
+      ledgerTimestampWriter,
     );
     this.initializeVmReconcilePublicCoreTransportPreferencePolicy();
     this.configureSwmTargetExecutorSessionsV1({
@@ -1546,6 +1549,8 @@ export class DKGAgent extends DKGAgentBase {
       updateStore: store, fallbackStore: agentStore, executeMutation,
     });
 
+    const ledgerTimestampWriter = createStorageAckLedgerTimestampWriter(store, executeMutation);
+
     const publicSnapshotStore = config.publicSnapshotStore ?? (config.publicSnapshotStoreFactory
       ? config.publicSnapshotStoreFactory(agentStore)
       : createPublicSnapshotStore(config.dataDir, config.sharedMemoryPublicSnapshotStorage, agentStore));
@@ -1645,7 +1650,7 @@ export class DKGAgent extends DKGAgentBase {
     const queryEngine = new DKGQueryEngine(agentStore);
 
     const agent = new DKGAgent(
-      resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, publisher, queryEngine, eventBus, chain,
+      resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, publisher, queryEngine, eventBus, chain,
       workspaceOwnedEntities, writeLocks, publicSnapshotStore,
     );
     agentRef = agent;
