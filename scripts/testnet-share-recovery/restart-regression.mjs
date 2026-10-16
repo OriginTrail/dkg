@@ -1,3 +1,4 @@
+import { observeRestartRecoveryPoll } from './restart-observation.mjs';
 // Separate from the fixed-denominator comparison. No publication or HTTP replay.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,15 +35,16 @@ if (mode === 'start') {
         quads:Array.from({length:8},(_,i)=>({subject:`urn:2963:${arm}:${name}`,predicate:`https://schema.org/p${i}`,object:JSON.stringify(`${name} value ${i}`),graph:''}))})});
     save('response',{status:r.status,value:await r.json(),at:new Date().toISOString()});
   } catch(error) {save('response',{status:null,error:error.message,at:new Date().toISOString()});}
-  console.log('Crash request sent once; preserve the exit evidence and restart the same owned home.');
+  console.log('Crash request sent once; observe the existing supervisor replacing the process without manual restart or HTTP replay.');
 } else if (mode === 'observe') {
   const fault = JSON.parse(fs.readFileSync(path.join(home,`2963-fault-${name}.json`)));
   const deadline = Date.parse(fault.firedAt)+20*60_000;
   save('protocol',{faultAt:fault.firedAt,deadline:new Date(deadline).toISOString(),leaseMs:900_000,manualRepairs:0});
   let firstSuccess;
   while (Date.now() <= deadline) {
-    const at = new Date().toISOString();
+    const requestStartedAt = new Date().toISOString();
     try {
+      const observation = await observeRestartRecoveryPoll(async () => {
       const [jobs,descriptor,status] = await Promise.all([
         get('/api/knowledge-assets/swm/share-jobs'),
         get(`/api/knowledge-assets/${name}?${new URLSearchParams({contextGraphId:cg,agentAddress:'0x247B02C301B34E52e9021728F34C3457F81f2dFc'})}`),
@@ -50,13 +52,14 @@ if (mode === 'start') {
       ]);
       const job = jobs.value.jobs.find(j=>j.assertionName===name);
       const catalog = status.value.rfc64Catalog?.contextGraphs?.find(c=>c.contextGraphId===cg);
-      const observation={at,job,descriptor,catalog};
+      return {job,descriptor,catalog};
+      }, deadline);
       fs.appendFileSync(`${dir}/observations.jsonl`,JSON.stringify(observation)+'\n');
-      if (!firstSuccess && job?.state==='succeeded' && descriptor.status===200 && catalog?.appliedRowCount==='437' && catalog?.legacyReadOnlyCount===0) {
+      if (!firstSuccess && observation.succeededBeforeDeadline) {
         firstSuccess=observation;save('first-success',observation);
-        console.log('Automatic restart recovery observed',at,job.jobId);
+        console.log('Automatic restart recovery observed',observation.at,observation.job.jobId);
       }
-    } catch(error) {fs.appendFileSync(`${dir}/observations.jsonl`,JSON.stringify({at,error:error.message})+'\n');}
+    } catch(error) {fs.appendFileSync(`${dir}/observations.jsonl`,JSON.stringify({requestStartedAt,at:new Date().toISOString(),error:error.message})+'\n');}
     await new Promise(resolve=>setTimeout(resolve,Math.min(15000,Math.max(1,deadline-Date.now()+1))));
   }
   save('outcome',{completedByDeadline:!!firstSuccess,firstSuccessAt:firstSuccess?.at,manualRepairs:0,observedUntil:new Date().toISOString()});

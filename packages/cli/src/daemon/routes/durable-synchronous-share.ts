@@ -17,7 +17,7 @@ export async function durableSynchronousShare(
   if (prepared.completedResult) return prepared.completedResult;
   const workerId = `http-share-${randomUUID()}`;
   let job: PromoteJob;
-  try { job = await queue.enqueueAndClaim({ contextGraphId, assertionName: name, entities: 'all',
+  try { job = await agent.assertion.admitDurableShare({ contextGraphId, assertionName: name, entities: 'all',
     subGraphName: options?.subGraphName, authorAgentAddress: options?.authorAgentAddress, ...prepared,
   }, workerId); } catch (error) {
     if (error instanceof PromoteJobConflictError) {

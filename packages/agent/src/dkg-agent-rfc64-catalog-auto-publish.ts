@@ -865,7 +865,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           if (currentLane === null || currentLane.kind !== prepared.laneKind) throw new Rfc64SwmInventoryAuthorityTransitionV1();
           const currentScope = Object.freeze({ ...currentLane.scopeBase, authorAddress: prepared.scope.authorAddress }) as SwmAuthorInventoryScopeV1;
           if (computeSwmAuthorInventoryScopeDigestV1(currentScope) !== inventoryScopeDigest) throw new Rfc64SwmInventoryAuthorityTransitionV1();
-          phase = 'inventory-commit';
+          phase = 'inventory-maintenance';
           return maintainRfc64SwmAuthorInventoryV1(persistence.swmAuthorInventory, {
             scope: currentScope, row: prepared.row, issuedAt: prepared.issuedAt,
             signer: Object.freeze({ issuer: signer.address as EvmAddressV1, signDigest: signer.signMessage }),
@@ -911,7 +911,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       const scope = Object.freeze({ ...lane.scopeBase, authorAddress: seal.authorAddress }) as SwmAuthorInventoryScopeV1;
       const expectedRow = Object.freeze({ assertionVersion: seal.assertionVersion, kaUal: seal.kaUal,
         sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal) });
-      phase = 'inventory-commit';
+      phase = 'inventory-maintenance';
       return await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({ scope, expectedRow });
     } catch (cause) { throw new SwmInventoryWriteFailure(phase, params.seal.kaUal ?? null, cause); }
   }

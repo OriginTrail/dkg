@@ -159,6 +159,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       ? new TripleStoreAsyncPromoteQueue(shareStore = new OxigraphStore()) : undefined;
     if (shareQueue) {
       daemonState.promoteWorkerAvailable = true;
+      assertion.admitDurableShare = (request: any, workerId: string) => shareQueue.enqueueAndClaim(request, workerId);
       assertion.prepareDurableShare = async (_cg: string, _name: string, opts: any) => ({
         agentAddress: opts?.agentAddress ?? ROOTLESS_AUTHOR,
         recoveryBinding: { version: 1, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: false,

@@ -573,11 +573,23 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     await first.agent.stop();
     agents.splice(agents.indexOf(first.agent), 1);
 
-    const second = await startPlacementAgentV1({ name: 'ownership-sealless-restart', dataDir, storePath });
-    const sealFailures = (): Array<Record<string, any>> => second.warnings().flatMap((line) => {
+    // Capture from before startup: the first repair can run before the fixture returns.
+    // Measure cooldown when emitted, independent of how long CI takes to resume this test.
+    const warnings: Array<{ line: string; observedAt: number }> = [];
+    const second = await startPlacementAgentV1({ name: 'ownership-sealless-restart', dataDir, storePath,
+      beforeStart: (agent) => {
+        const log = (agent as unknown as { log: { warn: (...args: unknown[]) => void } }).log;
+        const warn = log.warn.bind(log);
+        vi.spyOn(log, 'warn').mockImplementation((...args) => {
+          warnings.push({ line: String(args[1]), observedAt: Date.now() });
+          warn(...args);
+        });
+      },
+    });
+    const sealFailures = (): Array<Record<string, any>> => warnings.flatMap(({ line, observedAt }) => {
       try {
         const parsed = JSON.parse(line);
-        return parsed.event === 'catalog_private_repair_failed' && parsed.diagnostic?.stage === 'seal' ? [parsed] : [];
+        return parsed.event === 'catalog_private_repair_failed' && parsed.diagnostic?.stage === 'seal' ? [{ ...parsed, observedAt }] : [];
       } catch {
         return [];
       }
@@ -585,17 +597,19 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     await untilV1(() => sealFailures().length > 0, 'the placement fails for want of its seal', 30_000);
 
     // Visible: the failure names the stage and its kind, and the placement stays in the backlog.
-    expect(sealFailures()).toEqual([
+    expect(sealFailures()[0]).toEqual(
       expect.objectContaining({
         event: 'catalog_private_repair_failed',
         diagnostic: expect.objectContaining({ kind: 'integrity', stage: 'seal' }),
-        consecutiveFailures: 1,
+        consecutiveFailures: expect.any(Number),
       }),
-    ]);
+    );
+    // Startup can first fail authority readiness before reaching the missing-seal check.
+    expect(sealFailures()[0]!.consecutiveFailures).toBeGreaterThanOrEqual(1);
     expect(second.markers()).toHaveLength(1);
     expect(second.catalogRows()).toBeNull();
     expect(second.queue()).toMatchObject({ pending: 1, waiters: 0 });
-    // Bounded: the supervisor's backoff holds the next attempt back, here by its first interval.
-    expect(sealFailures()[0]!.nextAttemptAtMs - Date.now()).toBeGreaterThan(3_000);
+    // Bounded: the supervisor's backoff holds the next attempt back, by at least its first interval.
+    expect(sealFailures()[0]!.nextAttemptAtMs - sealFailures()[0]!.observedAt).toBeGreaterThan(3_000);
   }, 120_000);
 });

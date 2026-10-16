@@ -1,4 +1,4 @@
-import { prepareDurableAssertionShare, promoteAssertion } from './internal/promote/durable-assertion-share.js';
+import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { resolvePreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
 import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
@@ -3975,13 +3975,8 @@ export class DKGAgent extends DKGAgentBase {
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
-      async prepareDurableShare(contextGraphId: string, name: string, opts?: AssertionPromoteOptions) {
-        return prepareDurableAssertionShare(agent, contextGraphId, name, agentAddress, opts);
-      },
-      async promote(contextGraphId: string, name: string, opts?: AssertionPromoteOptions) {
-        return promoteAssertion(agent, contextGraphId, name, agentAddress, opts,
-          message => agent.log.warn(createOperationContext('share'), message));
-      },
+      ...durableAssertionShareMethods(agent, agentAddress,
+        message => agent.log.warn(createOperationContext('share'), message)),
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<void> {
         const discardAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionDiscard(contextGraphId, name, discardAgentAddress, opts?.subGraphName);

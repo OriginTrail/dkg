@@ -1,3 +1,4 @@
+import { inventoryPersistenceFailure } from '../../agent/src/rfc64/inventory-persistence-failure.js';
 import { Wallet, getBytes } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext, canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-official/dkg-core';
@@ -32,7 +33,7 @@ describe('bound worker owns the real inventory CAS', () => {
     if (!policy) (agent as any).rfc64PersistenceV1 = { ...persistence, swmAuthorInventory: { ...inventory,
       compareAndSwapSwmAuthorInventoryV1: (input: Parameters<typeof commit>[0]) => {
         if (fault === 'lost-acknowledgement') commit(input);
-        throw new Error('inventory CAS interruption');
+        throw inventoryPersistenceFailure(new Error('inventory CAS interruption'));
       },
     } };
     const run = (claimed: typeof job, workerId: string) => runPromoteJob({ job: claimed, queue, workerId,

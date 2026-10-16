@@ -39,6 +39,15 @@ describe('agent durable share preparation and replay', () => {
     expect(agent.log.warn).toHaveBeenCalled();
   });
 
+  it('admits a prepared owner under the publisher mutation fence', async () => {
+    const { agent } = await setup();
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME);
+    const job = await agent.assertion.admitDurableShare({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...prepared }, 'inline');
+    expect(job.request.recoveryBinding).toEqual(prepared.recoveryBinding);
+    expect((await agent.promoteQueue.getStatus(job.jobId)).state).toBe('running');
+    await expect(agent.assertion.discard(CG, NAME)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+  });
+
   it('keeps completed legacy content read-only without inventing an operation intent', async () => {
     const { agent, store } = await setup();
     const result = await agent.assertion.promote(CG, NAME);

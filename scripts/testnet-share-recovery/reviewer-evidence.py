@@ -17,19 +17,9 @@ verification = read('verification.json')
 seals = {row['name']: row for row in read('seal-proof.json')}
 rows = [row for catalog in read(f'{label}/catalogs.json') for row in catalog['rows']]
 inventory = read(f'{label}/inventory.json')['swm']
-identity_errors = []
-for row in rows:
-    sealed = seals[row['assertionCoordinate']]
-    if (row['kaId'], row['assertionVersion'], row['sealDigest']) != (
-        sealed['seal']['reservedKaId'], sealed['seal']['assertionVersion'], sealed['sealDigest']
-    ):
-        identity_errors.append({'catalog': row['assertionCoordinate']})
-for row in inventory:
-    sealed = seals[row['assertion_coordinate']]
-    if (row['ka_ual'], str(int(row['assertion_version_u64be'], 16)), row['seal_digest']) != (
-        sealed['seal']['kaUal'], sealed['seal']['assertionVersion'], sealed['sealDigest']
-    ):
-        identity_errors.append({'inventory': row['assertion_coordinate']})
+identities = read('identity-proof.json')
+identity_errors = identities['identityErrors']
+write('identity-proof.json', identities)
 write('summary.json', {key: value for key, value in verification.items() if key != 'assets'} | {
     'exactCatalogIdentityErrors': identity_errors,
     'snapshot': read(f'{label}/manifest.json'),

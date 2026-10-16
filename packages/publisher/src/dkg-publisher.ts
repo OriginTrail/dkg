@@ -1,3 +1,6 @@
+import { writeLocksForStore } from './store-write-locks.js';
+import { assertNoUnfinishedBoundShare } from './bound-share-mutation-guard.js';
+import type { BoundPromoteRequest } from './async-promote-queue-types.js';
 import { readAssertionPromoteEvidence, parsePromoteLifecycleLiteral } from './assertion-promote-evidence.js';
 import { verifyCompletedLegacyPromote } from './completed-legacy-promote.js';
 import { snapshotPublisherPromoteOptions, type PublisherAssertionPromoteOptions, type AssertionPromoteResult } from './assertion-promote-types.js';
@@ -529,32 +532,6 @@ export interface DKGPublisherConfig {
   provenanceEvents?: boolean;
 }
 
-/**
- * Publisher instances that target the same in-process store must serialize
- * lifecycle mutations together. A per-instance default lets a writer race a
- * promote in another publisher and disappear when promote drops the stale WM
- * snapshot. Explicitly supplied locks still win so the agent can share its
- * wider handler lock domain with the publisher.
- */
-const STORE_WRITE_LOCKS = new WeakMap<TripleStore, Map<string, Promise<void>>>();
-
-function writeLocksForStore(
-  store: TripleStore,
-  suppliedLocks?: Map<string, Promise<void>>,
-): Map<string, Promise<void>> {
-  const existingLocks = STORE_WRITE_LOCKS.get(store);
-  if (existingLocks) {
-    if (suppliedLocks && suppliedLocks !== existingLocks) {
-      throw new Error(
-        'DKGPublisher instances sharing one TripleStore must share the same writeLocks map',
-      );
-    }
-    return existingLocks;
-  }
-  const locks = suppliedLocks ?? new Map();
-  STORE_WRITE_LOCKS.set(store, locks);
-  return locks;
-}
 
 export interface WorkspaceSenderKeyEncryptInput {
   contextGraphId: string;
@@ -7012,6 +6989,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     subGraphName?: string,
   ): Promise<void> {
+    await assertNoUnfinishedBoundShare(this.store, contextGraphId, name, agentAddress, subGraphName);
     const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const [operationIdResult, intentResult, layerResult] = await Promise.all([
@@ -8393,6 +8371,16 @@ export class DKGPublisher implements Publisher {
       kaUal: scope.ual,
       assertionVersion: scope.assertionVersion,
     };
+  }
+
+  /** Validate and persist ownership within the same fence used by seal-changing mutations. */
+  async admitPreparedAssertionShare<T>(request: BoundPromoteRequest, admit: () => Promise<T>): Promise<T> {
+    return this.withAssertionLifecycleWriteLock(request.contextGraphId, request.assertionName,
+      request.agentAddress, request.subGraphName, async () => {
+        await assertPromoteRecoveryBinding(this.store, request.contextGraphId, request.assertionName,
+          request.agentAddress, { subGraphName: request.subGraphName, recoveryBinding: request.recoveryBinding });
+        return admit();
+      });
   }
 
   async prepareAssertionPromoteRecovery(

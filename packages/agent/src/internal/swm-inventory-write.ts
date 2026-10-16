@@ -8,7 +8,7 @@ export interface SwmInventoryWriteOutcome {
 }
 
 export class SwmInventoryWriteFailure extends Error {
-  constructor(readonly phase: 'authority' | 'preparation-read' | 'inventory-commit',
+  constructor(readonly phase: 'authority' | 'preparation-read' | 'inventory-maintenance',
     readonly kaUal: string | null, cause: unknown) {
     super('SWM inventory write did not complete', { cause });
   }

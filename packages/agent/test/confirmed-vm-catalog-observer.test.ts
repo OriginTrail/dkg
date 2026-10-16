@@ -55,7 +55,7 @@ describe('confirmed VM catalog completion certificate', () => {
     deps.storeRepair = vi.fn(async () => { throw disk; });
     const failure = await transferConfirmedVmCatalogV1(deps, params).catch(e => e);
     expect(failure).toBeInstanceOf(SwmInventoryWriteFailure);
-    expect(failure).toMatchObject({ phase: 'inventory-commit', cause: disk });
+    expect(failure).toMatchObject({ phase: 'inventory-maintenance', cause: disk });
     expect(deps.requestPlacement).not.toHaveBeenCalled();
   });
 

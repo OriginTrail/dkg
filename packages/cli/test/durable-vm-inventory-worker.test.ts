@@ -1,3 +1,4 @@
+import { inventoryPersistenceFailure } from '../../agent/src/rfc64/inventory-persistence-failure.js';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,7 +32,7 @@ describe('bound VM share retains catalog ownership', () => {
       entities: 'all', agentAddress: AUTHOR, recoveryBinding: binding }, 'first');
     const persistence = first.agent.rfc64PersistenceV1!;
     (first.agent as any).rfc64PersistenceV1 = { ...persistence, swmAuthorInventory: { ...persistence.swmAuthorInventory,
-      compareAndSwapSwmAuthorInventoryV1: () => { throw new Error('inventory CAS unavailable'); } } };
+      compareAndSwapSwmAuthorInventoryV1: () => { throw inventoryPersistenceFailure(new Error('inventory CAS unavailable')); } } };
     expect((await runPromoteJob({ job, queue, workerId: 'first', now: Date.now, heartbeatIntervalMs: 60_000, log: () => undefined,
       runPromote: async (_request, started) => { await started(); await commitDurableShareInventory(first.agent, params); return { promotedCount: 0 }; },
     })).outcome).toBe('failed_retrying');
@@ -49,7 +50,7 @@ describe('bound VM share retains catalog ownership', () => {
       { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
         batchId: seal.reservedKaId!, materializedVersion: { blockNumber: 1, txIndex: 0 } } } }),
     ]);
-    first.failMarkerWrite = new Error('confirmation marker unavailable');
+    first.failMarkerWrite = inventoryPersistenceFailure(new Error('confirmation marker unavailable'));
     expect(await first.agent.observeRfc64ConfirmedVmV1({ ...params, shareOperationId: binding.intent.operationId, seal: seeded.seal,
       assertionUri: 'urn:bound-vm', publicationLabel: 'queued publish' })).toBe(false);
     expect(first.markers()).toHaveLength(0);

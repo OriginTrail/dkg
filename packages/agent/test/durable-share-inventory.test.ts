@@ -13,12 +13,17 @@ const params = { contextGraphId: 'cg', assertionCoordinate: 'asset', lifecycleAg
 describe('durable inventory handoff', () => {
   it.each(['swm-inventory-producer-input', 'swm-inventory-producer-history', 'swm-inventory-producer-signer'] as const)('preserves typed permanent %s from the inventory phase', async code => {
     const cause = new Rfc64SwmAuthorInventoryProducerErrorV1(code, 'invalid signed inventory');
-    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('inventory-commit', null, cause); }) };
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('inventory-maintenance', null, cause); }) };
+    await expect(commitDurableShareInventory(agent as any, params)).rejects.toBe(cause);
+  });
+  it('does not infer retry safety from an unmarked persistence-like error code', async () => {
+    const cause = new InventoryV1CandidateError('candidate-database-error', 'unproven origin');
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('inventory-maintenance', null, cause); }) };
     await expect(commitDurableShareInventory(agent as any, params)).rejects.toBe(cause);
   });
   it('preserves a typed corrupt inventory database for inspection', async () => {
     const cause = new InventoryV1CandidateError('applied-head-database-corrupt', 'invalid stored head');
-    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('inventory-commit', null, cause); }) };
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('inventory-maintenance', null, cause); }) };
     await expect(commitDurableShareInventory(agent as any, params)).rejects.toBe(cause);
   });
 
@@ -96,7 +101,7 @@ describe('throwing confirmed inventory removal and observation', () => {
     const cause = new Error('inventory write unavailable');
     vi.spyOn(agent, 'removeRfc64SwmAuthorInventoryConfirmedRowV1').mockRejectedValue(cause);
     const request = { contextGraphId: CONTEXT_GRAPH_ID, seal: seeded.seal };
-    await expect(agent.commitRfc64ConfirmedInventoryRemovalV1(request)).rejects.toMatchObject({ phase: 'inventory-commit', cause });
+    await expect(agent.commitRfc64ConfirmedInventoryRemovalV1(request)).rejects.toMatchObject({ phase: 'inventory-maintenance', cause });
     expect(agent.rfc64SwmAuthorInventoryShadowStatusV1().failed).toBe(0);
     expect(await agent.observeRfc64ConfirmedVmV1({ ...request, assertionCoordinate: seeded.assertionCoordinate,
       assertionUri: 'urn:confirmed', ctx: createOperationContext('publish'), publicationLabel: 'queued publish' })).toBe(false);

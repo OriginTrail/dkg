@@ -1,3 +1,5 @@
+import { DatabaseSync } from 'node:sqlite';
+import { isInventoryPersistenceFailure } from '../src/rfc64/inventory-persistence-failure.js';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -557,6 +559,37 @@ function row(
     expiresAt: null,
   }) as SwmAuthorInventoryRowV1;
 }
+
+it.each(['before-write', 'lost-commit-ack'])('preserves real SQLite persistence provenance and exact CAS effects: %s', async fault => {
+  const foundation = await createInventory();
+  const inventory = foundation;
+  const request = input(ROW_A);
+  const exec = DatabaseSync.prototype.exec;
+  let armed = true, writeStarted = false;
+  const spy = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function(this: DatabaseSync, sql: string) {
+    if (armed && fault === 'before-write' && sql.trim().toUpperCase() === 'BEGIN IMMEDIATE') {
+      armed = false; throw new Error('injected SQLite begin interruption');
+    }
+    const result = exec.call(this, sql);
+    if (sql.trim().toUpperCase() === 'BEGIN IMMEDIATE') writeStarted = true;
+    if (armed && writeStarted && fault === 'lost-commit-ack' && sql.trim().toUpperCase() === 'COMMIT') {
+      armed = false; throw new Error('injected lost SQLite commit acknowledgement');
+    }
+    return result;
+  });
+  try {
+    const result = await maintainRfc64SwmAuthorInventoryV1(inventory, request).catch(error => error);
+    expect(armed).toBe(false);
+    if (fault === 'before-write') {
+      expect(result).toBeInstanceOf(InventoryV1CandidateError);
+      expect(isInventoryPersistenceFailure(result)).toBe(true);
+    } else expect(result.status).toBe('applied');
+    const replay = await maintainRfc64SwmAuthorInventoryV1(inventory, request);
+    expect(replay.status).toBe(fault === 'before-write' ? 'applied' : 'existing');
+    expect(replay.snapshot.rows).toHaveLength(1);
+    expect(replay.snapshot.head.payload.version).toBe('0');
+  } finally { spy.mockRestore(); }
+});
 
 async function createInventory(): Promise<Rfc64InventoryV1Foundation> {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'dkg-rfc64-swm-producer-')));

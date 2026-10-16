@@ -83,8 +83,9 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
   ) {
     store = new OxigraphStore();
     daemonState.promoteWorkerAvailable = true;
+    const queue = new TripleStoreAsyncPromoteQueue(store);
     const agent = {
-      promoteQueue: new TripleStoreAsyncPromoteQueue(store),
+      promoteQueue: queue,
       async listContextGraphs() {
         return [{
           id: CG_ID,
@@ -99,6 +100,7 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
       },
       resolveAgentByToken: () => undefined,
       assertion: {
+        admitDurableShare: (request: any, workerId: string) => queue.enqueueAndClaim(request, workerId),
         prepareDurableShare: async () => ({ agentAddress: 'did:dkg:agent:test',
           recoveryBinding: { version: 1, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: false,
             intent: { version: 1, operationId: randomUUID(), timestampMs: Date.now(),

@@ -1,3 +1,4 @@
+import { inventoryPersistenceFailure } from '../inventory-persistence-failure.js';
 import { type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 export { createRfc64SwmAuthorInventoryOperationsViewV1, type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 import { randomBytes } from 'node:crypto';
@@ -3368,15 +3369,15 @@ function normalizeCandidateError(message: string, cause: unknown): InventoryV1Ca
 }
 
 function databaseError(message: string, cause: unknown): InventoryV1CandidateError {
-  return new InventoryV1CandidateError('candidate-database-error', message, { cause });
+  return inventoryPersistenceFailure(new InventoryV1CandidateError('candidate-database-error', message, { cause }));
 }
 
 function latencyBudgetError(cause: unknown): InventoryV1CandidateError {
-  return new InventoryV1CandidateError(
+  return inventoryPersistenceFailure(new InventoryV1CandidateError(
     'latency-budget-exceeded',
     'SQL-1 latency budget was exceeded; the result was discarded and verified reopen is required',
     { cause },
-  );
+  ));
 }
 
 function invalidLoad(message: string): never {

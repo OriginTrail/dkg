@@ -1,3 +1,5 @@
+import { inventoryPersistenceFailure } from '../../agent/src/rfc64/inventory-persistence-failure.js';
+import { SwmInventoryWriteFailure } from '../../agent/src/internal/swm-inventory-write.js';
 import { resolveRfc64CatalogAuthoringPolicyV1 } from '../../agent/src/rfc64/public-catalog-activation-config-v1.js';
 import { classifySynchronousShareFailure } from '../src/daemon/routes/durable-share-response.js';
 import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/durable-share-failure.js';
@@ -362,6 +364,67 @@ describe('durable synchronous share ownership', () => {
     expect(await q.clearTerminalJob(job.jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
     await q.recover(job.jobId);
     await expect(q.cancel(job.jobId)).rejects.toThrow('obligation');
+    await store.close();
+  });
+
+  it('fences reopening through pending inventory recovery, including a fresh agent, then releases it after worker success', async () => {
+    const { store, agent, freshAgent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false });
+    agent.commitRfc64SwmAuthorInventoryV1 = async () => {
+      throw new SwmInventoryWriteFailure('inventory-maintenance', null, inventoryPersistenceFailure(new Error('inventory CAS unavailable')));
+    };
+    const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
+    expect(failure.observation.state).toBe('pending');
+    const original = await agent.promoteQueue.getStatus(failure.observation.jobId);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    const { agent: restarted } = await freshAgent();
+    await expect(restarted.assertion.pullFrom(CG, NAME, 'swm', { agentAddress: AUTHOR }))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: original.jobId });
+    await expect(restarted.assertion.discard(CG, NAME, { agentAddress: AUTHOR }))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    expect((await restarted.promoteQueue.getStatus(original.jobId)).request.recoveryBinding).toEqual(original.request.recoveryBinding);
+    restarted.commitRfc64SwmAuthorInventoryV1 = async () => ({ status: 'applied', attempts: 1, headObjectDigest: null, kaUal: null });
+    restarted.requestRfc64SwmCatalogProjectionV1 = () => true;
+    const worker = createPromoteWorkerSupervisor({ agent: restarted, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
+    try {
+      await worker.start();
+      await vi.waitFor(async () => expect((await restarted.promoteQueue.getStatus(original.jobId)).state).toBe('succeeded'));
+      expect((await restarted.promoteQueue.getStatus(original.jobId)).request.recoveryBinding).toEqual(original.request.recoveryBinding);
+      expect(await restarted.assertion.pullFrom(CG, NAME, 'swm', { agentAddress: AUTHOR })).toMatchObject({ seeded: 1 });
+    } finally { await worker.stop(); await store.close(); }
+  });
+
+  it('refuses a stale prepared seal before persisting an owner if reopening won the lifecycle lock', async () => {
+    const { store, agent } = await setup();
+    await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR });
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    await agent.assertion.pullFrom(CG, NAME, 'swm', { agentAddress: AUTHOR });
+    await expect(agent.assertion.admitDurableShare({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...prepared }, 'inline'))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
+    expect(await agent.promoteQueue.list({})).toEqual([]);
+    await store.close();
+  });
+
+  it('holds the lifecycle lock until admission is durable, so a concurrent reopen cannot erase its seal', async () => {
+    const { store, agent } = await setup();
+    await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR });
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    const enqueue = agent.promoteQueue.enqueueAndClaim.bind(agent.promoteQueue);
+    let release!: () => void, entered = false;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(agent.promoteQueue, 'enqueueAndClaim').mockImplementation(async (request, worker) => {
+      entered = true; await wait; return enqueue(request, worker);
+    });
+    const admission = agent.assertion.admitDurableShare({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...prepared }, 'inline');
+    await vi.waitFor(() => expect(entered).toBe(true));
+    let finished = false;
+    const reopening = agent.assertion.pullFrom(CG, NAME, 'swm', { agentAddress: AUTHOR }).catch((error: unknown) => error)
+      .finally(() => { finished = true; });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(finished).toBe(false);
+    release(); const job = await admission;
+    expect(await reopening).toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: job.jobId });
     await store.close();
   });
 

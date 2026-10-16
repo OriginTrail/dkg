@@ -36,7 +36,7 @@ export type ConfirmedVmOwnershipOutcome = 'owned' | 'inactive' | 'pending';
 export class ConfirmedVmOwnershipFailure extends SwmInventoryWriteFailure {
   constructor(readonly boundary: 'input' | 'authority' | 'marker' | 'removal', cause: unknown) {
     super(cause instanceof SwmInventoryWriteFailure ? cause.phase
-      : boundary === 'authority' ? 'authority' : boundary === 'input' ? 'preparation-read' : 'inventory-commit',
+      : boundary === 'authority' ? 'authority' : boundary === 'input' ? 'preparation-read' : 'inventory-maintenance',
     cause instanceof SwmInventoryWriteFailure ? cause.kaUal : null, cause instanceof SwmInventoryWriteFailure ? cause.cause : cause);
   }
 }

@@ -168,3 +168,19 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
   const publishReady = sealed && promotedAllRoots && !!shareOperationId;
   return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
 }
+
+/** Agent bindings keep admission and mutation fencing in the publisher's lifecycle domain. */
+export function durableAssertionShareMethods(agent: DKGAgent, agentAddress: string, warn: (message: string) => void) {
+  return {
+    async admitDurableShare(request: import('@origintrail-official/dkg-publisher').BoundPromoteRequest, workerId: string) {
+      const queue = agent.promoteQueue;
+      const admit = queue.enqueueAndClaim?.bind(queue);
+      if (!admit) throw new Error('Durable share admission is unavailable');
+      return agent.publisher.admitPreparedAssertionShare(request, () => admit(request, workerId));
+    },
+    prepareDurableShare: (contextGraphId: string, name: string, opts?: AssertionPromoteOptions) =>
+      prepareDurableAssertionShare(agent, contextGraphId, name, agentAddress, opts),
+    promote: (contextGraphId: string, name: string, opts?: AssertionPromoteOptions) =>
+      promoteAssertion(agent, contextGraphId, name, agentAddress, opts, warn),
+  };
+}

@@ -15,5 +15,7 @@ export function withDurableShareOwner<T extends { assertion?: any }>(agent: T, s
       intent: { version: 1, operationId: randomUUID(), timestampMs: Date.now(),
         confirmationRequired: false, accessPolicy: 'public', allowedPeers: [] } },
   });
-  return Object.assign(agent, { promoteQueue: new TripleStoreAsyncPromoteQueue(store) });
+  const queue = new TripleStoreAsyncPromoteQueue(store);
+  agent.assertion.admitDurableShare = (request: any, workerId: string) => queue.enqueueAndClaim(request, workerId);
+  return Object.assign(agent, { promoteQueue: queue });
 }
