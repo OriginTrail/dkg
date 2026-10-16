@@ -496,17 +496,31 @@ export function transferContended(since, until, readings, admissions, isTransfer
 }
 
 /**
+ * A promotion's delivery to the busy Edge, as busyReceiptOutcome takes it:
+ * through the Edge's own sync work, which had to contend with the transfer
+ * for the slot (`contended`, transferContended), or while an admission of
+ * the transfer held the slot throughout the delivery's window (`through`,
+ * transferHeldThrough; a delivery the Edge finalized locally from gossip
+ * needs no slot, and may land before the promotion is even answered). Either
+ * is evidence; without both, the reasons of both. Returns { held, why, how }.
+ */
+export function deliveryEvidence(contended, through) {
+  if (contended?.held) return { held: true, why: null, how: 'contended' };
+  if (through?.held) return { held: true, why: null, how: 'through' };
+  return { held: false, why: `${contended?.why ?? 'no reading'}; nor throughout its arrival: ${through?.why ?? 'no reading'}`, how: null };
+}
+
+/**
  * The busy Edge's check of one receipt: its pair result (pairOutcome), the
  * latest moment the report can have reached the Edge (`received`, the `by`
  * of its arrivalWindow), the transfer's life (transferLifetime), and the
  * slot evidence `held`: for a report, whether an admission of the transfer
  * held the general slot throughout the window of its arrival
- * (transferHeldThrough); for a promotion (`delivery`), whether the transfer
- * held it at some moment between the promotion and the delivery
- * (transferContended). It passes only with that evidence and a receipt
- * within the transfer's life. A receipt after the transfer ended, one
- * without that evidence, or one whose readings cannot be placed leaves the
- * case not exercised and fails. A result that failed, or a pair that was
+ * (transferHeldThrough); for a promotion (`delivery`), deliveryEvidence,
+ * whose `how` says which proof held. It passes only with that evidence and a
+ * receipt within the transfer's life. A receipt after the transfer ended,
+ * one without that evidence, or one whose readings cannot be placed leaves
+ * the case not exercised and fails. A result that failed, or a pair that was
  * never received, is returned as it is.
  */
 export function busyReceiptOutcome(result, { received, life, held, delivery = false }) {
@@ -516,7 +530,7 @@ export function busyReceiptOutcome(result, { received, life, held, delivery = fa
     const missing = delivery ? 'the transfer never held the general slot between the promotion and the delivery' : 'no reading shows the transfer holding the general slot throughout the moments the report can have arrived';
     return { outcome: 'fail', text: `${result.text}; not exercised: ${missing} (${held?.why ?? 'no reading'})` };
   }
-  const how = delivery ? 'after contending with the transfer for the general slot' : 'while an admission of the transfer held the general slot';
+  const how = delivery && held.how !== 'through' ? 'after contending with the transfer for the general slot' : 'while an admission of the transfer held the general slot';
   return { outcome: 'pass', text: `${result.text}, ${how}` };
 }
 
@@ -616,29 +630,89 @@ export function heldAtSubscribe(pairs, { withinMs = 2000 } = {}) {
     && Object.values(pair.dating).every(read => read.lastMissSentAt === null && read.hit && read.hit.completedAt - pair.from <= withinMs));
 }
 
+const operationOf = line => /^(?:\[[^\]]+\]|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \S+ (\S+) /.exec(line)?.[1] ?? '';
+
 /**
  * What a node's log says its shared-memory catch-up of a graph inserted
- * after its last subscribe (`[subscribe] contextGraph=<graph> …`): { passes
- * (the `SWM sync for "<graph>": N data + M meta triples` lines after it),
- * data (their data triples together) }, or null when the log shows no
- * subscribe of the graph.
+ * after its last subscribe (`[subscribe] contextGraph=<graph> …`), every
+ * kind of data the node counts as inserted: a round's data triples (`SWM
+ * sync for "<graph>": N data + M meta triples`, or `SWM recovery for
+ * "<graph>" from <peer>: … N data + M meta triples`), and the triples of the
+ * graph-scoped snapshots it materialized. A round logs each snapshot
+ * (`materialized snapshot <ref> as <graph> (N triples)`) and then, unless it
+ * failed first, their sum (`materialized K graph-scoped KA snapshot(s)
+ * totalling N triples`); a round's snapshots count once, the larger of the
+ * two. Returns { passes (the rounds that logged their data and meta
+ * triples), data }, or null when the log shows no subscribe of the graph.
  */
 export function catchupDataTriples(logText, graphId) {
   const text = String(logText ?? '');
   const at = text.lastIndexOf(`[subscribe] contextGraph=${graphId} `);
   if (at < 0) return null;
-  const marker = `SWM sync for "${graphId}": `;
+  const sync = `SWM sync for "${graphId}": `;
+  const recovery = `SWM recovery for "${graphId}" from `;
   let passes = 0;
   let data = 0;
+  const snapshots = new Map();
+  const ofRound = line => {
+    const operation = operationOf(line);
+    if (!snapshots.has(operation)) snapshots.set(operation, { each: 0, total: 0 });
+    return snapshots.get(operation);
+  };
   for (const line of text.slice(at).split('\n')) {
-    const from = line.indexOf(marker);
-    if (from < 0) continue;
-    const counts = /^(\d+) data \+ (\d+) meta triples/.exec(line.slice(from + marker.length));
-    if (!counts) continue;
-    passes += 1;
-    data += Number(counts[1]);
+    const inSync = line.indexOf(sync);
+    if (inSync >= 0) {
+      const rest = line.slice(inSync + sync.length);
+      const round = /^(\d+) data \+ \d+ meta triples/.exec(rest);
+      const total = /^materialized \d+ graph-scoped KA snapshot\(s\) totalling (\d+) triples/.exec(rest);
+      const each = /^materialized snapshot \S+ as \S+ \((\d+) triples\)/.exec(rest);
+      if (round) {
+        passes += 1;
+        data += Number(round[1]);
+      } else if (total) ofRound(line).total += Number(total[1]);
+      else if (each) ofRound(line).each += Number(each[1]);
+      continue;
+    }
+    const inRecovery = line.indexOf(recovery);
+    const recovered = inRecovery >= 0 ? /: replaced \d+ roots, \d+ exact graphs, (\d+) data \+ \d+ meta triples/.exec(line.slice(inRecovery)) : null;
+    if (recovered) {
+      passes += 1;
+      data += Number(recovered[1]);
+    }
   }
+  for (const { each, total } of snapshots.values()) data += Math.max(each, total);
   return { passes, data };
+}
+
+/**
+ * A subscriber's synced flag within its deadline after the client remedy's
+ * subscribe (with forceCatchup, at `from`), as a check with the evidence
+ * known gap #3296 takes: `seen` is the last listing a poll made from that
+ * subscribe ({ ok: it showed the graph synced, listed (listingEntry),
+ * completedAt }), `boundMs` the deadline, and `heldAtSubscribe` and
+ * `catchup` as for syncedAtEndResult. A flag that showed only after the
+ * deadline fails, however slowly the listing answered.
+ */
+export function syncedAfterRemedyResult({ node, graph, seen, from, boundMs, heldAtSubscribe: held, catchup }) {
+  const check = 'synced-after-remedy';
+  const listed = seen?.listed;
+  const bound = secs(boundMs);
+  if (!listed?.readable) {
+    return { check, outcome: 'fail', text: `${node.label}: its listing could not be read in the ${bound} s after it subscribed to ${graph.key} again with forceCatchup (${listed?.why ?? 'no answer'})`, evidence: { readable: false } };
+  }
+  const { entry } = listed;
+  const afterMs = Number.isFinite(seen.completedAt) ? seen.completedAt - from : null;
+  const evidence = {
+    readable: true, subscribed: entry?.subscribed === true, synced: entry?.synced === true, definitionHeld: listed.defined === true,
+    heldAtSubscribe: held === true, catchupPasses: catchup?.passes ?? 0, catchupDataTriples: catchup ? catchup.data : null,
+  };
+  if (evidence.synced && afterMs !== null && afterMs <= boundMs) {
+    return { check, outcome: 'pass', text: `${node.label}: lists ${graph.key} as synced ${secs(afterMs)} s after it subscribed again with forceCatchup`, evidence };
+  }
+  if (evidence.synced) {
+    return { check, outcome: 'fail', text: `${node.label}: lists ${graph.key} as synced only ${secs(afterMs)} s after it subscribed again with forceCatchup, past the ${bound} s`, evidence };
+  }
+  return { check, outcome: 'fail', text: `${node.label}: lists ${graph.key} as ${entry ? `subscribed=${entry.subscribed} synced=${entry.synced}` : 'absent'} ${bound} s after it subscribed again with forceCatchup`, evidence };
 }
 
 /**

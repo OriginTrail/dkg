@@ -81,8 +81,8 @@ const SUB_GRAPH_UNREGISTERED = {
  * report whose author is not the curator (`member-promotion`), and the check
  * that depends on it, the author sharing again after that promotion
  * (`post-promotion-share`, not exercised without it). A failure is the gap
- * only with evidence: that code, and the curator holding the report in its
- * shared memory before the promotion.
+ * only with evidence: that refusal (HTTP 409 with that code), and the curator
+ * holding the report in its shared memory before the promotion.
  */
 const MEMBER_PROMOTION = {
   issue: '#3294',
@@ -91,8 +91,9 @@ const MEMBER_PROMOTION = {
   isTheGap: ({ check }) => check === 'member-promotion',
   failure({ evidence }) {
     if (evidence.heldByCurator !== true) return { expected: false, because: 'the curator never held the report, so this is not #3294' };
-    if (evidence.code === 'ASSERTION_AUTHOR_NOT_RESIDENT') return { expected: true, because: 'the curator holds the report but not its author\'s seal' };
-    return { expected: false, because: undefined };
+    if (evidence.code !== 'ASSERTION_AUTHOR_NOT_RESIDENT') return { expected: false, because: undefined };
+    if (evidence.httpStatus !== 409) return { expected: false, because: `the refusal came with HTTP ${evidence.httpStatus ?? 'no status'}, not 409, so this is not #3294` };
+    return { expected: true, because: 'the curator holds the report but not its author\'s seal' };
   },
 };
 
@@ -101,23 +102,27 @@ const MEMBER_PROMOTION = {
  * never marked synced. A catch-up marks a graph synced only when one of its
  * planes inserted data triples; the node's shared-memory passes insert none,
  * and the durable plane of a catalog-authoritative graph is not attempted.
- * It covers the one-graph promotion suite's synced flag at the end of the run
- * (`synced-at-end`) of a node in that state: one that held every report it
- * should, in its layer, at the first reads after its last subscribe was
- * accepted (`heldAtSubscribe`). A failure is the gap only with evidence: the
- * node holds the graph's definition and is subscribed, and its log shows
- * shared-memory catch-up passes after that subscribe, none of which inserted
- * data. The flag holding on such a node is the gap's check holding.
+ * It covers the one-graph promotion suite's synced flag of a node in that
+ * state, within its deadline after the client remedy's subscribe
+ * (`synced-after-remedy`) and at the end of the run (`synced-at-end`): one
+ * that held every report it should, in its layer, at the first reads after
+ * its last subscribe was accepted (`heldAtSubscribe`). A failure is the gap
+ * only with evidence: the node holds the graph's definition and is
+ * subscribed, it was never marked synced, and its log shows shared-memory
+ * catch-up passes after that subscribe, none of which inserted data (rows or
+ * snapshots). The flag holding on such a node is the gap's check holding.
  */
 const caughtUpOnNothing = evidence => evidence?.catchupPasses > 0 && evidence?.catchupDataTriples === 0;
+const SYNCED_CHECKS = ['synced-after-remedy', 'synced-at-end'];
 const HELD_DATA_NEVER_SYNCED = {
   issue: '#3296',
   what: 'a node that already holds a graph\'s data is never marked synced: its catch-up inserts no data, and only inserted data marks a graph synced',
-  covers: ({ check, evidence }) => check === 'synced-at-end' && evidence?.heldAtSubscribe === true,
-  isTheGap: ({ check, evidence }) => check === 'synced-at-end' && evidence?.heldAtSubscribe === true && caughtUpOnNothing(evidence),
+  covers: ({ check, evidence }) => SYNCED_CHECKS.includes(check) && evidence?.heldAtSubscribe === true,
+  isTheGap: ({ check, evidence }) => SYNCED_CHECKS.includes(check) && evidence?.heldAtSubscribe === true && caughtUpOnNothing(evidence),
   failure({ evidence }) {
     if (evidence.definitionHeld !== true) return { expected: false, because: 'the node holds no definition of the graph, so this is not #3296' };
     if (evidence.subscribed !== true) return { expected: false, because: 'the node is not subscribed to the graph, so this is not #3296' };
+    if (evidence.synced === true) return { expected: false, because: 'the node was marked synced, only late, so this is not #3296' };
     if (!(evidence.catchupPasses > 0)) return { expected: false, because: 'its log shows no shared-memory catch-up after its last subscribe, so this is not known to be #3296' };
     if (evidence.catchupDataTriples !== 0) return { expected: false, because: `its catch-up inserted ${evidence.catchupDataTriples} data triple(s), so this is not #3296` };
     return { expected: true, because: `it held the graph's reports at its subscribe, and its catch-up's ${evidence.catchupPasses} shared-memory pass(es) inserted no data` };

@@ -25,10 +25,12 @@
 // opened. Because the transfer
 // leaves the slot for moments between admissions, edgeA shares again, up to
 // SHARE_ATTEMPTS times, until a receipt lands inside one. A promotion reaches
-// edgeB through edgeB's own sync work, which needs the slot itself, so its
-// receipt counts when the transfer held the slot at some reading between the
-// promotion and the last read that still missed the delivery: the delivery
-// contended with it. Either receipt must fall within the transfer's life; one
+// edgeB through edgeB's own sync work, which needs the slot itself, or edgeB
+// finalizes it locally from gossip, which does not. Its receipt counts when
+// the transfer held the slot at some reading between the promotion and the
+// last read that still missed the delivery (the delivery contended with it),
+// or held it throughout the delivery's window; the watch of each promotion
+// starts before its publish request, so that a fast delivery is dated too. Either receipt must fall within the transfer's life; one
 // that does not, or lacks that evidence, leaves the case not exercised. The
 // readings are kept in the run's folder.
 
@@ -37,8 +39,8 @@ import { join } from 'node:path';
 import { brief, sleep, waitFor } from '../member-sharing/devnet.mjs';
 import { heldAt } from '../member-sharing/observation.mjs';
 import {
-  admissionPolicyProblem, arrivalWindow, busyReceiptOutcome, countLogLines, pairOutcome, parseAdmissions, slotHolder, transferContended,
-  transferHeldThrough, transferLifetime, transferOccupancy,
+  admissionPolicyProblem, arrivalWindow, busyReceiptOutcome, countLogLines, deliveryEvidence, pairOutcome, parseAdmissions, slotHolder,
+  transferContended, transferHeldThrough, transferLifetime, transferOccupancy,
 } from '../qa/one-graph-promotion.mjs';
 import { settled } from './reports.mjs';
 
@@ -129,19 +131,29 @@ export async function busyEdge(ctx, main, large, promotions) {
   report.note(`case ${caseId}: ${edgeB.label} runs ${seen.admission.label} in its general sync slot, ${secs(seen.admission.at - subscribedAt)} s after it subscribed to the large graph`);
 
   const from = Date.now();
-  // The promotions run beside the reports; each is confirmed on chain before its watch starts.
+  // The promotions run beside the reports. Each one's watch starts before its
+  // publish request (edgeB may finalize the report locally from gossip before
+  // the curator's answer comes, and its reads date that too); its bound starts
+  // when the promotion is confirmed on chain.
   const promoting = (async () => {
     const watches = [];
     const done = [];
     for (const record of promotions) {
+      const options = { pending: true, notBefore: Date.now(), fromWhat: 'promotion' };
+      const handle = io.watch([
+        ...io.pairs(caseId, record, [edgeB], 'vm', { ...options, everyMs: 250 }),
+        ...io.pairs(caseId, record, [edgeB], 'gone', { ...options, everyMs: 250 }),
+        ...io.pairs(caseId, record, [curator, edgeA], 'vm', options),
+        ...io.pairs(caseId, record, [curator, edgeA], 'gone', options),
+      ]);
       const at = await ctx.promote(caseId, record);
-      if (at === null) continue;
+      if (at === null) {
+        handle.cancel();
+        continue;
+      }
+      handle.arm(at);
       done.push(record);
-      const options = { from: at, fromWhat: 'promotion' };
-      watches.push(io.watch([
-        ...io.pairs(caseId, record, [edgeB, curator, edgeA], 'vm', options),
-        ...io.pairs(caseId, record, [edgeB, curator, edgeA], 'gone', options),
-      ]));
+      watches.push(handle);
     }
     return { promoted: done, pairs: await settled(watches) };
   })();
@@ -203,7 +215,8 @@ export async function busyEdge(ctx, main, large, promotions) {
     const { received, window } = receipt(pair);
     let held;
     if (received !== null) {
-      held = delivery ? transferContended(pair.from, window?.after, slots.readings, all, isTransfer) : transferHeldThrough(window, slots.readings, all, isTransfer);
+      const through = transferHeldThrough(window, slots.readings, all, isTransfer);
+      held = delivery ? deliveryEvidence(transferContended(pair.from, window?.after, slots.readings, all, isTransfer), through) : through;
     }
     const verdict = busyReceiptOutcome(result, { received, life, held, delivery });
     if (pair.kind === 'swm' && pair !== lastAttempt) report.note(`case ${caseId}: an earlier share: ${verdict.text}`);

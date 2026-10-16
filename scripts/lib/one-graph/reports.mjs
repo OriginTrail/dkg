@@ -150,12 +150,15 @@ export function createReports(devnet, config) {
    * within `bound` (default the configured bound; Infinity for a watch that
    * runs until it is closed) of `from` (default the end of the report's share
    * job, which a watch started before it waits for); `fromWhat` names that
-   * moment in the report. `everyMs` reads more often than the configured
-   * interval; `notBefore` is a moment before the report was written, when it
-   * cannot have been at the node (the first miss of its dating).
+   * moment in the report. `pending` pairs start their bound only when the
+   * watch is armed (`handle.arm(from)`: the answer of a promotion, say).
+   * `everyMs` reads more often than the configured interval; `notBefore` is a
+   * moment before which the node cannot have shown what the pair waits for
+   * (before the report was written, or before it was promoted): the first
+   * miss of its dating.
    */
-  const pairs = (caseId, record, nodes, kind, { bound = boundMs, from, fromWhat, everyMs, notBefore } = {}) =>
-    nodes.map(node => ({ caseId, record, node, kind, boundMs: bound, from, fromWhat, everyMs, notBefore }));
+  const pairs = (caseId, record, nodes, kind, { bound = boundMs, from, fromWhat, everyMs, notBefore, pending = false } = {}) =>
+    nodes.map(node => ({ caseId, record, node, kind, boundMs: bound, from, fromWhat, everyMs, notBefore, pending }));
 
   /**
    * Starts watching pairs at once: each read of each pair polls on its own
@@ -164,7 +167,8 @@ export function createReports(devnet, config) {
    * pair's bound starts at its `from`; a watch started before the report's
    * share ended (from the moment the report is created, say) reads at once,
    * and its bound starts when the share ends, a read that found the report
-   * before then counting with age 0. A read that showed a report present is
+   * before then counting with age 0. A `pending` pair reads at once too, and
+   * its bound starts when the watch is armed. A read that showed a report present is
    * not made again; a pair that holds throughout (its absence, or `kept`)
    * keeps reading to the end of the bound. A reading that shows a report back
    * after it was absent is kept (`pair.reappeared`), and so is a reading that
@@ -174,13 +178,14 @@ export function createReports(devnet, config) {
    * read, when the last read that did not show what the pair waits for was
    * sent (from `notBefore` on) and when the first that showed it was sent and
    * completed: one history for the delivery and for arrivalWindow. Returns a
-   * handle { pairs, done, cancel, close }, not a promise, so that whoever
-   * starts a watch does not wait; `close()` ends the bound of a pair that
-   * runs until closed at that moment.
+   * handle { pairs, done, cancel, close, arm }, not a promise, so that
+   * whoever starts a watch does not wait; `close()` ends the bound of a pair
+   * that runs until closed at that moment, and `arm(from)` starts the bound
+   * of its pending pairs.
    */
   function watch(list) {
     for (const pair of list) {
-      pair.from = pair.from ?? pair.record.doneAt;
+      pair.from = pair.pending ? null : pair.from ?? pair.record.doneAt;
       pair.progress = { view: null, partitions: null };
       pair.last = { view: null, partitions: null };
       const unseen = Number.isFinite(pair.notBefore) ? pair.notBefore : null;
@@ -190,11 +195,13 @@ export function createReports(devnet, config) {
     const absence = pair => PAIR_KINDS[pair.kind].want === 'gone';
     const kept = pair => PAIR_KINDS[pair.kind].throughout === true;
     const throughout = pair => absence(pair) || kept(pair);
-    // The bound starts when the report's share ended; a read that found it before counts with age 0.
-    const arm = pair => {
+    // The bound starts when the report's share ended, or when a pending pair is armed;
+    // a read that found what the pair waits for before then counts with age 0.
+    const arm = (pair, from = pair.pending ? null : pair.record.doneAt) => {
       if (pair.from !== null && pair.from !== undefined) return;
-      if (pair.record.doneAt === null || pair.record.doneAt === undefined) return;
-      pair.from = pair.record.doneAt;
+      if (from === null || from === undefined) return;
+      pair.from = from;
+      pair.pending = false;
       for (const which of READS) {
         const { hit } = pair.dating[which];
         if (hit && pair.progress[which] === null) pair.progress = { ...pair.progress, [which]: Math.max(0, hit.completedAt - pair.from) };
@@ -209,6 +216,7 @@ export function createReports(devnet, config) {
       if (!armed(pair)) {
         if (seen.satisfied && !dating.hit) dating.hit = { sentAt, completedAt };
         else if (missed && !dating.hit) dating.lastMissSentAt = sentAt;
+        else if (missed && absence(pair)) pair.reappeared ??= { read: which, age: 0, seen };
       } else {
         const before = pair.progress[which];
         pair.progress = foldRead(pair.progress, which, { held: seen.satisfied, completedAt }, { from: pair.from, boundMs: pair.boundMs });
@@ -259,7 +267,7 @@ export function createReports(devnet, config) {
     const close = () => {
       for (const pair of list) if (armed(pair) && !Number.isFinite(pair.boundMs)) pair.boundMs = Math.max(0, Date.now() - pair.from);
     };
-    return { pairs: list, done, cancel: () => { cancelled = true; }, close };
+    return { pairs: list, done, cancel: () => { cancelled = true; }, close, arm: from => { for (const pair of list) if (pair.pending) arm(pair, from); } };
   }
 
   /**

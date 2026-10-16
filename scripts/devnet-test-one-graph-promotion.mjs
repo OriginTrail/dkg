@@ -132,8 +132,9 @@
 //      layers within ONE_GRAPH_RECOVERY_SECS, then shares a report that every
 //      other Edge must hold
 //   8  the synced flag: every subscriber lists the graph as synced within
-//      ONE_GRAPH_SYNCED_SECS, and every Edge lists it so at the end (#3296
-//      for the late Edge when it already held the reports at its subscribe)
+//      ONE_GRAPH_SYNCED_SECS of its subscribe, and again of the remedy's
+//      subscribe, and every Edge lists it so at the end (#3296 for the late
+//      Edge when it already held the reports at its subscribe)
 //   9  the end state: on every Edge, each promoted report is in Verified
 //      Memory and not in shared memory, and every other report is in shared
 //      memory
@@ -184,7 +185,7 @@ import { createReport } from './lib/member-sharing/report.mjs';
 import { describe, subscriptionResults } from './lib/qa/member-sharing.mjs';
 import {
   admissionPolicyProblem, catchupDataTriples, definitionInTime, heldAtSubscribe, memberPublishOutcome, pairOutcome, parseAdmissions,
-  postPromotionCheck, profileStatusProblems, promotionOutcome, promotionResult, subGraphWriteResult, syncedAtEndResult,
+  postPromotionCheck, profileStatusProblems, promotionOutcome, promotionResult, subGraphWriteResult, syncedAfterRemedyResult, syncedAtEndResult,
 } from './lib/qa/one-graph-promotion.mjs';
 import { busyEdge } from './lib/one-graph/busy-transfer.mjs';
 import { OneGraphEdges } from './lib/one-graph/edges.mjs';
@@ -359,6 +360,20 @@ async function holdsDefinition(node, graph, from) {
 }
 
 /**
+ * Polls a node's listing, from its subscribe at `from`, until it lists the
+ * graph as synced or SYNCED_MS has passed. Resolves to the last listing it
+ * made: { ok, listed (listingEntry), completedAt }, which
+ * syncedAfterRemedyResult judges against the deadline.
+ */
+const syncedBy = (node, graph, from) => waitFor(async () => {
+  const listed = await io.listingEntry(node, graph);
+  return { ok: listed.readable && listed.entry?.synced === true, listed, completedAt: Date.now() };
+}, Math.max(0, from + SYNCED_MS - Date.now()), 2000);
+
+// Each remedy's poll of the subscriber's synced flag from its second subscribe, by node: case 8 judges it.
+const remedySynced = new Map();
+
+/**
  * A subscriber that holds no definition of a graph rejoins it as a client
  * can: it dials the curator through its relay (a subscriber asks only the
  * peers it is connected to for the graph's declaration, and the curator may
@@ -366,9 +381,11 @@ async function holdsDefinition(node, graph, from) {
  * catch-up (`forceCatchup`). `onSubscribed(from)` runs as soon as that
  * subscribe was accepted. Resolves to { dialError, from (the second
  * subscribe), held (whether it held the definition within DEFINITION_MS),
- * late (it held it, but only past DEFINITION_MS), heldAfterMs }.
+ * late (it held it, but only past DEFINITION_MS), heldAfterMs, synced (with
+ * `watchSynced`: the poll of its synced flag from that subscribe, syncedBy,
+ * still running) }.
  */
-async function rejoin(node, graph, onSubscribed) {
+async function rejoin(node, graph, onSubscribed, { watchSynced = false } = {}) {
   let dialError = null;
   if (node !== edges.curator) {
     try {
@@ -379,8 +396,9 @@ async function rejoin(node, graph, onSubscribed) {
   }
   const from = await graphs.subscribe(node, graph, { forceCatchup: true });
   onSubscribed?.(from);
+  const synced = watchSynced ? syncedBy(node, graph, from) : null;
   const { held, late, afterMs } = await holdsDefinition(node, graph, from);
-  return { dialError, from, held, late, heldAfterMs: afterMs ?? Date.now() - from };
+  return { dialError, from, held, late, heldAfterMs: afterMs ?? Date.now() - from, synced };
 }
 
 /** The rejoin as the setup of another case: noted, not checked. Resolves to the second subscribe. */
@@ -425,7 +443,8 @@ async function subscribeChecked(node, graph, caseId) {
  * watch of its delivery, or null) }.
  */
 async function remedy(node, graph, caseId, { onSubscribed } = {}) {
-  const { dialError, from, held, late, heldAfterMs } = await rejoin(node, graph, onSubscribed);
+  const { dialError, from, held, late, heldAfterMs, synced } = await rejoin(node, graph, onSubscribed, { watchSynced: true });
+  remedySynced.set(node, { graph, from, synced });
   if (dialError) fail(10, `${node.label} could not dial the curator through its relay: ${dialError}`);
   else pass(10, `${node.label} dialed the curator through its relay`);
   if (held) pass(10, `${node.label} holds the definition of ${graph.key} ${seconds(heldAfterMs)} s after it subscribed again with forceCatchup`);
@@ -669,12 +688,20 @@ async function run() {
   shared.push(fromLate);
   await settle([io.watch(io.pairs(7, fromLate, others(late), 'swm'))]);
 
-  // Case 8: every Edge lists the graph as synced at the end. A node that held
+  // Case 8: every subscriber lists the graph as synced within SYNCED_MS of the
+  // remedy's subscribe, and every Edge lists it so at the end. A node that held
   // the graph's reports at its subscribe is judged with its catch-up's log (#3296).
+  const evidenceOf = node => {
+    const held = heldAtResubscribe.get(node) === true;
+    return { heldAtSubscribe: held, catchup: held ? catchupDataTriples(devnet.logSince(node, 0), main.id) : null };
+  };
+  for (const [node, { graph, from, synced }] of remedySynced) {
+    if (graph !== main) continue;
+    report.record(8, syncedAfterRemedyResult({ node, graph, seen: await synced, from, boundMs: SYNCED_MS, ...evidenceOf(node) }));
+  }
   for (const node of edges.running) {
     const listed = await io.listingEntry(node, main);
-    const held = heldAtResubscribe.get(node) === true;
-    report.record(8, syncedAtEndResult({ node, graph: main, listed, heldAtSubscribe: held, catchup: held ? catchupDataTriples(devnet.logSince(node, 0), main.id) : null }));
+    report.record(8, syncedAtEndResult({ node, graph: main, listed, ...evidenceOf(node) }));
   }
 
   // Case 9: the end state on every Edge.
