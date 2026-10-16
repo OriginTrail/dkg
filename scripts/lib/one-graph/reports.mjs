@@ -9,8 +9,8 @@
 
 import { brief, sleep } from '../member-sharing/devnet.mjs';
 import { createObservation } from '../member-sharing/observation.mjs';
-import { foldRead, inScope, judgeHeld, pairHeld, sharedMemoryScope } from '../qa/member-sharing.mjs';
-import { inVerifiedScope, judgeGone, PAIR_KINDS, readOutcome, verifiedScope, writeRetryable } from '../qa/one-graph-promotion.mjs';
+import { foldRead, inScope, pairHeld, sharedMemoryScope } from '../qa/member-sharing.mjs';
+import { inVerifiedScope, judgeGone, judgeReport, PAIR_KINDS, readOutcome, verifiedScope, writeRetryable } from '../qa/one-graph-promotion.mjs';
 import { parseObservation } from '../qa/query-observation.mjs';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -42,12 +42,15 @@ export function createReports(devnet, config) {
   const base = createObservation(tapped, { boundMs, definitionMs, syncedMs, stamp, predicate });
   let sequence = 0;
 
-  /** A report's triples: its class, its value, and a body of about 200 bytes. */
-  const quads = record => [
-    { subject: record.subject, predicate: RDF_TYPE, object: type, graph: '' },
-    { subject: record.subject, predicate, object: `"${record.value}"`, graph: '' },
-    { subject: record.subject, predicate: `${type}Body`, object: `"report ${record.sequence} of run ${stamp}: ${'payload '.repeat(22)}"`, graph: '' },
+  /** A report's triples, as judgeReport takes them: its class, its value, and a body of about 200 bytes. */
+  const triples = record => [
+    { name: 'class', predicate: RDF_TYPE, iri: type },
+    { name: 'value', predicate, text: record.value },
+    { name: 'body', predicate: `${type}Body`, text: `report ${record.sequence} of run ${stamp}: ${'payload '.repeat(22)}` },
   ];
+  const quads = record => record.triples.map(triple => ({
+    subject: record.subject, predicate: triple.predicate, object: 'iri' in triple ? triple.iri : `"${triple.text}"`, graph: '',
+  }));
 
   /**
    * One report, written with its seal and shared into the sub-graph's shared
@@ -59,9 +62,11 @@ export function createReports(devnet, config) {
    * not succeed. A create refused the way a client retries (writeRetryable:
    * the graph not yet synced for writes, say) is made again every `pollMs`
    * until `retryUntil`; `refused` then says how often and how long, and
-   * `doneAt` still counts from the share that ended.
+   * `doneAt` still counts from the share that ended. `triples` are the
+   * report's triples, which every read must find whole. `onStart(record)`
+   * runs before the first create is sent.
    */
-  async function share(author, graph, what, { retryUntil = 0 } = {}) {
+  async function share(author, graph, what, { retryUntil = 0, onStart } = {}) {
     sequence += 1;
     const record = {
       author, graph, sub, what, sequence,
@@ -70,6 +75,8 @@ export function createReports(devnet, config) {
       value: `${what} (${sequence})`,
       doneAt: null, error: null,
     };
+    record.triples = triples(record);
+    onStart?.(record);
     const started = Date.now();
     for (;;) {
       const outcome = await base.createAndShare(author, { contextGraphId: graph.id, name: record.name, subGraphName: sub, quads: quads(record) },
@@ -89,6 +96,7 @@ export function createReports(devnet, config) {
       record.refused = { code: outcome.code, times: (record.refused?.times ?? 0) + 1 };
       await sleep(pollMs);
     }
+    createAnswers.delete(record.name);
     if (record.refused) record.refused.waitedMs = Date.now() - started;
     return record;
   }
@@ -104,8 +112,8 @@ export function createReports(devnet, config) {
     return { error: observation.outcome === 'SETTLING' ? 'its read authority is still settling' : `${observation.reason}, ${brief(answer)}` };
   }
 
-  const written = record => ({ predicate, value: record.value });
-  const judge = (kind, rows, record) => (PAIR_KINDS[kind].want === 'gone' ? judgeGone(rows) : judgeHeld(rows, written(record)));
+  // A held kind needs the whole report: each of its triples, with the written object.
+  const judge = (kind, rows, record) => (PAIR_KINDS[kind].want === 'gone' ? judgeGone(rows) : judgeReport(rows, record.triples ?? triples(record)));
 
   const inVm = kind => PAIR_KINDS[kind].layer === 'vm';
 
@@ -154,14 +162,18 @@ export function createReports(devnet, config) {
    * reading that shows the report back after it was absent is kept
    * (`pair.reappeared`). Such a pair is read once more when its bound has
    * passed (`pair.confirm`, each read retried up to three times while it
-   * fails). Returns a handle { pairs, done, cancel }, not a promise, so that
-   * whoever starts a watch does not wait.
+   * fails). `pair.dating` keeps, for each read, when the last read that did
+   * not show what the pair waits for was sent and when the first that showed
+   * it was sent and completed (what arrivalWindow takes). Returns a handle {
+   * pairs, done, cancel }, not a promise, so that whoever starts a watch does
+   * not wait.
    */
   function watch(list) {
     for (const pair of list) {
       pair.from = pair.from ?? pair.record.doneAt;
       pair.progress = { view: null, partitions: null };
       pair.last = { view: null, partitions: null };
+      pair.dating = Object.fromEntries(READS.map(which => [which, { lastMissSentAt: null, hit: null }]));
     }
     let cancelled = false;
     const absence = pair => PAIR_KINDS[pair.kind].want === 'gone';
@@ -169,9 +181,13 @@ export function createReports(devnet, config) {
       && (pair.progress[which] === null || absence(pair));
     const poll = async (pair, which) => {
       while (open(pair, which)) {
+        const sentAt = Date.now();
         const seen = await read(which, pair.kind, pair.node, pair.record);
+        const completedAt = Date.now();
         const before = pair.progress[which];
-        pair.progress = foldRead(pair.progress, which, { held: seen.satisfied, completedAt: Date.now() }, { from: pair.from, boundMs: pair.boundMs });
+        pair.progress = foldRead(pair.progress, which, { held: seen.satisfied, completedAt }, { from: pair.from, boundMs: pair.boundMs });
+        if (before === null && pair.progress[which] !== null) pair.dating[which].hit = { sentAt, completedAt };
+        else if (before === null && seen.satisfied === false && !seen.error) pair.dating[which].lastMissSentAt = sentAt;
         // Absent before, present now: the report is back in the layer within the bound.
         if (before !== null && seen.satisfied === false && !seen.error) pair.reappeared ??= { read: which, age: Date.now() - pair.from, seen };
         pair.last[which] = seen;
@@ -198,6 +214,36 @@ export function createReports(devnet, config) {
     };
     const done = Promise.all(list.map(settle)).then(() => undefined);
     return { pairs: list, done, cancel: () => { cancelled = true; } };
+  }
+
+  /**
+   * Dates a report's arrival at `node` more closely than a pair's watch does,
+   * as evidence of what the node was doing at that moment: both reads of
+   * `kind` are made every `everyMs` (default 250 ms) from the moment the
+   * dating starts (before the report is created, so the report cannot have
+   * been there yet) until each read has found what the kind waits for,
+   * `untilMs` has passed, or the dating is stopped. `dating` is what
+   * arrivalWindow takes: for each read, when the last read that did not find
+   * it was sent (the start counts as one) and when the first read that found
+   * it was sent and completed. A pair's watch still decides the delivery and
+   * its bound. Returns { dating, done, stop }; `stop()` resolves to `dating`.
+   */
+  function dateArrival(node, record, kind, { everyMs = 250, untilMs = 300_000 } = {}) {
+    const startedAt = Date.now();
+    const dating = Object.fromEntries(READS.map(which => [which, { lastMissSentAt: startedAt, hit: null, errors: 0 }]));
+    let stopped = false;
+    const poll = async which => {
+      while (!stopped && !dating[which].hit && !record.error && Date.now() - startedAt < untilMs) {
+        const sentAt = Date.now();
+        const seen = await read(which, kind, node, record);
+        if (seen.error) dating[which].errors += 1;
+        else if (seen.satisfied) dating[which].hit = { sentAt, completedAt: Date.now() };
+        else dating[which].lastMissSentAt = sentAt;
+        if (!dating[which].hit && !stopped) await sleep(everyMs);
+      }
+    };
+    const done = Promise.all(READS.map(poll)).then(() => dating);
+    return { dating, done, stop: () => { stopped = true; return done; } };
   }
 
   /**
@@ -231,7 +277,7 @@ export function createReports(devnet, config) {
   }
 
   return {
-    share, pairs, watch, promote, ownPublish, lifecycle,
+    share, pairs, watch, dateArrival, promote, ownPublish, lifecycle,
     createAndShare: base.createAndShare, listingEntry: base.listingEntry, observeSubscription: base.observeSubscription,
   };
 }

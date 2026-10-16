@@ -178,8 +178,8 @@ import { brief, openDevnet, waitFor } from './lib/member-sharing/devnet.mjs';
 import { createReport } from './lib/member-sharing/report.mjs';
 import { describe, subscriptionResults } from './lib/qa/member-sharing.mjs';
 import {
-  admissionPolicyProblem, memberPublishOutcome, pairOutcome, parseAdmissions, postPromotionCheck, profileStatusProblems, promotionOutcome,
-  promotionResult, subGraphWriteResult,
+  admissionPolicyProblem, definitionInTime, memberPublishOutcome, pairOutcome, parseAdmissions, postPromotionCheck, profileStatusProblems,
+  promotionOutcome, promotionResult, subGraphWriteResult,
 } from './lib/qa/one-graph-promotion.mjs';
 import { busyEdge } from './lib/one-graph/busy-transfer.mjs';
 import { OneGraphEdges } from './lib/one-graph/edges.mjs';
@@ -338,11 +338,20 @@ async function catalogStatus(node) {
   return JSON.stringify({ enabled, finalizedRowHeal, authorCatalogCapacity }).slice(0, 400);
 }
 
-/** Polls a node's listing until it holds the graph's definition, for at most DEFINITION_MS. */
-const holdsDefinition = (node, graph) => waitFor(async () => {
-  const listed = await io.listingEntry(node, graph);
-  return { ok: listed.readable && listed.defined };
-}, DEFINITION_MS, 2000);
+/**
+ * Polls a node's listing, from its subscribe at `from`, until it holds the
+ * graph's definition or DEFINITION_MS has passed. Resolves to { held,
+ * late, afterMs }: held only when the listing that showed the definition
+ * completed within DEFINITION_MS of `from` (definitionInTime), however
+ * slowly it answered.
+ */
+async function holdsDefinition(node, graph, from) {
+  const seen = await waitFor(async () => {
+    const listed = await io.listingEntry(node, graph);
+    return { ok: listed.readable && listed.defined, completedAt: Date.now() };
+  }, Math.max(0, from + DEFINITION_MS - Date.now()), 2000);
+  return definitionInTime(seen, { from, boundMs: DEFINITION_MS });
+}
 
 /**
  * A subscriber that holds no definition of a graph rejoins it as a client
@@ -352,7 +361,7 @@ const holdsDefinition = (node, graph) => waitFor(async () => {
  * catch-up (`forceCatchup`). `onSubscribed(from)` runs as soon as that
  * subscribe was accepted. Resolves to { dialError, from (the second
  * subscribe), held (whether it held the definition within DEFINITION_MS),
- * heldAfterMs }.
+ * late (it held it, but only past DEFINITION_MS), heldAfterMs }.
  */
 async function rejoin(node, graph, onSubscribed) {
   let dialError = null;
@@ -365,14 +374,15 @@ async function rejoin(node, graph, onSubscribed) {
   }
   const from = await graphs.subscribe(node, graph, { forceCatchup: true });
   onSubscribed?.(from);
-  const held = (await holdsDefinition(node, graph)).ok;
-  return { dialError, from, held, heldAfterMs: Date.now() - from };
+  const { held, late, afterMs } = await holdsDefinition(node, graph, from);
+  return { dialError, from, held, late, heldAfterMs: afterMs ?? Date.now() - from };
 }
 
 /** The rejoin as the setup of another case: noted, not checked. Resolves to the second subscribe. */
 async function ensureDefinition(node, graph, caseId) {
-  const { dialError, from, held, heldAfterMs } = await rejoin(node, graph);
-  note(`case ${caseId}: ${node.label} ${dialError ? `could not dial the curator (${dialError}) but` : 'dialed the curator through its relay and'} subscribed to ${graph.key} again with forceCatchup: ${held ? `it held the definition ${seconds(heldAfterMs)} s later` : `it still held none ${seconds(DEFINITION_MS)} s later`}`);
+  const { dialError, from, held, late, heldAfterMs } = await rejoin(node, graph);
+  const outcome = held ? `it held the definition ${seconds(heldAfterMs)} s later` : late ? `it held the definition only ${seconds(heldAfterMs)} s later, past the ${seconds(DEFINITION_MS)} s` : `it still held none ${seconds(DEFINITION_MS)} s later`;
+  note(`case ${caseId}: ${node.label} ${dialError ? `could not dial the curator (${dialError}) but` : 'dialed the curator through its relay and'} subscribed to ${graph.key} again with forceCatchup: ${outcome}`);
   return from;
 }
 
@@ -410,14 +420,16 @@ async function subscribeChecked(node, graph, caseId) {
  * watch of its delivery, or null) }.
  */
 async function remedy(node, graph, caseId, { onSubscribed } = {}) {
-  const { dialError, from, held, heldAfterMs } = await rejoin(node, graph, onSubscribed);
+  const { dialError, from, held, late, heldAfterMs } = await rejoin(node, graph, onSubscribed);
   if (dialError) fail(10, `${node.label} could not dial the curator through its relay: ${dialError}`);
   else pass(10, `${node.label} dialed the curator through its relay`);
   if (held) pass(10, `${node.label} holds the definition of ${graph.key} ${seconds(heldAfterMs)} s after it subscribed again with forceCatchup`);
+  else if (late) fail(10, `${node.label} held the definition of ${graph.key} only ${seconds(heldAfterMs)} s after it subscribed again with forceCatchup, past the ${seconds(DEFINITION_MS)} s`);
   else fail(10, `${node.label} holds no definition of ${graph.key} ${seconds(DEFINITION_MS)} s after it subscribed again with forceCatchup`);
   let probe = null;
   let probeWatch = null;
-  if (graph.sub && held) {
+  // A definition that came past its deadline failed above; the node holds it, so the remedy goes on.
+  if (graph.sub && (held || late)) {
     const listed = await listsSubGraph(node, graph);
     probe = await shareReport(caseId, node, graph, `${node.role} write before its sub-graph`, from + SYNCED_MS);
     if (!probe.error) probeWatch = io.watch(io.pairs(caseId, probe, edges.running.filter(other => other !== node), 'swm'));

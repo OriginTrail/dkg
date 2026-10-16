@@ -16,23 +16,27 @@
 // shared-memory slot beside the general one, so under one general slot the
 // durable work a reading shows holds that slot. A report reaches edgeB through
 // gossip and counts only when an admission of the transfer held the slot at
-// that moment: the first reading after it shows an admission that started
-// before it. Because the transfer leaves the slot for moments between
-// admissions, edgeA shares again, up to SHARE_ATTEMPTS times, until a receipt
-// lands inside one. A promotion reaches edgeB through edgeB's own sync work,
-// which needs the slot itself, so its receipt counts when the transfer held
-// the slot at some reading between the promotion and the receipt: the
-// delivery contended with it. Either receipt must fall within the transfer's
-// life; one that does not, or lacks that evidence, leaves the case not
-// exercised. The readings are kept in the run's folder.
+// that moment. A read's completion is not that moment, so edgeB's reads of
+// each report are made every quarter second from before it is created, and
+// date its arrival between the last read that missed it and the first that
+// found it (arrivalWindow); the first reading after that window must show an
+// admission that started before the window opened. Because the transfer
+// leaves the slot for moments between admissions, edgeA shares again, up to
+// SHARE_ATTEMPTS times, until a receipt lands inside one. A promotion reaches
+// edgeB through edgeB's own sync work, which needs the slot itself, so its
+// receipt counts when the transfer held the slot at some reading between the
+// promotion and the last read that still missed the delivery: the delivery
+// contended with it. Either receipt must fall within the transfer's life; one
+// that does not, or lacks that evidence, leaves the case not exercised. The
+// readings are kept in the run's folder.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { brief, sleep, waitFor } from '../member-sharing/devnet.mjs';
 import { heldAt } from '../member-sharing/observation.mjs';
 import {
-  admissionPolicyProblem, busyReceiptOutcome, countLogLines, pairOutcome, parseAdmissions, slotHolder, transferContended,
-  transferHeldAt, transferLifetime, transferOccupancy,
+  admissionPolicyProblem, arrivalWindow, busyReceiptOutcome, countLogLines, pairOutcome, parseAdmissions, slotHolder, transferContended,
+  transferHeldThrough, transferLifetime, transferOccupancy,
 } from '../qa/one-graph-promotion.mjs';
 import { settled } from './reports.mjs';
 
@@ -131,22 +135,28 @@ export async function busyEdge(ctx, main, large, promotions) {
   // A report reaches edgeB at once through gossip, often between two of the
   // transfer's admissions. edgeA shares again, up to SHARE_ATTEMPTS times while
   // the transfer runs, until edgeB receives a report while an admission of the
-  // transfer holds its slot.
+  // transfer holds its slot throughout the window of its arrival.
   const shared = [];
   const reportPairs = [];
+  const arrivals = new Map();
   const readingAfter = moment => waitFor(() => ({ ok: slots.readings.some(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= moment) }), 5000, 200);
   for (let attempt = 1; attempt <= SHARE_ATTEMPTS; attempt += 1) {
     if (attempt > 1) await sleep(1500);
-    const record = await io.share(edgeA, main, `edgeA while edgeB is busy ${attempt}`);
+    let dating = null;
+    const record = await io.share(edgeA, main, `edgeA while edgeB is busy ${attempt}`, { onStart: made => { dating = io.dateArrival(edgeB, made, 'swm'); } });
     shared.push(record);
     const pairs = await settled([io.watch(io.pairs(caseId, record, [edgeB, curator], 'swm'))]);
     reportPairs.push(...pairs);
-    const received = heldAt(pairs.find(pair => pair.node === edgeB));
-    if (received === null) break;
+    const window = arrivalWindow(await dating.stop());
+    arrivals.set(record, window);
+    const heldBy = heldAt(pairs.find(pair => pair.node === edgeB));
+    if (heldBy === null) break;
+    // The report was there by the first read that found it, the watch's or the dating's.
+    const received = Math.min(heldBy, window?.by ?? Infinity);
     await readingAfter(received);
     const log = devnet.logSince(edgeB, offset);
     const all = parseAdmissions(log);
-    if (transferHeldAt(received, slots.readings, all, isTransfer).held) break;
+    if (transferHeldThrough(window && { after: window.after, by: received }, slots.readings, all, isTransfer).held) break;
     const life = transferLifetime(log, all, isTransfer, slots.readings);
     if (!life || received > life.to) break;
   }
@@ -172,12 +182,17 @@ export async function busyEdge(ctx, main, large, promotions) {
       (result.outcome === 'pass' ? report.pass : report.fail)(caseId, result.text);
       continue;
     }
-    const received = heldAt(pair);
-    // A report must land under a transfer admission; a promotion's delivery, which needs the slot itself, must have contended with the transfer for it.
+    // A report must land under a transfer admission, dated by its quarter-second
+    // reads; a promotion's delivery, which needs the slot itself, must have
+    // contended with the transfer for it, dated by its watch's reads.
     const delivery = pair.kind !== 'swm';
+    const window = delivery ? arrivalWindow(pair.dating) : arrivals.get(pair.record) ?? null;
+    const heldBy = heldAt(pair);
+    const received = heldBy === null ? null : Math.min(heldBy, window?.by ?? Infinity);
     let held;
     if (received !== null) {
-      held = delivery ? transferContended(pair.from, received, slots.readings, all, isTransfer) : transferHeldAt(received, slots.readings, all, isTransfer);
+      held = delivery ? transferContended(pair.from, window?.after, slots.readings, all, isTransfer)
+        : transferHeldThrough(window && { after: window.after, by: received }, slots.readings, all, isTransfer);
     }
     const verdict = busyReceiptOutcome(result, { received, life, held, delivery });
     if (pair.kind === 'swm' && pair !== lastAttempt) report.note(`case ${caseId}: an earlier share: ${verdict.text}`);

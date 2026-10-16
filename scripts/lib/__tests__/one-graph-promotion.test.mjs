@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, inVerifiedScope, judgeGone, memberPublishOutcome,
-  pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, slotHolder, transferHeldAt, transferLifetime,
+  pairOutcome, parseAdmissions, profileStatusProblems, promotionOutcome, readOutcome, slotHolder, transferHeldThrough, transferLifetime,
   transferOccupancy, verifiedScope, writeRetryable, busyReceiptOutcome, promotionResult, subGraphWriteResult, transferContended, postPromotionCheck,
+  arrivalWindow, definitionInTime, judgeReport,
 } from '../qa/one-graph-promotion.mjs';
 import { freshSubscription, sharedMemoryScope, subscriptionResults } from '../qa/member-sharing.mjs';
 import { classify, KNOWN_GAPS } from '../qa/known-gaps.mjs';
@@ -304,6 +305,8 @@ const T0 = new Date('2026-10-16T01:16:26.300').getTime();
 const reading = (sentAt, latency, operations) => ({ sentAt, at: sentAt + latency, operations });
 const durable = age => ({ lane: 'durable', operation: 'durable:catchup-foreground', oldestAgeMs: age });
 const isTransfer = admission => admission.label.startsWith('durable:0xabc/one-graph-large-1:');
+// A receipt dated to one moment: the window of its arrival opens and closes there.
+const moment = at => ({ after: at, by: at });
 
 test('a reading dates the running durable work; shared-memory work beside it is not the transfer', () => {
   assert.equal(durableStart(reading(T0 + 2500, 20, [{ operation: 'shared-memory:sync-on-connect', oldestAgeMs: 900 }])), null);
@@ -354,19 +357,19 @@ test('a receipt counts as made while the transfer held the slot only with a read
   const admissions = parseAdmissions(TRANSFER_LOG);
   const second33 = new Date('2026-10-16T01:16:33.400').getTime();
   const holding = [reading(second33 + 4000, 20, [durable(4000)])];
-  assert.deepEqual(transferHeldAt(second33 + 3500, holding, admissions, isTransfer), { held: true, why: null });
+  assert.deepEqual(transferHeldThrough(moment(second33 + 3500), holding, admissions, isTransfer), { held: true, why: null });
   // No reading soon enough after the receipt.
-  assert.match(transferHeldAt(second33 + 1500, holding, admissions, isTransfer).why, /no reading of the slot right after it/);
+  assert.match(transferHeldThrough(moment(second33 + 1500), holding, admissions, isTransfer).why, /no reading of the slot right after it/);
   // The reading dates the running admission at 33.3 s, after the receipt at 33.2 s: not proven.
-  assert.match(transferHeldAt(second33 - 200, [reading(second33 + 100, 20, [durable(200)])], admissions, isTransfer).why, /may have started only then/);
+  assert.match(transferHeldThrough(moment(second33 - 200), [reading(second33 + 100, 20, [durable(200)])], admissions, isTransfer).why, /may have started after the report arrived/);
   // Dated at 32.8 s, before it (its log line came within the log lag): proven.
-  assert.deepEqual(transferHeldAt(second33 - 200, [reading(second33 + 100, 20, [durable(700)])], admissions, isTransfer), { held: true, why: null });
+  assert.deepEqual(transferHeldThrough(moment(second33 - 200), [reading(second33 + 100, 20, [durable(700)])], admissions, isTransfer), { held: true, why: null });
   // Control-plane work in the slot, or none.
   const second31 = new Date('2026-10-16T01:16:31.500').getTime();
-  assert.match(transferHeldAt(second31 + 1000, [reading(second31 + 1200, 20, [durable(1200)])], admissions, isTransfer).why, /other work or none/);
-  assert.match(transferHeldAt(second31 + 1000, [reading(second31 + 1200, 20, [])], admissions, isTransfer).why, /other work or none/);
-  assert.match(transferHeldAt(second31, [{ at: second31 + 500, unreadable: 'HTTP 503' }], admissions, isTransfer).why, /could not be read/);
-  assert.match(transferHeldAt(second33 + 3500, [reading(second33 + 4000, 600, [durable(4000)])], admissions, isTransfer).why, /could not tell/);
+  assert.match(transferHeldThrough(moment(second31 + 1000), [reading(second31 + 1200, 20, [durable(1200)])], admissions, isTransfer).why, /other work or none/);
+  assert.match(transferHeldThrough(moment(second31 + 1000), [reading(second31 + 1200, 20, [])], admissions, isTransfer).why, /other work or none/);
+  assert.match(transferHeldThrough(moment(second31), [{ at: second31 + 500, unreadable: 'HTTP 503' }], admissions, isTransfer).why, /could not be read/);
+  assert.match(transferHeldThrough(moment(second33 + 3500), [reading(second33 + 4000, 600, [durable(4000)])], admissions, isTransfer).why, /could not tell/);
 });
 
 test('the window\'s readings are counted by whether they show the transfer in the general slot', () => {
@@ -388,20 +391,20 @@ test('a busy Edge\'s receipt passes only while an admission of the transfer held
   const held = { outcome: 'pass', text: '"r (1)" by node8 (edgeA) in main/reports at node9 (edgeB): in shared memory 1 s after the share' };
   // Inside the second admission (01:16:33), with a reading right after that shows it.
   const inside = new Date('2026-10-16T01:16:35.200').getTime();
-  const during = transferHeldAt(inside, [reading(inside + 300, 20, [durable(2100)])], admissions, isTransfer);
+  const during = transferHeldThrough(moment(inside), [reading(inside + 300, 20, [durable(2100)])], admissions, isTransfer);
   assert.deepEqual(busyReceiptOutcome(held, { received: inside, life, held: during }),
     { outcome: 'pass', text: `${held.text}, while an admission of the transfer held the general slot` });
   // Every receipt between the two admissions (01:16:30 to 01:16:32), the slot free or holding other work:
   // the case cannot pass as exercised.
   for (const at of ['2026-10-16T01:16:30.100', '2026-10-16T01:16:31.600', '2026-10-16T01:16:32.900']) {
     const between = new Date(at).getTime();
-    const evidence = transferHeldAt(between, [reading(between + 300, 20, [])], admissions, isTransfer);
+    const evidence = transferHeldThrough(moment(between), [reading(between + 300, 20, [])], admissions, isTransfer);
     const verdict = busyReceiptOutcome(held, { received: between, life, held: evidence });
     assert.equal(verdict.outcome, 'fail', at);
-    assert.match(verdict.text, /; not exercised: no reading shows the transfer holding the general slot at that moment \(the slot held other work or none\)$/);
+    assert.match(verdict.text, /; not exercised: no reading shows the transfer holding the general slot throughout the moments the report can have arrived \(the slot held other work or none\)$/);
   }
   // Slot evidence that cannot be read, or none at all, cannot pass either.
-  const unread = transferHeldAt(inside, [{ at: inside + 300, unreadable: 'HTTP 503' }], admissions, isTransfer);
+  const unread = transferHeldThrough(moment(inside), [{ at: inside + 300, unreadable: 'HTTP 503' }], admissions, isTransfer);
   assert.match(busyReceiptOutcome(held, { received: inside, life, held: unread }).text, /not exercised: .*could not be read/);
   assert.match(busyReceiptOutcome(held, { received: inside, life, held: undefined }).text, /not exercised: .*\(no reading\)$/);
   // After the transfer ended, or with no transfer at all.
@@ -447,6 +450,9 @@ test('#3293: a write into the sub-graph refused with HTTP 500 for the unregister
   // The write went through: the gap's check held.
   const written = subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(null), listed: false });
   assert.deepEqual([written.outcome, verdictOf(written), gapOf(written)], ['pass', 'xpass', '#3293']);
+  // A writer that already listed the sub-graph (learned from shared-memory sync) never met the gap: a plain pass.
+  const learned = subGraphWriteResult({ node, graph: { key: 'main' }, record: probeOf(null), listed: true });
+  assert.deepEqual([learned.outcome, verdictOf(learned), gapOf(learned)], ['pass', 'pass', null]);
 });
 
 test('#3294: the curator\'s promotion of another Edge\'s report refused as not resident is the known gap only with the report in its shared memory', () => {
@@ -520,12 +526,12 @@ test('a promotion\'s delivery to the busy Edge counts once the transfer held the
   assert.deepEqual(busyReceiptOutcome(result, { received: receivedAt, life, held: contended, delivery: true }),
     { outcome: 'pass', text: `${result.text}, after contending with the transfer for the general slot` });
   // At the receipt itself the slot was not the transfer's: the strict rule would not have counted it.
-  assert.equal(transferHeldAt(receivedAt, readings, admissions, isTransfer).held, false);
+  assert.equal(transferHeldThrough(moment(receivedAt), readings, admissions, isTransfer).held, false);
   // No reading in the window shows the transfer: not exercised.
   const idle = transferContended(promotedAt, promotedAt + 2000, readings, admissions, isTransfer);
   assert.deepEqual(idle, { held: false, why: 'none of the 1 reading(s) between them shows the transfer in the slot' });
   assert.match(busyReceiptOutcome(result, { received: promotedAt + 2000, life, held: idle, delivery: true }).text,
-    /; not exercised: the transfer never held the general slot between the promotion and the receipt \(none of the 1 reading\(s\) between them shows the transfer in the slot\)$/);
+    /; not exercised: the transfer never held the general slot between the promotion and the delivery \(none of the 1 reading\(s\) between them shows the transfer in the slot\)$/);
   assert.deepEqual(transferContended(promotedAt, promotedAt + 100, readings, admissions, isTransfer), { held: false, why: 'no reading was taken between them' });
   // After the transfer's life, even with contention before.
   assert.match(busyReceiptOutcome(result, { received: life.to + 5, life, held: contended, delivery: true }).text, /had ended by then$/);
@@ -544,10 +550,10 @@ test('successive transfer admissions around a receipt: the reading must date the
   // which both log lines match, and the later one may have started after the receipt.
   const straddling = reading(base + 2000, 200, [durable(1000)]);
   assert.equal(slotHolder(straddling, admissions, isTransfer).candidates.length, 2);
-  assert.deepEqual(transferHeldAt(receivedAt, [straddling], admissions, isTransfer), { held: false, why: 'the transfer\'s admission in the slot may have started only then' });
+  assert.deepEqual(transferHeldThrough(moment(receivedAt), [straddling], admissions, isTransfer), { held: false, why: 'the transfer\'s admission in the slot may have started after the report arrived (its arrival is dated to the 0 ms before a read found it)' });
   // A reading that dates the running admission wholly before the receipt proves it.
   const before = reading(base + 2000, 20, [durable(1600)]);
-  assert.deepEqual(transferHeldAt(receivedAt, [before], admissions, isTransfer), { held: true, why: null });
+  assert.deepEqual(transferHeldThrough(moment(receivedAt), [before], admissions, isTransfer), { held: true, why: null });
 });
 
 test('an absence watch fails a report whose value left the layer but whose body is still there', async () => {
@@ -610,7 +616,7 @@ test('a quiet admission the readings show at work keeps the transfer alive; a tr
   assert.equal(alive.to, start + 14_000);
   // Received a second before the last reading, as the suite reads the slot every second.
   const receivedAt = start + 13_000;
-  const held = transferHeldAt(receivedAt, quiet, admissions, isTransfer);
+  const held = transferHeldThrough(moment(receivedAt), quiet, admissions, isTransfer);
   const result = { outcome: 'pass', text: 'r at node9 (edgeB): in shared memory 1 s after the share' };
   assert.equal(busyReceiptOutcome(result, { received: receivedAt, life: alive, held }).outcome, 'pass');
   // Judged by its log alone, the same receipt would have been called after the transfer.
@@ -640,4 +646,171 @@ test('case 5 runs only for an author whose report was promoted; a refused promot
   caseReport.record(5, dependent);
   caseReport.record(5, postPromotionCheck({ author: { label: 'node9 (edgeB)' }, report: first, promoted: false, promotion: failed }));
   assert.deepEqual(caseReport.summary('Results'), ['5']);
+});
+
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const BODY = 'urn:one-graph:ReportBody';
+
+test('a report is held only whole: its class, its value and its body, each with the written object', () => {
+  const expected = [
+    { name: 'class', predicate: RDF_TYPE, iri: 'urn:one-graph:Report' },
+    { name: 'value', predicate: LABEL, text: 'r (1)' },
+    { name: 'body', predicate: BODY, text: 'report 1 of run S: payload' },
+  ];
+  const whole = [{ p: RDF_TYPE, o: 'urn:one-graph:Report' }, { p: LABEL, o: '"r (1)"' }, { p: BODY, o: '"report 1 of run S: payload"' }];
+  assert.deepEqual(judgeReport(whole, expected), { held: true });
+  // SPARQL-results cells, a bracketed IRI, and another predicate of the subject beside: held.
+  assert.deepEqual(judgeReport([
+    { p: `<${RDF_TYPE}>`, o: { type: 'uri', value: 'urn:one-graph:Report' } }, { p: { type: 'uri', value: LABEL }, o: { type: 'literal', value: 'r (1)' } },
+    whole[2], { p: 'urn:x:other', o: '"x"' },
+  ], expected), { held: true });
+  // The value alone: the class and the body were lost.
+  assert.deepEqual(judgeReport([whole[1]], expected), { held: false, missing: ['class', 'body'] });
+  assert.deepEqual(judgeReport([], expected), { held: false, missing: ['class', 'value', 'body'] });
+  // An altered body, a class given as a text, a second value beside the written one.
+  assert.deepEqual(judgeReport([whole[0], whole[1], { p: BODY, o: '"report 1 of run S: pay"' }], expected), { held: false, different: 'its body "report 1 of run S: pay"' });
+  assert.deepEqual(judgeReport([{ p: RDF_TYPE, o: '"urn:one-graph:Report"' }, whole[1], whole[2]], expected), { held: false, different: 'its class "urn:one-graph:Report"' });
+  assert.deepEqual(judgeReport([...whole, { p: LABEL, o: '"r (2)"' }], expected), { held: false, different: 'its value "r (2)"' });
+  assert.deepEqual(readOutcome('vm', judgeReport([whole[1]], expected)), { satisfied: false, missing: ['class', 'body'] });
+});
+
+// A node whose layers hold what `layers()` answers ({ swm, vm }: quads as written, or null), behind the create and share routes.
+function layeredNode(cg, layers) {
+  const written = [];
+  const rowsOf = (quads, graph) => (quads ?? []).map(quad => ({ ...(graph ? { g: graph } : {}), p: quad.predicate, o: quad.object }));
+  const api = async (_node, method, path, body) => {
+    if (method === 'POST' && path === '/api/knowledge-assets') {
+      written.push(...body.quads);
+      return { status: 200, json: {}, text: '{}' };
+    }
+    if (method === 'POST' && path.endsWith('/swm/share-async')) return { status: 200, json: { jobId: 'j1' }, text: '{"jobId":"j1"}' };
+    if (method === 'GET' && path.startsWith('/api/knowledge-assets/swm/share-jobs/')) return { status: 200, json: { state: 'succeeded' }, text: '{"state":"succeeded"}' };
+    if (path !== '/api/query') return { status: 404, json: null, text: 'not used' };
+    const { swm, vm } = layers();
+    const rows = body.view === 'shared-working-memory' ? rowsOf(swm)
+      : body.view === 'verifiable-memory' ? rowsOf(vm)
+        : [...rowsOf(swm, `${sharedMemoryScope(cg, 'reports')}/0xaa/1`), ...rowsOf(vm, `did:dkg:context-graph:${cg}/reports/_verifiable_memory/1`)];
+    return { status: 200, json: null, text: JSON.stringify({ result: { type: 'bindings', bindings: rows } }) };
+  };
+  return { written, api };
+}
+
+test('a placement check needs the whole report in the layer, as share() wrote it: class, value and body', async () => {
+  const cg = '0xabc/one-graph-main-1';
+  let layers = { swm: null, vm: null };
+  const stub = layeredNode(cg, () => layers);
+  const io = createReports({ api: stub.api }, { stamp: 'S', sub: 'reports', predicate: LABEL, type: 'urn:one-graph:Report', boundMs: 300, definitionMs: 1000, syncedMs: 1000, pollMs: 30 });
+  const record = await io.share(author, { key: 'main', id: cg, resolved: cg }, 'r');
+  assert.equal(record.error, null);
+  assert.deepEqual(stub.written.map(quad => quad.predicate), [RDF_TYPE, LABEL, BODY]);
+  const whole = stub.written;
+  const placed = async kind => {
+    const handle = io.watch(io.pairs(4, record, [node], kind, { from: Date.now(), bound: 300 }));
+    await handle.done;
+    return pairOutcome(handle.pairs[0], { boundMs: 300 });
+  };
+  layers = { swm: whole, vm: null };
+  assert.equal((await placed('swm')).outcome, 'pass');
+  // Only the value in shared memory: its class and body were lost.
+  layers = { swm: whole.filter(quad => quad.predicate === LABEL), vm: null };
+  const partial = await placed('swm');
+  assert.equal(partial.outcome, 'fail');
+  assert.match(partial.text, /NOT in shared memory: not in the shared-working-memory view of reports \(without its class and its body\) nor in the cross-partition read \(without its class and its body\)/);
+  // Verified Memory with an altered body, then whole.
+  layers = { swm: null, vm: whole.map(quad => (quad.predicate === BODY ? { ...quad, object: '"report 1 of run S: cut"' } : quad)) };
+  const altered = await placed('vm');
+  assert.equal(altered.outcome, 'fail');
+  assert.match(altered.text, /NOT in Verified Memory: not in the verifiable-memory view of reports \(holds another value: its body "report 1 of run S: cut"\)/);
+  layers = { swm: null, vm: whole.filter(quad => quad.predicate !== RDF_TYPE) };
+  assert.match((await placed('vm')).text, /\(without its class\)/);
+  layers = { swm: null, vm: whole };
+  assert.equal((await placed('vm')).outcome, 'pass');
+});
+
+test('a report\'s arrival is dated between the last read that missed it and the first that found it', () => {
+  assert.equal(arrivalWindow(null), null);
+  assert.equal(arrivalWindow({ view: { lastMissSentAt: 100, hit: null }, partitions: { lastMissSentAt: 100, hit: null } }), null);
+  const view = { lastMissSentAt: 1000, hit: { sentAt: 1250, completedAt: 1300 } };
+  assert.deepEqual(arrivalWindow({ view, partitions: { lastMissSentAt: 1100, hit: { sentAt: 1350, completedAt: 1400 } } }), { after: 1000, by: 1300 });
+  // A read that lags still missed it after the other found it: the window keeps the earlier miss.
+  assert.deepEqual(arrivalWindow({ view, partitions: { lastMissSentAt: 1350, hit: { sentAt: 1600, completedAt: 1650 } } }), { after: 1000, by: 1300 });
+  // Found at a read's first try, with no miss before: the window has no opening.
+  assert.deepEqual(arrivalWindow({ view, partitions: { lastMissSentAt: null, hit: { sentAt: 1250, completedAt: 1290 } } }), { after: null, by: 1290 });
+  assert.match(transferHeldThrough({ after: null, by: 1290 }, [], [], isTransfer).why, /could not be dated/);
+  assert.match(transferHeldThrough(null, [], [], isTransfer).why, /never dated/);
+});
+
+// The local log stamp of a moment, as the daemon writes it (`YYYY-MM-DD HH:MM:SS`).
+const pad = n => String(n).padStart(2, '0');
+const logStamp = ms => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+
+test('a report read only once an admission had started is not evidence of the busy slot: its arrival is dated by the reads around it', async () => {
+  // The report is in edgeB's shared memory from 300 ms on. Each query is answered as of 20 ms after it was
+  // sent and comes back 180 ms after it was sent, so the first read that finds it completes well after 300 ms.
+  const cg = '0xabc/one-graph-main-1';
+  let t0 = 0;
+  const arrival = () => t0 + 300;
+  const devnet = {
+    api: async (_node, _method, _path, body) => {
+      const seenAt = Date.now() + 20;
+      await new Promise(resolve => setTimeout(resolve, 180));
+      const present = seenAt >= arrival();
+      const rows = present ? [
+        { p: RDF_TYPE, o: 'urn:one-graph:Report' }, { p: LABEL, o: '"r (1)"' }, { p: BODY, o: '"report 1 of run S: payload"' },
+      ].map(row => ({ ...(body.includeContextGraphPartitions ? { g: `${sharedMemoryScope(cg, 'reports')}/0xaa/1` } : {}), ...row })) : [];
+      return { status: 200, json: null, text: JSON.stringify({ result: { type: 'bindings', bindings: rows } }) };
+    },
+  };
+  const io = createReports(devnet, { stamp: 'S', sub: 'reports', predicate: LABEL, type: 'urn:one-graph:Report', boundMs: 2000, definitionMs: 1000, syncedMs: 1000, pollMs: 30 });
+  const report = {
+    author, graph: { key: 'main', id: cg, resolved: cg }, sub: 'reports', subject: 'urn:one-graph:S:1', value: 'r (1)', doneAt: null, error: null,
+    triples: [
+      { name: 'class', predicate: RDF_TYPE, iri: 'urn:one-graph:Report' }, { name: 'value', predicate: LABEL, text: 'r (1)' },
+      { name: 'body', predicate: BODY, text: 'report 1 of run S: payload' },
+    ],
+  };
+  t0 = Date.now();
+  const window = arrivalWindow(await io.dateArrival(node, report, 'swm', { everyMs: 50, untilMs: 3000 }).done);
+  assert.ok(window.after < arrival() && arrival() <= window.by, JSON.stringify({ window, arrival: arrival() }));
+  assert.ok(window.by >= arrival() + 160, 'the read that found it completed long after the arrival');
+  // The transfer's admission started at 350 ms, after the report arrived and before the read completed;
+  // a reading right after the read shows it running.
+  const startedAt = t0 + 350;
+  const admissions = parseAdmissions(`${logStamp(startedAt)} sync aaaa [DKGAgent] Sync backpressure running durable:0xabc/one-graph-large-1:QP4sWZbL (global inflight=1/1, queued=0/0)`);
+  const after = reading(window.by + 100, 20, [durable(window.by + 100 - startedAt)]);
+  assert.equal(slotHolder(after, admissions, isTransfer).state, 'transfer');
+  // Dated by the read's completion alone, the receipt would have counted; dated by the reads around it, it does not.
+  assert.deepEqual(transferHeldThrough(moment(window.by), [after], admissions, isTransfer), { held: true, why: null });
+  const evidence = transferHeldThrough(window, [after], admissions, isTransfer);
+  assert.equal(evidence.held, false);
+  assert.match(evidence.why, /may have started after the report arrived/);
+  // An admission that was running before the reads could have missed the report holds the slot throughout.
+  const earlier = t0 - 500;
+  const longAdmission = parseAdmissions(`${logStamp(earlier)} sync bbbb [DKGAgent] Sync backpressure running durable:0xabc/one-graph-large-1:EJfXkbMM (global inflight=1/1, queued=0/0)`);
+  assert.deepEqual(transferHeldThrough(window, [reading(window.by + 100, 20, [durable(window.by + 100 - earlier)])], longAdmission, isTransfer), { held: true, why: null });
+});
+
+test('a promotion\'s delivery contended with the transfer only on readings answered before the last read that missed it', () => {
+  const admissions = parseAdmissions(TRANSFER_LOG);
+  const promotedAt = new Date('2026-10-16T01:16:30.000').getTime();
+  const busy = reading(new Date('2026-10-16T01:16:35.500').getTime(), 20, [durable(2100)]);
+  // The last read that missed the delivery was sent at 35.0 s: the reading at 35.5 s may show the slot after it.
+  assert.deepEqual(transferContended(promotedAt, new Date('2026-10-16T01:16:35.000').getTime(), [busy], admissions, isTransfer), { held: false, why: 'no reading was taken between them' });
+  assert.deepEqual(transferContended(promotedAt, new Date('2026-10-16T01:16:36.000').getTime(), [busy], admissions, isTransfer), { held: true, why: null });
+  // A reading sent before the promotion does not count either; a delivery never dated has no evidence.
+  assert.deepEqual(transferContended(busy.sentAt + 1, busy.at + 1000, [busy], admissions, isTransfer), { held: false, why: 'no reading was taken between them' });
+  assert.match(transferContended(promotedAt, null, [busy], admissions, isTransfer).why, /could not be dated/);
+});
+
+test('a definition shown only past its deadline does not count, however slowly the listing answered', () => {
+  const from = 1_000_000;
+  assert.deepEqual(definitionInTime({ ok: true, completedAt: from + 30_000 }, { from, boundMs: 90_000 }), { held: true, late: false, afterMs: 30_000 });
+  // Asked at 89 s, answered at 95 s with the definition: past the 90 s.
+  assert.deepEqual(definitionInTime({ ok: true, completedAt: from + 95_000 }, { from, boundMs: 90_000 }), { held: false, late: true, afterMs: 95_000 });
+  assert.deepEqual(definitionInTime({ ok: true, completedAt: from + 90_000 }, { from, boundMs: 90_000 }), { held: true, late: false, afterMs: 90_000 });
+  assert.deepEqual(definitionInTime({ ok: false, completedAt: from + 90_500 }, { from, boundMs: 90_000 }), { held: false, late: false, afterMs: 90_500 });
+  assert.deepEqual(definitionInTime(undefined, { from, boundMs: 90_000 }), { held: false, late: false, afterMs: null });
 });

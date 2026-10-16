@@ -61,7 +61,9 @@ const SUB_GRAPH_UNREGISTERED = {
   issue: '#3293',
   what: 'an Edge holding a registered graph\'s definition does not know its sub-graph, and its first write there fails with HTTP 500',
   covers: ({ check }) => check === 'sub-graph-write',
-  isTheGap: ({ check }) => check === 'sub-graph-write',
+  // A write that went through says #3293 is fixed only from a writer that did not list the sub-graph:
+  // one that had learned it (from shared-memory sync, say) never met the gap.
+  isTheGap: ({ check, evidence }) => check === 'sub-graph-write' && evidence?.subGraphListed === false,
   failure({ evidence }) {
     if (evidence?.definitionHeld !== true) return { expected: false, because: 'the writer held no definition, so this is not #3293' };
     if (evidence.subGraphListed === false && evidence.httpStatus === 500 && evidence.unregisteredSubGraph === true) {

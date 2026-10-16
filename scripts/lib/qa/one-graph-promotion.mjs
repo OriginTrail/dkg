@@ -6,7 +6,7 @@
 // held an Edge's only sync slot. The shared-memory reads reuse the judgements
 // of member-sharing.mjs.
 
-import { describe, pairHeld } from './member-sharing.mjs';
+import { describe, literalText, pairHeld } from './member-sharing.mjs';
 
 const cellText = cell => (cell !== null && typeof cell === 'object' ? String(cell.value ?? '') : String(cell ?? ''));
 const bare = iri => iri.replace(/^<|>$/g, '');
@@ -37,6 +37,45 @@ export function judgeGone(rows) {
   return { gone: rows.length === 0, found: rows.length };
 }
 
+// An IRI cell of the query API: a bare or bracketed IRI, or a SPARQL-results `uri`; null for a literal or a blank node.
+function iriText(cell) {
+  if (cell !== null && typeof cell === 'object') return cell.type === 'uri' && typeof cell.value === 'string' ? cell.value : null;
+  if (typeof cell !== 'string' || cell.startsWith('"') || cell.startsWith('_:')) return null;
+  return bare(cell);
+}
+function cellShown(cell) {
+  const text = literalText(cell);
+  if (text !== null) return JSON.stringify(text.length > 60 ? `${text.slice(0, 60)}...` : text);
+  const iri = iriText(cell);
+  return iri !== null ? `<${iri}>` : 'a value that is neither a text nor an IRI';
+}
+
+/**
+ * Whether rows of one report's subject hold the whole report as it was
+ * written: each of its triples (`expected`: [{ name, predicate, iri | text }],
+ * its class, its value and its body) is there, and every object held for
+ * that predicate is the written one. A layer that holds the value but lost
+ * the body or the class does not hold the report, and nor does one that
+ * holds another object beside the written one (corrupted content). Other
+ * predicates of the subject are not judged. Returns { held } or { held:
+ * false, missing (the names of the triples not there), different }.
+ */
+export function judgeReport(rows, expected) {
+  const missing = [];
+  const different = [];
+  for (const triple of expected) {
+    const objects = rows.filter(row => bare(cellText(row.p)) === triple.predicate).map(row => row.o);
+    if (objects.length === 0) {
+      missing.push(triple.name);
+      continue;
+    }
+    const wrong = objects.filter(cell => ('iri' in triple ? iriText(cell) !== triple.iri : literalText(cell) !== triple.text));
+    if (wrong.length) different.push(`its ${triple.name} ${[...new Set(wrong.map(cellShown))].join(' | ')}`);
+  }
+  if (missing.length === 0 && different.length === 0) return { held: true };
+  return { held: false, ...(missing.length ? { missing } : {}), ...(different.length ? { different: different.join('; ') } : {}) };
+}
+
 /**
  * What each kind of pair (a report, a node, what it must show) waits for, and
  * in which layer: `swm` the report in shared memory, `vm` in Verified Memory,
@@ -58,22 +97,27 @@ const LAYER_NAMES = { swm: 'shared memory', vm: 'Verified Memory' };
 
 /**
  * One read of a pair, folded to what the pair waits for: { satisfied, error,
- * different, found }. `seen` is { held, different } for a held kind (from
- * judgeHeld) and { gone, found } for `gone`, or { error } when the read
- * failed: a failed read satisfies nothing, not even `gone`.
+ * missing, different, found }. `seen` is { held, missing, different } for a
+ * held kind (from judgeReport) and { gone, found } for `gone`, or { error }
+ * when the read failed: a failed read satisfies nothing, not even `gone`.
  */
 export function readOutcome(kind, seen) {
   if (!PAIR_KINDS[kind]) throw new Error(`unknown pair kind ${kind}`);
   if (seen?.error) return { satisfied: false, error: seen.error };
   if (PAIR_KINDS[kind].want === 'gone') return { satisfied: seen?.gone === true, found: seen?.found ?? 0 };
-  return { satisfied: seen?.held === true, ...(seen?.different ? { different: seen.different } : {}) };
+  return {
+    satisfied: seen?.held === true,
+    ...(seen?.held !== true && seen?.missing?.length ? { missing: seen.missing } : {}),
+    ...(seen?.different ? { different: seen.different } : {}),
+  };
 }
 
 const viewName = (layer, sub) => `the ${layer === 'vm' ? 'verifiable-memory' : 'shared-working-memory'} view${sub ? ` of ${sub}` : ''}`;
 function readDetail(read) {
   if (!read) return ' (never read)';
   if (read.error) return ` (${read.error})`;
-  if (read.different) return ` (holds another value: ${read.different})`;
+  const parts = [read.missing?.length && `without its ${read.missing.join(' and its ')}`, read.different && `holds another value: ${read.different}`].filter(Boolean);
+  if (parts.length) return ` (${parts.join('; ')})`;
   if (read.found) return ` (${read.found} row(s) of it)`;
   return '';
 }
@@ -361,22 +405,49 @@ export function transferLifetime(logText, admissions, isTransfer, readings = [])
 }
 
 /**
- * Whether the large transfer held the node's only general slot when a report
- * arrived at `receivedAt`: the first reading taken at or after that moment
- * (and soon enough) shows the transfer, and dates the start of the running
- * admission before `receivedAt` (the latest start the reading allows, not the
- * log second of any one candidate: when several of the transfer's admissions
- * match, the running one may be a later one). One admission holds its slot
- * without a break, so it held it at `receivedAt`. Returns { held, why }.
+ * When a report reached a node, as far as the node's reads can date it:
+ * `dating` keeps, for each read, when the last read that did not find what
+ * it waits for was sent (`lastMissSentAt`; a read is answered as of some
+ * moment after it was sent, so the report came after that) and when the
+ * first read that found it was sent and completed (`hit`; the report was
+ * there by its completion). The arrival lies in the window (after, by]:
+ * `by` is the earliest completion of a read that found it; `after` the
+ * earliest of the reads' last misses, so that one read that lags the other
+ * cannot move the window past the arrival. `after` is null when a read found
+ * it at its first try, with no miss before. Returns { after, by } or null
+ * when no read found it.
  */
-export function transferHeldAt(receivedAt, readings, admissions, isTransfer) {
-  const after = readings.filter(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= receivedAt).sort((a, b) => a.at - b.at)[0];
-  if (!after || after.at - receivedAt > RECEIPT_READING_MS) return { held: false, why: 'no reading of the slot right after it' };
+export function arrivalWindow(dating) {
+  const reads = Object.values(dating ?? {}).filter(read => read?.hit && Number.isFinite(read.hit.completedAt));
+  if (reads.length === 0) return null;
+  const by = Math.min(...reads.map(read => read.hit.completedAt));
+  const after = reads.every(read => Number.isFinite(read.lastMissSentAt)) ? Math.min(...reads.map(read => read.lastMissSentAt)) : null;
+  return { after, by };
+}
+
+/**
+ * Whether the large transfer held the node's only general slot throughout
+ * the window in which a report arrived (arrivalWindow: after the moment
+ * `after`, by the moment `by`): the first reading taken at or after `by`
+ * (and soon enough) shows the transfer, and dates the start of the running
+ * admission before `after` (the latest start the reading allows, not the log
+ * second of any one candidate: when several of the transfer's admissions
+ * match, the running one may be a later one). One admission holds its slot
+ * without a break, so it held it at every moment the report could have
+ * arrived. A query's completion is not the arrival: a report that came in a
+ * free moment and was read only once an admission had started is not
+ * evidence. Returns { held, why }.
+ */
+export function transferHeldThrough(window, readings, admissions, isTransfer) {
+  if (!window) return { held: false, why: 'its arrival was never dated' };
+  if (!Number.isFinite(window.after)) return { held: false, why: 'its arrival could not be dated: no read found it missing before it was there' };
+  const after = readings.filter(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= window.by).sort((a, b) => a.at - b.at)[0];
+  if (!after || after.at - window.by > RECEIPT_READING_MS) return { held: false, why: 'no reading of the slot right after it' };
   const { state, start } = slotHolder(after, admissions, isTransfer);
   if (state !== 'transfer') {
     return { held: false, why: { other: 'the slot held other work or none', unclear: 'the reading after it could not tell which work held the slot', unreadable: 'the slot could not be read' }[state] };
   }
-  if (start.to >= receivedAt) return { held: false, why: 'the transfer\'s admission in the slot may have started only then' };
+  if (start.to >= window.after) return { held: false, why: `the transfer's admission in the slot may have started after the report arrived (its arrival is dated to the ${window.by - window.after} ms before a read found it)` };
   return { held: true, why: null };
 }
 
@@ -388,35 +459,41 @@ export function transferOccupancy({ readings, admissions, isTransfer, from, unti
 
 /**
  * Whether the transfer held the node's general slot at some moment between
- * `since` and `until`: a reading taken in that window shows it there. A
+ * `since` (the promotion) and `until` (the last moment the delivery was
+ * surely not done: the `after` of its arrivalWindow): a reading sent after
+ * `since` and answered before `until` shows it there. A reading that ran
+ * past `until` may show the slot after the delivery, and does not count. A
  * promotion's Verified Memory reaches a node through the node's own sync
  * work, which needs that slot, so its receipt never lands under a transfer
  * admission; what shows the busy slot is that the delivery had to contend
  * with the transfer for it. Returns { held, why }.
  */
 export function transferContended(since, until, readings, admissions, isTransfer) {
-  const window = readings.filter(reading => reading.at >= since && (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) <= until);
+  if (!Number.isFinite(until)) return { held: false, why: 'the delivery could not be dated: no read found it missing before it was there' };
+  const window = readings.filter(reading => (Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at) >= since && reading.at <= until);
   if (window.some(reading => slotHolder(reading, admissions, isTransfer).state === 'transfer')) return { held: true, why: null };
   return { held: false, why: window.length ? `none of the ${window.length} reading(s) between them shows the transfer in the slot` : 'no reading was taken between them' };
 }
 
 /**
- * The busy Edge's check of one receipt: its pair result (pairOutcome), when
- * the report reached the Edge, the transfer's life (transferLifetime), and
- * the slot evidence `held`: for a report, whether an admission of the
- * transfer held the general slot at that moment (transferHeldAt); for a
- * promotion (`delivery`), whether the transfer held it at some moment between
- * the promotion and the receipt (transferContended). It passes only with that
- * evidence and a receipt within the transfer's life. A receipt after the
- * transfer ended, one without that evidence, or one whose readings cannot be
- * placed leaves the case not exercised and fails. A result that failed, or a
- * pair that was never received, is returned as it is.
+ * The busy Edge's check of one receipt: its pair result (pairOutcome), the
+ * latest moment the report can have reached the Edge (`received`, the `by`
+ * of its arrivalWindow), the transfer's life (transferLifetime), and the
+ * slot evidence `held`: for a report, whether an admission of the transfer
+ * held the general slot throughout the window of its arrival
+ * (transferHeldThrough); for a promotion (`delivery`), whether the transfer
+ * held it at some moment between the promotion and the delivery
+ * (transferContended). It passes only with that evidence and a receipt
+ * within the transfer's life. A receipt after the transfer ended, one
+ * without that evidence, or one whose readings cannot be placed leaves the
+ * case not exercised and fails. A result that failed, or a pair that was
+ * never received, is returned as it is.
  */
 export function busyReceiptOutcome(result, { received, life, held, delivery = false }) {
   if (result.outcome !== 'pass' || received === null || received === undefined) return result;
   if (!life || received > life.to) return { outcome: 'fail', text: `${result.text}; not exercised: the transfer of the large graph had ended by then` };
   if (!held?.held) {
-    const missing = delivery ? 'the transfer never held the general slot between the promotion and the receipt' : 'no reading shows the transfer holding the general slot at that moment';
+    const missing = delivery ? 'the transfer never held the general slot between the promotion and the delivery' : 'no reading shows the transfer holding the general slot throughout the moments the report can have arrived';
     return { outcome: 'fail', text: `${result.text}; not exercised: ${missing} (${held?.why ?? 'no reading'})` };
   }
   const how = delivery ? 'after contending with the transfer for the general slot' : 'while an admission of the transfer held the general slot';
@@ -436,7 +513,10 @@ export function busyReceiptOutcome(result, { received, life, held, delivery = fa
 export function subGraphWriteResult({ node, graph, record, listed }) {
   const evidence = { definitionHeld: true, subGraphListed: listed };
   const where = `${graph.key}/${record.sub}`;
-  if (!record.error) return { check: 'sub-graph-write', outcome: 'pass', text: `${node.label} wrote into ${where} before registering the sub-graph itself`, evidence };
+  if (!record.error) {
+    const learned = listed ? ' (its listing already named it)' : '';
+    return { check: 'sub-graph-write', outcome: 'pass', text: `${node.label} wrote into ${where} before registering the sub-graph itself${learned}`, evidence };
+  }
   const refusal = record.refusal ?? {};
   return {
     check: 'sub-graph-write',
@@ -484,4 +564,19 @@ export function postPromotionCheck({ author, report, promoted, promotion }) {
     text: `${author.label}: not exercised: ${why}, so no share of it follows a promotion${promotion?.text ? ` (${promotion.text})` : ''}`,
     evidence: promotion?.evidence ?? { authorIsCurator: false, heldByCurator: false },
   };
+}
+
+/**
+ * Whether a node held a graph's definition in time: `seen` is the last
+ * listing a poll made ({ ok: whether it showed the definition, completedAt:
+ * when it completed }), `from` the subscribe and `boundMs` the deadline. A
+ * listing that showed the definition only after the deadline does not count:
+ * the deadline is the node's, not the poll's. Returns { held, late (it
+ * showed the definition, but past the deadline), afterMs (when that listing
+ * completed, from `from`) }.
+ */
+export function definitionInTime(seen, { from, boundMs }) {
+  const afterMs = Number.isFinite(seen?.completedAt) ? seen.completedAt - from : null;
+  const showed = seen?.ok === true && afterMs !== null;
+  return { held: showed && afterMs <= boundMs, late: showed && afterMs > boundMs, afterMs };
 }
