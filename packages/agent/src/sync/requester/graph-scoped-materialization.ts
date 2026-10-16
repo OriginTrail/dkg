@@ -1,21 +1,18 @@
+import { executeGraphScopedPublication } from './graph-scoped-publication.js';
 import {
-  assertSafeIri,
   parseDeterministicKnowledgeAssetUal,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   tryReplaceGraphAndSubjectAtomically,
+  type AtomicAssetReplacement,
   type Quad,
   type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
-  readCurrentAssertionVersion,
-  mergeSameVersionGraphKnowledgeAssetMetadataV1,
   overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
-  overlayLocallyTrustedKnowledgeAssetControls,
   readGraphKnowledgeAssetConfirmationKindV1,
-  withMaterializationLock,
 } from '@origintrail-official/dkg-publisher';
 import {
   filterOversizedSyncQuads,
@@ -380,118 +377,20 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     return 'quarantined';
   }
 
-  const materializeUnderLock = async (): Promise<GraphScopedMaterializationOutcome> => {
-    assertCurrent();
-    const currentVersion = await readCurrentAssertionVersion(
-      store,
-      asset.metaGraph,
-      asset.ual,
-      options,
-    );
-    assertCurrent();
-    if (currentVersion !== undefined && currentVersion > asset.assertionVersion) {
-      return 'stale';
-    }
-    let replacementMetadata = asset.metadataQuads;
-    if (currentVersion === asset.assertionVersion) {
-      const currentMetadata = await readCurrentGraphKnowledgeAssetMetadata(
-        store,
-        asset.metaGraph,
-        asset.ual,
-        options,
-      );
-      if (currentMetadata) {
-        replacementMetadata = mergeSameVersionGraphKnowledgeAssetMetadataV1(
-          replacementMetadata,
-          currentMetadata,
-        );
-      }
-      assertCurrent();
-    }
-    const committedMetadata = await overlayLocallyTrustedKnowledgeAssetControls(
-      store,
-      asset.metaGraph,
-      asset.ual,
-      replacementMetadata,
-      options,
-    );
-    // This is the last interruptible boundary. Once the atomic replacement is
-    // dispatched, its real completion owns the materialization lock and stop()
-    // must drain it rather than detaching the writer.
-    assertCurrent();
-    const { signal: _lifecycleSignal, ...commitOptions } = options;
-
-    const replaced = await tryReplaceGraphAndSubjectAtomically(
-      store,
-      asset.assertionGraph,
-      asset.dataQuads,
-      asset.metaGraph,
-      asset.ual,
-      committedMetadata,
-      commitOptions,
-    );
-    if (!replaced) {
-      throw Object.assign(
-        new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
-          'atomic data/metadata replacement',
-        )),
-        { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
-      );
-    }
-    if (shouldQuarantineCommitted?.() === true) {
-      const quarantined = await tryReplaceGraphAndSubjectAtomically(
-        store,
-        asset.assertionGraph,
-        [],
-        asset.metaGraph,
-        asset.ual,
-        [],
-        commitOptions,
-      );
-      if (!quarantined) {
-        throw Object.assign(
-          new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
-            'atomic stale-binding quarantine',
-          )),
-          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
-        );
-      }
-      return 'quarantined';
-    }
-    if (isCurrent?.() === false) return 'quarantined';
-    return 'applied';
+  const write = async (replacements: AtomicAssetReplacement[], commitOptions: QueryOptions, capability: string) => {
+    const replacement = replacements[0]!;
+    const replaced = await tryReplaceGraphAndSubjectAtomically(store, replacement.graphUri, replacement.graphQuads,
+      replacement.metaGraphUri, replacement.metadataSubject, replacement.metadataQuads, commitOptions);
+    if (!replaced) throw Object.assign(new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(capability)),
+      { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
   };
-  return lockAlreadyHeldByCaller
-    ? materializeUnderLock()
-    : withMaterializationLock(asset.metaGraph, asset.ual, materializeUnderLock, {
-        signal: options.signal,
-      });
+  return executeGraphScopedPublication({ store, assets: [asset], options, assertCurrent,
+    shouldQuarantineCommitted, lockAlreadyHeldByCaller, requireCurrentMetadata: false,
+    stale: () => 'stale', complete: () => isCurrent?.() === false ? 'quarantined' : 'applied',
+    publish: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic data/metadata replacement'),
+    quarantine: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic stale-binding quarantine'),
+  });
 }
-
-/** Read the current subject once; publisher metadata helpers own typed merging. */
-async function readCurrentGraphKnowledgeAssetMetadata(
-  store: TripleStore,
-  metaGraph: string,
-  ual: string,
-  options: QueryOptions,
-): Promise<Quad[] | undefined> {
-  const result = await store.query(`
-    SELECT ?predicate ?object WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> {
-        <${assertSafeIri(ual)}> ?predicate ?object .
-      }
-    }
-  `, options);
-  if (result.type !== 'bindings') return undefined;
-  if (result.bindings.some((row) => !row.predicate || !row.object)) return undefined;
-  return result.bindings.map((row) => ({
-    subject: ual,
-    predicate: row.predicate!,
-    object: row.object!,
-    graph: metaGraph,
-  }));
-}
-
 
 type PublishReceipt = Awaited<ReturnType<NonNullable<ChainAdapter['resolvePublishByTxHash']>>>;
 

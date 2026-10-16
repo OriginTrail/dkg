@@ -1,3 +1,5 @@
+import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { SparqlHttpResponseError, isDefinitiveSparqlUpdateRejectionV1 } from './sparql-http-response-error.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
@@ -865,6 +867,14 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     });
   }
 
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    if (!this.supportsConsistency('atomic-update')) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'SparqlHttpStore');
+    const plan = buildAtomicAssetGroupUpdate(assets);
+    statements.checkIris.replaceAssetGroup(assets);
+    await this.runRemoteGraphMutation({ scope: { kind: 'graphs', graphs: plan.graphs },
+      update: plan.update, options: options ?? {}, operation: 'replaceAssetGroup' });
+  }
+
   async replaceGraphAndSubject(
     graphUri: string,
     graphQuads: DKGQuad[],
@@ -1346,23 +1356,6 @@ function resolveConsistencyProfile(
     );
   }
   return profile;
-}
-
-function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? value
-    : fallback;
-}
-
-function normalizeSampleRate(value: number | undefined, fallback: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-  return Math.min(1, Math.max(0, value));
-}
-
-function normalizeQuerySource(source: string | undefined): string {
-  const trimmed = source?.trim();
-  if (!trimmed) return 'unknown';
-  return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 120) || 'unknown';
 }
 
 function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {

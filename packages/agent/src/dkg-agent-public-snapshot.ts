@@ -1,13 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
+import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
+import { createOperationContext } from "@origintrail-official/dkg-core";
+import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
+import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
-import { createUalOnlyExactAssetSelection } from './sync/exact-assets.js';
-import { exactAssetFetchSessionPolicy } from './sync/requester/exact-durable-fetch.js';
-import * as exactRecovery from './exact-recovery-execution.js';
-import { createOperationContext } from '@origintrail-official/dkg-core';
-
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { PublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
 import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
+// SPDX-License-Identifier: Apache-2.0
 import {
   PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
 } from "@origintrail-official/dkg-chain";
@@ -73,7 +72,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     options: PublicSnapshotSyncOptions,
   ) {
     const normalized = normalizePublicSnapshotSyncOptions(options);
-    const { contextGraphId, onChainId, mode, trustedCorePeerIds: peers } = normalized;
+    const { contextGraphId, onChainId, mode, transport, trustedCorePeerIds: peers } = normalized;
     if (jobs.has(this)) throw new Error("A snapshot job is already running");
     if (!this.started || this.workLifetime.closed) throw new Error("Node is stopping");
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
@@ -126,35 +125,25 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
           assertCurrent();
           const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
-          const committed = new Set<string>();
-          const recover = async (batch: string[], transport: "stream-preferred" | "legacy") => {
-            for (const peer of peers) {
-              assertCurrent();
-              const remaining = batch.filter(ual => !committed.has(ual));
-              if (!remaining.length) break;
-              const result = await exactRecovery.runExactRecovery({
-                host: DKGAgentBase.createDurableRecoveryCapabilities(this),
-                ctx: createOperationContext('sync'),
-                remotePeerId: peer, contextGraphId, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection(remaining), 'vm-update-refresh'), authority: evidence,
-                options: {
-                  signal, isCurrent,
-                  exactRecoveryTransportMode: transport,
-                  totalTimeoutMs: 120_000,
-                },
-              });
-              for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
-            }
-            return batch.filter(ual => !committed.has(ual));
-          };
-          for (let offset = 0; offset < uals.length; offset += 10) {
-            const batch = uals.slice(offset, offset + 10);
-            const remaining = await recover(batch, "stream-preferred");
-            // The stream profile excludes private commitments. Only missing assets
-            // use the bounded singleton transport, with identical authentication.
-            for (const ual of remaining) await recover([ual], "legacy");
-            if (batch.some(ual => !committed.has(ual)))
-              throw new Error(`Snapshot recovery incomplete: ${committed.size}/${uals.length} committed`);
-          }
+          const recovery = { contextGraphId, peers, uals, evidence, signal, assertCurrent };
+          let recovered: PublicSnapshotRecoveryResult;
+          if (transport === 'bulk') {
+            const { verification, reconcile } = DKGAgentBase.createDurableRecoveryCapabilities(this);
+            recovered = await recoverPublicSnapshotBulk({
+              store: this.store, router: this.router, verification, reconcile,
+              ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
+            }, { ...recovery,
+              deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
+              shouldQuarantineCommitted: () => {
+                const current = this.subscribedContextGraphs.get(contextGraphId);
+                return !current || (!current.subscribed && !current.coreHosted) || current.onChainId !== onChainId;
+              },
+              onCommitted: () => this.invalidateListContextGraphsCache(),
+              log: message => this.log.info(createOperationContext('sync'), message),
+            });
+          } else recovered = await recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), recovery);
+          const { committed, bulkChunks } = recovered;
+
           // A new inventory/root comparison is required before claiming current coverage.
           const fresh = await read(true);
           assertCurrent();
@@ -164,7 +153,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
             fresh.snapshot.contextGraphStorage === snapshot.contextGraphStorage &&
             BigInt(fresh.snapshot.blockNumber) >= BigInt(snapshot.blockNumber);
           return {
-            mode,
+            mode, transport, bulkChunks,
             sourceCore: initial.sourceCore,
             coverageSourceCore: fresh.sourceCore,
             snapshotDigest: snapshot.snapshotDigest,

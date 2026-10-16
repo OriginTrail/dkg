@@ -8,6 +8,7 @@ import { runSyncSingleFlight, syncSingleFlightKey } from './sync-single-flight.j
 import { DURABLE_RECOVERY_HARD_TIMEOUT_MS } from './durable-recovery-scheduling.js';
 import type { ExactKnowledgeAssetSyncOptions, ExactKnowledgeAssetRefreshSyncOptions, DurableSyncOptions, ExactKnowledgeAssetSyncResult, PhysicalDurableSyncResult, AdmittedDurableSyncResult, LegacyDurableContextGraphOptions } from './durable-recovery-types.js';
 export type { DurableSyncOptions, ExactKnowledgeAssetSyncResult } from './durable-recovery-types.js';
+import { registerPublicBulkGraph } from './sync/responder/bulk-graph-stream.js';
 import { createAbortError as asSyncFetchAbortError } from './bounded-operation.js';
 
 export { authenticateChallengePinnedGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
@@ -72,6 +73,8 @@ import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
 
+import {
+} from './sync/requester/graph-scoped-materialization.js';
 import {
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
@@ -2496,7 +2499,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onExperimentalExactBatchResources: resolveExactBatchStreamEnabled()
         && this.config.nodeRole === 'core'
         ? (resources) => {
-            const binding = createExactBatchResponderBinding({
+            const responderOptions: Parameters<typeof createExactBatchResponderBinding>[0] = {
               localPeerId: this.peerId,
               store: this.store,
               exportCache: resources.exportCache,
@@ -2521,6 +2524,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `Exact batch responder refusal asset=${assetIndex} reason=${reason}${budgetReason ? ` budgetReason=${budgetReason}` : ''}`),
               onStage: (stage, assetIndex, durationMs, operationContext) => this.log.info(operationContext,
                 `Exact batch responder stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
+            };
+            const binding = createExactBatchResponderBinding(responderOptions);
+            if (process.env.DKG_PUBLIC_SNAPSHOT_BULK === '1') registerPublicBulkGraph(this.router, {
+              ...responderOptions,
+              isPublicContextGraph: async (cg, signal) => await responderOptions.resolvePublicContextGraphAuthority(cg, signal) === 'public',
+              onExport: (index, count, ctx) => this.log.info(ctx, `Bulk responder export asset=${index} wholePayloadExports=${count}`),
+              onPayload: (index, plain, encoded, ctx) => this.log.info(ctx, `Bulk responder payload asset=${index} plainBytes=${plain} encodedBytes=${encoded}`),
+              onStage: (stage, index, ms, ctx) => this.log.info(ctx, `Bulk responder stage=${stage} asset=${index} durationMs=${ms.toFixed(3)}`),
             });
             registerExperimentalExactBatchResponder(this.router,
               exactBatchResponderTransportOptions(120_000, (level, message) => this.log[level](createOperationContext('sync'), message)), binding.authorizeRequest, binding.respond);

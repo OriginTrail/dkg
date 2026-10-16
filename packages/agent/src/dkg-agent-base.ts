@@ -1,3 +1,4 @@
+import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
@@ -569,6 +570,14 @@ function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
 export class DKGAgentBase {
   /** Assemble operation capabilities at the protected-field owner. */
   protected static createDurableRecoveryCapabilities(agent: DKGAgent): DurableRecoveryHost {
+    const cleanup: Parameters<typeof reconcileAfterMaterialization>[0] = {
+      store: agent.store, writeLocks: agent.writeLocks, log: agent.log,
+      invalidateListContextGraphsCache: () => agent.invalidateListContextGraphsCache(),
+      retireFinalizedSwmTwinCandidate: (candidate, ctx) => agent.retireFinalizedSwmTwinCandidate(candidate, ctx),
+      retireLegacySwmAfterVerifiedVmTwin: params => agent.retireLegacySwmAfterVerifiedVmTwin(params),
+    };
+    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
+      reconcileAfterMaterialization(cleanup, asset, ctx);
     const materialization = new RecoveryMaterializationOwner({
       chain: () => agent.chain,
       store: () => agent.store,
@@ -581,15 +590,11 @@ export class DKGAgentBase {
       persistSubscription: (id, subscription, reason, isCurrent) => agent.persistContextGraphSyncStateStrict(id, subscription, reason, isCurrent),
       bindSubscription: (id, subscription, onChainId) => agent.bindSubscriptionOnChainId(id, subscription, onChainId),
       recordDrops: (drops, seam) => agent.oversizeTombstoneLog.record(drops, seam),
-      cleanup: () => ({
-        store: agent.store, writeLocks: agent.writeLocks, log: agent.log,
-        invalidateListContextGraphsCache: () => agent.invalidateListContextGraphsCache(),
-        retireFinalizedSwmTwinCandidate: (candidate, ctx) => agent.retireFinalizedSwmTwinCandidate(candidate, ctx),
-        retireLegacySwmAfterVerifiedVmTwin: params => agent.retireLegacySwmAfterVerifiedVmTwin(params),
-      }),
+      reconcile,
     });
     return {
       owner: agent,
+      reconcile,
       policy: () => ({
         syncAgentsMeta: agent.config.syncAgentsMeta,
         syncContextGraphPriorities: agent.config.syncContextGraphPriorities,
