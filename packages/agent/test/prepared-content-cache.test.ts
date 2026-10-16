@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readdir, readFile, writeFile, rm, symlink, stat, utimes } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { preparedCacheFailureCause, createPreparedContentCache, resolvePreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
 
 const dirs: string[] = [];
@@ -139,6 +139,9 @@ describe('persistent prepared content', () => {
     expect(resolvePreparedContentCacheConfig(undefined)).toBeUndefined();
     expect(resolvePreparedContentCacheConfig({ enabled: false })).toBeUndefined();
     expect(resolvePreparedContentCacheConfig({ enabled: true }, '/owned')?.directory).toBe('/owned/prepared-content-v1');
+    expect(resolvePreparedContentCacheConfig({ enabled: true }, './agent-data')?.directory)
+      .toBe(resolve('./agent-data', 'prepared-content-v1'));
+    expect(() => resolvePreparedContentCacheConfig({ enabled: true, directory: './relative' }, '/owned')).toThrow();
     for (const config of [{ enabled: 'true' }, { enabled: true }, { enabled: true, directory: 'relative' },
       { enabled: true, directory: '/owned', maxEntries: 0 }, { enabled: true, directory: '/owned', maxBytes: 17 * 1024 ** 3 },
       { enabled: true, directory: '/owned', ttlMs: NaN }]) {
