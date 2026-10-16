@@ -1,11 +1,12 @@
 import * as exactRecovery from './exact-recovery-execution.js';
-import { createDurableRecoveryHost } from './durable-recovery-host.js';
+import type { DurableRecoveryHost } from './durable-recovery-host.js';
+import { createUalOnlyExactAssetSelection } from './sync/exact-assets.js';
+import { exactAssetFetchSessionPolicy } from './sync/requester/exact-durable-fetch.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
-import type { DKGAgent } from './dkg-agent.js';
 import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 
-export async function recoverPublicSnapshotExact(agent: DKGAgent, options: PublicSnapshotRecoveryOptions): Promise<PublicSnapshotRecoveryResult> {
+export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, options: PublicSnapshotRecoveryOptions): Promise<PublicSnapshotRecoveryResult> {
   const { contextGraphId, peers, uals, evidence, signal, assertCurrent } = options;
   const committed = new Set<string>();
   const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
@@ -15,10 +16,10 @@ export async function recoverPublicSnapshotExact(agent: DKGAgent, options: Publi
       const remaining = batch.filter(ual => !committed.has(ual));
       if (!remaining.length) break;
       const result = await exactRecovery.runExactRecovery({
-        host: createDurableRecoveryHost(agent), ctx: createOperationContext('sync'),
-        remotePeerId: peer, contextGraphId, selectionInput: remaining, authority: evidence,
+        host, ctx: createOperationContext('sync'),
+        remotePeerId: peer, contextGraphId, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection(remaining), 'vm-update-refresh'), authority: evidence,
         options: {
-          signal, isCurrent, forceFreshExactSession: true,
+          signal, isCurrent,
           exactRecoveryTransportMode: transport,
           totalTimeoutMs: 120_000,
         },

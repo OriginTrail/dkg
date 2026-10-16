@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createDurableRecoveryHost } from './durable-recovery-host.js';
+import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
+import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
 import { runExactRecovery } from './exact-recovery-execution.js';
 import { runAdmittedDurableGraph } from './durable-recovery-graph.js';
@@ -5038,8 +5039,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     options?: DurableSyncOptions,
   ): Promise<AdmittedDurableSyncResult> {
-    const { registeredPublicEvidence, ...executionOptions } = options ?? {};
-    const host = createDurableRecoveryHost(this);
+    const { registeredPublicEvidence, exactAssetFetchPolicy, exactAssetSelection, forceFreshExactSession, ...rest } = options ?? {};
+    const executionOptions = { ...rest, exactAssetFetchPolicy: normalizeExactAssetFetchPolicy(
+      exactAssetFetchPolicy, () => exactAssetSelection, forceFreshExactSession,
+    ) };
+    const host = DKGAgentBase.createDurableRecoveryCapabilities(this);
     const authority = host.resolveOrdinaryAuthority(ctx, { registeredPublicEvidence });
     return runDurableRecovery({ host, authority, ctx, remotePeerId, contextGraphIds,
       onPhase, onAccessDenied, sinceBatchIdFor, options: executionOptions });
@@ -5116,10 +5120,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options: ExactKnowledgeAssetRefreshSyncOptions = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const ctx = createOperationContext('sync');
-    const { registeredPublicEvidence, ...executionOptions } = options;
-    const host = createDurableRecoveryHost(this);
+    const { registeredPublicEvidence, exactFetchPurpose, forceFreshExactSession, ...executionOptions } = options;
+    const selection = Array.isArray(selectionInput)
+      ? createUalOnlyExactAssetSelection(selectionInput) : requireExactAssetSelection(selectionInput);
+    const policy = exactFetchPurpose === 'vm-update-refresh'
+      ? exactAssetFetchSessionPolicy(requireUalOnlyExactAssetSelection(selection), 'vm-update-refresh')
+      : normalizeExactAssetFetchPolicy(undefined, () => selection, forceFreshExactSession)!;
+    const host = DKGAgentBase.createDurableRecoveryCapabilities(this);
     const authority = host.resolveOrdinaryAuthority(ctx, { registeredPublicEvidence });
-    return runExactRecovery({ host, authority, ctx, remotePeerId, contextGraphId, selectionInput, options: executionOptions });
+    return runExactRecovery({ host, authority, ctx, remotePeerId, contextGraphId, policy, options: executionOptions });
   }
 
   /** Execute one legacy durable Context Graph after its caller owns admission. */
@@ -5158,8 +5167,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remainingContextGraphs: number,
     options: LegacyDurableContextGraphOptions = {},
   ): Promise<PhysicalDurableSyncResult> {
-    const { registeredPublicEvidence, ...executionOptions } = options;
-    const host = createDurableRecoveryHost(this);
+    const { registeredPublicEvidence, exactAssetFetchPolicy, exactAssetSelection, forceFreshExactSession, ...rest } = options;
+    const executionOptions = { ...rest, exactAssetFetchPolicy: normalizeExactAssetFetchPolicy(
+      exactAssetFetchPolicy, () => exactAssetSelection, forceFreshExactSession,
+    ) };
+    const host = DKGAgentBase.createDurableRecoveryCapabilities(this);
     const authority = host.resolveOrdinaryAuthority(ctx, { registeredPublicEvidence });
     return runAdmittedDurableGraph({ host, authority, ctx, remotePeerId, contextGraphId, remainingContextGraphs, options: executionOptions });
   }

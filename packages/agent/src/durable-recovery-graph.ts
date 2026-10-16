@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
-import { type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
+import { type DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import { type OperationContext } from '@origintrail-official/dkg-core';
 import { exactAssetUalsForSelection } from './sync/exact-assets.js';
 import { MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
 import { createDurableSyncBudget, normalizeDurableSyncTimeoutMs } from './sync/requester/durable-sync-budget.js';
 import { runChallengeExactAssetFetch, runDurableSync, runDurableSyncDetailed, type ChallengeExactAssetFetchContext, type DurableSyncContext } from './sync/requester/durable-sync.js';
-import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from './dkg-agent-constants.js';
 
-import type { LegacyDurableContextGraphOptions, PhysicalDurableSyncResult } from './durable-recovery-types.js';
+import type { DurableGraphOptions, PhysicalDurableSyncResult } from './durable-recovery-types.js';
 export type DurableGraphHost = DurableRecoveryHost;
 
 export interface DurableGraphRequest {
@@ -22,7 +21,7 @@ export interface DurableGraphRequest {
   readonly remotePeerId: string;
   readonly contextGraphId: string;
   readonly remainingContextGraphs: number;
-  readonly options: Omit<LegacyDurableContextGraphOptions, keyof DurableRecoveryInput>;
+  readonly options: DurableGraphOptions;
 }
 
 /** Executes one admitted graph while retaining physical authentication and materialization ownership. */
@@ -46,9 +45,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     isCurrent,
     durableMetaContinuation,
   } = options;
-  const exactAssetFetchPolicy = normalizeExactAssetFetchPolicy(
-    options.exactAssetFetchPolicy, () => options.exactAssetSelection, options.forceFreshExactSession,
-  );
+  const exactAssetFetchPolicy = options.exactAssetFetchPolicy;
   const exactAssetSelection = exactAssetFetchPolicy?.selection;
   const syncAgentsMeta = resolveSyncAgentsMeta(host.policy().syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
   const materialization = host.materialization({ ctx, contextGraphId, authority, isCurrent, onAtomicCommitStarted });
