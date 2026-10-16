@@ -1,9 +1,9 @@
 // The temporary Edges of the one-graph promotion suite
 // (scripts/devnet-test-one-graph-promotion.mjs): four Edges on the profile of
 // profile.mjs, each reachable through relays only. They are the member-sharing
-// suite's TemporaryEdges (node numbers, start, stop, the mark of a node of its
-// own, the reclaiming of a killed run's nodes, the cleanup) with other roles
-// and another topology:
+// suite's TemporaryEdges (node numbers, start, stop, the cleanup) with other
+// roles, another topology, a mark of their own in each node folder, and the
+// reclaiming of a killed run's nodes only once that run has ended:
 //
 //   curator  creates and registers the graph, and promotes reports
 //   edgeA    writes reports
@@ -15,7 +15,7 @@
 // a relay; they dial the Cores directly, as an Edge behind NAT reaches the
 // public nodes. A node record has the fields TemporaryEdges documents.
 
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { NODE_CANDIDATES, TemporaryEdges } from '../member-sharing/temporary-edges.mjs';
 import { connectionsObservation } from '../qa/member-sharing.mjs';
@@ -24,6 +24,29 @@ import { edgeEnv, edgeOverrides } from './profile.mjs';
 
 export const ROLES = Object.freeze(['curator', 'edgeA', 'edgeB', 'late']);
 
+// Every node folder this suite creates carries this file, apart from the
+// member-sharing suite's mark, so that neither suite takes the other's nodes
+// for its own. TemporaryEdges.start writes it: `<stamp> <role>`, the stamp of
+// the run that started the node, which ends with that run's process id
+// (`<time>-<pid>`).
+const OWN_MARK = '.one-graph-promotion';
+
+/** The run a node's mark names: { stamp, pid, role }, or null when it names none. */
+export function markOwner(text) {
+  const parts = /^(\S+-(\d+)) (\S+)\s*$/.exec(String(text ?? ''));
+  return parts ? { stamp: parts[1], pid: Number(parts[2]), role: parts[3] } : null;
+}
+
+/** Whether a process is running; one of another user counts as running. */
+export function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
 export class OneGraphEdges extends TemporaryEdges {
   constructor(devnet, options) {
     super(devnet, options);
@@ -31,6 +54,31 @@ export class OneGraphEdges extends TemporaryEdges {
     this.edgeA = null;
     this.edgeB = null;
     this.late = null;
+  }
+
+  /** This suite's own mark in a node folder. */
+  ownMark(number) { return join(this.devnet.nodeDir(number), OWN_MARK); }
+
+  /**
+   * Nodes an earlier run of this suite left behind (it was killed, say):
+   * stopped and removed, so that they cost no node number, but only once the
+   * run that started a node has ended (`isAlive(pid)`). A node of a run still
+   * running (another run of this suite on the same devnet), a mark that names
+   * no run, and a node of another suite (its folder carries no mark of this
+   * suite) are left alone; allocate() then finds their numbers taken.
+   */
+  reclaimLeftovers({ isAlive = processAlive } = {}) {
+    for (const number of NODE_CANDIDATES) {
+      const mark = this.ownMark(number);
+      if (!existsSync(mark)) continue;
+      let owner = null;
+      try {
+        owner = markOwner(readFileSync(mark, 'utf8'));
+      } catch { /* an unreadable mark names no run */ }
+      if (!owner) this.log.note(`node${number} carries this suite's mark but it names no run: left alone`);
+      else if (isAlive(owner.pid)) this.log.note(`node${number} belongs to run ${owner.stamp} of this suite, which is still running: left alone`);
+      else this.log.note(this.removeOwnNode(number) ?? `removed node${number}, left by run ${owner.stamp} of this suite, which has ended`);
+    }
   }
 
   /** Every Edge of the run, started or not. */

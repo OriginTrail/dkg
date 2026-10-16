@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   admissionPolicyProblem, countLogLines, durableStart, edgeTopologyProblems, inVerifiedScope, judgeGone, memberPublishOutcome,
@@ -10,6 +14,7 @@ import { freshSubscription, sharedMemoryScope, subscriptionResults } from '../qa
 import { classify, KNOWN_GAPS } from '../qa/known-gaps.mjs';
 import { createReport } from '../member-sharing/report.mjs';
 import { createReports } from '../one-graph/reports.mjs';
+import { markOwner, OneGraphEdges, processAlive } from '../one-graph/edges.mjs';
 import { DEAD_DIRECT_ADDRESS, edgeEnv, edgeOverrides, inheritedDkgEnv, OVERRIDE_ENV, PROFILE_CONFIG, PROFILE_ENV, PROFILE_NAMES } from '../one-graph/profile.mjs';
 
 const LABEL = 'urn:one-graph:label';
@@ -892,4 +897,48 @@ test('#3296: a late Edge that held the reports at its subscribe, never marked sy
   assert.deepEqual(caseReport.summary('Results'), []);
   assert.ok(lines.some(line => line.startsWith('  [XFAIL] case 8: node10 (late): lists main as subscribed=true synced=false at the end')), lines.join('\n'));
   assert.ok(lines.some(line => line.includes('known gap #3296') && line.includes('1 check(s) failed as expected')), lines.join('\n'));
+});
+
+test('a node\'s mark names the run that started it, and whether that run still runs', () => {
+  assert.deepEqual(markOwner('20261016T123857Z-37695 curator\n'), { stamp: '20261016T123857Z-37695', pid: 37695, role: 'curator' });
+  for (const text of ['', 'garbage', 'S curator', '20261016T123857Z-37695', undefined]) assert.equal(markOwner(text), null, String(text));
+  assert.equal(processAlive(process.pid), true);
+  const ended = spawnSync(process.execPath, ['-e', '']).pid;
+  assert.equal(processAlive(ended), false);
+});
+
+test('a run reclaims only nodes of its own suite whose run has ended; a running run\'s nodes and another suite\'s are left alone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'one-graph-edges-'));
+  try {
+    const nodeDir = number => join(dir, `node${number}`);
+    for (const number of [7, 8, 9, 10]) mkdirSync(nodeDir(number));
+    const ended = spawnSync(process.execPath, ['-e', '']).pid;
+    // node7: a run of this suite that still runs; node8: one that has ended; node9: the member-sharing
+    // suite's, its run ended or not; node10: a mark that names no run.
+    writeFileSync(join(nodeDir(7), '.one-graph-promotion'), `20261016T120000Z-${process.pid} curator\n`);
+    writeFileSync(join(nodeDir(8), '.one-graph-promotion'), `20261016T110000Z-${ended} edgeA\n`);
+    writeFileSync(join(nodeDir(9), '.issue-3251-member-sharing'), `20261016T110000Z-${ended} member1\n`);
+    writeFileSync(join(nodeDir(10), '.one-graph-promotion'), 'garbage\n');
+    const notes = [];
+    const edges = new OneGraphEdges({ nodeDir }, { stamp: 'S', log: { say() {}, note: text => notes.push(text) } });
+    const removed = [];
+    edges.removeOwnNode = number => { removed.push(number); return null; };
+    edges.reclaimLeftovers();
+    assert.deepEqual(removed, [8]);
+    assert.deepEqual(notes, [
+      `node7 belongs to run 20261016T120000Z-${process.pid} of this suite, which is still running: left alone`,
+      `removed node8, left by run 20261016T110000Z-${ended} of this suite, which has ended`,
+      'node10 carries this suite\'s mark but it names no run: left alone',
+    ]);
+    // The mark a started node gets is this suite's own, never the member-sharing suite's.
+    assert.equal(edges.ownMark(7), join(nodeDir(7), '.one-graph-promotion'));
+    // A run whose owner cannot be told ended keeps its node; once it ends, the node is reclaimed.
+    removed.length = 0;
+    edges.reclaimLeftovers({ isAlive: () => true });
+    assert.deepEqual(removed, []);
+    edges.reclaimLeftovers({ isAlive: () => false });
+    assert.deepEqual(removed, [7, 8]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
