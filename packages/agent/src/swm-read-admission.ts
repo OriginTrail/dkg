@@ -40,7 +40,7 @@ export function resolvePrivateRootLegacyLaneAdmission(reads: {
 }
 
 export async function resolveSharedMemoryAdmission(reads: {
-  acceptedAuthority(): boolean | undefined;
+  readonly acceptedAuthority: boolean | undefined;
   legacyLane(): Promise<PrivateRootLegacyLaneAdmission>;
   confirmedMetadata(): Promise<ContextGraphMetadataConfirmation>;
   readAuthority(): Promise<ContextGraphReadAuthorityDecision>;
@@ -48,7 +48,7 @@ export async function resolveSharedMemoryAdmission(reads: {
 }): Promise<SwmReadAdmission> {
   reads.signal?.throwIfAborted();
   try {
-    const accepted = reads.acceptedAuthority();
+    const accepted = reads.acceptedAuthority;
     if (accepted === true) return { outcome: 'allowed' };
     if (accepted === false) {
       const legacy = await reads.legacyLane();
