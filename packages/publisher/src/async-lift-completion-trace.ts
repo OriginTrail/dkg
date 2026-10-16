@@ -1,15 +1,11 @@
-import { createHash } from 'node:crypto';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { emitTrace, isTraceEnabled, type TraceSources } from './async-lift-trace-emitter.js';
 
 type CompletionEvent = 'accepted_primary_committed' | 'terminal_primary_committed'
   | 'terminal_operation_settled' | 'wallet_ownership_released' | 'finality_observed';
 
-export interface CompletionTraceSources {
-  enabled(): boolean;
-  clock(): number;
+export interface CompletionTraceSources extends TraceSources {
   monotonicNs(): bigint;
-  wallClock(): number;
-  write(line: string): void;
 }
 
 const logger = new Logger('AsyncLiftPublisher');
@@ -20,7 +16,6 @@ const sources: CompletionTraceSources = {
   wallClock: () => Date.now(),
   write: (line) => logger.info(createOperationContext('publish', 'completion-trace'), line),
 };
-const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
 
 /** Unthresholded, opt-in observations only. Call sites own every lifecycle boundary. */
 export class AsyncLiftCompletionTrace {
@@ -29,7 +24,7 @@ export class AsyncLiftCompletionTrace {
   constructor(private readonly source: CompletionTraceSources = sources) {}
 
   get enabled(): boolean {
-    try { return this.source.enabled(); } catch { return false; }
+    return isTraceEnabled(this.source);
   }
 
   acceptedPrimaryCommitted(jobId: string): void { this.emit('accepted_primary_committed', jobId); }
@@ -45,19 +40,10 @@ export class AsyncLiftCompletionTrace {
     jobId: string,
     context: { txHash?: string; walletId?: string; claimToken?: string } = {},
   ): void {
-    try {
-      if (!this.enabled) return;
-      const monotonicMs = this.source.clock();
-      const hrtimeNs = this.source.monotonicNs().toString();
-      const wallTimeMs = this.source.wallClock();
-      this.source.write(`async_publish_completion_trace ${JSON.stringify({
-        schemaVersion: 1, processId: process.pid, sequence: ++this.sequence,
-        event, jobId, monotonicMs, hrtimeNs, wallTimeMs,
-        ...(context.txHash === undefined ? {} : { txHash: context.txHash }),
-        ...(context.walletId === undefined ? {} : { walletHash: hash(context.walletId) }),
-        ...(context.claimToken === undefined ? {} : { claimEpochHash: hash(context.claimToken) }),
-      })}`);
-    } catch { /* Diagnostics never change a committed mutation or its completion. */ }
+    emitTrace(this.source, 'async_publish_completion_trace ', 'native-first', event, () => ({
+      sequence: ++this.sequence, jobId,
+      ...(context.txHash === undefined ? {} : { txHash: context.txHash }),
+    }), context.walletId, context.claimToken);
   }
 }
 

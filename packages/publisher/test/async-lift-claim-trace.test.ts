@@ -159,3 +159,39 @@ describe('canonical keyed-lock ownership', () => {
     expect(queues.size).toBe(0);
   });
 });
+
+
+describe('claim emission compatibility', () => {
+  it('samples performance, wall, then optional native time and returns only a written timestamp', () => {
+    const calls: string[] = [], lines: string[] = [];
+    const source = {
+      enabled: () => { calls.push('enabled'); return true; },
+      clock: () => { calls.push('performance'); return 17; },
+      wallClock: () => { calls.push('wall'); return 23; },
+      monotonicNs: () => { calls.push('native'); return 19n; },
+      write: (line: string) => { calls.push('write'); lines.push(line); },
+    };
+    const trace = new ClaimTrace(source);
+    expect(trace.emit('claim_lock_released', { acquiredAtMs: 7, operationId: 3 }, 'wallet', 'epoch')).toBe(17);
+    expect(calls).toEqual(['enabled', 'performance', 'wall', 'native', 'write']);
+    expect(JSON.parse(lines[0]!.slice(prefix.length))).toEqual({
+      schemaVersion: 1, processId: process.pid, event: 'claim_lock_released',
+      wallTimeMs: 23, monotonicMs: 17, hrtimeNs: '19', acquiredAtMs: 7, operationId: 3, holdMs: 10,
+      walletHash: createHash('sha256').update('wallet').digest('hex'),
+      claimEpochHash: createHash('sha256').update('epoch').digest('hex'),
+    });
+    source.write = () => { throw new Error('output'); };
+    expect(trace.emit('claim_lock_wait')).toBeUndefined();
+  });
+
+  it('omits optional native time without changing the existing injected field precedence', () => {
+    const lines: string[] = [];
+    const trace = new ClaimTrace({ enabled: () => true, clock: () => 17, wallClock: () => 23,
+      write: line => { lines.push(line); } });
+    expect(trace.emit('original', { event: 'override', monotonicMs: 41, holdMs: -1, acquiredAtMs: 7 })).toBe(17);
+    expect(JSON.parse(lines[0]!.slice(prefix.length))).toEqual({
+      schemaVersion: 1, processId: process.pid, event: 'override', wallTimeMs: 23,
+      monotonicMs: 41, holdMs: 10, acquiredAtMs: 7,
+    });
+  });
+});

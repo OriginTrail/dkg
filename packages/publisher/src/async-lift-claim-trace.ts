@@ -1,16 +1,10 @@
-import { createHash } from 'node:crypto';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import { withClaimDomainLock, type ClaimLockKind, type ClaimLockQueue } from './async-lift-claim-lock.js';
 
+import { emitTrace, type TraceFields, type TraceSources } from './async-lift-trace-emitter.js';
+
 export type { ClaimLockKind } from './async-lift-claim-lock.js';
-type TraceFields = Readonly<Record<string, string | number | boolean | undefined>>;
-export interface ClaimTraceSources {
-  enabled(): boolean;
-  clock(): number;
-  monotonicNs?(): bigint;
-  wallClock(): number;
-  write(line: string): void;
-}
+export type ClaimTraceSources = TraceSources;
 const logger = new Logger('AsyncLiftPublisher');
 const sources: ClaimTraceSources = {
   enabled: () => process.env.DKG_ASYNC_PUBLISH_TRACE === '1',
@@ -26,20 +20,10 @@ export class ClaimTrace {
   constructor(private readonly source: ClaimTraceSources = sources) {}
 
   emit(event: string, fields: TraceFields = {}, walletId?: string, claimToken?: string): number | undefined {
-    try {
-      if (!this.source.enabled()) return undefined;
-      const monotonicMs = this.source.clock();
-      this.source.write(`async_publish_claim_trace ${JSON.stringify({
-        schemaVersion: 1, processId: process.pid, event,
-        wallTimeMs: this.source.wallClock(), monotonicMs, hrtimeNs: this.source.monotonicNs?.().toString(), ...fields,
-        ...(typeof fields.acquiredAtMs === 'number' ? { holdMs: monotonicMs - fields.acquiredAtMs } : {}),
-        ...(walletId === undefined ? {} : {
-          walletHash: createHash('sha256').update(walletId).digest('hex'),
-        }),
-        ...(claimToken === undefined ? {} : { claimEpochHash: createHash('sha256').update(claimToken).digest('hex') }),
-      })}`);
-      return monotonicMs;
-    } catch { return undefined; }
+    return emitTrace(this.source, 'async_publish_claim_trace ', 'wall-first', event, (monotonicMs) => ({
+      ...fields,
+      ...(typeof fields.acquiredAtMs === 'number' ? { holdMs: monotonicMs - fields.acquiredAtMs } : {}),
+    }), walletId, claimToken);
   }
 }
 export const claimTrace = new ClaimTrace();

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@origintrail-official/dkg-core';
+import { ClaimTrace } from '../src/async-lift-claim-trace.js';
 import { AsyncLiftCompletionTrace, type CompletionTraceSources } from '../src/async-lift-completion-trace.js';
 
 const prefix = 'async_publish_completion_trace ';
@@ -94,4 +95,73 @@ describe('async publisher completion trace', () => {
     expect(info).toHaveBeenCalledOnce();
     expect(info.mock.calls[0][1]).toContain(prefix);
   });
+});
+
+
+describe('completion emission compatibility', () => {
+  it('samples performance, required native time, then wall time and preserves the complete envelope', () => {
+    const calls: string[] = [], lines: string[] = [];
+    const trace = new AsyncLiftCompletionTrace({
+      enabled: () => { calls.push('enabled'); return true; },
+      clock: () => { calls.push('performance'); return 17; },
+      monotonicNs: () => { calls.push('native'); return 19n; },
+      wallClock: () => { calls.push('wall'); return 23; },
+      write: (line) => { calls.push('write'); lines.push(line); },
+    });
+    trace.walletOwnershipReleased('job', 'wallet', 'epoch');
+    expect(calls).toEqual(['enabled', 'performance', 'native', 'wall', 'write']);
+    expect(JSON.parse(lines[0]!.slice(prefix.length))).toEqual({
+      schemaVersion: 1, processId: process.pid, sequence: 1,
+      event: 'wallet_ownership_released', jobId: 'job', monotonicMs: 17,
+      hrtimeNs: '19', wallTimeMs: 23, walletHash: sha('wallet'), claimEpochHash: sha('epoch'),
+    });
+  });
+
+  it('does not consume sequence on clock failure, but retains the gap after output failure', () => {
+    const { source, events } = capture();
+    const clock = source.clock, write = source.write;
+    const trace = new AsyncLiftCompletionTrace(source);
+    source.clock = () => { throw new Error('clock'); };
+    trace.acceptedPrimaryCommitted('job');
+    source.clock = clock;
+    trace.acceptedPrimaryCommitted('job');
+    source.write = () => { throw new Error('output'); };
+    trace.terminalPrimaryCommitted('job');
+    source.write = write;
+    trace.terminalOperationSettled('job');
+    expect(events().map(row => row.sequence)).toEqual([1, 3]);
+  });
+
+  it('does not replace a missing required native clock with a partial completion observation', () => {
+    const { source, events } = capture();
+    const malformed = { ...source, monotonicNs: undefined } as unknown as CompletionTraceSources;
+    const trace = new AsyncLiftCompletionTrace(malformed);
+    trace.acceptedPrimaryCommitted('job');
+    expect(events()).toEqual([]);
+    malformed.monotonicNs = source.monotonicNs;
+    trace.terminalOperationSettled('job');
+    expect(events()[0].sequence).toBe(1);
+  });
+});
+
+
+it('isolates actual logger failure and retains independent completion and claim opt-ins', () => {
+  const lines: string[] = [];
+  const info = vi.spyOn(Logger.prototype, 'info').mockImplementation(() => { throw new Error('logger'); });
+  vi.stubEnv('DKG_ASYNC_PUBLISH_COMPLETION_TRACE', '1');
+  vi.stubEnv('DKG_ASYNC_PUBLISH_TRACE', '0');
+  const completion = new AsyncLiftCompletionTrace();
+  const claim = new ClaimTrace();
+  expect(() => completion.acceptedPrimaryCommitted('job')).not.toThrow();
+  expect(claim.emit('claim_lock_wait')).toBeUndefined();
+  expect(info).toHaveBeenCalledOnce();
+  info.mockImplementation((_ctx, line) => { lines.push(line); });
+  completion.terminalOperationSettled('job');
+  expect(JSON.parse(lines[0]!.slice(prefix.length)).sequence).toBe(2);
+  vi.stubEnv('DKG_ASYNC_PUBLISH_COMPLETION_TRACE', '0');
+  vi.stubEnv('DKG_ASYNC_PUBLISH_TRACE', '1');
+  completion.acceptedPrimaryCommitted('other');
+  expect(typeof claim.emit('claim_lock_wait')).toBe('number');
+  expect(lines).toHaveLength(2);
+  expect(lines[1]).toContain('async_publish_claim_trace ');
 });
