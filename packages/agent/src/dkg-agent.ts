@@ -462,7 +462,6 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
-import { drainPhysicalWork } from './agent-work-lifetime.js';
 import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
 import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
@@ -2835,7 +2834,7 @@ export class DKGAgent extends DKGAgentBase {
     // sampled, so no dispatcher worker can appear behind an observed empty set.
     const dispatcherDrain = vmReconcileScheduling?.close();
     const drains: Promise<unknown>[] = [
-      drainPhysicalWork(this.workLifetime?.physicalRuns, this.graphScopedStorePhysicalRuns),
+      this.workLifetime?.drain() ?? Promise.resolve(),
       rfc64BackgroundDrain, this.closeOwedLegacySwmRetirementsV1(),
     ];
     drains.push(authorityIndexSnapshotDrain);

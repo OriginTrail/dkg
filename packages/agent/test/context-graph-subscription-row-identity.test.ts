@@ -129,7 +129,6 @@ describe('a graph-scoped operation and a row stored again while it runs', () => 
         bindingChangedError: () => new Error('binding changed'),
         asAbortError: (reason) => reason as Error,
         track: () => {},
-        untrack: () => {},
         operation,
       })
     );
