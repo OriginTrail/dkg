@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
+import { QueryAccessDeniedError } from '@origintrail-official/dkg-core';
+import { ContextGraphReadAuthorityUnavailableError } from '../src/context-graph-read-authority.js';
 import { keccak256, toUtf8Bytes } from 'ethers';
 import type {
   ContextGraphAuthorityReadOptions,
@@ -170,3 +172,51 @@ it('authorizes a named public query from the same atomic name-and-authority read
     await agent.stop();
   }
 });
+
+
+it.each(['revoked', 'unavailable'] as const)(
+  'does not grant a named private query from a registration snapshot when current membership is %s',
+  async (currentState) => {
+    const cg = 'private-registration-query';
+    const member = `0x${'44'.repeat(20)}`;
+    const nameHash = keccak256(toUtf8Bytes(cg));
+    const chain = new MockChainAdapter();
+    const privateSnapshot = snapshot({ nameHash, accessPolicy: 1, participantAgents: [member] });
+    const readNames = vi.fn(async (_names: readonly string[], options?: ContextGraphAuthorityReadOptions) => {
+      options?.onContextGraphAuthorityProjectionServed?.({ source: 'scan', ageMs: 0 });
+      return new Map([[nameHash, privateSnapshot]]);
+    });
+    const readNumeric = vi.fn(async () => new Map([['7', privateSnapshot]]));
+    const readRetained = vi.fn(async () => new Map([[nameHash, privateSnapshot]]));
+    Reflect.set(chain, 'contextGraphAuthorityIndexRevisionReader', {
+      resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: readNames,
+      peekFinalizedContextGraphAuthoritySnapshotsByNameHashes: readRetained,
+      readContextGraphAuthorityIndexSnapshots: readNumeric,
+      readContextGraphAuthorityIndexRevisions: async () => new Map(),
+      whenIdle: async () => {},
+    });
+    const currentAuthority = vi.spyOn(chain, 'getContextGraphLiveAuthority').mockImplementation(async () => {
+      if (currentState === 'unavailable') throw new Error('current authority transport unavailable');
+      return { active: true, accessPolicy: 1, participantAgents: [] };
+    });
+    const agent = await DKGAgent.create({ name: 'BoundedNamedPrivateQuery', chainAdapter: chain });
+    vi.spyOn(agent, 'peerId', 'get').mockReturnValue('bounded-private-query-test-peer');
+    const queryExecution = vi.spyOn(agent.queryEngine, 'query');
+    try {
+      await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o } LIMIT 1', {
+        contextGraphId: cg, callerAgentAddress: member,
+        accessDenied: 'error', includeSharedMemory: false,
+      })).rejects.toBeInstanceOf(currentState === 'revoked'
+        ? QueryAccessDeniedError : ContextGraphReadAuthorityUnavailableError);
+      expect(readNames).toHaveBeenCalledOnce();
+      expect(readNames.mock.calls[0][0]).toEqual([nameHash]);
+      expect(readNumeric).not.toHaveBeenCalled();
+      expect(readRetained).not.toHaveBeenCalled();
+      expect(currentAuthority).toHaveBeenCalledOnce();
+      expect(currentAuthority.mock.calls[0][0]).toBe(7n);
+      expect(queryExecution).not.toHaveBeenCalled();
+    } finally {
+      await agent.stop();
+    }
+  },
+);
