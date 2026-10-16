@@ -3,7 +3,7 @@
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION, contextGraphFinalizationTopic, encodeFinalizationMessage,
   type AssertionSeal, type FinalizationMessageMsg, type Logger, type OperationContext,
-  type createGraphKnowledgeAssetScope,
+  createGraphKnowledgeAssetScope, contextGraphAssertionUri, assertionLifecycleUri, contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
 import {
   VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED,
@@ -49,13 +49,8 @@ interface QueuedPublishFinalizationContext {
   readonly seal: AssertionSeal;
   readonly result: PublishResult;
   readonly operationPlan: ReturnType<typeof planKnowledgeAssetVmPublication>;
-  readonly graphScope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-  readonly sharedMemoryScope: SharedMemoryGraphScope;
-  readonly assertionUri: string;
-  readonly lifecycleUri: string;
-  readonly metaGraph: string;
-  readonly agentAddress: string;
-  readonly packedKaId: bigint;
+  /** Captured before execution; lifecycle ownership can differ from the UAL author. */
+  readonly effectiveAuthor: string;
   readonly snapshotPrivateRoot?: Uint8Array;
   readonly queuedOnChainContextGraphId?: string;
   readonly onChainCapable: boolean;
@@ -94,10 +89,19 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   services: QueuedPublishFinalizationServices,
 ): Promise<true | undefined> {
   const {
-    request, seal, result, operationPlan, graphScope, sharedMemoryScope,
-    assertionUri, lifecycleUri, metaGraph, agentAddress, packedKaId,
+    request, seal, result, operationPlan, effectiveAuthor: agentAddress,
     snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
   } = context;
+  // One validated request determines every finalization coordinate; author fallback is captured.
+  const graphScope = createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+  const assertionUri = contextGraphAssertionUri(request.contextGraphId, agentAddress, request.name, request.subGraphName);
+  const lifecycleUri = assertionLifecycleUri(request.contextGraphId, agentAddress, request.name, request.subGraphName);
+  const metaGraph = contextGraphMetaUri(request.contextGraphId);
+  const packedKaId = (BigInt(graphScope.agentAddress) << 96n) | BigInt(graphScope.kaNumber);
+  const sharedMemoryScope: SharedMemoryGraphScope = {
+    kind: 'named-lifecycle',
+    identity: { agentAddress: graphScope.agentAddress, kaNumber: BigInt(graphScope.kaNumber) },
+  };
   const { agent, publisher, log } = services;
   const ended = (step: LiftJobTailStep): void => {
     try { services.onPostConfirmationStep?.(step); } catch { /* observation only */ }

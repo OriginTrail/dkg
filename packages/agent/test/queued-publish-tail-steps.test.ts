@@ -9,7 +9,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION, contextGraphAssertionUri, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
   type KnowledgeAssetVmPublishRequest,
@@ -156,6 +156,54 @@ function harness(options: {
 }
 
 describe('the steps a queued executor reports after the confirmation', () => {
+  it.each([
+    ['initial', 'request'], ['initial', 'default'], ['update', 'request'], ['update', 'default'],
+  ] as const)('keeps one %s publication identity with its captured %s author', async (kind, authorSource) => {
+    const effectiveAuthor = `0x${'22'.repeat(20)}`;
+    const prior = 'cd'.repeat(32);
+    const queued = request({
+      contextGraphId: 'identity-scope', name: 'scoped-asset', subGraphName: 'documents',
+      ...(authorSource === 'request' ? { agentAddress: effectiveAuthor } : {}),
+      ...(kind === 'update' ? { vmCurrentAssertion: `0x${prior}` } : {}),
+    });
+    const { host, execute, calls } = harness({ publish: async () => {
+      // Finalization must retain the author selected before asynchronous execution.
+      (host as any).defaultAgentAddress = `0x${'33'.repeat(20)}`;
+      return publishResult();
+    } });
+    (host as any).defaultAgentAddress = effectiveAuthor;
+    const clear = vi.spyOn(host.publisher, 'clearPublishedKnowledgeAssetSwm');
+    const marker = vi.spyOn(host.publisher, 'clearSwmShareComplete');
+    const lifecycle = vi.spyOn(host as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
+    const pointer = vi.spyOn(host as any, '_stampPointer');
+    const insert = vi.spyOn(host.store, 'insert');
+    const catalog = vi.spyOn(host as any, 'observeRfc64ConfirmedVmV1');
+    const metaGraph = contextGraphMetaUri(queued.contextGraphId);
+    const lifecycleUri = assertionLifecycleUri(queued.contextGraphId, effectiveAuthor, queued.name, queued.subGraphName);
+    expect((await execute(queued)).localFinalizationComplete).toBe(true);
+    expect(clear).toHaveBeenCalledWith(queued.contextGraphId, {
+      kind: 'named-lifecycle', identity: { agentAddress: AUTHOR, kaNumber: KA_NUMBER },
+    }, 'documents', expect.any(Object), UAL, '1');
+    expect(marker).toHaveBeenCalledWith(queued.contextGraphId, queued.name, effectiveAuthor, 'documents');
+    expect(lifecycle).toHaveBeenCalledWith(queued, UAL, PACKED_KA_ID);
+    expect(catalog).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: queued.contextGraphId, subGraphName: 'documents', assertionCoordinate: queued.name,
+      assertionUri: contextGraphAssertionUri(queued.contextGraphId, effectiveAuthor, queued.name, 'documents'),
+    }));
+    if (kind === 'update') {
+      expect(calls).toContain('update()');
+      expect(pointer).toHaveBeenCalledWith(lifecycleUri, expect.any(String), ROOT.slice(2), metaGraph);
+      expect(insert).toHaveBeenCalledWith(expect.arrayContaining([{
+        subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf',
+        object: `${lifecycleUri}#assertion-${prior}`, graph: metaGraph,
+      }]));
+    } else {
+      expect(calls).toContain('publish()');
+      expect(pointer).not.toHaveBeenCalled();
+      expect(insert).not.toHaveBeenCalled();
+    }
+  });
+
   it('reports every step it runs as that step ends, the call that retires the legacy marker among them', async () => {
     const retirement = held();
     const { calls, execute } = harness({ retireLegacySwm: retirement.pass });

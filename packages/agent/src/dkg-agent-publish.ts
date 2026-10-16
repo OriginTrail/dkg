@@ -5551,8 +5551,7 @@ export class PublishMethods extends DKGAgentBase {
     }
 
     const localFinalizationComplete = await finalizeQueuedKnowledgeAssetVmPublish({
-      request, seal, result, operationPlan, graphScope, sharedMemoryScope,
-      assertionUri, lifecycleUri, metaGraph, agentAddress, packedKaId,
+      request, seal, result, operationPlan, effectiveAuthor: agentAddress,
       snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
     }, {
       agent: this, publisher, log: this.log,
