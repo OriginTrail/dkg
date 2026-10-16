@@ -34,7 +34,7 @@ export function createReports(devnet, config) {
   const quads = record => [
     { subject: record.subject, predicate: RDF_TYPE, object: type, graph: '' },
     { subject: record.subject, predicate, object: `"${record.value}"`, graph: '' },
-    { subject: record.subject, predicate: `${type}Body`, object: `"report ${record.sequence} of run ${stamp}: ${'indicator '.repeat(18)}"`, graph: '' },
+    { subject: record.subject, predicate: `${type}Body`, object: `"report ${record.sequence} of run ${stamp}: ${'payload '.repeat(22)}"`, graph: '' },
   ];
 
   /**

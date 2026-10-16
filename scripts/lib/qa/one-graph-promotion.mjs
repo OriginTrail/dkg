@@ -37,15 +37,17 @@ export function judgeGone(rows, { predicate }) {
 /**
  * What each kind of pair (a report, a node, what it must show) waits for, and
  * in which layer: `swm` the report in shared memory, `vm` in Verified Memory,
- * `gone` no longer in shared memory (it was promoted), `kept` still in shared
- * memory (another report was promoted), `unpublished` not in Verified Memory
- * (its publish was refused). A pair is read twice, with the layer's view and
- * with the cross-partition read, and holds once both showed it.
+ * `gone` no longer in shared memory (it was just promoted), `absent` not in
+ * shared memory (it was promoted before), `kept` still in shared memory
+ * (another report was promoted), `unpublished` not in Verified Memory (its
+ * publish was refused). A pair is read twice, with the layer's view and with
+ * the cross-partition read, and holds once both showed it.
  */
 export const PAIR_KINDS = Object.freeze({
   swm: { layer: 'swm', want: 'held' },
   vm: { layer: 'vm', want: 'held' },
   gone: { layer: 'swm', want: 'gone' },
+  absent: { layer: 'swm', want: 'gone' },
   kept: { layer: 'swm', want: 'held' },
   unpublished: { layer: 'vm', want: 'gone' },
 });
@@ -106,7 +108,7 @@ export function pairOutcome(pair, { boundMs }) {
   const missing = ['view', 'partitions'].filter(read => pair.progress[read] === null).map(read => `${names[read]}${readDetail(pair.last?.[read])}`);
   const found = [view !== null && `the view after ${secs(view)} s`, partitions !== null && `the cross-partition read after ${secs(partitions)} s`].filter(Boolean);
   const shown = found.length ? ` (${want === 'gone' ? 'absent from' : 'shown by'} ${found.join(', ')})` : '';
-  if (want === 'gone') return { outcome: 'fail', text: `${what}: STILL in ${missing.join(' and in ')} ${bound} s after the ${after}${shown}` };
+  if (want === 'gone') return { outcome: 'fail', text: `${what}: ${kind === 'gone' ? 'STILL' : 'FOUND'} in ${missing.join(' and in ')} ${bound} s after the ${after}${shown}` };
   return { outcome: 'fail', text: `${what}: NOT in ${layerName}: not in ${missing.join(' nor in ')} ${bound} s after the ${after}${shown}` };
 }
 

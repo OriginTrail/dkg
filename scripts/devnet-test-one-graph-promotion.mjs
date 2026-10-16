@@ -263,6 +263,19 @@ async function checkProfile(nodes) {
   }
 }
 
+/**
+ * What an author's status says of its shared-memory catalog once its report
+ * was promoted: the sweeps of finalized assets' rows and the catalog capacity
+ * counts (the `rfc64Catalog` block of /api/status), for the run's notes.
+ */
+async function catalogStatus(node) {
+  const status = await devnet.api(node, 'GET', '/api/status');
+  const block = status.json?.rfc64Catalog;
+  if (!block) return status.status === 200 ? 'no rfc64Catalog block' : brief(status);
+  const { enabled, finalizedRowHeal, authorCatalogCapacity } = block;
+  return JSON.stringify({ enabled, finalizedRowHeal, authorCatalogCapacity }).slice(0, 400);
+}
+
 /** A settled subscription: a missing definition under `definitionCase`, the synced flag under case 8. */
 function reportSubscription(handle, observation, definitionCase) {
   if (!observation) return fail(definitionCase, `${handle.node.label}: its subscription to ${handle.graph.key} was not observed`);
@@ -274,10 +287,10 @@ function reportSubscription(handle, observation, definitionCase) {
   return undefined;
 }
 
-/** The pairs every Edge in `nodes` must show for each report, by where it should be. */
+/** The pairs every Edge in `nodes` must show for each report, by where it should be by now. */
 function placementPairs(caseId, records, promoted, nodes, options) {
   return records.filter(record => !record.error).flatMap(record => (promoted.has(record)
-    ? [...io.pairs(caseId, record, nodes, 'vm', options), ...io.pairs(caseId, record, nodes, 'gone', options)]
+    ? [...io.pairs(caseId, record, nodes, 'vm', options), ...io.pairs(caseId, record, nodes, 'absent', options)]
     : io.pairs(caseId, record, nodes, 'swm', options)));
 }
 
@@ -334,18 +347,22 @@ async function run() {
   // Case 3: edgeA publishes its second report itself.
   const [a1, a2] = byAuthor.get(edgeA);
   const [b1] = byAuthor.get(edgeB);
+  const promoted = new Set();
   if (a2.error) fail(3, `${describe(a2)} was not written, so its publish was not tried`);
   else {
     const { answer, at } = await io.ownPublish(edgeA, a2);
     const own = memberPublishOutcome(answer);
     if (own.refused) pass(3, `${edgeA.label}'s own publish of ${describe(a2)} was refused: ${own.why}`);
-    else fail(3, `${edgeA.label}, not the curator, published ${describe(a2)} to Verified Memory: ${own.why}`);
-    await settle([io.watch(io.pairs(3, a2, edges.running, own.refused ? 'unpublished' : 'vm', { from: at, fromWhat: 'refused publish' }))]);
+    else {
+      fail(3, `${edgeA.label}, not the curator, published ${describe(a2)} to Verified Memory: ${own.why}`);
+      // It is in Verified Memory now: the later cases expect it there and out of shared memory.
+      promoted.add(a2);
+    }
+    await settle([io.watch(io.pairs(3, a2, edges.running, own.refused ? 'unpublished' : 'vm', { from: at, fromWhat: `${edgeA.role}'s own publish` }))]);
   }
 
   // Case 4: the curator promotes the first report of each author.
   await precondition(4, 'before the promotions');
-  const promoted = new Set();
   const promotions = [];
   for (const record of [a1, b1]) {
     if (record.error) {
@@ -367,7 +384,9 @@ async function run() {
   const check = () => ({ from: Date.now(), fromWhat: 'check', bound: CHECK_MS });
   const notPromoted = shared.filter(record => !record.error && !promoted.has(record));
   await settle([io.watch(notPromoted.flatMap(record => io.pairs(4, record, edges.running, 'kept', check())))]);
-  for (const record of promoted) note(`case 4: ${record.author.label}'s own record of ${describe(record)}: ${await io.lifecycle(record.author, record)}`);
+  for (const record of promoted) {
+    note(`case 4: on its author, ${describe(record)} has the record ${await io.lifecycle(record.author, record)}; the author's catalog status: ${await catalogStatus(record.author)}`);
+  }
 
   // Case 5: the authors share again.
   await precondition(5, 'before the authors share again');

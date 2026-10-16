@@ -84,6 +84,8 @@ test('a pair holds once both reads showed it, and says where and when', () => {
     /: left shared memory 9 s after the promotion$/);
   assert.match(pairOutcome(pairOf('unpublished', { view: 100, partitions: 100 }, { fromWhat: 'refused publish', confirm: { view: { satisfied: true }, partitions: { satisfied: true } } }), { boundMs: 60_000 }).text,
     /: not in Verified Memory 60 s after the refused publish$/);
+  assert.match(pairOutcome(pairOf('absent', { view: 100, partitions: 300 }, { fromWhat: 'check', boundMs: 30_000, confirm: { view: { satisfied: true }, partitions: { satisfied: true } } }), { boundMs: 60_000 }).text,
+    /: not in shared memory 30 s after the check$/);
 });
 
 test('a pair that did not hold names each read that missed it and what that read last saw', () => {
@@ -94,6 +96,11 @@ test('a pair that did not hold names each read that missed it and what that read
   const still = pairOf('gone', { view: null, partitions: null }, { fromWhat: 'promotion', last: { view: { satisfied: false, found: 1 }, partitions: { satisfied: false, found: 2 } } });
   assert.equal(pairOutcome(still, { boundMs: 60_000 }).text,
     '"edgeA report 1 (1)" by node8 (edgeA) in main/reports at node9 (edgeB): STILL in the shared-working-memory view of reports (1 row(s) of it) and in the cross-partition read (2 row(s) of it) 60 s after the promotion');
+  const found = pairOf('absent', { view: null, partitions: 1000 }, { fromWhat: 'late Edge subscribed', boundMs: 90_000, last: { view: { satisfied: false, found: 1 }, partitions: { satisfied: true } } });
+  assert.equal(pairOutcome(found, { boundMs: 60_000 }).text,
+    '"edgeA report 1 (1)" by node8 (edgeA) in main/reports at node9 (edgeB): FOUND in the shared-working-memory view of reports (1 row(s) of it) 90 s after the late Edge subscribed (absent from the cross-partition read after 1 s)');
+  const inVm = pairOf('unpublished', { view: null, partitions: null }, { fromWhat: 'own publish', last: { view: { satisfied: false, found: 1 }, partitions: { satisfied: false, found: 1 } } });
+  assert.match(pairOutcome(inVm, { boundMs: 60_000 }).text, /: FOUND in the verifiable-memory view of reports \(1 row\(s\) of it\) and in the cross-partition read \(1 row\(s\) of it\) 60 s after the own publish$/);
   const different = pairOf('swm', { view: null, partitions: null }, { last: { view: { satisfied: false, different: '"other"' }, partitions: null } });
   assert.match(pairOutcome(different, { boundMs: 60_000 }).text, /holds another value: "other"\) nor in the cross-partition read \(never read\) 60 s after the share$/);
 });
