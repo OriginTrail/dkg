@@ -398,6 +398,7 @@ import {
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
 import { SharedMemoryGossipAuthorityRead } from './internal/swm-gossip-authority-read.js';
+import { createSwmWriteGateRefreshOracle } from './internal/context-graph-authority/swm-write-gate-refresh.js';
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { projectRfc64CatalogTransportStateV1 } from
@@ -1302,6 +1303,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             `Context graph "${cgId}" metadata authority kept changing while resolving its SWM gate`,
           );
         },
+        // A verified signer the projected gate lacked gets one bounded look at
+        // the canonical gate (chain roster for a registered graph) after a
+        // curator metadata refresh, as sync authorization already does.
+        agentGateRefreshOracle: createSwmWriteGateRefreshOracle({
+          resolveAgentGate: (cgId, options) => this.resolveContextGraphAgentGateAuthority(cgId, options),
+          refreshMetaFromCurator: (cgId, options) => this.refreshMetaFromCurator(cgId, options),
+        }),
         // Same predicate the SENDER uses to decide plaintext vs encrypted SWM
         // (`resolveWorkspaceRecipientsGated`), so both sides of the wire stay
         // on one authority. Without it the receiver judged from local

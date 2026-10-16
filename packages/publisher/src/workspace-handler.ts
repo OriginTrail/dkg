@@ -48,6 +48,7 @@ import {
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
+import { retryAgentEnvelopeWithRefreshedGate, type SwmAgentGateRefreshOracle } from './swm-write-gate-refresh.js';
 import { computeFlatKCRootV10 } from './merkle.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
@@ -310,6 +311,8 @@ export class SharedMemoryHandler {
   private readonly contextGraphMetaOracle?: (
     contextGraphId: string,
   ) => Promise<ContextGraphMetaOracleRecord | null>;
+  /** Fresh gate for a signer the projected gate lacked; see `swm-write-gate-refresh.ts`. */
+  private readonly agentGateRefreshOracle?: SwmAgentGateRefreshOracle;
   /**
    * Authenticated proof that a CG's SWM is public-readable.
    *
@@ -464,6 +467,8 @@ export class SharedMemoryHandler {
       contextGraphMetaOracle?: (
         contextGraphId: string,
       ) => Promise<ContextGraphMetaOracleRecord | null>;
+      /** Fresh gate for a signer the projected gate lacked; see `swm-write-gate-refresh.ts`. Optional. */
+      agentGateRefreshOracle?: SwmAgentGateRefreshOracle;
       /**
        * Authenticated public-access proof (live on-chain policy, or an
        * unregistered graph's accepted owner-signed policy), mirroring the
@@ -549,6 +554,7 @@ export class SharedMemoryHandler {
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
+    this.agentGateRefreshOracle = options?.agentGateRefreshOracle;
     this.publicAccessPolicyOracle = options?.publicAccessPolicyOracle
       ?? options?.publicAccessPolicyOnChainOracle;
     this.legacyApplyAllowedOracle = options?.legacyApplyAllowedOracle;
@@ -1130,27 +1136,27 @@ export class SharedMemoryHandler {
       }
 
       if (agentGateAddresses !== null) {
+        let gateMissSigner: string | undefined;
         const verified = await this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, agentGateAddresses, ctx, {
-          // LU-6 host-catchup replay (PR #610 Codex round-2 #1): the
-          // 5-minute `GOSSIP_ENVELOPE_FRESHNESS_MS` window protects
-          // live gossip against replay attacks, but it BREAKS the
-          // host-catchup recovery path — a member that comes online
-          // hours/days after a curator wrote to SWM legitimately
-          // needs to replay envelopes whose timestamps are far older
-          // than the freshness window. Skipping the freshness check
-          // on trusted replays is safe because the (cryptographic)
-          // signature + decryption chain still verifies, and `seqno`
-          // monotonicity in the host catalog prevents re-applying
-          // already-seen entries. Without this skip, every aged
-          // host-catchup envelope returned `stale or invalid gossip
-          // timestamp` and the off-line member could never catch up.
+          // LU-6 host-catchup replay (PR #610 Codex round-2 #1): the 5-minute
+          // `GOSSIP_ENVELOPE_FRESHNESS_MS` window protects live gossip against
+          // replay, but a member that comes online hours/days after a curator
+          // wrote to SWM legitimately replays far older envelopes. Skipping the
+          // check on trusted replays is safe: the signature + decryption chain
+          // still verifies, and host catalog `seqno` monotonicity prevents
+          // re-applying already-seen entries.
           skipTimestampFreshness: trustedReplay,
+          onAgentGateMiss: (signer) => { gateMissSigner = signer; },
         });
         if (!verified) {
-          // verifyAgentEnvelope already logged the specific reason
-          // at WARN. Treated as permanent: a bad signature won't
-          // become good on retry.
-          return { applied: false, reason: 'agent envelope verification failed', retryable: false };
+          // verifyAgentEnvelope logged the reason at WARN. A bad signature is
+          // permanent; a signer the projected gate lacked gets one fresh look.
+          const retry = await retryAgentEnvelopeWithRefreshedGate({
+            oracle: this.agentGateRefreshOracle, contextGraphId, signerAddress: gateMissSigner,
+            verify: (freshGate) => this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, freshGate, ctx, { skipTimestampFreshness: trustedReplay }),
+            logWarn: (message) => this.log.warn(ctx, message), logInfo: (message) => this.log.info(ctx, message),
+          });
+          if (!retry.accepted) return { applied: false, reason: 'agent envelope verification failed', retryable: retry.retryable };
         }
       } else if (trustedReplay && !hasPrivateAccessPolicy && !decoded.senderKeyMessage && !decoded.encryptedPayload) {
         // GH #1124 (otReviewAgent #1239) — PUBLIC-CG host-catchup forgery gate.
@@ -2147,6 +2153,8 @@ export class SharedMemoryHandler {
        * actual replay attacks. Codex PR #610 round-2 finding #1.
        */
       skipTimestampFreshness?: boolean;
+      /** Told the verified signer that `agentGateAddresses` did not contain. */
+      onAgentGateMiss?: (recoveredSigner: string) => void;
     },
   ): Promise<boolean> {
     if (!envelope) {
@@ -2223,6 +2231,7 @@ export class SharedMemoryHandler {
     const agentGateSet = new Set(agentGateAddresses.map((agent) => agent.toLowerCase()));
     if (!agentGateSet.has(recovered.toLowerCase())) {
       this.log.warn(ctx, `SWM write rejected: agent ${recovered} is not allowed for context graph "${contextGraphId}"`);
+      options?.onAgentGateMiss?.(recovered);
       return false;
     }
 

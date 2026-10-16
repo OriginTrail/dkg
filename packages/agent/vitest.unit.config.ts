@@ -187,6 +187,8 @@ export default defineConfig({
       "test/swm-late-joiner-deferred-gossip.test.ts",
       "test/context-graph-metadata-placement.test.ts",
       "test/swm-plaintext-oracle-wiring.test.ts",
+      "test/swm-write-gate-refresh.test.ts",
+      "test/swm-write-gate-refresh-wiring.test.ts",
       "test/oversize-filter.test.ts",
       "test/cg-registration-oversize-guard.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",
