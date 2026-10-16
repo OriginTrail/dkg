@@ -87,4 +87,37 @@ describe('3D renderer with the real Three.js scene mapper', () => {
     renderer.destroy();
     expect(disposeMaterial).toHaveBeenCalledOnce(); expect(disposeTexture).toHaveBeenCalledOnce();
   });
+
+  it('keeps shared textures across forced scene refreshes while replacing their materials', async () => {
+    const scene = new ThreeForceGraph();
+    const renderer = new WebGL3DRenderer({
+      container: document.createElement('div'), events: new GraphEventEmitter(),
+      hexPainter: { setMaxDegree: () => {}, getRadius: () => 28 } as any,
+      styleEngine: {} as any,
+    });
+    const internal = renderer as any; internal._graph = scene;
+    const texture = new THREE.Texture(); const disposeTexture = vi.spyOn(texture, 'dispose');
+    internal._textureLoader = { load: () => texture };
+    scene.nodeThreeObject((node: any) => internal._createIconSprite(node._graphNode));
+    const a = { id: 'urn:a', degree: 1, imageUrl: 'https://example.invalid/icon.png' } as any;
+    const b = { ...a, id: 'urn:b' };
+    try {
+      renderer.render(new Map([[a.id, a], [b.id, b]]), new Map()); await settle();
+      for (let i = 0; i < 3; i++) {
+        const old = [a, b].map(node => internal._iconSprites.get(node.id).sprite);
+        const disposed = old.map(sprite => vi.spyOn(sprite.material, 'dispose'));
+        renderer.refresh(); await settle();
+        expect(scene.children).toHaveLength(2);
+        expect(disposeTexture).not.toHaveBeenCalled();
+        for (let n = 0; n < old.length; n++) {
+          expect(old[n].material.map).toBeNull(); expect(disposed[n]).toHaveBeenCalledOnce();
+          const current = internal._iconSprites.get([a, b][n].id).sprite;
+          expect(current).not.toBe(old[n]); expect(current.parent).toBe(scene);
+          expect(current.material.map).toBe(texture);
+        }
+        expect(disposeTexture).not.toHaveBeenCalled();
+      }
+    } finally { renderer.destroy(); await settle(); }
+    expect(disposeTexture).toHaveBeenCalledOnce();
+  });
 });

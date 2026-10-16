@@ -316,6 +316,9 @@ export class WebGL3DRenderer implements RendererBackend {
     if (!this._graph) return;
     const maybeRefresh = this._graph.refresh;
     if (typeof maybeRefresh === 'function') {
+      // ForceGraph refresh replaces every scene object. Transfer its old
+      // materials for disposal, but retain textures for the replacement icons.
+      this._retireIcons(this._currentNodes, true);
       maybeRefresh.call(this._graph);
     }
   }
@@ -363,9 +366,9 @@ export class WebGL3DRenderer implements RendererBackend {
   // ──────────────────────────────────────────
 
   /** Retire icons through their scene owner; the cache owns textures and pending image work. */
-  private _retireIcons(nodes: Map<string, ForceNode>): void {
+  private _retireIcons(nodes: Map<string, ForceNode>, replaceSprites = false): void {
     for (const [id, icon] of this._iconSprites) {
-      if (nodes.get(id)?._graphNode?.imageUrl === icon.url) continue;
+      if (!replaceSprites && nodes.get(id)?._graphNode?.imageUrl === icon.url) continue;
       retireIconSprite(icon.sprite);
       this._iconSprites.delete(id);
     }
