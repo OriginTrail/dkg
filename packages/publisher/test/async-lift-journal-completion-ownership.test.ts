@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { AsyncLiftJournalCompletion } from '../src/async-lift-journal-completion.js';
+import type { LiftJobTransitionScope } from '../src/lift-job-transition-scope.js';
 import { AsyncLiftRunner } from '../src/async-lift-runner.js';
 import type { AsyncLiftClaimCoordinator, AsyncLiftClaimProcessingOutcome } from '../src/async-lift-claim-session.js';
 import type { AsyncKnowledgeAssetVmPublishExecutionResult } from '../src/async-lift-publisher-types.js';
@@ -9,6 +11,73 @@ import { kaVmPublishRequest, stageKnowledgeAssetShareSnapshot, KA_VM_EXECUTOR_TX
 import { completeResult, completesWithin, fixture, gate, observe } from './_helpers/journal-completion.js';
 
 describe('journal completion retains operation ownership', () => {
+  it.each(['public', 'worker'] as const)('gives %s session transitions their declared journal settlement boundary', async (kind) => {
+    const f = fixture();
+    const publisher = f.create();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const coordinator = (publisher as unknown as { claimCoordinator: AsyncLiftClaimCoordinator }).claimCoordinator;
+    const journal = gate();
+    const handler = gate();
+    f.hooks.insert = (entry) => entry.kind === 'validated' ? journal.wait() : Promise.resolve();
+    let transition: ReturnType<typeof observe<unknown>> | undefined;
+    const processing = observe(coordinator.processClaim('wallet-1', async (worker) => {
+      const session = kind === 'public' ? publisher.openClaimSession(worker.claim) : worker;
+      transition = observe(session.update('validated', { validation: KA_VM_VALIDATION }));
+      await transition.promise;
+      await handler.wait();
+      return worker.claim;
+    }));
+    try {
+      expect(await completesWithin(journal.reached)).toBe(true);
+      expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+      expect(await completesWithin(transition!.promise, 30), 'public sessions settle independently; worker sessions defer to their owner')
+        .toBe(kind === 'worker');
+      expect(processing.settled()).toBe(false);
+      expect(coordinator.isProcessing(jobId)).toBe(true);
+    } finally {
+      journal.release(); handler.release(); await processing.promise;
+    }
+    expect(coordinator.isProcessing(jobId)).toBe(false);
+  });
+
+  it.each([true, false])('rejects expired commit and rollback capabilities before store or repair effects (journal=%s)', async (journalWrites) => {
+    const f = fixture();
+    const publisher = f.create({ journalWrites });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const claim = await publisher.claimNext('wallet-1');
+    if (!claim) throw new Error('Expected claim');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    const { claimCoordinator: coordinator, journalCompletion: completion } = publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator; journalCompletion: AsyncLiftJournalCompletion;
+    };
+    let captured!: LiftJobTransitionScope;
+    let restoreValidated!: () => Promise<void>;
+    const stillOpen = gate();
+    const operation = completion.runPublicOperation(async (owner) => {
+      await coordinator.runPreSendTransaction(owner, claim, async (_job, scope, restore) => { captured = scope; restoreValidated = restore; });
+      await stillOpen.wait();
+    });
+    const primary = vi.spyOn(f.inner, 'replaceSubjectAndInsert');
+    const wallet = vi.spyOn(f.inner, 'replaceSubject');
+    const repair = vi.fn(async () => null);
+    try {
+      await stillOpen.reached;
+      const current = await publisher.getStatus(jobId);
+      if (!current || current.status !== 'validated') throw new Error('Expected real validated job');
+      await expect(captured.commit(current, 'validated')).rejects.toThrow('section is closed');
+      await expect(restoreValidated()).rejects.toThrow('section is closed');
+      await expect(captured.commitProofFinalization(repair)).rejects.toThrow('section is closed');
+      await expect(captured.commitRemoval()).rejects.toThrow('section is closed');
+      expect(primary).not.toHaveBeenCalled();
+      expect(wallet).not.toHaveBeenCalled();
+      expect(repair).not.toHaveBeenCalled();
+      expect(await publisher.getStatus(jobId)).toEqual(current);
+    } finally {
+      stillOpen.release(); await operation;
+      primary.mockRestore(); wallet.mockRestore();
+    }
+  });
+
   it('observes terminal primary and wallet release before the held journal, then full settlement afterward', async () => {
     const f = fixture();
     const journal = gate();

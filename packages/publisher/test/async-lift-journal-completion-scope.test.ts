@@ -1,13 +1,18 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it } from 'vitest';
 import { activeDefaultStoreWorkPriority, withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
-import { AsyncLiftJournalCompletion } from '../src/async-lift-journal-completion.js';
+import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from '../src/async-lift-journal-completion.js';
+import { withKeyedLocks } from '../src/keyed-lock.js';
 import type { AdmissionJournalEntry } from '../src/lift-job.js';
 import { DEFAULT_JOURNAL_GRAPH_URI, JOURNAL_AT, JOURNAL_JOB_ID, JOURNAL_KIND, JOURNAL_SEQ, parseIntegerLiteral, parseLiteral } from '../src/async-lift-control-plane.js';
 import { completesWithin, fixture, gate, observe } from './_helpers/journal-completion.js';
 
 function facts(jobId: string, lineageKey = 'test-lineage'): Omit<AdmissionJournalEntry, 'seq' | 'at'> {
   return { jobId, lineageKey, kind: 'admission' };
+}
+
+function runCanonical<T>(completion: AsyncLiftJournalCompletion, work: (section: JournalSection) => Promise<T>): Promise<T> {
+  return completion.runPublicOperation((operation) => operation.runCanonical(work));
 }
 
 describe('journal completion ownership boundaries', () => {
@@ -19,14 +24,14 @@ describe('journal completion ownership boundaries', () => {
     f.hooks.read = journal.wait;
     let settled!: Promise<void>;
     let joined!: Promise<void>;
-    const operation = completion.runPublicOperation(() => completion.runCriticalSection(async () => {
-      const ticket = completion.append(facts('job'), () => {});
+    const operation = runCanonical(completion, async (section) => {
+      const ticket = section.append(facts('job'), () => {});
       expect(ticket).not.toHaveProperty('then');
       settled = ticket.settled;
-      joined = completion.registerJobJoin('job').settled;
+      joined = section.joinJob('job').settled;
       await canonical.wait();
       return 'result';
-    }));
+    });
     try {
       await canonical.reached;
       expect(f.journalReads).not.toHaveBeenCalled();
@@ -44,23 +49,28 @@ describe('journal completion ownership boundaries', () => {
     await expect(operation).resolves.toBe('result');
   });
 
-  it('refuses out-of-scope registration and joins synchronously, including a missing job', async () => {
+  it('refuses closed operation and section capabilities synchronously, including a missing-job join', async () => {
     const f = fixture();
     const completion = new AsyncLiftJournalCompletion(f.store, 'urn:test:required-scope');
     const journal = gate();
+    let section!: JournalSection;
+    let owner!: JournalOperation;
     let invoked = false;
     f.hooks.read = journal.wait;
-    const operation = completion.runPublicOperation(async () => {
-      completion.append(facts('existing'), () => {});
+    const operation = completion.runPublicOperation((operation) => {
+      owner = operation;
+      return operation.runCanonical(async (current) => {
+        section = current;
+        section.append(facts('existing'), () => {});
+      });
     });
     try {
       await journal.reached;
-      expect(() => completion.append(facts('new'), () => { invoked = true; }))
-        .toThrow('requires an open publisher completion scope');
+      expect(() => section.append(facts('new'), () => { invoked = true; })).toThrow('closed');
       for (const job of ['existing', 'missing']) {
-        expect(() => completion.registerJobJoin(job, () => { invoked = true; }))
-          .toThrow('requires an open publisher completion scope');
+        expect(() => section.joinJob(job, () => { invoked = true; })).toThrow('closed');
       }
+      expect(() => owner.runCanonical(async () => { invoked = true; })).toThrow('closed');
       expect(invoked).toBe(false);
       expect(f.journalReads).toHaveBeenCalledOnce();
     } finally { journal.release(); await operation; }
@@ -71,8 +81,8 @@ describe('journal completion ownership boundaries', () => {
     const completion = new AsyncLiftJournalCompletion(fixture().store, 'urn:test:join-miss');
     const failure = new Error('join bookkeeping failed');
     const order: string[] = [];
-    await expect(completion.runPublicOperation(async () => {
-      completion.registerJobJoin('missing', () => { order.push('callback'); throw failure; });
+    await expect(runCanonical(completion, async (section) => {
+      section.joinJob('missing', () => { order.push('callback'); throw failure; });
       order.push('after');
     })).rejects.toBe(failure);
     expect(order).toEqual(['callback']);
@@ -85,9 +95,9 @@ describe('journal completion ownership boundaries', () => {
     const journal = gate();
     const observed: string[] = [];
     f.hooks.read = journal.wait;
-    const work = completion.runCriticalSection(async () => {
-      completion.append(facts('job'), () => {});
-      completion.afterSuccessfulJobSettlement('job', () => { observed.push('success'); throw new Error('observer'); });
+    const work = runCanonical(completion, async (section) => {
+      section.append(facts('job'), () => {});
+      section.afterSuccessfulJobSettlement('job', () => { observed.push('success'); throw new Error('observer'); });
       return 'result';
     });
     try {
@@ -97,8 +107,8 @@ describe('journal completion ownership boundaries', () => {
     await expect(work).resolves.toBe('result');
     expect(observed).toEqual(['success']);
     const failure = new Error('authoritative failure');
-    await expect(completion.runCriticalSection(async () => {
-      completion.afterSuccessfulJobSettlement('job', () => { observed.push('false-success'); });
+    await expect(runCanonical(completion, async (section) => {
+      section.afterSuccessfulJobSettlement('job', () => { observed.push('false-success'); });
       throw failure;
     })).rejects.toBe(failure);
     expect(observed).toEqual(['success']);
@@ -110,10 +120,10 @@ describe('journal completion ownership boundaries', () => {
     const heldB = gate();
     const seen: string[] = [];
     f.hooks.insert = async ({ jobId }) => { if (jobId === 'B') await heldB.wait(); };
-    const operation = completion.runPublicOperation(async () => {
-      for (const jobId of ['A', 'B']) await completion.runCriticalSection(async () => {
-        completion.append(facts(jobId), () => {});
-        completion.afterSuccessfulJobSettlement(jobId, () => { seen.push(jobId); });
+    const operation = completion.runPublicOperation(async (owner) => {
+      for (const jobId of ['A', 'B']) await owner.runCanonical(async (section) => {
+        section.append(facts(jobId), () => {});
+        section.afterSuccessfulJobSettlement(jobId, () => { seen.push(jobId); });
       });
     });
     try {
@@ -123,40 +133,40 @@ describe('journal completion ownership boundaries', () => {
     expect(seen).toEqual(['A', 'B']);
   });
 
-  it('releases the outer canonical section before dispatching nested journal work', async () => {
+  it('releases the outer canonical section before dispatching work registered under a nested job lock', async () => {
     const f = fixture();
     const completion = new AsyncLiftJournalCompletion(f.store, 'urn:test:scope');
     const outer = gate();
     const dispatched = gate();
+    const locks = new Map<string, Promise<void>>();
     f.hooks.read = dispatched.wait;
-    const operation = completion.runCriticalSection(async () => {
-      await completion.runCriticalSection(async () => {
-        completion.append(facts('job'), () => {});
-      });
+    const operation = runCanonical(completion, (section) => withKeyedLocks(locks, ['claim'], async () => {
+      await withKeyedLocks(locks, ['job'], async () => { section.append(facts('job'), () => {}); });
       await outer.wait();
-    });
+    }));
     try {
       await outer.reached;
+      expect(locks.has('job')).toBe(false);
+      expect(locks.has('claim')).toBe(true);
       expect(await completesWithin(dispatched.reached, 30)).toBe(false);
       outer.release();
       expect(await completesWithin(dispatched.reached)).toBe(true);
-    } finally {
-      outer.release(); dispatched.release(); await operation;
-    }
+      expect(locks.size).toBe(0);
+    } finally { outer.release(); dispatched.release(); await operation; }
   });
 
-  it('creates a fresh owner from inherited closed operation and section contexts', async () => {
+  it('explicitly creates a fresh owner despite inherited closed diagnostic context', async () => {
     const f = fixture();
     const completion = new AsyncLiftJournalCompletion(f.store, 'urn:test:closed');
     const startLater = gate();
     const journal = gate();
     f.hooks.read = journal.wait;
     let later!: Promise<void>;
-    await completion.runCriticalSection(async () => {
+    await runCanonical(completion, async () => {
       later = (async () => {
         await startLater.wait();
-        await completion.runCriticalSection(async () => {
-          completion.append(facts('late'), () => {});
+        await runCanonical(completion, async (section) => {
+          section.append(facts('late'), () => {});
         });
       })();
     });
@@ -178,10 +188,10 @@ describe('journal completion ownership boundaries', () => {
     const first = new AsyncLiftJournalCompletion(f.store, 'urn:test:tail');
     const second = new AsyncLiftJournalCompletion(f.decoratedStore(), 'urn:test:tail');
     const bookkeeping = gate();
-    const initial = first.runPublicOperation(async () => { first.append(facts('job'), bookkeeping.wait); });
+    const initial = runCanonical(first, async (section) => { section.append(facts('job'), bookkeeping.wait); });
     await bookkeeping.reached;
-    const later = observe(second.runPublicOperation(async () => { second.append(facts('job'), () => {}); }));
-    const duplicate = observe(second.runPublicOperation(async () => { second.registerJobJoin('job'); }));
+    const later = observe(runCanonical(second, async (section) => { section.append(facts('job'), () => {}); }));
+    const duplicate = observe(runCanonical(second, async (section) => { section.joinJob('job'); }));
     try {
       await expect.poll(() => f.journalInserts.length, { timeout: 500 }).toBe(2);
       expect(await completesWithin(later.promise, 30)).toBe(false);
@@ -201,19 +211,19 @@ describe('journal completion ownership boundaries', () => {
     const order: string[] = [];
     firstStore.hooks.insert = async ({ jobId }) => { order.push(jobId); };
     if (domains === 'distinct') secondStore.hooks.insert = async ({ jobId }) => { order.push(jobId); };
-    const initial = first.runCriticalSection(async () => {
-      first.append(facts('first', 'fifo-lineage'), () => {});
+    const initial = runCanonical(first, async (section) => {
+      section.append(facts('first', 'fifo-lineage'), () => {});
       await canonical.wait();
     });
     const pending: Promise<unknown>[] = [initial];
     try {
       await canonical.reached;
-      const successor = second.runCriticalSection(async () => {
-        second.append(facts('second', 'fifo-lineage'), () => {});
+      const successor = runCanonical(second, async (section) => {
+        section.append(facts('second', 'fifo-lineage'), () => {});
       });
       pending.push(successor);
-      const independent = second.runCriticalSection(async () => {
-        second.append(facts('independent', 'other-lineage'), () => {});
+      const independent = runCanonical(second, async (section) => {
+        section.append(facts('independent', 'other-lineage'), () => {});
       });
       pending.push(independent);
       expect(await completesWithin(independent)).toBe(true);
@@ -234,8 +244,8 @@ describe('journal completion ownership boundaries', () => {
     const max = gate();
     f.hooks.read = max.wait;
     const captured = { ...facts('before', 'capture-lineage') };
-    const operation = completion.runCriticalSection(async () => {
-      completion.append(captured, () => {});
+    const operation = runCanonical(completion, async (section) => {
+      section.append(captured, () => {});
       captured.jobId = 'after';
       captured.kind = 'claimed';
       captured.lineageKey = 'changed-lineage';
@@ -265,17 +275,17 @@ describe('journal completion ownership boundaries', () => {
       return Promise.reject(new Error('MAX hook failed asynchronously'));
     };
     let completed = 0;
-    const failed = completion.runCriticalSection(async () => {
-      completion.append(facts('job'), () => { completed++; throw new Error('bookkeeping failed'); });
-      completion.append(facts('job'), () => { completed++; });
+    const failed = runCanonical(completion, async (section) => {
+      section.append(facts('job'), () => { completed++; throw new Error('bookkeeping failed'); });
+      section.append(facts('job'), () => { completed++; });
       throw original;
     });
     await expect(failed).rejects.toBe(original);
     expect(reads).toBe(2);
     expect(completed).toBe(2);
     f.hooks.read = undefined;
-    await expect(completion.runCriticalSection(async () => {
-      completion.append(facts('job'), () => {});
+    await expect(runCanonical(completion, async (section) => {
+      section.append(facts('job'), () => {});
       return 'next';
     })).resolves.toBe('next');
     expect(f.journalInserts).toHaveLength(1);
@@ -291,8 +301,8 @@ describe('journal completion ownership boundaries', () => {
     f.hooks.read = async () => { seen.push('MAX', context.getStore(), activeDefaultStoreWorkPriority()); };
     f.hooks.insert = async () => { seen.push('INSERT', context.getStore(), activeDefaultStoreWorkPriority()); };
     const operation = context.run('request', () => withDefaultStoreWorkPriority('background', () =>
-      completion.runCriticalSection(async () => {
-        completion.append(facts('job'), () => {});
+      runCanonical(completion, async (section) => {
+        section.append(facts('job'), () => {});
         await gateHeld.wait();
       })));
     await gateHeld.reached;

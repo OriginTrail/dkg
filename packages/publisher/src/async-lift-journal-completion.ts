@@ -18,9 +18,22 @@ interface CanonicalSection {
   succeeded: boolean;
   readonly released: Promise<void>;
 }
-interface CompletionContext {
-  readonly owner: CompletionOwner;
-  readonly section?: CanonicalSection;
+const operationBrand: unique symbol = Symbol('journal operation');
+const sectionBrand: unique symbol = Symbol('journal canonical section');
+
+/** Internal authority: always created at an independently awaited API/worker boundary. */
+export interface JournalOperation {
+  readonly [operationBrand]: true;
+  runCanonical<T>(work: (section: JournalSection) => Promise<T>): Promise<T>;
+}
+
+/** Captured by commit closures; never inferred from the caller's async context. */
+export interface JournalSection {
+  readonly [sectionBrand]: true;
+  assertOpen(): void;
+  append(facts: CapturedJournalFacts, afterAttempt: () => void): JournalRegistration;
+  joinJob(jobId: string, after?: () => void): JournalRegistration;
+  afterSuccessfulJobSettlement(jobId: string, observe: () => void): void;
 }
 interface QueueCompletions {
   readonly owners: Set<Promise<void>>;
@@ -37,7 +50,7 @@ export class AsyncLiftJournalCompletion {
   private static readonly domains = new WeakMap<object, Map<string, QueueCompletions>>();
   // Reserve under canonical ownership, but dispatch after release; journal work never acquires it.
   private static readonly lineageQueues = new Map<string, Promise<void>>();
-  private readonly context = new AsyncLocalStorage<CompletionContext>();
+  private readonly context = new AsyncLocalStorage<CompletionOwner>();
   private readonly identity: object;
 
   constructor(
@@ -50,16 +63,16 @@ export class AsyncLiftJournalCompletion {
   }
 
   /** An independently awaited API or worker lifecycle, including reentrant public calls. */
-  runPublicOperation<T>(work: () => Promise<T>): Promise<T> {
+  runPublicOperation<T>(work: (operation: JournalOperation) => Promise<T>): Promise<T> {
     const owner: CompletionOwner = { open: true, pending: new Set() };
     const queue = this.queue();
     let release!: () => void;
     const finished = new Promise<void>((resolve) => { release = resolve; });
     queue.owners.add(finished);
     // Invoke work synchronously: the canonical lock must reserve its place before we yield.
-    return this.context.run({ owner }, async () => {
+    return this.context.run(owner, async () => {
       try {
-        return await work();
+        return await work({ [operationBrand]: true, runCanonical: (work) => this.runCanonical(owner, work) });
       } finally {
         owner.open = false;
         try {
@@ -73,50 +86,57 @@ export class AsyncLiftJournalCompletion {
     });
   }
 
-  /** Observe this job's captured tail and successful canonical release, not its owner's other jobs. */
-  afterSuccessfulJobSettlement(jobId: string, observe: () => void): void {
-    const section = this.context.getStore()?.section;
-    if (!section?.open) return;
-    const completion = this.existingQueue()?.jobs.get(jobId);
-    void Promise.all([section.released, completion]).then(() => {
-      if (section.succeeded) try { observe(); } catch { /* Diagnostics cannot change settlement. */ }
-    });
-  }
-
-  runCriticalSection<T>(work: () => Promise<T>): Promise<T> {
-    const context = this.context.getStore();
-    if (!context?.owner.open) return this.runPublicOperation(() => this.runCriticalSection(work));
-    if (context.section?.open) return work();
+  private runCanonical<T>(owner: CompletionOwner, work: (section: JournalSection) => Promise<T>): Promise<T> {
+    this.assertOwnerOpen(owner);
     let release!: () => void;
-    const section: CanonicalSection = {
+    const state: CanonicalSection = {
       open: true, succeeded: false, released: new Promise<void>((resolve) => { release = resolve; }),
     };
-    return this.context.run({ ...context, section }, async () => {
+    const assertOpen = (): void => {
+      this.assertOwnerOpen(owner);
+      if (!state.open) throw new Error('Publisher canonical section is closed');
+    };
+    const section: JournalSection = {
+      [sectionBrand]: true, assertOpen,
+      append: (facts, after) => { assertOpen(); return this.append(owner, state, facts, after); },
+      joinJob: (jobId, after) => { assertOpen(); return this.registerJobJoin(owner, jobId, after); },
+      afterSuccessfulJobSettlement: (jobId, observe) => {
+        assertOpen();
+        const completion = this.existingQueue()?.jobs.get(jobId);
+        void Promise.all([state.released, completion]).then(() => {
+          if (state.succeeded) try { observe(); } catch { /* Diagnostics cannot change settlement. */ }
+        });
+      },
+    };
+    return (async () => {
       try {
-        const result = await work();
-        section.succeeded = true;
+        const result = await work(section);
+        state.succeeded = true;
         return result;
       } finally {
-        // The lock helper has already run its release finally, including all nested job locks.
-        section.open = false;
+        // The outer lock helper has already released all nested canonical locks.
+        state.open = false;
         release();
       }
-    });
+    })();
+  }
+
+  private assertOwnerOpen(owner: CompletionOwner): void {
+    if (!owner.open) throw new Error('Publisher completion operation is closed');
   }
 
   /** Reserve the append now; dispatch its store work only after canonical release. */
-  append(facts: CapturedJournalFacts, afterAttempt: () => void): JournalRegistration {
-    const context = this.registrationContext();
+  private append(owner: CompletionOwner, section: CanonicalSection, facts: CapturedJournalFacts, afterAttempt: () => void): JournalRegistration {
     const jobId = facts.jobId;
     // This call installs the lineage gate synchronously, before its first await.
-    const started = this.appendToLineage(facts, context.section?.released ?? Promise.resolve())
+    const started = this.appendToLineage(facts, section.released)
       .catch(() => { /* Auxiliary journal failure must not abort the authoritative write. */ })
       .then(afterAttempt);
     const queue = this.queue();
     const predecessor = queue.jobs.get(jobId);
     // A later journal's settlement includes earlier bookkeeping, not merely its FIFO insert.
     const completion = Promise.all([predecessor, started.catch(() => {})]).then(() => {});
-    context.owner.pending.add(completion);
+    owner.pending.add(completion);
     queue.jobs.set(jobId, completion);
     void completion.then(() => {
       if (queue.jobs.get(jobId) === completion) queue.jobs.delete(jobId);
@@ -165,24 +185,17 @@ export class AsyncLiftJournalCompletion {
   }
 
   /** Join only the captured predecessor, never another API's result or a changing future tail. */
-  registerJobJoin(jobId: string, after?: () => void): JournalRegistration {
-    const context = this.registrationContext();
+  private registerJobJoin(owner: CompletionOwner, jobId: string, after?: () => void): JournalRegistration {
     const predecessor = this.existingQueue()?.jobs.get(jobId);
     if (!predecessor) { after?.(); return { settled: Promise.resolve() }; }
     const settled = predecessor.then(() => { after?.(); }).catch(() => {});
-    context.owner.pending.add(settled);
+    owner.pending.add(settled);
     return { settled };
-  }
-
-  private registrationContext(): CompletionContext {
-    const context = this.context.getStore();
-    if (!context?.owner.open) throw new Error('Journal registration requires an open publisher completion scope');
-    return context;
   }
 
   async drain(): Promise<void> {
     // The runner invokes this outside operation ownership, after stopping its producers.
-    if (this.context.getStore()?.owner.open) throw new Error('Cannot drain publisher journals from an active publisher operation');
+    if (this.context.getStore()?.open) throw new Error('Cannot drain publisher journals from an active publisher operation');
     for (;;) {
       const queue = this.existingQueue();
       if (!queue || (queue.owners.size === 0 && queue.jobs.size === 0)) return;

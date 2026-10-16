@@ -1,3 +1,4 @@
+import type { JournalOperation } from '../src/async-lift-journal-completion.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -476,17 +477,17 @@ describe('GH#2270 chain-proof cadence', () => {
       // Stall pass A between its snapshot and its chain-proof dispatch — the window the
       // ordering claim is about — by parking the first recovery-lane call on its way through.
       const impl = publisher as unknown as {
-        recoverInterruptedPreBroadcastJobs(inventory: unknown): Promise<number>;
+        recoverInterruptedPreBroadcastJobs(owner: JournalOperation, inventory: unknown): Promise<number>;
       };
       const originalLane = impl.recoverInterruptedPreBroadcastJobs.bind(publisher);
       let firstLaneCall = true;
-      impl.recoverInterruptedPreBroadcastJobs = async (inventory: unknown) => {
+      impl.recoverInterruptedPreBroadcastJobs = async (owner: JournalOperation, inventory: unknown) => {
         if (firstLaneCall) {
           firstLaneCall = false;
           signalStalled();
           await stalled;
         }
-        return originalLane(inventory);
+        return originalLane(owner, inventory);
       };
 
       const passA = publisher.recover();
