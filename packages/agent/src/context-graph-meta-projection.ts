@@ -320,7 +320,11 @@ export class ContextGraphMetaProjection {
       contextGraphIdFromMetaGraphUri(graphUri) ?? contextGraphIdFromCatalogGraphUri(graphUri);
     if (contextGraphId) {
       this.markDirty(contextGraphId, false);
-      this.peerGateRevision.noteRemoval(contextGraphId, { subject, predicate });
+      // Catalog reads admit only the disclosure floor, never peers or roster.
+      // Keep projection/node-wide and recipient-key invalidation independent.
+      if (!isSafeIri(graphUri) || contextGraphIdFromCatalogGraphUri(graphUri) === null) {
+        this.peerGateRevision.noteRemoval(contextGraphId, { subject, predicate });
+      }
       return;
     }
     // Key lookup scans every named graph, and an atomic replacement can delete
@@ -348,7 +352,8 @@ export class ContextGraphMetaProjection {
       const contextGraphId = this.contextGraphIdTouchedByQuad(quad);
       if (!contextGraphId) continue;
       touched.add(contextGraphId);
-      this.markDirty(contextGraphId);
+      this.markDirty(contextGraphId, !isSafeIri(quad.graph)
+        || contextGraphIdFromCatalogGraphUri(quad.graph) !== contextGraphId);
     }
     // Generic update and complete-graph replace paths call markAllDirty(); one
     // conservative bump here closes the recipient-key insertion race.
