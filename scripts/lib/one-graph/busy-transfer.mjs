@@ -40,8 +40,8 @@ import { join } from 'node:path';
 import { brief, sleep, waitFor } from '../member-sharing/devnet.mjs';
 import { heldAt } from '../member-sharing/observation.mjs';
 import {
-  admissionPolicyProblem, arrivalWindow, busyReceiptOutcome, countLogLines, deliveryEvidence, pairOutcome, parseAdmissions, slotHolder,
-  transferContended, transferHeldThrough, transferLifetime, transferOccupancy,
+  admissionPolicyProblem, arrivalWindow, busyReceiptOutcome, contentionSince, countLogLines, deliveryEvidence, durableSyncAttempts, pairOutcome,
+  parseAdmissions, slotHolder, transferContended, transferHeldThrough, transferLifetime, transferOccupancy,
 } from '../qa/one-graph-promotion.mjs';
 import { settled } from './reports.mjs';
 
@@ -225,6 +225,7 @@ export async function busyEdge(ctx, main, large, promotions) {
     // slot (busyReceiptOutcome). Of the shares, the last decides; an earlier one
     // is noted. The other Edges' pairs are ordinary delivery checks.
     const lastAttempt = reportPairs.filter(pair => pair.node === edgeB).at(-1);
+    const syncAttempts = durableSyncAttempts(log, main.id);
     for (const pair of [...reportPairs, ...promotionPairs]) {
       const result = pairOutcome(pair, { boundMs: ctx.boundMs });
       if (pair.node !== edgeB) {
@@ -239,7 +240,9 @@ export async function busyEdge(ctx, main, large, promotions) {
       let held;
       if (received !== null) {
         const through = transferHeldThrough(window, slots.readings, all, isTransfer);
-        held = delivery ? deliveryEvidence(transferContended(pair.from, window?.after, slots.readings, all, isTransfer), through) : through;
+        // A delivery may wait for the slot, and land, before the curator's answer: its window starts at edgeB's first try.
+        const since = delivery ? contentionSince({ answeredAt: pair.from, requestedAt: pair.notBefore, attempts: syncAttempts }) : null;
+        held = delivery ? deliveryEvidence(transferContended(since, window?.after, slots.readings, all, isTransfer), through) : through;
       }
       const verdict = busyReceiptOutcome(result, { received, life, held, delivery });
       if (pair.kind === 'swm' && pair !== lastAttempt) report.note(`case ${caseId}: an earlier share: ${verdict.text}`);

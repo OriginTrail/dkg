@@ -9,8 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
-  admissionPolicyProblem, arrivalWindow, busyReceiptOutcome, countLogLines, deliveryEvidence, durableStart, pairOutcome, parseAdmissions,
-  slotHolder, transferContended, transferHeldThrough, transferLifetime, transferOccupancy,
+  admissionPolicyProblem, arrivalWindow, busyReceiptOutcome, contentionSince, countLogLines, deliveryEvidence, durableStart, durableSyncAttempts,
+  pairOutcome, parseAdmissions, slotHolder, transferContended, transferHeldThrough, transferLifetime, transferOccupancy,
 } from '../qa/one-graph-promotion.mjs';
 import { sharedMemoryScope } from '../qa/member-sharing.mjs';
 import { createReport } from '../member-sharing/report.mjs';
@@ -499,4 +499,41 @@ test('a receipt in a gap between the transfer\'s admissions does not end the att
   } finally {
     scenario.cleanup();
   }
+});
+
+test('a promotion\'s delivery that waited for the slot and landed before the curator\'s answer counts as contended', () => {
+  const base = new Date('2026-10-16T01:30:00').getTime();
+  const log = [
+    '2026-10-16 01:29:58 sync tttt [DKGAgent] Sync backpressure running durable:0xabc/one-graph-large-1:QP4sWZbL (global inflight=1/1, queued=0/0)',
+    '2026-10-16 01:29:50 sync old0 [DKGAgent] Sync backpressure running durable:0xabc/one-graph-main-1:U5shPKAE (global inflight=1/1, queued=0/0)',
+    '2026-10-16 01:30:00 sync rej1 [DKGAgent] Sync backpressure rejected durable:0xabc/one-graph-main-1:U5shPKAE (global inflight=1/1, queued=0/0)',
+    '2026-10-16 01:30:02 sync run1 [DKGAgent] Sync backpressure running durable:0xabc/one-graph-main-1:U5shPKAE (global inflight=1/1, queued=0/0)',
+  ].join('\n');
+  const attempts = durableSyncAttempts(log, '0xabc/one-graph-main-1');
+  assert.deepEqual(attempts.map(attempt => [attempt.at - base, attempt.outcome]), [[-10_000, 'running'], [0, 'rejected'], [2000, 'running']]);
+  // Requested at -0.2 s: the window starts at edgeB's first try after it (the end of its log second), before the answer at 3 s.
+  const requestedAt = base - 200;
+  const answeredAt = base + 3000;
+  assert.equal(contentionSince({ answeredAt, requestedAt, attempts }), base + 999);
+  // No try after the request (only an older sync), or none at all: the answer, as before.
+  assert.equal(contentionSince({ answeredAt, requestedAt, attempts: attempts.slice(0, 1) }), answeredAt);
+  assert.equal(contentionSince({ answeredAt, requestedAt, attempts: [] }), answeredAt);
+  assert.equal(contentionSince({ answeredAt, requestedAt: undefined, attempts }), answeredAt);
+  // A first try after the answer leaves the answer as the start.
+  assert.equal(contentionSince({ answeredAt: base - 100, requestedAt, attempts }), base - 100);
+  // The transfer held the slot at 1 s; it had released it when the promotion landed at 2.3-2.5 s, before the answer at 3 s.
+  const admissions = parseAdmissions(log);
+  const busy = reading(base + 1000, 20, [durable(3000)]);
+  const after = reading(base + 2600, 20, []);
+  const window = { after: base + 2300, by: base + 2500 };
+  const through = transferHeldThrough(window, [busy, after], admissions, isTransfer);
+  assert.equal(through.held, false);
+  // Judged from the answer, nothing lies between it and the last miss; from edgeB's first try, the reading at 1 s does.
+  assert.equal(transferContended(answeredAt, window.after, [busy, after], admissions, isTransfer).held, false);
+  const contended = transferContended(contentionSince({ answeredAt, requestedAt, attempts }), window.after, [busy, after], admissions, isTransfer);
+  assert.deepEqual(contended, { held: true, why: null });
+  const life = { from: base - 2000, to: base + 60_000 };
+  const result = { outcome: 'pass', text: '"c (2)" by node7 (curator) in main/reports at node9 (edgeB): in Verified Memory 0 s after the promotion' };
+  assert.deepEqual(busyReceiptOutcome(result, { received: window.by, life, held: deliveryEvidence(contended, through), delivery: true }),
+    { outcome: 'pass', text: `${result.text}, after contending with the transfer for the general slot` });
 });

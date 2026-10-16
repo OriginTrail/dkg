@@ -484,9 +484,41 @@ export function transferOccupancy({ readings, admissions, isTransfer, from, unti
   return { transfer: window.filter(reading => slotHolder(reading, admissions, isTransfer).state === 'transfer').length, total: window.length };
 }
 
+const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The moments a node's log shows its sync of a graph's Verified Memory trying
+ * for a slot (`Sync backpressure running|queued|rejected durable:<graph>:<peer>`),
+ * each at its log second: [{ at, outcome }], in log order.
+ */
+export function durableSyncAttempts(logText, graphId) {
+  const marker = new RegExp(`Sync backpressure (running|queued|rejected) durable:${escapeRegExp(graphId)}:`);
+  const attempts = [];
+  for (const line of String(logText ?? '').split('\n')) {
+    const found = marker.exec(line);
+    const time = found ? lineTime(line) : null;
+    if (time) attempts.push({ at: time.at, outcome: found[1] });
+  }
+  return attempts;
+}
+
+/**
+ * Where the window in which a promotion's delivery contended with the
+ * transfer starts: when the promotion was answered (`answeredAt`), or, if
+ * earlier, when the node's own sync of the graph's Verified Memory first
+ * tried for a slot after the promotion was requested (`attempts` from
+ * durableSyncAttempts, `requestedAt`): a delivery can wait for the slot, and
+ * land, before the curator's answer comes. An attempt counts from the end of
+ * its log second, so that no reading from before it does.
+ */
+export function contentionSince({ answeredAt, requestedAt, attempts }) {
+  const first = Number.isFinite(requestedAt) ? (attempts ?? []).find(attempt => attempt.at + 999 >= requestedAt) : undefined;
+  return first ? Math.min(answeredAt, first.at + 999) : answeredAt;
+}
+
 /**
  * Whether the transfer held the node's general slot at some moment between
- * `since` (the promotion) and `until` (the last moment the delivery was
+ * `since` (the promotion, see contentionSince) and `until` (the last moment the delivery was
  * surely not done: the `after` of its arrivalWindow): a reading sent after
  * `since` and answered before `until` shows it there. A reading that ran
  * past `until` may show the slot after the delivery, and does not count. A
