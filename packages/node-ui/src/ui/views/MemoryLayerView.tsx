@@ -155,19 +155,11 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   const graphSuffix = layer === 'swm' ? '_shared_memory' as const : undefined;
   const includeShared = layer === 'swm';
   const queryView = layer === 'vm' ? 'verifiable-memory' as const : undefined;
-  // WM content lives in the CG's assertion partitions, which sit outside the
-  // daemon's static `GRAPH ?g` allow-list. Without this opt-in the WM view's
-  // `GRAPH ?g { ?s ?p ?o }` enumeration resolves against only
-  // { <cg>, <cg>/_meta, <cg>/_shared_memory_meta } and renders empty. SWM/VM
-  // use their own `view`-routed scopes and don't need it.
-  //
-  // Scope the opt-in to the *built-in* WM query only (`sparql === defaultSparql`):
-  // that query constrains `?g` to WM-marked graphs via the `_meta` join, so the
-  // widened allow-list stays layer-correct. A custom query typed into the WM tab
-  // must NOT get the opt-in — otherwise an advanced `GRAPH ?g { … }` could
-  // enumerate SWM/VM/meta partitions and silently escape the WM scope. Custom
-  // queries fall back to the daemon's default static allow-list.
+  // Only the built-in WM query constrains partitions to WM lifecycle markers.
+  // Custom queries retain the daemon's default graph scope. SWM/VM use views.
+  // Explicit queries also retain their interactive timeout/response-size policy.
   const includePartitions = layer === 'wm' && sparql === defaultSparql;
+  const interactive = !!activeQuery;
 
   const { data, loading, error, refresh } = useFetch(
     () => executeQuery(sparql, {
@@ -176,8 +168,8 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       graphSuffix,
       view: queryView,
       includeContextGraphPartitions: includePartitions,
-    }),
-    [sparql, contextGraphId, includeShared, graphSuffix, queryView, includePartitions],
+    }, interactive ? { timeoutMs: null, maxResponseBytes: null } : {}),
+    [sparql, contextGraphId, includeShared, graphSuffix, queryView, includePartitions, interactive],
     0
   );
   useMemoryGraphEvents(contextGraphId, refresh, { layers: [layer] });
