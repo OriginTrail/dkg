@@ -49,6 +49,8 @@ export default defineConfig({
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/query-catalog-profile-route.test.ts',
+      // The catalog filter of the query-catalog read on a real store (review of #3235).
+      'test/query-catalog-filter.test.ts',
           'test/context-graph-route-read-authority.test.ts',
           'test/knowledge-assets-local-curator-read.test.ts',
       'test/publisher-jobs-graph-inventory.test.ts',

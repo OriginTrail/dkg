@@ -207,6 +207,26 @@ describe('DkgLocalLlmRuntime', () => {
     expect(runtime.getSessionHistory()).toHaveLength(2);
   });
 
+  it('lets the model ask for a missing identifier when history goes before any tool result', async () => {
+    const mcp = makeMcp();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(answerResponse('The order discussed is urn:order:123.'))
+      .mockImplementationOnce(async () => contextRejected())
+      .mockResolvedValueOnce(answerResponse('Which order do you mean? Please give its identifier.'));
+    const runtime = await DkgLocalLlmRuntime.create({ mcp, fetch: fetcher as typeof fetch, projectId: 'testing' });
+    await runtime.run('hello');
+    const result = await runtime.run('Which query catalog queries are saved for that order?');
+    const failed = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    const recovered = JSON.parse(String(fetcher.mock.calls[2][1]?.body));
+    expect(failed.tool_choice).toBe('required');
+    expect(recovered.messages[0].content).not.toContain('urn:order:123');
+    expect(recovered.messages[0].content).toContain('ask for the missing identifier');
+    expect(recovered.tool_choice).toBe('auto');
+    expect(result.answer).toBe('Which order do you mean? Please give its identifier.');
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(mcp.callTool).not.toHaveBeenCalled();
+  });
+
   it('can finish from unchanged current evidence without tool schemas when the request still exceeds context', async () => {
     const mcp = makeMcp();
     const fetcher = vi.fn()
