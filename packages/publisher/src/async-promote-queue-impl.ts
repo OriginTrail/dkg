@@ -30,6 +30,8 @@ import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
   PromoteJobConflictError,
+  PromoteAdmissionUncertainError,
+  type BoundPromoteRequest, type BoundPromoteJob,
   PromoteJobLeaseError,
   PROMOTE_JOB_STATES,
   type AsyncPromoteQueue,
@@ -121,9 +123,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     this.backoff = config.backoff ?? createDefaultPromoteBackoff(config.rand);
   }
 
-  // ===========================================================================
   // Public surface — RFC §3.1–3.4
-  // ===========================================================================
 
   async enqueue(request: PromoteRequest): Promise<string> {
     this.validateRequest(request);
@@ -151,7 +151,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return jobId;
   }
 
-  async enqueueAndClaim(request: PromoteRequest, workerId: string): Promise<PromoteJob> {
+  async enqueueAndClaim(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob> {
     this.validateRequest(request);
     if (!workerId) throw new Error('workerId is required');
     const requestSnapshot = this.snapshotRequest(request);
@@ -168,8 +168,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       try { await this.writeJob(job); } catch (cause) {
         // An acknowledgement can be lost after the atomic write. Do not start
         // content mutation; retain the handle for observation and lease recovery.
-        throw Object.assign(new Error('Durable share admission could not be confirmed', { cause }),
-          { code: 'SHARE_ADMISSION_UNCERTAIN', recoveryJobId: jobId, recoveryState: 'admission-unconfirmed' });
+        throw new PromoteAdmissionUncertainError(jobId, cause);
       }
       return job;
     });

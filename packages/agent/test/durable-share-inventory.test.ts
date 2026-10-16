@@ -1,3 +1,4 @@
+import { SwmCatalogAuthorityNotReady, SwmInventoryWriteFailure } from '../src/internal/swm-inventory-write.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { commitDurableShareInventory, finishDurableShare } from '../src/internal/promote/durable-share-inventory.js';
@@ -11,6 +12,14 @@ describe('durable inventory handoff', () => {
       requestRfc64SwmCatalogProjectionV1: vi.fn() };
     await expect(commitDurableShareInventory(agent as any, params)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
     expect(agent.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
+  });
+  it.each(['service-unavailable', 'policy-not-accepted'] as const)('retries typed readiness %s only', async reason => {
+    const cause = new SwmCatalogAuthorityNotReady(reason);
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('authority', null, cause); }) };
+    await expect(commitDurableShareInventory(agent as any, params)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE', cause });
+    const denied = new Error('catalog policy authority invalid');
+    agent.commitRfc64SwmAuthorInventoryV1.mockImplementation(async () => { throw new SwmInventoryWriteFailure('authority', null, denied); });
+    await expect(commitDurableShareInventory(agent as any, params)).rejects.toBe(denied);
   });
   it('refuses policy mismatch and never substitutes a detached observer for durable admission', async () => {
     const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'dormant', dormantReason: 'policy-mismatch' })) };

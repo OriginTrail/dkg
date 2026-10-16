@@ -1,6 +1,7 @@
+import {verifyIdentityTuples} from './identity-tuples.mjs';
 // Read-only proof around the separately requested process-crash regression.
 import fs from 'node:fs';
-import {ASSERTION_SEAL_PREDICATES, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer} from '../../packages/core/dist/index.js';
+import {ASSERTION_SEAL_PREDICATES, parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer} from '../../packages/core/dist/index.js';
 import {createRequire} from 'node:module';
 const require=createRequire(new URL('../../packages/cli/package.json',import.meta.url));
 const {JsonRpcProvider}=require('ethers');
@@ -55,6 +56,18 @@ if(mode==='before'){
  const wm=knowledgeAssetLayerGraphUri(cg,MemoryLayer.WorkingMemory,scope);
  const wmCleared=!rows.some(r=>r.g.value===wm||r.g.value.startsWith(wm+'/'));
  const catalogs=JSON.parse(fs.readFileSync(`${root}/restart-readback/catalogs.json`)).flatMap(c=>c.rows);
+ const crashSealSubjects=[...new Set(fault.metadataAtFault.quads.filter(q=>q.predicate===ASSERTION_SEAL_PREDICATES.KA_UAL).map(q=>q.subject))];
+ if(crashSealSubjects.length!==1)throw Error('Expected one original crash seal');
+ const crashSeal=parseAssertionSealQuads(fault.metadataAtFault.quads,crashSealSubjects[0]);
+ if(!crashSeal)throw Error('Missing original crash seal');
+ const canonicalSeal=canonicalGraphScopedAuthorSealFromAssertionSealV1(crashSeal);
+ const crashDigest=computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal);
+ const originalBindingSeal=before.request.recoveryBinding.sealDigest===crashDigest;
+ const expected=[...JSON.parse(fs.readFileSync(`${root}/seal-proof.json`)),
+   {name:'restart-recovery',seal:canonicalSeal,sealDigest:crashDigest}];
+ if(expected.length!==437||expected.some(row=>row.error||row.unchanged===false))throw Error('Incomplete original identity evidence');
+ const inventory=JSON.parse(fs.readFileSync(`${root}/restart-readback/inventory.json`)).swm;
+ const tuples=verifyIdentityTuples(expected,catalogs,inventory);
  const publications=JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-publisher-jobs.json`)).value.jobs;
  const mainPublications=JSON.parse(fs.readFileSync(`${root}/fixed-deadline/-api-publisher-jobs.json`)).value.jobs;
  const receipts=JSON.parse(fs.readFileSync(`${root}/reconciliation.json`));
@@ -66,8 +79,8 @@ if(mode==='before'){
  const sameRuntime=['version','commit','peerId'].every(key=>runtimeBefore[key]===runtimeAfter[key]);
  const result={sameRuntime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
  originalBinding:JSON.stringify(job.request)===JSON.stringify(before.request),state:job.state,attempts:job.attempt.count,
- originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate==='restart-recovery').length,
+ originalBindingSeal,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate==='restart-recovery').length,
  noAdditionalPublicationEffects:publications.length===48&&publications.every(j=>mainPublications.some(old=>old.jobId===j.jobId&&old.finalization.txHash===j.finalization.txHash)),nonces,manualRepairs:0};
  fs.writeFileSync(`${dir}/identity-proof.json`,JSON.stringify(result,null,2));console.log(result);
- if(!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==437||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
+ if(!originalBindingSeal||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==437||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
 }else throw Error('Expected before or after');

@@ -1,4 +1,4 @@
-import { validatePromoteRecoveryBinding } from './promote-recovery-binding.js';
+import { isBoundPromoteRequest } from './bound-promote-request.js';
 /**
  * Async Promote Queue — utils.
  *
@@ -271,8 +271,7 @@ function isPromoteRequest(value: unknown): value is PromoteRequest {
   if (value['agentAddress'] !== undefined && typeof value['agentAddress'] !== 'string') return false;
   if (value['authorAgentAddress'] !== undefined && typeof value['authorAgentAddress'] !== 'string') return false;
   if (value['recoveryBinding'] !== undefined) {
-    try { validatePromoteRecoveryBinding(value['recoveryBinding']); } catch { return false; }
-    if (value['entities'] !== 'all' || !value['agentAddress']) return false;
+    return isBoundPromoteRequest(value);
   }
   const entities = value['entities'];
   if (entities === 'all') return true;

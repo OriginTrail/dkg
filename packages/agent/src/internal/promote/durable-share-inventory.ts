@@ -1,5 +1,5 @@
 import { rfc64SwmInventoryShadowRuntimeV1 } from '../../rfc64/swm-inventory-shadow-runtime-v1.js';
-import { SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from '../swm-inventory-write.js';
+import { SwmInventoryWriteFailure, SwmCatalogAuthorityNotReady, type SwmInventoryWriteOutcome } from '../swm-inventory-write.js';
 import type { ContextGraphIdV1, EvmAddressV1 } from '@origintrail-official/dkg-core';
 import { createPromoteRetryableFailure, runPromoteCommittedFinalization } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
@@ -21,6 +21,9 @@ async function commitInventoryUnderAssetLock(agent: DKGAgent, params: AfterDurab
   try { result = await agent.commitRfc64SwmAuthorInventoryV1({ ...params, shareOperationId: params.shareOperationId }); }
   catch (error) {
     if (!(error instanceof SwmInventoryWriteFailure)) throw error;
+    if (error.phase === 'authority' && error.cause instanceof SwmCatalogAuthorityNotReady) {
+      throw createPromoteRetryableFailure(error.cause);
+    }
     // Only the replay-safe inventory CAS is a committed finalization boundary.
     // Authority and preparation-read errors retain their original classification.
     if (error.phase === 'inventory-commit') await runPromoteCommittedFinalization(async () => { throw error.cause; });

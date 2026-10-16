@@ -1,0 +1,50 @@
+{
+  "recordedAt": "2026-10-16T19:13:53.435429+00:00",
+  "productRevision": "6fc212c92cba46a5c8bc595e761cf19da5433824",
+  "measuredTrafficStarted": false,
+  "reason": "Superseded by actionable round-4 remote review before benchmark traffic. Preserve preparation and natural startup recovery separately.",
+  "manualRepairs": 0,
+  "startupRecovery": {
+    "phase": "preparation, excluded from measured 256-share denominator",
+    "initialHttpStatus": 503,
+    "initialErrorCode": "PROMOTE_RETRYABLE_FAILURE",
+    "jobId": "a3886f44-5814-4f5d-a4ce-7cfedf857efa",
+    "state": "succeeded",
+    "attempts": 2,
+    "enqueuedAt": "2026-10-16T19:03:28.699Z",
+    "finishedAt": "2026-10-16T19:04:43.801Z",
+    "admissionToCompletionMs": 75102,
+    "firstObservedSuccessAt": "2026-10-16T19:04:47.858Z",
+    "manualRepairs": 0,
+    "sharePostAttempts": 1,
+    "protocol": {
+      "observedFrom": "2026-10-16T19:04:02.709Z",
+      "deadline": "2026-10-16T19:24:02.710Z",
+      "jobId": "a3886f44-5814-4f5d-a4ce-7cfedf857efa",
+      "manualRepairs": 0
+    },
+    "limitation": "No fault-time store snapshot for this natural preparation event; its precise store boundary is not established."
+  },
+  "preparation": {
+    "initialRequests": 179,
+    "initial201": 179,
+    "draftRequests": 256,
+    "draft201": 256,
+    "inventoryRows": 180,
+    "catalogRows": 180
+  },
+  "shutdown": {
+    "at": "2026-10-16T19:23:27.563655+00:00",
+    "ownedPidsAbsent": [
+      47357,
+      47359
+    ],
+    "containerStopped": true,
+    "publicationJobs": 0,
+    "allNoncesSettled": true,
+    "accountedTransactions": 2,
+    "shareJobsSucceeded": 180,
+    "measuredTrafficStarted": false
+  },
+  "limitation": "Natural startup failure had no fault-time snapshot; exact original failure boundary and identity at fault were not captured. Preparation overlapped local checks and is excluded from performance comparison."
+}

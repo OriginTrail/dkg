@@ -163,5 +163,16 @@
     "prerequisites": [
       "Python 3.9 or newer"
     ]
+  },
+  {
+    "pattern": "scripts/testnet-share-recovery/*.test.mjs",
+    "lane": "scripts",
+    "reason": "Exact identity evidence verifier regressions for the testnet share-recovery campaign",
+    "cadence": "manual",
+    "command": "node --test scripts/testnet-share-recovery/*.test.mjs",
+    "layer": "evidence validation",
+    "prerequisites": [
+      "Node.js 22"
+    ]
   }
 ]

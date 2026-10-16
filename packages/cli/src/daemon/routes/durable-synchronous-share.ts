@@ -1,5 +1,6 @@
+import { DurableShareFailure, observeShareRecovery } from './durable-share-failure.js';
 import { randomUUID } from 'node:crypto';
-import { PromoteJobConflictError, type PromoteJob } from '@origintrail-official/dkg-publisher';
+import { PromoteJobConflictError, PromoteAdmissionUncertainError, type PromoteJob } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent, AssertionPromoteOptions } from '@origintrail-official/dkg-agent';
 import { runPromoteJob } from '../worker/async-promote-worker.js';
 import { daemonState } from '../state.js';
@@ -10,8 +11,7 @@ export async function durableSynchronousShare(
 ): ReturnType<DKGAgent['assertion']['promote']> {
   const queue = agent.promoteQueue;
   if (!queue?.enqueueAndClaim || !daemonState.promoteWorkerAvailable) {
-    throw Object.assign(new Error('Durable sharing requires an available share recovery worker'),
-      { code: 'SHARE_RECOVERY_UNAVAILABLE' });
+    throw new DurableShareFailure(new Error('Durable sharing requires an available share recovery worker'), { state: 'unavailable' });
   }
   const prepared = await agent.assertion.prepareDurableShare(contextGraphId, name, options);
   if (prepared.completedResult) return prepared.completedResult;
@@ -21,8 +21,10 @@ export async function durableSynchronousShare(
     subGraphName: options?.subGraphName, authorAgentAddress: options?.authorAgentAddress, ...prepared,
   }, workerId); } catch (error) {
     if (error instanceof PromoteJobConflictError) {
-      throw Object.assign(error, { code: 'SHARE_ALREADY_PENDING', recoveryJobId: error.existingJobId,
-        recoveryState: 'pending', recoveryStatusUrl: `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(error.existingJobId)}` });
+      throw new DurableShareFailure(error, await observeShareRecovery(queue, error.existingJobId));
+    }
+    if (error instanceof PromoteAdmissionUncertainError) {
+      throw new DurableShareFailure(error, { state: 'admission-unconfirmed', jobId: error.jobId });
     }
     throw error;
   }
@@ -40,10 +42,13 @@ export async function durableSynchronousShare(
     },
   });
   if (outcome.outcome === 'succeeded' && response) return response;
-  const error = failure instanceof Error ? failure : new Error('Share completion is awaiting durable recovery');
-  throw Object.assign(error, { contextGraphId, subGraphName: options?.subGraphName, retryKnowledgeAssetName: name, recoveryJobId: job.jobId,
-    recoveryState: outcome.outcome === 'failed_terminal' ? 'inspection-required' : 'pending',
-    recoveryStatusUrl: `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(job.jobId)}` });
+  const cause = failure ?? new Error('Share completion is awaiting durable recovery');
+  const observation = outcome.outcome === 'failed_terminal'
+    ? { state: 'inspection-required' as const, jobId: job.jobId }
+    : outcome.outcome === 'failed_retrying'
+      ? { state: 'pending' as const, jobId: job.jobId }
+      : await observeShareRecovery(queue, job.jobId);
+  throw new DurableShareFailure(cause, observation);
 }
 
 export function synchronousShareSuccessBody(share: Awaited<ReturnType<DKGAgent['assertion']['promote']>>) {

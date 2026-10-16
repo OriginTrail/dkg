@@ -331,6 +331,12 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.recoveryJobId).toEqual(expect.any(String));
     expect(res.body.recoveryStatusUrl).toBe(`/api/knowledge-assets/swm/share-jobs/${res.body.recoveryJobId}`);
     if (!oneShot) expect(res.body).toMatchObject({ code: 'CURATOR_REJECTED', curatorDelivery: 'rejected' });
+    if (!oneShot) {
+      const repeat = await post('swm/share', { contextGraphId: CG_ID });
+      expect(repeat.status).toBe(409);
+      expect(repeat.body).toMatchObject({ code: 'SHARE_OWNER_CONFLICT', recoveryState: 'inspection-required',
+        retryable: false, recoveryJobId: res.body.recoveryJobId, recoveryStatusUrl: res.body.recoveryStatusUrl });
+    }
   });
 
   it('swm/share: KA_NAMED_GRAPH_SHARE_UNSUPPORTED → 409 { code, error, namedGraphs }', async () => {

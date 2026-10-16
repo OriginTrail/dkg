@@ -77,7 +77,8 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
       completedResult: { promotedCount: 0, sealed: true, publishReady: false,
         ...(recoveryBinding.completedResult.shareOperationId ? { shareOperationId: recoveryBinding.completedResult.shareOperationId } : {}) } };
   }
-  assertCompatibleAcknowledgement(recoveryBinding.intent.confirmationRequired, opts?.awaitCuratorAck);
+  assertCompatibleAcknowledgement(recoveryBinding.intent.confirmationRequired,
+    opts?.awaitCuratorAck === true && publisherOptions.confirmBeforeCommit !== undefined);
   return { agentAddress: storageLane, recoveryBinding, completedResult: undefined };
 }
 
@@ -89,8 +90,7 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
       throw new Error('Bound recovery requires a sealed, complete Knowledge Asset');
     }
     const binding = validatePromoteRecoveryBinding(opts.recoveryBinding);
-    assertCompatibleAcknowledgement(binding.intent.confirmationRequired, opts.awaitCuratorAck);
-    opts = { ...opts, recoveryBinding: binding, awaitCuratorAck: binding.intent.confirmationRequired,
+    opts = { ...opts, recoveryBinding: binding, awaitCuratorAck: binding.intent.confirmationRequired || opts.awaitCuratorAck === true,
       accessPolicy: binding.intent.accessPolicy, allowedPeers: [...binding.intent.allowedPeers] };
   }
   if (!opts?.recoveryBinding) await prepareShareSeal(agent, contextGraphId, name, promoteAgentAddress, opts);
@@ -100,6 +100,10 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
     publisherPeerId: agent.node.peerId.toString(),
     options: opts,
   });
+  if (opts?.recoveryBinding) {
+    assertCompatibleAcknowledgement(opts.recoveryBinding.intent.confirmationRequired,
+      opts.awaitCuratorAck === true && publisherOptions.confirmBeforeCommit !== undefined);
+  }
   const {
     promotedCount,
     gossipPayload,

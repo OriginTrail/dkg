@@ -178,6 +178,10 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
 
     expect(res.status).toBe(409);
     expect(res.body).toEqual({
+      recoveryJobId: expect.any(String),
+      recoveryState: 'inspection-required',
+      recoveryStatusUrl: `/api/knowledge-assets/swm/share-jobs/${res.body.recoveryJobId}`,
+      retryable: false,
       // The publisher's full error message is forwarded so debug
       // tools / curl users get the same explanation the UI builds
       // via `describePromoteError`.

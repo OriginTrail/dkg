@@ -71,18 +71,30 @@ export type PromoteFailureClassification = 'transient' | 'cap_exceeded' | 'fatal
  * A promote request — the payload the queue persists for the worker to
  * replay. Validated at the HTTP layer; the queue stores it verbatim.
  */
-export interface PromoteRequest {
-  /** Internal immutable synchronous-recovery authority; never client supplied. */
-  recoveryBinding?: PromoteRecoveryBinding;
+interface PromoteRequestScope {
   contextGraphId: string;
   subGraphName?: string;
   assertionName: string;
-  entities: readonly string[] | 'all';
   /** Worker-facing storage namespace used to locate the WM draft; conflict keys canonicalize separately. */
   agentAddress?: string;
   /** Signing author used by finalize/seal during promote replay. */
   authorAgentAddress?: string;
 }
+
+export interface OrdinaryPromoteRequest extends PromoteRequestScope {
+  recoveryBinding?: undefined;
+  entities: readonly string[] | 'all';
+}
+
+/** Internal immutable synchronous-recovery authority; never client supplied. */
+export interface BoundPromoteRequest extends PromoteRequestScope {
+  recoveryBinding: PromoteRecoveryBinding;
+  entities: 'all';
+  agentAddress: string;
+}
+
+export type PromoteRequest = OrdinaryPromoteRequest | BoundPromoteRequest;
+export type BoundPromoteJob = PromoteJob & { request: BoundPromoteRequest; formatVersion: 4 };
 
 /**
  * Per-attempt lease metadata. Present only when state is `running`.
@@ -241,7 +253,7 @@ export interface AsyncPromoteQueue {
   // RFC §3.1
   enqueue(request: PromoteRequest): Promise<string>;
   /** Persist ownership and the inline lease together, before content mutation. */
-  enqueueAndClaim?(request: PromoteRequest, workerId: string): Promise<PromoteJob>;
+  enqueueAndClaim?(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob>;
   // RFC §3.2
   getStatus(jobId: string): Promise<PromoteJob | null>;
   // RFC §3.3
@@ -351,5 +363,13 @@ export class PromoteJobLeaseError extends Error {
     reason: string,
   ) {
     super(`Stale promote lease for ${jobId}: ${reason}`);
+  }
+}
+
+/** Atomic admission may have committed; callers must observe this owner before retrying. */
+export class PromoteAdmissionUncertainError extends Error {
+  override readonly name = 'PromoteAdmissionUncertainError';
+  constructor(readonly jobId: string, cause: unknown) {
+    super('Durable share admission could not be confirmed', { cause });
   }
 }

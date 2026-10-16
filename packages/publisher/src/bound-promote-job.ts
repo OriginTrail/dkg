@@ -1,24 +1,27 @@
 import { tryReplaceSubjectAtomically, type TripleStore } from '@origintrail-official/dkg-storage';
 import { validatePromoteRecoveryBinding } from './promote-recovery-binding.js';
-import type { PromoteJob, PromoteRequest } from './async-promote-queue-types.js';
+import { isBoundPromoteRequest } from './bound-promote-request.js';
+import type { BoundPromoteJob, PromoteJob, PromoteRequest } from './async-promote-queue-types.js';
 import { serializeJobRecord } from './async-promote-queue-utils.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 
-export function isBoundPromoteJob(job: PromoteJob): boolean {
-  if (job.formatVersion !== 4 || job.request.entities !== 'all' || !job.request.agentAddress) return false;
-  try { validatePromoteRecoveryBinding(job.request.recoveryBinding); return true; } catch { return false; }
+export function isBoundPromoteJob(job: PromoteJob): job is BoundPromoteJob {
+  return job.formatVersion === 4 && isBoundPromoteRequest(job.request);
 }
 
 export function snapshotPromoteRequest(request: PromoteRequest): PromoteRequest {
-  return {
+  const scope = {
     contextGraphId: request.contextGraphId, assertionName: request.assertionName,
-    entities: request.entities === 'all' ? 'all' : Object.freeze([...request.entities]),
     ...(request.subGraphName !== undefined ? { subGraphName: request.subGraphName } : {}),
-    ...(request.agentAddress?.trim() ? { agentAddress: request.agentAddress.trim() } : {}),
     ...(request.authorAgentAddress !== undefined ? { authorAgentAddress: request.authorAgentAddress } : {}),
-    ...(request.recoveryBinding !== undefined
-      ? { recoveryBinding: validatePromoteRecoveryBinding(request.recoveryBinding) } : {}),
   };
+  if (request.recoveryBinding !== undefined) {
+    if (!isBoundPromoteRequest(request)) throw new Error('Invalid bound promote request');
+    return { ...scope, entities: 'all', agentAddress: request.agentAddress.trim(),
+      recoveryBinding: validatePromoteRecoveryBinding(request.recoveryBinding) };
+  }
+  return { ...scope, entities: request.entities === 'all' ? 'all' : Object.freeze([...request.entities]),
+    ...(request.agentAddress?.trim() ? { agentAddress: request.agentAddress.trim() } : {}) };
 }
 
 export function claimPromoteJob(job: PromoteJob, workerId: string, now: number, leaseMs: number, token: string): PromoteJob {

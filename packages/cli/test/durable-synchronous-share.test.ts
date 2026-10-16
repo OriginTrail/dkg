@@ -1,8 +1,10 @@
+import { classifySynchronousShareFailure } from '../src/daemon/routes/durable-share-response.js';
+import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/durable-share-failure.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncPromoteQueue, CuratorRejectedError } from '@origintrail-official/dkg-publisher';
+import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, PromoteAdmissionUncertainError } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
@@ -82,8 +84,8 @@ describe('durable synchronous share ownership', () => {
     daemonState.promoteWorkerAvailable = true;
     store.typed = typed; store.remaining = 2;
     const error = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
-    expect(error.recoveryState).toBe('pending');
-    const failed = await agent.promoteQueue.getStatus(error.recoveryJobId);
+    expect(error.observation.state).toBe('pending');
+    const failed = await agent.promoteQueue.getStatus(error.observation.jobId);
     expect(failed.request.recoveryBinding.intent.operationId).toMatch(/^[0-9a-z]+-[0-9a-z]+$/);
     expect(failed.state).toBe('failed_retrying');
     expect(failed.attempt.lastError.retryable).toBe(true);
@@ -94,8 +96,8 @@ describe('durable synchronous share ownership', () => {
       pollIntervalMs: 10, heartbeatIntervalMs: 60_000, log: () => undefined });
     try {
       await supervisor.start();
-      await vi.waitFor(async () => expect((await restarted.promoteQueue.getStatus(error.recoveryJobId)).state).toBe('succeeded'), { timeout: 10_000 });
-      const recovered = await restarted.promoteQueue.getStatus(error.recoveryJobId);
+      await vi.waitFor(async () => expect((await restarted.promoteQueue.getStatus(error.observation.jobId)).state).toBe('succeeded'), { timeout: 10_000 });
+      const recovered = await restarted.promoteQueue.getStatus(error.observation.jobId);
       expect(recovered.request.recoveryBinding).toEqual(failed.request.recoveryBinding);
       expect(recovered.attempt.count).toBe(3);
       expect(await restarted.assertion.history(CG, NAME, { agentAddress: AUTHOR })).toMatchObject({ state: 'promoted', memoryLayer: 'SWM' });
@@ -113,8 +115,8 @@ describe('durable synchronous share ownership', () => {
     const confirmation = vi.fn(async () => ({ applied: connected }));
     agent.buildCuratorAckConfirmer = async () => confirmation;
     const error = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true }).catch(e => e);
-    expect(error.code).toBe('CURATOR_UNCONFIRMED');
-    const failed = await agent.promoteQueue.getStatus(error.recoveryJobId);
+    expect(error.cause.code).toBe('CURATOR_UNCONFIRMED');
+    const failed = await agent.promoteQueue.getStatus(error.observation.jobId);
     expect(failed.state).toBe('failed_retrying');
     expect(failed.request.recoveryBinding.intent.confirmationRequired).toBe(true);
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
@@ -122,8 +124,8 @@ describe('durable synchronous share ownership', () => {
     const supervisor = createPromoteWorkerSupervisor({ agent, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
     try {
       await supervisor.start();
-      await vi.waitFor(async () => expect((await agent.promoteQueue.getStatus(error.recoveryJobId)).state).toBe('succeeded'));
-      expect((await agent.promoteQueue.getStatus(error.recoveryJobId)).request.recoveryBinding).toEqual(failed.request.recoveryBinding);
+      await vi.waitFor(async () => expect((await agent.promoteQueue.getStatus(error.observation.jobId)).state).toBe('succeeded'));
+      expect((await agent.promoteQueue.getStatus(error.observation.jobId)).request.recoveryBinding).toEqual(failed.request.recoveryBinding);
       expect(confirmation).toHaveBeenCalledTimes(2);
     } finally { await supervisor.stop(); await store.close(); }
   });
@@ -144,13 +146,34 @@ describe('durable synchronous share ownership', () => {
     await store.close();
   });
 
+  it('accepts an explicit acknowledgement when the node is itself the curator and no remote confirmation is needed', async () => {
+    const { store, agent } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    agent.buildCuratorAckConfirmer = async () => undefined;
+    const result = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true });
+    expect(result.promotedCount).toBe(1);
+    expect((await agent.promoteQueue.list({}))[0].request.recoveryBinding.intent.confirmationRequired).toBe(false);
+    await store.close();
+  });
+
   it('keeps permanent curator rejection in an inspection hold', async () => {
     const { store, agent } = await setup();
     daemonState.promoteWorkerAvailable = true;
     agent.buildCuratorAckConfirmer = async () => async () => { throw new CuratorRejectedError(CG); };
     const error = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true }).catch(e => e);
-    expect(error.code).toBe('CURATOR_REJECTED');
-    expect((await agent.promoteQueue.getStatus(error.recoveryJobId)).state).toBe('failed');
+    expect(error.cause.code).toBe('CURATOR_REJECTED');
+    expect((await agent.promoteQueue.getStatus(error.observation.jobId)).state).toBe('failed');
+    const repeated = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true }).catch(e => e);
+    expect(repeated).toBeInstanceOf(DurableShareFailure);
+    expect(repeated.observation).toEqual({ state: 'inspection-required', jobId: error.observation.jobId });
+    expect(classifySynchronousShareFailure(repeated, { contextGraphId: CG, name: NAME, phase: 'swm-share' }))
+      .toMatchObject({ status: 409, body: { recoveryState: 'inspection-required', retryable: false,
+        recoveryJobId: error.observation.jobId, code: 'SHARE_OWNER_CONFLICT' } });
+    expect(await agent.promoteQueue.list({})).toHaveLength(1);
+    vi.spyOn(agent.promoteQueue, 'getStatus').mockRejectedValueOnce(new Error('store unavailable'));
+    expect(await observeShareRecovery(agent.promoteQueue, error.observation.jobId))
+      .toEqual({ state: 'unobserved', jobId: error.observation.jobId });
+
     await store.close();
   });
 
@@ -253,7 +276,7 @@ describe('durable synchronous share ownership', () => {
     const { store, agent, finalized } = await setup();
     const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
     vi.spyOn(store, 'replaceSubject').mockRejectedValue(new UnsupportedTripleStoreCapabilityError('replaceSubject'));
-    await expect(agent.promoteQueue.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...bound }, 'inline')).rejects.toMatchObject({ code: 'SHARE_ADMISSION_UNCERTAIN' });
+    await expect(agent.promoteQueue.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...bound }, 'inline')).rejects.toBeInstanceOf(PromoteAdmissionUncertainError);
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
     expect(await store.countQuads(finalized.graphUri)).toBe(1);
     await store.close();
@@ -269,13 +292,13 @@ describe('durable synchronous share ownership', () => {
     });
     const error = await q.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...bound }, 'lost')
       .catch(error => error);
-    expect(error.recoveryState).toBe('admission-unconfirmed');
-    expect((await q.getStatus(error.recoveryJobId))?.state).toBe('running');
+    expect(error).toBeInstanceOf(PromoteAdmissionUncertainError);
+    expect((await q.getStatus(error.jobId))?.state).toBe('running');
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
     now += 101;
     const reopened = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100 });
     const reclaimed = await reopened.claimNext('new');
-    expect(reclaimed?.jobId).toBe(error.recoveryJobId);
+    expect(reclaimed?.jobId).toBe(error.jobId);
     expect(reclaimed?.request.recoveryBinding).toEqual(bound.recoveryBinding);
     expect(await agent.assertion.promote(CG, NAME, bound)).toMatchObject({
       promotedCount: 1, shareOperationId: bound.recoveryBinding.intent.operationId,

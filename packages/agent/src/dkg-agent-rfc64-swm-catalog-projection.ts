@@ -1,3 +1,4 @@
+import { SwmCatalogAuthorityNotReady } from './internal/swm-inventory-write.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /** Selected-CG durable SWM-inventory to signed-catalog projection owner. */
@@ -599,16 +600,14 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     if (service === undefined) {
       return Object.freeze({
         status: 'unavailable',
-        error: new Error('RFC-64 public catalog service is unavailable'),
+        error: new SwmCatalogAuthorityNotReady('service-unavailable'),
       });
     }
     const acceptedPolicy = service.acceptedPolicySnapshot(networkId, contextGraphId);
     if (acceptedPolicy === null) {
       return Object.freeze({
         status: 'unavailable',
-        error: new Error(
-          'RFC-64 catalog authoring requires an independently accepted current policy',
-        ),
+        error: new SwmCatalogAuthorityNotReady('policy-not-accepted'),
       });
     }
     if (
