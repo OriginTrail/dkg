@@ -18,7 +18,7 @@ import { catalogPlacementTimingV1, type CatalogPlacementWaiterObserverV1 } from 
 interface ConfirmedVmCatalogObserverDependencies {
   readonly owner: object;
   readonly log: Logger;
-  finalizedPrivateScope(contextGraphId: string, subGraphName: string | null, authorAddress: string): SwmAuthorInventoryScopeV1 | null;
+  readonly finalizedPrivateScopeBase: Readonly<Omit<SwmAuthorInventoryScopeV1, 'authorAddress'>> | null;
   storeRepair(repair: Rfc64FinalizedPrivatePlacementRepairV1): Promise<void>;
   requestPlacement(params: {
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
@@ -67,29 +67,20 @@ export async function observeConfirmedVmCatalogV1(
     assertionCoordinate,
   });
   try {
-    let finalizedPrivateInventoryScope: SwmAuthorInventoryScopeV1 | null;
-    try {
-      finalizedPrivateInventoryScope = deps.finalizedPrivateScope(contextGraphId, subGraphName, confirmedSeal.authorAddress);
-    } catch (cause) {
-      deps.log.warn(
-        params.ctx,
-        `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-      return false;
-    }
+    const finalizedPrivateScopeBase = deps.finalizedPrivateScopeBase;
     // Fence every confirmed version before the first await; newer versions have distinct entries.
     // The fence outlives this call until the asset-tail repair and queued observers drain.
     if (params.shareOperationId !== undefined) {
       shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion, params.shareOperationId);
     }
-    if (finalizedPrivateInventoryScope !== null) {
+    if (finalizedPrivateScopeBase !== null) {
       let repair: Rfc64FinalizedPrivatePlacementRepairV1;
       try {
         repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
           version: 1,
           contextGraphId: contextGraphId as ContextGraphIdV1,
           authorAddress: confirmedSeal.authorAddress,
-          inventoryScope: finalizedPrivateInventoryScope,
+          inventoryScope: Object.freeze({ ...finalizedPrivateScopeBase, authorAddress: confirmedSeal.authorAddress }),
           assertionCoordinate,
           assertionVersion: confirmedSeal.assertionVersion,
           kaUal: confirmedSeal.kaUal,
