@@ -1,3 +1,4 @@
+import { observeOutboundBulkFrames } from './helpers/observe-bulk-graph-frames.js';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
@@ -69,18 +70,10 @@ describe('public bulk snapshot recovery', () => {
       },
     };
     const requests: string[][] = [], peers: string[] = [];
-    const exchange = f.router.withDuplexStream.bind(f.router);
-    vi.spyOn(f.router, 'withDuplexStream').mockImplementation((peer, protocol, options, consume) => {
+    observeOutboundBulkFrames(f.router, (frame, peer) => {
+      if (frame.kind !== K.REQUEST) return;
       peers.push(peer);
-      return exchange(peer, protocol, options, (stream, signal) => {
-        const send = stream.send.bind(stream);
-        let first = true;
-        stream.send = bytes => {
-          if (first) { first = false; requests.push(JSON.parse(Buffer.from(bytes.subarray()).subarray(20).toString()).assetUals); }
-          return send(bytes);
-        };
-        return consume(stream, signal);
-      });
+      requests.push(JSON.parse(Buffer.from(frame.payload).toString()).assetUals);
     });
     const signal = new AbortController().signal;
     const pending = recoverPublicSnapshotBulk(agent, { contextGraphId: cg, peers: ['offline', f.supplierPeer],
