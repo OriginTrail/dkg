@@ -9,7 +9,7 @@ function deferred() { let resolve!: () => void; const promise = new Promise<void
 const assets = [1, 2].map(n => ({ ual: `urn:publication:${n}`, metaGraph: 'urn:publication:meta' } as VerifiedGraphScopedAsset));
 const replacements = assets.map(a => ({ metadataSubject: a.ual } as AtomicAssetReplacement));
 function run(publish: () => Promise<void>) {
-  return executeGraphScopedPublication({ store: {} as TripleStore, assets, options: {}, assertCurrent: () => {},
+  return executeGraphScopedPublication({ store: { getPressureSnapshot: () => ({ normalInflightLimit: 2 }) } as TripleStore, assets, options: {}, assertCurrent: () => {},
     requireCurrentMetadata: true, stale: () => 'stale' as const, complete: () => 'applied' as const,
     publish, quarantine: async () => {} });
 }
