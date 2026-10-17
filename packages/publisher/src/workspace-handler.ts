@@ -49,6 +49,7 @@ import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 import { computeFlatKCRootV10 } from './merkle.js';
+import { SharedMemoryAuthorSealKeeper } from './shared-memory-author-seal.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
 import {
@@ -307,6 +308,7 @@ export class SharedMemoryHandler {
   private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly writeLocks: Map<string, Promise<void>>;
   private readonly localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+  private readonly authorSeals: SharedMemoryAuthorSealKeeper;
   private readonly contextGraphMetaOracle?: (
     contextGraphId: string,
   ) => Promise<ContextGraphMetaOracleRecord | null>;
@@ -461,6 +463,7 @@ export class SharedMemoryHandler {
       sharedMemoryOwnedEntities?: Map<string, Map<string, string>>;
       writeLocks?: Map<string, Promise<void>>;
       localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+      keepsAuthorSeals?: (contextGraphId: string) => boolean | Promise<boolean>;
       contextGraphMetaOracle?: (
         contextGraphId: string,
       ) => Promise<ContextGraphMetaOracleRecord | null>;
@@ -548,6 +551,7 @@ export class SharedMemoryHandler {
     }
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
+    this.authorSeals = new SharedMemoryAuthorSealKeeper(store, this.log, options);
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
     this.publicAccessPolicyOracle = options?.publicAccessPolicyOracle
       ?? options?.publicAccessPolicyOnChainOracle;
@@ -1312,6 +1316,7 @@ export class SharedMemoryHandler {
         accessPolicy: wireAccessPolicy,
         allowedPeers: wireAllowedPeers,
       } = request;
+      const sealedShare = request;
       const shareOperationId = request.shareOperationId?.trim();
       const requestLifecycleFields: SharedMemoryLifecycleFields = {
         contextGraphId,
@@ -1648,6 +1653,7 @@ export class SharedMemoryHandler {
               // Refresh local-only controls so a retry completes a prior
               // head/sidecar tear.
               await persistLocallyTrustedControls();
+              await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized, { envelope, signedPayload });
               return swmWriteApplied;
             }
             const reason =
@@ -1786,6 +1792,7 @@ export class SharedMemoryHandler {
         // this assertion's locally recomputed root, only after the durable SWM
         // head has committed. Receipt recovery must fail closed without them.
         await persistLocallyTrustedControls();
+        await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized, { envelope, signedPayload });
 
         return swmWriteApplied;
       });

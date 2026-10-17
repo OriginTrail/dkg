@@ -104,6 +104,8 @@ import {
   assertQuadLiteralsMutf8Safe,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
+  ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
+  type ContextGraphIdV1,
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
@@ -204,6 +206,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
 import { resolveFinalizedAssertionAuthor } from './finalized-assertion-author.js';
+import { resolveDurableGraphScopedAuthorSealCandidateV1 } from './durable-author-seal-resolver-v1.js';
 
 /**
  * Public options for {@link DKGAgentPublishMixin.resolveAssertionAuthor}. Declared
@@ -4436,6 +4439,29 @@ export class PublishMethods extends DKGAgentBase {
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
     });
     if (!history) {
+      // GH#3294 — a node that is not the author (a curator) keeps the author's
+      // seal and share when the share arrives, never the author's lifecycle
+      // record. This lane checks that record before and after it queues, so it
+      // refuses the asset; the synchronous lane needs only the seal and share.
+      const foreignSeal = await resolveDurableGraphScopedAuthorSealCandidateV1({
+        store: this.store,
+        contextGraphId: contextGraphId as ContextGraphIdV1,
+        agentAddress,
+        assertionCoordinate: name,
+        subGraphName: opts?.subGraphName,
+        source: 'agent.asyncVmPublish.foreignSeal',
+      });
+      if (foreignSeal !== undefined) {
+        throw Object.assign(
+          new Error(
+            `Cannot publish "${name}" in context graph "${contextGraphId}" asynchronously: this node holds ` +
+              `the seal of author ${agentAddress} but not that author's lifecycle record, which the queued ` +
+              `lane checks. A seal kept from another author's share is published with ` +
+              `POST /api/knowledge-assets/${encodeURIComponent(name)}/vm/publish.`,
+          ),
+          { code: ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE },
+        );
+      }
       throw new Error(
         `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
       );

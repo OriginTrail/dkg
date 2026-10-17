@@ -1278,6 +1278,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
+        // GH#3294 — the graph's curator publishes its members' shared assets,
+        // so it keeps the author seals their shares carry; other nodes do not.
+        keepsAuthorSeals: (cgId: string) => this.isCuratorOf(cgId),
         contextGraphMetaOracle: async (cgId: string) => {
           // The approved-private proof authorizes this receiver only. Another
           // member can be revoked after the metadata snapshot but before that
