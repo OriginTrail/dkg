@@ -68,3 +68,11 @@ No schema migration or new wire contract. Rollback retains existing data formats
 Live daemon test reproduced four committed deletions after native async share succeeded (attempt 1/5), preserved the archive/source, restarted daemon and Blazegraph, then recovered exact public/private data. A second pull correctly returns draft conflict; editing and re-finalizing works. Unpublished mint drafts intentionally retain assertion version 1 until VM confirmation.
 
 A subsequent finalized-unpublished-edit -> discard -> pull failed with a source count mismatch. A deterministic characterization against unchanged base `2361a863d` reproduces the same failure (3 sealed vs 2 SWM triples), so this is a pre-existing adjacent archive/discard defect, not introduced by this fix. Preserve and disclose this limitation rather than resetting live fixture metadata or claiming the whole lifecycle is regression-free. Final live fault/restart proof will be rerun on the reviewed revision using a fresh synthetic name.
+
+### Final implementation/live validation
+
+- Code head `40521b894`: both remote findings addressed and replied with evidence; review threads resolved after fixes were pushed. Re-review requested. Round count 2; observation window for that revision ends approximately 2026-10-18 00:55 Europe/Belgrade (exact timestamps in ignored review-state evidence). Documentation updates do not reset it.
+- Final full publisher suite passes 2,211 tests / 120 files. Real testnet fault/restart replay on that code passes exact public/private equality and conflict preservation.
+- [Sanitized live report](../../run-reports/2026-10-18-issue-3332.md) records setup, reproducible harness, checks, baseline limitation and cleanup.
+- Both live share jobs succeeded; zero VM jobs or pending finalizations. Daemon/store stopped, ports closed, all nine signer nonces unchanged with pending=latest, batch-1 released. No monitoring automation created.
+- Remaining: confirm remote re-review and required CI gates on the final PR revision; inspect all threads including resolved ones for new feedback. Do not merge.
