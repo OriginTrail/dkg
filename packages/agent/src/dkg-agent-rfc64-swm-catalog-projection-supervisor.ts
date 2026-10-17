@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { SwmCatalogAuthorityNotReady } from './internal/swm-inventory-write.js';
 import { discoverDurableCatalogRepairsV1, newPendingRepairV1 } from './rfc64/catalog-projection-discovery-v1.js';
 
 /** Restart-safe local SWM-inventory to catalog projection supervisor. */
@@ -205,7 +206,8 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     const partition = this.#dependencies.resolvePartition();
     const localAuthors = this.#dependencies.listLocalAuthorAddresses();
     const repairs: MutableAuthorRepairStatusV1[] = [];
-    const candidates = (partition?.track2Policies ?? []).flatMap(({ policyEnvelope }) =>
+    const candidates = (partition?.track2Policies ?? [])
+      .filter(({ policyEnvelope }) => this.#dependencies.acceptsPublicRootLane(policyEnvelope.payload.contextGraphId as ContextGraphIdV1)).flatMap(({ policyEnvelope }) =>
       localAuthors.map(authorAddress => ({ contextGraphId: policyEnvelope.payload.contextGraphId as ContextGraphIdV1, authorAddress })));
     discoverDurableCatalogRepairsV1(() => candidates, repairs, newPendingRepairV1, error => { throw error; });
     this.#discoverDurableRepairs(repairs, ctx);
@@ -597,8 +599,9 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       const active = this.#dependencies.acceptsPublicRootLane(contextGraphId);
       return retry.observe(active
         ? this.#dependencies.readRepairRevision(contextGraphId, authorAddress) : null);
-    } catch {
-      // A hint failure must not reject the mutation caller or reset its cooldown.
+    } catch (error) {
+      if (error instanceof SwmCatalogAuthorityNotReady) return retry.observe(null);
+      // Unknown hint failures cannot reset cooldown; only typed lane absence can.
       return undefined;
     }
   }

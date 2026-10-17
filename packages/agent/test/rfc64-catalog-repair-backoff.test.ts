@@ -1,3 +1,4 @@
+import { SwmCatalogAuthorityNotReady } from '../src/internal/swm-inventory-write.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createOperationContext,
@@ -93,6 +94,23 @@ describe('RFC-64 unchanged repair backoff', () => {
     f.setAvailable(true); f.reconcile.mockResolvedValue(null);
     await f.advance(5_000);
     expect(f.reconcile).toHaveBeenCalledWith(expect.objectContaining({ contextGraphId: CG, authorAddress: other }));
+  });
+
+  it('wakes a discovered head when accepted policy replaces a typed unavailable hint', async () => {
+    const f = fixture();
+    f.durableScopes.mockReturnValue([{ contextGraphId: CG, authorAddress: AUTHOR }]);
+    const missing = new SwmCatalogAuthorityNotReady('policy-not-accepted');
+    f.readRevision.mockImplementation(() => { throw missing; });
+    f.reconcile.mockRejectedValue(missing);
+    f.owner.start(ctx); await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    expect(f.owner.status()?.repairs[0].nextAttemptAtMs).toBe(5_000);
+    f.readRevision.mockReturnValue({ scopeIdentity: 'accepted', headRevision: 'same-head' });
+    f.reconcile.mockResolvedValue(null);
+    f.request(); await f.owner.whenIdle();
+    expect(Date.now()).toBe(0);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(f.owner.status()?.repairs[0].outcome).toBe('no-inventory');
   });
 
   it('retries transient discovery failure even when there are no local author scopes', async () => {
