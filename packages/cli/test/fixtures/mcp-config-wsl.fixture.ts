@@ -179,7 +179,9 @@ main().catch(error => { console.error(error); process.exitCode = 1; });
     assert.equal(existsSync(marker), false, 'uninstall must not execute the PATH/cwd shadow PowerShell');
     assert.equal(descriptor(), before, 'uninstall must preserve the complete protected security descriptor');
     assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mcpServers: { sibling: { command: 'other' } } });
-    assert.deepEqual(readdirSync(cursorDirectory).sort(), ['mcp.json', 'skills']);
+    assert.deepEqual(readdirSync(cursorDirectory), ['mcp.json'], 'Windows config leaves no transaction artifacts');
+    assert.equal(existsSync(join(linuxCursorDirectory, 'skills', 'dkg-node', 'SKILL.md')), true,
+      'setup delivers the bundled skill under the selected Linux HOME');
     process.env.HOME = directory;
 
     // Codex has no Windows-side alias. Its native WSL configuration can still
