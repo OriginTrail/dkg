@@ -8328,7 +8328,7 @@ export class DKGPublisher implements Publisher {
     }
 
     if (!selectedSeal || !selectedScope || !validated) {
-      if (candidateError) throw candidateError;
+      if (interruptedPromote || candidateError) throw interruptedPromote || candidateError;
       if (sawLegacySeal) throw new LegacyKnowledgeAssetReadOnlyError();
       throw Object.assign(
         new Error(

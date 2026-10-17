@@ -94,6 +94,23 @@ describe('interrupted SWM pull recovery', () => {
     await store.close();
   });
 
+  it('preserves the recovery-required error when no candidate proves a safe recovery', async () => {
+    const store = new OxigraphStore();
+    const { finalized } = await seedRecoveryAsset(store);
+    await seedInterruptedSealClear(store, 4);
+    await store.deleteByPattern({ graph: finalized.sharedGraphUri });
+    for (const graph of await store.listGraphs()) {
+      if (graph.includes('/_private/') && graph.endsWith('/1')) await store.deleteByPattern({ graph });
+    }
+    const before = await inventory(store);
+    const publisher = await recoveryPublisher(store);
+    await expect(publisher.assertionPullFrom(CG, NAME, AUTHOR, 'swm')).rejects.toMatchObject({
+      code: 'KA_PROMOTE_RECOVERY_REQUIRED',
+    });
+    expect(await inventory(store)).toEqual(before);
+    await store.close();
+  });
+
   it.each(['consumed pointer and intent', 'legacy pointer without intent'])(
     'recovers the completed %s shape', async shape => {
       const store = new OxigraphStore();
