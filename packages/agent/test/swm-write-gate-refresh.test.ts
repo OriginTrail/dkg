@@ -13,6 +13,7 @@ import {
   createSwmWriteGateRefreshOracle,
   SWM_WRITE_GATE_REFRESH_FAILED_REASON,
   SWM_WRITE_GATE_REFRESH_RATIONED_REASON,
+  SWM_WRITE_GATE_REFRESH_ROSTER_CHANGED_REASON,
   SWM_WRITE_GATE_REFRESH_TIMEOUT_REASON,
   type SwmWriteGateRefreshHost,
 } from '../src/internal/context-graph-authority/swm-write-gate-refresh.js';
@@ -232,7 +233,7 @@ describe('SWM write gate refresh oracle: what one window remembers', () => {
     expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
   });
 
-  it('a roster change that lands during a look voids what the look learned', async () => {
+  it('a roster change that lands during a look admits nobody from that look: its requester is told to retry', async () => {
     const receiver = host([available(CURATOR, MEMBER, JOINER)]);
     receiver.resolveAgentGate.mockImplementationOnce(async () => {
       receiver.rosterChanged();
@@ -240,8 +241,46 @@ describe('SWM write gate refresh oracle: what one window remembers', () => {
     });
     const oracle = createSwmWriteGateRefreshOracle(receiver);
 
+    await expect(oracle(CG, JOINER, PEER)).resolves.toEqual({
+      kind: 'unavailable',
+      reason: SWM_WRITE_GATE_REFRESH_ROSTER_CHANGED_REASON,
+      retryable: true,
+    });
+    // Nothing of it was remembered: the next attempt reads the authority again.
     await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
+  });
+
+  it('a request arriving after a revocation does not inherit the admission of a look that started before it', async () => {
+    // A chain read captured the writer's membership, but its answer is delayed.
+    let release: (() => void) | undefined;
+    const delayed = new Promise<void>((resolve) => { release = resolve; });
+    const receiver = host([available(CURATOR, MEMBER)]);
+    receiver.resolveAgentGate.mockImplementationOnce(async () => {
+      await delayed;
+      return available(CURATOR, MEMBER, JOINER);
+    });
+    const oracle = createSwmWriteGateRefreshOracle(receiver);
+
+    const before = oracle(CG, JOINER, PEER);
+    // The writer is revoked in the local metadata while that read is pending;
+    // its next envelope misses the projected gate and asks again.
+    receiver.rosterChanged();
+    const after = oracle(CG, JOINER, PEER);
+    release?.();
+
+    // The later request got its own look at the current authority, which
+    // excludes the writer; the earlier one is told to retry, not admitted from
+    // a roster read before the revocation.
+    await expect(after).resolves.toEqual({ kind: 'available', agentAddresses: [CURATOR, MEMBER] });
+    await expect(before).resolves.toEqual({
+      kind: 'unavailable',
+      reason: SWM_WRITE_GATE_REFRESH_ROSTER_CHANGED_REASON,
+      retryable: true,
+    });
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
+    // The later look is what is remembered: the writer stays excluded without a read.
+    await expect(oracle(CG, JOINER, PEER)).resolves.toEqual({ kind: 'available', agentAddresses: [CURATOR, MEMBER] });
     expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
   });
 
