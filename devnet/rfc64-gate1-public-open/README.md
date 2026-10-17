@@ -112,3 +112,30 @@ Every phase also proves that finalized public VM inventory selection remains
 chain-based. The adapter reports only product readbacks: service/bootstrap
 liveness, configured legacy scope, manual SWM admission result, chain-VM
 selection, exact staged/applied head, and exact semantic graph bytes.
+
+### Interrupted SWM pull recovery
+
+With a disposable local Blazegraph service running and package dependencies built:
+
+```sh
+BLAZEGRAPH_TEST_URL=http://127.0.0.1:9999/bigdata/namespace/kb/sparql \
+  pnpm --filter @origintrail-official/dkg-publisher exec vitest run \
+  --config vitest.blazegraph.config.ts test/assertion-pull-recovery.blazegraph.integration.test.ts
+BLAZEGRAPH_TEST_URL=http://127.0.0.1:9999/bigdata/namespace/kb/sparql \
+  node --import tsx scripts/repro/pull-from-recovery.mts
+```
+
+Both campaigns create and dispose their own namespace. The backend suite covers
+all historical active-seal deletion prefixes, a real failed SPARQL transaction,
+and a committed clear whose acknowledgement is lost. The second command kills
+the publisher process after four legacy predicate deletes and verifies exact
+public/private draft recovery in a fresh process. It requires a loopback endpoint
+and never stops the Blazegraph server. This exercises the publisher lifecycle
+against a real store; it does not run the full network scheduler or simulate
+server power loss. The same backend test is included in the Blazegraph CI lane.
+
+A pull interrupted after archiving can now be retried as the same `wm/pull-from`
+request. Recovery requires a verified archive and source, a completed operation,
+and the matching current SWM head. Sharing again is not the repair for this
+partial-clear state; genuine unfinished promotes retain the existing recovery
+error. A conflicting local draft still requires an explicit replacement choice.

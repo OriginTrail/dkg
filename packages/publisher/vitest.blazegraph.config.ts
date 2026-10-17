@@ -5,6 +5,7 @@ export default defineConfig({
     allowOnly: false,
     include: [
       'test/async-lift-wallet-ownership.blazegraph.integration.test.ts',
+      'test/assertion-pull-recovery.blazegraph.integration.test.ts',
       'test/async-lift-primary-persistence.blazegraph.integration.test.ts',
     ],
     testTimeout: 60_000,

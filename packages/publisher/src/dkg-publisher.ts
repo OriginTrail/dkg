@@ -1,3 +1,4 @@
+import { canResumeCompletedSwmPull, clearAssertionSealPredicates } from './assertion-pull-recovery.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
@@ -6712,17 +6713,8 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     subGraphName?: string,
   ): Promise<void> {
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    for (const subject of await this.activeAssertionSealSubjects(
-      contextGraphId,
-      name,
-      agentAddress,
-      subGraphName,
-    )) {
-      for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
-        await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject, predicate });
-      }
-    }
+    await clearAssertionSealPredicates(this.store, contextGraphMetaUri(contextGraphId),
+      await this.activeAssertionSealSubjects(contextGraphId, name, agentAddress, subGraphName));
   }
 
   /**
@@ -8236,12 +8228,13 @@ export class DKGPublisher implements Publisher {
   }> {
     const subGraphName = opts?.subGraphName;
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
-    await this.assertNoUnfinishedAssertionPromote(
-      contextGraphId,
-      name,
-      agentAddress,
-      subGraphName,
-    );
+    let interruptedPromote: unknown;
+    try {
+      await this.assertNoUnfinishedAssertionPromote(contextGraphId, name, agentAddress, subGraphName);
+    } catch (error) {
+      if (sourceLayer !== 'swm' || (error as { code?: string })?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') throw error;
+      interruptedPromote = error;
+    }
     const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const loadedSeals = await this.loadAssertionSeals(
       contextGraphId,
@@ -8250,6 +8243,7 @@ export class DKGPublisher implements Publisher {
       subGraphName,
     );
     if (loadedSeals.length === 0) {
+      if (interruptedPromote) throw interruptedPromote;
       throw Object.assign(
         new Error(
           `Cannot pull "${name}" from ${sourceLayer.toUpperCase()}: rootless mutation requires a finalized v2 assertion seal`,
@@ -8316,6 +8310,14 @@ export class DKGPublisher implements Publisher {
           sourcePrivateQuads,
           `${sourceLayer}-memory`,
         );
+        if (interruptedPromote && (loadedSeal.subject !== this.assertionRecoverySealSubject(
+          contextGraphId, name, agentAddress, subGraphName,
+        ) || !await canResumeCompletedSwmPull({
+          store: this.store, graphManager: this.graphManager, contextGraphId, name, agentAddress, subGraphName,
+          archivedSeal: seal, archivedQuads: loadedSeal.quads,
+          activeSubjects: await this.activeAssertionSealSubjects(contextGraphId, name, agentAddress, subGraphName),
+          normalizedPublicQuads: candidatePayload.normalizedPublicQuads,
+        }))) throw interruptedPromote;
         selectedSeal = loadedSeal;
         selectedScope = scope;
         validated = candidatePayload;
