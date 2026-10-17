@@ -18,6 +18,7 @@ export function inventoryScopeFixture(campaign, inventoryRows, catalogRows, era 
   // Codec-valid synthetic signature for a fixture, not a claim of cryptographic issuer verification.
   const signed = { ...envelope, objectDigest: computeControlObjectDigestHex(envelope), signature: '0x' + '11'.repeat(65) };
   const head = { inventory_scope_digest: scopeDigest, author_address: scope.authorAddress, current_head_digest: signed.objectDigest,
+    inventory_version_u64be: hex64(envelope.payload.version), rows_digest: envelope.payload.rowsDigest,
     total_rows_u64be: hex64(swm.length), signed_head_envelope: '0x' + Buffer.from(JSON.stringify(signed)).toString('hex') };
   const catalogScope = { ...scope, bucketCount: '1' }, catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
   const rows = catalogRows.map((r, i) => ({ assertionVersion: '1', sealDigest: digest('44'), projectionId: 'cg-shared-v1', projectionDigest: digest('00'),

@@ -47,6 +47,8 @@ export function verifyInventoryScope(campaign, capture, catalogs, status) {
       const actualScope = snapshotAuthorLaneScopeV1(envelope.payload), scopeDigest = computeSwmAuthorInventoryScopeDigestV1(actualScope);
       if (actualScope.contextGraphId !== campaign.contextGraphId || scopeDigest !== head.inventory_scope_digest
         || actualScope.authorAddress !== head.author_address || computeSwmAuthorInventoryHeadObjectDigestV1(unsigned(envelope)) !== head.current_head_digest
+        || !/^0x[0-9a-f]{16}$/.test(head.inventory_version_u64be) || BigInt(head.inventory_version_u64be) !== BigInt(envelope.payload.version)
+        || head.rows_digest !== envelope.payload.rowsDigest
         || BigInt(head.total_rows_u64be) !== BigInt(entry.swm.length) || BigInt(envelope.payload.totalRows) !== BigInt(entry.swm.length)
         || entry.swm.some(r => r.inventory_scope_digest !== scopeDigest || r.author_address !== actualScope.authorAddress)) {
         throw Error('Inventory head/rows have inconsistent scope provenance');

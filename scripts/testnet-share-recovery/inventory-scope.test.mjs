@@ -21,7 +21,7 @@ const catalogRows = [{ assertionCoordinate: 'asset', kaId, assertionVersion: '1'
 function collect(entries, applied) {
   const db = new Database(':memory:');
   try {
-    db.exec('CREATE TABLE rfc64_swm_author_inventory_heads_v1 (inventory_scope_digest BLOB, author_address BLOB, current_head_digest BLOB, total_rows_u64be BLOB, signed_head_envelope BLOB); CREATE TABLE rfc64_swm_author_inventory_rows_v1 (inventory_scope_digest BLOB, author_address BLOB, assertion_coordinate TEXT, ka_ual TEXT, assertion_version_u64be BLOB, share_operation_id TEXT, projection_digest BLOB, public_triple_count_u64be BLOB, private_triple_count_u64be BLOB, seal_digest BLOB, shared_at_u64be BLOB, expires_at_u64be BLOB); CREATE TABLE rfc64_applied_catalog_heads_v1 (catalog_scope_digest BLOB, author_address BLOB, current_catalog_head_digest BLOB);');
+    db.exec('CREATE TABLE rfc64_swm_author_inventory_heads_v1 (inventory_scope_digest BLOB, author_address BLOB, current_head_digest BLOB, inventory_version_u64be BLOB, rows_digest BLOB, total_rows_u64be BLOB, signed_head_envelope BLOB); CREATE TABLE rfc64_swm_author_inventory_rows_v1 (inventory_scope_digest BLOB, author_address BLOB, assertion_coordinate TEXT, ka_ual TEXT, assertion_version_u64be BLOB, share_operation_id TEXT, projection_digest BLOB, public_triple_count_u64be BLOB, private_triple_count_u64be BLOB, seal_digest BLOB, shared_at_u64be BLOB, expires_at_u64be BLOB); CREATE TABLE rfc64_applied_catalog_heads_v1 (catalog_scope_digest BLOB, author_address BLOB, current_catalog_head_digest BLOB);');
     const insert = (table, value) => db.prepare(`INSERT INTO ${table} (${Object.keys(value).join(',')}) VALUES (${Object.keys(value).map(() => '?').join(',')})`)
       .run(...Object.values(value).map(v => typeof v === 'string' && v.startsWith('0x') ? Buffer.from(v.slice(2), 'hex') : v));
     for (const entry of entries) {
@@ -179,4 +179,16 @@ test('catalog proof verifies every child of a multi-level directory and its comm
   };
   assert.equal(verify(build(false)).valid, true);
   assert.equal(verify(build(true)).valid, false);
+});
+
+
+test('SQLite head columns must agree with the unchanged signed inventory envelope', () => {
+  for (const [key, value] of [['inventory_version_u64be', '0x0000000000000001'], ['inventory_version_u64be', '0x00'], ['rows_digest', '0x' + '55'.repeat(32)]]) {
+    const f = inventoryScopeFixture(campaign, [row], catalogRows);
+    const envelope = f.capture.scopes[0].head.signed_head_envelope;
+    f.capture.scopes[0].head[key] = value;
+    const capture = collect(f.capture.scopes, f.capture.applied);
+    assert.equal(capture.scopes[0].head.signed_head_envelope, envelope);
+    assert.equal(verify({ ...f, capture }).valid, false, key);
+  }
 });
