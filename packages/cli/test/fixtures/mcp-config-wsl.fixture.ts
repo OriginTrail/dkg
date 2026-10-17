@@ -104,7 +104,7 @@ async function main(): Promise<void> {
       .filter(target => target.id === 'cursor');
     assert.deepEqual(clients.map(target => target.configPath), [linuxCursorPath, path]);
     const separateDeps = { ...setupDeps, detectClients: () => clients };
-    await mcpSetupAction(setupOptions, { ...separateDeps, confirmPlan: async planned => {
+    await mcpSetupAction({ ...setupOptions, force: false }, { ...separateDeps, confirmPlan: async planned => {
       assert.deepEqual(planned.map(item => item.action), ['register', 'refresh']);
       return [...planned];
     } });
