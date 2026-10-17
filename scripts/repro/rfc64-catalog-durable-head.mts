@@ -13,6 +13,7 @@ import { OxigraphStore } from '../../packages/storage/dist/index.js';
 import { openRfc64PersistenceV1 } from '../../packages/agent/src/rfc64/persistence-v1.js';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
+// sparql-scan-allow: R2 -- Only the private, freshly-created 17-quad crash fixture is read; never an operator store.
 const query = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o';
 const allStages = ['before-flush', 'before-cas', 'after-cas'] as const;
 const selectedStage = process.argv[2];
