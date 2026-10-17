@@ -27,6 +27,35 @@ describe('caller-owned private access bounds', () => {
       .rejects.toMatchObject({ code: 'ACCESS_REQUEST_OWNED_REQUIRED' });
     expect(sends).toBe(0);
   });
+  it('ignores unrelated enumerable properties when all supported controls are undefined', async () => {
+    let sends = 0;
+    const denied = encodeAccessResponse({ granted: false, nquads: new Uint8Array(), privateMerkleRoot: new Uint8Array(), rejectionReason: 'denied' });
+    const access = new AccessClient({ sendReliable: async () => { sends++; return result(denied); } },
+      await generateEd25519Keypair(), 'local-peer');
+    const options = { signal: undefined, timeoutMs: undefined, maxResponseBytes: undefined,
+      maxQuads: undefined, traceId: 'read-1' };
+    await expect(access.requestAccess('publisher-peer', UAL, undefined, options)).resolves.toMatchObject({ granted: false });
+    expect(sends).toBe(1);
+  });
+
+  it('captures the owned send capability once and preserves its receiver across signing', async () => {
+    let reads = 0;
+    const denied = encodeAccessResponse({ granted: false, nquads: new Uint8Array(), privateMerkleRoot: new Uint8Array(), rejectionReason: 'denied' });
+    const surface: AccessSendSurface = {
+      sendReliable: async () => { throw new Error('legacy path must not run'); },
+      get sendRequestOwned() {
+        reads++;
+        return reads === 1 ? async function (this: AccessSendSurface) {
+          expect(this).toBe(surface); return result(denied);
+        } : undefined;
+      },
+    };
+    const access = new AccessClient(surface, await generateEd25519Keypair(), 'local-peer');
+    await expect(access.requestAccess('publisher-peer', UAL, undefined, { maxQuads: 1 }))
+      .resolves.toMatchObject({ granted: false });
+    expect(reads).toBe(1);
+  });
+
   it('forwards deadline and cancellation, and never delivers a late response', async () => {
     const controller = new AbortController();
     let observed: unknown;

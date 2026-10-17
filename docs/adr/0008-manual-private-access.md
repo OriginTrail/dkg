@@ -78,3 +78,8 @@ Regression coverage includes real allowed and denied local peers, tampered and
 rootless responses, response bounds, deadline/node-stop/caller cancellation,
 no durable retry, and operator HTTP authorization. The real-peer test uses only
 an owned loopback bootstrap and does not discover other local nodes.
+
+Transport byte-ceiling failures retain a typed local read-limit error and become
+`ACCESS_RESPONSE_TOO_LARGE` / HTTP 413 at the access boundary. The stream stops
+on the first over-budget chunk. Only the four declared request controls select
+request-owned transport; unrelated enumerable options do not change delivery policy.

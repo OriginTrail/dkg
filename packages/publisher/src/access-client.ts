@@ -1,5 +1,6 @@
 import {
   PROTOCOL_ACCESS,
+  ProtocolReadLimitError,
   encodeAccessRequest,
   decodeAccessResponse,
   ed25519Sign,
@@ -77,14 +78,17 @@ export class AccessClient {
     paymentProof: Uint8Array = new Uint8Array(0),
     options: AccessClientRequestOptions = {},
   ): Promise<AccessResult> {
-    options.signal?.throwIfAborted();
-    for (const limit of [options.maxResponseBytes, options.maxQuads]) {
+    const { signal, timeoutMs, maxResponseBytes, maxQuads } = options;
+    signal?.throwIfAborted();
+    for (const limit of [maxResponseBytes, maxQuads]) {
       if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
         throw new RangeError('Private access limits must be positive safe integers');
       }
     }
-    const requestOwned = Object.values(options).some(value => value !== undefined);
-    if (requestOwned && !this.messenger.sendRequestOwned) {
+    const requestOwned = signal !== undefined || timeoutMs !== undefined
+      || maxResponseBytes !== undefined || maxQuads !== undefined;
+    const sendOwned = requestOwned ? this.messenger.sendRequestOwned?.bind(this.messenger) : undefined;
+    if (requestOwned && !sendOwned) {
       throw Object.assign(new Error('Bounded private access requires sendRequestOwned transport'), {
         code: 'ACCESS_REQUEST_OWNED_REQUIRED',
       });
@@ -94,7 +98,7 @@ export class AccessClient {
     );
     const signature = await ed25519Sign(message, this.keypair.secretKey);
 
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     const requestData = encodeAccessRequest({
       kaUal,
       requesterPeerId: this.peerId,
@@ -103,13 +107,22 @@ export class AccessClient {
       requesterPublicKey: this.keypair.publicKey,
     });
 
-    const sendResult = await resolveWithinAbort(() => requestOwned
-      ? this.messenger.sendRequestOwned!(publisherPeerId, PROTOCOL_ACCESS, requestData, {
-        timeoutMs: options.timeoutMs, signal: options.signal, maxReadBytes: options.maxResponseBytes,
-        recoverPeerAfterFailure: false,
-      })
-      : this.messenger.sendReliable(publisherPeerId, PROTOCOL_ACCESS, requestData), options.signal);
-    options.signal?.throwIfAborted();
+    let sendResult: AccessSendResult | null;
+    try {
+      sendResult = await resolveWithinAbort(() => sendOwned
+        ? sendOwned(publisherPeerId, PROTOCOL_ACCESS, requestData, {
+          timeoutMs, signal, maxReadBytes: maxResponseBytes, recoverPeerAfterFailure: false,
+        })
+        : this.messenger.sendReliable(publisherPeerId, PROTOCOL_ACCESS, requestData), signal);
+    } catch (error) {
+      if (error instanceof ProtocolReadLimitError) {
+        throw Object.assign(new Error('Private access response exceeds byte limit', { cause: error }), {
+          code: 'ACCESS_RESPONSE_TOO_LARGE',
+        });
+      }
+      throw error;
+    }
+    signal?.throwIfAborted();
     if (!sendResult) throw new Error('Private access cancelled');
 
     if (!sendResult.delivered) {
@@ -126,7 +139,7 @@ export class AccessClient {
       };
     }
 
-    if (options.maxResponseBytes !== undefined && sendResult.response.byteLength > options.maxResponseBytes) {
+    if (maxResponseBytes !== undefined && sendResult.response.byteLength > maxResponseBytes) {
       throw Object.assign(new Error('Private access response exceeds byte limit'), { code: 'ACCESS_RESPONSE_TOO_LARGE' });
     }
     const response = decodeAccessResponse(sendResult.response);
@@ -142,7 +155,7 @@ export class AccessClient {
 
     const nquadsStr = new TextDecoder().decode(response.nquads);
     const quads = parseSimpleNQuads(nquadsStr);
-    if (options.maxQuads !== undefined && quads.length > options.maxQuads) {
+    if (maxQuads !== undefined && quads.length > maxQuads) {
       throw Object.assign(new Error('Private access response exceeds quad limit'), { code: 'ACCESS_RESPONSE_TOO_LARGE' });
     }
 

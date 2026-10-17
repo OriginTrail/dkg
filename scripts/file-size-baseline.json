@@ -107,7 +107,7 @@
     "packages/core/src/cg-shared-projection.ts": 1103,
     "packages/core/src/message-stream-pool.ts": 1355,
     "packages/core/src/node.ts": 1885,
-    "packages/core/src/protocol-router.ts": 2136,
+    "packages/core/src/protocol-router.ts": 2103,
     "packages/core/src/vm-update-convergence.ts": 978,
     "packages/local-llm/src/runtime.ts": 973,
     "packages/mcp-dkg/src/client.ts": 1599,

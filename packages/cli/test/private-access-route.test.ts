@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { AccessClient } from '@origintrail-official/dkg-publisher';
+import { ProtocolRouter, generateEd25519Keypair, InMemoryMessageIdempotencyStore, InMemoryProtocolOutboxStore, type DKGNode } from '@origintrail-official/dkg-core';
+import { Messenger } from '../../agent/src/p2p/messenger.js';
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { handlePrivateAccessRoutes } from '../src/daemon/routes/private-access.js';
@@ -81,6 +84,35 @@ describe('operator-owned private access HTTP route', () => {
     expect(f.res.body).not.toContain('untrusted remote detail');
     expect(JSON.parse(f.res.body)).not.toHaveProperty('quads');
   });
+  it('returns HTTP 413 when the real router rejects an oversized Messenger response early', async () => {
+    const f = fixture();
+    let yielded = 0;
+    const abort = vi.fn();
+    const stream = { send: () => {}, close: async () => {}, abort, writeStatus: 'open',
+      async *[Symbol.asyncIterator]() {
+        yielded++; yield new Uint8Array(5);
+        yielded++; yield new Uint8Array(5);
+      } };
+    const router = new ProtocolRouter({ libp2p: {
+      getConnections: () => [{ status: 'open', remotePeer: { equals: (peer: unknown) => String(peer) === PEER,
+        toString: () => PEER }, newStream: async () => stream }],
+      dialProtocol: async () => { throw new Error('must use existing connection'); },
+      peerStore: { get: async () => { throw new Error('NotFound'); } },
+      handle: () => {}, unhandle: () => {},
+    } } as unknown as DKGNode);
+    const messenger = new Messenger({ router, idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore: new InMemoryProtocolOutboxStore() });
+    const access = new AccessClient(messenger, await generateEd25519Keypair(), 'local-peer');
+    f.requestPrivateAccess.mockImplementation(async () => access.requestAccess(PEER, UAL, undefined,
+      { maxResponseBytes: 4 }) as unknown as Promise<Record<string, unknown>>);
+    await handlePrivateAccessRoutes(f.ctx);
+    expect(f.res.statusCode).toBe(413);
+    expect(JSON.parse(f.res.body)).toMatchObject({ code: 'ACCESS_RESPONSE_TOO_LARGE' });
+    expect(yielded).toBe(1);
+    expect(abort).toHaveBeenCalled();
+    expect(messenger.getOutboxStats()?.queuedEntries).toBe(0);
+  });
+
   it('caps JSON output independently of the wire response', async () => {
     const f = fixture();
     f.requestPrivateAccess.mockResolvedValue({ ...success, quads: [{ subject: 'a', predicate: 'b', object: 'x'.repeat(2 * 1024 * 1024), graph: '' }] });
