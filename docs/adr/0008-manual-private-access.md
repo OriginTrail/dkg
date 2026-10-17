@@ -45,11 +45,13 @@ a different but self-consistent payload. Applications needing anchored evidence
 must verify that commitment independently. A missing or mismatched root fails
 closed, without returning the unverified quads.
 
-Direct `AccessClient` calls with cancellation or response-limit options require
-an explicit `sendRequestOwned` transport method (the standard Messenger provides
-it). Legacy adapters exposing only `sendReliable` retain optionless behavior;
-bounded calls fail before sending instead of silently dropping ownership. The
-client also settles caller cancellation even if a transport ignores its signal.
+`RequestOwnedAccessClient` requires a `sendRequestOwned` transport method in its
+constructor (the standard Messenger provides it). Delivery remains request-owned
+even without optional bounds. The existing optionless `AccessClient` separately
+preserves legacy `sendReliable` behavior. Both clients share request encoding and
+response verification. The owned client also settles caller cancellation even
+if a transport ignores its signal. An owned Messenger caller waiting on shared
+peer recovery can cancel its wait without cancelling recovery for other callers.
 
 The operation returns content to its caller and does not insert it into any RDF
 partition. It promises neither automatic delivery nor EPCIS/local-query parity.
@@ -81,5 +83,5 @@ an owned loopback bootstrap and does not discover other local nodes.
 
 Transport byte-ceiling failures retain a typed local read-limit error and become
 `ACCESS_RESPONSE_TOO_LARGE` / HTTP 413 at the access boundary. The stream stops
-on the first over-budget chunk. Only the four declared request controls select
-request-owned transport; unrelated enumerable options do not change delivery policy.
+on the first over-budget chunk. The client type selects delivery ownership;
+response bounds and cancellation options never implicitly switch transport mode.
