@@ -107,7 +107,7 @@ import {
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
-import { hasVerifiedPullRecoverySeal, validateGraphScopedPayloadAgainstSeal } from './assertion-seal-recovery.js';
+import { verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type VerifiedPullRecovery } from './assertion-seal-recovery.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
 import { ethers } from 'ethers';
@@ -6970,7 +6970,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     subGraphName?: string,
     allowPullRecovery = false,
-  ): Promise<void> {
+  ): Promise<VerifiedPullRecovery | undefined> {
     const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const [operationIdResult, intentResult, layerResult] = await Promise.all([
@@ -7034,9 +7034,8 @@ export class DKGPublisher implements Publisher {
         if (!allowPullRecovery) throw error;
       }
       if (!seal && allowPullRecovery && (operationId || (!hasOperationId && !hasIntent))) {
-        if (await this.hasVerifiedPullRecoverySeal(
-          contextGraphId, name, agentAddress, operationId, subGraphName,
-        )) return;
+        const recovery = await this.verifyPullRecoverySeal(contextGraphId, name, agentAddress, operationId, subGraphName);
+        if (recovery) return recovery;
       }
       // A completed promote consumes its provisional lifecycle pointer. The
       // monotonic SWM head is then the authoritative recovery pointer. Resolve
@@ -7084,14 +7083,14 @@ export class DKGPublisher implements Publisher {
   }
 
   /** Only pull-from may use this proof; ordinary draft mutations stay frozen. */
-  private async hasVerifiedPullRecoverySeal(
+  private async verifyPullRecoverySeal(
     contextGraphId: string, name: string, agentAddress: string,
     operationId: string | undefined, subGraphName?: string,
-  ): Promise<boolean> {
+  ): Promise<VerifiedPullRecovery | undefined> {
     const subject = this.assertionRecoverySealSubject(contextGraphId, name, agentAddress, subGraphName);
     const archived = (await this.loadAssertionSeals(contextGraphId, name, agentAddress, subGraphName))
       .find((candidate) => candidate.subject === subject);
-    return hasVerifiedPullRecoverySeal({
+    return verifyPullRecoverySeal({
       store: this.store, graphManager: this.graphManager, contextGraphId, name, agentAddress, subGraphName,
       operationId, archived,
       activeSubjects: await this.activeAssertionSealSubjects(contextGraphId, name, agentAddress, subGraphName),
@@ -8206,7 +8205,7 @@ export class DKGPublisher implements Publisher {
   }> {
     const subGraphName = opts?.subGraphName;
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
-    await this.assertNoUnfinishedAssertionPromote(
+    const recovery = await this.assertNoUnfinishedAssertionPromote(
       contextGraphId,
       name,
       agentAddress,
@@ -8214,7 +8213,7 @@ export class DKGPublisher implements Publisher {
       true,
     );
     const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-    const loadedSeals = await this.loadAssertionSeals(
+    const loadedSeals = recovery ? [recovery.loadedSeal] : await this.loadAssertionSeals(
       contextGraphId,
       name,
       agentAddress,
@@ -8229,9 +8228,10 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    let selectedSeal: typeof loadedSeals[number] | undefined;
-    let selectedScope: GraphKnowledgeAssetScope | undefined;
-    let validated: Awaited<ReturnType<typeof validateGraphScopedPayloadAgainstSeal>> | undefined;
+    const recoveredSource = sourceLayer === 'swm' ? recovery : undefined;
+    let selectedSeal = recoveredSource?.loadedSeal;
+    let selectedScope = recoveredSource?.scope;
+    let validated = recoveredSource?.payload;
     let candidateError: unknown;
     let sawLegacySeal = false;
 
@@ -8239,7 +8239,7 @@ export class DKGPublisher implements Publisher {
     // open. Validate candidates against the requested exact source graph in
     // priority order; a discarded/torn active seal must never shadow the last
     // complete VM/SWM recovery commitment.
-    for (const loadedSeal of loadedSeals) {
+    for (const loadedSeal of selectedSeal ? [] : loadedSeals) {
       const seal = loadedSeal.seal;
       if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
         sawLegacySeal = true;

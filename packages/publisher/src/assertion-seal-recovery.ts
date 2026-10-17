@@ -20,28 +20,34 @@ interface PullRecoveryProof {
   agentAddress: string;
   subGraphName?: string;
   operationId: string | undefined;
-  archived: { seal: AssertionSeal; quads: Quad[] } | undefined;
+  archived: VerifiedPullRecovery['loadedSeal'] | undefined;
   activeSubjects: string[];
   shareComplete: boolean;
   readPublicQuads: (graph: string) => Promise<Quad[]>;
   readPrivateQuads: (scope: GraphKnowledgeAssetScope) => Promise<Quad[]>;
 }
 
+export interface VerifiedPullRecovery {
+  loadedSeal: { seal: AssertionSeal; subject: string; quads: Quad[] };
+  scope: GraphKnowledgeAssetScope;
+  payload: Awaited<ReturnType<typeof validateGraphScopedPayloadAgainstSeal>>;
+}
+
 /** Prove an interrupted clear belongs to the exact completed SWM commitment. */
-export async function hasVerifiedPullRecoverySeal(input: PullRecoveryProof): Promise<boolean> {
+export async function verifyPullRecoverySeal(input: PullRecoveryProof): Promise<VerifiedPullRecovery | undefined> {
   const { store, graphManager, contextGraphId, name, agentAddress, subGraphName,
     operationId, archived, activeSubjects, shareComplete, readPublicQuads, readPrivateQuads } = input;
-  if (!archived || archived.seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) return false;
+  if (!archived || archived.seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) return undefined;
   const { seal } = archived;
-  if (!seal.kaUal || !seal.assertionVersion) return false;
+  if (!seal.kaUal || !seal.assertionVersion) return undefined;
   const lifecycle = await readAssertionLifecycleRecord(
     store, contextGraphId, agentAddress, name, subGraphName, 'strict-reservation',
   );
   const reservedUals = lifecycle.bindings.filter((row) => row.p === 'http://dkg.io/ontology/reservedUal');
   const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
   if (reservedUals.length !== 1 || lifecycle.reservedUal !== scope.ual
-    || lifecycle.number !== BigInt(scope.kaNumber)) return false;
-  if (!shareComplete) return false;
+    || lifecycle.number !== BigInt(scope.kaNumber)) return undefined;
+  if (!shareComplete) return undefined;
 
   // A partial clear can only REMOVE fields. Conflicting surviving fields may
   // belong to a newer finalized draft and must never authorize its replacement.
@@ -54,7 +60,7 @@ export async function hasVerifiedPullRecoverySeal(input: PullRecoveryProof): Pro
       }`,
     );
     if (result.type !== 'quads' || result.quads.some((quad) => predicates.has(quad.predicate)
-      && !archivedTerms.has(JSON.stringify([quad.predicate, quad.object])))) return false;
+      && !archivedTerms.has(JSON.stringify([quad.predicate, quad.object])))) return undefined;
   }
   const head = await resolveKnowledgeAssetWorkspaceHead({
     store, graphManager, contextGraphId, kaUal: seal.kaUal, subGraphName,
@@ -62,15 +68,17 @@ export async function hasVerifiedPullRecoverySeal(input: PullRecoveryProof): Pro
   if (!head || head.assertionVersion !== String(seal.assertionVersion)
     || (operationId && !head.operationAliases.some((alias) => alias.shareOperationId === operationId))
     || head.publicTripleCount !== seal.publicTripleCount
-    || head.privateTripleCount !== seal.privateTripleCount) return false;
+    || head.privateTripleCount !== seal.privateTripleCount) return undefined;
   const sourcePublic = (await readPublicQuads(head.assertionGraph))
     .filter((quad) => !isSwmMerkleExcludedQuad(quad));
-  if (workspacePublicQuadsDigest(sourcePublic) !== head.publicQuadsDigest) return false;
+  if (workspacePublicQuadsDigest(sourcePublic) !== head.publicQuadsDigest) return undefined;
   const sourcePrivate = await readPrivateQuads(scope);
+  if (sourcePublic.length === 0 && sourcePrivate.length === 0) return undefined;
   const validated = await validateGraphScopedPayloadAgainstSeal(seal, sourcePublic, sourcePrivate, 'swm-recovery');
   const privateRoot = validated.privateMerkleRoot ? ethers.hexlify(validated.privateMerkleRoot) : undefined;
-  return privateRoot?.replace(/^0x/i, '').toLowerCase()
-    === head.privateMerkleRoot?.replace(/^0x/i, '').toLowerCase();
+  if (privateRoot?.replace(/^0x/i, '').toLowerCase()
+    !== head.privateMerkleRoot?.replace(/^0x/i, '').toLowerCase()) return undefined;
+  return { loadedSeal: archived, scope, payload: validated };
 }
 
 export async function validateGraphScopedPayloadAgainstSeal(

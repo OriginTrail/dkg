@@ -20,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, GraphManager, OxigraphStore, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, assertionScopedGraphUri } from '../src/index.js';
+import { resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
 const CG = 'pull-from-test';
@@ -254,6 +255,41 @@ describe('rootless assertionPullFrom', () => {
       expect(await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o')).toEqual(before);
     },
   );
+
+  it('reuses the verified SWM payload but separately validates a requested VM source (#3332)', async () => {
+    const { publisher, store } = await makePublisher();
+    const finalized = await seedShared(publisher, store);
+    await interruptClear(publisher, store, 4);
+    const vm = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(finalized.kaUal, 1));
+    await store.insert(finalized.publicQuads.map((quad) => ({ ...quad,
+      object: '"Different same-count VM payload"', graph: assertionScopedGraphUri(vm, quad.graph) })));
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'vm')).rejects.toThrow('Merkle mismatch');
+    const sourceGraph = assertionScopedGraphUri(finalized.sharedGraphUri, '');
+    const reads = vi.spyOn(store, 'query');
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).resolves.toMatchObject({ seededPublic: 2 });
+    expect(reads.mock.calls.filter(([query]) => query.includes('CONSTRUCT') && query.includes(`GRAPH <${sourceGraph}>`))).toHaveLength(1);
+  });
+
+  it('refuses a coherent newer SWM head with the same content and a consumed lifecycle pointer (#3332)', async () => {
+    const { publisher, store } = await makePublisher();
+    const finalized = await seedShared(publisher, store);
+    await interruptClear(publisher, store, 4);
+    const graphManager = new GraphManager(store);
+    const next = { store, graphManager, contextGraphId: CG, kaUal: finalized.kaUal,
+      assertionVersion: '2', shareOperationId: 'newer-completed-share' };
+    await storeKnowledgeAssetOperationPublicQuads({ ...next, quads: finalized.publicQuads, publisherPeerId: 'test-peer' });
+    await storeKnowledgeAssetWorkspaceHead(next);
+    const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, createGraphKnowledgeAssetScope(finalized.kaUal, 2));
+    await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: assertionScopedGraphUri(graph, quad.graph) })));
+    for (const predicate of [`${DKG}shareOperationId`, `${DKG}promoteOperationIntent`]) {
+      await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AGENT, NAME), predicate });
+    }
+    await expect(resolveKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId: CG, kaUal: finalized.kaUal }))
+      .resolves.toMatchObject({ assertionVersion: '2', shareOperationId: next.shareOperationId });
+    const before = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    expect(await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o')).toEqual(before);
+  });
 
   it('recovers when the completed lifecycle operation pointer was consumed (#3332)', async () => {
     const { publisher, store } = await makePublisher();
