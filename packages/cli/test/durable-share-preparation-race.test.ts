@@ -1,4 +1,8 @@
+import { createServer } from 'node:http';
 import { afterEach, expect, it, vi } from 'vitest';
+import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
+import { assertionLifecycleWriteLockKey } from '../../publisher/src/store-write-locks.js';
 vi.mock('@origintrail-official/dkg-agent', () => import('../../agent/src/index.js'));
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -77,24 +81,33 @@ it('rejects a competing real finalizer before it can restore WM behind owner cle
   } finally { resume.release(); finish.release(); await worker; await competing; }
 });
 
-it('holds the lifecycle lock across real finalization before a newly queued worker can clean WM', async () => {
+it.each(['share', 'explicit'])('holds the lifecycle lock across %s finalization until the worker actually queues on it', async mode => {
   const { store, agent, publisher, finalized, prepared, request, queue, startWorker, assertCompleted } = await setup();
   const entered = barrier(), resume = barrier(), workerEntered = barrier();
   const materialize = publisher.materializeCanonicalWorkingMemory.bind(publisher);
   vi.spyOn(publisher, 'materializeCanonicalWorkingMemory').mockImplementationOnce(async (...args) => {
     entered.release(); await resume.promise; return materialize(...args);
   });
-  const preparation = agent.assertion.prepareDurableShare(CG, NAME);
+  const preparation = mode === 'share' ? agent.assertion.prepareDurableShare(CG, NAME) : agent.assertion.finalize(CG, NAME);
   await entered.promise;
   // Queue insertion itself is supported independently of HTTP admission. Its
   // worker must still obey the same lifecycle fence as the real finalizer.
   const job = await queue.enqueueAndClaim(request, 'owner');
-  const promote = publisher.assertionPromote.bind(publisher);
-  vi.spyOn(publisher, 'assertionPromote').mockImplementation(async (...args) => { workerEntered.release(); return promote(...args); });
+  const lock = (publisher as any).withAssertionLifecycleWriteLock.bind(publisher);
+  const locks = (publisher as any).writeLocks as Map<string, Promise<void>>;
+  const key = assertionLifecycleWriteLockKey(CG, NAME, AUTHOR);
+  let predecessor: Promise<void> | undefined;
+  vi.spyOn(publisher as any, 'withAssertionLifecycleWriteLock').mockImplementationOnce((...args: any[]) => {
+    predecessor = locks.get(key);
+    const pending = lock(...args); // Registers the successor after actual claim validation.
+    workerEntered.release(); return pending;
+  });
   const mutation = vi.spyOn(publisher as any, 'assertionPromoteUnlocked');
   const worker = startWorker(job);
   try {
     await workerEntered.promise;
+    expect(predecessor, 'real finalization must still hold the worker’s predecessor gate').toBeDefined();
+    expect(locks.get(key)).not.toBe(predecessor);
     expect(mutation).not.toHaveBeenCalled();
     expect(await store.countQuads(finalized.graphUri)).toBe(1);
     resume.release(); await preparation;
@@ -102,7 +115,7 @@ it('holds the lifecycle lock across real finalization before a newly queued work
     expect(await store.countQuads(finalized.graphUri)).toBe(0);
     await assertCompleted();
     expect((await queue.getStatus(job.jobId))?.request.recoveryBinding).toEqual(prepared.recoveryBinding);
-  } finally { resume.release(); await preparation; await worker; }
+  } finally { resume.release(); await Promise.allSettled([preparation, worker]); }
 });
 
 it('preserves the draft when ownership cannot be read before real finalization', async () => {
@@ -117,4 +130,48 @@ it('preserves the draft when ownership cannot be read before real finalization',
   expect(materialize).not.toHaveBeenCalled();
   expect(await store.countQuads(finalized.graphUri)).toBe(1);
   expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+});
+
+it('fences explicit wm/finalize before it can restore content behind a succeeded owner', async () => {
+  const { store, agent, publisher, finalized, request, startWorker, assertCompleted } = await setup();
+  const job = await agent.assertion.admitDurableShare(request, 'owner');
+  vi.spyOn(agent, 'listContextGraphs').mockResolvedValue([{ id: CG, uri: `did:dkg:context-graph:${CG}`, name: CG, subscribed: true, synced: true }] as any);
+  vi.spyOn(agent, 'contextGraphExists').mockResolvedValue(true);
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url!, 'http://127.0.0.1');
+    try {
+      await handleKnowledgeAssetsRoutes({ req, res, url, path: url.pathname, agent,
+        requestAgentAddress: AUTHOR, authentication: requestAuthentication({ kind: 'anonymous' }),
+        extractionStatus: new Map(), assertionImportLocks: new Map(), emitMemoryGraphChanged: () => {}, publisherControl: {},
+      } as any);
+      if (!res.writableEnded) { res.writeHead(404); res.end('{}'); }
+    } catch (error) { res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  const entered = barrier(), resume = barrier(), tail = barrier(), finish = barrier();
+  const materialize = publisher.materializeCanonicalWorkingMemory.bind(publisher);
+  const mutation = vi.spyOn(publisher, 'materializeCanonicalWorkingMemory').mockImplementation(async (...args) => {
+    entered.release(); await resume.promise; return materialize(...args);
+  });
+  const handoff = agent.afterDurableSwmPromotionV1.bind(agent);
+  vi.spyOn(agent, 'afterDurableSwmPromotionV1').mockImplementation(async (...args: any[]) => {
+    tail.release(); await finish.promise; return handoff(...args);
+  });
+  const requestResult = fetch(`http://127.0.0.1:${port}/api/knowledge-assets/${NAME}/wm/finalize`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contextGraphId: CG }),
+  }).then(async response => ({ status: response.status, value: await response.json() }));
+  await Promise.race([requestResult, entered.promise]);
+  const worker = startWorker(job);
+  try {
+    await tail.promise; expect(await store.countQuads(finalized.graphUri)).toBe(0);
+    resume.release(); const response = await requestResult;
+    finish.release(); expect((await worker).outcome).toBe('succeeded');
+    await assertCompleted();
+    expect(response).toMatchObject({ status: 409, value: { code: 'KA_PROMOTE_RECOVERY_REQUIRED' } });
+    expect(mutation).not.toHaveBeenCalled();
+  } finally {
+    resume.release(); finish.release(); await worker; await requestResult;
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });

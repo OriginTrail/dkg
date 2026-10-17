@@ -2829,6 +2829,7 @@ export class PublishMethods extends DKGAgentBase {
       throw new Error('assertionFinalize: authorSignTypedData requires authorAgentAddress');
     }
 
+    return this.publisher.prepareAssertionShareSeal(contextGraphId, name, agentAddress, opts?.subGraphName, async () => {
     // 1. Resolve URIs.
     const assertionUri = contextGraphAssertionUri(
       contextGraphId,
@@ -3606,6 +3607,7 @@ export class PublishMethods extends DKGAgentBase {
       kav10Address,
       eip712Digest,
     };
+    });
   }
 
   /**

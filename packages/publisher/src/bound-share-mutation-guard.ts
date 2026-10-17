@@ -8,7 +8,13 @@ export async function assertNoUnfinishedBoundShare(
   if (job) throw unfinishedBoundShareError(job.jobId);
 }
 
+export class UnfinishedBoundShareError extends Error {
+  readonly code = 'KA_PROMOTE_RECOVERY_REQUIRED';
+  constructor(readonly recoveryJobId: string) {
+    super('The original share still owns recovery; wait for its completion before changing the sealed asset');
+  }
+}
+
 export function unfinishedBoundShareError(recoveryJobId: string): Error {
-  return Object.assign(new Error('The original share still owns recovery; wait for its completion before changing the sealed asset'),
-    { code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId });
+  return new UnfinishedBoundShareError(recoveryJobId);
 }

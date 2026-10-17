@@ -55,16 +55,12 @@ function recipientOutage(
   );
 }
 
-// These policy-boundary doubles have no store or owner; run their no-op seal callback.
-const prepareAssertionShareSeal: DKGPublisher['prepareAssertionShareSeal'] = async (_cg, _name, _agent, _sub, prepare) => prepare();
-
 function promoteBoundaryAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.defaultAgentAddress = `0x${'11'.repeat(20)}`;
   agent.node = {
     peerId: { toString: () => '12D3KooWBoundary' },
   };
-  agent.publisher = { prepareAssertionShareSeal };
   agent.prepareAtomicAssertionShare = async () => undefined;
   agent.buildCuratorAckConfirmer = async () => undefined;
   return agent;
@@ -91,7 +87,7 @@ describe('DKGAgent assertion promote boundary', () => {
       const assertionPromote = vi.fn(async (..._args: Parameters<DKGPublisher['assertionPromote']>) => ({
         promotedCount: 1, promotedAllRoots: true, shareOperationId: 'share-operation-1',
       }));
-      agent.publisher = { prepareAssertionShareSeal, assertionPromote };
+      agent.publisher = { assertionPromote };
       const options: AssertionPromoteOptions = {
         ...accessOptions,
         subGraphName: 'documents',
@@ -224,7 +220,6 @@ describe('DKGAgent assertion promote boundary', () => {
     agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
     agent.resolveWorkspaceRecipientsGated = vi.fn(async () => { throw authorityFailure; });
     agent.publisher = {
-      prepareAssertionShareSeal,
       assertionPromote: async (_cg: string, _name: string, _agent: string, opts: {
         resolveWorkspaceRecipients: (input: { contextGraphId: string }) => Promise<unknown>;
       }) => {
@@ -263,7 +258,6 @@ describe('DKGAgent assertion promote boundary', () => {
     const agent = promoteBoundaryAgent();
     agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
     agent.publisher = {
-      prepareAssertionShareSeal,
       assertionPromote: async () => { throw authorityFailure; },
     };
 
@@ -284,7 +278,7 @@ describe('DKGAgent assertion promote boundary', () => {
     const agent = promoteBoundaryAgent();
     agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
     agent.getContextGraphOnChainPolicy = async () => { throw authorityFailure; };
-    agent.publisher = { prepareAssertionShareSeal, assertionPromote };
+    agent.publisher = { assertionPromote };
 
     const failure = await agent.assertion.promote('cg-1', 'asset-1')
       .catch((error: unknown) => error);
@@ -302,7 +296,6 @@ describe('DKGAgent assertion promote boundary', () => {
     const agent = promoteBoundaryAgent();
     agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
     agent.publisher = {
-      prepareAssertionShareSeal,
       assertionPromote: async () => ({
         promotedCount: 1,
         gossipPayload: undefined,

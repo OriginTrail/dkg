@@ -549,6 +549,7 @@ export {
 export { DEFAULT_PROMOTE_RETRY_TUNING, createDefaultPromoteBackoff, resolvePromoteRetryTuning, type PromoteRetryTuning } from './promote-retry-policy.js';
 
 export { PromoteStaleAdmissionError, validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';
+export { UnfinishedBoundShareError } from './bound-share-mutation-guard.js';
 export { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from './graph-knowledge-asset-metadata.js';
 
 export { withMaterializationLocks } from './materialization-lock-group.js';

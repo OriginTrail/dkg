@@ -1,5 +1,5 @@
 import { literal, uniquenessKey, PROMOTE_UNIQUENESS_KEY, PROMOTE_STATE, PROMOTE_PAYLOAD } from '../src/async-promote-queue-utils.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair, assertionLifecycleUri, contextGraphMetaUri, SwmGossipPayloadTooLargeError } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -25,6 +25,33 @@ async function setup() {
   return {store,publisher,reopen,queue,request,seal};
 }
 describe('bound ownership extends the publisher lifecycle mutation fence', () => {
+  it.each(['running', 'failed_retrying', 'failed'])('refuses resealing behind an unfinished %s owner after publisher cleanup', async state => {
+    const { publisher, store, queue, request, seal } = await setup();
+    const job = await queue.enqueueAndClaim(request, 'owner');
+    await publisher.assertionPromote(CG, NAME, AUTHOR, { recoveryBinding: request.recoveryBinding });
+    if (state !== 'running') await queue.fail(job.jobId, job.lease!.claimToken, {
+      classification: state === 'failed' ? 'fatal' : 'transient', retryable: state !== 'failed',
+      message: 'inventory handoff incomplete', recordedAt: Date.now(),
+    });
+    const restore = vi.fn(() => publisher.materializeCanonicalWorkingMemory(CG,
+      seal.kaUal, seal.assertionVersion, seal.publicQuads));
+    await expect(publisher.prepareAssertionShareSeal(CG, NAME, AUTHOR, undefined, restore))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: job.jobId });
+    expect(restore).not.toHaveBeenCalled();
+    expect(await store.countQuads(seal.graphUri)).toBe(0);
+    expect(await store.countQuads(seal.sharedGraphUri)).toBe(1);
+    expect((await queue.getStatus(job.jobId))?.request.recoveryBinding).toEqual(request.recoveryBinding);
+  });
+
+  it('returns the original canonical finalization result when no owner exists', async () => {
+    const { publisher, store, seal } = await setup();
+    const result = await publisher.prepareAssertionShareSeal(CG, NAME, AUTHOR, undefined,
+      () => publisher.materializeCanonicalWorkingMemory(CG, seal.kaUal, seal.assertionVersion, seal.publicQuads));
+    expect(result).toBe(seal.graphUri);
+    expect(await store.countQuads(seal.graphUri)).toBe(1);
+    expect(await store.countQuads(seal.sharedGraphUri)).toBe(0);
+  });
+
   it('persists a real fresh oversized rejection as a retired owner without changing SWM', async () => {
     const {publisher,store,queue}=await setup();const name='too-large';
     await publisher.assertionCreate(CG,name,AUTHOR);

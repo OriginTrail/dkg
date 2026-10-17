@@ -8353,14 +8353,11 @@ export class DKGPublisher implements Publisher {
   }
 
   /** Finalization can recreate canonical WM; exclude it from an unfinished owner's cleanup. */
-  async prepareAssertionShareSeal(contextGraphId: string, name: string, agentAddress: string,
-    subGraphName: string | undefined, prepare: () => Promise<void>, preserveOwner = false): Promise<void> {
+  async prepareAssertionShareSeal<T>(contextGraphId: string, name: string, agentAddress: string,
+    subGraphName: string | undefined, prepare: () => Promise<T>): Promise<T> {
     return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, subGraphName, async () => {
       const owner = await this.promoteOwnershipReader({ contextGraphId, assertionName: name, agentAddress, subGraphName });
-      if (owner) {
-        if (preserveOwner) return; // Read/validate its binding next; never re-finalize its payload.
-        throw unfinishedBoundShareError(owner.jobId);
-      }
+      if (owner) throw unfinishedBoundShareError(owner.jobId);
       return prepare();
     });
   }

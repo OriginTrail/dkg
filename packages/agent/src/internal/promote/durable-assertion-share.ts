@@ -2,7 +2,7 @@ import { normalizeAssertionPromoteExecution } from './assertion-promote-input.js
 import { SwmCatalogAuthorityNotReady } from '../swm-inventory-write.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
-import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
+import { createPromoteRetryableFailure, UnfinishedBoundShareError } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 import { prepareAssertionPromote } from './assertion-promote-precommit.js';
@@ -34,13 +34,14 @@ async function prepareShareSeal(agent: DKGAgent, contextGraphId: string, name: s
     );
   }
   try {
-    await agent.publisher.prepareAssertionShareSeal(contextGraphId, name, promoteAgentAddress, opts?.subGraphName,
-      () => agent.prepareAtomicAssertionShare(contextGraphId, name, promoteAgentAddress, {
-        subGraphName: opts?.subGraphName,
-        authorAgentAddress: opts?.authorAgentAddress,
-        preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-      }), preserveOwner);
+    await agent.prepareAtomicAssertionShare(contextGraphId, name, promoteAgentAddress, {
+      subGraphName: opts?.subGraphName,
+      authorAgentAddress: opts?.authorAgentAddress,
+      preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+    });
   } catch (err: any) {
+    // Finalization itself owns the lock/guard, including explicit wm/finalize.
+    if (preserveOwner && err instanceof UnfinishedBoundShareError) return;
     const msg = err?.message ?? String(err);
     const isCapabilityGap =
       err?.code === SEAL_CAPABILITY_GAP_CODE ||
