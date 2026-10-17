@@ -31,7 +31,8 @@ const empty=()=>finalizeDurableSyncCompletion(createDurableSyncAccumulator());
 function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only', last:'missing'|'refused-once'='missing') {
   let generation=0;
   const count=mode==='core-cache'?11:10;
-  const snapshot=sealPublicGraphSnapshot({version:1,chainId:'evm:31337',deploymentId:'test',contextGraphId:graph,onChainId:'1',nameHash:ethers.id(graph),contextGraphStorage:address,assetStorage:address,blockNumber:'10',blockHash:`0x${'a'.repeat(64)}`,finalityConfirmations:1,observedAt:Date.now(),expiresAt:Date.now()+120000,accessPolicy:0,
+  const observedAt = Date.now();
+  const snapshot=sealPublicGraphSnapshot({version:1,chainId:'evm:31337',deploymentId:'test',contextGraphId:graph,onChainId:'1',nameHash:ethers.id(graph),contextGraphStorage:address,assetStorage:address,blockNumber:'10',blockHash:`0x${'a'.repeat(64)}`,finalityConfirmations:1,observedAt,expiresAt:observedAt+120000,accessPolicy:0,
     assets:Array.from({length:count},(_,i)=>({id:((BigInt(address)<<96n)|BigInt(i+1)).toString(),root,version:'1'}))});
   const assets=new Map(Array.from({length:11},(_,i)=>{const a=asset(i+1);return [a.ual,a];}));
   const a:any={started:true,vmReconcileRotationClosed:false,workLifetime: new AgentWorkLifetime(),
@@ -86,7 +87,12 @@ describe('partial public snapshot durable trust',()=>{
     const dir=await mkdtemp(join(tmpdir(),'snapshot-persistence-'));
     let store=new OxigraphStore(join(dir,'store.nq'));
     try {
+      // Crossing a millisecond boundary must not make the fixture's lifetime
+      // exceed the protocol maximum before recovery even starts.
+      const now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValueOnce(now).mockReturnValueOnce(now + 1);
       const a=fixture(store,'core-cache');
+      clock.mockRestore();
       // A peer's answer without the asset, unlike a refusal, ends the job: the
       // batch of ten, the batch of one, then one singleton on the legacy transport.
       await expect(run(a,'core-cache')).rejects.toThrow('Snapshot recovery incomplete: 10/11 committed');
