@@ -205,6 +205,7 @@ import  {
   mergeSamePeerSharedMemoryDiagnostics,
   mergeFleetSharedMemoryDiagnostics,
   recordSharedMemoryPhaseFailure,
+  sharedMemoryRoundFoundNothingMissing,
 } from './sync/shared-memory-diagnostics.js';
 import {
   createSelectedSwmMetaFetcher,
@@ -6258,6 +6259,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               result.insertedMetaTriples = recovered.insertedMetaQuads;
               result.insertedTriples = recovered.insertedDataQuads + recovered.insertedMetaQuads;
               result.droppedDataTriples = recovered.droppedDataTriples;
+              result.alreadyHeldAssets = recovered.alreadyHeldGraphs ?? 0;
               // An incomplete recovery can retain whole verified KAs, but must
               // remain retryable. A local admission yield is not a peer failure.
               if (recovered.completed) {
@@ -6800,7 +6802,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     deferredBackpressure: number;
     dataSynced: number;
     sharedMemorySynced: number;
-    /** A selected peer completed a non-empty SWM snapshot without failure. */
+    /** A selected peer completed SWM without failure: it delivered data, or found nothing missing. */
     sharedMemoryCompletedCleanly: boolean;
     /** Immutable evidence owned by this catch-up operation and its single-flight result. */
     cleanSharedMemoryPeerIds: readonly string[];
@@ -6982,6 +6984,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let cleanDurableDataSynced = 0;
     let cleanDurablePrivateOnlyCompletions = 0;
     let cleanSharedMemoryDataSynced = 0;
+    /** Assets of clean SWM rounds that found nothing missing: already held here. */
+    let cleanSharedMemoryHeldAssets = 0;
     const peersSucceeded = new Set<string>();
     for (const [resultIndex, r] of results.entries()) {
       const remotePeerId = catchupPeers[resultIndex]!;
@@ -7051,6 +7055,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       if (sharedMemoryCompletedCleanly) {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
+      }
+      if (r.shared && sharedProgress?.completedWithoutFailure && sharedMemoryRoundFoundNothingMissing(r.shared)) {
+        cleanSharedMemoryHeldAssets += r.shared.alreadyHeldAssets ?? 0;
       }
       if (durableResponded || sharedResponded) {
         peersResponded.add(remotePeerId);
@@ -7150,6 +7157,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (shared.insertedDataTriples > 0 && progress.completedWithoutFailure) {
         cleanSharedMemoryDataSynced += shared.insertedDataTriples;
       }
+      if (progress.completedWithoutFailure && sharedMemoryRoundFoundNothingMissing(shared)) {
+        cleanSharedMemoryHeldAssets += shared.alreadyHeldAssets ?? 0;
+      }
     };
 
     if (includeSharedMemory) {
@@ -7223,10 +7233,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // The per-peer clean-completion proof above already excludes planes that
     // were deferred by local admission pressure, so a deferred peer cannot
     // promote readiness — and cannot erase a clean snapshot another peer did
-    // deliver.
+    // deliver. A clean round that found nothing missing proves the plane too:
+    // the node received those writes earlier and holds what that peer holds.
     const durableCompletedCleanly =
       cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0;
-    const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0;
+    const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0 || cleanSharedMemoryHeldAssets > 0;
     if (durableCompletedCleanly || sharedMemoryCompletedCleanly) {
       this.markContextGraphSubscriptionState(contextGraphId, {
         // `synced` is the overall graph-readiness bit. A clean SWM-only
@@ -7239,6 +7250,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         contextGraphId,
         dataSynced: cleanDurableDataSynced,
         sharedMemorySynced: cleanSharedMemoryDataSynced,
+        sharedMemoryHeldAssets: cleanSharedMemoryHeldAssets,
         verifiedPrivateOnlyResponses: cleanDurablePrivateOnlyCompletions,
       });
     }

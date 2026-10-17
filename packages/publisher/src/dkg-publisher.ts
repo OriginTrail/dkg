@@ -32,6 +32,7 @@ import {
   classifyPromoteCompanionSettlementFailure,
 } from './promote-replay-safety.js';
 import { finalizeCommittedAssertionPromote } from './assertion-promote-finalization.js';
+import { SWM_SHARE_COMPLETE_PRED, sharedMemoryAuthorSealFields } from './shared-memory-author-seal.js';
 import {
   createPromoteOperationIntent,
   parsePromoteOperationIntent,
@@ -163,12 +164,6 @@ export {
   CuratorRejectedError,
   type CASCondition,
 };
-
-// #1116 (review A1) — marker predicate stamped on the lifecycle URN when a KA
-// has been FULLY shared to SWM (entities:"all", all roots landed). It gates
-// finalize(layer:"swm") so a subset share — which also stamps dkg:rootEntity
-// member rows — cannot be sealed-in-SWM and published as a partial asset.
-const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 
 
 /** Publisher-owned contract for assertion promotion after agent prerequisites resolve. */
@@ -9003,6 +8998,9 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: normalizedPrivateQuads.length,
         accessPolicy,
         allowedPeers: [...allowedPeers],
+        // GH#3294 — the seal travels with the share, so a curator can publish
+        // this asset as the author's.
+        ...sharedMemoryAuthorSealFields(name, seal),
       });
 
       // Wrap the plaintext publish-request in the encrypted envelope

@@ -307,3 +307,11 @@ normal operation. Leave the sync limits at their defaults (10 jobs at once,
 only slot, and every other sync job is refused for as long as it runs (#3251).
 From 10.0.25, shared-memory pulls keep one reserved slot and a short queue of
 their own, so they still run beside such a transfer.
+
+Metadata refreshes, which bring a graph's definition and a private graph's
+member list, also keep one reserved slot (#3280), with no queue of their own.
+A refresh that finds that slot busy as well is refused at once, as before.
+A node set to one slot therefore runs up to three sync jobs at once: one
+transfer, one shared-memory pull and one metadata refresh.
+`DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT=0` and
+`DKG_SYNC_CONTROL_PLANE_RESERVED_INFLIGHT=0` turn the reserves off.
