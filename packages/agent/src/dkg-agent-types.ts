@@ -1035,8 +1035,8 @@ export interface ContextGraphWritePreflightProbe {
    * `storeErrorMessage`.
    */
   storeUnavailable?: boolean;
-  /** First store-read failure message, retained for 503 diagnostics. */
-  storeErrorMessage?: string;
+  storeErrorMessage?: string; // Existing 503 message; new attribution never copies it.
+  failureAttribution?: readonly import('./write-preflight-attribution.js').WritePreflightFailure[];
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';

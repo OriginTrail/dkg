@@ -66,7 +66,7 @@ type WarningDecision = { readonly warn: true; readonly heldBack: number } | { re
  * least recently warned key first. A window that starts in the future (the
  * clock stepped back) has expired.
  */
-function createWarningGate(
+export function createWarningGate(
   now: () => number,
   intervalMs: number,
   cacheMax: number,
