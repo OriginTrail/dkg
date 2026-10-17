@@ -95,18 +95,18 @@ it('retains bounded failure evidence on reopen and cascades it only with exact m
   const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-failure-')); roots.push(dataDir);
   const store = await openStore(dataDir);
   // Diagnostic writes must never manufacture owed work.
-  store.writeFailure!(repair, failure);
-  expect(store.list()).toEqual([]); expect(store.readFailure!(repair)).toBeNull();
-  await store.put(repair); store.writeFailure!(repair, failure);
+  store.writeFailure(repair, failure);
+  expect(store.list()).toEqual([]); expect(store.readFailure(repair)).toBeNull();
+  await store.put(repair); store.writeFailure(repair, failure);
   await store.put(repair); // Idempotent queue admission does not erase the prior failure.
   inventories.pop()!.close();
   const reopened = await openStore(dataDir);
-  expect(reopened.list()).toEqual([repair]); expect(reopened.readFailure!(repair)).toEqual(failure);
+  expect(reopened.list()).toEqual([repair]); expect(reopened.readFailure(repair)).toEqual(failure);
   const unrelated = { ...repair, assertionCoordinate: 'other', assertionVersion: '2' as PositiveDecimalU64V1 };
-  await reopened.put(unrelated); expect(reopened.readFailure!(unrelated)).toBeNull();
-  await reopened.delete(repair); expect(reopened.readFailure!(repair)).toBeNull();
+  await reopened.put(unrelated); expect(reopened.readFailure(unrelated)).toBeNull();
+  await reopened.delete(repair); expect(reopened.readFailure(repair)).toBeNull();
   expect(reopened.list()).toEqual([unrelated]);
-  reopened.writeFailure!(repair, failure); expect(reopened.readFailure!(repair)).toBeNull();
+  reopened.writeFailure(repair, failure); expect(reopened.readFailure(repair)).toBeNull();
 });
 
 it('upgrades the prior exact v5 schema while retaining canonical owed rows', async () => {
@@ -117,23 +117,23 @@ it('upgrades the prior exact v5 schema while retaining canonical owed rows', asy
   const old = new DatabaseSync(path);
   old.exec('DROP TABLE rfc64_private_placement_failures_v1; PRAGMA user_version = 5'); old.close();
   const upgraded = await openStore(dataDir);
-  expect(upgraded.list()).toEqual([repair]); expect(upgraded.readFailure!(repair)).toBeNull();
-  upgraded.writeFailure!(repair, failure); inventories.pop()!.close();
+  expect(upgraded.list()).toEqual([repair]); expect(upgraded.readFailure(repair)).toBeNull();
+  upgraded.writeFailure(repair, failure); inventories.pop()!.close();
   const read = new DatabaseSync(path); expect(read.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 6 }); read.close();
-  const reopened = await openStore(dataDir); expect(reopened.readFailure!(repair)).toEqual(failure);
+  const reopened = await openStore(dataDir); expect(reopened.readFailure(repair)).toEqual(failure);
 });
 
 it('refuses invalid failure state, and ignores damaged diagnostics without losing owed work', async () => {
   const { DatabaseSync } = await import('node:sqlite');
   const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-failure-corrupt-')); roots.push(dataDir);
   const store = await openStore(dataDir); await store.put(repair);
-  expect(() => store.writeFailure!(repair, { ...failure, kind: 'secret' } as any)).toThrow('Invalid');
-  store.writeFailure!(repair, failure); inventories.pop()!.close();
+  expect(() => store.writeFailure(repair, { ...failure, kind: 'secret' } as any)).toThrow('Invalid');
+  store.writeFailure(repair, failure); inventories.pop()!.close();
   const db = new DatabaseSync(join(dataDir, 'rfc64-sync', 'inventory-v1.sqlite3'));
   db.exec("UPDATE rfc64_private_placement_failures_v1 SET state_json = 'broken'"); db.close();
   const reopened = await openStore(dataDir);
-  expect(reopened.readFailure!(repair)).toBeNull(); expect(reopened.list()).toEqual([repair]);
-  reopened.writeFailure!(repair, failure); expect(reopened.readFailure!(repair)).toEqual(failure);
+  expect(reopened.readFailure(repair)).toBeNull(); expect(reopened.list()).toEqual([repair]);
+  reopened.writeFailure(repair, failure); expect(reopened.readFailure(repair)).toEqual(failure);
 });
 
 
@@ -146,10 +146,11 @@ it('restores real SQLite failure age, cooldown and parking, then retries only by
   const makeOwner = () => {
     const owner = new Rfc64SwmCatalogProjectionOwnerV1({
       resolvePartition: () => ({ retryIntervalMs: 5000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
+      listDurableInventoryScopes: () => [],
       listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
       acceptsFinalizedPrivateLane: () => true, readRepairRevision: () => null,
-      listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure!(row),
-      writePrivateFailure: (row, state) => store.writeFailure!(row, state),
+      listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
+      writePrivateFailure: (row, state) => store.writeFailure(row, state),
       repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
     });
     owners.push(owner); return owner;
@@ -167,7 +168,7 @@ it('restores real SQLite failure age, cooldown and parking, then retries only by
     kinds: [{ kind: 'signer_mismatch', count: 1 }],
   });
   await vi.advanceTimersByTimeAsync(10000); await owner.whenIdle();
-  expect(attempt).toHaveBeenCalledTimes(3); expect(store.readFailure!(repair)?.parked).toBe(true);
+  expect(attempt).toHaveBeenCalledTimes(3); expect(store.readFailure(repair)?.parked).toBe(true);
   await owner.close(); inventories.pop()!.close();
   store = await openStore(dataDir); owner = makeOwner(); owner.start(ctx); await owner.whenIdle();
   await vi.advanceTimersByTimeAsync(60000); await owner.whenIdle();
@@ -176,10 +177,10 @@ it('restores real SQLite failure age, cooldown and parking, then retries only by
   attempt.mockImplementation(async () => { await store.delete(repair); });
   expect(owner.retryFailedPrivate(ctx)).toBe(1);
   expect(store.list()).toEqual([repair]); // Retry schedules; it never declares the obligation complete.
-  expect(store.readFailure!(repair)).toMatchObject({ firstFailedAtMs: 1000, parked: false, consecutiveFailures: 0 });
+  expect(store.readFailure(repair)).toMatchObject({ firstFailedAtMs: 1000, parked: false, consecutiveFailures: 0 });
   await vi.advanceTimersByTimeAsync(0); await owner.whenIdle();
   expect(attempt).toHaveBeenCalledTimes(4); expect(store.list()).toEqual([]);
-  expect(store.readFailure!(repair)).toBeNull();
+  expect(store.readFailure(repair)).toBeNull();
   expect(owner.status()?.finalizedPrivatePlacement.failures?.failedMarkers).toBe(0);
   await owner.close(); expect(() => owner.retryFailedPrivate(ctx)).toThrow('closed');
 });

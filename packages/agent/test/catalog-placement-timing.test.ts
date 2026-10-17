@@ -559,6 +559,8 @@ describe('catalog placement timing through the finalized-private supervisor', ()
       acceptsPublicRootLane: () => true,
       acceptsFinalizedPrivateLane: () => true,
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
+      readPrivateFailure: () => null,
+      writePrivateFailure: () => {},
       listFinalizedPrivateRepairs: () => markers,
       repairFinalizedPrivatePlacement: repair,
       reconcile: async () => null,

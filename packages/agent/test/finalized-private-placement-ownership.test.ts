@@ -109,6 +109,8 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
         return state.laneActive;
       },
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
+      readPrivateFailure: () => null,
+      writePrivateFailure: () => {},
       listFinalizedPrivateRepairs: () => {
         state.listings += 1;
         return state.markers;

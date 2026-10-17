@@ -7,7 +7,7 @@ import {
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
 } from '../finalized-private-placement-repair-store-v1.js';
-import { parsePrivatePlacementFailureStateV1, type PrivatePlacementFailureStateV1 } from '../../internal/finalized-private-repair-retry.js';
+import { parsePrivatePlacementFailureStateV1, type PrivatePlacementFailureStateV1 } from '../private-placement-failure-state-v1.js';
 import { sqlBlobsEqualV1 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
 type SqlRowV1 = Record<string, unknown>;

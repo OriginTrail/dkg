@@ -1,5 +1,5 @@
 import { FinalizedPrivateRepairPersistenceV1 } from './finalized-private-repair-persistence.js';
-import type { PrivatePlacementFailureStateV1 } from '../../internal/finalized-private-repair-retry.js';
+import type { PrivatePlacementFailureStateV1 } from '../private-placement-failure-state-v1.js';
 import { inventoryPersistenceFailure, inheritInventoryPersistenceFailure } from '../inventory-persistence-failure.js';
 import { type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 export { createRfc64SwmAuthorInventoryOperationsViewV1, type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';

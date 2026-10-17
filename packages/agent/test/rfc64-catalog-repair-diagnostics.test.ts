@@ -87,3 +87,26 @@ it.each(['policy_conflict', 'persistence_unavailable'] as const)('classifies the
   expect(catalogRepairDiagnosticV1(error).kind).toBe(kind);
   expect(JSON.stringify(catalogRepairDiagnosticV1(error))).not.toContain('private-guard');
 });
+
+it.each(['missing signer', 'wrong signing key', 'external payer'] as const)(
+  'classifies the production %s guard without leaking private identity', async scenario => {
+    const { ethers } = await import('ethers');
+    const { Rfc64SwmCatalogProjectionMethods } = await import('../src/dkg-agent-rfc64-swm-catalog-projection.js');
+    const wrong = new ethers.Wallet(`0x${'43'.repeat(32)}`);
+    const authorAddress = `0x${'11'.repeat(20)}`;
+    const chain = scenario === 'external payer'
+      ? { operationalSigning: () => ({ external: true, payerAddresses: [] }) }
+      : scenario === 'wrong signing key' ? { signMessage: async (message: Uint8Array) => {
+        const signature = ethers.Signature.from(await wrong.signMessage(message));
+        return { r: ethers.getBytes(signature.r), vs: ethers.getBytes(signature.yParityAndS) };
+      } } : {};
+    const createSigner = (Rfc64SwmCatalogProjectionMethods.prototype as any).createRfc64CatalogAuthorSignerV1;
+    const signer = createSigner.call({ chain, config: {}, getCustodialAgentPrivateKey: () => undefined }, authorAddress);
+    const error = await observeCatalogRepairStageV1('seal', () => signer.signMessage(new TextEncoder().encode(SECRET)))
+      .catch((error: unknown) => error);
+    expect(catalogRepairDiagnosticV1(error)).toMatchObject({ kind: 'signer_mismatch', stage: 'seal' });
+    const summary = catalogRepairErrorSummaryV1(error);
+    expect(summary).not.toContain(authorAddress);
+    expect(summary).not.toContain(SECRET);
+  },
+);

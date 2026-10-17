@@ -408,6 +408,8 @@ export async function startPlacementAgentV1(
   const markerStore = persistence.finalizedPrivatePlacementRepairs;
   const watchedMarkerStore: Rfc64FinalizedPrivatePlacementRepairStoreV1 = Object.freeze({
     list: () => markerStore.list(),
+    readFailure: repair => markerStore.readFailure(repair),
+    writeFailure: (repair, state) => markerStore.writeFailure(repair, state),
     put: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
       if (hooks.failMarkerWrite !== undefined) throw hooks.failMarkerWrite;
       await markerStore.put(repair);

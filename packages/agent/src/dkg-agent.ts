@@ -1058,10 +1058,10 @@ export class DKGAgent extends DKGAgentBase {
           };
         },
         listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
-        readPrivateFailure: (repair) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.readFailure?.(repair) ?? null,
-        writePrivateFailure: (repair, state) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.writeFailure?.(repair, state),
-        repairFinalizedPrivatePlacement: (repair, placement) =>
-          this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement),
+        readPrivateFailure: (repair) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.readFailure(repair) ?? null,
+        writePrivateFailure: (repair, state) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.writeFailure(repair, state),
+        repairFinalizedPrivatePlacement: async (repair, placement) => {
+          await this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement); },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
         readAppliedCatalogHead: (scope, author) => this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(scope, author),
         warn: (ctx, message) => this.log.warn(ctx, message),

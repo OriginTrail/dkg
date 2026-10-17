@@ -44,7 +44,7 @@ it('restores actual node repair failure evidence and keeps inactive owed work af
   try {
     const store = createRfc64FinalizedPrivatePlacementRepairStoreV1(read);
     expect(store.list()).toEqual([repair]);
-    firstFailureAt = store.readFailure!(repair)!.firstFailedAtMs;
+    firstFailureAt = store.readFailure(repair)!.firstFailedAtMs;
   } finally { read.close(); }
   const second = await startRepairAgentV1({ name: 'private-repair-after-restart', dataDir });
   await second.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
@@ -60,6 +60,6 @@ it('restores actual node repair failure evidence and keeps inactive owed work af
   try {
     const store = createRfc64FinalizedPrivatePlacementRepairStoreV1(final);
     expect(store.list()).toEqual([repair]); // An inactive lane is never acknowledged as placed.
-    expect(store.readFailure!(repair)).toMatchObject({ firstFailedAtMs: firstFailureAt, kind: 'lane_inactive' });
+    expect(store.readFailure(repair)).toMatchObject({ firstFailedAtMs: firstFailureAt, kind: 'lane_inactive' });
   } finally { final.close(); }
 }, 60000);

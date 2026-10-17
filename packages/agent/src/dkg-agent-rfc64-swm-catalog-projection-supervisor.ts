@@ -1,4 +1,5 @@
-import { summarizePrivatePlacementFailuresV1, type PrivatePlacementFailureStateV1 } from './internal/finalized-private-repair-retry.js';
+import type { FinalizedPrivateRepairRetryV1 } from './internal/finalized-private-repair-retry.js';
+import { summarizePrivatePlacementFailuresV1, type PrivatePlacementFailureStateV1 } from './rfc64/private-placement-failure-state-v1.js';
 import { runFinalizedPrivatePlacementPass, type PrivateRetryEntryV1 } from './internal/finalized-private-placement-pass.js';
 // SPDX-License-Identifier: Apache-2.0
 import { SwmCatalogAuthorityNotReady } from './internal/swm-inventory-write.js';
@@ -133,8 +134,8 @@ export interface Rfc64FinalizedPrivatePlacementRepairRequestV1 {
 }
 
 interface ProjectionOwnerDependenciesV1 {
-  readonly readPrivateFailure?: (repair: Rfc64FinalizedPrivatePlacementRepairV1) => PrivatePlacementFailureStateV1 | null;
-  readonly writePrivateFailure?: (repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null) => void;
+  readonly readPrivateFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1) => PrivatePlacementFailureStateV1 | null;
+  readonly writePrivateFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null) => void;
   readonly resolvePartition: () => Rfc64CatalogBootstrapPartitionV1 | undefined;
   readonly listDurableInventoryScopes: () => readonly Readonly<{ contextGraphId: ContextGraphIdV1; authorAddress: EvmAddressV1 }>[];
   readonly listLocalAuthorAddresses: () => readonly EvmAddressV1[];
@@ -195,7 +196,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       if (entry.contextGraphId !== contextGraphId) continue;
       try {
         if (!this.#dependencies.acceptsFinalizedPrivateLane(entry.contextGraphId)) {
-          entry.retry.observe(null);
+          entry.retry.observeLane(false);
         }
       } catch { /* The periodic admission check remains authoritative. */ }
     }
@@ -316,7 +317,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       if (!laneAccepts && (state.retryIntervalMs ?? 0) > 0) state.finalizedPrivateRunner.schedule(state.retryIntervalMs!);
     }
     if (!laneAccepts) {
-      state.finalizedPrivateRetries.get(key)?.retry.observe(null);
+      state.finalizedPrivateRetries.get(key)?.retry.observeLane(false);
       return rejected();
     }
     const waiter = state.finalizedPrivateWaiters.add(key, this.#timing().now(), params.observer);
@@ -352,7 +353,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       ))),
       finalizedPrivatePlacement: Object.freeze({ ...this.#timing().queueStatus(
         state.finalizedPrivateWaiters.summary(), state.finalizedPrivateRunner.running),
-        failures: summarizePrivatePlacementFailuresV1([...state.finalizedPrivateRetries.values()].map(entry => entry.retry)),
+        failures: summarizePrivatePlacementFailuresV1([...state.finalizedPrivateRetries.values()].map(entry => entry.retry.snapshot())),
       }),
       authorCatalogCapacity: this.#fullCatalogs.status(state.repairs),
       finalizedRowHeal: this.#dependencies.readFinalizedRowHealCounts?.(),
@@ -366,9 +367,9 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     let requested = 0;
     for (const repair of this.#dependencies.listFinalizedPrivateRepairs()) {
       const entry = state.finalizedPrivateRetries.get(finalizedPrivateRepairKeyV1(repair));
-      const previous = entry?.retry.snapshot() ?? this.#dependencies.readPrivateFailure?.(repair);
+      const previous = entry?.retry.snapshot() ?? this.#dependencies.readPrivateFailure(repair);
       if (!previous) continue;
-      this.#dependencies.writePrivateFailure?.(repair, { ...previous, consecutiveFailures: 0,
+      this.#dependencies.writePrivateFailure(repair, { ...previous, consecutiveFailures: 0,
         sameKindFailures: 0, nextAttemptAtMs: null, parked: false });
       entry?.retry.retryNow();
       requested += 1;
@@ -552,11 +553,11 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     state.finalizedPrivateWaiterTimer.unref?.();
   }
 
-  #observePrivateLane(retry: CatalogRepairRetryV1, contextGraphId: ContextGraphIdV1): boolean {
+  #observePrivateLane(retry: FinalizedPrivateRepairRetryV1, contextGraphId: ContextGraphIdV1): boolean {
     try {
       // Exact durable identity already partitions private retries. An unrelated
       // mutation of the author's inventory must not reset this repair's backoff.
-      return retry.observe(this.#dependencies.acceptsFinalizedPrivateLane(contextGraphId) ? { scopeIdentity: 'finalized-private', headRevision: 'active' } : null);
+      return retry.observeLane(this.#dependencies.acceptsFinalizedPrivateLane(contextGraphId));
     } catch {
       return false;
     }
@@ -578,7 +579,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     }
   }
 
-  #warnFailure(event: string, error: unknown, attempt: number, retry: CatalogRepairRetryV1): void {
+  #warnFailure(event: string, error: unknown, attempt: number, retry: Pick<CatalogRepairRetryV1, 'consecutiveFailures' | 'nextAttemptAtMs'>): void {
     try {
       this.#dependencies.warn(createOperationContext('system'), JSON.stringify({
         event, diagnostic: catalogRepairDiagnosticV1(error), attempt,

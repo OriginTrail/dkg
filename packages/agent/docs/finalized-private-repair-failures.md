@@ -63,4 +63,9 @@ owned inventory and Oxigraph paths against an inactive marker without a mocked
 repair implementation. These tests do not establish the cause of every historical
 `unknown` failure reported in issue #3178.
 
-Catalog-capacity parking keeps its existing applied-head wakeups and hourly safety-net rotation. It does not persist the generic private-failure cooldown, so freeing a row can admit owed placement in the next pass.
+Catalog-capacity parking keeps its existing applied-head wakeups and hourly
+safety-net rotation. Its failure kind, count and age remain visible and durable,
+with no generic private-failure cooldown, so freeing a row can admit owed
+placement in the next pass. Operator retry cannot let an older failed attempt
+restore either generic backoff or capacity parking. Already parked capacity
+work still waits for its existing head-change or safety-net condition.

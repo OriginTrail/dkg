@@ -44,6 +44,8 @@ function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorParamete
     acceptsPublicRootLane: () => available,
     acceptsFinalizedPrivateLane: () => available,
     readRepairRevision: readRevision,
+    readPrivateFailure: () => null,
+    writePrivateFailure: () => {},
     listFinalizedPrivateRepairs: listPrivateRepairs,
     repairFinalizedPrivatePlacement: repairPrivate,
     reconcile,
@@ -770,4 +772,54 @@ it('schedules successful operator retries even if a later diagnostic write fails
   expect(f.repairPrivate).toHaveBeenCalledTimes(1);
   expect(f.repairPrivate.mock.calls[0][0]).toEqual(a);
   expect(f.listPrivateRepairs()).toEqual([a, b]);
+});
+
+it.each(['unknown', 'catalog_full'] as const)('operator retry fences an in-flight %s failure through the owner', async kind => {
+  const { AuthorCatalogFullErrorV1 } = await import('../src/internal/author-catalog-capacity.js');
+  let persisted: import('../src/rfc64/private-placement-failure-state-v1.js').PrivatePlacementFailureStateV1 | null = null;
+  const f = fixture(0, { readPrivateFailure: () => persisted, writePrivateFailure: (_repair, state) => { persisted = state; } });
+  const repair = privateRepair(); f.setPrivateRepairs([repair]);
+  await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
+  let rejectOld!: () => void; const old = new Promise<void>(resolve => { rejectOld = resolve; });
+  let releaseFollowup!: () => void; const followup = new Promise<void>(resolve => { releaseFollowup = resolve; });
+  f.repairPrivate.mockImplementationOnce(async () => {
+    await old;
+    if (kind === 'catalog_full') throw new AuthorCatalogFullErrorV1(Array.from({ length: 1024 }, (_, i) => ({ seal: { kaUal: `held-${i}` } })), 1);
+    throw new Error('private stale failure must not be retained');
+  }).mockImplementationOnce(async () => { await followup; });
+  const request = f.owner.requestFinalizedPrivate({ repair, ctx });
+  try {
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+    expect(f.owner.retryFailedPrivate(ctx)).toBe(1);
+    const reset = persisted;
+    expect(reset).toMatchObject({ consecutiveFailures: 0, sameKindFailures: 0, nextAttemptAtMs: null, parked: false });
+    rejectOld(); await vi.advanceTimersByTimeAsync(1);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(3);
+    expect(persisted).toEqual(reset);
+    expect(f.owner.status()?.authorCatalogCapacity.parkedPlacements).toBe(0);
+  } finally {
+    rejectOld(); releaseFollowup(); await request.whenAttempted; await f.owner.whenIdle();
+  }
+});
+
+it('keeps a capacity-refused owed marker visible without introducing a generic cooldown', async () => {
+  const { AuthorCatalogFullErrorV1 } = await import('../src/internal/author-catalog-capacity.js');
+  let persisted: import('../src/rfc64/private-placement-failure-state-v1.js').PrivatePlacementFailureStateV1 | null = null;
+  const f = fixture(0, { readPrivateFailure: () => persisted, writePrivateFailure: (_repair, state) => { persisted = state; } });
+  const repair = privateRepair(); f.setPrivateRepairs([repair]);
+  f.repairPrivate.mockRejectedValue(new AuthorCatalogFullErrorV1(Array.from({ length: 1024 }, (_, i) => ({ seal: { kaUal: `held-${i}` } })), 1));
+  await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
+  expect(f.owner.status()?.finalizedPrivatePlacement.failures).toMatchObject({ failedMarkers: 1, oldestFailureAgeMs: 0, kinds: [{ kind: 'catalog_full', count: 1 }] });
+  expect(persisted).toMatchObject({ kind: 'catalog_full', nextAttemptAtMs: null });
+  await f.advance(60_000); f.owner.start(ctx); await f.owner.whenIdle();
+  expect(f.repairPrivate).toHaveBeenCalledTimes(1);
+  expect(f.owner.status()?.finalizedPrivatePlacement.failures).toMatchObject({ failedMarkers: 1, oldestFailureAgeMs: 60_000, kinds: [{ kind: 'catalog_full', count: 1 }] });
+  await f.owner.close();
+  const restarted = fixture(0, { readPrivateFailure: () => persisted, writePrivateFailure: (_repair, state) => { persisted = state; } });
+  restarted.setPrivateRepairs([repair]);
+  restarted.repairPrivate.mockRejectedValue(new AuthorCatalogFullErrorV1(Array.from({ length: 1024 }, (_, i) => ({ seal: { kaUal: `held-${i}` } })), 1));
+  restarted.owner.start(ctx); await restarted.owner.whenIdle();
+  expect(restarted.owner.status()?.finalizedPrivatePlacement.failures).toMatchObject({ failedMarkers: 1, oldestFailureAgeMs: 60_000, kinds: [{ kind: 'catalog_full', count: 1 }] });
+  expect(persisted).toMatchObject({ kind: 'catalog_full', firstFailedAtMs: 0, nextAttemptAtMs: null });
 });
