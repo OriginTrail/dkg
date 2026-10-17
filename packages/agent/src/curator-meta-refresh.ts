@@ -499,8 +499,9 @@ async function fetchAuthoritativeMetaSnapshot(
     // Registrations this node holds are left out before the per-snapshot
     // limit applies, so a node that refreshes a definition with more
     // registrations than the limit learns the next ones each time (#3293).
+    // A store that cannot answer leaves nothing out; the definition still lands.
     subGraphs: readPeerSubGraphRegistrations(contextGraphId, result.quads, {
-      exclude: await readLocalSubGraphNames(agent.store, contextGraphId),
+      exclude: await readLocalSubGraphNames(agent.store, contextGraphId).catch(() => new Set<string>()),
     }),
     ...(approvedMember === undefined ? {} : { approvedMember }),
   };

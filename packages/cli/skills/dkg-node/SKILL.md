@@ -281,14 +281,10 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
 
 > **Lifecycle provenance.** Every assertion carries a durable `dkg:Assertion` lifecycle record in the CG's `_meta` graph, updated as a side effect of create, `/wm/write`, `/wm/finalize`, `/swm/share`, `/wm/discard`, and `/vm/publish`. The assertion data moves WM→SWM→VM as it is shared and published — the lifecycle record is an independent audit trail you can read without touching the data itself. (The internal `dkg:state` values are `created` / `promoted` / `published` / `finalized` / `discarded`; these are data-model literals, distinct from the tool/verb names.)
 
-> If `subGraphName` names a sub-graph that is not registered in the CG's `_meta`
-> graph on this node, the node first asks the graph's owner and connected peers
-> whether they hold it, and registers it when one does (a member also learns the
-> owner's sub-graphs together with the graph's definition when it subscribes).
-> When none holds it, assertion operations are refused with HTTP 400 and
-> `code: "SUB_GRAPH_NOT_FOUND"`:
-> `Sub-graph "{name}" has not been registered in context graph "{id}" (…)`.
-> Create a new sub-graph before targeting it.
+> If `subGraphName` names a sub-graph this node has not registered, the node asks
+> the graph's owner and connected peers (Cores serve the owner's sub-graphs of a registered
+> graph) and registers it when one holds it; a member also learns them with the graph's
+> definition. When none holds it, assertion operations are refused with HTTP 400 and `code: "SUB_GRAPH_NOT_FOUND"`. Create a new sub-graph before targeting it.
 
 ### Shared Working Memory (SWM) — Team-visible
 

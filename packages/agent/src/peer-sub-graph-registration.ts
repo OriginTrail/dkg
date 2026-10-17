@@ -386,7 +386,7 @@ async function resolveFromPeers(
     answered += 1;
     const found = readPeerSubGraphRegistrations(contextGraphId, quads, {
       first: subGraphName,
-      exclude: await readLocalSubGraphNames(agent.store, contextGraphId),
+      exclude: await readLocalSubGraphNames(agent.store, contextGraphId).catch(() => new Set<string>()),
     });
     if (await withinBudget(registerPeerSubGraphs(agent, contextGraphId, found, peerId, ctx), budget) === OUT_OF_TIME) {
       outOfTime = true;
