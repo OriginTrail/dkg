@@ -169,9 +169,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { constructConfiguredChainAdapter } from './configured-chain-adapter.js';
 import { signsThroughExternalSigner } from './external-author-signing.js';
-import {
-  translateLegacySwmRetirementFence,
-} from './internal/promote/assertion-promote-precommit.js';
+import { translateLegacySwmRetirementFence } from './internal/promote/assertion-promote-precommit.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -539,9 +537,7 @@ import { QueryMethods } from './dkg-agent-query.js';
 import { AgentRegistryMethods } from './dkg-agent-registry.js';
 import { WorkspaceCryptoMethods } from './dkg-agent-crypto.js';
 import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
-import {
-  PublishMethods,
-} from './dkg-agent-publish.js';
+import { PublishMethods } from './dkg-agent-publish.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';
