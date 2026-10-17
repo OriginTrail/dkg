@@ -123,7 +123,7 @@
     "packages/node-ui/src/ui/views/DashboardView.tsx": 862,
     "packages/node-ui/src/ui/views/MemoryLayerView.tsx": 906,
     "packages/node-ui/src/ui/views/project/components/entities.tsx": 835,
-    "packages/node-ui/src/ui/views/project/components/overview.tsx": 957,
+    "packages/node-ui/src/ui/views/project/components/overview.tsx": 876,
     "packages/node-ui/src/ui/views/project/components/query.tsx": 816,
     "packages/node-ui/src/ui/views/project/components/subgraph.tsx": 1808,
     "packages/node-ui/src/ui/views/project/helpers.ts": 895,
