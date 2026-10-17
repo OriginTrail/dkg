@@ -1,0 +1,116 @@
+{
+  "runtimeRevision": "a76cb38a5aacf2261d888c69c7e2abd5dbb0878c",
+  "platform": "native macOS arm64 Node 22.23.3 pnpm 10.28.1",
+  "batchesOverlapDoNotSum": true,
+  "checks": [
+    {
+      "batch": "publisher-final",
+      "privateLogSha256": "0ed96c9336dbd2d2e56caf6c837fc53df44e2dfb4a076750259d51b5217cb272",
+      "testSummary": [
+        " Test Files  3 passed (3)",
+        "      Tests  132 passed (132)",
+        "   Start at  01:18:59",
+        "   Duration  23.79s (transform 1.82s, setup 0ms, import 3.44s, tests 1.01s, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "agent-regressions",
+      "privateLogSha256": "e49978194617f0e11df5413cb33ba45b9f3cb157e28ee38cd08ebe5f27079fa8",
+      "testSummary": [
+        " Test Files  2 passed (2)",
+        "      Tests  33 passed (33)",
+        "   Start at  01:17:55",
+        "   Duration  27.15s (transform 4.80s, setup 0ms, import 7.42s, tests 357ms, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "workers-verified",
+      "privateLogSha256": "ecc1879d9c411dbdc7eb1877b678030cc1745b3f69aaf38ad0ea516bc797dc65",
+      "testSummary": [
+        " Test Files  4 passed (4)",
+        "      Tests  118 passed (118)",
+        "   Start at  01:21:40",
+        "   Duration  39.35s (transform 6.37s, setup 0ms, import 11.50s, tests 3.46s, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "vm-verified",
+      "privateLogSha256": "5ea52e4e26842ab5f970b855ca2db87760cc5e22bdcd3133c2cc5d6be301cba8",
+      "testSummary": [
+        " Test Files  1 passed (1)",
+        "      Tests  1 passed (1)",
+        "   Start at  01:23:07",
+        "   Duration  25.56s (transform 4.20s, setup 0ms, import 5.54s, tests 611ms, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "http-verified",
+      "privateLogSha256": "d4ce898d7e96d63000bbd942d4dd4a4559c4c827d664f6921509a9bf23c04aa1",
+      "testSummary": [
+        " Test Files  5 passed (5)",
+        "      Tests  204 passed (204)",
+        "   Start at  01:21:41",
+        "   Duration  38.52s (transform 7.23s, setup 0ms, import 13.83s, tests 660ms, environment 1ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "daemon-verified",
+      "privateLogSha256": "4ce3211984ed74d92d8ceee20ed60559cc49a2570743d7bd59cdac4fb4fdf0af",
+      "testSummary": [
+        " Test Files  2 passed (2)",
+        "      Tests  105 passed (105)",
+        "   Start at  01:22:49",
+        "   Duration  163.15s (transform 4.52s, setup 0ms, import 6.45s, tests 137.32s, environment 0ms)"
+      ],
+      "passed": true
+    },
+    {
+      "batch": "build-verified",
+      "privateLogSha256": "bbff358a40504a57d8c52575d8dff3597ab3ed640c4f9c79590fcec0f7b1d248",
+      "testSummary": [],
+      "passed": true
+    },
+    {
+      "batch": "clean-build",
+      "privateLogSha256": "31fbd148bd961516a46644d91aa7a66d6540508a8afda932a17882fc881ee7a6",
+      "testSummary": [],
+      "passed": true
+    },
+    {
+      "batch": "lint-verified",
+      "privateLogSha256": "6deb8fd482d436631468e458c131ba006cb423564b8f3193ac96ca23624b2fa6",
+      "testSummary": [],
+      "passed": true
+    },
+    {
+      "batch": "size-verified",
+      "privateLogSha256": "37d962298df83ab409aa5355ce20e640e4a49550e083872611a7ec7c2722fa52",
+      "testSummary": [],
+      "passed": true
+    },
+    {
+      "batch": "inventory-verified",
+      "privateLogSha256": "284a8566d0fd0ee50210e33b53025258ca4c8dd29079aae1db8b720a57b2f831",
+      "testSummary": [],
+      "passed": true
+    },
+    {
+      "batch": "sparql-verified",
+      "privateLogSha256": "437c242b8ce1b64cd85e278edbc294471a4495e3a08708a7bc0d1c09004a1b54",
+      "testSummary": [],
+      "passed": true
+    }
+  ],
+  "limitations": [
+    "Confirmed-removal worker fixture models chain confirmation; actual live process-exit evidence is separate.",
+    "Initial oversized fixture violated per-literal encoding cap and expected a non-void discard return; corrected before final passing runs.",
+    "Initial custom-scope fixture used a legacy discard path; corrected to assert the public pull-from ownership boundary.",
+    "An initial SPARQL invocation omitted --files; corrected check passed.",
+    "No build or heavy regression suite ran during measured traffic or drain."
+  ]
+}

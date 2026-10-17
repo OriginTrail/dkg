@@ -6,44 +6,58 @@ The final candidate automatically completed both interrupted synchronous shares 
 
 The cause is missing durable ownership: a synchronous request could commit sealed SWM content before separate lifecycle/head/cleanup and catalog-observer work, then return an error with no async share job responsible for finishing it. The fix admits a sealed, immutable, leased recovery owner before mutation and lets the existing worker resume that same operation. Authorization, uncertain-write, claim and identity fences remain enforced. Error presentation alone would not close the gap.
 
-**Current status:** final matched live comparison and local regressions passed on `f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7`. The separate actual process-exit proof also passed; final-head remote CI/review remains outstanding. No merge is authorized. Historical sections below retain the status and failures at each earlier revision; they are not claims about the final candidate.
+**Current status:** latest matched live comparison and local regressions passed on `a76cb38a5aacf2261d888c69c7e2abd5dbb0878c`. Its separate actual process-exit proof also passed; final-head remote CI/review remains outstanding. No merge is authorized. Historical sections below retain the status and failures at each earlier revision; they are not claims about the final candidate.
 
 The original baseline uses performance PR [#3253](https://github.com/OriginTrail/dkg/pull/3253) at `9436b5c927f9fc8e5eb0cd5523da785dfa1cdd75`; its scope is unchanged. That PR merged at 18:08:57 UTC. Separate [PR #3300](https://github.com/OriginTrail/dkg/pull/3300), branch `codex/2963-durable-share-recovery`, now targets `testnet-canary` and integrates base `2aba84de35754e5663b52018f9781a6e6c8b948d` without rebasing. See the [execution plan](../agent-docs/plans/2026-10-16-2963-durable-share-recovery.md) and [reproduction harness](../scripts/testnet-share-recovery/README.md).
 
 ## Final matched comparison
 
-| Result | Clean merged baseline (`baseline3`) | Final candidate (`candidate9`) |
+| Result | Clean merged baseline (`baseline3`) | Latest candidate (`candidate10`) |
 | --- | --- | --- |
-| Tested runtime commit | `2aba84de35754e5663b52018f9781a6e6c8b948d` | `f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7` |
-| Runtime / build time UTC | 10.0.25 / 18:12:45.944 | 10.0.25 / 21:49:42.655 |
-| Traffic UTC, 2026-10-16 | 18:23:28.474–18:30:43.016 | 22:01:02.254–22:08:20.527 |
+| Tested runtime commit | `2aba84de35754e5663b52018f9781a6e6c8b948d` | `a76cb38a5aacf2261d888c69c7e2abd5dbb0878c` |
+| Runtime / build time UTC | 10.0.25 / 18:12:45.944 | 10.0.25 / 23:25:56.264 |
+| Traffic UTC, 2026-10-16 | 18:23:28.474–18:30:43.016 | 23:37:16.381–23:44:54.915 |
 | Synchronous request denominator | 256: 254 HTTP 200, 2 injected HTTP 503 | 256: 254 HTTP 200, 2 injected HTTP 503 |
 | Naturally successful requests | 254/254 | 254/254 |
 | Interrupted operations automatically completed | 0/2 | 2/2 |
-| Fault-to-durable-success times | Neither completed by deadline | 67.366 s, 70.612 s |
-| First original-author descriptor 200 response completion after fault | Neither available by deadline | 78.318 s, 75.466 s |
+| Fault-to-durable-success times | Neither completed by deadline | 74.723 s, 52.968 s |
+| First original-author descriptor 200 response completion after fault | Neither available by deadline | 85.141 s, 54.578 s |
 | Publications finalized by fixed deadline | 48/48 | 48/48 |
-| Publication p50 / p90 | 178.085 s / 323.891 s | 205.458 s / 348.022 s |
-| Full-cohort makespan / throughput | 360.794 s / 0.133040 per s | 385.549 s / 0.124498 per s |
+| Publication p50 / p90 | 178.085 s / 323.891 s | 174.323 s / 312.754 s |
+| Full-cohort makespan / throughput | 360.794 s / 0.133040 per s | 343.474 s / 0.139749 per s |
 | Exact final inventory / catalog / descriptor set | 434/436; only the injected two absent | 436/436 |
-| First complete catalog observation | Never by deadline | 22:13:25.329Z; 304.802 s after traffic end |
-| Fixed catalog deadline / full snapshot | 18:50:43.016 / 18:51:03.541 (+20.525 s) | 22:28:20.527 / 22:28:21.543 (+1.016 s) |
+| First complete catalog observation | Never by deadline | 23:49:44.480Z; 289.565 s after traffic end |
+| Fixed catalog deadline / full snapshot | 18:50:43.016 / 18:51:03.541 (+20.525 s) | Oct 17 00:04:54.915 / 00:04:55.920 (+1.005 s) |
 | Original seals / whole-graph content preserved | 436/436 | 436/436 |
 | Unique creation events and exact publication carriers | 48/48 | 48/48 |
 | Complete successful signer nonce interval / gaps | 98 transactions / 0 | 98 transactions / 0 |
 | Manual repairs or share replays | 0 | 0 |
 
-All times are UTC on 2026-10-16. Descriptor times use response completion, not request start. The baseline full snapshot is 20.525 seconds late; bracketing polls at 18:50:37.279 and 18:50:52.317 both retained 434 rows, and the preserved two operations were still incomplete at readback. Candidate count convergence is followed by exact tuple/content proofs and continued observations through the fixed deadline. No builds or local regression suites ran during either measured workload or drain.
+All times are UTC; traffic is on 2026-10-16 and the latest candidate deadline/readback is on 2026-10-17. Descriptor times use response completion, not request start. The baseline full snapshot is 20.525 seconds late; bracketing polls at 18:50:37.279 and 18:50:52.317 both retained 434 rows, and the preserved two operations were still incomplete at readback. Candidate count convergence is followed by exact tuple/content proofs and continued observations through the fixed deadline. No builds or local regression suites ran during either measured workload or drain.
 
 Both arms started with exactly 180 catalog/inventory identities, 256 sealed drafts and no publication jobs. Candidate preparation necessarily leaves 180 succeeded synchronous recovery owners; the baseline has none. This product-induced queue-history difference is recorded in its environment artifact. Homes, namespaces, graph identities and monotonic allocator ranges differ to prevent contamination. Wallet count, resource limits, workload, faults and deadlines are the same. Frozen runner SHA-256: `80c72964a23a633cfa355589d0806d79628f87dc9a965b6027f96a49e697a682`; fault hook: `1aa663c1368f64da6454db1a2c2c4bab0f9575c2de90e25580ecc96f5e753c8c`; snapshot: `4b602b763eb633a0f8288b6573c105d3b633578f700f0ad17304a0a0a36ccbb5`.
 
-The candidate’s p50 is 15.37% higher, p90 7.45% higher and throughput 6.42% lower. This sequential public-testnet pair does not isolate causality or establish a performance improvement. [Follow-up #3310](https://github.com/OriginTrail/dkg/issues/3310) requests alternating replicated arms and attribution of chain, queue and catalog/store costs without weakening correctness. The performance parent’s scope remains unchanged.
+The latest candidate’s p50 is 2.11% lower, p90 3.44% lower and throughput 5.04% higher than the preserved merged baseline. The preceding candidate9 was slower (p50 +15.37%, p90 +7.45%, throughput −6.42%); both completed runs remain preserved. This sequential public-testnet pair does not isolate causality or establish a performance improvement. [Follow-up #3310](https://github.com/OriginTrail/dkg/issues/3310) requests alternating replicated arms and attribution of chain, queue and catalog/store costs without weakening correctness. The performance parent’s scope remains unchanged.
 
-Candidate preparation also had one natural startup 503 which recovered automatically in 68.050 seconds after admission; one request, zero replays. Its first successful observation was 21:51:47.508Z. That preparation-only failure is retained separately from the 254 natural measured shares, and its exact dependency boundary was not instrumented. All 179 remaining initial-share requests and 256 draft requests returned 201. Earlier preparation-only candidates and the invalid first baseline remain in the evidence index.
+Candidate preparation also had one natural startup 503 which recovered automatically in 67.078 seconds after admission; one request, zero replays. Its first successful observation was 23:28:29.213Z. That preparation-only failure is retained separately from the 254 natural measured shares, and its exact dependency boundary was not instrumented. All 179 remaining initial-share requests and 256 draft requests returned 201. Earlier preparation-only candidates and the invalid first baseline remain in the evidence index.
 
-Reviewer artifacts: [baseline3](2963-evidence/baseline3/summary.json), [candidate9](2963-evidence/candidate9/summary.json), [candidate identity tuples](2963-evidence/candidate9/identity-proof.json), [all 304 requests](2963-evidence/candidate9/requests.csv), [fixed-window observations](2963-evidence/candidate9/deadline-observations.json), [nonce accounting](2963-evidence/candidate9/nonce-accounting.json).
+Reviewer artifacts: [baseline3](2963-evidence/baseline3/summary.json), [candidate10](2963-evidence/candidate10/summary.json), [candidate identity tuples](2963-evidence/candidate10/identity-proof.json), [all 304 requests](2963-evidence/candidate10/requests.csv), [fixed-window observations](2963-evidence/candidate10/deadline-observations.json), [nonce accounting](2963-evidence/candidate10/nonce-accounting.json).
 
-## Actual process-exit recovery
+## Latest actual process-exit recovery
+
+The separate one-request test on `a76cb38a5aacf2261d888c69c7e2abd5dbb0878c` injected process exit at `2026-10-17T00:07:28.163Z` after SWM commit and before lifecycle insertion. The request disconnected at `00:07:28.227Z` and was not replayed. A read-only witness observed worker 84146 disappear and existing supervisor 84144 start replacement 84733 at `00:07:29.491007Z`, with the same home and running Blazegraph. Code 86 belongs to the injection implementation; the witness observes process replacement, not OS exit status.
+
+The original job `eedaf4e4-00d3-4038-9347-c8d696dab52f` retained its original binding and unmodified 900000 ms lease expiring at `00:22:26.931Z`. The ordinary worker reclaimed it and completed attempt two at `00:22:29.724Z`, **901.561 seconds after the crash**. The first completed job-success/descriptor-200 observation was `00:22:30.222Z` (902.059 seconds); complete job/descriptor/catalog state was observed at `00:23:15.465Z` (947.302 seconds). All **79 observations**, including one read failure during startup, are preserved. The fixed deadline was `00:27:28.163Z`; observation ended at `00:27:28.167Z`.
+
+Exact readback at `00:27:38.085Z` proved the same runtime commit/build/version/peer, original job/full binding/seal/intent/version, exact eight-triple payload, completed lifecycle and cleared WM. The catalog and inventory contain exactly **437 identities**, including exactly one crash-asset entry. All 48 publication carriers and all ten signer nonces are unchanged. All 437 share jobs succeeded. Manual HTTP replays, manual process restarts and manual repairs: **zero**. Owned supervisor, worker and store were stopped after proof; final transaction reconciliation and matching claim release are recorded in [cleanup evidence](2963-evidence/candidate10/shutdown.json).
+
+See [deadline outcome](2963-evidence/candidate10/restart-regression/outcome.json), [process witness](2963-evidence/candidate10/restart-regression/process-restart-proof.json), [before owner](2963-evidence/candidate10/restart-regression/before-job.json), [after owner](2963-evidence/candidate10/restart-regression/after-job.json), [exact proof](2963-evidence/candidate10/restart-regression/identity-proof.json), and [all observations](2963-evidence/candidate10/restart-regression/observations.json). The scenario is separate from the matched 256-share denominator. Recovery depends on a running ordinary supervisor and retained durable home/store; disabling workers suspends it.
+
+## Previous completed candidate9
+
+Candidate9 tested `f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7`, build `21:49:42.655Z`. Traffic ran `22:01:02.254–22:08:20.527Z`, with 48/48 publications and 256 shares (254 HTTP 200, two injected 503). Both faults recovered automatically in 67.366/70.612 seconds; exact catalog convergence was first observed at `22:13:25.329Z`, 304.802 seconds after traffic. The deadline was `22:28:20.527Z`, snapshot `22:28:21.543Z` (+1.016 seconds). All 436 seals/content/identities/descriptors, 48 publication effects and 98 transactions passed. P50/p90 were 205.458/348.022 seconds; makespan 385.549 seconds, throughput 0.124498/s. One separate startup 503 recovered in 68.050 seconds. Zero manual repairs. This successful earlier run does not substitute for validation of the later code.
+
+### Candidate9 actual process-exit recovery
 
 A separate one-request scenario ran after the fixed matched workload, on the same `f7fdbdfaedc9bb3b8e1ff2307ec50a856d4010e7` runtime/home/store. At `22:33:18.813Z`, the fsynced fault hook exited the daemon immediately after SWM content committed and before promoted lifecycle insertion. The request disconnected (`fetch failed`); it was never replayed. A read-only process witness observed the original child disappear and the same foreground supervisor replace it at `22:33:19.984629Z`, with Blazegraph still running. Exit code 86 belongs to the injected implementation; the witness does **not** capture an OS exit status.
 
@@ -236,3 +250,9 @@ A second gap lost persistence provenance when verified native SQLite reopening f
 Round-10 verification passed 59 inventory/latency/provenance cases, followed by 23 producer cases including filesystem-I/O reopening; 95 queue cases and five final ownership-fence cases; 109 worker/synchronous cases including the real persisted native-reopen worker; and 30 preparation/confirmation-observer cases. Native SQLite lifecycle verification passed 66 cases with four existing platform skips, including fresh-process SIGKILL/quarantine boundaries. Batches overlap and are not summed. Runtime/type/export build, lint, file-size limits, SPARQL checks and routing of 2,598 test files passed. An initial build rejected an overly narrow lifetime-predicate parameter and lint found an unused fixture field; both were corrected before the successful checks. All 69 actual-daemon route cases also passed. The final matched candidate and actual process-exit proof are reported above; current-head remote review remains a separate requirement.
 
 The final round-10 actual-daemon suite subsequently passed all 69 route cases (155.24 seconds total), including token-scoped sharing and pulling from the original author lane. Candidate9 will use a clean committed build of these production changes. No live result is claimed by the local regression results.
+
+## Review response round 11
+
+Four new findings on the prior head were validated and addressed: producer-certified retirement of a fresh no-effect gossip-size rejection; typed retry ownership when confirmed-removal authority becomes temporarily inactive while waiting for the scope lock; explicit queue-owned lifecycle-reader composition independent of lazy queue construction and store-wrapper identity; and one canonical executor deriving durable inline/background arguments from the admitted job. The no-effect exception requires the original first attempt, matching binding, no claimed operation, no SWM content or receipt, and no external confirmation dispatch. Invalid/missing/later-attempt proof and uncertain or committed operations remain fenced; retired rows cannot be recovered onto a changed seal. Policy/scope/integrity refusals remain terminal.
+
+Local verification passed: 132 publisher tests, 33 agent tests, 118 CLI recovery/worker tests, one VM-inventory worker test, 204 HTTP/error-contract tests, and 105 daemon/error-mapping tests including 69 actual-daemon cases. Runtime build/types/package exports, lint, unchanged file-size budgets, 2,598-file test routing and SPARQL checks passed. These batches overlap and must not be summed as unique tests. Initial fixture/command mistakes and their corrected final checks are recorded in [local validation](2963-evidence/candidate10/local-validation.json). The original request explicitly requires iteration until validation and review convergence; the response count continues at 11 beyond the skill’s default ten-round cap, without resetting history or extending an old observation window. No merge is authorized.
