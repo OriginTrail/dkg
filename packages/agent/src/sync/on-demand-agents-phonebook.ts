@@ -105,6 +105,14 @@ export const AGENTS_PHONEBOOK_CURATOR_MISS_SUPPRESSION_MS = 6 * 60 * 60_000;
 export const AGENTS_PHONEBOOK_MIN_NETWORK_TRIPLES = 1_000;
 /** Re-check cadence while wanted graphs wait for a first usable peer. */
 export const AGENTS_PHONEBOOK_NO_PEER_RETRY_MS = 30_000;
+/**
+ * Pause before a peer is asked again when this node's own sync scheduler
+ * turned the request away (every slot busy, for example with a subscribe's
+ * catch-up). The peer was not asked, so its answer is still to come.
+ */
+export const AGENTS_PHONEBOOK_LOCAL_DEFERRAL_RETRY_MS = 1_000;
+/** Times one fetch asks again after such a refusal before it waits for the re-check. */
+export const AGENTS_PHONEBOOK_LOCAL_DEFERRAL_MAX_RETRIES = 30;
 /** No-peer re-checks one wait may use before waiting for the next trigger. */
 export const AGENTS_PHONEBOOK_NO_PEER_MAX_RETRIES = 20;
 /** Reuse window for an on-chain access-policy answer. */
@@ -132,6 +140,8 @@ export interface AgentsPhonebookPeerSyncResult {
   readonly insertedTriples: number;
   /** Every requested graph reached a verified terminal state. */
   readonly complete: boolean;
+  /** This node's sync scheduler turned the request away before it reached the peer. */
+  readonly deferred?: boolean;
 }
 
 export interface OnDemandAgentsPhonebookDeps {
@@ -179,6 +189,8 @@ export interface OnDemandAgentsPhonebookOptions {
   minNetworkTriples?: number;
   noPeerRetryMs?: number;
   noPeerMaxRetries?: number;
+  localDeferralRetryMs?: number;
+  localDeferralMaxRetries?: number;
   policyVerdictTtlMs?: number;
   maxStateEntries?: number;
 }
@@ -232,6 +244,8 @@ export class OnDemandAgentsPhonebookFetcher {
   readonly #minNetworkTriples: number;
   readonly #noPeerRetryMs: number;
   readonly #noPeerMaxRetries: number;
+  readonly #localDeferralRetryMs: number;
+  readonly #localDeferralMaxRetries: number;
   readonly #policyVerdictTtlMs: number;
   readonly #maxStateEntries: number;
 
@@ -263,6 +277,9 @@ export class OnDemandAgentsPhonebookFetcher {
     this.#minNetworkTriples = options.minNetworkTriples ?? AGENTS_PHONEBOOK_MIN_NETWORK_TRIPLES;
     this.#noPeerRetryMs = options.noPeerRetryMs ?? AGENTS_PHONEBOOK_NO_PEER_RETRY_MS;
     this.#noPeerMaxRetries = options.noPeerMaxRetries ?? AGENTS_PHONEBOOK_NO_PEER_MAX_RETRIES;
+    this.#localDeferralRetryMs = options.localDeferralRetryMs ?? AGENTS_PHONEBOOK_LOCAL_DEFERRAL_RETRY_MS;
+    this.#localDeferralMaxRetries = options.localDeferralMaxRetries
+      ?? AGENTS_PHONEBOOK_LOCAL_DEFERRAL_MAX_RETRIES;
     this.#policyVerdictTtlMs = options.policyVerdictTtlMs ?? AGENTS_PHONEBOOK_POLICY_VERDICT_TTL_MS;
     this.#maxStateEntries = options.maxStateEntries ?? AGENTS_PHONEBOOK_STATE_MAX_ENTRIES;
   }
@@ -463,6 +480,7 @@ export class OnDemandAgentsPhonebookFetcher {
     let fetchedTriples = 0;
     let insertedTriples = 0;
     let answeredEmpty = false;
+    let deferredLocally = false;
     // A known Core's complete answer that carried a real phonebook. Only this
     // ends the walk early or suppresses a graph whose owner it lacks.
     let networkPhonebook = false;
@@ -482,10 +500,15 @@ export class OnDemandAgentsPhonebookFetcher {
         attemptedPeers += 1;
         const role = core ? 'core' : 'peer';
         try {
-          const result = await this.#deps.syncAgentsFromPeer(peerId, {
-            signal: budget.signal,
-            totalTimeoutMs: remainingMs,
-          });
+          const result = await this.#syncAgentsFrom(peerId, budget.signal, startedAt);
+          if (result === 'deferred') {
+            // The peer was never asked: this node's own sync slots stayed busy.
+            // No answer, so no cooldown; the re-check below asks again.
+            attemptedPeers -= 1;
+            deferredLocally = true;
+            peerSummaries.push(`${shortPeerId(peerId)}:${role}:deferred`);
+            break;
+          }
           fetchedTriples += result.fetchedTriples;
           insertedTriples += result.insertedTriples;
           if (result.fetchedTriples === 0) answeredEmpty = true;
@@ -523,7 +546,8 @@ export class OnDemandAgentsPhonebookFetcher {
       this.#wantedWallets.clear();
       this.#recordMetrics(trigger, 'no-peers', false, this.#now() - startedAt);
       this.#deps.logDebug(
-        `On-demand agents phonebook fetch deferred: no usable connected peer `
+        `On-demand agents phonebook fetch deferred: `
+          + `${deferredLocally ? "this node's sync slots stayed busy" : 'no usable connected peer'} `
           + `(trigger=${trigger} candidates=${candidates.length} wanted=${this.#wants.size})`,
       );
       this.#scheduleRecheck();
@@ -576,6 +600,27 @@ export class OnDemandAgentsPhonebookFetcher {
           : ''),
     );
     if (resolved.length > 0) this.#deps.onCuratorsResolved(resolved);
+  }
+
+  /**
+   * The peer's answer. While this node's own sync scheduler turns the request
+   * away, the peer is asked again after a short pause, within the budget.
+   */
+  async #syncAgentsFrom(
+    peerId: string,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<AgentsPhonebookPeerSyncResult | 'deferred'> {
+    for (let retries = 0; ; retries += 1) {
+      const totalTimeoutMs = startedAt + this.#budgetMs - this.#now();
+      if (totalTimeoutMs <= 0) return 'deferred';
+      const result = await this.#deps.syncAgentsFromPeer(peerId, { signal, totalTimeoutMs });
+      if (result.deferred !== true) return result;
+      if (retries >= this.#localDeferralMaxRetries || signal.aborted) return 'deferred';
+      await waitUnlessAborted(new Promise<void>((resolve) => {
+        setTimeout(resolve, this.#localDeferralRetryMs).unref?.();
+      }), signal);
+    }
   }
 
   async #unresolvedWallets(signal: AbortSignal): Promise<string[]> {

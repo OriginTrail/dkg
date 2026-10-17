@@ -35,6 +35,8 @@ const PEER_A = '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a';
 const PEER_B = '12D3KooWFHUALUrdSfrVHSxtCRCJC9xvxS7nYfM6T1sbYVak9HTu';
 const PEER_C = '12D3KooWGRUVh6uXvRkYt8oYp9VvrxgZvKk3eYcZ6oZ3mGJ8sQwT';
 const GRAPH = 'test-cg/shares-through-relay';
+/** The wallet of the owner of a graph whose id names it. */
+const OWNER_WALLET = '0x1111111111111111111111111111111111111111';
 
 /** What a Core node grants for one circuit today. */
 const CORE_CIRCUIT = { bytes: 256n * 1024n * 1024n, seconds: 30 * 60 };
@@ -388,7 +390,9 @@ describe('a share into a public graph that has followers', () => {
     subscribers: string[];
     followers: string[];
     answer?: (peerId: string) => typeof DELIVERED | typeof REFUSED | typeof RETRY_LATER;
+    graph?: string;
   }) {
+    const graph = options.graph ?? GRAPH;
     const agent = await DKGAgent.create({
       name: `shares-through-relay-${Math.random().toString(36).slice(2)}`,
       chainAdapter: new MockChainAdapter(),
@@ -418,13 +422,13 @@ describe('a share into a public graph that has followers', () => {
         return (options.answer ?? (() => DELIVERED))(peerId);
       },
     };
-    for (const peerId of options.followers) sharedMemoryFollowersOf(agent).note(GRAPH, peerId);
+    for (const peerId of options.followers) sharedMemoryFollowersOf(agent).note(graph, peerId);
     let shares = 0;
     const share = async (subGraphName: string | null | undefined): Promise<string[]> => {
       sent.length = 0;
       shares += 1;
       await agent.publishWorkspaceGossip(
-        GRAPH,
+        graph,
         new Uint8Array([1, 2, 3, shares]),
         createOperationContext('share'),
         null,
@@ -614,6 +618,144 @@ describe('a share into a public graph that has followers', () => {
       const { host, share } = await agentWith({ subscribers: [], followers: [PEER_B] });
       host.rfc64LegacySwmApplyAllowedForScope = () => false;
       expect(await share(undefined)).toEqual([PEER_B]);
+    });
+  });
+
+  // An author that connects only to Cores has no route to the graph's owner:
+  // GossipSub does not run over a relayed connection, and the owner never asked
+  // it for the graph. The owner needs the share itself, with its author's seal.
+  describe('to the graph\'s owner', () => {
+    const OWNER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const OWNER_2 = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
+
+    /** The graph's owner is OWNER; `connected` lists the peers this node holds a connection to. */
+    async function withOwner(options: {
+      connected?: string[];
+      reachable?: boolean;
+      /** Peers whose dial fails without an error, as `ensurePeerConnected` lets a failed dial pass. */
+      silentlyUnreachable?: string[];
+      /** The graph's peer allowlist; none by default. */
+      allowedPeers?: string[];
+      owners?: string[] | (() => string[]);
+      /** This node runs the graph's owner. */
+      own?: boolean;
+      isPrivate?: boolean;
+      graph?: string;
+    } = {}) {
+      const target = await agentWith({ subscribers: [PEER_A], followers: [], graph: options.graph });
+      const connected = options.connected ?? [];
+      const connects: string[] = [];
+      const owners = options.owners ?? [OWNER];
+      Object.assign(target.host, {
+        isPrivateContextGraph: async () => options.isPrivate === true,
+        resolveCuratorPeerIdsForCg: async () => (options.own === true
+          ? { peerIds: [], curatorIsLocal: true, legacyTripleResolved: false }
+          : { peerIds: typeof owners === 'function' ? owners() : owners, curatorIsLocal: false, legacyTripleResolved: true }),
+        ensurePeerConnected: async (peerId: string) => {
+          connects.push(peerId);
+          if (options.reachable === false) throw new Error('no route to the owner');
+          if (options.silentlyUnreachable?.includes(peerId)) return;
+          connected.push(peerId);
+        },
+        ...(options.allowedPeers === undefined
+          ? {}
+          : { resolveSwmAllowedPeersForCurrentAuthority: async () => options.allowedPeers }),
+      });
+      Object.defineProperty(target.host.node, 'libp2p', {
+        value: {
+          getPeers: () => connected.map((peerId) => ({ toString: () => peerId })),
+          peerStore: { get: async () => ({ protocols: [SHARE_PROTOCOL] }) },
+        },
+        configurable: true,
+      });
+      return { ...target, connects };
+    }
+
+    it('goes to an owner this node is not connected to, through a connection made for it', async () => {
+      const { share, connects } = await withOwner();
+      expect(await share('reports')).toEqual([PEER_A, OWNER].sort());
+      expect(connects).toEqual([OWNER]);
+    });
+
+    it('counts an owner peer it could not dial as not reached, though the peer store lists its protocol, and goes to the next', async () => {
+      const { share, connects } = await withOwner({ owners: [OWNER, OWNER_2], silentlyUnreachable: [OWNER] });
+      expect(await share('reports')).toEqual([PEER_A, OWNER_2].sort());
+      expect(connects).toEqual([OWNER, OWNER_2]);
+    });
+
+    it('goes to the owner of a public graph whose peer allowlist does not name the owner\'s peer, and once when it does', async () => {
+      const offList = await withOwner({ allowedPeers: [PEER_A] });
+      expect(await offList.share('reports')).toEqual([PEER_A, OWNER].sort());
+      expect(offList.connects).toEqual([OWNER]);
+
+      const onList = await withOwner({ allowedPeers: [PEER_A, OWNER] });
+      expect(await onList.share('reports')).toEqual([PEER_A, OWNER].sort());
+    });
+
+    it('goes to a connected owner without connecting again', async () => {
+      const { share, connects } = await withOwner({ connected: [OWNER] });
+      expect(await share('reports')).toEqual([PEER_A, OWNER].sort());
+      expect(connects).toEqual([]);
+    });
+
+    it('still goes to the others when the owner cannot be reached, and the next share does not wait for it', async () => {
+      const { share, connects } = await withOwner({ reachable: false });
+      expect(await share('reports')).toEqual([PEER_A]);
+      expect(await share('reports')).toEqual([PEER_A]);
+      expect(connects).toEqual([OWNER]);
+    });
+
+    it('looks an owner the local phonebook does not know up on demand, then goes to it', async () => {
+      let phonebookHasOwner = false;
+      const lookups: string[][] = [];
+      const target = await withOwner({
+        graph: `${OWNER_WALLET}/owned-elsewhere`,
+        owners: () => (phonebookHasOwner ? [OWNER] : []),
+      });
+      Object.assign(target.host, {
+        ensureAgentsInOnDemandPhonebook: async (wallets: readonly string[]) => {
+          lookups.push([...wallets]);
+          phonebookHasOwner = true;
+          return new Set(wallets.map((wallet) => wallet.toLowerCase()));
+        },
+      });
+      expect(await target.share('reports')).toEqual([PEER_A, OWNER].sort());
+      expect(lookups).toEqual([[OWNER_WALLET]]);
+      expect(target.connects).toEqual([OWNER]);
+    });
+
+    it('goes to the others when a Core\'s phonebook does not know the owner either, and the next share does not look again', async () => {
+      const lookups: string[][] = [];
+      const target = await withOwner({ graph: `${OWNER_WALLET}/owned-elsewhere`, owners: [] });
+      Object.assign(target.host, {
+        ensureAgentsInOnDemandPhonebook: async (wallets: readonly string[]) => {
+          lookups.push([...wallets]);
+          return new Set<string>();
+        },
+      });
+      expect(await target.share('reports')).toEqual([PEER_A]);
+      expect(await target.share('reports')).toEqual([PEER_A]);
+      expect(lookups).toHaveLength(1);
+      expect(target.connects).toEqual([]);
+    });
+
+    it('is not routed for a root the catalog owns, on the graph\'s own node, or for a private graph', async () => {
+      const root = await withOwner();
+      root.host.rfc64LegacySwmApplyAllowedForScope = (_contextGraphId, subGraphName) => subGraphName !== null;
+      expect(await root.share(null)).toEqual([PEER_A]);
+      const ownNode = await withOwner({ own: true, graph: `${OWNER_WALLET}/owned-here` });
+      const lookups: string[][] = [];
+      Object.assign(ownNode.host, {
+        ensureAgentsInOnDemandPhonebook: async (wallets: readonly string[]) => {
+          lookups.push([...wallets]);
+          return new Set<string>();
+        },
+      });
+      expect(await ownNode.share('reports')).toEqual([PEER_A]);
+      const privateGraph = await withOwner({ isPrivate: true });
+      await privateGraph.agent.routeShareToPublicGraphOwnerV1(GRAPH);
+      expect([...root.connects, ...ownNode.connects, ...privateGraph.connects]).toEqual([]);
+      expect(lookups).toEqual([]);
     });
   });
 });

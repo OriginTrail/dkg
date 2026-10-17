@@ -260,7 +260,8 @@ import {
   classifySwmFanoutPeerOutcome,
   type SelectSwmFanoutPeersResult,
 } from './swm/swm-fanout-peer-selection.js';
-import type { WorkspaceShareScope } from './swm/shared-memory-followers.js';
+import { sharedMemoryFollowersOf, type WorkspaceShareScope } from './swm/shared-memory-followers.js';
+import { graphOwnerPeersOf, routeShareToGraphOwner, type GraphOwnerRoutePorts } from './swm/relay-only-share-routes.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
@@ -896,6 +897,54 @@ function normalizeWorkspaceGossipPublishInput(
 }
 
 export class PublishMethods extends DKGAgentBase {
+  /**
+   * Before a share into a public graph goes out, make the graph's owner one of
+   * its followers, connecting to it through a relay when the two nodes are not
+   * connected (`swm/relay-only-share-routes.ts`). Resolves with the owner's
+   * peers it routed to. Bounded; never throws.
+   */
+  async routeShareToPublicGraphOwnerV1(this: DKGAgent, contextGraphId: string): Promise<readonly string[]> {
+    if (await this.isPrivateContextGraph(contextGraphId).catch(() => true)) return [];
+    const routed = await routeShareToGraphOwner(this.graphOwnerRoutePortsV1(), contextGraphId);
+    if (routed.length > 0) {
+      this.log.debug(
+        createOperationContext('share'),
+        `Share into "${contextGraphId}" goes to the graph's owner ${routed.map((peerId) => peerId.slice(-8)).join(', ')} as a follower`,
+      );
+    }
+    return routed;
+  }
+
+  graphOwnerRoutePortsV1(this: DKGAgent): GraphOwnerRoutePorts {
+    const owners = graphOwnerPeersOf(this, async (contextGraphId, signal) => {
+      const lookUp = () => this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16, signal });
+      let resolution = await lookUp();
+      const ownerDid = deriveCuratorDidFromCgId(contextGraphId);
+      if (resolution.peerIds.length === 0 && !resolution.curatorIsLocal && ownerDid !== null) {
+        // An Edge keeps no `agents` phonebook: fetch the owner's profile from a
+        // Core's, then look the owner's peers up again.
+        await this.ensureAgentsInOnDemandPhonebook([ownerDid.slice('did:dkg:agent:'.length)], signal);
+        resolution = await lookUp();
+      }
+      return resolution.peerIds.filter((peerId) => peerId !== this.peerId);
+    });
+    const isConnected = (peerId: string): boolean => this.node.libp2p.getPeers().some((peer) => peer.toString() === peerId);
+    return {
+      ownerPeerIds: (contextGraphId, signal) => owners.of(contextGraphId, signal),
+      isConnected,
+      connect: async (peerId, signal) => {
+        // A dial that fails is not an error there, and the peer store may still
+        // list the protocol of a peer that is gone: only a live connection counts.
+        await this.ensurePeerConnected(peerId, { signal });
+        if (!isConnected(peerId)) return false;
+        return waitForPeerProtocol(this.node.libp2p.peerStore, { toString: () => peerId }, PROTOCOL_SWM_UPDATE, 20, 250, signal);
+      },
+      mayConnect: (peerId) => owners.mayConnect(peerId),
+      connectFailed: (peerId) => owners.connectFailed(peerId),
+      noteFollower: (contextGraphId, peerId) => sharedMemoryFollowersOf(this).note(contextGraphId, peerId),
+    };
+  }
+
   publishWorkspaceGossip(this: DKGAgent,
     contextGraphId: string,
     payload: EncodedWorkspaceGossipPayload,
@@ -1002,6 +1051,15 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    // Followers are never sent a share into a root that the catalog owns (below).
+    const sendsToFollowers = shareScope?.subGraphName !== null
+      || this.rfc64LegacySwmApplyAllowedForScope(contextGraphId, null);
+    // A relay-only author reaches the graph's owner only as a follower. A
+    // captured fan-out is a private graph's roster, which names its members.
+    const ownerPeers = sendsToFollowers && payload.fanout.kind !== 'captured'
+      ? await this.routeShareToPublicGraphOwnerV1(contextGraphId)
+      : [];
+
     // rc.9 PR-C (SWM reliable fan-out plan, Step 3): tier-switch
     // between substrate fan-out (point-to-point reliable via
     // /dkg/10.0.1/swm-update) and GossipSub mesh based on CG
@@ -1097,10 +1155,13 @@ export class PublishMethods extends DKGAgentBase {
     // gossip-only. One share is not sent to them: a share into a root that
     // the catalog owns. The receiver refuses it and takes the content from
     // the author's catalog, so sending it would only spend the relay's bytes.
-    const directFollowers = shareScope?.subGraphName === null
-      && !this.rfc64LegacySwmApplyAllowedForScope(contextGraphId, null)
-      ? []
-      : (plan.directFollowers ?? []);
+    // A public graph with a peer allowlist is sent to that list instead of its
+    // followers; the graph's owner routed above goes as well when it is not
+    // on the list.
+    const ownerOffAllowlist = plan.enumerationSource === 'allowlist'
+      ? ownerPeers.filter((peerId) => !plan.substrateMembers.includes(peerId))
+      : [];
+    const directFollowers = sendsToFollowers ? [...(plan.directFollowers ?? []), ...ownerOffAllowlist] : [];
     const followerPeers = new Set(directFollowers);
     const sendMembers = directFollowers.length === 0
       ? substrateMembers
