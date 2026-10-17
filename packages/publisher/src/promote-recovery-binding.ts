@@ -64,17 +64,27 @@ async function readPromoteRecoveryEvidence(
 export async function preparePromoteRecoveryBinding(
   store: TripleStore, contextGraphId: string, name: string, agentAddress: string,
   opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean,
+  retireCompletion: () => Promise<void>,
   verifyCompleted?: (seal: AssertionSeal, operationId?: string) => Promise<AssertionPromoteResult | null>,
 ): Promise<PromoteRecoveryAdmission> {
   const evidence = await readPromoteRecoveryEvidence(store, contextGraphId, name, agentAddress, opts);
   const { seal, sealDigest } = evidence;
   const layer = evidence.readLayer();
-  const operation = evidence.readOperation();
+  let operation: ReturnType<typeof evidence.readOperation>;
+  try { operation = evidence.readOperation(); }
+  catch (error) {
+    // Refusing corrupt persisted authority must also revoke its publish certificate.
+    await retireCompletion();
+    throw error;
+  }
   if ((operation.kind === 'legacy' || (operation.kind === 'absent' && layer === 'VM')) && verifyCompleted) {
     const completedResult = await verifyCompleted(seal, operation.kind === 'legacy' ? operation.operationId : undefined);
     if (completedResult) return { completedResult };
   }
-  if (operation.kind === 'legacy') throw recoveryBindingConflict('The existing share operation lacks a complete immutable intent');
+  if (operation.kind === 'legacy') {
+    await retireCompletion();
+    throw recoveryBindingConflict('The existing share operation lacks a complete immutable intent');
+  }
   const intent = operation.kind === 'complete' ? operation.intent
     : createPromoteOperationIntent({ operationId: createShareOperationId(), timestampMs: Date.now(),
       publisherPeerId: opts?.publisherPeerId, confirmationRequired: opts?.confirmBeforeCommit !== undefined,

@@ -66,6 +66,22 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     };
     const original = run(); assert.equal(original.seals.length, 1); assert.equal(original.seals[0].unchanged, true);
     assert.deepEqual(original.proof.sealChanged, []); assert.deepEqual(original.proof.missingLifecycle, []); assert.deepEqual(original.proof.lifecycleErrors, [], JSON.stringify(original.proof.assets));
+    const wmPayload = payload.map(r => ({ ...r, g: { type: 'uri', value: swmGraph.replace('_shared_memory', '_working_memory') } }));
+    write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...wmPayload]));
+    assert.deepEqual(run().proof.contentErrors, [name]);
+    write('restart-readback/rdf.json', rdf([...metadata, ...payload, ...wmPayload]));
+    write('restart-readback/manifest.json', { observedAt: '2026-10-16T01:00:00.000Z' });
+    fs.mkdirSync(path.join(root, 'restart-regression'));
+    assert.throws(() => execFileSync('python3', [fileURLToPath(new URL('./restart-content-proof.py', import.meta.url)), arm], { cwd, stdio: 'pipe' }));
+    const restart = JSON.parse(fs.readFileSync(path.join(root, 'restart-regression/whole-cohort-content-proof.json')));
+    assert.equal(restart.originalPayloadGraphsUnchanged, true);
+    assert.equal(restart.allExact, false);
+    assert.deepEqual(restart.contentErrors, [name]);
+    // An interrupted baseline may legitimately retain WM; it must remain an incomplete lifecycle.
+    write('fixed-deadline/rdf.json', rdf([...before, ...payload, ...wmPayload]));
+    const incomplete = run().proof;
+    assert.deepEqual(incomplete.lifecycleErrors, [name]);
+    assert.deepEqual(incomplete.contentErrors, []);
     for (const object of [{ type: 'literal', value: 'promoted', 'xml:lang': 'fr' }, { type: 'uri', value: 'promoted' }]) {
       write('fixed-deadline/rdf.json', rdf([...metadata.map(r => r.s.value === life && r.p.value.endsWith('/state') ? { ...r, o: object } : r), ...payload]));
       assert.deepEqual(run().proof.lifecycleErrors, [name]);

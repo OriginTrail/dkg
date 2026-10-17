@@ -1936,7 +1936,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
   });
 
-  it('fails closed when a legacy durable operation ID has no immutable intent', async () => {
+  it.each(['ordinary', 'durable'])('fails closed when a legacy durable operation ID has no immutable intent (%s)', async path => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     await finalizeAssertion();
@@ -1956,14 +1956,16 @@ describe('Working Memory Assertion Lifecycle', () => {
       subject: lifecycle,
       predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
     });
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
     await expect(
-      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
-    ).rejects.toMatchObject({ code: 'KA_PROMOTE_OPERATION_INTENT_MISSING' });
+      path === 'ordinary' ? publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER })
+        : publisher.prepareAssertionPromoteRecovery(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }, false),
+    ).rejects.toMatchObject({ code: path === 'ordinary' ? 'KA_PROMOTE_OPERATION_INTENT_MISSING' : 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
     expect(await readShareOperationId()).toBeTruthy();
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });
 
-  it('clears a stale completion marker before rejecting corrupt recovery intent', async () => {
+  it.each(['ordinary', 'durable'])('clears a stale completion marker before rejecting corrupt recovery intent (%s)', async path => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     await finalizeAssertion();
@@ -1993,7 +1995,8 @@ describe('Working Memory Assertion Lifecycle', () => {
     }]);
 
     await expect(
-      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      path === 'ordinary' ? publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER })
+        : publisher.prepareAssertionPromoteRecovery(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }, false),
     ).rejects.toMatchObject({ code: 'KA_PROMOTE_OPERATION_INTENT_CORRUPT' });
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });

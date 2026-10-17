@@ -1,3 +1,4 @@
+import { validateCapturedShareIdentity } from './captured-share-identity.mjs';
 import { indexAuthoritativeMetadata } from './authoritative-metadata.mjs';
 import { ASSERTION_SEAL_PREDICATES } from '../../packages/core/dist/index.js';
 import { capturedTermIdentity, bindingTermIdentity, sameCapturedTerm, sameBindingQuads } from './rdf-term-identity.mjs';
@@ -11,12 +12,12 @@ export function verifyRestartMetadata(fault, rows) {
   if (graphs.size !== 1 || ![...graphs][0]) throw Error('Missing unambiguous captured metadata graph');
   const metadataGraph = [...graphs][0];
   const metadata = rows.filter(r => r.g.type === 'uri' && r.g.value === metadataGraph);
-  const original = fault.metadataAtFault.quads.filter(q => identityPredicates.has(q.predicate));
+  const { original, captureComplete } = validateCapturedShareIdentity(fault);
   const subjects = new Set(original.map(q => q.subject));
   const before = original.map(q => JSON.stringify([capturedTermIdentity(q.subject), capturedTermIdentity(q.predicate), capturedTermIdentity(q.object)]));
   const after = metadata.filter(r => subjects.has(r.s.value) && identityPredicates.has(r.p.value))
     .map(r => JSON.stringify([bindingTermIdentity(r.s), bindingTermIdentity(r.p), bindingTermIdentity(r.o)]));
-  const originalSealAndIntent = before.length > 0 && canonical(before) === canonical(after);
+  const originalSealAndIntent = captureComplete && before.length > 0 && canonical(before) === canonical(after);
   const lifecycle = fault.intendedMetadataInsert.find(q => q.predicate === DKG + 'state')?.subject;
   const root = original.find(q => q.predicate === DKG + 'assertionMerkleRoot')?.object;
   // The seal uses xsd:hexBinary; the lifecycle pointer stores its lexical root as xsd:string.

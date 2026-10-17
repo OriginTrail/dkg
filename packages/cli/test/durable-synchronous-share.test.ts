@@ -214,7 +214,7 @@ describe('durable synchronous share ownership', () => {
   });
 
   it.each(['incomplete', 'changed-content'])('refuses pre-intent %s without admitting replay', async kind => {
-    const { store, agent, finalized } = await setup();
+    const { store, agent, publisher, finalized } = await setup();
     daemonState.promoteWorkerAvailable = true;
     if (kind === 'incomplete') store.remaining = 1;
     await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR }).catch(() => undefined);
@@ -224,7 +224,31 @@ describe('durable synchronous share ownership', () => {
       subject: 'urn:extra', predicate: 'urn:p', object: '"changed"' }]);
     const admission = vi.spyOn(agent.promoteQueue, 'enqueueAndClaim');
     await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR })).rejects.toThrow();
+    expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
     expect(admission).not.toHaveBeenCalled();
+    await store.close();
+  });
+
+  it.each(['corrupt-with-wm', 'corrupt-without-wm', 'incomplete-legacy'])('retires stale completion evidence before refusing %s admission', async kind => {
+    const { store, agent, publisher, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR });
+    const graph = contextGraphMetaUri(CG);
+    const predicate = 'http://dkg.io/ontology/promoteOperationIntent';
+    await store.deleteByPattern({ graph, subject: lifecycle, predicate });
+    if (kind.startsWith('corrupt')) await store.insert([{ graph, subject: lifecycle, predicate, object: '"not-json"' }]);
+    if (kind !== 'corrupt-without-wm') await store.insert([{ graph: finalized.graphUri,
+      subject: 'urn:asset', predicate: 'https://schema.org/name', object: '"original"' }]);
+    expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    const admission = vi.spyOn(agent.promoteQueue, 'enqueueAndClaim');
+    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR })).rejects.toMatchObject({
+      code: kind.startsWith('corrupt') ? 'KA_PROMOTE_OPERATION_INTENT_CORRUPT' : 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT',
+    });
+    // This is the certificate checked by the VM publication full-share gate.
+    expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+    expect(admission).not.toHaveBeenCalled();
+    expect(await agent.promoteQueue.list()).toEqual([]);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
     await store.close();
   });
 

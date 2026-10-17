@@ -35,6 +35,7 @@ def audit_graphs(rows, cg, arm, coordinates, published, on_chain_id=None, triple
         expected = expected_payload(arm, name, triples_per_asset)
         present = {layer: values for layer, graph in graphs.items() if (values := by_graph.get(graph))}
         assets[name] = {
+            'wmEmpty': not any(g == graphs['wm'] or g.startswith(graphs['wm'] + '/') for g in by_graph),
             'requiredGraph': graphs[required],
             'requiredGraphPresent': bool(by_graph.get(graphs[required])),
             'contentCounts': {layer: len(values) for layer, values in present.items()},

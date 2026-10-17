@@ -22,7 +22,7 @@ original_unchanged=same_payload_graphs(read(root/'fixed-deadline/rdf.json')['res
 jobs=read(root/'fixed-deadline/-api-publisher-jobs.json')['value']['jobs']
 published={j['request']['knowledgeAssetVmPublish']['name'] for j in jobs if j['status']=='finalized'}
 proof=audit_graphs(rows,campaign['contextGraphId'],arm,coordinates,published,read(root/'context-graph.json')['value']['onChainId'],campaign['triplesPerAsset'])
-errors=[name for name,p in proof['assets'].items() if not p['requiredGraphPresent'] or not all(p['exactContentByGraph'].values())]
+errors=[name for name,p in proof['assets'].items() if not p['requiredGraphPresent'] or not all(p['exactContentByGraph'].values()) or not p['wmEmpty']]
 all_exact=(original_unchanged and not errors and proof['materializedGraphPresent'] and all(proof['materializedGraphsExact'].values()) and not proof['unexpectedPayloadGraphs'])
 result={'arm':arm,'snapshotObservedAt':read(root/'restart-readback/manifest.json')['observedAt'],'assets':len(coordinates),
  'originalPayloadGraphsUnchanged':original_unchanged,'allExact':all_exact,'contentErrors':errors,'graphAudit':{k:v for k,v in proof.items() if k!='assets'}}

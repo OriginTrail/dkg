@@ -8385,6 +8385,7 @@ export class DKGPublisher implements Publisher {
   ): Promise<PromoteRecoveryAdmission> {
     return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, opts?.subGraphName,
       () => preparePromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts, inventoryRequired,
+        () => this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, opts?.subGraphName),
         (seal, operationId) => this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName, operationId)));
   }
 
@@ -8394,7 +8395,10 @@ export class DKGPublisher implements Publisher {
       scopedQuads: graph => this.assertionScopedQuads(graph),
       hasMarker: () => this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName),
       hasTail: (scope, id) => this.hasDurableAssertionPromoteTail(contextGraphId, id, scope.ual, scope.assertionVersion, subGraphName),
-      validatePayload: (publicQuads, privateQuads) => validateGraphScopedPayloadAgainstSeal(seal, publicQuads, privateQuads, 'completed-memory'),
+      validatePayload: async (publicQuads, privateQuads) => {
+        try { return await validateGraphScopedPayloadAgainstSeal(seal, publicQuads, privateQuads, 'completed-memory'); }
+        catch (error) { await this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName); throw error; }
+      },
     }, contextGraphId, name, agentAddress, seal, subGraphName, operationId);
   }
 

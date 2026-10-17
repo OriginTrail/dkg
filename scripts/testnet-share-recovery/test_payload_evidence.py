@@ -39,6 +39,15 @@ class ExactGraphEvidence(unittest.TestCase):
         self.assertTrue(proof['requiredGraphPresent'])
         self.assertEqual(proof['exactContentByGraph'], {'swm': True})
 
+    def test_exact_swm_with_leftover_wm_family_is_not_cleaned_up(self):
+        for suffix in ['', '/private']:
+            rows = payload() + [row('urn:2963:test:asset', 'https://schema.org/p0', 'asset value 0',
+                                    GRAPH.replace('_shared_memory', '_working_memory') + suffix)]
+            proof = self.audit(rows)['assets'][NAME]
+            self.assertTrue(proof['exactContentByGraph']['swm'])
+            self.assertFalse(proof['wmEmpty'])
+        self.assertTrue(self.audit(payload())['assets'][NAME]['wmEmpty'])
+
     def test_unexpected_subject_is_not_filtered_out(self):
         proof = self.audit(payload() + [row('urn:unexpected', 'urn:p', 'corrupt')])['assets'][NAME]
         self.assertEqual(proof['exactContentByGraph'], {'swm': False})
