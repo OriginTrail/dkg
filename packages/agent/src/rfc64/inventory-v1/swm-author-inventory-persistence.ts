@@ -88,6 +88,29 @@ type SwmAuthorInventoryCommitPlanV1 =
       current: StoredSwmAuthorInventoryCommitV1 | null;
     }>;
 
+/** Validate indexed identity before using a durable head as a discovery hint. */
+function decodeStoredHead(row: SqlRowV1, scopeDigest: Uint8Array, author: Uint8Array) {
+  const envelopeBytes = assertBoundedSqlBlobV1(
+    row.signed_head_envelope,
+    1,
+    4 * 1024,
+    'stored SWM author inventory head envelope',
+  );
+  const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(envelopeBytes);
+  const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
+  if (
+    computeSwmAuthorInventoryScopeDigestV1(scope) !== sqlBlobToDigest32V1(scopeDigest)
+    || head.payload.authorAddress !== sqlBlobToEvmAddressV1(author)
+    || head.objectDigest !== sqlBlobToDigest32V1(row.current_head_digest)
+    || head.payload.version !== sqlBlobToDecimalU64V1(row.inventory_version_u64be)
+    || head.payload.totalRows !== sqlBlobToDecimalU64V1(row.total_rows_u64be)
+    || head.payload.rowsDigest !== sqlBlobToDigest32V1(row.rows_digest)
+  ) {
+    throw new Error('stored head columns do not match the signed envelope');
+  }
+  return { head, scope };
+}
+
 /** Pure, shared state machine for normal apply and indeterminate-COMMIT recovery. */
 function planSwmAuthorInventoryCommitV1(
   current: StoredSwmAuthorInventoryCommitV1 | null,
@@ -182,6 +205,19 @@ export class SwmAuthorInventoryPersistenceV1 {
     }
   }
 
+  listScopes() {
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.listSwmAuthorHeads);
+    const rows = this.host.statement(() => query.all() as SqlRowV1[]);
+    try {
+      return Object.freeze(rows.map(row => decodeStoredHead(row,
+        assertBoundedSqlBlobV1(row.inventory_scope_digest, 32, 32, 'inventory scope'),
+        assertBoundedSqlBlobV1(row.author_address, 20, 20, 'inventory author'),
+      ).scope));
+    } catch (cause) {
+      throw this.host.error('swm-inventory-database-corrupt', 'stored SWM author discovery head is invalid', { cause });
+    }
+  }
+
   private readStored(
     key: EncodedSwmAuthorInventoryKeyV1,
   ): StoredSwmAuthorInventoryCommitV1 | null {
@@ -197,24 +233,7 @@ export class SwmAuthorInventoryPersistenceV1 {
       author: key.author,
     }) as SqlRowV1[]);
     try {
-      const envelopeBytes = assertBoundedSqlBlobV1(
-        headRow.signed_head_envelope,
-        1,
-        4 * 1024,
-        'stored SWM author inventory head envelope',
-      );
-      const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(envelopeBytes);
-      const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
-      if (
-        computeSwmAuthorInventoryScopeDigestV1(scope) !== sqlBlobToDigest32V1(key.scope)
-        || head.payload.authorAddress !== sqlBlobToEvmAddressV1(key.author)
-        || head.objectDigest !== sqlBlobToDigest32V1(headRow.current_head_digest)
-        || head.payload.version !== sqlBlobToDecimalU64V1(headRow.inventory_version_u64be)
-        || head.payload.totalRows !== sqlBlobToDecimalU64V1(headRow.total_rows_u64be)
-        || head.payload.rowsDigest !== sqlBlobToDigest32V1(headRow.rows_digest)
-      ) {
-        throw new Error('stored head columns do not match the signed envelope');
-      }
+      const { head } = decodeStoredHead(headRow, key.scope, key.author);
       const rows = Object.freeze(
         storedRows
           .map(decodeStoredSwmAuthorInventoryRowV1)

@@ -1,3 +1,4 @@
+import type { AssertionFailureResponse } from './assertion-failure-response.js';
 import type { RequestContext } from './context.js';
 import { jsonResponse, sanitizeRpcMessage } from '../http-utils.js';
 import { diagnosticPromoteStage } from '../promote-stage-diagnostics.js';
@@ -43,14 +44,12 @@ function promoteRecoveryResponseBody(e: any, context?: PromoteRecoveryContext) {
   };
 }
 
-export function respondPromoteRecoveryError(
-  res: RequestContext["res"],
+export function classifyPromoteRecoveryError(
   e: any,
   context?: PromoteRecoveryContext,
-): boolean {
+): AssertionFailureResponse | undefined {
   if (e?.code === 'PROMOTE_POST_COMMIT_FAILURE') {
-    jsonResponse(res, 503, { ...promoteRecoveryResponseBody(e, context), retryable: true });
-    return true;
+    return { status: 503, body: { ...promoteRecoveryResponseBody(e, context), retryable: true } };
   }
   if (e?.code === 'PROMOTE_RETRYABLE_FAILURE') {
     // A prerequisite of the share could not be read just now. The same share is
@@ -75,22 +74,22 @@ export function respondPromoteRecoveryError(
       ...(causeSite ? { causeSite } : {}),
       ...context,
     })}\n`);
-    jsonResponse(
-      res,
-      503,
-      { ...promoteRecoveryResponseBody(e, context), retryable: true },
-      undefined,
-      { 'Retry-After': PROMOTE_PREREQUISITE_RETRY_AFTER_SECONDS },
-    );
-    return true;
+    return { status: 503, body: { ...promoteRecoveryResponseBody(e, context), retryable: true },
+      headers: { 'Retry-After': PROMOTE_PREREQUISITE_RETRY_AFTER_SECONDS } };
   }
-  if (e?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') return false;
+  if (e?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') return undefined;
   process.stderr.write(`[DKG-Daemon] ${JSON.stringify({
     event: 'knowledge_asset_recovery_required',
     code: e.code,
     ...context,
   })}\n`);
-  jsonResponse(res, 409, promoteRecoveryResponseBody(e, context));
-  return true;
+  return { status: 409, body: promoteRecoveryResponseBody(e, context) };
 }
 
+
+export function respondPromoteRecoveryError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): boolean {
+  const failure = classifyPromoteRecoveryError(e, context);
+  if (!failure) return false;
+  jsonResponse(res, failure.status, failure.body, undefined, failure.headers);
+  return true;
+}
