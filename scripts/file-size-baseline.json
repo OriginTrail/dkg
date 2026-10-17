@@ -97,7 +97,7 @@
     "packages/cli/src/daemon/routes/query.ts": 1222,
     "packages/cli/src/daemon/routes/status.ts": 1470,
     "packages/cli/src/daemon/worker/async-promote-worker.ts": 966,
-    "packages/cli/src/mcp-setup.ts": 1187,
+    "packages/cli/src/mcp-setup.ts": 1081,
     "packages/cli/src/publisher-runner.ts": 1375,
     "packages/core/src/administrative-authority-objects.ts": 1169,
     "packages/core/src/author-catalog-directory.ts": 838,

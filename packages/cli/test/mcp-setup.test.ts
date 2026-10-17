@@ -2387,6 +2387,36 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
   // ── Codex Round-8 Fix 15: per-client failure isolation ───────────
 
+  it('writes a WSL launcher only for Windows clients and recognizes it on the next setup', async () => {
+    const previousDistro = process.env.WSL_DISTRO_NAME;
+    process.env.WSL_DISTRO_NAME = 'DKG Test Distro';
+    try {
+      const nativePath = join(tmpHome, 'linux-cursor.json');
+      const windowsPath = join(tmpHome, 'windows-cursor.json');
+      const native: ClientTarget = { id: 'cursor', name: 'Cursor', configPath: nativePath, displayPath: nativePath,
+        location: 'native', format: 'json', serverContainer: 'mcpServers' };
+      const windows: ClientTarget = { ...native, name: 'Cursor Windows', configPath: windowsPath, displayPath: windowsPath,
+        location: 'windows-wsl' };
+      const plans: PlannedItem[][] = [];
+      const deps = makeDeps({ detectClients: () => [native, windows], detectMcpRuntime: () => 'wsl',
+        confirmPlan: async planned => { plans.push([...planned]); return [...planned]; } });
+      await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
+      const linuxEntry = JSON.parse(readFileSync(nativePath, 'utf8')).mcpServers.dkg;
+      const windowsEntry = JSON.parse(readFileSync(windowsPath, 'utf8')).mcpServers.dkg;
+      expect(linuxEntry).toEqual(EXPECTED_INSTALLED_ENTRY());
+      expect(windowsEntry.command).toMatch(/\\System32\\wsl\.exe$/);
+      expect(windowsEntry.args.slice(0, 2)).toEqual(['--distribution', 'DKG Test Distro']);
+      expect(windowsEntry.args).toContain('/usr/bin/env');
+      expect(windowsEntry.args).toContain(`DKG_HOME=${linuxEntry.env.DKG_HOME}`);
+      expect(windowsEntry.args.slice(-4)).toEqual([linuxEntry.command, ...linuxEntry.args]);
+      await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
+      expect(plans[1].map(item => [item.s.state, item.action])).toEqual([['registered', 'skip'], ['registered', 'skip']]);
+    } finally {
+      if (previousDistro === undefined) delete process.env.WSL_DISTRO_NAME;
+      else process.env.WSL_DISTRO_NAME = previousDistro;
+    }
+  });
+
   it.each([false, true])('plans one Windows-backed registration when native and WSL targets alias (Windows first: %s)', async (windowsFirst) => {
     const configPath = join(tmpHome, 'aliased-cursor.json');
     writeFileSync(configPath, JSON.stringify({ mcpServers: { dkg: { command: 'old' } } }));
