@@ -21,6 +21,7 @@ const HIDDEN_KEY = 'v10:hiddenProjectIds';
 // wrapper's withFallback would otherwise route to the mock provider in
 // the test env and bypass a plain api.js stub.
 const fetchCurrentAgentMock = vi.fn();
+const fetchContextGraphsMock = vi.fn();
 vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
   return { ...actual, fetchCurrentAgent: fetchCurrentAgentMock };
@@ -32,7 +33,7 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
   // test here, not the loader).
   api: {
     fetchCurrentAgent: () => fetchCurrentAgentMock(),
-    fetchContextGraphs: () => Promise.reject(new Error('no daemon (test)')),
+    fetchContextGraphs: () => fetchContextGraphsMock(),
   },
 }));
 // The hook now subscribes to node events for live CG/membership
@@ -88,6 +89,7 @@ describe('useHiddenContextGraphIds', () => {
     localStorage.clear();
     document.body.innerHTML = '';
     vi.resetModules();
+    fetchContextGraphsMock.mockReset().mockRejectedValue(new Error('no daemon (test)'));
     fetchCurrentAgentMock.mockResolvedValue({ agentDid: 'did:dkg:agent:0xabc', peerId: 'p1' });
   });
   afterEach(() => {
@@ -165,10 +167,83 @@ describe('useMyContextGraphs (sidebar/dashboard membership parity)', () => {
     localStorage.clear();
     document.body.innerHTML = '';
     vi.resetModules();
+    fetchContextGraphsMock.mockReset().mockRejectedValue(new Error('no daemon (test)'));
     fetchCurrentAgentMock.mockResolvedValue({ agentDid: 'did:dkg:agent:0xabc', peerId: 'p1' });
   });
   afterEach(() => {
     localStorage.clear();
+  });
+
+  it('distinguishes a failed cold list from a confirmed empty list and clears the error on retry', async () => {
+    const { useMyContextGraphs, useProjectsStore } = await importHooks();
+    useProjectsStore.setState({ contextGraphs: [] });
+    const h = await renderHook(() => useMyContextGraphs());
+    try {
+      expect(h.current().cgsLoading).toBe(false);
+      expect(h.current().cgsError).toContain('no daemon');
+      expect(h.current().myCgs).toEqual([]);
+      fetchContextGraphsMock.mockResolvedValue({ contextGraphs: [] });
+      await act(async () => { await h.current().retry(); });
+      expect(h.current().cgsError).toBeNull();
+      expect(h.current().myCgs).toEqual([]);
+    } finally { await h.unmount(); }
+  });
+
+  it('preserves the last good graphs and exposes the failing endpoint', async () => {
+    const { useMyContextGraphs, useProjectsStore } = await importHooks();
+    useProjectsStore.setState({ contextGraphs: [cg('kept', { callerInvolved: true })] });
+    fetchCurrentAgentMock.mockRejectedValueOnce(new Error('identity unavailable'));
+    const h = await renderHook(() => useMyContextGraphs());
+    try {
+      expect(h.current().myCgs.map(cg => cg.id)).toEqual(['kept']);
+      expect(h.current().cgsError).toContain('no daemon');
+      expect(h.current().identityError).toContain('identity unavailable');
+      fetchContextGraphsMock.mockResolvedValue({ contextGraphs: [cg('kept', { callerInvolved: true })] });
+      fetchCurrentAgentMock.mockResolvedValue({ agentDid: 'did:dkg:agent:0xabc' });
+      await act(async () => { await h.current().retry(); });
+      expect(h.current().cgsError).toBeNull();
+      expect(h.current().identityError).toBeNull();
+    } finally { await h.unmount(); }
+  });
+
+  it('does not let a slow older list overwrite a successful retry', async () => {
+    let oldReply!: (value: any) => void;
+    fetchContextGraphsMock.mockReturnValueOnce(new Promise(resolve => { oldReply = resolve; }));
+    const { useMyContextGraphs, useProjectsStore } = await importHooks();
+    useProjectsStore.setState({ contextGraphs: [] });
+    const h = await renderHook(() => useMyContextGraphs());
+    try {
+      fetchContextGraphsMock.mockResolvedValue({ contextGraphs: [cg('new', { callerInvolved: true })] });
+      await act(async () => { await h.current().retry(); });
+      await act(async () => { oldReply({ contextGraphs: [cg('old', { callerInvolved: true })] }); });
+      expect(h.current().myCgs.map(cg => cg.id)).toEqual(['new']);
+    } finally { await h.unmount(); }
+  });
+
+  it('retries identity even when the graph-list cache returns the same array reference', async () => {
+    const graphs = [cg('kept', { callerInvolved: true })];
+    fetchContextGraphsMock.mockResolvedValue({ contextGraphs: graphs });
+    fetchCurrentAgentMock.mockRejectedValue(new Error('identity unavailable'));
+    const { useMyContextGraphs, useProjectsStore } = await importHooks();
+    useProjectsStore.setState({ contextGraphs: graphs });
+    const h = await renderHook(() => useMyContextGraphs());
+    try {
+      expect(h.current().identityError).toContain('identity unavailable');
+      fetchCurrentAgentMock.mockResolvedValue({ agentDid: 'did:dkg:agent:0xabc' });
+      await act(async () => { await h.current().retry(); });
+      expect(h.current().identityError).toBeNull();
+    } finally { await h.unmount(); }
+  });
+
+  it('does not mutate the shared graph store after unmount', async () => {
+    let reply!: (value: any) => void;
+    fetchContextGraphsMock.mockReturnValueOnce(new Promise(resolve => { reply = resolve; }));
+    const { useMyContextGraphs, useProjectsStore } = await importHooks();
+    useProjectsStore.setState({ contextGraphs: [] });
+    const h = await renderHook(() => useMyContextGraphs());
+    await h.unmount();
+    await act(async () => { reply({ contextGraphs: [cg('old', { callerInvolved: true })] }); });
+    expect(useProjectsStore.getState().contextGraphs).toEqual([]);
   });
 
   it('returns only callerInvolved members and excludes non-members (identity-independent)', async () => {

@@ -1,4 +1,4 @@
-import React, { useCallback, useId, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -22,7 +22,7 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
-import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
+import { refreshCurrentAgent, useCurrentAgent } from '../../hooks/useCurrentAgent.js';
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -215,8 +215,17 @@ export function PanelLeft() {
   const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
-  const sharedAgent = useCurrentAgent().data;
-  const agentIdentity: AgentSidebarIdentity | null = sharedAgent ? toSidebarIdentity(sharedAgent) : null;
+  const sharedAgent = useCurrentAgent();
+  const agentIdentity: AgentSidebarIdentity | null = sharedAgent.data ? toSidebarIdentity(sharedAgent.data) : null;
+  const [listError, setListError] = useState<string | null>(null);
+  const [listLoading, setListLoading] = useState(true);
+  const mounted = useRef(false), listRequest = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; listRequest.current++; };
+  }, []);
+  const inventoryError = listError || sharedAgent.error;
+  const inventoryLoading = listLoading || sharedAgent.loading;
 
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
   const myProjects = visibleContextGraphs.filter((cg) =>
@@ -239,15 +248,23 @@ export function PanelLeft() {
     setJoinContextGraphId(undefined);
   }, []);
 
-  const loadCGs = useCallback(() => {
+  const loadCGs = useCallback(async () => {
+    const request = ++listRequest.current;
     setLoading(true);
-    // Identity is now sourced from the shared `useCurrentAgent` hook
-    // — see `agentIdentity` above. This effect only refreshes the CG
-    // list, which is what the user actually expects from a poll.
-    api.fetchContextGraphs()
-      .then(({ contextGraphs: cgs }: any) => setContextGraphs(cgs ?? []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    setListLoading(true);
+    try {
+      const { contextGraphs: cgs } = await api.fetchContextGraphs();
+      if (!Array.isArray(cgs)) throw new Error('Invalid context graph list response');
+      if (!mounted.current || request !== listRequest.current) return;
+      setContextGraphs(cgs);
+      setListError(null);
+    } catch (error) {
+      if (mounted.current && request === listRequest.current) {
+        setListError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (mounted.current && request === listRequest.current) { setLoading(false); setListLoading(false); }
+    }
   }, [setContextGraphs, setLoading]);
   // BUG-007: 60 s sidebar refresh runs through the shared
   // visibility-aware hook so the daemon stops absorbing list calls
@@ -282,6 +299,15 @@ export function PanelLeft() {
         </button>
       </div>
 
+      {inventoryError && (
+        <div className="v10-journey-empty-card" role="alert">
+          <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
+          <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
+          <button type="button" disabled={inventoryLoading} onClick={() => { void loadCGs(); void refreshCurrentAgent(); }}>Retry</button>
+        </div>
+      )}
+      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}
+
       {treeMode === 'explorer' && (
         <div className="v10-tree-content">
           <div
@@ -293,7 +319,7 @@ export function PanelLeft() {
 
           {/* Empty-state card hoisted ABOVE the collapsible sections so it
               stays visible if both sections are collapsed. */}
-          {contextGraphs.length === 0 && stage <= 1 && (
+          {contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading && (
             <div className="v10-journey-empty-card">
               <div className="v10-jec-title">No context graphs yet</div>
               <div className="v10-jec-hint">
@@ -341,7 +367,7 @@ export function PanelLeft() {
                       className="v10-tree-item"
                       style={{ cursor: 'default', color: 'var(--text-tertiary)', fontStyle: 'italic' }}
                     >
-                      <span className="v10-tree-item-label">No context graphs in this view yet.</span>
+                      <span className="v10-tree-item-label">{inventoryError ? 'Context graph membership unavailable.' : inventoryLoading ? 'Loading context graphs…' : 'No context graphs in this view yet.'}</span>
                     </div>
                   ) : myProjects.map((cg) => (
                     <ProjectTreeItem
@@ -448,7 +474,7 @@ export function PanelLeft() {
               })}
             </>
           )}
-          {contextOracleProjects.length === 0 && (
+          {contextOracleProjects.length === 0 && !inventoryError && !inventoryLoading && (
             <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 1.5 }}>
               No discovered public Context Graphs yet. Public graphs appear here as soon as your node discovers them; use <strong>Join Context Graph</strong> to subscribe by ID.
             </p>

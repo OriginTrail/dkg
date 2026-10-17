@@ -102,19 +102,19 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     });
   });
 
-  async function renderPanel() {
+  async function renderPanel(options: { graphs?: any[]; stage?: number } = {}) {
     const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');
     const { useLayoutStore } = await import('../src/ui/stores/layout.js');
     // Reset stores between tests so prior toggles don't leak.
     act(() => {
-      useJourneyStore.setState({ stage: 2 });
+      useJourneyStore.setState({ stage: options.stage ?? 2 });
       useProjectsStore.setState({
         // `callerInvolved: true` short-circuits the My-CG membership
         // predicate (`belongsInMyProjectsSidebar`) without needing an
         // agent-identity resolve — keeps the test pure-DOM, no async.
-        contextGraphs: [
+        contextGraphs: options.graphs ?? [
           { id: 'cg-1', name: 'My First CG', assetCount: 42, callerInvolved: true } as any,
         ],
         loading: false,
@@ -137,6 +137,40 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     await flush();
     return { container, root };
   }
+
+  it.each(['graphs', 'identity'])('shows an actionable cold-load %s failure instead of a false empty state', async (endpoint) => {
+    apiFetchContextGraphsMock.mockResolvedValue({ contextGraphs: [] });
+    const failed = endpoint === 'graphs' ? apiFetchContextGraphsMock : fetchCurrentAgentMock;
+    failed.mockRejectedValueOnce(new Error(`${endpoint} unavailable`));
+    const { container } = await renderPanel({ graphs: [], stage: 1 });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('unavailable');
+    expect(container.textContent).not.toContain('No context graphs yet');
+    expect(container.textContent).not.toContain('No context graphs in this view yet.');
+    const modes = container.querySelectorAll<HTMLButtonElement>('.v10-tree-mode-btn');
+    await act(async () => { modes[1].click(); });
+    expect(container.textContent).not.toContain('No discovered public Context Graphs yet');
+    await act(async () => { modes[0].click(); });
+    const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry');
+    expect(retry).toBeTruthy();
+    await act(async () => { retry!.click(); });
+    await flush();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).toContain('No context graphs yet');
+  });
+
+  it('keeps the last graph list visible and marks it stale after refresh failure', async () => {
+    apiFetchContextGraphsMock.mockRejectedValueOnce(new Error('list unavailable'));
+    const { container } = await renderPanel();
+    expect(container.textContent).toContain('My First CG');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('last available');
+  });
+
+  it('does not show empty onboarding while the list is still loading', async () => {
+    apiFetchContextGraphsMock.mockImplementationOnce(() => new Promise(() => {}));
+    const { container } = await renderPanel({ graphs: [], stage: 1 });
+    expect(container.textContent).toContain('Loading context graphs');
+    expect(container.textContent).not.toContain('No context graphs yet');
+  });
 
   it('does not render the in-panel ◂ collapse button (global header toggle is the sole control)', async () => {
     const { container } = await renderPanel();

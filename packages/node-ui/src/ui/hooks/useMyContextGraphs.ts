@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { api } from '../api-wrapper.js';
 import {
@@ -21,16 +21,21 @@ export function useMyContextGraphs(): {
   identity: AgentSidebarIdentity | null;
   /** True until the agent identity request has resolved (or failed). */
   identityLoading: boolean;
-  /** True until the FIRST context-graph list fetch has settled. The
-   *  store may already be hydrated by PanelLeft (so contextGraphs.length
-   *  > 0 immediately), in which case this flips false right away. */
+  /** True while the current list request is pending; previous graphs remain visible. */
   cgsLoading: boolean;
+  cgsError: string | null;
+  identityError: string | null;
+  retry: () => Promise<void>;
 } {
   const contextGraphs = useProjectsStore((s) => s.contextGraphs);
   const setContextGraphs = useProjectsStore((s) => s.setContextGraphs);
   const { hidden } = useHiddenContextGraphIds();
   const [identity, setIdentity] = useState<AgentSidebarIdentity | null>(null);
   const [identityLoading, setIdentityLoading] = useState(true);
+  const [identityError, setIdentityError] = useState<string | null>(null);
+  const [identityRetry, setIdentityRetry] = useState(0);
+  const [cgsError, setCgsError] = useState<string | null>(null);
+  const mounted = useRef(false), listRequest = useRef(0);
   // Initial CG-list-loading flag — distinct from identity. On a cold
   // load `fetchCurrentAgent` can settle before `fetchContextGraphs`,
   // which previously made the dashboard briefly render "No context
@@ -44,20 +49,37 @@ export function useMyContextGraphs(): {
   // collapsed sidebar would otherwise leave the dashboard showing 0
   // graphs forever (Codex). Idempotent with PanelLeft's own loader
   // (setContextGraphs just replaces); same 60s + node-event cadence.
-  const loadCGs = useCallback(() => {
-    api.fetchContextGraphs()
-      .then(({ contextGraphs: cgs }: any) => setContextGraphs(cgs ?? []))
-      .catch(() => { /* keep last list; PanelLeft/next tick may recover */ })
-      // Settle the initial-load flag whether the fetch succeeded or
-      // failed — after this we know the list is either populated or
-      // really empty, not "still pending".
-      .finally(() => setCgsLoading(false));
+  const loadCGs = useCallback(async (): Promise<boolean> => {
+    const request = ++listRequest.current;
+    setCgsLoading(true);
+    try {
+      const { contextGraphs: cgs } = await api.fetchContextGraphs();
+      if (!Array.isArray(cgs)) throw new Error('Invalid context graph list response');
+      if (!mounted.current || request !== listRequest.current) return false;
+      setContextGraphs(cgs);
+      setCgsError(null);
+      return true;
+    } catch (error) {
+      if (mounted.current && request === listRequest.current) {
+        setCgsError(error instanceof Error ? error.message : String(error));
+      }
+      return false; // Keep the last successful list, without claiming it is current.
+    } finally {
+      if (mounted.current && request === listRequest.current) setCgsLoading(false);
+    }
   }, [setContextGraphs]);
 
   useEffect(() => {
-    loadCGs();
-    const iv = setInterval(loadCGs, 60_000);
-    return () => clearInterval(iv);
+    mounted.current = true;
+    void loadCGs();
+    const iv = setInterval(() => { void loadCGs(); }, 60_000);
+    return () => { mounted.current = false; listRequest.current++; clearInterval(iv); };
+  }, [loadCGs]);
+  const retry = useCallback(async () => {
+    await loadCGs();
+    // The list cache may return the same array, which does not re-run the
+    // identity effect. Retry that endpoint even when the list already succeeded.
+    if (mounted.current) setIdentityRetry(value => value + 1);
   }, [loadCGs]);
   // Refresh the CG list only on membership-changing events, not on
   // every SSE message — high-volume `memory_graph_changed` traffic
@@ -86,11 +108,11 @@ export function useMyContextGraphs(): {
     // regression where a transient blip emptied the dashboard.
     setIdentityLoading(true);
     api.fetchCurrentAgent()
-      .then((a) => { if (mounted) setIdentity(toSidebarIdentity(a)); })
-      .catch(() => { /* keep last good identity (see above) */ })
+      .then((a) => { if (mounted) { setIdentity(toSidebarIdentity(a)); setIdentityError(null); } })
+      .catch((error) => { if (mounted) setIdentityError(error instanceof Error ? error.message : String(error)); })
       .finally(() => { if (mounted) setIdentityLoading(false); });
     return () => { mounted = false; };
-  }, [contextGraphs]);
+  }, [contextGraphs, identityRetry]);
 
   const myCgs = useMemo(
     () => contextGraphs
@@ -99,5 +121,5 @@ export function useMyContextGraphs(): {
     [contextGraphs, hidden, identity],
   );
 
-  return { myCgs, identity, identityLoading, cgsLoading };
+  return { myCgs, identity, identityLoading, cgsLoading, cgsError, identityError, retry };
 }

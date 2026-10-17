@@ -126,6 +126,10 @@ function stopPollingIfIdle() {
   stateAuthKey = currentAuthKey();
 }
 
+export function refreshCurrentAgent(): Promise<void> {
+  return loadCurrentAgent();
+}
+
 export function useCurrentAgent() {
   const [snapshot, setSnapshot] = useState(snapshotForCurrentAuth);
 
