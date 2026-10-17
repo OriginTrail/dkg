@@ -754,10 +754,14 @@ describe('the sub-graph registrations taken from a peer\'s _meta', () => {
     ]);
   });
 
-  it(`takes at most ${PEER_SUB_GRAPH_REGISTRATION_LIMIT} from one peer`, () => {
+  it(`takes at most ${PEER_SUB_GRAPH_REGISTRATION_LIMIT} from one peer, the one named first included`, () => {
     const names = Array.from({ length: PEER_SUB_GRAPH_REGISTRATION_LIMIT + 5 }, (_, i) => `s${String(i).padStart(4, '0')}`);
-    const found = readPeerSubGraphRegistrations(contextGraphId, names.flatMap((name) => subGraphRegistration(name)));
+    const quads = names.flatMap((name) => subGraphRegistration(name));
+    const found = readPeerSubGraphRegistrations(contextGraphId, quads);
     expect(found.map((registration) => registration.name)).toEqual(names.slice(0, PEER_SUB_GRAPH_REGISTRATION_LIMIT));
+    const first = readPeerSubGraphRegistrations(contextGraphId, quads, { first: names.at(-1)! });
+    expect(first.map((registration) => registration.name))
+      .toEqual([names.at(-1), ...names.slice(0, PEER_SUB_GRAPH_REGISTRATION_LIMIT - 1)]);
   });
 
   it('leaves an existing registration as it is and never registers a context graph of its own', async () => {

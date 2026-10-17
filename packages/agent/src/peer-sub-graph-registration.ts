@@ -119,75 +119,37 @@ interface PeerSubGraphResolutionAgent extends PeerSubGraphRegistrationPorts, Fre
 /**
  * The sub-graph registrations of `contextGraphId` in `quads`, a peer's copy of
  * the graph's `_meta`: subject `<graph>/<name>` typed `dkg:SubGraph` and named
- * `<name>`, in name order, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT}.
+ * `<name>`, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT}. `options.first`
+ * (the sub-graph a write names) is taken first when the snapshot holds it, so
+ * the limit never leaves it out; the rest follow in name order.
  */
 export function readPeerSubGraphRegistrations(
   contextGraphId: string,
   quads: readonly Quad[],
+  options: { readonly first?: string } = {},
 ): PeerSubGraphRegistration[] {
-  const rowsByName = subGraphRowsByName(contextGraphId, quads);
-  const found: PeerSubGraphRegistration[] = [];
-  for (const name of [...rowsByName.keys()].sort()) {
-    if (found.length >= PEER_SUB_GRAPH_REGISTRATION_LIMIT) break;
-    const registration = parsePeerSubGraphRegistration(name, rowsByName.get(name)!);
-    if (registration !== undefined) found.push(registration);
-  }
-  return found;
-}
-
-/**
- * The registrations of the sub-graphs `names` that `quads` hold, however many
- * others they hold: what a write asks for is never left out by the limit of
- * {@link readPeerSubGraphRegistrations}.
- */
-function readRequestedPeerSubGraphRegistrations(
-  contextGraphId: string,
-  quads: readonly Quad[],
-  names: ReadonlySet<string>,
-): PeerSubGraphRegistration[] {
-  return [...subGraphRowsByName(contextGraphId, quads, names)]
-    .flatMap(([name, rows]) => parsePeerSubGraphRegistration(name, rows) ?? []);
-}
-
-/** The rows of each `<graph>/<name>` subject of the graph's `_meta` in `quads`, by name; of `names` only, when given. */
-function subGraphRowsByName(
-  contextGraphId: string,
-  quads: readonly Quad[],
-  names?: ReadonlySet<string>,
-): Map<string, Quad[]> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
   const rowsByName = new Map<string, Quad[]>();
   for (const quad of quads) {
     if (quad.graph !== metaGraph || !quad.subject.startsWith(prefix)) continue;
     const name = quad.subject.slice(prefix.length);
-    if (names !== undefined && !names.has(name)) continue;
     const rows = rowsByName.get(name) ?? [];
     rows.push(quad);
     rowsByName.set(name, rows);
   }
-  return rowsByName;
-}
-
-/** The registration `rows` make for `name`, when they make a complete, well-formed one. */
-function parsePeerSubGraphRegistration(name: string, rows: readonly Quad[]): PeerSubGraphRegistration | undefined {
-  if (name.length > MAX_PEER_SUB_GRAPH_NAME_LENGTH || !validateSubGraphName(name).valid) return undefined;
-  const objects = (predicate: string) => rows.filter((row) => row.predicate === predicate).map((row) => row.object);
-  if (!objects(RDF_TYPE).includes(SUB_GRAPH_TYPE)) return undefined;
-  if (!objects(SCHEMA_NAME).some((value) => value.startsWith('"') && stripLiteral(value) === name)) return undefined;
-  const createdAt = objects(CREATED_AT)
-    .map((value) => new Date(stripLiteral(value)))
-    .find((date) => Number.isFinite(date.getTime()));
-  const description = objects(SCHEMA_DESCRIPTION)
-    .filter((value) => value.startsWith('"'))
-    .map(stripLiteral)
-    .find((text) => text.length > 0 && text.length <= MAX_PEER_SUB_GRAPH_DESCRIPTION_LENGTH);
-  return {
-    name,
-    createdBy: objects(CREATED_BY).find((value) => PLAIN_AGENT_DID.test(value)) ?? PEER_SUB_GRAPH_CREATED_BY_FALLBACK,
-    ...(createdAt === undefined ? {} : { createdAt }),
-    ...(description === undefined ? {} : { description }),
-  };
+  const found: PeerSubGraphRegistration[] = [];
+  const names = [...rowsByName.keys()].sort();
+  if (options.first !== undefined && rowsByName.has(options.first)) {
+    names.splice(names.indexOf(options.first), 1);
+    names.unshift(options.first);
+  }
+  for (const name of names) {
+    if (found.length >= PEER_SUB_GRAPH_REGISTRATION_LIMIT) break;
+    const registration = parsePeerSubGraphRegistration(name, rowsByName.get(name)!);
+    if (registration !== undefined) found.push(registration);
+  }
+  return found;
 }
 
 /**
@@ -253,6 +215,45 @@ export async function learnPeerSubGraphs(
       + `holds: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+/**
+ * The registrations of the sub-graphs `names` that `quads` hold, however many
+ * others they hold: what a write asks for is never left out by the limit of
+ * {@link readPeerSubGraphRegistrations}.
+ */
+function readRequestedPeerSubGraphRegistrations(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  names: ReadonlySet<string>,
+): PeerSubGraphRegistration[] {
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
+  return [...names].flatMap((name) => {
+    const rows = quads.filter((quad) => quad.graph === metaGraph && quad.subject === `${prefix}${name}`);
+    return rows.length === 0 ? [] : parsePeerSubGraphRegistration(name, rows) ?? [];
+  });
+}
+
+/** The registration `rows` make for `name`, when they make a complete, well-formed one. */
+function parsePeerSubGraphRegistration(name: string, rows: readonly Quad[]): PeerSubGraphRegistration | undefined {
+  if (name.length > MAX_PEER_SUB_GRAPH_NAME_LENGTH || !validateSubGraphName(name).valid) return undefined;
+  const objects = (predicate: string) => rows.filter((row) => row.predicate === predicate).map((row) => row.object);
+  if (!objects(RDF_TYPE).includes(SUB_GRAPH_TYPE)) return undefined;
+  if (!objects(SCHEMA_NAME).some((value) => value.startsWith('"') && stripLiteral(value) === name)) return undefined;
+  const createdAt = objects(CREATED_AT)
+    .map((value) => new Date(stripLiteral(value)))
+    .find((date) => Number.isFinite(date.getTime()));
+  const description = objects(SCHEMA_DESCRIPTION)
+    .filter((value) => value.startsWith('"'))
+    .map(stripLiteral)
+    .find((text) => text.length > 0 && text.length <= MAX_PEER_SUB_GRAPH_DESCRIPTION_LENGTH);
+  return {
+    name,
+    createdBy: objects(CREATED_BY).find((value) => PLAIN_AGENT_DID.test(value)) ?? PEER_SUB_GRAPH_CREATED_BY_FALLBACK,
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(description === undefined ? {} : { description }),
+  };
 }
 
 /** A resolution that did not find its sub-graph, remembered for a while. */
