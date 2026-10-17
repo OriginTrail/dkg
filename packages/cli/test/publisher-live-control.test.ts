@@ -1,0 +1,143 @@
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { AsyncLiftRunner } from '../../publisher/src/async-lift-runner.js';
+import { TripleStoreAsyncLiftPublisher } from '../../publisher/src/async-lift-publisher-impl.js';
+import { createPublisherLiveControl, publisherDesiredStatePath } from '../src/publisher-live-control.js';
+import { KA_VM_EXECUTOR_TX_HASH, kaVmPublishRequest, stageKnowledgeAssetShareSnapshot } from '../../../scripts/testing/ka-vm-publish.js';
+
+const persistenceBarrier = vi.hoisted(() => ({ directory: null as string | null,
+  entered: null as (() => void) | null, release: null as Promise<void> | null }));
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+    const file = await actual.open(...args);
+    if (args[1] === 'wx' && persistenceBarrier.directory && String(args[0]).startsWith(persistenceBarrier.directory)) {
+      persistenceBarrier.directory = null;
+      const sync = file.sync.bind(file);
+      file.sync = async () => { persistenceBarrier.entered?.(); await persistenceBarrier.release; await sync(); };
+    }
+    return file;
+  } };
+});
+
+const cleanup: (() => Promise<unknown>)[] = [];
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
+async function fixture(directory?: string, publisher?: TripleStoreAsyncLiftPublisher) {
+  const dataDir = directory ?? await mkdtemp(join(tmpdir(), 'dkg-publisher-control-'));
+  if (!directory) cleanup.push(() => rm(dataDir, { recursive: true, force: true }));
+  const store = new OxigraphStore();
+  cleanup.push(() => store.close());
+  publisher ??= new TripleStoreAsyncLiftPublisher(store);
+  const runner = new AsyncLiftRunner({ publisher, walletIds: ['one', 'two'], pollIntervalMs: 60_000 });
+  cleanup.push(() => runner.stop());
+  const control = await createPublisherLiveControl(runner, dataDir);
+  cleanup.push(() => control.close());
+  return { dataDir, publisher, runner, control };
+}
+
+describe('durable control of the active publisher wallet loops', () => {
+  it('persists pause and restores it before a recreated runner can claim accepted evidence', async () => {
+    const first = await fixture();
+    const paused = await first.control.pause();
+    expect(paused).toMatchObject({ desiredState: 'paused', effectiveState: 'paused', generation: 1,
+      acknowledgedGeneration: 1, wallets: [{ walletId: 'one', paused: true, generation: 1 }, { walletId: 'two', paused: true, generation: 1 }] });
+    await first.control.close(); await first.runner.stop();
+    const second = await fixture(first.dataDir);
+    const jobId = await second.publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const before = await second.publisher.getStatus(jobId);
+    await second.runner.start();
+    expect(second.control.status()).toMatchObject(paused);
+    expect(await second.publisher.claimNext('one')).toBeNull();
+    expect(await second.publisher.claimNext('two')).toBeNull();
+    expect(await second.publisher.getStatus(jobId)).toEqual(before);
+    const resumed = await second.control.resume();
+    expect(resumed).toMatchObject({ desiredState: 'running', effectiveState: 'running', generation: 2,
+      wallets: [{ walletId: 'one', paused: false, generation: 2 }, { walletId: 'two', paused: false, generation: 2 }] });
+    expect(JSON.parse(await readFile(publisherDesiredStatePath(first.dataDir), 'utf8'))).toMatchObject({ desiredState: 'running', generation: 2 });
+  });
+
+  it('serializes concurrent operators and does not increment generation for an idempotent repeat', async () => {
+    const { control, dataDir } = await fixture();
+    const responses = await Promise.all([control.pause(), control.pause(), control.resume(), control.pause()]);
+    expect(responses.map(s => [s.desiredState, s.generation])).toEqual([['paused', 1], ['paused', 1], ['running', 2], ['paused', 3]]);
+    expect(JSON.parse(await readFile(publisherDesiredStatePath(dataDir), 'utf8'))).toMatchObject({ desiredState: 'paused', generation: 3 });
+  });
+
+  it('rejects stale or contradictory runtime generations without reopening wallet gates', async () => {
+    const { runner, control } = await fixture();
+    await control.pause();
+    await expect(runner.applyClaimControl(false, 0)).rejects.toThrow('generation');
+    await expect(runner.applyClaimControl(false, 1)).rejects.toThrow('generation');
+    expect(control.status().wallets.every(w => w.paused && w.generation === 1)).toBe(true);
+  });
+
+  it('keeps every gate closed and returns no acknowledgement when durable intent cannot be written', async () => {
+    const { control, dataDir, publisher } = await fixture();
+    await rename(dataDir, `${dataDir}.held`);
+    cleanup.push(() => rm(`${dataDir}.held`, { recursive: true, force: true }));
+    await expect(control.pause()).rejects.toThrow('could not commit');
+    expect(control.status()).toMatchObject({ effectiveState: 'unavailable', acknowledgedGeneration: 0, fault: 'persistence_or_control_failed' });
+    expect(control.status().wallets.every(w => w.paused)).toBe(true);
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    expect(await publisher.claimNext('one')).toBeNull();
+    await expect(control.resume()).rejects.toThrow('unavailable');
+  });
+
+  it('fences a resume waiting on durable persistence when the runtime begins closing', async () => {
+    const { dataDir, control, runner, publisher } = await fixture();
+    await control.pause(); await runner.start();
+    let entered!: () => void; const syncing = new Promise<void>(resolve => { entered = resolve; });
+    let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+    persistenceBarrier.directory = dataDir; persistenceBarrier.entered = entered; persistenceBarrier.release = held;
+    const resuming = control.resume();
+    // Attach the rejection assertion before closing can reject the pending operation.
+    const rejected = expect(resuming).rejects.toThrow('could not commit');
+    await syncing;
+    const closing = control.close();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const accepted = await publisher.getStatus(jobId);
+    release(); await rejected; await closing;
+    expect(runner.claimControlStatus().wallets.every(wallet => wallet.paused)).toBe(true);
+    expect(await publisher.claimNext('late')).toBeNull();
+    expect(await publisher.getStatus(jobId)).toEqual(accepted);
+    // The persisted resume is intent for the next incarnation, never permission for this closed one.
+    expect(JSON.parse(await readFile(publisherDesiredStatePath(dataDir), 'utf8'))).toMatchObject({ desiredState: 'running', generation: 2 });
+  });
+
+  it('fails startup closed on corrupt persisted state instead of silently resuming', async () => {
+    const { dataDir, control, runner, publisher } = await fixture();
+    await control.close();
+    await writeFile(publisherDesiredStatePath(dataDir), '{broken');
+    await expect(createPublisherLiveControl(runner, dataDir)).rejects.toThrow();
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    expect(await publisher.claimNext('two')).toBeNull();
+    expect(runner.claimControlStatus().wallets.every(w => w.paused)).toBe(true);
+  });
+
+  it('lets an execution already in flight record broadcast evidence after pause acknowledgement', async () => {
+    const store = new OxigraphStore(); cleanup.push(() => store.close());
+    let release!: () => void; const held = new Promise<void>(done => { release = done; });
+    let entered!: () => void; const executing = new Promise<void>(done => { entered = done; });
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      chainProofResolver: async () => ({ status: 'pending-mempool' }),
+      knowledgeAssetVmPublishHandler: { execute: async input => {
+        entered(); await held;
+        await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+        throw new Error('submission acknowledgement lost');
+      } },
+    });
+    await stageKnowledgeAssetShareSnapshot({ store, graphManager: new GraphManager(store) });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const { control, runner } = await fixture(undefined, publisher);
+    await runner.start(); await executing;
+    try {
+      expect((await control.pause()).effectiveState).toBe('paused');
+      expect(await publisher.claimNext('other')).toBeNull();
+    } finally { release(); }
+    await vi.waitFor(async () => expect((await publisher.getStatus(jobId))?.status).toBe('broadcast'));
+    expect((await publisher.getStatus(jobId))?.broadcast?.txHash).toBe(KA_VM_EXECUTOR_TX_HASH);
+  });
+});

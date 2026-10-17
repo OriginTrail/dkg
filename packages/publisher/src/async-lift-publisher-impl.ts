@@ -2758,11 +2758,14 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async pause(): Promise<void> {
-    this.paused = true;
+    // Acknowledgement follows every claim already inside the shared claim domain.
+    await this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimTransaction(owner,
+      async () => { this.paused = true; }));
   }
 
   async resume(): Promise<void> {
-    this.paused = false;
+    await this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimTransaction(owner,
+      async () => { this.paused = false; }));
     this.notifyWorkAvailable();
   }
 
