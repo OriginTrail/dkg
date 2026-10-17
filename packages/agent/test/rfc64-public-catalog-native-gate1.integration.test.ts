@@ -2,6 +2,8 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { captureCatalogDurabilityBoundary } from './helpers/catalog-durability-boundary.js';
+
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
@@ -44,7 +46,7 @@ import {
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
-import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphSetIndexStore, OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -147,6 +149,23 @@ vi.mock('../src/rfc64/catalog-row-authorship.js', async (importOriginal) => {
   };
 });
 
+const snapshotBarrier = vi.hoisted(() => ({
+  path: null as string | null,
+  captured: null as (() => void) | null,
+  release: null as Promise<void> | null,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+    if (snapshotBarrier.path === String(args[0]) && args[1] === 'w') {
+      snapshotBarrier.path = null;
+      snapshotBarrier.captured?.();
+      await snapshotBarrier.release;
+    }
+    return actual.open(...args);
+  } };
+});
+
 const bucketClosures = () => vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mock.calls
   .map(([input]) => ({
     bucketDigest: input.catalogBucket.objectDigest,
@@ -209,7 +228,10 @@ async function openPersistence(label: string): Promise<{
   directory: string;
   persistence: Rfc64PersistenceV1;
 }> {
-  const directory = await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${label}-`));
+  const directory = label === 'receiver' && process.env.DKG_CATALOG_DURABILITY_RESTART
+    ? process.env.DKG_CATALOG_DURABILITY_RESTART
+    : await mkdtemp(join(process.env.DKG_CATALOG_DURABILITY_ROOT ?? tmpdir(),
+      `dkg-rfc64-native-${label}-`));
   temporaryDirectories.push(directory);
   const persistence = await openRfc64PersistenceV1(
     directory,
@@ -2442,6 +2464,235 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       AUTHOR,
     )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+  }, 30_000);
+
+  it('persists exact SWM and VM before applied-head CAS through a store decorator', async () => {
+    const fixture = await setupLiveReceiver();
+    const snapshot = join(fixture.receiverDirectory, 'store.nq');
+    const raw = new OxigraphStore(snapshot);
+    const store = new GraphSetIndexStore(raw);
+    // Freeze only the debounced background path. Production flush() remains
+    // untouched, and the observed schedule calls prove this fault was reached.
+    const scheduled = vi.spyOn(raw as unknown as { scheduleFlush(): void }, 'scheduleFlush')
+      .mockImplementation(() => {});
+    let persistedAtCas: OxigraphStore | undefined;
+    try {
+      if (process.env.DKG_CATALOG_DURABILITY_RESTART) {
+        const restarted = fixture.createReceiver(fixture.receiverPersistence.inventory,
+          undefined, undefined, store, async () => {
+            await setTransactionTestVmGeneration(store, 'target');
+          });
+        await fixture.synchronize(fixture.announcement, restarted);
+        await expect(raw.countQuads()).resolves.toBe(17);
+        await expect(readTransactionTestVmGeneration(raw)).resolves.toBe('target');
+        const reopened = new OxigraphStore(snapshot);
+        await expect(reopened.countQuads()).resolves.toBe(17);
+        expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+          fixture.scopeDigest, AUTHOR,
+        )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+        return;
+      }
+      const initial = fixture.createReceiver(fixture.receiverPersistence.inventory,
+        undefined, undefined, store);
+      await fixture.bootstrap(fixture.genesisAnnouncement, initial);
+      await setTransactionTestVmGeneration(store, 'predecessor');
+      await raw.flush(); // Establish the durable predecessor before the transition.
+      scheduled.mockClear();
+      const boundary = {
+        receiverDirectory: fixture.receiverDirectory, snapshot, scopeDigest: fixture.scopeDigest,
+        author: AUTHOR, predecessor: fixture.genesis.head.objectDigest,
+        target: fixture.successor.head.objectDigest,
+        predecessorState: await store.query('SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o'),
+        targetState: null as unknown, backgroundWritesHeld: 0,
+      };
+      const cas = vi.fn((...args: Parameters<
+        Rfc64PersistenceV1['inventory']['compareAndSwapAppliedCatalogHeadV1']
+      >) => {
+        captureCatalogDurabilityBoundary('before-cas', boundary);
+        persistedAtCas = new OxigraphStore(snapshot);
+        const result = fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1(...args);
+        captureCatalogDurabilityBoundary('after-cas', boundary);
+        return result;
+      });
+      const receiver = fixture.createReceiver({
+        readAppliedCatalogHeadV1: fixture.receiverPersistence.inventory
+          .readAppliedCatalogHeadV1.bind(fixture.receiverPersistence.inventory),
+        compareAndSwapAppliedCatalogHeadV1: cas,
+      }, undefined, undefined, store, async () => {
+        await setTransactionTestVmGeneration(store, 'target');
+        expect(scheduled).toHaveBeenCalled();
+        boundary.targetState = await store.query('SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+        boundary.backgroundWritesHeld = scheduled.mock.calls.length;
+        captureCatalogDurabilityBoundary('before-flush', boundary);
+        return { commit: () => {}, rollback: async () => {
+          await setTransactionTestVmGeneration(store, 'predecessor');
+        } };
+      });
+      await fixture.synchronize(fixture.announcement, receiver);
+      expect(cas).toHaveBeenCalledOnce();
+      await expect(persistedAtCas!.countQuads()).resolves.toBe(17);
+      await expect(readTransactionTestVmGeneration(persistedAtCas!)).resolves.toBe('target');
+      const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+        contextGraphId: CONTEXT_GRAPH_ID, subGraphName: null, authorAddress: AUTHOR,
+        assertionCoordinate: 'gate-1-object' as never,
+      });
+      const graph = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`;
+      await expect(readExactSemanticPairForTest(persistedAtCas!, graph,
+        placement.metaGraph, placement.subject)).resolves.toEqual(
+        await readExactSemanticPairForTest(store, graph,
+          placement.metaGraph, placement.subject),
+      );
+    } finally {
+      scheduled.mockRestore();
+      await raw.close();
+    }
+  }, 30_000);
+
+  it('waits out an older in-flight snapshot and durably captures the activated generation', async () => {
+    const fixture = await setupLiveReceiver();
+    const snapshot = join(fixture.receiverDirectory, 'inflight.nq');
+    const store = new OxigraphStore(snapshot);
+    const scheduled = vi.spyOn(store as unknown as { scheduleFlush(): void }, 'scheduleFlush')
+      .mockImplementation(() => {});
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let oldFlush: Promise<void> | undefined;
+    let transition: Promise<unknown> | undefined;
+    try {
+      const initial = fixture.createReceiver(fixture.receiverPersistence.inventory,
+        undefined, undefined, store);
+      await fixture.bootstrap(fixture.genesisAnnouncement, initial);
+      await setTransactionTestVmGeneration(store, 'predecessor');
+      await store.flush();
+      const captured = new Promise<void>((resolve) => { snapshotBarrier.captured = resolve; });
+      snapshotBarrier.path = `${snapshot}.tmp`;
+      snapshotBarrier.release = held;
+      oldFlush = store.flush();
+      await captured; // Actual old N-Quads serialization has already happened.
+      let activated!: () => void;
+      const activatedPromise = new Promise<void>((resolve) => { activated = resolve; });
+      let atCas: OxigraphStore | undefined;
+      const cas = vi.fn((...args: Parameters<
+        Rfc64PersistenceV1['inventory']['compareAndSwapAppliedCatalogHeadV1']
+      >) => {
+        atCas = new OxigraphStore(snapshot);
+        return fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1(...args);
+      });
+      const receiver = fixture.createReceiver({
+        readAppliedCatalogHeadV1: fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1
+          .bind(fixture.receiverPersistence.inventory),
+        compareAndSwapAppliedCatalogHeadV1: cas,
+      }, undefined, undefined, store, async () => {
+        await setTransactionTestVmGeneration(store, 'target');
+        activated();
+      });
+      transition = fixture.synchronize(fixture.announcement, receiver);
+      await activatedPromise;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(cas).not.toHaveBeenCalled();
+      release();
+      await oldFlush;
+      await transition;
+      expect(cas).toHaveBeenCalledOnce();
+      await expect(atCas!.countQuads()).resolves.toBe(17);
+      await expect(readTransactionTestVmGeneration(atCas!)).resolves.toBe('target');
+    } finally {
+      release();
+      await Promise.allSettled([oldFlush, transition]);
+      snapshotBarrier.path = null;
+      snapshotBarrier.captured = null;
+      snapshotBarrier.release = null;
+      scheduled.mockRestore();
+      await store.close();
+    }
+  }, 30_000);
+
+  it('rejects a failed durability barrier without advancing the applied head', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    const failure = new Error('injected durable RDF flush failure');
+    const flush = vi.spyOn(fixture.receiverStore, 'flush').mockRejectedValue(failure);
+    const rollback = vi.fn(async () => {
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
+    });
+    const commit = vi.fn();
+    const cas = vi.fn(fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1
+      .bind(fixture.receiverPersistence.inventory));
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1: fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1
+        .bind(fixture.receiverPersistence.inventory),
+      compareAndSwapAppliedCatalogHeadV1: cas,
+    }, undefined, undefined, fixture.receiverStore, async () => {
+      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
+      return { commit, rollback };
+    });
+    try {
+      await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toMatchObject({
+        code: 'catalog-native-receiver-activation', cause: failure,
+      });
+      expect(flush).toHaveBeenCalledOnce();
+      expect(cas).not.toHaveBeenCalled();
+      expect(commit).not.toHaveBeenCalled();
+      expect(rollback).toHaveBeenCalledWith(failure);
+      expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+        fixture.scopeDigest, AUTHOR,
+      )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+      await expect(fixture.receiverStore.countQuads()).resolves.toBe(1);
+      await expect(readTransactionTestVmGeneration(fixture.receiverStore))
+        .resolves.toBe('predecessor');
+    } finally {
+      flush.mockRestore();
+    }
+  }, 30_000);
+
+  it('does not commit even an empty genesis when its durability barrier fails', async () => {
+    const fixture = await setupLiveReceiver();
+    const failure = new Error('genesis flush unavailable');
+    const flush = vi.spyOn(fixture.receiverStore, 'flush').mockRejectedValue(failure);
+    const cas = vi.fn(fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1
+      .bind(fixture.receiverPersistence.inventory));
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1: fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1
+        .bind(fixture.receiverPersistence.inventory),
+      compareAndSwapAppliedCatalogHeadV1: cas,
+    });
+    try {
+      await expect(fixture.bootstrap(fixture.genesisAnnouncement, receiver)).rejects.toMatchObject({
+        code: 'catalog-native-receiver-activation', cause: failure,
+      });
+      expect(flush).toHaveBeenCalledOnce();
+      expect(cas).not.toHaveBeenCalled();
+      expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+        fixture.scopeDigest, AUTHOR,
+      )).toBeNull();
+    } finally { flush.mockRestore(); }
+  }, 30_000);
+
+  it('rechecks cancellation after a pending durability barrier before committing', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const controller = new AbortController();
+    const reason = new Error('authority cancelled while durable flush was pending');
+    const flush = vi.spyOn(fixture.receiverStore, 'flush').mockImplementation(async () => {
+      controller.abort(reason);
+    });
+    const cas = vi.fn(fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1
+      .bind(fixture.receiverPersistence.inventory));
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1: fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1
+        .bind(fixture.receiverPersistence.inventory),
+      compareAndSwapAppliedCatalogHeadV1: cas,
+    });
+    try {
+      await expect(fixture.synchronize(fixture.announcement, receiver, controller.signal))
+        .rejects.toBe(reason);
+      expect(cas).not.toHaveBeenCalled();
+      await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+      expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+        fixture.scopeDigest, AUTHOR,
+      )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    } finally { flush.mockRestore(); }
   }, 30_000);
 
   it('rolls back a semantic-before-CAS failure and accepts an idempotent retry', async () => {
