@@ -511,6 +511,20 @@ describe('SharedMemoryHandler keeps the author seal a share carries', () => {
     expect(await keptSeal(curatorStore)).toBeDefined();
   });
 
+  it.each([
+    ['unsigned', (message: Uint8Array) => Promise.resolve(message)],
+    ['signed by another peer', (message: Uint8Array) => signed(message, STRANGER)],
+    ['signed by the author for another graph', (message: Uint8Array) => signed(message, AUTHOR, 'another-graph')],
+  ])('applies a share %s but keeps none of its valid seal, on a name not bound yet', async (_how, deliver) => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    expect(await handler.handle(await deliver(shareMessage('one', await sealOf('one'))), PEER_ID))
+      .toMatchObject({ applied: true });
+    expect(await keptSeal(store)).toBeUndefined();
+    expect(await rowsOf(store, contextGraphAssertionUri(CG, AUTHOR.address, NAME, SUB))).toEqual([]);
+    expect(await rowsOf(store, assertionLifecycleUri(CG, AUTHOR.address, NAME, SUB))).toEqual([]);
+  });
+
   /** A share of another asset of the author's (KA 8), whose seal and content a peer could have seen elsewhere. */
   async function otherAssetShare(): Promise<Uint8Array> {
     return shareMessage('other', await sealOf('other', { number: 8n }), {
