@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
+import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
 import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLocalPublish } from './queued-publish-finalization.js';
 
 /**
@@ -2581,7 +2583,11 @@ export class PublishMethods extends DKGAgentBase {
       // NOT the raw inner bytes — sending the inner bytes fails protobuf decode
       // on the receiver (a permanent rejection). A share prepared that envelope
       // before its commit; otherwise encode its message identically.
-      const wireMessage = payload.envelope ?? await this.encodeWorkspaceGossipMessage(contextGraphId, payload.message, gossipSigner);
+      const wireMessage = payload.envelope ?? await this.encodeWorkspaceGossipMessage(contextGraphId, payload.message, gossipSigner).catch(cause => {
+        // Signing has not dispatched the envelope or mutated SWM. Keep permanent refusals terminal.
+        if (isTransientInventorySignerFailure(cause)) throw createPromoteRetryableFailure(cause);
+        throw cause;
+      });
       return this.confirmCuratorApplied(contextGraphId, curator.peerIds, wireMessage, curator.timeoutMs, ctx);
     };
   }
@@ -2890,6 +2896,7 @@ export class PublishMethods extends DKGAgentBase {
       throw new Error('assertionFinalize: authorSignTypedData requires authorAgentAddress');
     }
 
+    return this.publisher.prepareAssertionShareSeal(contextGraphId, name, agentAddress, opts?.subGraphName, async () => {
     // 1. Resolve URIs.
     const assertionUri = contextGraphAssertionUri(
       contextGraphId,
@@ -3667,6 +3674,7 @@ export class PublishMethods extends DKGAgentBase {
       kav10Address,
       eip712Digest,
     };
+    });
   }
 
   /**
