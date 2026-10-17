@@ -1,5 +1,5 @@
 import unittest
-from payload_evidence import audit_graphs
+from payload_evidence import audit_graphs, same_payload_graphs
 from metadata_evidence import index_authoritative_metadata
 
 CG, ARM, NAME, UAL = 'cg', 'test', 'asset', 'did:dkg:base:84532/0xabc/1'
@@ -7,7 +7,7 @@ GRAPH = 'did:dkg:context-graph:cg/_shared_memory/0xabc/1'
 
 
 def row(subject, predicate, value, graph=GRAPH):
-    return {'g': {'value': graph}, 's': {'value': subject}, 'p': {'value': predicate}, 'o': {'type': 'literal', 'value': value}}
+    return {'g': {'type': 'uri', 'value': graph}, 's': {'type': 'uri', 'value': subject}, 'p': {'type': 'uri', 'value': predicate}, 'o': {'type': 'literal', 'value': value}}
 
 
 def payload():
@@ -42,6 +42,35 @@ class ExactGraphEvidence(unittest.TestCase):
     def test_unexpected_subject_is_not_filtered_out(self):
         proof = self.audit(payload() + [row('urn:unexpected', 'urn:p', 'corrupt')])['assets'][NAME]
         self.assertEqual(proof['exactContentByGraph'], {'swm': False})
+
+    def test_subject_and_predicate_kind_are_part_of_content_identity(self):
+        for term in ['s', 'p']:
+            rows = payload()
+            rows[0][term]['type'] = 'bnode'
+            self.assertFalse(self.audit(rows)['assets'][NAME]['exactContentByGraph']['swm'])
+
+    def test_explicit_string_datatype_is_rdf_equivalent_but_language_is_not(self):
+        rows = payload()
+        rows[0]['o']['datatype'] = 'http://www.w3.org/2001/XMLSchema#string'
+        self.assertTrue(self.audit(rows)['assets'][NAME]['exactContentByGraph']['swm'])
+        rows[0]['o'] = {'type': 'literal', 'value': rows[0]['o']['value'], 'xml:lang': 'fr'}
+        self.assertFalse(self.audit(rows)['assets'][NAME]['exactContentByGraph']['swm'])
+
+    def test_graph_kind_is_part_of_payload_location(self):
+        rows = payload()
+        for item in rows:
+            item['g']['type'] = 'bnode'
+        proof = self.audit(rows)
+        self.assertFalse(proof['assets'][NAME]['requiredGraphPresent'])
+        self.assertEqual(proof['unexpectedPayloadGraphs'], ['bnode:' + GRAPH])
+
+    def test_existing_graph_presence_and_content_are_unchanged_after_restart(self):
+        original = payload()
+        graphs = {GRAPH, GRAPH + '-wm'}
+        self.assertTrue(same_payload_graphs(original, original, graphs))
+        self.assertTrue(same_payload_graphs(original, original + [row('urn:new', 'urn:p', 'new', 'urn:new-asset')], graphs))
+        self.assertFalse(same_payload_graphs(original, original[:-1], graphs))
+        self.assertFalse(same_payload_graphs(original, original + [row('urn:extra', 'urn:p', 'extra', GRAPH + '-wm')], graphs))
 
     def test_missing_content(self):
         self.assertFalse(self.audit(payload()[:-1])['assets'][NAME]['exactContentByGraph']['swm'])

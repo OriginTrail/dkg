@@ -32,6 +32,12 @@ export function sameCapturedTerm(captured, binding) {
  * must supply that captured query's source graph for its default-graph results. */
 export function sameCapturedQuads(captured, bindings, capturedDefaultGraph) {
   const before = captured.map(q => JSON.stringify([q.subject, q.predicate, q.object, q.graph || capturedDefaultGraph].map(capturedTermIdentity))).sort();
-  const after = bindings.map(r => JSON.stringify([r.s, r.p, r.o, r.g].map(bindingTermIdentity))).sort();
-  return before.length > 0 && JSON.stringify(before) === JSON.stringify(after);
+  return before.length > 0 && JSON.stringify(before) === canonicalBindingQuads(bindings);
+}
+
+const canonicalBindingQuads = rows => JSON.stringify(rows.map(r => JSON.stringify([r.s, r.p, r.o, r.g].map(bindingTermIdentity))).sort());
+
+/** Exact equality for two SPARQL snapshots, including graph and term kinds. */
+export function sameBindingQuads(before, after) {
+  return before.length > 0 && canonicalBindingQuads(before) === canonicalBindingQuads(after);
 }

@@ -1,0 +1,1874 @@
+[
+  {
+    "requestStartedAt": "2026-10-17T02:20:29.467Z",
+    "at": "2026-10-17T02:20:29.556Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": null,
+      "appliedRowCount": null,
+      "legacyReadOnlyCount": null,
+      "authorityState": null,
+      "authorityFreshness": null
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:20:44.557Z",
+    "at": "2026-10-17T02:20:44.620Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": null,
+      "appliedRowCount": null,
+      "legacyReadOnlyCount": null,
+      "authorityState": null,
+      "authorityFreshness": null
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:20:59.623Z",
+    "at": "2026-10-17T02:20:59.698Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "resolving-authority",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "resolving",
+      "authorityFreshness": null
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:21:14.700Z",
+    "at": "2026-10-17T02:21:14.763Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:21:29.765Z",
+    "at": "2026-10-17T02:21:29.837Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:21:44.839Z",
+    "at": "2026-10-17T02:21:44.900Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:21:59.902Z",
+    "at": "2026-10-17T02:21:59.960Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:22:14.963Z",
+    "at": "2026-10-17T02:22:15.021Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:22:30.024Z",
+    "at": "2026-10-17T02:22:30.077Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:22:45.079Z",
+    "at": "2026-10-17T02:22:45.126Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:23:00.128Z",
+    "at": "2026-10-17T02:23:00.193Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:23:15.196Z",
+    "at": "2026-10-17T02:23:15.255Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:23:30.257Z",
+    "at": "2026-10-17T02:23:30.323Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:23:45.325Z",
+    "at": "2026-10-17T02:23:45.387Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:24:00.388Z",
+    "at": "2026-10-17T02:24:00.451Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:24:15.453Z",
+    "at": "2026-10-17T02:24:15.517Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:24:30.520Z",
+    "at": "2026-10-17T02:24:30.586Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:24:45.588Z",
+    "at": "2026-10-17T02:24:45.629Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:25:00.631Z",
+    "at": "2026-10-17T02:25:00.688Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:25:15.691Z",
+    "at": "2026-10-17T02:25:15.747Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:25:30.749Z",
+    "at": "2026-10-17T02:25:30.789Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:25:45.792Z",
+    "at": "2026-10-17T02:25:45.870Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:26:00.873Z",
+    "at": "2026-10-17T02:26:00.929Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:26:15.931Z",
+    "at": "2026-10-17T02:26:15.982Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:26:30.984Z",
+    "at": "2026-10-17T02:26:31.027Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:26:46.029Z",
+    "at": "2026-10-17T02:26:46.076Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:27:01.078Z",
+    "at": "2026-10-17T02:27:01.134Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:27:16.137Z",
+    "at": "2026-10-17T02:27:16.197Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:27:31.199Z",
+    "at": "2026-10-17T02:27:31.259Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:27:46.260Z",
+    "at": "2026-10-17T02:27:46.325Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:28:01.327Z",
+    "at": "2026-10-17T02:28:01.395Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:28:16.397Z",
+    "at": "2026-10-17T02:28:16.470Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:28:31.473Z",
+    "at": "2026-10-17T02:28:31.525Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:28:46.528Z",
+    "at": "2026-10-17T02:28:46.584Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:29:01.587Z",
+    "at": "2026-10-17T02:29:01.645Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:29:16.647Z",
+    "at": "2026-10-17T02:29:16.707Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:29:31.709Z",
+    "at": "2026-10-17T02:29:31.772Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:29:46.774Z",
+    "at": "2026-10-17T02:29:46.840Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:30:01.842Z",
+    "at": "2026-10-17T02:30:01.894Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:30:16.896Z",
+    "at": "2026-10-17T02:30:16.940Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:30:31.942Z",
+    "at": "2026-10-17T02:30:32.020Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:30:47.022Z",
+    "at": "2026-10-17T02:30:47.093Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:31:02.095Z",
+    "at": "2026-10-17T02:31:02.156Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:31:17.159Z",
+    "at": "2026-10-17T02:31:17.221Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:31:32.224Z",
+    "at": "2026-10-17T02:31:32.288Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:31:47.290Z",
+    "at": "2026-10-17T02:31:47.332Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:32:02.334Z",
+    "at": "2026-10-17T02:32:02.392Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:32:17.394Z",
+    "at": "2026-10-17T02:32:17.450Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:32:32.451Z",
+    "at": "2026-10-17T02:32:32.506Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:32:47.508Z",
+    "at": "2026-10-17T02:32:47.563Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:33:02.566Z",
+    "at": "2026-10-17T02:33:02.621Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:33:17.623Z",
+    "at": "2026-10-17T02:33:17.679Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:33:32.681Z",
+    "at": "2026-10-17T02:33:32.728Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:33:47.731Z",
+    "at": "2026-10-17T02:33:47.786Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:34:02.789Z",
+    "at": "2026-10-17T02:34:02.850Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:34:17.851Z",
+    "at": "2026-10-17T02:34:17.920Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:34:32.922Z",
+    "at": "2026-10-17T02:34:32.992Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:34:47.996Z",
+    "at": "2026-10-17T02:34:48.055Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 1,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:35:03.056Z",
+    "at": "2026-10-17T02:35:03.109Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "running",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": null,
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 404,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:35:18.112Z",
+    "at": "2026-10-17T02:35:18.180Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:35:33.183Z",
+    "at": "2026-10-17T02:35:33.331Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": false,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "known-incomplete",
+      "appliedRowCount": "436",
+      "legacyReadOnlyCount": 1,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:35:48.334Z",
+    "at": "2026-10-17T02:35:48.399Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:36:03.402Z",
+    "at": "2026-10-17T02:36:03.459Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:36:18.462Z",
+    "at": "2026-10-17T02:36:18.526Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:36:33.529Z",
+    "at": "2026-10-17T02:36:33.588Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:36:48.589Z",
+    "at": "2026-10-17T02:36:48.656Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:37:03.656Z",
+    "at": "2026-10-17T02:37:03.718Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:37:18.720Z",
+    "at": "2026-10-17T02:37:18.787Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:37:33.789Z",
+    "at": "2026-10-17T02:37:33.852Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:37:48.853Z",
+    "at": "2026-10-17T02:37:48.922Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:38:03.923Z",
+    "at": "2026-10-17T02:38:03.986Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:38:18.987Z",
+    "at": "2026-10-17T02:38:19.051Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:38:34.053Z",
+    "at": "2026-10-17T02:38:34.121Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:38:49.123Z",
+    "at": "2026-10-17T02:38:49.197Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:39:04.198Z",
+    "at": "2026-10-17T02:39:04.254Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:39:19.256Z",
+    "at": "2026-10-17T02:39:19.316Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:39:34.319Z",
+    "at": "2026-10-17T02:39:34.385Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  },
+  {
+    "requestStartedAt": "2026-10-17T02:39:49.387Z",
+    "at": "2026-10-17T02:39:49.447Z",
+    "completedWithinDeadline": true,
+    "succeededBeforeDeadline": true,
+    "error": null,
+    "job": {
+      "jobId": "8b275066-a219-40ae-b33b-efabb6827ad4",
+      "state": "succeeded",
+      "attempts": 2,
+      "enqueuedAt": "2026-10-17T02:20:01.118Z",
+      "finishedAt": "2026-10-17T02:35:03.821Z",
+      "nextRetryAt": null,
+      "lastError": null
+    },
+    "descriptorStatus": 200,
+    "catalog": {
+      "phase": "complete",
+      "appliedRowCount": "437",
+      "legacyReadOnlyCount": 0,
+      "authorityState": "accepted",
+      "authorityFreshness": "current"
+    }
+  }
+]

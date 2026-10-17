@@ -104,5 +104,8 @@
   "manualRepairs": 0,
   "metadataGraph": "did:dkg:context-graph:0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-candidate9-20261016/_meta",
   "metadataComparison": "authoritative-full-rdf-term-v2",
-  "metadataRevalidatedAt": "2026-10-17T01:29:01.501Z"
+  "metadataRevalidatedAt": "2026-10-17T02:17:30.066Z",
+  "originalCohortMetadataUnchanged": true,
+  "wholeCohortContentUnchanged": true,
+  "wholeCohortRevalidatedAt": "2026-10-17T02:40:19.398Z"
 }

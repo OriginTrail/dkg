@@ -2,19 +2,27 @@
 from collections import defaultdict
 
 
+XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string'
+RDF_LANG_STRING = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString'
+
+
 def rdf_tuple(row):
     obj = row['o']
-    return (row['s']['value'], row['p']['value'], obj['type'], obj['value'], obj.get('datatype'), obj.get('xml:lang'))
+    language = obj.get('xml:lang', '').lower()
+    kind = 'literal' if obj['type'] == 'typed-literal' else obj['type']
+    datatype = obj.get('datatype', RDF_LANG_STRING if language else XSD_STRING) if kind == 'literal' else None
+    return (row['s']['type'], row['s']['value'], row['p']['type'], row['p']['value'], kind, obj['value'], datatype, language)
 
 
 def expected_payload(arm, name, triples_per_asset):
-    return sorted((f'urn:2963:{arm}:{name}', f'https://schema.org/p{i}', 'literal', f'{name} value {i}', None, None) for i in range(triples_per_asset))
+    return sorted(('uri', f'urn:2963:{arm}:{name}', 'uri', f'https://schema.org/p{i}', 'literal', f'{name} value {i}', XSD_STRING, '') for i in range(triples_per_asset))
 
 
 def audit_graphs(rows, cg, arm, coordinates, published, on_chain_id=None, triples_per_asset=8):
     by_graph = defaultdict(list)
     for row in rows:
-        by_graph[row['g']['value']].append(rdf_tuple(row))
+        if row['g']['type'] == 'uri':
+            by_graph[row['g']['value']].append(rdf_tuple(row))
     prefix = f'did:dkg:context-graph:{cg}/'
     allowed = set()
     assets = {}
@@ -37,6 +45,14 @@ def audit_graphs(rows, cg, arm, coordinates, published, on_chain_id=None, triple
     materialized_exact = {graph: sorted(by_graph[graph]) == expected_union for graph in materialized}
     unexpected = sorted(graph for graph in by_graph if graph.startswith(tuple(prefix + family + '/' for family in
                         ['_working_memory', '_shared_memory', '_verifiable_memory'])) and graph not in allowed)
+    unexpected.extend(sorted({f"{r['g']['type']}:{r['g']['value']}" for r in rows if r['g']['type'] != 'uri' and r['g']['value'].startswith(prefix)}))
     return {'assets': assets, 'materializedGraphsExact': materialized_exact,
             'materializedGraphPresent': (materialized == [prefix + 'context/' + str(on_chain_id)]) if published else not materialized,
             'unexpectedPayloadGraphs': unexpected}
+
+
+def same_payload_graphs(before, after, graphs):
+    def canonical(rows):
+        return sorted((r['g']['type'], r['g']['value'], *rdf_tuple(r)) for r in rows if r['g']['value'] in graphs)
+    original = canonical(before)
+    return bool(original) and original == canonical(after)

@@ -13,6 +13,14 @@ metadata_graph=f'did:dkg:context-graph:{cg}/_meta'
 index=index_authoritative_metadata(rdf,metadata_graph); before=index_authoritative_metadata(pre,metadata_graph)
 def exact(rows):return sorted((r['p']['value'],r['o']['type'],r['o']['value'],r['o'].get('datatype'),r['o'].get('xml:lang')) for r in rows)
 def property(rows,p):return [r['o']['value'] for r in rows if r['p']['value']==dkg+p]
+def exact_property(rows,p,expected,kind='literal'):
+ values=[r['o'] for r in rows if r['p']['type']=='uri' and r['p']['value']==dkg+p]
+ if len(values)!=1:return False
+ value=values[0]
+ if kind=='uri':return value['type']=='uri' and value['value']==expected
+ return (value['type'] in ('literal','typed-literal') and value['value']==expected
+  and value.get('datatype','http://www.w3.org/2001/XMLSchema#string')=='http://www.w3.org/2001/XMLSchema#string'
+  and not value.get('xml:lang'))
 inv=read(end/'inventory.json')['swm']; catalogs=read(end/'catalogs.json'); cr=[r for c in catalogs for r in c['rows']]
 invnames=collections.Counter(r['assertion_coordinate'] for r in inv);catnames=collections.Counter(r['assertionCoordinate'] for r in cr)
 jobs=read(end/'-api-publisher-jobs.json')['value']['jobs']
@@ -26,10 +34,10 @@ for name in names:
  original=property(before[life],'shareOperationId'); op=property(l,'shareOperationId')
  expected_state, expected_layer = ('published','VM') if name in published else ('promoted','SWM')
  root_value=property(before[seal],'assertionMerkleRoot')
- lifecycle_complete=(property(l,'state')==[expected_state] and property(l,'memoryLayer')==[expected_layer]
-  and property(l,'assertionGraph')==[graph_proof['requiredGraph']] and len(root_value)==1
-  and property(l,'vmCurrentAssertion' if name in published else 'swmCurrentAssertion')==root_value
-  and (name in published or property(l,'swmShareComplete')==['true']))
+ lifecycle_complete=(exact_property(l,'state',expected_state) and exact_property(l,'memoryLayer',expected_layer)
+  and exact_property(l,'assertionGraph',graph_proof['requiredGraph'],'uri') and len(root_value)==1
+  and exact_property(l,'vmCurrentAssertion' if name in published else 'swmCurrentAssertion',root_value[0])
+  and (name in published or exact_property(l,'swmShareComplete','true')))
  assets.append({'name':name,'lifecycleComplete':lifecycle_complete,'kaUal':property(s,'kaUal'),'version':property(s,'assertionVersion'),'sealUnchanged':exact([r for r in s if r['p']['value'] not in [dkg+'memoryLayer',dkg+'publishedAtTx',dkg+'publishedAtBlock']])==exact([r for r in before[seal] if r['p']['value'] not in [dkg+'memoryLayer',dkg+'publishedAtTx',dkg+'publishedAtBlock']]),'state':property(l,'state'),'memoryLayer':property(l,'memoryLayer'),'operationId':op,'originalOperationPreserved':not original or op==original,'intent':property(l,'promoteOperationIntent'),'completion':property(l,'swmShareComplete'),**graph_proof,'inventoryOccurrences':invnames[name],'catalogOccurrences':catnames[name]})
 shares=read(root/'synchronous-shares.json'); admissions=read(root/'publication-admissions.json'); jobs=read(end/'-api-publisher-jobs.json')['value']['jobs']; proto=read(root/'protocol.json')
 ms=lambda s:datetime.datetime.fromisoformat(s.replace('Z','+00:00')).timestamp()*1000

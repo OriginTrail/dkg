@@ -122,6 +122,18 @@ describe('runPromoteJob', () => {
     expect((await queue.getStatus(job.jobId))?.state).toBe('succeeded');
   });
 
+  it('classifies a legacy marker failure before invoking promotion and records an unacknowledged start', async () => {
+    const job = await enqueueAndClaim();
+    vi.spyOn(queue, 'recordCommitMarker').mockRejectedValueOnce(new Error('marker acknowledgement unavailable'));
+    const promote = vi.fn(async () => ({ promotedCount: 1 }));
+    const result = await runPromoteJob({ job, queue, workerId: 'worker-test', runPromote: promote,
+      now: fixture.clock.now, heartbeatIntervalMs: 0, log: message => logs.push(message) });
+    expect(result.outcome).toBe('failed_terminal');
+    expect(promote).not.toHaveBeenCalled();
+    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+    expect(promoteFailureDiagnostics(logs)).toEqual([expect.objectContaining({ promoteStartedMarkerPersisted: false })]);
+  });
+
   it('on success, records the recovery commit marker and transitions to succeeded', async () => {
     const job = await enqueueAndClaim();
     const result = await runPromoteJob({

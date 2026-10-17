@@ -66,6 +66,10 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     };
     const original = run(); assert.equal(original.seals.length, 1); assert.equal(original.seals[0].unchanged, true);
     assert.deepEqual(original.proof.sealChanged, []); assert.deepEqual(original.proof.missingLifecycle, []); assert.deepEqual(original.proof.lifecycleErrors, [], JSON.stringify(original.proof.assets));
+    for (const object of [{ type: 'literal', value: 'promoted', 'xml:lang': 'fr' }, { type: 'uri', value: 'promoted' }]) {
+      write('fixed-deadline/rdf.json', rdf([...metadata.map(r => r.s.value === life && r.p.value.endsWith('/state') ? { ...r, o: object } : r), ...payload]));
+      assert.deepEqual(run().proof.lifecycleErrors, [name]);
+    }
     write('fixed-deadline/rdf.json', rdf([...metadata.map(r => ({ ...r, g: { type: 'uri', value: graph + '-relocated' } })), ...payload]));
     const moved = run(); assert.equal(moved.seals.length, 1); assert.equal(moved.seals[0].unchanged, false);
     assert.deepEqual(moved.proof.sealChanged, [name]); assert.deepEqual(moved.proof.missingLifecycle, [name]); assert.deepEqual(moved.proof.lifecycleErrors, [name]);

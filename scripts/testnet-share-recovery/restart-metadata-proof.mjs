@@ -1,5 +1,6 @@
+import { indexAuthoritativeMetadata } from './authoritative-metadata.mjs';
 import { ASSERTION_SEAL_PREDICATES } from '../../packages/core/dist/index.js';
-import { capturedTermIdentity, bindingTermIdentity, sameCapturedTerm } from './rdf-term-identity.mjs';
+import { capturedTermIdentity, bindingTermIdentity, sameCapturedTerm, sameBindingQuads } from './rdf-term-identity.mjs';
 const DKG = 'http://dkg.io/ontology/';
 const identityPredicates = new Set([...Object.values(ASSERTION_SEAL_PREDICATES), DKG + 'shareOperationId', DKG + 'promoteOperationIntent']);
 const canonical = values => JSON.stringify(values.sort());
@@ -9,7 +10,7 @@ export function verifyRestartMetadata(fault, rows) {
   const graphs = new Set(fault.intendedMetadataInsert.map(q => q.graph));
   if (graphs.size !== 1 || ![...graphs][0]) throw Error('Missing unambiguous captured metadata graph');
   const metadataGraph = [...graphs][0];
-  const metadata = rows.filter(r => r.g.value === metadataGraph);
+  const metadata = rows.filter(r => r.g.type === 'uri' && r.g.value === metadataGraph);
   const original = fault.metadataAtFault.quads.filter(q => identityPredicates.has(q.predicate));
   const subjects = new Set(original.map(q => q.subject));
   const before = original.map(q => JSON.stringify([capturedTermIdentity(q.subject), capturedTermIdentity(q.predicate), capturedTermIdentity(q.object)]));
@@ -28,4 +29,13 @@ export function verifyRestartMetadata(fault, rows) {
   const lifecycleComplete = !!lifecycle && one('state', '"promoted"') && one('memoryLayer', '"SWM"')
     && one('swmShareComplete', '"true"') && one('swmCurrentAssertion', rootPointer) && one('assertionGraph', graph);
   return { metadataGraph, originalSealAndIntent, lifecycleComplete };
+}
+
+/** The additional crash trial cannot alter the already verified cohort. */
+export function unchangedCohortMetadata(before, after, metadataGraph, subjects) {
+  const predicates = new Set([...identityPredicates, ...['state', 'memoryLayer', 'assertionGraph', 'swmShareComplete',
+    'swmCurrentAssertion', 'vmCurrentAssertion', 'wmCurrentAssertion'].map(p => DKG + p)]);
+  const original = indexAuthoritativeMetadata(before, metadataGraph, predicates);
+  const current = indexAuthoritativeMetadata(after, metadataGraph, predicates);
+  return subjects.length > 0 && subjects.every(subject => sameBindingQuads(original.get(subject) ?? [], current.get(subject) ?? []));
 }

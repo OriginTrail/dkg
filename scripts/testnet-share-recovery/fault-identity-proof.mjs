@@ -14,7 +14,7 @@ for (const name of loadCampaign(arm).faults.map(f => f.name)) {
   const metadataGraph = fault.intendedMetadataInsert[0]?.graph;
   if (!metadataGraph) throw Error('Fault evidence lacks its exact metadata graph');
   const matches = before.map(q => {
-    const rows = final.filter(r => r.g.value === metadataGraph && r.s.value === q.subject && r.p.value === q.predicate);
+    const rows = final.filter(r => r.g.type === 'uri' && r.g.value === metadataGraph && r.s.value === q.subject && r.p.value === q.predicate);
     return { subject: q.subject, predicate: q.predicate,
       matches: rows.length === 1 && sameCapturedTerm(q.object, rows[0].o) };
   });

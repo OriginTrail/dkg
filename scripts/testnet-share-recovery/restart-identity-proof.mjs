@@ -1,6 +1,6 @@
 import { sameCapturedQuads } from './rdf-term-identity.mjs';
 import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
-import { verifyRestartMetadata } from './restart-metadata-proof.mjs';
+import { verifyRestartMetadata, unchangedCohortMetadata } from './restart-metadata-proof.mjs';
 import {verifyIdentityTuples} from './identity-tuples.mjs';
 // Read-only proof around the separately requested process-crash regression.
 import fs from 'node:fs';
@@ -37,6 +37,16 @@ if(mode==='before'){
  const originalFields=fault.metadataAtFault.quads.filter(q=>identityPredicates.has(q.predicate));
  const identitySubjects=new Set(originalFields.map(q=>q.subject));
  const {metadataGraph, originalSealAndIntent, lifecycleComplete}=verifyRestartMetadata(fault,rows);
+ const originalNames=[...campaign.cohorts.initial,...campaign.cohorts.shares];
+ const originalSubjects=originalNames.flatMap(name=>[`did:dkg:context-graph:${cg}/assertion/${campaign.author}/${name}`,
+   `urn:dkg:assertion:${cg}:${campaign.author}:${name}`]);
+ const mainRows=JSON.parse(fs.readFileSync(`${root}/fixed-deadline/rdf.json`)).results.bindings;
+ const originalCohortMetadataUnchanged=unchangedCohortMetadata(mainRows,rows,metadataGraph,originalSubjects);
+ const wholeContentProof=JSON.parse(fs.readFileSync(`${dir}/whole-cohort-content-proof.json`));
+ const snapshot=JSON.parse(fs.readFileSync(`${root}/restart-readback/manifest.json`));
+ const wholeCohortContentUnchanged=wholeContentProof.arm===arm && wholeContentProof.snapshotObservedAt===snapshot.observedAt
+   && wholeContentProof.assets===counts.restart && wholeContentProof.allExact===true;
+
  const graph=fault.intendedMetadataInsert.find(q=>q.predicate==='http://dkg.io/ontology/assertionGraph')?.object;
  if(!graph)throw Error('Missing exact crash graph');
  const publicRows=rows.filter(r=>r.g.value===graph);
@@ -70,10 +80,10 @@ if(mode==='before'){
  const sameRuntime=['version','commit','peerId'].every(key=>runtimeBefore[key]===runtimeAfter[key]);
  const originalBuild=JSON.parse(fs.readFileSync(`${root}/startup-status.json`)).value;
  const runtimeBuildTimeUnchanged=originalBuild.buildTime===runtimeAfter.buildTime;
- const result={metadataGraph,metadataComparison:'authoritative-full-rdf-term-v2',sameRuntime,runtimeBuildTimeUnchanged,runtimeBuildTime:runtimeAfter.buildTime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
+ const result={originalCohortMetadataUnchanged,wholeCohortContentUnchanged,metadataGraph,metadataComparison:'authoritative-full-rdf-term-v2',sameRuntime,runtimeBuildTimeUnchanged,runtimeBuildTime:runtimeAfter.buildTime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
  originalBinding:JSON.stringify(job.request)===JSON.stringify(before.request),state:job.state,attempts:job.attempt.count,
  originalBindingSeal,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate===restartName).length,
  noAdditionalPublicationEffects:publications.length===counts.publications&&publications.every(j=>mainPublications.some(old=>old.jobId===j.jobId&&old.finalization.txHash===j.finalization.txHash)),nonces,manualRepairs:0};
  fs.writeFileSync(`${dir}/identity-proof.json`,JSON.stringify(result,null,2));console.log(result);
- if(!runtimeBuildTimeUnchanged||!originalBindingSeal||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==counts.restart||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
+ if(!originalCohortMetadataUnchanged||!wholeCohortContentUnchanged||!runtimeBuildTimeUnchanged||!originalBindingSeal||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==counts.restart||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
 }else throw Error('Expected before or after');
