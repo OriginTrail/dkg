@@ -423,7 +423,7 @@ it('exposes only bounded private-placement failure aggregates and rejects forged
 
 
 it('sanitizes every declared agent failure kind without dropping the aggregate', async () => {
-  const { CATALOG_REPAIR_FAILURE_KINDS_V1 } = await import('../../agent/src/rfc64/catalog-repair-diagnostics-v1.js');
+  const { CATALOG_REPAIR_FAILURE_KINDS_V1 } = await import('../../agent/src/rfc64/private-placement-failure-state-v1.js');
   const kinds = CATALOG_REPAIR_FAILURE_KINDS_V1.map(kind => ({ kind, count: 1 }));
   const failures = { failedMarkers: kinds.length, parkedMarkers: 0, maxConsecutiveFailures: 1, oldestFailureAgeMs: 10, kinds };
   const queue = { depth: kinds.length, waiters: 0, cooldownSkips: 0, passRunning: false,

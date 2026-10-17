@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-import { isCatalogRepairFailureKindV1, type CatalogRepairFailureKindV1 } from './catalog-repair-diagnostics-v1.js';
+/** Dependency-free persisted failure vocabulary, shared by diagnostics and validation. */
+export const CATALOG_REPAIR_FAILURE_KINDS_V1 = Object.freeze([
+  'queue_wait', 'queue_full', 'store_timeout_not_started', 'store_timeout_indeterminate',
+  'transport', 'cancelled', 'integrity', 'lane_inactive', 'catalog_full', 'unknown',
+  'policy_conflict', 'version_conflict', 'signer_mismatch', 'persistence_unavailable',
+] as const);
+export type CatalogRepairFailureKindV1 = typeof CATALOG_REPAIR_FAILURE_KINDS_V1[number];
+export const isCatalogRepairFailureKindV1 = (value: unknown): value is CatalogRepairFailureKindV1 =>
+  CATALOG_REPAIR_FAILURE_KINDS_V1.some(kind => kind === value);
 
 export const PRIVATE_REPAIR_MAX_BACKOFF_MS = 30 * 60_000;
 export const isDeterministicPrivateRepairFailureV1 = (kind: CatalogRepairFailureKindV1): boolean =>
   kind === 'policy_conflict' || kind === 'version_conflict' || kind === 'signer_mismatch';
-
 
 /** Scheduling evidence only, keyed by the unchanged canonical owed-marker digest. */
 export interface PrivatePlacementFailureStateV1 {
@@ -60,4 +67,9 @@ export function parsePrivatePlacementFailureStateV1(input: unknown): PrivatePlac
     return Object.freeze({ kind, consecutiveFailures, sameKindFailures, firstFailedAtMs,
       lastFailedAtMs, nextAttemptAtMs, parked });
   } catch { return null; }
+}
+
+/** Operator/lane reset changes scheduling only, retaining the last failure and its age. */
+export function resetPrivatePlacementFailureStateV1(state: PrivatePlacementFailureStateV1): PrivatePlacementFailureStateV1 {
+  return Object.freeze({ ...state, consecutiveFailures: 0, sameKindFailures: 0, nextAttemptAtMs: null, parked: false });
 }

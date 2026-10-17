@@ -6,8 +6,9 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
+import { CATALOG_REPAIR_FAILURE_KINDS_V1 } from '../src/rfc64/private-placement-failure-state-v1.js';
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
-import { CatalogRepairConditionErrorV1, CATALOG_REPAIR_FAILURE_KINDS_V1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
+import { CatalogRepairConditionErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import type {
   AssertionCoordinateV1,
   CanonicalDeterministicUalV1,

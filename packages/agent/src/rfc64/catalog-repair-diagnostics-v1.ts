@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { performance } from 'node:perf_hooks';
+import type { CatalogRepairFailureKindV1 } from './private-placement-failure-state-v1.js';
+export { CATALOG_REPAIR_FAILURE_KINDS_V1, isCatalogRepairFailureKindV1, type CatalogRepairFailureKindV1 } from './private-placement-failure-state-v1.js';
 import {
   ExactGraphReadError,
   isStoreOperationTimeoutError,
@@ -16,14 +18,7 @@ const SOURCES = {
   projection_validation: 'catalog.projection_validation',
 } as const;
 type CatalogRepairStageV1 = keyof typeof SOURCES;
-export const CATALOG_REPAIR_FAILURE_KINDS_V1 = Object.freeze([
-  'queue_wait', 'queue_full', 'store_timeout_not_started', 'store_timeout_indeterminate',
-  'transport', 'cancelled', 'integrity', 'lane_inactive', 'catalog_full', 'unknown',
-  'policy_conflict', 'version_conflict', 'signer_mismatch', 'persistence_unavailable',
-] as const);
-export type CatalogRepairFailureKindV1 = typeof CATALOG_REPAIR_FAILURE_KINDS_V1[number];
-export const isCatalogRepairFailureKindV1 = (value: unknown): value is CatalogRepairFailureKindV1 =>
-  CATALOG_REPAIR_FAILURE_KINDS_V1.some(kind => kind === value);
+
 
 export interface CatalogRepairDiagnosticV1 {
   readonly kind: CatalogRepairFailureKindV1;

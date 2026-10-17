@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { CatalogRepairFailureKindV1 } from '../rfc64/catalog-repair-diagnostics-v1.js';
-import { PRIVATE_REPAIR_MAX_BACKOFF_MS, isDeterministicPrivateRepairFailureV1, parsePrivatePlacementFailureStateV1, type PrivatePlacementFailureStateV1 } from '../rfc64/private-placement-failure-state-v1.js';
+import { resetPrivatePlacementFailureStateV1, type CatalogRepairFailureKindV1, PRIVATE_REPAIR_MAX_BACKOFF_MS, isDeterministicPrivateRepairFailureV1, parsePrivatePlacementFailureStateV1, type PrivatePlacementFailureStateV1 } from '../rfc64/private-placement-failure-state-v1.js';
 
 /** Private repair identity is exact and durable; unrelated inventory traffic cannot reset it. */
 export class FinalizedPrivateRepairRetryV1 {
@@ -34,14 +33,16 @@ export class FinalizedPrivateRepairRetryV1 {
   }
 
   reset(): void {
-    this.consecutiveFailures = 0;
-    this.nextAttemptAtMs = null;
-    this.sameKindFailures = 0;
-    this.parked = false;
+    const state = this.snapshot();
+    if (state) Object.assign(this, resetPrivatePlacementFailureStateV1(state));
   }
 
   /** Explicit operator retry invalidates any in-flight failure's scheduling generation. */
-  retryNow(): void { this.generation += 1; this.reset(); }
+  retryNow(persistedReset?: PrivatePlacementFailureStateV1 | null): void {
+    this.generation += 1;
+    if (persistedReset) Object.assign(this, persistedReset);
+    else this.reset();
+  }
 
   fail(generation: number, nowMs: number, intervalMs?: number, kind: CatalogRepairFailureKindV1 = 'unknown'): boolean {
     if (generation !== this.generation) return false;

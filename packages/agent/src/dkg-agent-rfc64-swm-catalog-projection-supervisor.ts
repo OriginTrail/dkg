@@ -1,5 +1,5 @@
 import type { FinalizedPrivateRepairRetryV1 } from './internal/finalized-private-repair-retry.js';
-import { summarizePrivatePlacementFailuresV1, type PrivatePlacementFailureStateV1 } from './rfc64/private-placement-failure-state-v1.js';
+import { resetPrivatePlacementFailureStateV1, summarizePrivatePlacementFailuresV1, type PrivatePlacementFailureStateV1 } from './rfc64/private-placement-failure-state-v1.js';
 import { runFinalizedPrivatePlacementPass, type PrivateRetryEntryV1 } from './internal/finalized-private-placement-pass.js';
 // SPDX-License-Identifier: Apache-2.0
 import { SwmCatalogAuthorityNotReady } from './internal/swm-inventory-write.js';
@@ -369,13 +369,12 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       const entry = state.finalizedPrivateRetries.get(finalizedPrivateRepairKeyV1(repair));
       const previous = entry?.retry.snapshot() ?? this.#dependencies.readPrivateFailure(repair);
       if (!previous) continue;
-      resets.push({ repair, state: { ...previous, consecutiveFailures: 0,
-        sameKindFailures: 0, nextAttemptAtMs: null, parked: false } });
+      resets.push({ repair, state: resetPrivatePlacementFailureStateV1(previous) });
     }
     if (resets.length === 0) return 0;
     this.#dependencies.writePrivateFailures(resets);
     // A failed transaction leaves every in-memory generation and wakeup unchanged.
-    for (const { repair } of resets) state.finalizedPrivateRetries.get(finalizedPrivateRepairKeyV1(repair))?.retry.retryNow();
+    for (const { repair, state: reset } of resets) state.finalizedPrivateRetries.get(finalizedPrivateRepairKeyV1(repair))?.retry.retryNow(reset);
     state.finalizedPrivateRunner.requestNextTurn();
     return resets.length;
   }
