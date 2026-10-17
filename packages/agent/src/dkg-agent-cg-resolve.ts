@@ -1,4 +1,3 @@
-import { probeContextGraphWritePreflight } from './context-graph-write-preflight.js';
 // SPDX-License-Identifier: Apache-2.0
 /**
  * Context-graph resolution subsystem extracted from dkg-agent.ts as a mixin
@@ -9,7 +8,7 @@ import { probeContextGraphWritePreflight } from './context-graph-write-preflight
  * cross-calls resolve against the composed class.
  */
 
-
+import { probeContextGraphWritePreflight } from './context-graph-write-preflight.js';
 import { throwIfOperationAborted } from './bounded-operation.js';
 import { resolveContextGraphNameBindingTarget, type ContextGraphNameHashBindingTarget } from './context-graph-name-binding-target.js';
 import { readAgentPeerPage } from './agent-peer-discovery.js';
@@ -1051,7 +1050,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   probeContextGraphWritePreflight(this: DKGAgent, contextGraphId: string, opts?: { callerAgentAddress?: string | null }): Promise<ContextGraphWritePreflightProbe> {
-    return probeContextGraphWritePreflight.call(this, contextGraphId, opts);
+    return probeContextGraphWritePreflight(this, { store: this.config.contextGraphSubscriptionStore,
+      current: id => this.subscribedContextGraphs.get(id) }, contextGraphId, opts);
   }
 
   /**

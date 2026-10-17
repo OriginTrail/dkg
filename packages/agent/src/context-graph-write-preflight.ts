@@ -1,12 +1,18 @@
 import { ethers } from 'ethers';
 import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from './dkg-agent.js';
-import type { ContextGraphWritePreflightProbe } from './dkg-agent-types.js';
+import type { ContextGraphSub, ContextGraphSubscriptionStore, ContextGraphWritePreflightProbe } from './dkg-agent-types.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 import { classifyWritePreflightFailure, type WritePreflightFailure, type WritePreflightFailureSite } from './write-preflight-attribution.js';
 
+interface WritePreflightSubscriptions {
+  readonly store?: ContextGraphSubscriptionStore;
+  readonly current: (contextGraphId: string) => Pick<ContextGraphSub, 'subscribed' | 'synced'> | undefined;
+}
+
 export async function probeContextGraphWritePreflight(
-    this: DKGAgent,
+    host: DKGAgent,
+    subscriptions: WritePreflightSubscriptions,
     contextGraphId: string,
     opts?: { callerAgentAddress?: string | null },
   ): Promise<ContextGraphWritePreflightProbe> {
@@ -15,7 +21,7 @@ export async function probeContextGraphWritePreflight(
     const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const metaSubjectUri = contextGraphDataGraphUri(contextGraphId);
-    const subscriptionStore = this.config.contextGraphSubscriptionStore;
+    const subscriptionStore = subscriptions.store;
 
     const persistedSubscriptionPromise = subscriptionStore?.load
       ? subscriptionStore.load(contextGraphId)
@@ -28,7 +34,7 @@ export async function probeContextGraphWritePreflight(
     // ignore a cross-source private-policy ratchet. Gate presence uses EXISTS
     // so this path returns at most one gate row per source instead of expanding
     // a potentially large allowlist.
-    const declarationPromise = this.store.query(`
+    const declarationPromise = host.store.query(`
       SELECT ?kind ?value WHERE {
         VALUES (?sourceGraph ?sourceSubject) {
           (<${ontologyGraph}> <${contextGraphUri}>)
@@ -80,8 +86,8 @@ export async function probeContextGraphWritePreflight(
     // survives.
     const [existsRead, hasLocalContentRead, persistedSubscriptionRead, declarationRead] =
       await Promise.allSettled([
-        this.contextGraphExists(contextGraphId),
-        this.contextGraphHasLocalContent(contextGraphId),
+        host.contextGraphExists(contextGraphId),
+        host.contextGraphHasLocalContent(contextGraphId),
         persistedSubscriptionPromise,
         declarationPromise,
       ]);
@@ -157,7 +163,7 @@ export async function probeContextGraphWritePreflight(
         callerAuthorized = true;
       } else if (accessPolicy === 'private') {
         const curatorMatch = curators.some((curator) =>
-          this.curatorDidMatchesChecksumAgent(curator, checksum),
+          host.curatorDidMatchesChecksumAgent(curator, checksum),
         );
         if (curatorMatch) {
           callerAuthorized = true;
@@ -167,7 +173,7 @@ export async function probeContextGraphWritePreflight(
           // UNKNOWN (never a deny) and flag the store instead of throwing
           // the whole probe away.
           try {
-            callerAuthorized = await this.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
+            callerAuthorized = await host.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
           } catch (err) {
             noteStoreFailure('caller-access', err);
           }
@@ -175,7 +181,7 @@ export async function probeContextGraphWritePreflight(
       }
     }
 
-    const inMemorySubscription = this.subscribedContextGraphs.get(contextGraphId);
+    const inMemorySubscription = subscriptions.current(contextGraphId);
     return {
       // Required typed boundary: `storeAvailable` is the inverse of
       // `storeUnavailable`, emitted unconditionally so consumers cannot read
