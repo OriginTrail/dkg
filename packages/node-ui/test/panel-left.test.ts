@@ -138,6 +138,56 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     return { container, root };
   }
 
+  it('settles shared loading when the sidebar collapses during an inventory request', async () => {
+    let reply!: (value: any) => void;
+    apiFetchContextGraphsMock.mockImplementationOnce(() => new Promise(resolve => { reply = resolve; }));
+    const { root } = await renderPanel();
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    expect(useProjectsStore.getState().loading).toBe(true);
+    await act(async () => { root.render(null); });
+    expect(useProjectsStore.getState().loading).toBe(false);
+    await act(async () => { reply({ contextGraphs: [] }); });
+    expect(useProjectsStore.getState().loading).toBe(false);
+  });
+
+  it('a dashboard retry recovers the shared inventory error in the mounted sidebar too', async () => {
+    apiFetchContextGraphsMock.mockRejectedValue(new Error('list unavailable'));
+    const { container } = await renderPanel();
+    const { useMyContextGraphs } = await import('../src/ui/hooks/useMyContextGraphs.js');
+    let mine!: ReturnType<typeof useMyContextGraphs>;
+    function DashboardProbe() { mine = useMyContextGraphs(); return null; }
+    const probeContainer = document.createElement('div'); document.body.appendChild(probeContainer);
+    const probeRoot = createRoot(probeContainer); mountedRoots.push(probeRoot); mountedContainers.push(probeContainer);
+    await act(async () => { probeRoot.render(React.createElement(DashboardProbe)); });
+    await flush();
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(mine.cgsError).toContain('list unavailable');
+    apiFetchContextGraphsMock.mockResolvedValue({ contextGraphs: [{ id: 'recovered', name: 'Recovered graph', callerInvolved: true }] });
+    await act(async () => { await mine.retry(); });
+    expect(mine.cgsError).toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).toContain('Recovered graph');
+    expect(apiFetchContextGraphsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears an anonymous inventory before a failed authenticated refresh', async () => {
+    const { container } = await renderPanel();
+    const { refreshContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    expect(container.textContent).toContain('My First CG');
+    window.__DKG_TOKEN__ = 'new-auth-context';
+    apiFetchContextGraphsMock.mockRejectedValueOnce(new Error('authenticated list unavailable'));
+    try {
+      await act(async () => { await refreshContextGraphInventory(true); });
+      expect(useProjectsStore.getState().contextGraphs).toEqual([]);
+      expect(useProjectsStore.getState().inventoryError).toContain('authenticated list unavailable');
+      expect(useProjectsStore.getState().loading).toBe(false);
+      expect(container.textContent).not.toContain('My First CG');
+    } finally {
+      delete window.__DKG_TOKEN__;
+    }
+  });
+
   it.each(['graphs', 'identity'])('shows an actionable cold-load %s failure instead of a false empty state', async (endpoint) => {
     apiFetchContextGraphsMock.mockResolvedValue({ contextGraphs: [] });
     const failed = endpoint === 'graphs' ? apiFetchContextGraphsMock : fetchCurrentAgentMock;

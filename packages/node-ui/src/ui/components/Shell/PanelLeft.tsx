@@ -1,13 +1,12 @@
-import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useId, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import { useJourneyStore } from '../../stores/journey.js';
-import { api } from '../../api-wrapper.js';
 import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
 import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
-import { useNodeEvents } from '../../hooks/useNodeEvents.js';
+import { useContextGraphInventory, refreshContextGraphInventory } from '../../hooks/useContextGraphInventory.js';
 import { useVisibilityPolling } from '../../hooks/useVisibilityPolling.js';
 import { useHiddenContextGraphIds as useHiddenProjectIds } from '../../hooks/useHiddenContextGraphIds.js';
 import {
@@ -210,20 +209,14 @@ export function PanelLeft() {
   const myProjectsBodyId = useId();
   const integrationsBodyId = useId();
   const { openTab, activeTabId, setActiveTab } = useTabsStore();
-  const { contextGraphs, setContextGraphs, setLoading, activeProjectId, setActiveProject } = useProjectsStore();
+  const { activeProjectId, setActiveProject } = useProjectsStore();
+  const { contextGraphs, loading: listLoading, error: listError } = useContextGraphInventory();
   const stage = useJourneyStore((s) => s.stage);
   const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
   const sharedAgent = useCurrentAgent();
   const agentIdentity: AgentSidebarIdentity | null = sharedAgent.data ? toSidebarIdentity(sharedAgent.data) : null;
-  const [listError, setListError] = useState<string | null>(null);
-  const [listLoading, setListLoading] = useState(true);
-  const mounted = useRef(false), listRequest = useRef(0);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; listRequest.current++; };
-  }, []);
   const inventoryError = listError || sharedAgent.error;
   const inventoryLoading = listLoading || sharedAgent.loading;
 
@@ -248,34 +241,6 @@ export function PanelLeft() {
     setJoinContextGraphId(undefined);
   }, []);
 
-  const loadCGs = useCallback(async () => {
-    const request = ++listRequest.current;
-    setLoading(true);
-    setListLoading(true);
-    try {
-      const { contextGraphs: cgs } = await api.fetchContextGraphs();
-      if (!Array.isArray(cgs)) throw new Error('Invalid context graph list response');
-      if (!mounted.current || request !== listRequest.current) return;
-      setContextGraphs(cgs);
-      setListError(null);
-    } catch (error) {
-      if (mounted.current && request === listRequest.current) {
-        setListError(error instanceof Error ? error.message : String(error));
-      }
-    } finally {
-      if (mounted.current && request === listRequest.current) { setLoading(false); setListLoading(false); }
-    }
-  }, [setContextGraphs, setLoading]);
-  // BUG-007: 60 s sidebar refresh runs through the shared
-  // visibility-aware hook so the daemon stops absorbing list calls
-  // when the tab is hidden.
-  useVisibilityPolling(loadCGs, 60_000);
-
-  useNodeEvents(useCallback((event) => {
-    if (event.type === 'join_approved' || event.type === 'project_synced') {
-      loadCGs();
-    }
-  }, [loadCGs]));
 
   return (
     <div className="v10-panel-left">
@@ -303,7 +268,7 @@ export function PanelLeft() {
         <div className="v10-journey-empty-card" role="alert">
           <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
           <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
-          <button type="button" disabled={inventoryLoading} onClick={() => { void loadCGs(); void refreshCurrentAgent(); }}>Retry</button>
+          <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); void refreshCurrentAgent(); }}>Retry</button>
         </div>
       )}
       {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}

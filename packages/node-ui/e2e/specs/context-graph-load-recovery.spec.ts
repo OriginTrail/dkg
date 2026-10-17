@@ -11,7 +11,7 @@ for (const endpoint of ['/api/context-graph/list', '/api/agent/identity']) {
     }));
     await shell.goto();
     const dashboardRoot = page.locator('.v10-dashboard');
-    const sidebar = page.locator('.v10-panel-left');
+    const sidebar = page.locator('.v10-panel-left').last();
     await expect(dashboardRoot.getByRole('alert')).toContainText('could not be loaded');
     await expect(sidebar.getByRole('alert')).toContainText('unavailable');
     await expect(sidebar).not.toContainText('No context graphs yet');
@@ -21,7 +21,6 @@ for (const endpoint of ['/api/context-graph/list', '/api/agent/identity']) {
 
     await page.unroute(route);
     await dashboardRoot.getByRole('button', { name: 'Retry', exact: true }).click();
-    await sidebar.getByRole('button', { name: 'Retry', exact: true }).click();
     await expect(dashboardRoot.getByRole('alert')).toHaveCount(0);
     await expect(sidebar.getByRole('alert')).toHaveCount(0);
     await dashboard.waitForCgRowsLoaded();
