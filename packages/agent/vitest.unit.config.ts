@@ -221,6 +221,8 @@ export default defineConfig({
       "test/sync-backpressure.test.ts",
       // #3251 — the reserved shared-memory slot and its own bounded queue.
       "test/sync-shared-memory-reserve.test.ts",
+      // #3280 — the reserved control-plane slot and its own bounded queue.
+      "test/sync-control-plane-reserve.test.ts",
       // #3251 — the safety-net pull of public graphs in use on an Edge.
       "test/recent-shared-memory-pulls.test.ts",
       "test/sync-policy.test.ts",
