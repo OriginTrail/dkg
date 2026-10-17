@@ -30,6 +30,14 @@ class LayerCandidates {
     this.rows = new Map(layers.map(layer => [layer, new Map()]));
   }
   add(row: SearchResult): void {
+    // A duplicate may be evicted from this layer while remaining eligible in
+    // another. Preserve its evidence on all retained copies before trimming.
+    const retained = [...this.rows.values()].flatMap(rows => {
+      const existing = rows.get(row.entityUri);
+      return existing ? [existing] : [];
+    });
+    row.sources = [...new Set([...retained.flatMap(existing => existing.sources), ...row.sources])];
+    for (const existing of retained) existing.sources = row.sources;
     const rows = this.rows.get(row.memoryLayer)!;
     const previous = rows.get(row.entityUri);
     if (previous) {
