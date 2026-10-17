@@ -1,8 +1,0 @@
-{
-  "requestDenominator": 1,
-  "manualShareReplays": 0,
-  "manualProcessRestarts": 0,
-  "missingEvidence": [],
-  "osExitStatusCaptured": false,
-  "note": "Process disappearance/replacement is witnessed; code 86 is the injected implementation, not captured OS exit status. The normal 900000 ms lease was not edited."
-}

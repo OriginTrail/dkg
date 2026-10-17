@@ -1,6 +1,6 @@
 """Allowlisted restart proof export; raw RDF/jobs and claim capabilities stay private."""
 import pathlib,json,sys
-arm=sys.argv[1];root=pathlib.Path('.tmp/2963/evidence')/arm;source=root/'restart-regression';out=pathlib.Path('run-reports/2963-evidence')/arm/'restart-regression';out.mkdir(parents=True,exist_ok=True)
+arm=sys.argv[1];root=pathlib.Path('.tmp/2963/evidence')/arm;source=root/'restart-regression';out=pathlib.Path('.tmp/2963/exported-evidence')/arm/'restart-regression';out.mkdir(parents=True,exist_ok=True)
 write=lambda name,value:(out/name).write_text(json.dumps(value,indent=2)+'\n')
 missing=[]
 for name in ['request.json','response.json','runtime-before.json','protocol.json','outcome.json','before-job.json','after-job.json','identity-proof.json','whole-cohort-content-proof.json','process-before.json','process-restart-proof.json']:

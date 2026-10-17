@@ -9,7 +9,7 @@ from campaign_manifest import load_campaign
 arm, label = sys.argv[1:3]
 campaign = load_campaign(arm)
 root = pathlib.Path('.tmp/2963/evidence') / arm
-out = pathlib.Path('run-reports/2963-evidence') / arm
+out = pathlib.Path('.tmp/2963/exported-evidence') / arm
 out.mkdir(parents=True, exist_ok=True)
 read = lambda name: json.loads((root / name).read_text())
 def write(name, value):

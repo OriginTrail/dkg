@@ -98,7 +98,7 @@ sequenceDiagram
   Publisher->>Store: commit content and operation intent
   Publisher->>Store: lifecycle / head / cleanup
   Store--xPublisher: interruption
-  Agent-->>HTTP: 503; no retry owner
+  Agent-->>HTTP: 503 with no retry owner
 ```
 
 After (implemented):
@@ -120,7 +120,7 @@ sequenceDiagram
   HTTP->>Queue: settle success
   Note over Queue,Worker: Failure or expired lease retains the bound obligation
   Worker->>Queue: claim with fresh token after backoff / expiry
-  Worker->>Agent: replay original bound operation; no reseal
+  Worker->>Agent: replay original bound operation without resealing
 ```
 
 The main live protocol is frozen at baseline-2 traffic start. Preparation completed without failure; exact starting catalog/inventory both contain 180 entries. Read-only evidence reducers additionally compare every original seal predicate, exact payload graph sets, catalog identity/version/seal digests, all 48 transaction carriers, and decoded `KnowledgeAssetCreated` events. Attempt 0's 48/48 canonical chain identities and 436/436 original seals are independently verified; its readiness invalidity remains unchanged.
@@ -290,3 +290,9 @@ The actual process-exit trial fired at 02:20:02.367 UTC. The existing supervisor
 Next: complete restart proofs; stop only owned supervisor/worker/store; reconcile fresh pending/latest nonces before matching claim release; export allowlisted, hashed and secret-scanned artifacts; run static checks; commit/push evidence and tests. Round 15's bounded remote window closed with 69 successful and four skipped checks, all 58 threads addressed and human/code-owner review still requested/unconfirmed. Final substantive evidence submission starts counted round 16; do not reset history, infer approval, merge, or claim full completion while approval remains unconfirmed.
 
 Final restart observation closed successfully at 02:40:02.370 UTC with 78 observations and zero read failures. Full 437-entry catalog/descriptor convergence occurred at 02:35:48.399 (946.032 seconds); readback at 02:40:09.744 and independent proof at 02:40:18.492 verified every original identity, payload and authoritative lifecycle/intent record, plus unchanged publication effects and all ten nonces. All 43 Node/nine Python evidence tests and both historical whole-cohort restart revalidations passed after the fixed window. Lint, size and 2,621-file test routing passed. Owned processes/store stopped at 02:40:34.012723; fresh reconciliation at 02:41:15.961 preceded matching claim release. No product source changed after the tested clean build. Remaining work is final evidence submission/current-head remote review and required approval.
+
+### User-directed evidence packaging, 2026-10-17
+
+The user superseded remote full-evidence publication: retain the concise repository report and archive generated exports locally in `Projects/dkg-archive`. Preserve all 244 files from `ee2fe18ec` byte-for-byte with checksums before removing them from the current PR tree; retain private raw evidence/homes and existing Git history. Exporters now target ignored `.tmp/2963/exported-evidence` so regeneration does not refill the diff. Measure the remaining source/test/harness diff before deciding whether a PR split is warranted. The user also requests render verification and repair of Mermaid diagrams in the PR description and changed Markdown. No implementation split or merge is performed in this packaging step.
+
+Packaging verification: all 244 archived file hashes passed; both exporters regenerated 40 candidate files byte-for-byte under ignored `.tmp`. Reproduced four Mermaid sequence parse failures caused by unescaped semicolons, corrected the labels in the plan and PR body, and visually verified all five changed-document/PR diagrams render with Mermaid 10.9.3. Relative report/harness links and diff whitespace checks passed. Production source and package tests remain unchanged from `ee2fe18ec`.
