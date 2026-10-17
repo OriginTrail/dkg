@@ -30,7 +30,7 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
   let alreadyPresent = 0;
   const ctx = createOperationContext('sync');
   const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
-  const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId, deadline, signal, isCurrent, canAdmit: options.canAdmit });
+  const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId, deadline, signal, assertCurrent, canAdmit: options.canAdmit });
   const incomplete = (reason?: string) => new Error(
     `Snapshot recovery incomplete: ${committed.size}/${uals.length} committed${reason ? ` (${reason})` : ''}`);
   const assertActive = () => {
@@ -83,7 +83,6 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
         ? await pacing.waitForAdmission()
         : await pacing.waitForPeer(peers.filter(peer => !answered.has(peer)));
       if (!waited) throw incomplete(wait === 'admission' ? 'local sync capacity stayed in use' : 'the configured cores stayed busy');
-      assertActive();
       // Another sync may have stored some of these while the job waited.
       await skipHeld(batch);
     }

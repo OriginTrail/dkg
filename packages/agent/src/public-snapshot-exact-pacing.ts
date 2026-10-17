@@ -30,8 +30,11 @@ export interface PublicSnapshotPacingOptions {
   /** Epoch milliseconds at which the job ends. */
   readonly deadline: number;
   readonly signal: AbortSignal;
-  /** The job's ownership fence; a wait ends within one interval once it fails. */
-  readonly isCurrent: () => boolean;
+  /**
+   * The job's ownership fence. It throws on cancellation, shutdown or loss of
+   * the graph, and a wait rethrows that within one interval.
+   */
+  readonly assertCurrent: () => void;
   /** Whether this node's sync admission would take the graph's exact fetch now. */
   readonly canAdmit?: () => boolean;
 }
@@ -81,27 +84,25 @@ export class PublicSnapshotRecoveryPacing {
     return Math.max(0, Math.min(PUBLIC_SNAPSHOT_ATTEMPT_TIMEOUT_MS, this.options.deadline - Date.now()));
   }
 
-  /** Wait until local sync admission would take the attempt. False when that cannot happen in time. */
+  /**
+   * Wait until local sync admission would take the attempt. False when that
+   * cannot happen in time; the job's cancellation or loss of its graph throws.
+   */
   async waitForAdmission(): Promise<boolean> {
     const hold = Math.min(PUBLIC_SNAPSHOT_MAX_HOLD_MS, PUBLIC_SNAPSHOT_RETRY_MS * 2 ** (this.refusals - 1));
     if (!(await this.sleep(jitter(hold)))) return false;
-    while (this.current() && !this.admissionAvailable()) {
+    while (!this.admissionAvailable()) {
       if (!(await this.sleep(jitter(PUBLIC_SNAPSHOT_RETRY_MS)))) return false;
     }
     return true;
   }
 
-  /** Wait until one of these peers is past its hold-off. False when that cannot happen in time. */
+  /** Wait until one of these peers is past its hold-off, with the same outcomes as `waitForAdmission`. */
   async waitForPeer(peerIds: readonly string[]): Promise<boolean> {
-    while (this.current() && peerIds.length > 0 && peerIds.every(peerId => this.heldOff(peerId))) {
+    while (peerIds.length > 0 && peerIds.every(peerId => this.heldOff(peerId))) {
       if (!(await this.sleep(jitter(PUBLIC_SNAPSHOT_RETRY_MS)))) return false;
     }
     return true;
-  }
-
-  /** A cancelled job, or one whose graph was unsubscribed or rebound, stops waiting. */
-  private current(): boolean {
-    return !this.options.signal.aborted && this.options.isCurrent();
   }
 
   /** A capacity read that cannot answer falls back to the plain bounded retry. */
@@ -114,16 +115,19 @@ export class PublicSnapshotRecoveryPacing {
   }
 
   /**
-   * Sleep unless the wait would reach into the final read's reserve. The
-   * sleep runs in slices of one interval, so it ends within one interval of
-   * the job losing its graph, and at once on cancellation.
+   * Sleep, or return false when the sleep would reach into the final read's
+   * reserve. It runs in slices of one interval and checks the job's fence
+   * after each, so loss of the graph throws within one interval and
+   * cancellation at once.
    */
   private async sleep(ms: number): Promise<boolean> {
-    const { deadline, signal } = this.options;
+    const { deadline, signal, assertCurrent } = this.options;
     const until = Date.now() + ms;
     if (until > deadline - PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS) return false;
-    while (this.current() && Date.now() < until) {
+    assertCurrent();
+    while (!signal.aborted && Date.now() < until) {
       await vmRecoveryRetryDelay(Math.min(PUBLIC_SNAPSHOT_RETRY_MS, until - Date.now()), signal);
+      assertCurrent();
     }
     return true;
   }

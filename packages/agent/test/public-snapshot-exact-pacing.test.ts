@@ -159,20 +159,31 @@ describe('public snapshot exact recovery pacing', () => {
 });
 
 describe('public snapshot pacing waits', () => {
-  it('does not sleep when the job was cancelled before the wait began', async () => {
+  it('throws the job cancellation from the wait without sleeping', async () => {
     const controller = new AbortController();
     controller.abort(new Error('stop'));
+    const assertCurrent = () => { if (controller.signal.aborted) throw new Error('job cancelled'); };
     const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId: graph, deadline: Date.now() + 3_600_000,
-      signal: controller.signal, isCurrent: () => true, canAdmit: () => false });
+      signal: controller.signal, assertCurrent, canAdmit: () => false });
     const startedAt = performance.now();
-    await expect(pacing.waitForAdmission()).resolves.toBe(true);
-    await expect(pacing.waitForPeer(['core-a'])).resolves.toBe(true);
+    await expect(pacing.waitForAdmission()).rejects.toThrow('job cancelled');
     expect(performance.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it('returns once a held-off peer is free again, and false only when time runs out', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId: graph, deadline: Date.now() + 3_600_000,
+      signal: new AbortController().signal, assertCurrent: () => {} });
+    expect(pacing.settle('core-a', outcome({ streamOutcome: 'responder-busy' }), 0)).toBe('retry-peer');
+    const waited = pacing.waitForPeer(['core-a']);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await expect(waited).resolves.toBe(true);
+    expect(pacing.heldOff('core-a')).toBe(false);
   });
 
   it('refuses a wait that would reach into the final read reserve', async () => {
     const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId: graph,
-      deadline: Date.now() + PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS, signal: new AbortController().signal, isCurrent: () => true });
+      deadline: Date.now() + PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS, signal: new AbortController().signal, assertCurrent: () => {} });
     await expect(pacing.waitForAdmission()).resolves.toBe(false);
     expect(pacing.attemptTimeoutMs()).toBeLessThanOrEqual(PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS);
   });
