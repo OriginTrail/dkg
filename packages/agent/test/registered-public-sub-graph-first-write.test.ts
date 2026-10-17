@@ -47,6 +47,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DKGAgent } from '../src/index.js';
+import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
 import { Rfc64MetaBootstrapMethods } from '../src/dkg-agent-rfc64-meta-bootstrap.js';
 import {
@@ -139,12 +140,24 @@ async function servedMeta(peer: PeerNode): Promise<Quad[]> {
 /**
  * Peers that answer a `_meta` fetch page by page and keep one metadata session
  * per requester and graph, as a responder does (`prepareResponderSession`):
- * each fresh fetch opens a new session, and a page of a session that another
- * fetch replaced is refused. `most` is the most fetches that ran at once.
+ * each fetch opens a new session, and a page of a session that another fetch
+ * replaced is refused. The refusal reaches the requester as a reset stream,
+ * as the router aborts the stream of a handler that threw; with
+ * `refusal: 'text'` it carries the responder's own words. `beforePage` runs
+ * before each page of the `fetch`-th fetch, `supersede` opens a session the
+ * way another round would, and `most` is the most fetches that ran at once.
  */
-function pagedMetaPeers(peers: ReadonlyMap<string, PeerNode>, pageSize = 2) {
+function pagedMetaPeers(
+  peers: ReadonlyMap<string, PeerNode>,
+  options: {
+    readonly refusal?: 'reset' | 'text';
+    readonly beforePage?: (fetch: number, page: number) => Promise<void> | void;
+  } = {},
+) {
+  const pageSize = 2;
   const sessions = new Map<string, symbol>();
-  const stats = { running: 0, most: 0 };
+  const stats = { running: 0, most: 0, fetches: 0 };
+  const supersede = (peerId: string) => { sessions.set(peerId, Symbol(`another round at ${peerId}`)); };
   const fetch = async (
     _ctx: OperationContext,
     peerId: string,
@@ -155,23 +168,30 @@ function pagedMetaPeers(peers: ReadonlyMap<string, PeerNode>, pageSize = 2) {
     _deadline: number,
     _options?: { forceFreshSession?: boolean; signal?: AbortSignal },
   ) => {
+    stats.fetches += 1;
+    const fetchNumber = stats.fetches;
     const session = Symbol(peerId);
     sessions.set(peerId, session);
     stats.running += 1;
     stats.most = Math.max(stats.most, stats.running);
     try {
       const quads = await servedMeta(peers.get(peerId)!);
-      for (let offset = 0; offset < quads.length; offset += pageSize) {
+      for (let offset = 0, page = 0; offset < quads.length; offset += pageSize, page += 1) {
         // A page is a round trip: long enough for any other fetch to start meanwhile.
         await new Promise((resolve) => setTimeout(resolve, 5));
-        if (sessions.get(peerId) !== session) throw new Error('Durable meta sync session was superseded before page completion');
+        await options.beforePage?.(fetchNumber, page);
+        if (sessions.get(peerId) !== session) {
+          throw options.refusal === 'text'
+            ? new Error('Durable meta sync session was superseded before page completion')
+            : toSyncTransportFailureError(new Error('stream reset'));
+        }
       }
       return { quads, checkpointKey: `meta-checkpoint-${peerId}`, resumedFromOffset: 0, completed: true };
     } finally {
       stats.running -= 1;
     }
   };
-  return { fetch, stats };
+  return { fetch, stats, supersede };
 }
 
 interface MemberOptions {
@@ -526,6 +546,67 @@ describe('a member\'s first write into a sub-graph of a registered public graph 
     expect(drafts).toEqual({ registered: true });
     expect(definition).toBe('fetched');
     expect(peers.stats.most).toBe(1);
+  });
+
+  it('asks the peer again when an ordinary durable sync round of the graph supersedes its session, and the write goes through', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(bootstrap(member)).resolves.toBe('fetched');
+    await owner.store.insert(subGraphRegistration(SUB_GRAPH));
+    let syncRound: Promise<unknown> | undefined;
+    const peers = pagedMetaPeers(peersOf([[OWNER_PEER_ID, owner]]), {
+      // Between the lookup's first and second page, an ordinary durable sync
+      // round of the graph from the same peer (it does not take the lookup's
+      // turn) opens its own session there and runs to its end.
+      beforePage: async (fetch, page) => {
+        if (fetch !== 1 || page !== 1) return;
+        syncRound = peers.fetch(createOperationContext('sync'), OWNER_PEER_ID, contextGraphId, false, 'meta', metaGraph, Date.now() + 5_000);
+        await syncRound;
+      },
+    });
+    member.fetchSyncPages.mockImplementation(peers.fetch);
+    member.fetchSyncPages.mockClear();
+    const publisher = await memberPublisher(member);
+
+    await expect(firstWrite(publisher, 'report-1', SUB_GRAPH)).resolves.toBeUndefined();
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, SUB_GRAPH)).resolves.toBe(true);
+    // Both completed: the sync round, and the lookup with a fresh session of its own.
+    await expect(syncRound).resolves.toMatchObject({ completed: true });
+    expect(member.fetchSyncPages).toHaveBeenCalledTimes(2);
+    expect(peers.stats.fetches).toBe(3);
+    expect(member.log.warn).not.toHaveBeenCalled();
+  });
+
+  it('refuses with the timeout answer when the peer\'s session is superseded on every try until the time is up', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    // Rounds of other fetches at the same peer, one after another, each
+    // replacing the lookup's session after its first page; the peer's refusal
+    // gets through in its own words this time.
+    const peers = pagedMetaPeers(peersOf([[OWNER_PEER_ID, owner]]), {
+      refusal: 'text',
+      beforePage: (_fetch, page) => {
+        if (page === 1) peers.supersede(OWNER_PEER_ID);
+      },
+    });
+    member.fetchSyncPages.mockImplementation(peers.fetch);
+
+    await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 1_500 }))
+      .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
+    // Asked again after each refusal while the time lasted.
+    expect(member.fetchSyncPages.mock.calls.length).toBeGreaterThanOrEqual(2);
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, SUB_GRAPH)).resolves.toBe(false);
+  });
+
+  it('does not ask again within a lookup a peer it found no address for', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    member.fetchSyncPages.mockRejectedValueOnce(new Error('All multiaddr dials failed'));
+
+    await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH)).resolves.toEqual({
+      registered: false, detail: 'no peer of the context graph could be asked: All multiaddr dials failed',
+    });
+    expect(member.fetchSyncPages).toHaveBeenCalledOnce();
   });
 
   it('registers the sub-graphs that writes queued behind a lookup wait for, so they do not ask again', async () => {
