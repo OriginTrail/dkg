@@ -1,3 +1,4 @@
+import { requestOwnedPrivateAccess, type PrivateAccessRequest } from './private-access-request.js';
 import { resolvePreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
 import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
@@ -1816,6 +1817,12 @@ export class DKGAgent extends DKGAgentBase {
 
   async getPeerProtocols(peerId: string): Promise<string[]> {
     return diagnostics.getPeerProtocols(this.node, peerId);
+  }
+
+  /** Explicit private read; a peer-root self-check is not chain authentication. */
+  async requestPrivateAccess(input: PrivateAccessRequest, options: { signal?: AbortSignal } = {}) {
+    if (!this.started) throw Object.assign(new Error('Node is not started'), { code: 'ACCESS_UNAVAILABLE' });
+    return requestOwnedPrivateAccess(this, input, options);
   }
 
   /**

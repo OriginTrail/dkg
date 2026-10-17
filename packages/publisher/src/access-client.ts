@@ -9,10 +9,18 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 
+export interface AccessClientRequestOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  maxResponseBytes?: number;
+  maxQuads?: number;
+}
+
 export interface AccessResult {
   granted: boolean;
   quads: Quad[];
   privateMerkleRoot?: Uint8Array;
+  /** Matches the root supplied by the peer; does not authenticate a chain anchor. */
   verified: boolean;
   rejectionReason?: string;
 }
@@ -29,7 +37,7 @@ export interface AccessSendSurface {
     peerId: string,
     protocolId: string,
     payload: Uint8Array,
-    opts?: { messageId?: string; timeoutMs?: number },
+    opts?: { messageId?: string; timeoutMs?: number; signal?: AbortSignal; maxReadBytes?: number },
   ): Promise<
     | { delivered: true; response: Uint8Array; attempts: number; messageId: string }
     | {
@@ -69,12 +77,20 @@ export class AccessClient {
     publisherPeerId: string,
     kaUal: string,
     paymentProof: Uint8Array = new Uint8Array(0),
+    options: AccessClientRequestOptions = {},
   ): Promise<AccessResult> {
+    options.signal?.throwIfAborted();
+    for (const limit of [options.maxResponseBytes, options.maxQuads]) {
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
+        throw new RangeError('Private access limits must be positive safe integers');
+      }
+    }
     const message = new TextEncoder().encode(
       kaUal + toHex(paymentProof),
     );
     const signature = await ed25519Sign(message, this.keypair.secretKey);
 
+    options.signal?.throwIfAborted();
     const requestData = encodeAccessRequest({
       kaUal,
       requesterPeerId: this.peerId,
@@ -87,7 +103,9 @@ export class AccessClient {
       publisherPeerId,
       PROTOCOL_ACCESS,
       requestData,
+      { timeoutMs: options.timeoutMs, signal: options.signal, maxReadBytes: options.maxResponseBytes },
     );
+    options.signal?.throwIfAborted();
 
     if (!sendResult.delivered) {
       // Access is synchronous-by-design — surface queued as a
@@ -102,6 +120,9 @@ export class AccessClient {
       };
     }
 
+    if (options.maxResponseBytes !== undefined && sendResult.response.byteLength > options.maxResponseBytes) {
+      throw Object.assign(new Error('Private access response exceeds byte limit'), { code: 'ACCESS_RESPONSE_TOO_LARGE' });
+    }
     const response = decodeAccessResponse(sendResult.response);
 
     if (!response.granted) {
@@ -115,6 +136,9 @@ export class AccessClient {
 
     const nquadsStr = new TextDecoder().decode(response.nquads);
     const quads = parseSimpleNQuads(nquadsStr);
+    if (options.maxQuads !== undefined && quads.length > options.maxQuads) {
+      throw Object.assign(new Error('Private access response exceeds quad limit'), { code: 'ACCESS_RESPONSE_TOO_LARGE' });
+    }
 
     // Verify merkle root of received private triples
     let verified = false;
