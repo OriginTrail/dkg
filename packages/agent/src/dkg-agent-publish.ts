@@ -913,9 +913,17 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   graphOwnerRoutePortsV1(this: DKGAgent): GraphOwnerRoutePorts {
-    const owners = graphOwnerPeersOf(this, async (contextGraphId, signal) => (
-      await this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16, signal })
-    ).peerIds.filter((peerId) => peerId !== this.peerId));
+    const owners = graphOwnerPeersOf(this, async (contextGraphId, signal) => {
+      const lookUp = () => this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16, signal });
+      let resolution = await lookUp();
+      const ownerDid = deriveCuratorDidFromCgId(contextGraphId);
+      if (resolution.peerIds.length === 0 && !resolution.curatorIsLocal && ownerDid !== null) {
+        // An Edge keeps no `agents` phonebook: look the owner's wallet up in a Core's.
+        const wallet = ownerDid.slice('did:dkg:agent:'.length).toLowerCase();
+        if ((await this.ensureAgentsInOnDemandPhonebook([wallet], signal)).has(wallet)) resolution = await lookUp();
+      }
+      return resolution.peerIds.filter((peerId) => peerId !== this.peerId);
+    });
     return {
       ownerPeerIds: (contextGraphId, signal) => owners.of(contextGraphId, signal),
       isConnected: (peerId) => this.node.libp2p.getPeers().some((peer) => peer.toString() === peerId),

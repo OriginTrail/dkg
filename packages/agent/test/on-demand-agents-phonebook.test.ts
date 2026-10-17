@@ -4,6 +4,7 @@ import {
   AGENTS_PHONEBOOK_CURATOR_MISS_SUPPRESSION_MS,
   AGENTS_PHONEBOOK_FETCH_BUDGET_MS,
   AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS,
+  AGENTS_PHONEBOOK_FETCH_EMPTY_COOLDOWN_MS,
   AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS,
   AGENTS_PHONEBOOK_MIN_NETWORK_TRIPLES,
   AGENTS_PHONEBOOK_POLICY_VERDICT_TTL_MS,
@@ -216,11 +217,15 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     // The empty answer neither ends the walk nor counts as a complete fetch...
     expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_A, CORE_B]);
     expect(h.info[0]).toContain('outcome=empty');
-    expect(h.info[0]).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS}`);
+    expect(h.info[0]).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_EMPTY_COOLDOWN_MS}`);
 
     // ...and the graph is not suppressed for hours: it asks again after the
-    // short cooldown.
-    h.advance(AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS);
+    // shortest cooldown, by when a just-started Core holds the phonebook.
+    h.advance(AGENTS_PHONEBOOK_FETCH_EMPTY_COOLDOWN_MS - 1);
+    h.fetcher.request(CG, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(2);
+    h.advance(1);
     h.fetcher.request(CG, 'vm-reconcile');
     await h.fetcher.whenIdle();
     expect(h.syncCalls).toHaveLength(4);

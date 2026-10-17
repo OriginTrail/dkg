@@ -19,7 +19,9 @@
  *    connecting to it through a relay when the two are not connected
  *    ({@link routeShareToGraphOwner}). A pulled copy carries no author seal,
  *    and the owner needs the seal to publish a member's asset to Verified
- *    Memory, so the owner must get the share itself.
+ *    Memory, so the owner must get the share itself. An Edge keeps no
+ *    `agents` phonebook, so it looks the owner's wallet up in a Core's
+ *    phonebook on demand when it cannot map the owner to a peer.
  */
 
 import type { ContextGraphSub } from '../dkg-agent-types.js';
@@ -43,7 +45,10 @@ export function coreHostsPublicGraph(
 export const GRAPH_OWNER_ROUTE_TIMEOUT_MS = 10_000;
 /** Owner peers tried, in order, when none is connected. */
 export const GRAPH_OWNER_CONNECT_ATTEMPTS = 2;
-/** A peer this node could not connect to is not tried again for this long, so later shares do not wait for it. */
+/**
+ * A peer this node could not connect to, and an owner that was not found, are
+ * not tried again for this long, so later shares do not wait for them.
+ */
 export const GRAPH_OWNER_RETRY_AFTER_MS = 60_000;
 
 /** What the owner route uses of the agent. */
@@ -111,7 +116,7 @@ function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
-/** Owner peers looked up at most once per graph in this window. */
+/** Owner peers that were found are reused for this long. */
 export const GRAPH_OWNER_PEERS_TTL_MS = 5 * 60_000;
 const MAX_CACHED_GRAPHS = 256;
 
@@ -131,16 +136,17 @@ export class GraphOwnerPeers {
   }
 
   /**
-   * The owner's peers; a failed lookup counts as none until the window ends.
-   * A lookup the caller gave up on (`signal`) is not remembered.
+   * The owner's peers. Peers that were found are reused for
+   * {@link GRAPH_OWNER_PEERS_TTL_MS}. An owner that was not found (none known,
+   * or the lookup failed or ran out of time) is looked up again after
+   * {@link GRAPH_OWNER_RETRY_AFTER_MS}: an Edge's phonebook can learn it at any
+   * time, and in between shares do not wait for the lookup.
    */
   async of(contextGraphId: string, signal?: AbortSignal): Promise<readonly string[]> {
     const cached = this.#byGraph.get(contextGraphId);
-    if (cached !== undefined && this.#now() - cached.at < GRAPH_OWNER_PEERS_TTL_MS) return cached.peerIds;
-    const peerIds = await this.#resolve(contextGraphId, signal).catch((error: unknown): readonly string[] => {
-      if (signal?.aborted) throw error;
-      return [];
-    });
+    const reuseFor = cached?.peerIds.length === 0 ? GRAPH_OWNER_RETRY_AFTER_MS : GRAPH_OWNER_PEERS_TTL_MS;
+    if (cached !== undefined && this.#now() - cached.at < reuseFor) return cached.peerIds;
+    const peerIds = await this.#resolve(contextGraphId, signal).catch((): readonly string[] => []);
     this.#byGraph.delete(contextGraphId);
     if (this.#byGraph.size >= MAX_CACHED_GRAPHS) this.#byGraph.delete(this.#byGraph.keys().next().value as string);
     this.#byGraph.set(contextGraphId, { at: this.#now(), peerIds });

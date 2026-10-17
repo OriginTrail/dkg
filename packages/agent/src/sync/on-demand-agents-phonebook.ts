@@ -81,6 +81,13 @@ export function resolveOnDemandAgentsPhonebookFetch(
 export const AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS = 30 * 60_000;
 /** Spacing after a fetch that reached peers but obtained nothing. */
 export const AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS = 10 * 60_000;
+/**
+ * Spacing after a fetch whose peers answered with no rows: Cores that have
+ * just started and hold no phonebook yet. Such an answer costs almost nothing,
+ * and those Cores hold the profiles minutes later, when a share asks for its
+ * graph's owner (`swm/relay-only-share-routes.ts`).
+ */
+export const AGENTS_PHONEBOOK_FETCH_EMPTY_COOLDOWN_MS = 60_000;
 /** Wall-clock budget one fetch shares across every peer it tries. */
 export const AGENTS_PHONEBOOK_FETCH_BUDGET_MS = 120_000;
 /** Peers one fetch may transfer from. */
@@ -172,6 +179,7 @@ export interface OnDemandAgentsPhonebookOptions {
   now?: () => number;
   cooldownMs?: number;
   failureCooldownMs?: number;
+  emptyCooldownMs?: number;
   budgetMs?: number;
   maxPeers?: number;
   maxCandidates?: number;
@@ -225,6 +233,7 @@ export class OnDemandAgentsPhonebookFetcher {
   readonly #now: () => number;
   readonly #cooldownMs: number;
   readonly #failureCooldownMs: number;
+  readonly #emptyCooldownMs: number;
   readonly #budgetMs: number;
   readonly #maxPeers: number;
   readonly #maxCandidates: number;
@@ -255,6 +264,7 @@ export class OnDemandAgentsPhonebookFetcher {
     this.#now = options.now ?? Date.now;
     this.#cooldownMs = options.cooldownMs ?? AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS;
     this.#failureCooldownMs = options.failureCooldownMs ?? AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS;
+    this.#emptyCooldownMs = options.emptyCooldownMs ?? AGENTS_PHONEBOOK_FETCH_EMPTY_COOLDOWN_MS;
     this.#budgetMs = options.budgetMs ?? AGENTS_PHONEBOOK_FETCH_BUDGET_MS;
     this.#maxPeers = options.maxPeers ?? AGENTS_PHONEBOOK_FETCH_MAX_PEERS;
     this.#maxCandidates = options.maxCandidates ?? AGENTS_PHONEBOOK_FETCH_MAX_CANDIDATES;
@@ -543,14 +553,15 @@ export class OnDemandAgentsPhonebookFetcher {
     const resolved = wanted.filter((contextGraphId) => !unresolved.has(contextGraphId));
     const now = this.#now();
     // `empty`: peers answered but served no rows (a just-started or lean Core);
-    // like `failed`, it keeps the short cooldown so another peer is asked soon.
+    // it keeps the shortest cooldown, so that the phonebook is asked for again
+    // once such Cores hold it.
     const outcome: FetchOutcome = networkPhonebook
       || (fetchedTriples > 0 && unresolved.size === 0 && unresolvedWallets.length === 0)
       ? 'complete'
       : fetchedTriples > 0 ? 'partial' : answeredEmpty ? 'empty' : 'failed';
-    this.#nextEligibleAt = now + (outcome === 'failed' || outcome === 'empty'
-      ? this.#failureCooldownMs
-      : this.#cooldownMs);
+    this.#nextEligibleAt = now + (outcome === 'empty'
+      ? this.#emptyCooldownMs
+      : outcome === 'failed' ? this.#failureCooldownMs : this.#cooldownMs);
     if (networkPhonebook) {
       for (const contextGraphId of unresolved) {
         setBounded(

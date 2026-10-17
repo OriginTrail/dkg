@@ -149,38 +149,46 @@ describe('the route of a share to the graph\'s owner', () => {
 });
 
 describe('the owner peers of a graph', () => {
-  it('are looked up once per graph within the window, a failed lookup included', async () => {
+  it('are looked up once per graph within the window', async () => {
     let now = 0;
-    const resolve = vi.fn(async (contextGraphId: string) => {
-      if (contextGraphId === 'failing') throw new Error('registry unavailable');
-      return [OWNER_1];
-    });
+    const resolve = vi.fn(async () => [OWNER_1]);
     const owners = new GraphOwnerPeers(resolve, () => now);
 
     await expect(owners.of(GRAPH)).resolves.toEqual([OWNER_1]);
     await expect(owners.of(GRAPH)).resolves.toEqual([OWNER_1]);
-    await expect(owners.of('failing')).resolves.toEqual([]);
-    await expect(owners.of('failing')).resolves.toEqual([]);
-    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(resolve).toHaveBeenCalledTimes(1);
 
     now += GRAPH_OWNER_PEERS_TTL_MS;
     await owners.of(GRAPH);
-    expect(resolve).toHaveBeenCalledTimes(3);
+    expect(resolve).toHaveBeenCalledTimes(2);
   });
 
-  it('do not remember a lookup the caller gave up on', async () => {
-    let calls = 0;
-    const owners = new GraphOwnerPeers(async (_contextGraphId, signal) => {
-      calls += 1;
-      if (signal?.aborted) throw new Error('lookup aborted');
-      return [OWNER_1];
-    }, () => 0);
-    const gaveUp = new AbortController();
-    gaveUp.abort();
+  it('look an owner that was not found up again only after the pause, whether none was known or the lookup failed', async () => {
+    let now = 0;
+    const answers: Array<() => readonly string[]> = [
+      () => [],
+      () => { throw new Error('lookup aborted'); },
+      () => [OWNER_1],
+    ];
+    const resolve = vi.fn(async () => answers.shift()!());
+    const owners = new GraphOwnerPeers(resolve, () => now);
 
-    await expect(owners.of(GRAPH, gaveUp.signal)).rejects.toThrow('lookup aborted');
+    await expect(owners.of(GRAPH)).resolves.toEqual([]);
+    now += GRAPH_OWNER_RETRY_AFTER_MS - 1;
+    await expect(owners.of(GRAPH)).resolves.toEqual([]);
+    expect(resolve).toHaveBeenCalledTimes(1);
+
+    now += 1;
+    await expect(owners.of(GRAPH)).resolves.toEqual([]);
+    expect(resolve).toHaveBeenCalledTimes(2);
+    await expect(owners.of(GRAPH)).resolves.toEqual([]);
+    expect(resolve).toHaveBeenCalledTimes(2);
+
+    now += GRAPH_OWNER_RETRY_AFTER_MS;
     await expect(owners.of(GRAPH)).resolves.toEqual([OWNER_1]);
-    expect(calls).toBe(2);
+    now += GRAPH_OWNER_RETRY_AFTER_MS;
+    await expect(owners.of(GRAPH)).resolves.toEqual([OWNER_1]);
+    expect(resolve).toHaveBeenCalledTimes(3);
   });
 
   it('let a peer a connection failed to be tried again after the pause', () => {
