@@ -7,6 +7,7 @@ import {
 import { AccessClient } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from './dkg-agent.js';
+import { DKGAgentBase } from './dkg-agent-base.js';
 
 export interface PrivateAccessRequest {
   publisherPeerId: string;
@@ -77,5 +78,13 @@ export async function requestOwnedPrivateAccess(
   } finally {
     lifecycle.release();
     running.delete(owner);
+  }
+}
+
+export class PrivateAccessMethods extends DKGAgentBase {
+  /** Explicit private read; a peer-root self-check is not chain authentication. */
+  async requestPrivateAccess(this: DKGAgent, input: PrivateAccessRequest, options: { signal?: AbortSignal } = {}) {
+    if (!this.started) throw Object.assign(new Error('Node is not started'), { code: 'ACCESS_UNAVAILABLE' });
+    return requestOwnedPrivateAccess(this, input, options);
   }
 }

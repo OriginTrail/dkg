@@ -1,3 +1,5 @@
+import { classifyReconcileUnavailable } from './reconcile-unavailable.js';
+export { classifyReconcileUnavailable } from './reconcile-unavailable.js';
 import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 export { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 // HTTP request/response utilities extracted from the legacy monolithic
@@ -340,40 +342,10 @@ export function validateWritableQuadLiteralSizes(
   }
 }
 
-/**
- * KA-number-floor reconcile resilience (follow-up to the "KA create 500-on-429"
- * fix). If `e` is a **transient** reconcile failure — the chain RPC couldn't serve
- * the one-time-per-author floor read (e.g. a 429 after the bounded retry in
- * `allocator.ts` is exhausted) — send a retryable **503** and return true;
- * otherwise return false so the caller falls through to its normal mapping.
- *
- * The transient-vs-deterministic verdict comes from `retryable` (derived from
- * `isTransientChainError`): the typed `KaFloorReconcileError` carries it, and the
- * finalize/selection re-wrap sites in `dkg-agent-publish.ts` tag the same marker.
- * A deterministic failure (`retryable === false`, e.g. a revert) is NOT a 503 —
- * advertising a retry would be pointless — so it falls through. The legacy
- * message-text match is honored ONLY when the error explicitly marks itself
- * retryable, so a bare re-wrapped message can never force a deterministic error
- * into a retryable 503 (PR #1319 review). Used by every route that can trigger the
- * reconcile (named create, one-shot publish, shared-memory publish, and the
- * WM-verb routes via `respondAssertionError`) so they answer consistently.
- */
 export function respondIfReconcileUnavailable(res: ServerResponse, e: any): boolean {
-  const msg = e?.message ?? String(e);
-  const isTyped = e?.code === "KA_FLOOR_RECONCILE_UNAVAILABLE";
-  // Message-text fallback (for errors re-wrapped on the way up) is accepted only
-  // when the error explicitly carries a retryable marker — never for a bare
-  // message, which might be hiding a deterministic revert.
-  const isMarkedLegacyTransient =
-    e?.retryable === true && /failed to reconcile KA-number floor/i.test(msg);
-  if ((!isTyped && !isMarkedLegacyTransient) || e?.retryable === false) {
-    return false;
-  }
-  jsonResponse(res, 503, {
-    error: msg,
-    code: "KA_FLOOR_RECONCILE_UNAVAILABLE",
-    retryable: true,
-  });
+  const body = classifyReconcileUnavailable(e);
+  if (!body) return false;
+  jsonResponse(res, 503, body);
   return true;
 }
 
