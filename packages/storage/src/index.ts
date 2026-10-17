@@ -326,3 +326,5 @@ import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
 
 export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, type AtomicAssetReplacement } from './atomic-asset-group.js';
+
+export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';

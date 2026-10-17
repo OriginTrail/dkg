@@ -1,4 +1,5 @@
-import { respondPromoteRecoveryError, type PromoteRecoveryContext } from './promote-recovery-response.js';
+import type { AssertionFailureResponse } from './assertion-failure-response.js';
+import { classifyPromoteRecoveryError, type PromoteRecoveryContext } from './promote-recovery-response.js';
 export { respondPromoteRecoveryError } from './promote-recovery-response.js';
 import type { RequestContext } from './context.js';
 import {
@@ -13,9 +14,9 @@ import {
   jsonResponse,
   oversizedRdfLiteralResponseBody,
   payloadTooLargeResponseBody,
-  respondIfReconcileUnavailable,
-  respondIfStoreUnavailable,
-  respondIfChainRpcTransportError,
+  classifyReconcileUnavailable,
+  classifyStoreUnavailable,
+  classifyChainRpcTransportStatus,
 } from '../http-utils.js';
 
 /**
@@ -76,6 +77,8 @@ export function respondPublicationPricingPolicyError(res: RequestContext["res"],
 
 const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
   ['KA_ASSERTION_ALREADY_FINALIZED', 409],
+  ['KA_PROMOTE_ACK_REQUIREMENT_CONFLICT', 409],
+  ['KA_SHARE_INVENTORY_SIGNER_UNAVAILABLE', 422],
   ['KA_SLOT_ALREADY_CLAIMED', 409],
   ['KA_RESERVED_ID_MISMATCH', 409],
   ['ASSERTION_EMPTY', 409],
@@ -97,70 +100,38 @@ export function respondAssertionCodeError(res: RequestContext["res"], e: any): b
  * Map typed WM/SWM preconditions and integrity failures before message fallbacks.
  * VM publishing keeps its own mapping so chain failures remain server errors.
  */
-export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
-  if (respondPromoteRecoveryError(res, e, context)) return;
-  if (e?.code === "OVERSIZED_RDF_LITERAL") {
-    jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
-    return;
-  }
-  if (isPayloadTooLargeError(e)) {
-    jsonResponse(res, 413, payloadTooLargeResponseBody(e));
-    return;
-  }
-  if (respondIfStoreUnavailable(res, e)) return;
+export function classifyAssertionError(e: any, context?: PromoteRecoveryContext): AssertionFailureResponse {
+  const promote = classifyPromoteRecoveryError(e, context);
+  if (promote) return promote;
+  if (e?.code === "OVERSIZED_RDF_LITERAL") return { status: 400, body: oversizedRdfLiteralResponseBody(e) };
+  if (isPayloadTooLargeError(e)) return { status: 413, body: payloadTooLargeResponseBody(e) };
+  const store = classifyStoreUnavailable(e);
+  if (store) return { status: 503, partialDisposition: 'unavailable', body: store.body, headers: { 'Retry-After': '1' } };
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
-    jsonResponse(res, 409, {
-      error: e.message,
-      code: "ASSERTION_NOT_PERSISTED",
-      contextGraphId: e.contextGraphId,
-      assertionGraph: e.assertionGraph,
-      expectedTripleCount: e.expectedTripleCount,
-    });
-    return;
+    return { status: 409, body: {
+      error: e.message, code: "ASSERTION_NOT_PERSISTED", contextGraphId: e.contextGraphId,
+      assertionGraph: e.assertionGraph, expectedTripleCount: e.expectedTripleCount,
+    } };
   }
-  // Strict curator-ack gate (OT-RFC-49 curator-leader) on the WM→SWM promote
-  // (swm/share). The curator (authoritative replica) did not confirm, so the
-  // promote was aborted with WM left intact — surface a distinct, actionable
-  // status instead of a 500. The client is TOLD, never silently led to success.
-  if (e?.code === "CURATOR_UNCONFIRMED") {
-    jsonResponse(res, 503, {
-      error: e.message,
-      code: "CURATOR_UNCONFIRMED",
-      curatorDelivery: "unconfirmed",
-      contextGraphId: e.contextGraphId,
-    });
-    return;
+  if (e?.code === "CURATOR_UNCONFIRMED" || e?.code === "CURATOR_REJECTED") {
+    const unconfirmed = e.code === 'CURATOR_UNCONFIRMED';
+    return { status: unconfirmed ? 503 : 409, body: { error: e.message, code: e.code,
+      curatorDelivery: unconfirmed ? 'unconfirmed' : 'rejected', contextGraphId: e.contextGraphId } };
   }
-  if (e?.code === "CURATOR_REJECTED") {
-    jsonResponse(res, 409, {
-      error: e.message,
-      code: "CURATOR_REJECTED",
-      curatorDelivery: "rejected",
-      contextGraphId: e.contextGraphId,
-    });
-    return;
-  }
-  if (respondAssertionCodeError(res, e)) return;
-  // KA-number-floor reconcile couldn't reach the chain (e.g. a rate-limited RPC
-  // 429'd the one-time-per-author read) -> retryable 503, not 500.
-  if (respondIfReconcileUnavailable(res, e)) return;
-  // Transient chain-RPC transport failure (all endpoints exhausted / receipt
-  // lookup failed / timeout) -> retryable 503/504, keyed on err.code so a
-  // genuine on-chain revert (no transport code) still falls through to the
-  // 4xx/500 mapping below. Code-keyed check precedes the message-keyed 400
-  // branch so an exhaustion message that happens to contain "not found"
-  // (e.g. "header not found") is not mis-mapped to a 400.
-  if (respondIfChainRpcTransportError(res, e)) return;
+  const status = ASSERTION_CODE_STATUS.get(e?.code);
+  if (status !== undefined) return { status, body: { error: e.message, code: e.code } };
+  const reconcile = classifyReconcileUnavailable(e);
+  if (reconcile) return { status: 503, body: reconcile };
+  const transport = classifyChainRpcTransportStatus(e);
+  if (transport) return { ...transport, ...(transport.body.code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL'
+    ? { headers: { 'Retry-After': '1' } } : {}) };
   const msg = e?.message ?? String(e);
-  if (
-    e?.name === "ReservedNamespaceError" ||
-    msg.includes("not found") ||
-    msg.includes("Invalid") ||
-    msg.includes("Unsafe") ||
-    msg.includes("reserved namespace")
-  ) {
-    jsonResponse(res, 400, { error: msg });
-    return;
-  }
-  jsonResponse(res, 500, { error: msg });
+  const invalid = e?.name === "ReservedNamespaceError" || msg.includes("not found")
+    || msg.includes("Invalid") || msg.includes("Unsafe") || msg.includes("reserved namespace");
+  return { status: invalid ? 400 : 500, body: { error: msg } };
+}
+
+export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
+  const failure = classifyAssertionError(e, context);
+  jsonResponse(res, failure.status, failure.body, undefined, failure.headers);
 }

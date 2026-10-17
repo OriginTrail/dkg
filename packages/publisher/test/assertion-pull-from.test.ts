@@ -19,7 +19,7 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { BlazegraphNamespaceManager, BlazegraphStore, GraphManager, OxigraphStore, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { DKGPublisher, assertionScopedGraphUri } from '../src/index.js';
+import { DKGPublisher, TripleStoreAsyncPromoteQueue, assertionScopedGraphUri } from '../src/index.js';
 import { resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
@@ -319,6 +319,32 @@ describe('rootless assertionPullFrom', () => {
     await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).rejects.toThrow('injected archive failure');
     fault.mockRestore();
     await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).resolves.toMatchObject({ seededPublic: 2 });
+  });
+
+  it('keeps a torn seal blocked by a durable share owner until that owner succeeds (#3300, #3332)', async () => {
+    const { publisher, store } = await makePublisher();
+    await publisher.assertionCreate(CG, NAME, AGENT);
+    await publisher.assertionWrite(CG, NAME, AGENT, [q(ENTITY_1, SCHEMA, '"Alice"')]);
+    await publisher.assertionWritePrivate(CG, NAME, AGENT, [q(ENTITY_1, 'urn:secret', '"Private"')]);
+    await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AGENT });
+    const binding = await publisher.prepareAssertionPromoteRecovery(CG, NAME, AGENT, undefined, true);
+    if ('completedResult' in binding) throw new Error('Expected a fresh share binding');
+    await publisher.assertionPromote(CG, NAME, AGENT, { recoveryBinding: binding });
+    await interruptClear(publisher, store, 4);
+    // Model a historical torn clear alongside a persisted unfinished owner.
+    const queue = new TripleStoreAsyncPromoteQueue(store);
+    const job = await queue.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME,
+      agentAddress: AGENT, entities: 'all', recoveryBinding: binding }, 'owner');
+    const restarted = new DKGPublisher({ store, chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+    const before = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+    await expect(restarted.assertionPullFrom(CG, NAME, AGENT, 'swm'))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: job.jobId });
+    expect(await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o')).toEqual(before);
+    await queue.recordCommitMarker(job.jobId, job.lease!.claimToken, 'swmInserted');
+    await queue.succeed(job.jobId, job.lease!.claimToken, { promotedCount: 0, succeededAt: Date.now() });
+    await expect(restarted.assertionPullFrom(CG, NAME, AGENT, 'swm'))
+      .resolves.toMatchObject({ seededPublic: 1, seededPrivate: 1 });
   });
 
   it('preserves conflicting drafts and ordinary mutation guards after partial clear (#3332)', async () => {
