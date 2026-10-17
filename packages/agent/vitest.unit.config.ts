@@ -43,6 +43,7 @@ export default defineConfig({
       "test/private-swm-recovery-budget.test.ts",
       "test/swm-target-executor.test.ts",
       "test/swm-sync-sub-graph-registration.test.ts",
+      "test/swm-pull-knowledge-asset-share.test.ts",
       "test/swm-change-notice.test.ts",
       "test/swm-change-notice-wiring.test.ts",
       "test/shared-memory-sync-fresh-round.test.ts",
