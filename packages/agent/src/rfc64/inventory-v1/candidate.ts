@@ -1,3 +1,5 @@
+import { FinalizedPrivateRepairPersistenceV1 } from './finalized-private-repair-persistence.js';
+import type { PrivatePlacementFailureStateV1 } from '../../internal/finalized-private-repair-retry.js';
 import { type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 export { createRfc64SwmAuthorInventoryOperationsViewV1, type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 import { randomBytes } from 'node:crypto';
@@ -82,10 +84,6 @@ import {
 } from './swm-author-inventory-commit-plan.js';
 import { SwmAuthorInventoryPersistenceV1 } from './swm-author-inventory-persistence.js';
 import {
-  digestRfc64FinalizedPrivatePlacementRepairV1,
-  encodeRfc64FinalizedPrivatePlacementRepairV1,
-  parseRfc64FinalizedPrivatePlacementRepairV1,
-  snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairOperationsV1,
 } from '../finalized-private-placement-repair-store-v1.js';
@@ -1327,97 +1325,27 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     }
   }
 
-  listFinalizedPrivatePlacementRepairs(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[] {
-    this.assertOpen();
-    return this.readTransaction(() => {
-      const query = this.prepare(INVENTORY_V1_STATEMENT_SQL.listFinalizedPrivatePlacementRepairs);
-      const rows = this.statement(() => query.all() as SqlRowV1[]);
-      return Object.freeze(rows.map((row) => this.decodeFinalizedPrivatePlacementRepair(row)));
+  private finalizedRepairPersistence(): FinalizedPrivateRepairPersistenceV1 {
+    return new FinalizedPrivateRepairPersistenceV1({
+      assertOpen: () => this.assertOpen(), prepare: (sql) => this.prepare(sql),
+      statement: (run) => this.statement(run), read: (run) => this.readTransaction(run),
+      write: (label, run, strategy) => this.writeTransaction(label, run, strategy),
+      corrupt: (message) => new InventoryV1CandidateError('candidate-database-corrupt', message),
     });
   }
 
-  putFinalizedPrivatePlacementRepair(
-    input: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
-  ): void {
-    this.assertOpen();
-    const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1(input);
-    const bytes = encodeRfc64FinalizedPrivatePlacementRepairV1(repair);
-    const digest = digestRfc64FinalizedPrivatePlacementRepairV1(bytes);
-    const repairJson = new TextDecoder().decode(bytes);
-    this.writeTransaction('put finalized-private placement repair', () => {
-      const statement = this.prepare(
-        INVENTORY_V1_STATEMENT_SQL.insertFinalizedPrivatePlacementRepair,
-      );
-      const result = this.statement(() => statement.run({ repairDigest: digest, repairJson }));
-      if (Number(result.changes) === 0) {
-        const existing = this.readFinalizedPrivatePlacementRepairRow(digest);
-        if (existing?.repair_json !== repairJson) {
-          throw new InventoryV1CandidateError(
-            'candidate-database-corrupt',
-            'finalized-private placement repair digest is not bound to its bytes',
-          );
-        }
-      }
-    }, {
-      resolve: () => this.readFinalizedPrivatePlacementRepairRow(digest) === null
-        ? 'not-committed' : 'committed',
-      retry: () => {
-        const statement = this.prepare(
-          INVENTORY_V1_STATEMENT_SQL.insertFinalizedPrivatePlacementRepair,
-        );
-        this.statement(() => statement.run({ repairDigest: digest, repairJson }));
-      },
-    });
+  listFinalizedPrivatePlacementRepairs() { return this.finalizedRepairPersistence().listFinalizedPrivatePlacementRepairs(); }
+  putFinalizedPrivatePlacementRepair(repair: Rfc64FinalizedPrivatePlacementRepairV1): void {
+    this.finalizedRepairPersistence().putFinalizedPrivatePlacementRepair(repair);
   }
-
-  deleteFinalizedPrivatePlacementRepair(
-    input: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
-  ): void {
-    this.assertOpen();
-    const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1(input);
-    const bytes = encodeRfc64FinalizedPrivatePlacementRepairV1(repair);
-    const digest = digestRfc64FinalizedPrivatePlacementRepairV1(bytes);
-    const repairJson = new TextDecoder().decode(bytes);
-    this.writeTransaction('delete finalized-private placement repair', () => {
-      const current = this.readFinalizedPrivatePlacementRepairRow(digest);
-      if (current === null) return;
-      if (current.repair_json !== repairJson) {
-        throw new InventoryV1CandidateError(
-          'candidate-database-corrupt',
-          'finalized-private placement repair changed before deletion',
-        );
-      }
-      const statement = this.prepare(
-        INVENTORY_V1_STATEMENT_SQL.deleteFinalizedPrivatePlacementRepair,
-      );
-      const result = this.statement(() => statement.run({ repairDigest: digest, repairJson }));
-      if (Number(result.changes) !== 1) {
-        throw new InventoryV1CandidateError(
-          'candidate-database-corrupt',
-          'finalized-private placement repair deletion did not remove exactly one row',
-        );
-      }
-    }, {
-      resolve: () => this.readFinalizedPrivatePlacementRepairRow(digest) === null
-        ? 'committed' : 'not-committed',
-      retry: () => {
-        const statement = this.prepare(
-          INVENTORY_V1_STATEMENT_SQL.deleteFinalizedPrivatePlacementRepair,
-        );
-        this.statement(() => statement.run({ repairDigest: digest, repairJson }));
-      },
-    });
+  deleteFinalizedPrivatePlacementRepair(repair: Rfc64FinalizedPrivatePlacementRepairV1): void {
+    this.finalizedRepairPersistence().deleteFinalizedPrivatePlacementRepair(repair);
   }
-
-  private readFinalizedPrivatePlacementRepairRow(
-    digest: Uint8Array,
-  ): SqlRowV1 | null {
-    const query = this.prepare(
-      `SELECT repair_digest, repair_json
-       FROM rfc64_finalized_private_placement_repairs_v1
-       WHERE repair_digest = :repairDigest;`,
-    );
-    return (this.statement(() => query.get({ repairDigest: digest })) as SqlRowV1 | undefined) ?? null;
+  readFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1) {
+    return this.finalizedRepairPersistence().readFinalizedPrivatePlacementFailure(repair);
+  }
+  writeFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null): void {
+    this.finalizedRepairPersistence().writeFinalizedPrivatePlacementFailure(repair, state);
   }
 
   readUnregisteredAuthoritySeedV1(
@@ -1520,34 +1448,6 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
         { cause },
       );
     }
-  }
-
-  private decodeFinalizedPrivatePlacementRepair(
-    row: SqlRowV1,
-  ): Readonly<Rfc64FinalizedPrivatePlacementRepairV1> {
-    if (!(row.repair_digest instanceof Uint8Array)
-      || row.repair_digest.byteLength !== 32
-      || typeof row.repair_json !== 'string') {
-      throw new InventoryV1CandidateError(
-        'candidate-database-corrupt',
-        'finalized-private placement repair row has invalid storage types',
-      );
-    }
-    const bytes = new TextEncoder().encode(row.repair_json);
-    const repair = parseRfc64FinalizedPrivatePlacementRepairV1(bytes);
-    if (!sqlBlobsEqualV1(
-      row.repair_digest,
-      digestRfc64FinalizedPrivatePlacementRepairV1(bytes),
-    ) || !sqlBlobsEqualV1(
-      bytes,
-      encodeRfc64FinalizedPrivatePlacementRepairV1(repair),
-    )) {
-      throw new InventoryV1CandidateError(
-        'candidate-database-corrupt',
-        'finalized-private placement repair row is not canonical or digest-bound',
-      );
-    }
-    return repair;
   }
 
   private assertCandidateHeadBinding(

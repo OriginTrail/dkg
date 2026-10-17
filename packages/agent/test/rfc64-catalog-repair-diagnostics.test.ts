@@ -64,3 +64,26 @@ describe('catalog repair bounded cause attribution', () => {
     expect(catalogRepairDiagnosticV1(error)).toMatchObject({ kind: 'unknown', stage: 'seal' });
   });
 });
+
+it('classifies the actual inactive finalized-private placement guard', async () => {
+  const { Rfc64SwmCatalogProjectionMethods } = await import('../src/dkg-agent-rfc64-swm-catalog-projection.js');
+  const method = (Rfc64SwmCatalogProjectionMethods.prototype as any).publishRfc64FinalizedPrivateCatalogPlacementV1;
+  const error = await method.call({ resolveRfc64CatalogAuthoringLaneV1: () => null },
+    { contextGraphId: 'inactive-private' }, {}).catch((error: unknown) => error);
+  expect(catalogRepairDiagnosticV1(error).kind).toBe('lane_inactive');
+});
+
+
+it.each(['policy_conflict', 'persistence_unavailable'] as const)('classifies the actual %s placement guard without exposing its text', async kind => {
+  const { Rfc64SwmCatalogProjectionMethods } = await import('../src/dkg-agent-rfc64-swm-catalog-projection.js');
+  const authorAddress = `0x${'11'.repeat(20)}`;
+  const scope = { networkId: 'testnet', contextGraphId: 'private-guard', governanceChainId: null,
+    governanceContractAddress: null, ownershipTransitionDigest: null, authorAddress, subGraphName: null, era: '1' };
+  const lane = { acceptsFinalizedVmRepair: true, scopeBase: { ...scope,
+    era: kind === 'policy_conflict' ? '2' : '1' } };
+  const method = (Rfc64SwmCatalogProjectionMethods.prototype as any).publishRfc64FinalizedPrivateCatalogPlacementV1;
+  const error = await method.call({ resolveRfc64CatalogAuthoringLaneV1: () => lane },
+    { contextGraphId: scope.contextGraphId, inventoryScope: scope, authorAddress }, {}).catch((error: unknown) => error);
+  expect(catalogRepairDiagnosticV1(error).kind).toBe(kind);
+  expect(JSON.stringify(catalogRepairDiagnosticV1(error))).not.toContain('private-guard');
+});

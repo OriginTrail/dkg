@@ -173,6 +173,7 @@ export function sanitizeRfc64FinalizedPrivatePlacementQueueV1(
     || !isNullableNonNegativeSafeIntegerV1(input.lastPassDurationMs)
   ) return null;
   return Object.freeze({
+    ...(input.failures === undefined ? {} : { failures: sanitizePrivatePlacementFailures(input.failures) }),
     depth: input.depth as number,
     ...(input.pending === undefined ? {} : { pending: input.pending }),
     ...(input.oldestPendingAgeMs === undefined ? {} : { oldestPendingAgeMs: input.oldestPendingAgeMs }),
@@ -252,4 +253,26 @@ function hasConsistentShadowSafetyEvidenceV1(
     && isNonNegativeSafeIntegerV1(authoritativeApplyCount)
     && receiver.stagingObserved === (staged > 0)
     && receiver.stageOnlyInvariantSatisfied === (authoritativeApplyCount === 0);
+}
+
+/** Rebuild the bounded aggregate; no marker identity or dependency text crosses the route. */
+function sanitizePrivatePlacementFailures(input: unknown): NonNullable<FinalizedPrivatePlacementQueueStatusV1['failures']> | undefined {
+  if (!isRecordV1(input) || !hasNonNegativeSafeIntegersV1(input,
+    ['failedMarkers', 'parkedMarkers', 'maxConsecutiveFailures'])
+    || !isNullableNonNegativeSafeIntegerV1(input.oldestFailureAgeMs)
+    || !Array.isArray(input.kinds) || input.kinds.length > 14) return undefined;
+  const allowed = new Set(['queue_wait', 'queue_full', 'store_timeout_not_started', 'store_timeout_indeterminate',
+    'transport', 'cancelled', 'integrity', 'lane_inactive', 'catalog_full', 'unknown',
+    'policy_conflict', 'version_conflict', 'signer_mismatch', 'persistence_unavailable']);
+  const counts: NonNullable<FinalizedPrivatePlacementQueueStatusV1['failures']>['kinds'][number][] = [];
+  for (const row of input.kinds) {
+    if (!isRecordV1(row) || typeof row.kind !== 'string' || !allowed.delete(row.kind)
+      || !isNonNegativeSafeIntegerV1(row.count)) return undefined;
+    counts.push(Object.freeze({ kind: row.kind as typeof counts[number]['kind'], count: row.count }));
+  }
+  if (Number(input.parkedMarkers) > Number(input.failedMarkers) || counts.reduce((sum, row) => sum + row.count, 0) !== input.failedMarkers) return undefined;
+  return Object.freeze({ failedMarkers: input.failedMarkers as number, parkedMarkers: input.parkedMarkers as number,
+    maxConsecutiveFailures: input.maxConsecutiveFailures as number, oldestFailureAgeMs: input.oldestFailureAgeMs,
+    kinds: Object.freeze(counts),
+  });
 }

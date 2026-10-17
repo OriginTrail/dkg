@@ -10,6 +10,7 @@ import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import { handleSharedMemoryTtlSettingsRequest } from '../src/daemon/shared-memory-ttl-route.js';
+import { sanitizeRfc64FinalizedPrivatePlacementQueueV1 } from '../src/daemon/routes/rfc64-status-contract.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // Node-wide operations accept only callers that can administer the node: a
@@ -378,4 +379,44 @@ describe('shared memory TTL setting', () => {
     expect((await ttl('POST', '/api/settings/shared-memory-ttl', OPERATOR)).handled).toBe(false);
     expect((await ttl('PUT', '/api/settings/retention', OPERATOR)).handled).toBe(false);
   });
+});
+
+
+describe('private placement operator retry', () => {
+  const path = '/api/rfc64/private-placement/retry-failed';
+  it('denies agent-scoped callers before scheduling any work', async () => {
+    const retryRfc64FailedPrivatePlacementsV1 = vi.fn(() => 2);
+    const result = await callRoute(handleStatusRoutes, 'POST', path, AGENT, { agent: { retryRfc64FailedPrivatePlacementsV1 } });
+    expect(result.status).toBe(403); expect(retryRfc64FailedPrivatePlacementsV1).not.toHaveBeenCalled();
+  });
+  it.each([OPERATOR, AUTH_DISABLED])('accepts node administration and returns only the scheduled count', async (authentication) => {
+    const retryRfc64FailedPrivatePlacementsV1 = vi.fn(() => 2);
+    expect(await callRoute(handleStatusRoutes, 'POST', path, authentication, { agent: { retryRfc64FailedPrivatePlacementsV1 } }))
+      .toEqual({ status: 202, body: { requested: 2 } });
+    expect(retryRfc64FailedPrivatePlacementsV1).toHaveBeenCalledTimes(1);
+  });
+  it('contains private persistence errors without claiming retry succeeded', async () => {
+    const retryRfc64FailedPrivatePlacementsV1 = () => { throw new Error('private marker SECRET'); };
+    const result = await callRoute(handleStatusRoutes, 'POST', path, OPERATOR, { agent: { retryRfc64FailedPrivatePlacementsV1 } });
+    expect(result.status).toBe(503); expect(result.body.code).toBe('PRIVATE_PLACEMENT_RETRY_UNAVAILABLE');
+    expect(JSON.stringify(result)).not.toContain('SECRET');
+  });
+});
+
+
+it('exposes only bounded private-placement failure aggregates and rejects forged kinds/counts', () => {
+  const failures = { failedMarkers: 2, parkedMarkers: 1, maxConsecutiveFailures: 3, oldestFailureAgeMs: 90000,
+    kinds: [{ kind: 'signer_mismatch', count: 2, repairId: 'SECRET' }], authorAddress: 'SECRET', error: 'SECRET' };
+  const queue = { depth: 2, waiters: 0, cooldownSkips: 3, passRunning: false,
+    oldestWaiterAgeMs: null, lastPassDurationMs: 4, failures };
+  const sanitized = sanitizeRfc64FinalizedPrivatePlacementQueueV1(queue);
+  expect(sanitized?.failures).toEqual({ failedMarkers: 2, parkedMarkers: 1,
+    maxConsecutiveFailures: 3, oldestFailureAgeMs: 90000, kinds: [{ kind: 'signer_mismatch', count: 2 }] });
+  expect(JSON.stringify(sanitized)).not.toContain('SECRET');
+  for (const bad of [{ ...failures, kinds: [{ kind: 'SECRET', count: 2 }] },
+    { ...failures, parkedMarkers: 3 }, { ...failures, kinds: [{ kind: 'unknown', count: 1 }] },
+    { ...failures, kinds: Array(15).fill({ kind: 'unknown', count: 1 }) },
+    { ...failures, oldestFailureAgeMs: -1 }]) {
+    expect(sanitizeRfc64FinalizedPrivatePlacementQueueV1({ ...queue, failures: bad })?.failures).toBeUndefined();
+  }
 });

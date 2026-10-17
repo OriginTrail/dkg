@@ -24,7 +24,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-function fixture(retryIntervalMs = 5_000) {
+function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorParameters<typeof Rfc64SwmCatalogProjectionOwnerV1>[0]> = {}) {
   let revision: CatalogRepairRevisionHintV1 = { scopeIdentity: 'scope-1', headRevision: 'head-1' };
   let available = true;
   let privateRepairs: readonly Rfc64FinalizedPrivatePlacementRepairV1[] = [];
@@ -45,6 +45,7 @@ function fixture(retryIntervalMs = 5_000) {
     repairFinalizedPrivatePlacement: repairPrivate,
     reconcile,
     warn,
+    ...overrides,
   };
   const owner = new Rfc64SwmCatalogProjectionOwnerV1(dependencies);
   owners.push(owner);
@@ -696,4 +697,31 @@ describe('RFC-64 unchanged repair backoff', () => {
     await f.advance(20_000);
     expect(f.repairPrivate).toHaveBeenCalledTimes(1);
   });
+});
+
+it('reduces the repeated private-marker retry cost beyond the old one-minute ceiling', async () => {
+  const f = fixture();
+  f.setPrivateRepairs([privateRepair()]);
+  f.owner.start(ctx);
+  await f.advance(600_000);
+  expect(f.repairPrivate.mock.calls.length).toBeLessThanOrEqual(8);
+  expect(f.repairPrivate.mock.calls.length).toBeGreaterThan(1);
+});
+
+
+it('schedules successful operator retries even if a later diagnostic write fails with periodic work disabled', async () => {
+  let writes = 0;
+  const f = fixture(0, {
+    readPrivateFailure: () => ({ kind: 'signer_mismatch', consecutiveFailures: 3, sameKindFailures: 3,
+      firstFailedAtMs: 0, lastFailedAtMs: 0, nextAttemptAtMs: null, parked: true }),
+    writePrivateFailure: () => { if (++writes === 2) throw new Error('second row unavailable'); },
+  });
+  const a = privateRepair(), b = { ...privateRepair(), assertionCoordinate: 'other' };
+  f.setPrivateRepairs([a, b]); f.owner.start(ctx); await f.owner.whenIdle();
+  expect(f.repairPrivate).not.toHaveBeenCalled();
+  expect(() => f.owner.retryFailedPrivate(ctx)).toThrow('second row unavailable');
+  await f.advance(0);
+  expect(f.repairPrivate).toHaveBeenCalledTimes(1);
+  expect(f.repairPrivate.mock.calls[0][0]).toEqual(a);
+  expect(f.listPrivateRepairs()).toEqual([a, b]);
 });

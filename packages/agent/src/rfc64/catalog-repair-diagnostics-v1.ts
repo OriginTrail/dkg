@@ -16,10 +16,11 @@ const SOURCES = {
   projection_validation: 'catalog.projection_validation',
 } as const;
 type CatalogRepairStageV1 = keyof typeof SOURCES;
-type CatalogRepairFailureKindV1 =
+export type CatalogRepairFailureKindV1 =
   | 'queue_wait' | 'queue_full' | 'store_timeout_not_started'
   | 'store_timeout_indeterminate' | 'transport' | 'cancelled'
-  | 'integrity' | 'lane_inactive' | 'catalog_full' | 'unknown';
+  | 'integrity' | 'lane_inactive' | 'catalog_full' | 'unknown'
+  | 'policy_conflict' | 'version_conflict' | 'signer_mismatch' | 'persistence_unavailable';
 
 export interface CatalogRepairDiagnosticV1 {
   readonly kind: CatalogRepairFailureKindV1;
@@ -34,6 +35,14 @@ export class CatalogRepairLaneInactiveErrorV1 extends Error {
 }
 
 export class CatalogRepairIntegrityErrorV1 extends Error {}
+
+export type CatalogRepairConditionKindV1 =
+  | 'policy_conflict' | 'version_conflict' | 'signer_mismatch' | 'persistence_unavailable';
+
+/** Typed local guards; diagnostic output never reflects their internal message. */
+export class CatalogRepairConditionErrorV1 extends Error {
+  constructor(readonly kind: CatalogRepairConditionKindV1, message: string) { super(message); }
+}
 
 class CatalogRepairStageErrorV1 extends Error {
   constructor(
@@ -83,7 +92,11 @@ export function catalogRepairDiagnosticV1(error: unknown): Readonly<CatalogRepai
             ? Math.round(current.elapsedMs) : null;
         }
       }
-      if (current instanceof CatalogRepairLaneInactiveErrorV1) kind = 'lane_inactive';
+      if (current instanceof CatalogRepairConditionErrorV1) {
+        const condition = current.kind;
+        if (['policy_conflict', 'version_conflict', 'signer_mismatch', 'persistence_unavailable'].includes(condition)) kind = condition;
+      }
+      else if (current instanceof CatalogRepairLaneInactiveErrorV1) kind = 'lane_inactive';
       else if (current instanceof CatalogRepairIntegrityErrorV1
         || (current instanceof ExactGraphReadError && current.kind === 'integrity')) kind = 'integrity';
       else if (isStoreSchedulerBusyError(current)) kind = current.reason === 'queue_wait_timeout' ? 'queue_wait' : 'queue_full';

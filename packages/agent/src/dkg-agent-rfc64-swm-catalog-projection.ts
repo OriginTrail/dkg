@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { CatalogRepairConditionErrorV1, CatalogRepairLaneInactiveErrorV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 /** Selected-CG durable SWM-inventory to signed-catalog projection owner. */
 
 import {
@@ -258,7 +259,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
     if (lane === null || !lane.acceptsFinalizedVmRepair) {
-      throw new Error('RFC-64 finalized-private placement repair lane is inactive');
+      throw new CatalogRepairLaneInactiveErrorV1();
     }
     const currentInventoryScope = Object.freeze({
       ...lane.scopeBase,
@@ -268,13 +269,13 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       computeSwmAuthorInventoryScopeDigestV1(currentInventoryScope)
       !== computeSwmAuthorInventoryScopeDigestV1(params.inventoryScope)
     ) {
-      throw new Error(
+      throw new CatalogRepairConditionErrorV1('policy_conflict',
         'RFC-64 finalized-private placement repair conflicts with a policy transition',
       );
     }
     const inventoryScope = params.inventoryScope;
     const persistence = this.rfc64PersistenceV1;
-    if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+    if (persistence === undefined) throw new CatalogRepairConditionErrorV1('persistence_unavailable', 'RFC-64 persistence is unavailable');
     const scope = Object.freeze({
       ...inventoryScope,
       bucketCount: '1',
@@ -355,7 +356,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
             ? signMessageAs(authorAddress, message)
             : signMessage !== undefined
               ? signMessage(message)
-              : Promise.reject(new Error('RFC-64 configured chain has no message signer'))
+              : Promise.reject(new CatalogRepairConditionErrorV1('signer_mismatch', 'RFC-64 configured chain has no message signer'))
         ),
         signal,
       );
@@ -364,7 +365,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         yParityAndS: ethers.hexlify(compact.vs),
       }).serialized;
       if (ethers.verifyMessage(message, signature).toLowerCase() !== authorAddress) {
-        throw new Error('RFC-64 configured publisher cannot sign for the confirmed KA author');
+        throw new CatalogRepairConditionErrorV1('signer_mismatch', 'RFC-64 configured publisher cannot sign for the confirmed KA author');
       }
       return signature;
     };
@@ -380,7 +381,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         const author = await heldAuthorSigner(this, authors, authorAddress);
         if (author !== undefined) return rfc64AuthorDigestSignerV1(authorAddress, author, signal)(message);
         if (signsThroughExternalSigner(chain)) {
-          throw new Error(`RFC-64: author ${authorAddress} has no key on this node and is no author key of its external signer`);
+          throw new CatalogRepairConditionErrorV1('signer_mismatch', `RFC-64: author ${authorAddress} has no key on this node and is no author key of its external signer`);
         }
         return signWithChain(message);
       },
@@ -424,7 +425,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       authorAddress: params.authorAddress,
     }) as SwmAuthorInventoryScopeV1;
     const persistence = this.rfc64PersistenceV1;
-    if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+    if (persistence === undefined) throw new CatalogRepairConditionErrorV1('persistence_unavailable', 'RFC-64 persistence is unavailable');
     const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(inventoryScope);
     const inventoryScopeKey = `${inventoryScopeDigest}\n${params.authorAddress}`;
     // Hold the inventory lock only long enough to take one immutable durable

@@ -136,6 +136,7 @@ export interface CatalogPlacementWaitV1 {
 
 /** Aggregate finalized-private queue evidence; no UAL, author or graph id. */
 export interface FinalizedPrivatePlacementQueueStatusV1 {
+  readonly failures?: import('./finalized-private-repair-retry.js').PrivatePlacementFailureSummaryV1;
   /** Markers the most recent supervisor pass listed (never a fresh read). */
   readonly depth: number;
   /**

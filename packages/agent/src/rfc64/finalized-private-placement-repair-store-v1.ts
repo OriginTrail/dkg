@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { PrivatePlacementFailureStateV1 } from '../internal/finalized-private-repair-retry.js';
 import { createHash } from 'node:crypto';
 
 import {
@@ -41,6 +42,8 @@ export interface Rfc64FinalizedPrivatePlacementRepairV1
 /** The repair queue is implemented by the single owned inventory connection. */
 export interface Rfc64FinalizedPrivatePlacementRepairOperationsV1 {
   listFinalizedPrivatePlacementRepairs(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[];
+  readFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1): PrivatePlacementFailureStateV1 | null;
+  writeFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null): void;
   putFinalizedPrivatePlacementRepair(
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
   ): void;
@@ -51,6 +54,8 @@ export interface Rfc64FinalizedPrivatePlacementRepairOperationsV1 {
 
 export interface Rfc64FinalizedPrivatePlacementRepairStoreV1 {
   list(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[];
+  readFailure?(repair: Rfc64FinalizedPrivatePlacementRepairV1): PrivatePlacementFailureStateV1 | null;
+  writeFailure?(repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null): void;
   put(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void>;
   delete(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void>;
 }
@@ -60,6 +65,8 @@ export function createRfc64FinalizedPrivatePlacementRepairStoreV1(
 ): Rfc64FinalizedPrivatePlacementRepairStoreV1 {
   return Object.freeze({
     list: () => operations.listFinalizedPrivatePlacementRepairs(),
+    readFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1) => operations.readFinalizedPrivatePlacementFailure(repair),
+    writeFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null) => operations.writeFinalizedPrivatePlacementFailure(repair, state),
     put: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
       operations.putFinalizedPrivatePlacementRepair(repair);
     },
