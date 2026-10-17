@@ -259,7 +259,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
     if (lane === null || !lane.acceptsFinalizedVmRepair) {
-      throw new CatalogRepairLaneInactiveErrorV1();
+      throw new CatalogRepairLaneInactiveErrorV1('RFC-64 finalized-private placement repair lane is inactive');
     }
     const currentInventoryScope = Object.freeze({
       ...lane.scopeBase,

@@ -31,7 +31,7 @@ export interface CatalogRepairDiagnosticV1 {
 }
 
 export class CatalogRepairLaneInactiveErrorV1 extends Error {
-  constructor() { super('RFC-64 catalog repair lane is temporarily inactive'); }
+  constructor(message = 'RFC-64 catalog repair lane is temporarily inactive') { super(message); }
 }
 
 export class CatalogRepairIntegrityErrorV1 extends Error {}

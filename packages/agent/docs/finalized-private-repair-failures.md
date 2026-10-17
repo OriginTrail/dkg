@@ -62,3 +62,5 @@ aggregate redaction. A native node restart test exercises the real agent startup
 owned inventory and Oxigraph paths against an inactive marker without a mocked
 repair implementation. These tests do not establish the cause of every historical
 `unknown` failure reported in issue #3178.
+
+Catalog-capacity parking keeps its existing applied-head wakeups and hourly safety-net rotation. It does not persist the generic private-failure cooldown, so freeing a row can admit owed placement in the next pass.

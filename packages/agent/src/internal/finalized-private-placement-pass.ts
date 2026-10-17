@@ -78,6 +78,18 @@ export async function runFinalizedPrivatePlacementPass(state: State, signal: Abo
         placement.end('failed');
         if (!signal.aborted) {
           const changed = host.observeLane(entry.retry, repair.contextGraphId);
+          if (changed) state.finalizedPrivateRunner.request();
+          // Capacity parking owns its own head-change and safety-net retries.
+          // Persisting a generic cooldown here would delay a newly freed row.
+          if (host.fullCatalogs.placementRefused(key, repair, error)) {
+            state.finalizedPrivateRetries.delete(key);
+            try { host.writeFailure?.(repair, null); }
+            catch {
+              host.warn(new CatalogRepairConditionErrorV1('persistence_unavailable',
+                'Private placement failure history could not clear; owed work is retained'), entry.attempts, entry.retry);
+            }
+            return;
+          }
           const recorded = entry.retry.fail(attemptGeneration, Date.now(), state.retryIntervalMs, catalogRepairDiagnosticV1(error).kind);
           if (recorded) {
             try { host.writeFailure?.(repair, entry.retry.snapshot()); }
@@ -86,9 +98,7 @@ export async function runFinalizedPrivatePlacementPass(state: State, signal: Abo
                 'Private placement failure history could not persist; owed work is retained'), entry.attempts, entry.retry);
             }
           }
-          if (changed) state.finalizedPrivateRunner.request();
-          if (host.fullCatalogs.placementRefused(key, repair, error)) state.finalizedPrivateRetries.delete(key);
-          else host.warn(error, entry.attempts, entry.retry);
+          host.warn(error, entry.attempts, entry.retry);
         }
       } finally {
         state.finalizedPrivateWaiters.release(key, placement);
