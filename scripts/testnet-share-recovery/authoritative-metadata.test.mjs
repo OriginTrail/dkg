@@ -89,6 +89,23 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     }
     write('pre-workload/rdf.json', rdf(before));
     campaign.cohorts = { initial: [], shares: [name], publications: [], restart: [] }; write('campaign-manifest.json', campaign);
+    // Newly shared assets have no original operation, but their final authority must be valid.
+    write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...operation]));
+    assert.deepEqual(run().proof.operationErrors, []);
+    for (const invalid of [
+      [], [operation[0]], [operation[1]],
+      [operation[0], { ...operation[1], o: { type: 'literal', value: 'not-json' } }],
+      [operation[0], { ...operation[1], o: { type: 'literal', value: JSON.stringify({ ...intent, timestampMs: 0 }) } }],
+      [{ ...operation[0], o: { type: 'literal', value: '/invalid' } }, { ...operation[1], o: { type: 'literal', value: JSON.stringify({ ...intent, operationId: '/invalid' }) } }],
+      [...operation, { ...operation[1], o: { type: 'literal', value: JSON.stringify({ ...intent, timestampMs: 2 }) } }],
+      [{ ...operation[0], o: { type: 'literal', value: 'different' } }, operation[1]],
+    ]) {
+      write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...invalid]));
+      const invalidProof = run().proof;
+      assert.equal(invalidProof.assets[0].originalOperationPreserved, true);
+      assert.equal(invalidProof.assets[0].finalOperationValid, false);
+      assert.deepEqual(invalidProof.operationErrors, [name]);
+    }
     const wmPayload = payload.map(r => ({ ...r, g: { type: 'uri', value: swmGraph.replace('_shared_memory', '_working_memory') } }));
     write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...wmPayload]));
     assert.deepEqual(run().proof.contentErrors, [name]);
@@ -105,6 +122,7 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     const incomplete = run().proof;
     assert.deepEqual(incomplete.lifecycleErrors, [name]);
     assert.deepEqual(incomplete.contentErrors, []);
+    assert.deepEqual(incomplete.operationErrors, []);
     for (const object of [{ type: 'literal', value: 'promoted', 'xml:lang': 'fr' }, { type: 'uri', value: 'promoted' }]) {
       write('fixed-deadline/rdf.json', rdf([...metadata.map(r => r.s.value === life && r.p.value.endsWith('/state') ? { ...r, o: object } : r), ...payload]));
       assert.deepEqual(run().proof.lifecycleErrors, [name]);

@@ -95,23 +95,27 @@ export async function preparePromoteRecoveryBinding(
 /** Recheck immutable stored evidence before entering any replay mutation. */
 export async function assertPromoteRecoveryBinding(
   store: TripleStore, contextGraphId: string, name: string, agentAddress: string,
-  opts: PublisherAssertionPromoteOptions, retireCompletion: () => Promise<void>,
+  opts: PublisherAssertionPromoteOptions, retireCompletion: () => Promise<void>, phase: 'admission' | 'replay',
 ) {
   const binding = validatePromoteRecoveryBinding(opts.recoveryBinding);
   const current = await readPromoteRecoveryEvidence(store, contextGraphId, name, agentAddress, opts);
   if (current.sealDigest !== binding.sealDigest) throw recoveryBindingConflict('The sealed asset changed after durable share admission');
+  let operation: ReturnType<typeof current.readOperation>;
   try {
-    const operation = current.readOperation();
+    operation = current.readOperation();
     if (operation.kind === 'legacy') throw recoveryBindingConflict('The original share operation lost its immutable intent');
-    if (operation.kind === 'complete'
-      && serializePromoteOperationIntent(operation.intent) !== serializePromoteOperationIntent(binding.intent)) {
-      throw recoveryBindingConflict('The immutable share operation changed after durable admission');
-    }
   } catch (error) {
     // Only deterministic persisted-operation validation is inside this catch.
     // Reads and caller/seal validation above must not revoke a valid certificate.
     await retireCompletion();
     throw error;
+  }
+  if (operation.kind === 'complete'
+    && serializePromoteOperationIntent(operation.intent) !== serializePromoteOperationIntent(binding.intent)) {
+    // Another request can win between preparation and admission. Its valid
+    // operation is not corrupt merely because this unadmitted binding is stale.
+    if (phase === 'replay') await retireCompletion();
+    throw recoveryBindingConflict('The immutable share operation changed after durable admission');
   }
   return current;
 }

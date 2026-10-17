@@ -76,6 +76,18 @@ describe('bound ownership extends the publisher lifecycle mutation fence', () =>
     expect(await store.countQuads(seal.sharedGraphUri)).toBe(persisted.includes('swm')?80:0);
   });
 
+  it('preserves a completed competing operation when a stale binding reaches admission', async()=>{
+    const {publisher,queue,request}=await setup();
+    const stale=await publisher.prepareAssertionPromoteRecovery(CG,NAME,AUTHOR,undefined,true);
+    if('completedResult' in stale)throw new Error('Expected a second prepared binding');
+    await publisher.assertionPromote(CG,NAME,AUTHOR,{recoveryBinding:request.recoveryBinding});
+    const late={...request,recoveryBinding:stale};
+    await expect(publisher.admitPreparedAssertionShare(late,()=>queue.enqueueAndClaim(late,'late')))
+      .rejects.toMatchObject({code:'KA_PROMOTE_RECOVERY_BINDING_CONFLICT'});
+    expect(await publisher.hasSwmShareComplete(CG,NAME,AUTHOR)).toBe(true);
+    expect(await queue.list()).toEqual([]);
+  });
+
   it.each(['corrupt','missing','changed'])('revokes a completed publisher certificate for %s persisted bound authority', async fault=>{
     const {publisher,store,request}=await setup();
     await publisher.assertionPromote(CG,NAME,AUTHOR,{recoveryBinding:request.recoveryBinding});

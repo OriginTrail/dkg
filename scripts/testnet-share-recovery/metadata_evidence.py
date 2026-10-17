@@ -10,16 +10,14 @@ def index_authoritative_metadata(rows, metadata_graph):
     return index
 
 
-def preserves_original_operation(before, after):
-    """Compare the complete immutable record, including cardinality and RDF kinds."""
-    import json
+def valid_operation_record(rows):
+    """Require one complete, mutually consistent immutable operation record."""
+    import json, re
     from collections import Counter
-    from payload_evidence import rdf_tuple, XSD_STRING
+    from payload_evidence import XSD_STRING
     prefix = 'http://dkg.io/ontology/'
     predicates = {prefix + 'shareOperationId', prefix + 'promoteOperationIntent'}
-    original = [row for row in before if row['p']['value'] in predicates]
-    if not original:
-        return True  # A newly shared draft had no original operation to preserve.
+    original = [row for row in rows if row['p']['value'] in predicates]
     if Counter(row['p']['value'] for row in original) != Counter({p: 1 for p in predicates}):
         return False
     values = {}
@@ -36,7 +34,7 @@ def preserves_original_operation(before, after):
             return False
         peers = intent.get('allowedPeers')
         peer = intent.get('publisherPeerId')
-        if (type(intent.get('version')) is not int or intent['version'] != 1 or not values[prefix + 'shareOperationId']
+        if (type(intent.get('version')) is not int or intent['version'] != 1 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,255}', values[prefix + 'shareOperationId'])
                 or intent.get('operationId') != values[prefix + 'shareOperationId']
                 or type(intent.get('timestampMs')) is not int or not 0 < intent['timestampMs'] <= 9007199254740991
                 or type(intent.get('confirmationRequired')) is not bool
@@ -47,5 +45,15 @@ def preserves_original_operation(before, after):
             return False
     except (ValueError, TypeError):
         return False
+    return True
+
+
+def preserves_original_operation(before, after):
+    """Preservation is distinct from validity of a newly created final record."""
+    from collections import Counter
+    from payload_evidence import rdf_tuple
+    predicates = {'http://dkg.io/ontology/' + p for p in ('shareOperationId', 'promoteOperationIntent')}
+    original = [row for row in before if row['p']['value'] in predicates]
     current = [row for row in after if row['p']['value'] in predicates]
-    return Counter(map(rdf_tuple, original)) == Counter(map(rdf_tuple, current))
+    return not original or (valid_operation_record(original)
+                            and Counter(map(rdf_tuple, original)) == Counter(map(rdf_tuple, current)))

@@ -588,6 +588,24 @@ describe('durable synchronous share ownership', () => {
     } finally { await worker.stop(); await store.close(); }
   });
 
+  it('rejects a stale prepared admission without revoking the completed winner', async()=>{
+    const {store,agent,publisher}=await setup();
+    const first=await agent.assertion.prepareDurableShare(CG,NAME,{agentAddress:AUTHOR});
+    const second=await agent.assertion.prepareDurableShare(CG,NAME,{agentAddress:AUTHOR});
+    expect(first.recoveryBinding.intent.operationId).not.toBe(second.recoveryBinding.intent.operationId);
+    const job=await agent.assertion.admitDurableShare({contextGraphId:CG,assertionName:NAME,entities:'all',...first},'winner');
+    expect((await runPromoteJob({job,queue:agent.promoteQueue,workerId:'winner',now:Date.now,
+      heartbeatIntervalMs:60_000,log:()=>undefined,runPromote:()=>agent.assertion.promote(CG,NAME,first)})).outcome).toBe('succeeded');
+    const publishable=await agent.resolveFinalizedAssertionVmPublishIntent(CG,NAME,{agentAddress:AUTHOR});
+    await expect(agent.assertion.admitDurableShare({contextGraphId:CG,assertionName:NAME,entities:'all',...second},'stale'))
+      .rejects.toMatchObject({code:'KA_PROMOTE_RECOVERY_BINDING_CONFLICT'});
+    expect(await publisher.hasSwmShareComplete(CG,NAME,AUTHOR)).toBe(true);
+    expect(await agent.resolveFinalizedAssertionVmPublishIntent(CG,NAME,{agentAddress:AUTHOR})).toEqual(publishable);
+    expect(await agent.promoteQueue.list()).toHaveLength(1);
+    expect((await agent.promoteQueue.getStatus(job.jobId))?.state).toBe('succeeded');
+    await store.close();
+  });
+
   it.each(['corrupt', 'missing', 'changed'])('revokes a publication certificate on %s bound replay after inventory failure', async corruption => {
     const {store,agent,publisher,finalized}=await setup();
     daemonState.promoteWorkerAvailable=true;
