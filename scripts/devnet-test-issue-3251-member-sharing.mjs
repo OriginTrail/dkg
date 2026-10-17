@@ -61,16 +61,16 @@
 //   6  member 2 while its only sync slot is busy with a large transfer of
 //      another graph (MEMBER_SHARING_BIG_ASSETS x MEMBER_SHARING_BIG_TRIPLES).
 //      Member 2's own evidence must show the transfer in the slot: its
-//      sync-slot readings (/api/diagnostics/backpressure, every second) show
-//      its effective policy of one slot and no queue and name when the oldest
-//      running admission started; its log ties that start to an admission of
-//      the large graph and no other; and every reading until each write was
-//      received names the same start (work admitted once the transfer ended
-//      names a later one). Its daemon starts with the sync environment
-//      variables pinned to that policy (they override config). A write
-//      received after the transfer left the slot, or a transfer never
-//      admitted, fails the case as not exercised; a running catch-up job
-//      alone proves nothing
+//      admission trace (DKG_SYNC_ADMISSION_TRACE, written by the agent) names
+//      the admission of the large graph that took its general slot, under the
+//      effective policy of one general slot and no queue, and when it gave the
+//      slot up. A write counts only when it was received before then. A
+//      reserved shared-memory slot beside the general one is the fix under
+//      test (the diagnostics report it as part of one pool, so they are not
+//      read for this). Its daemon starts with the sync environment variables
+//      pinned to that policy (they override config). A write received after
+//      the transfer gave up the slot, or a transfer never admitted, fails the
+//      case as not exercised; a running catch-up job alone proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
 //      and 3 on a private graph whose members joined through the signed
 //      request flow. A member's write into a private graph sets up its sender
@@ -95,13 +95,15 @@
 //
 // Temporary node numbers. The suite takes the first three free of 7, 8, 9 and
 // 10 (no folder, nothing listening on the node's API or libp2p port). A node
-// folder of its own carries a mark, written only once this run's addnode
-// created the folder (it did not exist just before, and addnode succeeded); a
-// marked folder left by a run that was killed is stopped and removed at the
-// start, so the suite's own debris never costs a node number. Another suite's
-// node, also one that took a number after it was picked, is left alone. At the
-// end the suite removes a node's folder only once nothing listens on its
-// ports.
+// folder of its own carries a mark that addnode writes right after it created
+// the folder (with one mkdir, which fails on a folder that exists), before the
+// daemon starts: a start that fails or is interrupted (a signal while the node
+// comes up) is cancelled and its node removed at the cleanup, and a marked
+// folder left by a run that was killed is stopped and removed at the start of
+// the next, so the suite's own debris never costs a node number. Another
+// suite's node, also one that took a number after it was picked, is left
+// alone. At the end the suite removes a node's folder only once nothing
+// listens on its ports.
 //
 // Exit codes: 0 every case passed; 1 a case failed or was not run; 3 the
 // devnet cannot host the scenario and nothing was exercised: no devnet, node 1
@@ -125,10 +127,11 @@
 // This file orders the cases. The rest is under scripts/lib/: the temporary
 // Edges (member-sharing/temporary-edges.mjs), the graphs and each graph's part
 // of the run (member-sharing/graphs.mjs, graph-scenario.mjs), the writes,
-// reads and watches (member-sharing/observation.mjs), case 6
-// (member-sharing/busy-member.mjs), the report (member-sharing/report.mjs),
-// and the judgements, which hold no I/O (qa/member-sharing.mjs,
-// qa/busy-slot.mjs, qa/known-gaps.mjs).
+// reads and watches, and each member's history with a graph's definition
+// (member-sharing/observation.mjs), case 6 (member-sharing/busy-member.mjs),
+// the report (member-sharing/report.mjs), and the judgements, which hold no
+// I/O (qa/member-sharing.mjs, qa/busy-slot.mjs, qa/admission-trace.mjs,
+// qa/known-gaps.mjs).
 
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -198,9 +201,11 @@ async function precondition(caseId, when) {
   return false;
 }
 
-/** Waits for the watches, then reports each pair under its case. */
+/** Waits for the watches, then reports each pair under its case, with its author's history with the definition as it stands now. */
 async function settle(handles) {
-  for (const pair of await watched(handles)) report.reportPair(pair, { boundMs: BOUND_MS });
+  for (const pair of await watched(handles)) {
+    report.reportPair(pair, { boundMs: BOUND_MS, definitionSeen: io.definitionSeen(pair.record.author, pair.record.graph) });
+  }
 }
 
 async function run() {

@@ -235,6 +235,7 @@ export default defineConfig({
       "test/sync-control-plane-reserve.test.ts",
       // #3251 — the safety-net pull of public graphs in use on an Edge.
       "test/recent-shared-memory-pulls.test.ts",
+      "test/sync-admission-trace.test.ts",
       "test/sync-policy.test.ts",
       "test/catchup-policy.test.ts",
       "test/catchup-concurrency.test.ts",

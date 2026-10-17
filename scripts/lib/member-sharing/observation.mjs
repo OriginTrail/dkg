@@ -18,6 +18,21 @@ export function createObservation(devnet, config) {
   const { boundMs, definitionMs, syncedMs, stamp, predicate } = config;
   let sequence = 0;
 
+  // Each node's history with each graph's definition: whether anything ever
+  // showed the node holding it (its subscription's observer, a write the node
+  // accepted, a refused write whose listing still showed it), or that its
+  // observed subscription never did. Kept here, where those observations are
+  // made; the report takes a snapshot of it when it judges a write.
+  const definitions = new Map();
+  const definitionKey = (node, graph) => `${typeof node === 'object' ? node.number : node}|${graph.id}`;
+  const noteDefinition = (node, graph, seen) => {
+    const key = definitionKey(node, graph);
+    if (seen) definitions.set(key, true);
+    else if (!definitions.has(key)) definitions.set(key, false);
+  };
+  /** Whether anything so far showed `node` holding `graph`'s definition: true, false (its observed subscription never did), or undefined. */
+  const definitionSeen = (node, graph) => definitions.get(definitionKey(node, graph));
+
   /**
    * Creates an asset and shares it through the asynchronous share job, as a
    * client does, and waits for the job to end. Resolves to { doneAt } (the time
@@ -51,18 +66,17 @@ export function createObservation(devnet, config) {
   /**
    * One asset with a subject of its own: the record the watches of the write
    * use. A refused write keeps the refusal's code and whether its author held
-   * the graph's definition right after it. `definitionHistory` is the author's
-   * history with the graph's definition ({ seen }: whether anything ever showed
-   * the author holding it), kept by the graph's scenario and read when the
-   * write is judged; undefined when it is not kept.
+   * the graph's definition right after it. Either way the outcome goes into
+   * the author's history with the definition: a write the node accepted was
+   * made while the author held it.
    */
-  async function write(author, graph, sub, what, { definitionHistory } = {}) {
+  async function write(author, graph, sub, what) {
     sequence += 1;
     const record = {
       author, graph, sub, what, sequence,
       subject: `urn:issue3251:${stamp}:${sequence}`,
       value: `${what} (${sequence})`,
-      doneAt: null, error: null, errorCode: undefined, definitionHeld: undefined, definitionHistory,
+      doneAt: null, error: null, errorCode: undefined, definitionHeld: undefined,
     };
     const outcome = await createAndShare(author, {
       contextGraphId: graph.id, name: `i3251-${stamp.toLowerCase()}-${sequence}`, subGraphName: sub,
@@ -70,12 +84,14 @@ export function createObservation(devnet, config) {
     }, { createTimeoutMs: 120_000, jobTimeoutMs: 120_000, pollMs: 1000 });
     if (!outcome.error) {
       record.doneAt = outcome.doneAt;
+      noteDefinition(author, graph, true);
       return record;
     }
     record.error = outcome.error;
     record.errorCode = outcome.code;
     const listed = await listingEntry(author, graph);
     record.definitionHeld = listed.readable ? listed.defined : undefined;
+    if (record.definitionHeld === true) noteDefinition(author, graph, true);
     return record;
   }
 
@@ -147,8 +163,8 @@ export function createObservation(devnet, config) {
   }
 
   /** A write, and at once the watch of the nodes that must hold it (a handle, see watch). */
-  async function writeAndWatch(caseId, author, graph, sub, what, nodes, evidence = {}) {
-    const record = await write(author, graph, sub, what, evidence);
+  async function writeAndWatch(caseId, author, graph, sub, what, nodes) {
+    const record = await write(author, graph, sub, what);
     return watch(nodes.map(node => ({ caseId, record, node })));
   }
 
@@ -171,7 +187,11 @@ export function createObservation(devnet, config) {
         if (cancelled) return null;
         const listed = await listingEntry(node, graph);
         observation = foldSubscription(observation, listed, Date.now() - from, deadlines);
-        if (observation.done) return observation;
+        if (observation.definedAt !== null) noteDefinition(node, graph, true);
+        if (observation.done) {
+          if (observation.definedAt === null) noteDefinition(node, graph, false);
+          return observation;
+        }
         // Read again in 2 s, or at the next deadline still open if that is sooner.
         const open = [observation.atDefinitionDeadline === null && from + definitionMs, observation.atSyncedDeadline === null && from + syncedMs]
           .filter(Boolean).filter(at => at > Date.now());
@@ -181,7 +201,7 @@ export function createObservation(devnet, config) {
     return { node, graph, done, cancel: () => { cancelled = true; } };
   }
 
-  return { createAndShare, listingEntry, write, watch, writeAndWatch, observeSubscription };
+  return { createAndShare, listingEntry, write, watch, writeAndWatch, observeSubscription, definitionSeen };
 }
 
 /** When a pair was held (both reads), or null. */
