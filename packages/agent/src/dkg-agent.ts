@@ -1489,6 +1489,10 @@ export class DKGAgent extends DKGAgentBase {
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
+      rfc64CatalogManualTrustRootContextGraphs: legacyRfc64CatalogAccessPolicyAuthority === undefined
+        && catalogActivation.accessPolicyAuthority !== undefined
+        ? catalogActivation.selectedPrivateContextGraphs
+        : undefined,
       rfc64CatalogDeploymentProfile,
       rfc64CatalogBootstrap,
       rfc64CatalogAuthoringPolicy,

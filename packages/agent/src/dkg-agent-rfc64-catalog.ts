@@ -108,8 +108,10 @@ import {
   resolveRfc64CatalogAuthorizationRosterV1,
   type AcceptRfc64CatalogAccessSnapshotInputV1,
   type AcceptedRfc64CatalogAccessSnapshotV1,
+  type Rfc64CatalogAccessPolicyRegistryOptionsV1,
   type Rfc64CatalogLocalAuthorizationScopeV1,
 } from './rfc64/catalog-access-policy-v1.js';
+import { scopeRfc64CatalogAccessAuthorityV1 } from './rfc64/manual-catalog-authority-scope-v1.js';
 import type {
   Rfc64PublicCatalogCurrentReceiverReconcilerV1,
 } from './rfc64/public-catalog-receiver-v1.js';
@@ -1825,6 +1827,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         authorityEra: '0' as DecimalU64V1,
       })
       : null;
+  }
+
+  /** This node's catalog identity authority, per graph (`rfc64/manual-catalog-authority-scope-v1.ts`). */
+  rfc64CatalogAccessAuthorityV1(this: DKGAgent): Rfc64CatalogAccessPolicyRegistryOptionsV1 {
+    return scopeRfc64CatalogAccessAuthorityV1({
+      manual: this.config.rfc64CatalogAccessPolicyAuthority,
+      manualContextGraphs: this.config.rfc64CatalogManualTrustRootContextGraphs,
+      resolveLocalAgentAddress: (contextGraphId, scope) =>
+        this.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId, scope),
+      resolveRemoteAgentAddress: (peerId, contextGraphId) =>
+        this.resolveRfc64CatalogRemoteAgentAddressV1(peerId, contextGraphId),
+    });
   }
 
   /**
@@ -4045,16 +4059,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       router: this.router,
       controlObjects: persistence.controlObjects,
       localPeerId: this.peerId,
-      accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority
-        ?? {
-          resolveLocalAgentAddress: (contextGraphId, authorizationScope) =>
-            this.resolveRfc64CatalogLocalAgentAddressV1(
-              contextGraphId,
-              authorizationScope,
-            ),
-          resolveRemoteAgentAddress: (peerId, contextGraphId) =>
-            this.resolveRfc64CatalogRemoteAgentAddressV1(peerId, contextGraphId),
-        },
+      accessPolicyAuthority: this.rfc64CatalogAccessAuthorityV1(),
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
       resolveContextGraphAuthority: (contextGraphId, direction) =>

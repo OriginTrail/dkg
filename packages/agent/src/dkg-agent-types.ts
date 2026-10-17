@@ -2054,6 +2054,8 @@ export type ResolvedDKGAgentConfig =
     chainAuthorityReadBudgets: ChainAuthorityReadBudgets;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
+    /** Graphs the manual peer table of `rfc64Catalog.accessPolicyAuthority` covers. */
+    rfc64CatalogManualTrustRootContextGraphs?: readonly string[];
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
     rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
       .Rfc64CatalogExecutionPlanV1;

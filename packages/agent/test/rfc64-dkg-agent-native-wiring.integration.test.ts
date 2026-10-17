@@ -1524,6 +1524,32 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(announce).toHaveBeenCalledWith(expect.objectContaining({
       peers: [publicAnnouncementPeerId],
     }));
+
+    // The manual peer table answers for the selected private graph alone; a
+    // private graph joined at runtime resolves its peers from its own state.
+    expect((author as any).config.rfc64CatalogManualTrustRootContextGraphs)
+      .toEqual([privatePolicy.contextGraphId]);
+    const joinedMemberAgent = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
+    const ownState = vi.spyOn(author, 'resolveRfc64CatalogRemoteAgentAddressV1')
+      .mockResolvedValue(joinedMemberAgent);
+    const catalogAuthority = author.rfc64CatalogAccessAuthorityV1();
+    await expect(catalogAuthority.resolveRemoteAgentAddress(
+      privateProviderPeerId,
+      privatePolicy.contextGraphId,
+    )).resolves.toBe(AUTHOR);
+    await expect(catalogAuthority.resolveRemoteAgentAddress(
+      '12D3KooRuntimeJoinedMember',
+      privatePolicy.contextGraphId,
+    )).resolves.toBeNull();
+    expect(ownState).not.toHaveBeenCalled();
+    const joinedContextGraphId = (
+      '0x1111111111111111111111111111111111111111/native-wiring-joined-private'
+    ) as ContextGraphIdV1;
+    await expect(catalogAuthority.resolveRemoteAgentAddress(
+      '12D3KooRuntimeJoinedMember',
+      joinedContextGraphId,
+    )).resolves.toBe(joinedMemberAgent);
+    expect(ownState).toHaveBeenCalledWith('12D3KooRuntimeJoinedMember', joinedContextGraphId);
   }, 60_000);
 
   it.each([
@@ -1937,6 +1963,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           providerPeerAddresses.get(peerId) ?? null,
       },
     });
+    // A function authority supplied in code keeps answering for every graph.
+    expect((provider as any).config.rfc64CatalogManualTrustRootContextGraphs).toBeUndefined();
+    expect(provider.rfc64CatalogAccessAuthorityV1())
+      .toBe((provider as any).config.rfc64CatalogAccessPolicyAuthority);
     provider.acceptRfc64CatalogAccessSnapshotV1({
       policy: authority.policy,
       policyDigest: authority.policyDigest,
