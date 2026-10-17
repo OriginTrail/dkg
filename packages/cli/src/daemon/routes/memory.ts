@@ -68,8 +68,8 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, advertisesSyncProtocol } from '@origintrail-official/dkg-core';
-import { memorySearchPlans, memorySearchVectorScope } from "./memory-search-scope.js";
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, advertisesSyncProtocol } from '@origintrail-official/dkg-core';
+import { retrieveMemorySearch } from "./memory-search-retrieval.js";
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -348,10 +348,6 @@ import {
 } from '../local-agents.js';
 
 import { actorFromRequestContext, type RequestContext } from './context.js';
-import {
-  API_QUERY_CALLER_DISCONNECTED,
-  createStoreQueryRequestLifecycle,
-} from '../store-query-lifecycle.js';
 import { authorizeAgentScopedAuthorClaim, isSameAgentAddress } from './shared-assertion-helpers.js';
 
 /**
@@ -1774,7 +1770,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     }
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
-    const resultLimit = typeof rawLimit === 'number' && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
+    const resultLimit = typeof rawLimit === 'number' && Number.isFinite(rawLimit) && rawLimit > 0
+      ? Math.max(1, Math.min(Math.floor(rawLimit), 100)) : 20;
     const requestedLayers = Array.isArray(parsed.memoryLayers)
       ? parsed.memoryLayers
       : ['wm', 'swm', 'vm'];
@@ -1809,6 +1806,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const callerAgentAddress = actor.authenticatedAgentAddress;
     const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
     if (!(await requireContextGraphReadAuthority(ctx, contextGraphId, CG_AUTH_RPC_SITES.memorySearch))) return;
+    const unavailableLayers: Array<{ layer: 'swm'; reason: 'read-authority' }> = [];
     if (!isNodeAdmin) {
       // Shared memory carries a SECOND gate. `DKGAgent.query` requires
       // `canUseSharedMemoryForContextGraph` — which additionally demands
@@ -1825,171 +1823,18 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       ) {
         const idx = memoryLayers.indexOf('swm');
         if (idx >= 0) memoryLayers.splice(idx, 1);
+        unavailableLayers.push({ layer: 'swm', reason: 'read-authority' });
       }
     }
 
-    const results: Array<{
-      entityUri: string;
-      label: string | null;
-      sources: string[];
-      similarity: number | null;
-      sourceFile: string | null;
-      snippet: string | null;
-      memoryLayer: string | null;
-    }> = [];
-    const seen = new Map<string, number>();
-
-    // Fan-out 1: Vector search
-    if (embeddingProvider) {
-      try {
-        const queryEmbedding = await embeddingProvider.embed(query);
-        const vectorResults = await vectorStore.search(queryEmbedding, {
-          contextGraphId,
-          memoryLayers,
-          limit: resultLimit,
-          minSimilarity: 0.3,
-          workingMemoryScope: memorySearchVectorScope(agent, actor),
-        });
-        for (const vr of vectorResults) {
-          const idx = results.length;
-          seen.set(vr.entityUri, idx);
-          results.push({
-            entityUri: vr.entityUri,
-            label: vr.label,
-            sources: ['vector'],
-            similarity: Math.round(vr.similarity * 1000) / 1000,
-            sourceFile: vr.sourceUri,
-            snippet: vr.snippet,
-            memoryLayer: vr.memoryLayer,
-          });
-        }
-      } catch {
-        // Vector search failure is non-fatal
-      }
-    }
-
-    // Fan-out 2: text search over the memory layers, through the GUARDED
-    // query path.
-    //
-    // This used to call `agent.store.query` directly with hand-built
-    // `STRSTARTS(STR(?g), "<cg>/_working_memory")`-style filters. That
-    // bypassed `DKGQueryEngine`'s graph-scope rewrites AND `DKGAgent.query`'s
-    // per-view resolution, which meant two things had to be re-implemented
-    // here and could drift from the writer-side layout: which named graphs
-    // belong to a memory layer, and which of them the caller may read.
-    // Notably the `wm` prefixes matched EVERY agent's drafts in the context
-    // graph, so the A-1 working-memory isolation `DKGAgent.query` enforces on
-    // the `working-memory` view did not apply to this route.
-    //
-    // Fan out per view instead and let the engine own graph resolution. The
-    // caller query keeps only the text predicate; `GRAPH ?g` stays, and
-    // `constrainGraphVariablesToAllowedSet` pins it to the view's allow-set.
-    //
-    // escapeSparqlLiteral escapes backslashes, quotes, and CR/LF/TAB per the
-    // SPARQL STRING_LITERAL2 grammar -- a simple `replace(/"/g, '\\"')` would
-    // still allow `\` to escape the closing quote and break out of the literal.
-    const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
-    // #1096: accept both http:// and https:// schema.org forms -- real
-    // payloads overwhelmingly use https://schema.org, which the previous
-    // http-only property path silently excluded.
-    const searchSparql = `
-        SELECT DISTINCT ?entity ?name ?desc WHERE {
-          GRAPH ?g {
-            ?entity <http://schema.org/name>|<https://schema.org/name>|<http://www.w3.org/2000/01/rdf-schema#label> ?name .
-            OPTIONAL { ?entity <http://schema.org/description>|<https://schema.org/description> ?desc }
-          }
-          FILTER(
-            CONTAINS(LCASE(STR(?name)), "${escapedQuery}")
-            || (BOUND(?desc) && CONTAINS(LCASE(STR(?desc)), "${escapedQuery}"))
-          )
-        }
-        LIMIT ${resultLimit}
-      `;
-
-    const searchPlans = memorySearchPlans(
-      memoryLayers, actor, () => agent.listLocalAgents(),
-    );
-
-    // Untrusted, planner-heavy API reads belong on the BACKGROUND admission
-    // lane, and must be cancelled when the HTTP caller goes away — otherwise a
-    // disconnected search leaves orphan store work occupying slots that
-    // promotion, reconciliation and SWM catch-up need (issue #1989).
-    // `/api/query` gets this from `createStoreQueryRequestLifecycle`; this
-    // route now multiplies store work by the number of views, so it needs it
-    // strictly more than `/api/query` does.
-    const searchLifecycle = createStoreQueryRequestLifecycle(req, res, 'api.memory.search');
-    try {
-    for (const plan of searchPlans) {
-      try {
-        const viewResult = await agent.query(searchSparql, {
-          contextGraphId,
-          view: plan.view,
-          agentAddress: plan.agentAddress,
-          callerAgentAddress,
-          signal: searchLifecycle.signal,
-          priority: searchLifecycle.priority,
-          source: searchLifecycle.source,
-        });
-        for (const binding of viewResult.bindings ?? []) {
-          const uri = binding.entity;
-          if (!uri) continue;
-          const label = binding.name ?? null;
-          const snippet = binding.desc ?? null;
-          if (seen.has(uri)) {
-            const idx = seen.get(uri)!;
-            if (!results[idx].sources.includes('sparql')) {
-              results[idx].sources.push('sparql');
-            }
-          } else {
-            const idx = results.length;
-            seen.set(uri, idx);
-            results.push({
-              entityUri: uri,
-              label,
-              sources: ['sparql'],
-              similarity: null,
-              sourceFile: null,
-              snippet,
-              memoryLayer: null,
-            });
-          }
-        }
-      } catch (err) {
-        // A caller disconnect aborts the WHOLE search — continuing would keep
-        // scheduling store work for a response nobody will read.
-        if ((err as { code?: string } | undefined)?.code === API_QUERY_CALLER_DISCONNECTED) throw err;
-        // Otherwise a single view failing stays non-fatal, as the single
-        // combined query was before.
-        //
-        // Note on what this can and cannot mask: the read-authority gate near
-        // the top of this handler has already run, so a caller with no
-        // authority for the CG got a 403 and never reached here. What CAN
-        // still produce an empty layer without an error is `DKGAgent.query`'s
-        // own per-view checks — in particular `canUseSharedMemoryForContextGraph`
-        // for the `shared-working-memory` view, which additionally requires
-        // confirmed SWM metadata. That is a deliberate tightening (the
-        // replaced direct store read applied neither check), but it means an
-        // `swm` layer can come back empty for authorization reasons rather
-        // than for lack of matches.
-      }
-    }
-    } finally {
-      searchLifecycle.dispose();
-    }
-
-    // Sort: vector-matched results first (by similarity), then SPARQL-only
-    results.sort((a, b) => {
-      if (a.similarity !== null && b.similarity !== null) return b.similarity - a.similarity;
-      if (a.similarity !== null) return -1;
-      if (b.similarity !== null) return 1;
-      return 0;
-    });
+    const results = await retrieveMemorySearch(ctx, actor, { query, contextGraphId, memoryLayers, resultLimit });
 
     return jsonResponse(res, 200, {
       query,
       contextGraphId,
       resultCount: results.length,
-      results: results.slice(0, resultLimit),
+      results,
+      unavailableLayers,
     });
   }
 

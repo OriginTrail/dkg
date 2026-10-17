@@ -100,6 +100,26 @@ async function search(store: VectorStore, principal: Parameters<typeof requestAu
 }
 
 describe('enabled vector memory search tenant isolation', () => {
+  it('retains vector-only matches in every layer even when WM occupies the global top three', async () => {
+    const store = createStore();
+    for (let n = 0; n < 5; n++) await insert(store, `alice-${n}`, 'wm', A);
+    await insert(store, 'shared', 'swm', B);
+    await insert(store, 'verified', 'vm', B);
+    await insert(store, 'bob', 'wm', B);
+    const { ctx, res, agent } = request(store, { kind: 'agent', agentAddress: A });
+    (ctx.req as any).__dkgPrebufferedBody = Buffer.from(JSON.stringify({
+      contextGraphId: CG, query: 'vector-only-query', memoryLayers: ['wm', 'swm', 'vm'], limit: 3,
+    }));
+    await handleMemoryRoutes(ctx);
+    const body = JSON.parse(res.body);
+    expect(body.results.map((row: any) => row.memoryLayer)).toEqual(['wm', 'swm', 'vm']);
+    expect(body.results.map((row: any) => row.entityUri)).toContain('shared');
+    expect(body.results.map((row: any) => row.entityUri)).toContain('verified');
+    expect(JSON.stringify(body)).not.toContain('secret:bob');
+    expect(body.resultCount).toBe(3);
+    expect(agent.query).toHaveBeenCalledTimes(3);
+  });
+
   it.each([PEER, PEER.toUpperCase()])('preserves exact peer ownership without granting reverse default aliases: %s', async (caller) => {
     const store = createStore();
     await insert(store, 'default-wallet', 'wm', A);
