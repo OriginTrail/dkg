@@ -92,7 +92,8 @@ test('proof entry points reject a different published asset with unchanged count
       })];
     }
     const admission = structuredClone(f.admissions[0]);
-    const install = name => {
+    const expectedContract = '0x5555555555555555555555555555555555555555';
+    const install = (name, contract = expectedContract) => {
       const i = name === 'A' ? 0 : 1, job = structuredClone(f.jobs[i]);
       // Preserve A's admission/job ID even when the actual request, receipt and payload are B.
       job.jobId = admission.value.jobId;
@@ -102,9 +103,14 @@ test('proof entry points reject a different published asset with unchanged count
       }
       const abi = JSON.parse(fs.readFileSync(path.join(repo, 'packages/chain/abi/DKGKnowledgeAssets.json'))), iface = new Interface(abi.abi ?? abi);
       const event = iface.encodeEventLog(iface.getEvent('KnowledgeAssetCreated'), [i + 1, author, 'publish', seals[i].seal.assertionMerkleRoot, 1, 1, 2, 1, false]);
-      write('reconciliation.json', { receipts: [{ jobId: job.jobId, hash: 'tx', from: author, nonce: 0,
-        logs: [{ address: author, ...event }] }] });
+      write('reconciliation.json', { receipts: [{ jobId: job.jobId, hash: 'tx', from: author, nonce: 0, blockNumber: 123,
+        logs: [{ address: contract, ...event }] }] });
     };
+    const hub = '0x6666666666666666666666666666666666666666';
+    fs.mkdirSync(path.dirname(root), { recursive: true });
+    fs.writeFileSync(path.join(root, '..', 'baseline-balances-nonces.json'), JSON.stringify({ chainId: 84532, hub }));
+    write('chain-deployment.json', { arm, chainId: '84532', hub, provenance: 'historical-hub-read-at-receipt-block',
+      blocks: [{ blockNumber: 123, blockHash: '0x' + '77'.repeat(32), knowledgeAssets: expectedContract }] });
     write('campaign-manifest.json', campaign); write('seal-proof.json', seals); write('pre-workload/rdf.json', rdf(before));
     write('publication-admissions.json', [admission]); write('synchronous-shares.json', []);
     write('protocol.json', { startedAt: '1970-01-01T00:00:00Z' }); write('context-graph.json', { value: { onChainId: 1 } });
@@ -121,6 +127,24 @@ test('proof entry points reject a different published asset with unchanged count
     }
     const valid = JSON.parse(fs.readFileSync(path.join(root, 'verification.json')));
     for (const key of ['sealChanged', 'lifecycleErrors', 'operationErrors', 'contentErrors']) assert.deepEqual(valid[key], []);
+    const binding = JSON.parse(fs.readFileSync(path.join(root, 'chain-deployment.json')));
+    for (const invalidBinding of [
+      { ...binding, hub: expectedContract }, { ...binding, blocks: [] },
+      { ...binding, blocks: [...binding.blocks, ...binding.blocks] },
+      { ...binding, blocks: [{ ...binding.blocks[0], knowledgeAssets: '0x' + '0'.repeat(40) }] },
+    ]) {
+      write('chain-deployment.json', invalidBinding);
+      assert.notEqual(run('chain-proof.mjs', [arm, 'fixed-deadline']).status, 0, 'accepted invalid deployment binding');
+    }
+    write('chain-deployment.json', binding);
+    install('A', '0x8888888888888888888888888888888888888888');
+    const foreign = run('chain-proof.mjs', [arm, 'fixed-deadline']);
+    assert.notEqual(foreign.status, 0, 'chain proof accepted an otherwise identical foreign-contract event');
+    const foreignProof = JSON.parse(fs.readFileSync(path.join(root, 'chain-proof.json')));
+    assert.equal(foreignProof[0].createdEvents, 1);
+    assert.equal(foreignProof[0].carrierMatches, true);
+    assert.equal(foreignProof[0].contractMatches, false);
+    assert.equal(foreignProof[0].identityMatches, false);
     install('B');
     for (const file of ['verify.py', 'chain-proof.mjs', 'restart-content-proof.py']) {
       const result = run(file, file === 'restart-content-proof.py' ? [arm] : [arm, 'fixed-deadline']);
