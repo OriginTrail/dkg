@@ -10,7 +10,12 @@ import {ContractStatus} from "../abstract/ContractStatus.sol";
 
 contract AskStorage is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "AskStorage";
-    string private constant _VERSION = "10.0.2";
+    string private constant _VERSION = "10.0.3";
+
+    event WeightedActiveAskSumUpdated(uint256 newSum);
+    event PrevWeightedActiveAskSumUpdated(uint256 newSum);
+    event TotalActiveStakeUpdated(uint96 newStake);
+    event PrevTotalActiveStakeUpdated(uint96 newStake);
 
     ParametersStorage public parametersStorage;
 
@@ -70,33 +75,41 @@ contract AskStorage is INamed, IVersioned, ContractStatus, IInitializable {
 
     function setWeightedActiveAskSum(uint256 _weightedActiveAskSum) external onlyContracts {
         weightedActiveAskSum = _weightedActiveAskSum;
+        emit WeightedActiveAskSumUpdated(weightedActiveAskSum);
     }
 
     function increaseWeightedActiveAskSum(uint256 amount) external onlyContracts {
         weightedActiveAskSum += amount;
+        emit WeightedActiveAskSumUpdated(weightedActiveAskSum);
     }
 
     function decreaseWeightedActiveAskSum(uint256 amount) external onlyContracts {
         weightedActiveAskSum -= amount;
+        emit WeightedActiveAskSumUpdated(weightedActiveAskSum);
     }
 
     function setPrevWeightedActiveAskSum(uint256 _prevWeightedActiveAskSum) external onlyContracts {
         prevWeightedActiveAskSum = _prevWeightedActiveAskSum;
+        emit PrevWeightedActiveAskSumUpdated(prevWeightedActiveAskSum);
     }
 
     function setTotalActiveStake(uint96 _totalActiveStake) external onlyContracts {
         totalActiveStake = _totalActiveStake;
+        emit TotalActiveStakeUpdated(totalActiveStake);
     }
 
     function increaseTotalActiveStake(uint96 amount) external onlyContracts {
         totalActiveStake += amount;
+        emit TotalActiveStakeUpdated(totalActiveStake);
     }
 
     function decreaseTotalActiveStake(uint96 amount) external onlyContracts {
         totalActiveStake -= amount;
+        emit TotalActiveStakeUpdated(totalActiveStake);
     }
 
     function setPrevTotalActiveStake(uint96 _prevTotalActiveStake) external onlyContracts {
         prevTotalActiveStake = _prevTotalActiveStake;
+        emit PrevTotalActiveStakeUpdated(prevTotalActiveStake);
     }
 }
