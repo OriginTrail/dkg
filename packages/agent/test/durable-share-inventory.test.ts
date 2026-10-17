@@ -51,7 +51,7 @@ describe('durable inventory handoff', () => {
   it('waits for the durable CAS and requests projection only after acknowledgement', async () => {
     let finish!: (value: any) => void;
     const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(() => new Promise(resolve => { finish = resolve; })),
-      requestRfc64SwmCatalogProjectionV1: vi.fn(() => false) };
+      requestRfc64SwmCatalogProjectionV1: vi.fn(() => true) };
     const pending = commitDurableShareInventory(agent as any, params);
     expect(agent.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(finish).toEqual(expect.any(Function)));
@@ -59,6 +59,13 @@ describe('durable inventory handoff', () => {
     expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledWith(expect.objectContaining({
       shareOperationId: 'original-operation', lifecycleAgentAddress: params.lifecycleAgentAddress,
     }));
+    expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
+  });
+  it('retains the original obligation when projection admission returns false', async () => {
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'existing' })),
+      requestRfc64SwmCatalogProjectionV1: vi.fn(() => false) };
+    await expect(commitDurableShareInventory(agent as any, params)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledWith(expect.objectContaining({ shareOperationId: 'original-operation' }));
     expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
   });
   it.each(['service-unavailable', 'policy-not-accepted', 'authority-inactive'] as const)('keeps projection readiness %s retryable after acknowledged inventory', async reason => {

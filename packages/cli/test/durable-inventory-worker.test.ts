@@ -112,12 +112,22 @@ describe('bound worker owns the real inventory CAS', () => {
     expect(snapshot?.rows[0]).toMatchObject({ kaUal: seeded.seal.kaUal, assertionCoordinate: seeded.assertionCoordinate });
   });
 
-  it('retries projection authority loss after the real inventory CAS without changing its original row', async () => {
-    const agent = await startRepairAgentV1({ name: 'bound-projection-authority-loss',
+  it.each(['policy-unavailable', 'authority-inactive'])('retries projection %s after the real inventory CAS without changing its original row', async fault => {
+    const agent = await startRepairAgentV1({ name: `bound-projection-${fault}`,
       autoPublish: { peers: [], catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1 } });
     vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
     agent.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
     await agent.whenRfc64CatalogResponsibilitiesIdleV1(); await agent.whenRfc64CatalogSupervisorsIdleV1();
+    const initial = await seedDurableWorkspaceAssetV1(agent, 'projection-initial', 90n);
+    await agent.commitRfc64SwmAuthorInventoryV1({ contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: initial.assertionCoordinate, lifecycleAgentAddress: AUTHOR, shareOperationId: initial.shareOperationId });
+    expect(agent.requestRfc64SwmCatalogProjectionV1({ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR })).toBe(true);
+    await agent.whenRfc64CatalogSupervisorsIdleV1();
+    const initialHead = agent.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: catalogScopeDigestV1(), authorAddress: AUTHOR });
+    expect(initialHead).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
+      .toContainEqual(expect.objectContaining({ outcome: 'reconciled', inventoryRowCount: '1' }));
+    const projection = vi.spyOn(agent, 'requestRfc64SwmCatalogProjectionV1');
     const seeded = await seedDurableWorkspaceAssetV1(agent, 'projection-authority-loss', 97n);
     const binding = { version: 1 as const, inventoryRequired: true,
       sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seeded.seal)),
@@ -129,13 +139,21 @@ describe('bound worker owns the real inventory CAS', () => {
     const params = { contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seeded.assertionCoordinate,
       lifecycleAgentAddress: AUTHOR, recoveryBinding: binding, ctx: createOperationContext('share') };
     const commit = agent.commitRfc64SwmAuthorInventoryV1.bind(agent);
-    let restorePolicy: (() => void) | undefined;
+    let restoreAuthority: (() => void) | undefined;
     const acknowledgement = vi.spyOn(agent, 'commitRfc64SwmAuthorInventoryV1').mockImplementationOnce(async input => {
       const result = await commit(input);
       expect(result.status).toBe('applied');
-      // Lose actual accepted authority only after native inventory acknowledged its CAS.
-      const policy = vi.spyOn(agent.rfc64PublicCatalogServiceV1!, 'acceptedPolicySnapshot').mockReturnValue(null);
-      restorePolicy = () => policy.mockRestore(); return result;
+      // Lose authority only after native inventory acknowledged its CAS; projection stays real.
+      if (fault === 'policy-unavailable') {
+        const policy = vi.spyOn(agent.rfc64PublicCatalogServiceV1!, 'acceptedPolicySnapshot').mockReturnValue(null);
+        restoreAuthority = () => policy.mockRestore();
+      } else {
+        const resolve = agent.resolveRfc64CatalogReceiverAuthorityV1.bind(agent);
+        const authority = vi.spyOn(agent, 'resolveRfc64CatalogReceiverAuthorityV1')
+          .mockImplementation(cg => ({ ...resolve(cg), authoringAllowed: false }));
+        restoreAuthority = () => authority.mockRestore();
+      }
+      return result;
     });
     try {
       const result = await runPromoteJob({ job, queue, workerId: 'original', now: Date.now, log: () => undefined,
@@ -143,10 +161,12 @@ describe('bound worker owns the real inventory CAS', () => {
       expect(result.outcome).toBe('failed_retrying');
       expect((await queue.getStatus(job.jobId))?.attempt.lastError)
         .toMatchObject({ diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE', retryable: true });
-    } finally { restorePolicy?.(); acknowledgement.mockRestore(); }
+      if (fault === 'authority-inactive') expect(projection).toHaveReturnedWith(false);
+      expect(agent.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: catalogScopeDigestV1(), authorAddress: AUTHOR })).toEqual(initialHead);
+    } finally { restoreAuthority?.(); acknowledgement.mockRestore(); }
     const before = agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR })!;
-    expect(before.rows).toHaveLength(1);
-    expect(before.rows[0]).toMatchObject({ kaUal: seeded.seal.kaUal, assertionCoordinate: seeded.assertionCoordinate,
+    expect(before.rows).toHaveLength(2);
+    expect(before.rows.find(row => row.assertionCoordinate === seeded.assertionCoordinate)).toMatchObject({ kaUal: seeded.seal.kaUal, assertionCoordinate: seeded.assertionCoordinate,
       shareOperationId: binding.intent.operationId });
     vi.spyOn(agent, 'promoteQueue', 'get').mockReturnValue(queue);
     const assertion = agent.assertion;
@@ -160,14 +180,14 @@ describe('bound worker owns the real inventory CAS', () => {
       await supervisor.start();
       await vi.waitFor(async () => expect((await queue.getStatus(job.jobId))?.state).toBe('succeeded'));
       await vi.waitFor(() => expect(agent.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: catalogScopeDigestV1(), authorAddress: AUTHOR }))
-        .toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' }), { timeout: 10_000 });
+        .toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' }), { timeout: 10_000 });
     } finally { await supervisor.stop(); }
     expect((await queue.getStatus(job.jobId))?.request.recoveryBinding).toEqual(binding);
     expect((await queue.getStatus(job.jobId))?.attempt.count).toBe(2);
     const after = agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR })!;
     expect(after).toEqual(before);
     expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs).toContainEqual(expect.objectContaining({
-      outcome: 'reconciled', inventoryHeadObjectDigest: before.head.objectDigest, inventoryRowCount: '1',
+      outcome: 'reconciled', inventoryHeadObjectDigest: before.head.objectDigest, inventoryRowCount: '2',
     }));
   });
 

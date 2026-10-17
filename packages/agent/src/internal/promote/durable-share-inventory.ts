@@ -36,13 +36,14 @@ async function commitInventoryUnderAssetLock(agent: DKGAgent, params: BoundDurab
       default: { const unreachable: never = reason; throw new Error(`Unknown inventory outcome: ${unreachable}`); }
     }
   }
-  // A committed row still needs projection admission; retain its owner on typed readiness failure.
+  // A committed row still needs accepted projection admission before releasing its owner.
   try {
-    agent.requestRfc64SwmCatalogProjectionV1({
+    const accepted = agent.requestRfc64SwmCatalogProjectionV1({
       contextGraphId: params.contextGraphId as ContextGraphIdV1,
       authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
       ctx: params.ctx,
     });
+    if (!accepted) throw createPromoteRetryableFailure(new Error('Durable share catalog projection admission remains pending'));
   } catch (error) { return throwInventoryRecoveryFailure(error); }
 }
 
