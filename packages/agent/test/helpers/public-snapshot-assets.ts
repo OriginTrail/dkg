@@ -41,11 +41,13 @@ export type SnapshotAsset = ReturnType<typeof makeSnapshotAssets>[number];
 
 /** A freshly observed sealed snapshot of these assets. */
 export function sealSnapshotOf(graph: string, assets: readonly SnapshotAsset[], version = '1') {
+  // One clock read: a millisecond between two reads would exceed the maximum evidence age.
+  const now = Date.now();
   return sealPublicGraphSnapshot({ version: 1, chainId: 'evm:31337', deploymentId: 'test',
     contextGraphId: graph, onChainId: '1', nameHash: ethers.id(graph),
     contextGraphStorage: SNAPSHOT_AUTHOR, assetStorage: SNAPSHOT_AUTHOR,
-    blockNumber: '10', blockHash: `0x${'a'.repeat(64)}`, finalityConfirmations: 1, observedAt: Date.now(),
-    expiresAt: Date.now() + 120_000, accessPolicy: 0,
+    blockNumber: '10', blockHash: `0x${'a'.repeat(64)}`, finalityConfirmations: 1, observedAt: now,
+    expiresAt: now + 120_000, accessPolicy: 0,
     assets: assets.map(asset => ({ id: asset.kaId.toString(), root: asset.root, version })) });
 }
 
