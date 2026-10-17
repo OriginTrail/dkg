@@ -1,3 +1,4 @@
+import { inventoryScopeFixture } from './inventory-scope-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -28,8 +29,8 @@ test('starting gate requires the exact authoritative prepared seal subjects', ()
     const dir = path.join(cwd, '.tmp/2963/evidence', arm); fs.mkdirSync(path.join(dir, 'pre-workload'), { recursive: true });
     const write = (file, value) => fs.writeFileSync(path.join(dir, file), JSON.stringify(value));
     write('campaign-manifest.json', campaign);
-    write('pre-workload/inventory.json', { swm: [{ assertion_coordinate: name, ka_ual: seal.kaUal, assertion_version_u64be: seal.assertionVersion, seal_digest: digest }] });
-    write('pre-workload/catalogs.json', [{ rows: [{ assertionCoordinate: name, kaId: seal.reservedKaId, assertionVersion: seal.assertionVersion, sealDigest: digest }] }]);
+    const scopeFixture = inventoryScopeFixture(campaign, [{ assertion_coordinate: name, ka_ual: seal.kaUal, assertion_version_u64be: seal.assertionVersion, seal_digest: digest }], [{ assertionCoordinate: name, kaId: seal.reservedKaId, assertionVersion: seal.assertionVersion, sealDigest: digest }]);
+    write('pre-workload/inventory.json', scopeFixture.capture); write('pre-workload/catalogs.json', scopeFixture.catalogs); write('pre-workload/-api-status.json', scopeFixture.status);
     const run = () => execFileSync(process.execPath, [fileURLToPath(new URL('./starting-set-proof.mjs', import.meta.url)), arm], { cwd, stdio: 'pipe' });
     write('pre-workload/rdf.json', { results: { bindings: rows } }); run();
     for (const [predicate, value] of [

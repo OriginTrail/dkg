@@ -1,3 +1,4 @@
+import { verifyInventoryScope } from './inventory-scope.mjs';
 import { requirePublicationCohort } from './publication-evidence.mjs';
 import { sameCapturedQuads } from './rdf-term-identity.mjs';
 import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
@@ -62,7 +63,9 @@ if(mode==='before'){
  const scope=createGraphKnowledgeAssetScope(sealValue('kaUal'),sealValue('assertionVersion'));
  const wm=knowledgeAssetLayerGraphUri(cg,MemoryLayer.WorkingMemory,scope);
  const wmCleared=!rows.some(r=>r.g.value===wm||r.g.value.startsWith(wm+'/'));
- const catalogs=JSON.parse(fs.readFileSync(`${root}/restart-readback/catalogs.json`)).flatMap(c=>c.rows);
+ const inventoryScope=verifyInventoryScope(campaign,JSON.parse(fs.readFileSync(`${root}/restart-readback/inventory.json`)),JSON.parse(fs.readFileSync(`${root}/restart-readback/catalogs.json`)),JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-status.json`)));
+ if(!inventoryScope.valid)throw Error(inventoryScope.errors.join('; '));
+ const catalogs=inventoryScope.catalogRows;
  const crashSealSubjects=[...new Set(fault.metadataAtFault.quads.filter(q=>q.predicate===ASSERTION_SEAL_PREDICATES.KA_UAL).map(q=>q.subject))];
  if(crashSealSubjects.length!==1)throw Error('Expected one original crash seal');
  const crashSeal=parseAssertionSealQuads(fault.metadataAtFault.quads,crashSealSubjects[0]);
@@ -75,7 +78,7 @@ if(mode==='before'){
  const expected=[...JSON.parse(fs.readFileSync(`${root}/seal-proof.json`)),
    {name:restartName,seal:canonicalSeal,sealDigest:crashDigest}];
  if(expected.length!==counts.restart||expected.some(row=>row.error||row.unchanged===false))throw Error('Incomplete original identity evidence');
- const inventory=JSON.parse(fs.readFileSync(`${root}/restart-readback/inventory.json`)).swm;
+ const inventory=inventoryScope.rows;
  const tuples=verifyIdentityTuples(expected,catalogs,inventory);
  const publications=JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-publisher-jobs.json`)).value.jobs;
  const mainPublications=JSON.parse(fs.readFileSync(`${root}/fixed-deadline/-api-publisher-jobs.json`)).value.jobs;

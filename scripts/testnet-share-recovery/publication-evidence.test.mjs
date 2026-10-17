@@ -1,3 +1,4 @@
+import { inventoryScopeFixture } from './inventory-scope-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -116,8 +117,8 @@ test('proof entry points reject a different published asset with unchanged count
     write('campaign-manifest.json', campaign); write('seal-proof.json', seals); write('pre-workload/rdf.json', rdf(before));
     write('publication-admissions.json', [admission]); write('synchronous-shares.json', []);
     write('protocol.json', { startedAt: '1970-01-01T00:00:00Z' }); write('context-graph.json', { value: { onChainId: 1 } });
-    write('fixed-deadline/inventory.json', { swm: seals.map(s => ({ assertion_coordinate: s.name })) });
-    write('fixed-deadline/catalogs.json', [{ rows: seals.map(s => ({ assertionCoordinate: s.name })) }]);
+    const scopeFixture = inventoryScopeFixture(campaign, seals.map(s => ({ assertion_coordinate: s.name })), seals.map(s => ({ assertionCoordinate: s.name })));
+    write('fixed-deadline/inventory.json', scopeFixture.capture); write('fixed-deadline/catalogs.json', scopeFixture.catalogs); write('fixed-deadline/-api-status.json', scopeFixture.status);
     write('restart-readback/manifest.json', { observedAt: '2026-10-17T00:00:00Z' });
     fs.mkdirSync(path.join(root, 'restart-regression'));
     const home = path.join(cwd, 'home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ contextGraphs: [cg], store: { options: { url: 'http://127.0.0.1:1' } } }));

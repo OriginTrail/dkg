@@ -1,3 +1,4 @@
+import { inventoryScopeFixture } from './inventory-scope-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { indexAuthoritativeMetadata } from './authoritative-metadata.mjs';
@@ -54,8 +55,8 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     const rdf = bindings => ({ results: { bindings } });
     write('campaign-manifest.json', campaign); write('pre-workload/rdf.json', rdf(before));
     write('fixed-deadline/rdf.json', rdf([...metadata, ...payload]));
-    write('fixed-deadline/inventory.json', { swm: [{ assertion_coordinate: name }] });
-    write('fixed-deadline/catalogs.json', [{ rows: [{ assertionCoordinate: name }] }]);
+    const scopeFixture = inventoryScopeFixture(campaign, [{ assertion_coordinate: name }], [{ assertionCoordinate: name }]);
+    write('fixed-deadline/inventory.json', scopeFixture.capture); write('fixed-deadline/catalogs.json', scopeFixture.catalogs); write('fixed-deadline/-api-status.json', scopeFixture.status);
     write('fixed-deadline/-api-publisher-jobs.json', { value: { jobs: [] } });
     write('synchronous-shares.json', [{ label: `share:${name}`, status: 200 }]); write('publication-admissions.json', []);
     write('protocol.json', { startedAt: '2026-10-16T00:00:00Z' }); write('context-graph.json', { value: { onChainId: 1 } });

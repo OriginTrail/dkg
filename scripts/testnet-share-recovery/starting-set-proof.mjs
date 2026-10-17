@@ -1,3 +1,4 @@
+import { verifyInventoryScope } from './inventory-scope.mjs';
 import { assertUnambiguousSealFields } from './seal-cardinality.mjs';
 import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
 import { indexAuthoritativeMetadata } from './authoritative-metadata.mjs';
@@ -23,8 +24,11 @@ for (const [subject, rows] of groups) {
   seals.set(subject.split('/').at(-1), {seal,digest:computeCanonicalGraphScopedAuthorSealDigestV1(seal)});
 }
 for (const name of prepared) if (!seals.has(name)) throw Error(`Missing prepared seal: ${name}`);
-const inventory = JSON.parse(fs.readFileSync(`${dir}/pre-workload/inventory.json`)).swm;
-const catalog = JSON.parse(fs.readFileSync(`${dir}/pre-workload/catalogs.json`)).flatMap(c=>c.rows);
+const inventoryCapture = JSON.parse(fs.readFileSync(`${dir}/pre-workload/inventory.json`));
+const inventoryScope = verifyInventoryScope(campaign, inventoryCapture, JSON.parse(fs.readFileSync(`${dir}/pre-workload/catalogs.json`)), JSON.parse(fs.readFileSync(`${dir}/pre-workload/-api-status.json`)));
+if (!inventoryScope.valid) throw Error(inventoryScope.errors.join('; '));
+const inventory = inventoryScope.rows;
+const catalog = inventoryScope.catalogRows;
 const expected = names.map(name => {
   const entry = seals.get(name);
   if (!entry) throw Error(`Missing prepared seal: ${name}`);
