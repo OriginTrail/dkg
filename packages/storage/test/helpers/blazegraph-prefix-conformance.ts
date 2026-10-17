@@ -1,18 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { listGraphsByPrefixCandidate } from '../../scripts/blazegraph-prefix-candidate.mjs';
-import { BlazegraphStore as ProductionBlazegraphStore } from '../../src/adapters/blazegraph.js';
+import { BlazegraphStore } from '../../src/adapters/blazegraph.js';
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint } from '../../src/blazegraph-namespace-manager.js';
 import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../../src/atomic-graph-replace.js';
 import { startOxigraphSparqlEndpoint, type OxigraphSparqlEndpoint } from './oxigraph-sparql-endpoint.js';
-
-// The experiment runs through the public query path; no production capability
-// is installed until native measurements justify the change.
-class BlazegraphStore extends ProductionBlazegraphStore {
-  listGraphsByPrefix(prefix: string, options?: import('../../src/triple-store.js').TripleStoreQueryOptions) {
-    return listGraphsByPrefixCandidate(this, prefix, options);
-  }
-}
 
 export function graphPrefixConformance(backend: 'oxigraph-http' | 'blazegraph') {
   describe(`prefix enumeration (${backend})`, () => {
@@ -54,16 +46,16 @@ export function graphPrefixConformance(backend: 'oxigraph-http' | 'blazegraph') 
         'urn:scope:"', 'urn:scope:\\', '\n\t\r',
         '") } UNION { GRAPH ?g { ?s ?p ?o } } #', ATOMIC_GRAPH_REPLACE_STAGING_PREFIX]) {
         const expected = (await store.listGraphs()).filter(g => g.startsWith(prefix)).sort();
-        expect((await store.listGraphsByPrefix(prefix)).sort(), prefix).toEqual(expected);
+        expect((await listGraphsByPrefixCandidate(store, prefix)).sort(), prefix).toEqual(expected);
       }
     });
 
     it('sees writes and removals from another client without sharing a cache', async () => {
-      expect(await store.listGraphsByPrefix('urn:external:')).toEqual([]);
+      expect(await listGraphsByPrefixCandidate(store, 'urn:external:')).toEqual([]);
       await external.insert([{ graph: 'urn:external:new', subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
-      expect(await store.listGraphsByPrefix('urn:external:')).toEqual(['urn:external:new']);
+      expect(await listGraphsByPrefixCandidate(store, 'urn:external:')).toEqual(['urn:external:new']);
       await external.dropGraph('urn:external:new');
-      expect(await store.listGraphsByPrefix('urn:external:')).toEqual([]);
+      expect(await listGraphsByPrefixCandidate(store, 'urn:external:')).toEqual([]);
     });
   });
 }

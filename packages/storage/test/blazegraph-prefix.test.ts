@@ -1,23 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { listGraphsByPrefixCandidate } from '../scripts/blazegraph-prefix-candidate.mjs';
-import { BlazegraphStore as ProductionBlazegraphStore } from '../src/adapters/blazegraph.js';
+import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import type { TripleStore } from '../src/triple-store.js';
-
-// The experiment runs through the public query path; no production capability
-// is installed until native measurements justify the change.
-class BlazegraphStore extends ProductionBlazegraphStore {
-  listGraphsByPrefix(prefix: string, options?: import('../src/triple-store.js').TripleStoreQueryOptions) {
-    return listGraphsByPrefixCandidate(this, prefix, options);
-  }
-}
-
-// Exercise the optional capability without changing the production adapter.
-async function prefixGraphs(store: TripleStore, prefix: string) {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix)
-    : (await store.listGraphs()).filter(g => g.startsWith(prefix));
-}
 
 function response(graphs: string[]) {
   return new Response(JSON.stringify({ head: { vars: ['g'] }, results: {
@@ -29,7 +14,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe('experimental fresh Blazegraph graph-prefix reads', () => {
   it('keeps the slower candidate disabled in the production adapter', () => {
-    expect((new ProductionBlazegraphStore('http://local.test/sparql') as TripleStore).listGraphsByPrefix).toBeUndefined();
+    expect((new BlazegraphStore('http://local.test/sparql') as TripleStore).listGraphsByPrefix).toBeUndefined();
   });
   it('pushes the prefix to the server instead of downloading unrelated identifiers', async () => {
     const all = ['urn:scope:one', ...Array.from({ length: 100 }, (_, i) => `urn:other:${i}`)];
@@ -40,7 +25,7 @@ describe('experimental fresh Blazegraph graph-prefix reads', () => {
       returnedRows += graphs.length;
       return response(graphs);
     }));
-    expect(await prefixGraphs(new BlazegraphStore('http://local.test/sparql'), 'urn:scope:'))
+    expect(await listGraphsByPrefixCandidate(new BlazegraphStore('http://local.test/sparql'), 'urn:scope:'))
       .toEqual(['urn:scope:one']);
     expect(returnedRows).toBe(1);
   });
@@ -50,8 +35,8 @@ describe('experimental fresh Blazegraph graph-prefix reads', () => {
       .mockResolvedValueOnce(response(['urn:scope:new']));
     vi.stubGlobal('fetch', fetch);
     const store = new BlazegraphStore('http://local.test/sparql');
-    expect(await prefixGraphs(store, 'urn:scope:')).toEqual(['urn:scope:old']);
-    expect(await prefixGraphs(store, 'urn:scope:')).toEqual(['urn:scope:new']);
+    expect(await listGraphsByPrefixCandidate(store, 'urn:scope:')).toEqual(['urn:scope:old']);
+    expect(await listGraphsByPrefixCandidate(store, 'urn:scope:')).toEqual(['urn:scope:new']);
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
@@ -60,13 +45,11 @@ describe('experimental fresh Blazegraph graph-prefix reads', () => {
     const run = vi.spyOn(scheduler, 'run');
     const fetch = vi.fn(async () => response(['urn:scope:one']));
     vi.stubGlobal('fetch', fetch);
-    const store: TripleStore = new BlazegraphStore('http://local.test/sparql', { scheduler, timeout: 100 });
-    // The first assertion also detects an accidentally dropped optional capability.
-    expect(store.listGraphsByPrefix).toBeTypeOf('function');
+    const store = new BlazegraphStore('http://local.test/sparql', { scheduler, timeout: 100 });
     const abort = new AbortController(); abort.abort(new Error('caller stopped'));
-    await expect(store.listGraphsByPrefix!('urn:', { signal: abort.signal })).rejects.toThrow('caller stopped');
+    await expect(listGraphsByPrefixCandidate(store, 'urn:', { signal: abort.signal })).rejects.toThrow('caller stopped');
     expect(fetch).not.toHaveBeenCalled();
-    await store.listGraphsByPrefix!('urn:', { priority: 'ack', source: 'test.prefix' });
+    await listGraphsByPrefixCandidate(store, 'urn:', { priority: 'ack', source: 'test.prefix' });
     expect(run).toHaveBeenCalledWith('ack', 'test.prefix', expect.any(Function), expect.any(AbortSignal), { storeOperation: 'query' });
     const wire = fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(wire[1].signal).toBeInstanceOf(AbortSignal);
@@ -79,13 +62,13 @@ describe('experimental fresh Blazegraph graph-prefix reads', () => {
     })));
     const scheduler = new StorePriorityScheduler();
     const store = new BlazegraphStore('http://local.test/sparql', { scheduler, timeout: 30 });
-    await expect(store.listGraphsByPrefix('urn:')).rejects.toMatchObject({ storeOperation: 'query' });
+    await expect(listGraphsByPrefixCandidate(store, 'urn:')).rejects.toMatchObject({ storeOperation: 'query' });
     expect(scheduler.snapshot.normalInflight).toBe(0);
   });
 
   it('preserves an explicit response byte limit', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => response(['urn:scope:one'])));
     const store = new BlazegraphStore('http://local.test/sparql');
-    await expect(store.listGraphsByPrefix('urn:', { maxResponseBytes: 8 })).rejects.toThrow();
+    await expect(listGraphsByPrefixCandidate(store, 'urn:', { maxResponseBytes: 8 })).rejects.toThrow();
   });
 });
