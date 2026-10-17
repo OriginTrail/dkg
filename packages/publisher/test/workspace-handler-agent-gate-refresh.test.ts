@@ -307,6 +307,20 @@ describe('SharedMemoryHandler: second look at the agent gate for a signer the pr
     await expect(storedName()).resolves.toBeUndefined();
   });
 
+  it('a receiver whose only agent is revoked locally admits nothing, whatever the fresh authority lists', async () => {
+    // The projected gate subtracts the receiver's own tombstone; the fresh roster
+    // from the authority still lists that agent (and the writer). Local
+    // membership is judged on the fresh roster minus local tombstones.
+    const oracle = freshGateOracle();
+    const handler = createHandler(oracle, { revokedAgents: [localMember.address] });
+
+    const outcome = await handler.handle(await writeBy(newMember, 'Receiver Revoked'), PEER_ID);
+
+    expect(outcome).toMatchObject(PERMANENT);
+    expect(oracle).toHaveBeenCalledTimes(1);
+    await expect(storedName()).resolves.toBeUndefined();
+  });
+
   it('keeps the local-membership check on the fresh gate', async () => {
     const oracle = freshGateOracle();
     const stranger = ethers.Wallet.createRandom();
@@ -389,7 +403,10 @@ describe('admitAgentSigner', () => {
 
 describe('retryAgentEnvelopeWithRefreshedGate', () => {
   const gateMiss: AgentEnvelopeVerdict = { kind: 'gate-miss', signer: newMember.address.toLowerCase() };
-  const noRevocations = async () => new Set<string>();
+  const metadata = (revoked: string[] = [], allowedPeers: string[] | null = null) => ({
+    revokedAgents: new Set(revoked.map((a) => a.toLowerCase())),
+    allowedPeers,
+  });
   const base = {
     verdict: gateMiss,
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -397,8 +414,8 @@ describe('retryAgentEnvelopeWithRefreshedGate', () => {
     trustedReplay: false,
     allowedPeers: null,
     localAgentAddresses: () => [localMember.address],
-    readRevokedAgents: noRevocations,
-    readAllowedPeers: async () => null,
+    revokedAgents: new Set<string>(),
+    readRefreshedMetadata: async () => metadata(),
     logWarn: () => {},
     logInfo: () => {},
   };
@@ -428,7 +445,7 @@ describe('retryAgentEnvelopeWithRefreshedGate', () => {
     await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, allowedPeers: [OTHER_PEER_ID], oracle }))
       .resolves.toEqual({ accepted: false, retryable: false });
     await expect(retryAgentEnvelopeWithRefreshedGate({
-      ...base, oracle, readRevokedAgents: async () => new Set([newMember.address.toLowerCase()]),
+      ...base, oracle, revokedAgents: new Set([newMember.address.toLowerCase()]),
     })).resolves.toEqual({ accepted: false, retryable: false });
     expect(oracle).not.toHaveBeenCalled();
   });
@@ -436,7 +453,7 @@ describe('retryAgentEnvelopeWithRefreshedGate', () => {
   it('on trusted replay the relaying host need not be in the peer allowlist, before or after the refresh', async () => {
     const oracle = freshGateOracle();
     await expect(retryAgentEnvelopeWithRefreshedGate({
-      ...base, oracle, trustedReplay: true, allowedPeers: [OTHER_PEER_ID], readAllowedPeers: async () => [OTHER_PEER_ID],
+      ...base, oracle, trustedReplay: true, allowedPeers: [OTHER_PEER_ID], readRefreshedMetadata: async () => metadata([], [OTHER_PEER_ID]),
     })).resolves.toEqual({ accepted: true });
     expect(oracle).toHaveBeenCalledTimes(1);
   });
@@ -444,13 +461,16 @@ describe('retryAgentEnvelopeWithRefreshedGate', () => {
   it('re-runs the peer allowlist and the revocations on the metadata the refresh installed', async () => {
     const oracle = freshGateOracle();
     await expect(retryAgentEnvelopeWithRefreshedGate({
-      ...base, oracle, allowedPeers: [PEER_ID], readAllowedPeers: async () => [OTHER_PEER_ID],
+      ...base, oracle, allowedPeers: [PEER_ID], readRefreshedMetadata: async () => metadata([], [OTHER_PEER_ID]),
     })).resolves.toEqual({ accepted: false, retryable: false });
-    let reads = 0;
     await expect(retryAgentEnvelopeWithRefreshedGate({
-      ...base, oracle, readRevokedAgents: async () => (reads++ === 0 ? new Set() : new Set([newMember.address.toLowerCase()])),
+      ...base, oracle, readRefreshedMetadata: async () => metadata([newMember.address]),
     })).resolves.toEqual({ accepted: false, retryable: false });
-    expect(oracle).toHaveBeenCalledTimes(2);
+    // The receiver's own agent revoked by the refreshed metadata: no local member on the fresh roster.
+    await expect(retryAgentEnvelopeWithRefreshedGate({
+      ...base, oracle, readRefreshedMetadata: async () => metadata([localMember.address]),
+    })).resolves.toEqual({ accepted: false, retryable: false });
+    expect(oracle).toHaveBeenCalledTimes(3);
   });
 
   it.each<[string, SwmAgentGateRefreshResult, boolean]>([

@@ -48,13 +48,8 @@ import {
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
-import {
-  AGENT_ENVELOPE_INVALID,
-  admitAgentSigner,
-  retryAgentEnvelopeWithRefreshedGate,
-  type AgentEnvelopeVerdict,
-  type SwmAgentGateRefreshOracle,
-} from './swm-write-gate-refresh.js';
+import { AGENT_ENVELOPE_INVALID, admitAgentSigner, retryAgentEnvelopeWithRefreshedGate } from './swm-write-gate-refresh.js';
+import type { AdmissionMetadata, AgentEnvelopeVerdict, SwmAgentGateRefreshOracle } from './swm-write-gate-refresh.js';
 import { computeFlatKCRootV10 } from './merkle.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
@@ -1153,14 +1148,13 @@ export class SharedMemoryHandler {
           skipTimestampFreshness: trustedReplay,
         });
         if (verdict.kind !== 'verified') {
-          // verifyAgentEnvelope logged the reason at WARN. An invalid envelope is
-          // permanent; an authenticated signer the projected gate lacked gets one
-          // fresh look, with the whole admission re-run on it (`swm-write-gate-refresh.ts`).
+          // Logged at WARN already. An invalid envelope is permanent; an authenticated
+          // signer the projected gate lacked gets one fresh look (`swm-write-gate-refresh.ts`).
           const retry = await retryAgentEnvelopeWithRefreshedGate({
             verdict, oracle: this.agentGateRefreshOracle, contextGraphId, fromPeerId, trustedReplay, allowedPeers,
             localAgentAddresses: this.localAgentAddresses?.bind(this),
-            readRevokedAgents: async () => this.getContextGraphRevokedAgents(contextGraphId, await this.createContextGraphMetaOracleRead(contextGraphId)?.()),
-            readAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId, this.createContextGraphMetaOracleRead(contextGraphId)),
+            revokedAgents: await this.getContextGraphRevokedAgents(contextGraphId, await readProjectedMeta?.()),
+            readRefreshedMetadata: () => this.readAdmissionMetadata(contextGraphId),
             logWarn: (message) => this.log.warn(ctx, message), logInfo: (message) => this.log.info(ctx, message),
           });
           if (!retry.accepted) return { applied: false, reason: 'agent envelope verification failed', retryable: retry.retryable };
@@ -2317,9 +2311,8 @@ export class SharedMemoryHandler {
   }
 
   /**
-   * Revoked tombstones, lowercased: the projection when it carried the field,
-   * otherwise `_meta`. Applied to whichever source an allowlist comes from, so
-   * a projected revocation kicks a store-resolved member and vice versa.
+   * Revoked tombstones, lowercased: the projection when it carried the field, otherwise
+   * `_meta`. Applied to whichever source an allowlist comes from (a projected revocation kicks a store member).
    */
   private async getContextGraphRevokedAgents(
     contextGraphId: string,
@@ -2329,6 +2322,13 @@ export class SharedMemoryHandler {
     return new Set(revokedAgents
       .filter((v): v is string => typeof v === 'string' && ethers.isAddress(v))
       .map((v) => v.toLowerCase()));
+  }
+
+  /** The revocations and peer allowlist of the metadata as it is now, from one projected read. */
+  private async readAdmissionMetadata(contextGraphId: string): Promise<AdmissionMetadata> {
+    const read = this.createContextGraphMetaOracleRead(contextGraphId);
+    const revokedAgents = await this.getContextGraphRevokedAgents(contextGraphId, await read?.());
+    return { revokedAgents, allowedPeers: await this.getContextGraphAllowedPeers(contextGraphId, read) };
   }
 
   /**

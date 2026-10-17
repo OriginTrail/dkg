@@ -244,14 +244,28 @@ describe('SWM write gate refresh oracle: the ration of looks', () => {
     expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(3);
   });
 
+  it('churn of sending peers cannot evict a graph\'s ration and hand it a fresh budget', async () => {
+    const receiver = host([available(CURATOR, MEMBER)]);
+    const oracle = createSwmWriteGateRefreshOracle(receiver, { looksPerPeer: 10, looksPerGraph: 2, rationMemoryMax: 3 });
+    const freshKey = () => ethers.Wallet.createRandom().address;
+
+    await expect(oracle(CG, freshKey(), 'peer-0')).resolves.toMatchObject({ kind: 'available' });
+    await expect(oracle(CG, freshKey(), 'peer-1')).resolves.toMatchObject({ kind: 'available' });
+    for (let n = 2; n < 20; n += 1) {
+      await expect(oracle(CG, freshKey(), `peer-${n}`)).resolves.toEqual(RATIONED);
+    }
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
+  });
+
   it('tracks only so many rations, forgetting the oldest first', async () => {
     const receiver = host([available(CURATOR)]);
-    const oracle = createSwmWriteGateRefreshOracle(receiver, { looksPerPeer: 1, looksPerGraph: 10, rationMemoryMax: 3 });
+    const oracle = createSwmWriteGateRefreshOracle(receiver, { looksPerPeer: 1, looksPerGraph: 10, rationMemoryMax: 2 });
     const freshKey = () => ethers.Wallet.createRandom().address;
 
     await expect(oracle(CG, freshKey(), 'peer-a')).resolves.toMatchObject({ kind: 'available' });
     await expect(oracle(CG, freshKey(), 'peer-a')).resolves.toEqual(RATIONED);
-    // Two more peers push peer-a's ration out of the bounded memory.
+    // Two more peers push peer-a's ration out of the bounded peer memory; the
+    // graph's own ration lives apart and is untouched by that.
     await expect(oracle(CG, freshKey(), 'peer-b')).resolves.toMatchObject({ kind: 'available' });
     await expect(oracle(CG, freshKey(), 'peer-c')).resolves.toMatchObject({ kind: 'available' });
     await expect(oracle(CG, freshKey(), 'peer-a')).resolves.toMatchObject({ kind: 'available' });

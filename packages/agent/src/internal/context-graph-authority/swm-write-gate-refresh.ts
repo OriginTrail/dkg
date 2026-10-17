@@ -68,7 +68,7 @@ export interface SwmWriteGateRefreshOptions {
   looksPerPeer?: number;
   /** Looks all peers together may start on one graph per window. */
   looksPerGraph?: number;
-  /** How many rations (graphs, and graph-peer pairs) are tracked at most. */
+  /** How many rations are tracked at most, for graphs and for graph-peer pairs each. */
   rationMemoryMax?: number;
   now?: () => number;
 }
@@ -173,26 +173,32 @@ export function createSwmWriteGateRefreshOracle(
   const looksPerGraph = options.looksPerGraph ?? DEFAULT_SWM_WRITE_GATE_LOOKS_PER_GRAPH;
   const rationMemoryMax = options.rationMemoryMax ?? DEFAULT_SWM_WRITE_GATE_RATION_MEMORY_MAX;
   const now = options.now ?? Date.now;
-  const rations = new Map<string, Ration>();
+  // Graph and peer rations live apart, so churn of sending peers cannot evict
+  // a graph's counter and hand it a fresh budget inside its window.
+  const graphRations = new Map<string, Ration>();
+  const peerRations = new Map<string, Ration>();
 
-  /** Take one look from the ration of `key`, or refuse it. */
-  const takeLook = (key: string, limit: number): boolean => {
-    const at = now();
+  const current = (rations: Map<string, Ration>, key: string): Ration | undefined => {
     const ration = rations.get(key);
-    if (ration === undefined || ration.windowEndsAt <= at) {
-      rememberBounded(rations, key, { windowEndsAt: at + windowMs, looks: 1 }, rationMemoryMax);
-      return true;
-    }
-    if (ration.looks >= limit) return false;
-    ration.looks += 1;
-    return true;
+    return ration !== undefined && ration.windowEndsAt > now() ? ration : undefined;
+  };
+  const hasLook = (rations: Map<string, Ration>, key: string, limit: number): boolean =>
+    (current(rations, key)?.looks ?? 0) < limit;
+  const takeLook = (rations: Map<string, Ration>, key: string): void => {
+    const ration = current(rations, key);
+    if (ration !== undefined) ration.looks += 1;
+    else rememberBounded(rations, key, { windowEndsAt: now() + windowMs, looks: 1 }, rationMemoryMax);
   };
 
   return async (contextGraphId, signerAddress, fromPeerId) => {
-    // The graph's ration is taken only when the peer's allows the look, so one
-    // refused peer does not consume what another peer's late member needs.
-    if (!takeLook(`${contextGraphId}\u0000${fromPeerId}`, looksPerPeer)) return RATIONED;
-    if (!takeLook(contextGraphId, looksPerGraph)) return RATIONED;
+    // Both rations are checked before either is taken: a refused request
+    // consumes nothing, neither another peer's late member's look nor map space.
+    const peerKey = `${contextGraphId}\u0000${fromPeerId}`;
+    if (!hasLook(peerRations, peerKey, looksPerPeer) || !hasLook(graphRations, contextGraphId, looksPerGraph)) {
+      return RATIONED;
+    }
+    takeLook(peerRations, peerKey);
+    takeLook(graphRations, contextGraphId);
     return secondLook(host, contextGraphId, signerAddress, timeoutMs);
   };
 }

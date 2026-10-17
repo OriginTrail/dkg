@@ -100,6 +100,14 @@ export type AgentEnvelopeRetryVerdict =
   | { readonly accepted: true }
   | { readonly accepted: false; readonly retryable: boolean };
 
+/** The local metadata facts the admission re-runs after a refresh, from one projected read. */
+export interface AdmissionMetadata {
+  /** Explicitly revoked agents, lowercased. */
+  readonly revokedAgents: ReadonlySet<string>;
+  /** The peer allowlist (null: no allowlist). */
+  readonly allowedPeers: readonly string[] | null;
+}
+
 export interface RetryAgentEnvelopeInput {
   /** The verdict of the verification against the projected gate. */
   verdict: AgentEnvelopeVerdict;
@@ -111,10 +119,10 @@ export interface RetryAgentEnvelopeInput {
   /** The peer allowlist the envelope was first judged by (null: no allowlist). */
   allowedPeers: readonly string[] | null;
   localAgentAddresses: LocalAgentAddressesSource | undefined;
-  /** The graph's explicitly revoked agents, lowercased, read fresh. */
-  readRevokedAgents: () => Promise<ReadonlySet<string>>;
-  /** The graph's peer allowlist, read fresh. */
-  readAllowedPeers: () => Promise<readonly string[] | null>;
+  /** Explicitly revoked agents, lowercased, from the snapshot the envelope was first judged by. */
+  revokedAgents: ReadonlySet<string>;
+  /** The metadata as it is after the look, from one fresh projected read. */
+  readRefreshedMetadata: () => Promise<AdmissionMetadata>;
   logWarn: (message: string) => void;
   logInfo: (message: string) => void;
 }
@@ -133,7 +141,7 @@ export async function retryAgentEnvelopeWithRefreshedGate(
 ): Promise<AgentEnvelopeRetryVerdict> {
   const {
     verdict, oracle, contextGraphId, fromPeerId, trustedReplay, allowedPeers,
-    localAgentAddresses, readRevokedAgents, readAllowedPeers, logWarn, logInfo,
+    localAgentAddresses, revokedAgents, readRefreshedMetadata, logWarn, logInfo,
   } = input;
   if (verdict.kind === 'verified') return { accepted: true };
   if (verdict.kind === 'invalid' || oracle === undefined) return PERMANENT;
@@ -144,7 +152,7 @@ export async function retryAgentEnvelopeWithRefreshedGate(
   const signerKey = signer.toLowerCase();
   // A signer the local metadata explicitly revoked is not a signer the
   // metadata has not heard of: no authority read can lift a tombstone.
-  if ((await readRevokedAgents()).has(signerKey)) {
+  if (revokedAgents.has(signerKey)) {
     logWarn(`SWM write by ${signer} to context graph "${contextGraphId}" rejected: the agent is revoked locally`);
     return PERMANENT;
   }
@@ -174,21 +182,21 @@ export async function retryAgentEnvelopeWithRefreshedGate(
   }
 
   // The look may have installed new metadata: every local check is re-run on
-  // the metadata as it is now, not on the snapshot the envelope was first judged by.
-  if ((await readRevokedAgents()).has(signerKey)) {
-    logWarn(`SWM write by ${signer} to context graph "${contextGraphId}" rejected: the refreshed metadata revokes the agent`);
-    return PERMANENT;
-  }
+  // the metadata as it is now, not on the snapshot the envelope was first judged
+  // by. Local tombstones are subtracted from the fresh roster before admission,
+  // as the projected gate subtracts them, so a revoked signer and a receiver
+  // whose only agent is revoked are both refused whatever the authority lists.
+  const refreshed = await readRefreshedMetadata();
   const admitted = await admitAgentSigner({
     signer,
     contextGraphId,
-    agentGateAddresses: fresh.agentAddresses,
+    agentGateAddresses: fresh.agentAddresses.filter((agent) => !refreshed.revokedAgents.has(agent.toLowerCase())),
     requireLocalMembership: true,
     localAgentAddresses,
     logWarn,
   });
   if (admitted.kind !== 'verified') return PERMANENT;
-  if (!peerAdmits(await readAllowedPeers())) {
+  if (!peerAdmits(refreshed.allowedPeers)) {
     logWarn(
       `SWM write by ${signer} to context graph "${contextGraphId}" rejected: `
         + `peer "${fromPeerId}" is not in the refreshed peer allowlist`,
