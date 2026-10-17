@@ -199,6 +199,62 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_B]);
   });
 
+  it('asks a peer again while this node\'s own sync slots turn the request away, and counts no answer until one comes', async () => {
+    const deferred = { fetchedTriples: 0, insertedTriples: 0, complete: false, deferred: true };
+    let refusals = 2;
+    let addOwner = (): void => {};
+    const h = createHarness({
+      localDeferralRetryMs: 1,
+      sync: async () => {
+        if (refusals > 0) {
+          refusals -= 1;
+          return deferred;
+        }
+        addOwner();
+        return complete(75_141);
+      },
+    });
+    addOwner = () => { h.phonebook.add(OWNER.toLowerCase()); };
+
+    h.fetcher.request(CG, 'subscribe');
+    await h.fetcher.whenIdle();
+
+    expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_A, CORE_A, CORE_A]);
+    expect(h.info).toHaveLength(1);
+    expect(h.info[0]).toContain(`peers=[${CORE_A.slice(-8)}:core:complete:75141]`);
+    expect(h.info[0]).toContain('outcome=complete');
+    expect(h.resolvedBatches).toEqual([[CG]]);
+  });
+
+  it('starts no cooldown when this node\'s own sync slots stay busy, and asks again on the re-check', async () => {
+    const deferred = { fetchedTriples: 0, insertedTriples: 0, complete: false, deferred: true };
+    let busy = true;
+    let addOwner = (): void => {};
+    const h = createHarness({
+      localDeferralRetryMs: 1,
+      localDeferralMaxRetries: 2,
+      sync: async () => {
+        if (busy) return deferred;
+        addOwner();
+        return complete(75_141);
+      },
+    });
+    addOwner = () => { h.phonebook.add(OWNER.toLowerCase()); };
+
+    h.fetcher.request(CG, 'subscribe');
+    await h.fetcher.whenIdle();
+    // Asked once and again twice; never counted as an answer.
+    expect(h.syncCalls).toHaveLength(3);
+    expect(h.info).toEqual([]);
+    expect(h.debug.some((line) => line.includes("this node's sync slots stayed busy"))).toBe(true);
+
+    busy = false;
+    await vi.waitFor(() => expect(h.info).toHaveLength(1));
+    await h.fetcher.whenIdle();
+    expect(h.info[0]).toContain('outcome=complete');
+    expect(h.resolvedBatches).toEqual([[CG]]);
+  });
+
   it('does not take an empty "complete" Core answer for the network phonebook', async () => {
     // A just-started or lean Core answers a full scan as complete with no rows.
     const h = createHarness({

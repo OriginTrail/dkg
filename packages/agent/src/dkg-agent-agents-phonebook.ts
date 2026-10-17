@@ -183,6 +183,7 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
           fetchedTriples: result.fetchedDataTriples + result.fetchedMetaTriples,
           insertedTriples: result.insertedTriples,
           complete: result.complete,
+          deferred: (result.deferredBackpressure ?? 0) > 0,
         };
       },
       onCuratorsResolved: (contextGraphIds) => {
