@@ -84,12 +84,19 @@ import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
  * catch-ups (their listener and pending admission reads) and the pending
  * readiness repeats would only start jobs that are refused from here on. A
  * failure there is logged and does not stop the shutdown either.
+ *
+ * `endWriteReadinessWaits` runs before the first await as well: a write that
+ * waits for its graph's catch-up (`context-graph-write-readiness.ts`) is
+ * refused at once, retryable, so it does not hold the HTTP server's close,
+ * which comes before the catch-up drain, until the shutdown deadline.
  */
 export async function beginGracefulShutdown(deps: {
   state: { catchupAcceptingJobs: boolean };
   removeApiPort: () => Promise<void>;
   log: (message: string) => void;
   endShareAdmissionWaits?: () => void;
+  /** Refuses the writes that wait for their graph's catch-up, and every later one that would. */
+  endWriteReadinessWaits?: () => void;
   /** Stops the triggers of later catch-up jobs. */
   stopCatchupTriggers?: () => void;
 }): Promise<void> {
@@ -98,6 +105,11 @@ export async function beginGracefulShutdown(deps: {
     deps.endShareAdmissionWaits?.();
   } catch (err: any) {
     deps.log(`Share admission wait shutdown error: ${err?.message ?? String(err)}`);
+  }
+  try {
+    deps.endWriteReadinessWaits?.();
+  } catch (err: any) {
+    deps.log(`Write readiness wait shutdown error: ${err?.message ?? String(err)}`);
   }
   try {
     deps.stopCatchupTriggers?.();

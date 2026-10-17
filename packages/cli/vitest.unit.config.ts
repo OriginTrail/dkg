@@ -106,6 +106,12 @@ export default defineConfig({
           // A persisted subscription restored unsynced gets a catch-up job
           // (#3251). Agent double and stub runner; no hardhat.
           'test/context-graph-activation-catchup.test.ts',
+          // A write into a graph this node is still catching up waits for the
+          // catch-up, bounded; a restarted owner's first write into its own
+          // registered graph goes through. Same worker and fake thread.
+          'test/context-graph-write-readiness.test.ts',
+          'test/context-graph-owner-write-after-restart.test.ts',
+          'test/context-graph-write-readiness-shutdown.test.ts',
           'test/context-graph-authority-attribution.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
           // Subscribing by an on-chain name hash (Base #33): route, catch-up
@@ -197,6 +203,7 @@ export default defineConfig({
           'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
+          'test/knowledge-assets-sub-graph-refusal.test.ts',
           'test/import-artifact-routes.test.ts',
           'test/shared-memory-catchup-durable.test.ts',
           'test/skill-endpoint.test.ts',

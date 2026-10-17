@@ -9,11 +9,14 @@
  * the graph is not catalog-owned), plus, for a catalog-owned graph, a head
  * replay of the graph's catalog from the connected peers, which carries the
  * root scope.
+ *
+ * The owner of a graph pulls it too. A member that reaches the graph only
+ * through Cores (a relay-only Edge) shares into it through them, and the
+ * owner holds such a share only once it fetched it from one of them.
  */
 
 import {
   createOperationContext,
-  deriveCuratorDidFromCgId,
   DKGEvent,
   SYSTEM_CONTEXT_GRAPHS,
   type OperationContext,
@@ -44,7 +47,6 @@ interface RecentSharedMemoryPullAgent {
     readonly libp2p: { getPeers(): ReadonlyArray<{ toString(): string }> };
   };
   readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
-  readonly localAgents: ReadonlyMap<string, unknown>;
   readonly preferredSyncPeers: Map<string, string>;
   readonly networkAdmissionCoordinator: { isAcceptedPeer(peerId: string): boolean };
   readonly eventBus: {
@@ -53,7 +55,6 @@ interface RecentSharedMemoryPullAgent {
   };
   readonly log: { debug(ctx: OperationContext, message: string): void };
   isPrivateContextGraph(contextGraphId: string): Promise<boolean>;
-  isCuratorOf(contextGraphId: string): Promise<boolean>;
   canUseSharedMemoryForContextGraph(contextGraphId: string): Promise<boolean>;
   selectCatchupPeers(peers: Array<{ toString(): string }>): Array<{ toString(): string }>;
   rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId: string): boolean;
@@ -129,17 +130,7 @@ export function startRecentSharedMemoryPulls(
   const ownerTtlMs = options.ownerTtlMs ?? RECENT_SHARED_MEMORY_OWNER_TTL_MS;
   const owners = new Map<string, { readonly peerId?: string; readonly at: number }>();
 
-  // Who owns the graph decides whether to pull it at all, so only what the
-  // graph id says (its owner wallet is a local agent) or, for an id without
-  // one, the curator the graph's metadata names counts. Where to pull from is
-  // a routing preference and may come from weaker hints (`ownerPeerOf`).
-  const ownedHere = async (contextGraphId: string): Promise<boolean> => {
-    const ownerDid = deriveCuratorDidFromCgId(contextGraphId);
-    if (ownerDid === null) return agent.isCuratorOf(contextGraphId);
-    const owner = ownerDid.slice('did:dkg:agent:'.length).toLowerCase();
-    return [...agent.localAgents.keys()].some((address) => address.toLowerCase() === owner);
-  };
-
+  // Where to pull from is a routing preference and may come from weak hints.
   const ownerPeerOf = async (contextGraphId: string): Promise<string | undefined> => {
     const cached = owners.get(contextGraphId);
     if (cached !== undefined && now() - cached.at < ownerTtlMs) return cached.peerId;
@@ -158,9 +149,8 @@ export function startRecentSharedMemoryPulls(
       if (SYSTEM_CONTEXT_GRAPH_IDS.has(contextGraphId)) return false;
       const subscription = agent.subscribedContextGraphs.get(contextGraphId);
       if (subscription?.subscribed !== true || subscription.syncMode !== 'always-on') return false;
-      if (await agent.isPrivateContextGraph(contextGraphId)) return false;
-      // The owner holds every write its members send it.
-      return !(await ownedHere(contextGraphId));
+      // The graph's owner as well: see the module comment.
+      return !(await agent.isPrivateContextGraph(contextGraphId));
     },
     sources: async (contextGraphId) => {
       // Authority not confirmed yet: the sync would only be refused. Next interval.

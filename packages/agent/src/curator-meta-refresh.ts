@@ -32,9 +32,7 @@ import {
   hasAuthoritativePublicMetaDefinitionForApprovedMember,
 } from './context-graph-public-meta-proof.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
-import {
-  hasSyncAdmissionSource,
-} from './sync/attempt-telemetry.js';
+import { fetchFreshContextGraphMeta } from './sync/requester/fresh-meta-fetch.js';
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
 import type {
   SyncPageFetchOptions,
@@ -45,6 +43,12 @@ import { stripLiteral } from './dkg-agent-utils.js';
 import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
 import { ensureCuratorConnected } from './curator-peer-connection.js';
+import {
+  learnPeerSubGraphs,
+  readLocalSubGraphNames,
+  readPeerSubGraphRegistrations,
+  type PeerSubGraphRegistration,
+} from './peer-sub-graph-registration.js';
 import {
   noteCuratorMetaRefreshStarted,
   noteCuratorRegistrationRefusal,
@@ -110,12 +114,13 @@ interface CuratorBoundSubscription {
   onChainHash?: string;
 }
 
-interface CuratorMetaRefreshAgent {
+export interface CuratorMetaRefreshAgent {
   readonly peerId: string;
   readonly metaRefreshTimestamps: Map<string, number>;
   readonly node: { libp2p: Libp2pConnectHost };
   readonly peerResolver: Pick<PeerResolver, 'connect'>;
   readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
   readonly syncCheckpoints: Pick<SyncCheckpointStore, 'delete'>;
   readonly oversizeTombstoneLog: {
     record(drops: OversizeDrop[], seam: string): void;
@@ -175,6 +180,8 @@ interface CuratorMetaRefreshState {
 interface AuthoritativeMetaSnapshot {
   checkpointKey: string;
   quads: Quad[];
+  /** The sub-graph registrations the peer's `_meta` held, registered with the definition (#3293). */
+  subGraphs: readonly PeerSubGraphRegistration[];
   /**
    * The acceptance an approved member's snapshot was admitted under. The
    * replacement asks it again right before its first projection write.
@@ -384,81 +391,23 @@ async function fetchAuthoritativeMetaSnapshot(
   ctx: OperationContext,
 ): Promise<AuthoritativeMetaSnapshot | undefined> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  // Clearing the offset alone is insufficient: page-fetch also retains
-  // unfinished responder-session tokens. A guaranteed-new session prevents a
-  // stale cached row list from being replayed as the authoritative snapshot.
+  // The fetch clears this checkpoint itself; the failures below clear it again.
   const snapshotCheckpointKey = getSyncCheckpointKey(
     curatorPeerId,
     contextGraphId,
     false,
     'meta',
   );
-  agent.syncCheckpoints.delete(snapshotCheckpointKey);
-  // W1 §5.5 — TRIGGER attribution with a base case.
-  //
-  // This is the only fetch in this file, and every route into it funnels here,
-  // so one guard covers all three enumerated callers:
-  //   1. `runImmediatePostApprovalSync` (dkg-agent-lifecycle.ts) — requester,
-  //      no enclosing operation (gossipsub handler)
-  //   2. `resolveCuratorPeerIdsForCg` (dkg-agent-lifecycle.ts) — requester,
-  //      reached from the changelog lane's `runResync`, so it DOES run inside
-  //      an admitted operation
-  //   3. `authorizeSyncRequest` (sync/auth/request-authorize.ts) — RESPONDER,
-  //      authorizing an inbound request; no requester operation exists
-  //
-  // `control-plane` therefore covers BOTH requester-side and responder-side
-  // control traffic. Anyone later reading it as "requester meta refresh" is
-  // wrong. A FOURTH caller must be checked against this list rather than
-  // assumed to fit — the guard will silently give it a plausible label.
-  //
-  // Guarded on scope PRESENCE, never on `=== 'unspecified'`: an admitted
-  // operation whose caller omitted `source` legitimately holds that sentinel,
-  // and relabelling it `control-plane` would launder "we do not know" into a
-  // confident answer. See `hasSyncAdmissionSource`'s doc comment.
-  //
-  // Case 2 keeps its ENCLOSING source on purpose. A refresh nested inside a
-  // catch-up happens *because* of that catch-up — skip the catch-up and the
-  // refresh does not happen — so those bytes are that lane's cost. Attributing
-  // them to `control-plane` would move them out of the eligible numerator and
-  // under-count the very lane §7.3 is evaluating.
-  const runFetch = () => agent.fetchSyncPages(
-    ctx,
-    curatorPeerId,
-    contextGraphId,
-    false,
-    'meta',
-    metaGraph,
+  // A fresh session from offset 0, admitted as control-plane traffic (the
+  // attribution of every caller is listed in `fetchFreshContextGraphMeta`).
+  const result = await fetchFreshContextGraphMeta(agent, ctx, curatorPeerId, contextGraphId, {
     // A curator projection shares the root `_meta` graph with KA lifecycle
     // metadata, so even the small control-plane subset can sit behind many
     // pages. Use the normal bounded sync budget instead of a special 10-second
     // cap that made sufficiently populated private CGs impossible to join.
-    Date.now() + SYNC_TOTAL_TIMEOUT_MS,
-    {
-      signal: options.signal,
-      forceFreshSession: true,
-    },
-  );
-  // A standalone control-plane refresh is real outbound sync work. Admit it
-  // through the node-wide scheduler so partitioned mode can route it to fast
-  // capacity and the global cap still bounds it; in shared mode it may also
-  // take the one reserved control-plane slot beside that cap (#3280), so a
-  // transfer that holds every general slot does not refuse it. Nested
-  // refreshes deliberately stay inside their enclosing admission: acquiring
-  // twice could deadlock a saturated partition, and the enclosing trigger
-  // remains the honest source.
-  const result = await (hasSyncAdmissionSource()
-    ? runFetch()
-    : agent.runContextGraphSyncWithBackpressure(
-      ctx,
-      contextGraphId,
-      'durable',
-      'durable:control-plane',
-      runFetch,
-      {
-        operationSignal: options.signal,
-        source: 'control-plane',
-      },
-    ));
+    deadline: () => Date.now() + SYNC_TOTAL_TIMEOUT_MS,
+    signal: options.signal,
+  });
   throwIfCuratorMetaRefreshAborted(options.signal);
 
   // The shared N-Quads parser admits any graph under the CG prefix. This
@@ -547,6 +496,13 @@ async function fetchAuthoritativeMetaSnapshot(
   return {
     checkpointKey: result.checkpointKey,
     quads,
+    // Registrations this node holds are left out before the per-snapshot
+    // limit applies, so a node that refreshes a definition with more
+    // registrations than the limit learns the next ones each time (#3293).
+    // A store that cannot answer leaves nothing out; the definition still lands.
+    subGraphs: readPeerSubGraphRegistrations(contextGraphId, result.quads, {
+      exclude: await readLocalSubGraphNames(agent.store, contextGraphId).catch(() => new Set<string>()),
+    }),
     ...(approvedMember === undefined ? {} : { approvedMember }),
   };
 }
@@ -829,6 +785,7 @@ async function executeCuratorMetaRefresh(
     if (options.ignoreRegistrationBinding !== true) {
       applyCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads);
     }
+    await learnPeerSubGraphs(agent, contextGraphId, snapshot.subGraphs, curatorPeerId, ctx);
     agent.syncCheckpoints.delete(snapshot.checkpointKey);
     agent.log.info(
       ctx,

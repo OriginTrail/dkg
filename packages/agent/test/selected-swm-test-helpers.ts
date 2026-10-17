@@ -460,6 +460,11 @@ export interface SelectedSwmLifecycleHarnessOptions {
   readonly dataFailuresBeforeSuccess?: number;
   /** Mirror the production verifier's empty-batch classification. */
   readonly reportEmptyResponse?: boolean;
+  /**
+   * The peer's answer to a snapshot request for a ref this node does not hold.
+   * Without it, every snapshot must be a cache hit.
+   */
+  readonly snapshotAnswer?: (ref: string) => readonly Quad[];
   /** Override the aggregate data phase to exercise incomplete empty rounds. */
   readonly dataPage?: {
     readonly quads?: readonly Quad[];
@@ -732,7 +737,19 @@ export function createSelectedSwmLifecycleHarness(
       } = fetchOptions;
       if (phase === 'snapshot') {
         snapshotFetches.push(snapshotRef ?? 'missing-ref');
-        throw new Error('all snapshot fixtures should be cache hits');
+        if (options.snapshotAnswer === undefined || snapshotRef === undefined) {
+          throw new Error('all snapshot fixtures should be cache hits');
+        }
+        const quads = [...options.snapshotAnswer(snapshotRef)];
+        return {
+          quads,
+          bytesReceived: quads.length,
+          resumedFromOffset: 0,
+          nextOffset: quads.length,
+          checkpointKey: `${contextGraphId}:${phase}:${snapshotRef}`,
+          completed: true,
+          timedOut: false,
+        };
       }
       if (phase === 'meta') {
         metaFetches += 1;

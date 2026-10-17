@@ -1,8 +1,7 @@
 // daemon/context-graph-readiness-repeat.ts
 //
-// Repeats the catch-up job of a public Context Graph that is not registered on
-// chain, while a subscription has left it unproven; and of a registered public
-// graph while its jobs ran before its RFC-64 authority was in place.
+// Repeats the catch-up job of a public Context Graph, registered on chain or
+// not, while a subscription has left it unproven.
 //
 // A subscription reports `synced` only once a catch-up job has proven its
 // requested planes, and the subscribe route runs exactly one job per call. For
@@ -24,14 +23,31 @@
 // cancellation; each attempt is one ordinary job. A newer subscribe call's
 // sequence replaces the graph's older one, wherever that one is.
 //
-// A registered public graph can be left unproven the same way. A member's
-// first job, or the job that catches up its subscription after a restart, can
-// walk its peers before the node has accepted the graph's RFC-64 authority:
-// the graph's selected shared-memory lane is not active yet, so the walk asks
-// no peer anything, and the authority arrives seconds later. Such a graph is
-// repeated too, for as long as its attempts find the lane not active.
+// A registered public graph can be left unproven the same way: its root scope
+// is the catalog's, so its durable plane is not walked, and only a round of
+// shared memory can prove it. A member's first job, or the job that catches up
+// its subscription after a restart, can walk its peers before the node has
+// accepted the graph's RFC-64 authority: the graph's selected shared-memory
+// lane is not active yet, so the walk asks no peer anything, and the authority
+// arrives seconds later. Or the walk runs while that authority is being put in
+// place, as it is when the job's own metadata pull installs the graph's
+// definition from the chain: the activation revokes the walk's recovery
+// leases, so the round does not complete. Or a Core still lists the
+// shared-memory copy of an asset it signed a StorageACK for, whose snapshot it
+// does not hold, until the asset reaches its Verified Memory and the copy
+// goes. Each of these is over seconds later, and a registered public graph is
+// repeated like an unregistered one.
+//
+// Such a repeat has nothing to wait for once the lane is active. The job's
+// own last step refreshes the graph's authority, so the lane is often active
+// by the time the job settles: the repeat then runs at once instead of after
+// its delay. A write that waits for the graph (`context-graph-write-readiness.ts`)
+// starts an armed repeat early the same way, once the lane is active.
 
 import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
+import { selectedSharedMemoryLaneActive } from '../catchup-selected-lane.js';
+import { classifyNameHashOnlyCatchup } from '../context-graph-readiness.js';
+import type { ContextGraphCatchupProgressSource } from './context-graph-catchup-progress.js';
 import {
   startContextGraphCatchupJob,
   type ContextGraphCatchupJobInput,
@@ -93,16 +109,23 @@ export function cancelContextGraphReadinessRepeats(): void {
 }
 
 /**
- * Admission of a graph that repeats: a public graph that is not registered on
- * chain, or a registered public graph whose last attempt found its selected
- * shared-memory lane not active. A registered graph otherwise has its durable
- * plane and its curator's word, and a private graph has proofs of its own (the
- * member catalog, the empty-VM proof).
+ * The repeats as catch-up progress (`context-graph-catchup-progress.ts`): a
+ * graph with a sequence is being caught up, an attempt in flight or a repeat
+ * armed, and a write that waits for it starts an armed repeat early when that
+ * repeat waited only for the graph's authority (`expedite`).
  */
-function admitsRepeat(authority: ContextGraphReadAuthorityDecision, laneFoundInactive: boolean): boolean {
-  return authority.outcome === 'allowed'
-    && authority.grantScope === 'public'
-    && (authority.registration === 'unregistered' || laneFoundInactive);
+export const readinessRepeatProgress: ContextGraphCatchupProgressSource = Object.freeze({
+  catchingUp: (contextGraphId: string) => sequences.has(contextGraphId),
+  hurry: (contextGraphId: string) => sequences.get(contextGraphId)?.expedite(),
+});
+
+/**
+ * Admission of a graph that repeats: a public graph, registered on chain or
+ * not. A private graph has proofs of its own (the member catalog, the empty-VM
+ * proof).
+ */
+function admitsRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
+  return authority.outcome === 'allowed' && authority.grantScope === 'public';
 }
 
 /** The repeats that follow one subscribe call's job for one graph. */
@@ -115,6 +138,8 @@ class ReadinessRepeatSequence {
   #ended = false;
   /** The last attempt found the graph's selected shared-memory lane not active. */
   #laneFoundInactive = false;
+  /** The armed repeat follows a settled attempt, not an admission that could not be read. */
+  #armedAfterAttempt = false;
 
   constructor(caller: ContextGraphReadinessRepeatCaller) {
     this.#caller = caller;
@@ -132,6 +157,26 @@ class ReadinessRepeatSequence {
   }
 
   /**
+   * Run the armed repeat now, when it follows an attempt that ran before the
+   * graph's authority and the lane is active by now. Once per attempt: a
+   * repeat armed after an unreadable admission keeps its delay, so the
+   * sequence never spends its repeats faster than its attempts run.
+   */
+  expedite(): void {
+    if (this.#ended || this.#timer === undefined || !this.#armedAfterAttempt || !this.#laneNowActive()) return;
+    readinessRepeatTimers.clear(this.#timer);
+    this.#timer = undefined;
+    this.#armedAfterAttempt = false;
+    void this.#repeat();
+  }
+
+  /** The last attempt found the graph's selected lane not active, and it is active now. */
+  #laneNowActive(): boolean {
+    return this.#laneFoundInactive
+      && selectedSharedMemoryLaneActive(this.#caller.agent, this.#caller.contextGraphId);
+  }
+
+  /**
    * After an attempt settles: arm the next repeat while the graph is still
    * actively subscribed and unsynced, with shared memory requested and no
    * denial; else end. A denial is not cleared by asking again, and without
@@ -143,13 +188,15 @@ class ReadinessRepeatSequence {
       const subscription = this.#caller.agent.getSubscribedContextGraphs().get(this.#caller.contextGraphId);
       this.#laneFoundInactive = job.selectedLaneFoundInactive === true;
       const unproven = this.#caller.includeSharedMemory
-        && admitsRepeat(authority, this.#laneFoundInactive)
+        && admitsRepeat(authority)
         && job.status !== 'denied'
         // A job that continued under another id (a resolved name) left this graph.
         && job.resolvedContextGraphId === undefined
+        // Nothing under a name-hash id can be proven: holders key the graph by its cleartext id.
+        && classifyNameHashOnlyCatchup(this.#caller.agent.describeContextGraphIdentity?.(this.#caller.contextGraphId)) === null
         && subscription?.subscribed === true
         && subscription.synced !== true;
-      if (unproven) this.#armNext();
+      if (unproven) this.#armNext(true);
       else this.cancel();
     } catch {
       // A repeat is a convenience on top of a settled job; it must not turn
@@ -158,7 +205,7 @@ class ReadinessRepeatSequence {
     }
   }
 
-  #armNext(): void {
+  #armNext(afterAttempt = false): void {
     const delayMs = CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS[this.#repeatsRun];
     if (delayMs === undefined) {
       console.log(
@@ -168,10 +215,14 @@ class ReadinessRepeatSequence {
       this.cancel();
       return;
     }
+    this.#armedAfterAttempt = afterAttempt;
+    // The attempt ran before the graph's authority, which is in place now:
+    // its own authority refresh may have put it there. Nothing to wait for.
+    const dueMs = afterAttempt && this.#laneNowActive() ? 0 : delayMs;
     this.#timer = readinessRepeatTimers.set(() => {
       this.#timer = undefined;
       void this.#repeat();
-    }, delayMs);
+    }, dueMs);
   }
 
   /**
@@ -212,7 +263,7 @@ class ReadinessRepeatSequence {
         return;
       }
       // No await from here to the mint, as on the subscribe route.
-      if (!this.#wanted() || !admitsRepeat(admission.authority, this.#laneFoundInactive)) {
+      if (!this.#wanted() || !admitsRepeat(admission.authority)) {
         this.cancel();
         return;
       }

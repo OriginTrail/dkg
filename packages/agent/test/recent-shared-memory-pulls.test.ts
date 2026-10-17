@@ -320,8 +320,6 @@ describe('recent shared-memory pull runtime (#3251)', () => {
   const OWNER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
   const OTHER = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
   const GRAPH = '0x1111111111111111111111111111111111111111/public-unregistered';
-  const OWNER_WALLET = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
-  const OWNED = `${OWNER_WALLET}/owned-here`;
   const agents: DKGAgent[] = [];
 
   afterEach(async () => {
@@ -475,6 +473,31 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     }
   });
 
+  it('pulls a graph this node owns as well: a member that reaches it only through Cores shares through them', async () => {
+    const { agent, internals, sharedPulls, rootReplays } = await startedMember('CoreHostedOwnerPull');
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    try {
+      // A graph whose id names a wallet of this node's own.
+      const ownWallet = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+      internals.localAgents.set(ownWallet, { agentAddress: ownWallet });
+      const owned = `${ownWallet}/owned-here`;
+      internals.subscribedContextGraphs.set(owned, { subscribed: true, synced: true, syncMode: 'always-on' });
+      vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(false);
+      runtime.noteActivity(owned);
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      // No owner peer to prefer: it is this node. A connected peer (a Core) is asked.
+      expect(sharedPulls).toEqual([
+        { peerId: OTHER, contextGraphIds: [owned], source: 'reconcile', reservedSlotOnly: true },
+      ]);
+      expect(rootReplays).toEqual([owned]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('takes a received shared-memory write as activity, and a Verified Memory change as none', async () => {
     const { agent, internals, sharedPulls } = await startedMember('Rfc3251Received');
     await internals.recentSharedMemoryPulls.close();
@@ -592,8 +615,6 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     const debug = vi.fn();
     const subscriptions = new Map<string, Record<string, unknown>>([
       ['agents', { subscribed: true, synced: true, syncMode: 'always-on' }],
-      [OWNED, { subscribed: true, synced: true, syncMode: 'always-on' }],
-      ['urn:cg:curated-here', { subscribed: true, synced: true, syncMode: 'always-on' }],
       ['urn:cg:on-demand', { subscribed: true, synced: true, syncMode: 'on-demand' }],
       ['urn:cg:private', { subscribed: true, synced: true, syncMode: 'always-on' }],
       ['urn:cg:unconfirmed', { subscribed: true, synced: true, syncMode: 'always-on' }],
@@ -604,8 +625,6 @@ describe('recent shared-memory pull runtime (#3251)', () => {
       peerId: 'local-peer',
       node: { libp2p: { getPeers: () => [{ toString: () => OTHER }] } },
       subscribedContextGraphs: subscriptions,
-      localAgents: new Map([[OWNER_WALLET.toUpperCase().replace('0X', '0x'), {}]]),
-      isCuratorOf: async (contextGraphId: string) => contextGraphId === 'urn:cg:curated-here',
       preferredSyncPeers: new Map<string, string>(),
       networkAdmissionCoordinator: { isAcceptedPeer: () => true },
       eventBus: { on: () => {}, off: () => {} },
@@ -624,8 +643,7 @@ describe('recent shared-memory pull runtime (#3251)', () => {
     const runtime = startRecentSharedMemoryPulls(agentLike, { now: () => clock, tickMs: 3_600_000 });
     try {
       for (const id of [
-        'agents', OWNED, 'urn:cg:curated-here', 'urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private',
-        'urn:cg:unconfirmed', 'urn:cg:failing',
+        'agents', 'urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private', 'urn:cg:unconfirmed', 'urn:cg:failing',
       ]) {
         runtime.noteActivity(id);
       }

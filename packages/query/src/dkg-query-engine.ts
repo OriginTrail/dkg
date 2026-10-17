@@ -1,7 +1,7 @@
 import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
-import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
+import { createQueryStoreReadContext, createStoreReadLane, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
@@ -72,6 +72,7 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
+import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
 /** Upstream statuses that mean the SUBMITTED query was malformed. */
@@ -352,11 +353,21 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       this.store.graphEnumerationVisibility ? admission : null);
     const reads = createQueryStoreReadContext(this.store, options);
+    if (options?.withheldGraphRoots?.length && plan.kind !== 'unscoped') {
+      throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
+    }
     switch (plan.kind) {
       case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
         plan.options.contextGraphId, plan.options, reads, reads.catalog);
-      case 'unscoped': return this.execWithExclusions(initialGraphScope, reads, options?.excludeGraphPrefixes);
+      case 'unscoped': {
+        // The store answers over its dataset without the withheld graphs.
+        const withheld = options?.withheldGraphRoots ?? [];
+        if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
+        return this.execWithExclusions(initialGraphScope, withheld.length
+          ? createStoreReadLane(this.store, { ...storeOptions(options), withheldGraphRoots: withheld }) : reads,
+        options?.excludeGraphPrefixes);
+      }
     }
   }
 
