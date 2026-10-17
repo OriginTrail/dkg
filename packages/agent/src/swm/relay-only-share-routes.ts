@@ -24,6 +24,7 @@
  *    phonebook on demand when it cannot map the owner to a peer.
  */
 
+import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import type { ContextGraphSub } from '../dkg-agent-types.js';
 
 /**
@@ -80,19 +81,20 @@ export async function routeShareToGraphOwner(
   options: { readonly timeoutMs?: number; readonly attempts?: number } = {},
 ): Promise<readonly string[]> {
   const deadline = AbortSignal.timeout(options.timeoutMs ?? GRAPH_OWNER_ROUTE_TIMEOUT_MS);
-  let owners: readonly string[];
-  try {
-    owners = await untilAborted(ports.ownerPeerIds(contextGraphId, deadline), deadline);
-  } catch {
-    return [];
-  }
+  const owners = await resolveWithinAbort(
+    (signal) => ports.ownerPeerIds(contextGraphId, signal ?? deadline),
+    deadline,
+  ).catch(() => null) ?? [];
   let routed = owners.filter((peerId) => ports.isConnected(peerId));
   if (routed.length === 0) {
     const candidates = owners.filter((peerId) => ports.mayConnect(peerId));
     for (const peerId of candidates.slice(0, options.attempts ?? GRAPH_OWNER_CONNECT_ATTEMPTS)) {
       if (deadline.aborted) break;
-      const reached = await untilAborted(ports.connect(peerId, deadline), deadline).catch(() => false);
-      if (reached) {
+      const reached = await resolveWithinAbort(
+        (signal) => ports.connect(peerId, signal ?? deadline),
+        deadline,
+      ).catch(() => false);
+      if (reached === true) {
         routed = [peerId];
         break;
       }
@@ -101,19 +103,6 @@ export async function routeShareToGraphOwner(
   }
   for (const peerId of routed) ports.noteFollower(contextGraphId, peerId);
   return routed;
-}
-
-/** `work`, or a rejection as soon as `signal` aborts, whichever comes first. */
-function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(
-      (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
-      (error: unknown) => { signal.removeEventListener('abort', onAbort); reject(error); },
-    );
-  });
 }
 
 /** Owner peers that were found are reused for this long. */

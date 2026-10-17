@@ -626,11 +626,16 @@ describe('a share into a public graph that has followers', () => {
   // it for the graph. The owner needs the share itself, with its author's seal.
   describe('to the graph\'s owner', () => {
     const OWNER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const OWNER_2 = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
 
     /** The graph's owner is OWNER; `connected` lists the peers this node holds a connection to. */
     async function withOwner(options: {
       connected?: string[];
       reachable?: boolean;
+      /** Peers whose dial fails without an error, as `ensurePeerConnected` lets a failed dial pass. */
+      silentlyUnreachable?: string[];
+      /** The graph's peer allowlist; none by default. */
+      allowedPeers?: string[];
       owners?: string[] | (() => string[]);
       /** This node runs the graph's owner. */
       own?: boolean;
@@ -649,8 +654,12 @@ describe('a share into a public graph that has followers', () => {
         ensurePeerConnected: async (peerId: string) => {
           connects.push(peerId);
           if (options.reachable === false) throw new Error('no route to the owner');
+          if (options.silentlyUnreachable?.includes(peerId)) return;
           connected.push(peerId);
         },
+        ...(options.allowedPeers === undefined
+          ? {}
+          : { resolveSwmAllowedPeersForCurrentAuthority: async () => options.allowedPeers }),
       });
       Object.defineProperty(target.host.node, 'libp2p', {
         value: {
@@ -666,6 +675,21 @@ describe('a share into a public graph that has followers', () => {
       const { share, connects } = await withOwner();
       expect(await share('reports')).toEqual([PEER_A, OWNER].sort());
       expect(connects).toEqual([OWNER]);
+    });
+
+    it('counts an owner peer it could not dial as not reached, though the peer store lists its protocol, and goes to the next', async () => {
+      const { share, connects } = await withOwner({ owners: [OWNER, OWNER_2], silentlyUnreachable: [OWNER] });
+      expect(await share('reports')).toEqual([PEER_A, OWNER_2].sort());
+      expect(connects).toEqual([OWNER, OWNER_2]);
+    });
+
+    it('goes to the owner of a public graph whose peer allowlist does not name the owner\'s peer, and once when it does', async () => {
+      const offList = await withOwner({ allowedPeers: [PEER_A] });
+      expect(await offList.share('reports')).toEqual([PEER_A, OWNER].sort());
+      expect(offList.connects).toEqual([OWNER]);
+
+      const onList = await withOwner({ allowedPeers: [PEER_A, OWNER] });
+      expect(await onList.share('reports')).toEqual([PEER_A, OWNER].sort());
     });
 
     it('goes to a connected owner without connecting again', async () => {
