@@ -372,16 +372,27 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
   try {
     let result: T;
     let promoteStartedMarked = false;
+    let startMarkerFailure: { cause: unknown } | undefined;
     const markPromoteStarted = async (): Promise<void> => {
       if (promoteStartedMarked) return;
       throwIfShutdownInterrupted();
-      await queue.recordCommitMarker(job.jobId, claimToken, 'promoteStarted');
+      try {
+        await persistWithRecovery('record promoteStarted', now() + Math.max(0, bookkeepingRetryBudgetMs),
+          () => queue.recordCommitMarker(job.jobId, claimToken, 'promoteStarted'));
+      } catch (cause) { startMarkerFailure = { cause }; throw cause; }
       promoteStartedMarked = true;
     };
     try {
       result = await runPromote(job.request, markPromoteStarted);
     } catch (err: unknown) {
       throwIfShutdownInterrupted();
+      if (startMarkerFailure && job.request.recoveryBinding) {
+        // Promotion has not run. A marker acknowledgement cannot establish whether
+        // its fenced write committed; retain the owner for ordinary lease recovery.
+        const cause = startMarkerFailure.cause;
+        return { outcome: 'failure_bookkeeping_uncertain', cause, bookkeepingCause: cause,
+          diagnostic: failureBookkeepingUncertainty(cause) };
+      }
       const classified = classifyPromoteError(err, { boundRecovery: job.request.recoveryBinding !== undefined });
       const message = err instanceof Error ? err.message : String(err);
       logPromoteAttemptFailure({

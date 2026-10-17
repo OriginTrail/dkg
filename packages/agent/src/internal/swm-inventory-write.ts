@@ -1,11 +1,18 @@
 /** Throwing inventory domain boundary, independent of promotion/queue policy. */
-export interface SwmInventoryWriteOutcome {
-  status: 'applied' | 'existing' | 'dormant';
+export type SwmInventoryDormantReason = 'inactive-lane' | 'authority-transition' | 'policy-mismatch' | 'vm-confirmed';
+export type SwmInventoryWriteOutcome = {
+  status: 'applied' | 'existing';
   attempts: number;
-  headObjectDigest: string | null;
+  headObjectDigest: string;
+  kaUal: string;
+  dormantReason?: never;
+} | {
+  status: 'dormant';
+  attempts: 0;
+  headObjectDigest: null;
   kaUal: string | null;
-  dormantReason?: 'inactive-lane' | 'authority-transition' | 'policy-mismatch' | 'vm-confirmed';
-}
+  dormantReason: SwmInventoryDormantReason;
+};
 
 export class SwmInventoryWriteFailure extends Error {
   constructor(readonly phase: 'authority' | 'preparation-read' | 'inventory-maintenance',

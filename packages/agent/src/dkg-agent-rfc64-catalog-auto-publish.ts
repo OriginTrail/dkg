@@ -842,7 +842,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<SwmInventoryWriteOutcome> {
     let kaUal: string | null = null;
     let phase: SwmInventoryWriteFailure['phase'] = 'authority';
-    const dormant = (dormantReason: SwmInventoryWriteOutcome['dormantReason']): SwmInventoryWriteOutcome =>
+    const dormant = (dormantReason: Extract<SwmInventoryWriteOutcome, { status: 'dormant' }>['dormantReason']): SwmInventoryWriteOutcome =>
       ({ status: 'dormant', dormantReason, attempts: 0, headObjectDigest: null, kaUal });
     try {
       if (this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName) === null) return dormant('inactive-lane');

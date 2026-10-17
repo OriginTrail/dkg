@@ -6,7 +6,7 @@ import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { BlazegraphStore, OxigraphStore, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, OxigraphStore, StoreOperationTimeoutError, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, PromoteAdmissionUncertainError } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
@@ -49,6 +49,65 @@ async function setup() {
 afterEach(() => { daemonState.promoteWorkerAvailable = false; });
 
 describe('durable synchronous share ownership', () => {
+  it('fences an unbound promotion admitted behind a bound owner and lets its real worker finish', async () => {
+    const { store, agent, publisher, finalized } = await setup();
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    const jobId = await agent.promoteQueue.enqueue({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...prepared });
+    await expect(agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR }))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: jobId });
+    await expect(publisher.assertionPromote(CG, NAME, AUTHOR))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: jobId });
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    const supervisor = createPromoteWorkerSupervisor({ agent, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
+    try {
+      await supervisor.start();
+      await vi.waitFor(async () => expect((await agent.promoteQueue.getStatus(jobId))?.state).toBe('succeeded'));
+      expect((await agent.promoteQueue.getStatus(jobId))?.request.recoveryBinding).toEqual(prepared.recoveryBinding);
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    } finally { await supervisor.stop(); await store.close(); }
+  });
+
+  it.each([false, true])('recovers a synchronous start-marker timeout (write committed: %s) through the real worker', async committed => {
+    const { store, agent, finalized } = await setup();
+    let now = Date.now();
+    const queue = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100, backoff: () => 0 });
+    vi.spyOn(agent, 'promoteQueue', 'get').mockReturnValue(queue);
+    daemonState.promoteWorkerAvailable = true;
+    const marker = queue.recordCommitMarker.bind(queue), replace = store.replaceSubject.bind(store);
+    vi.spyOn(queue, 'recordCommitMarker').mockImplementationOnce(async (...args) => {
+      vi.spyOn(store, 'replaceSubject').mockImplementationOnce(async (...write) => {
+        if (committed) await replace(...write);
+        throw new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'replaceSubject', outcome: 'indeterminate' });
+      });
+      return marker(...args);
+    });
+    const assertion = agent.assertion, promote = vi.fn(assertion.promote);
+    vi.spyOn(agent, 'assertion', 'get').mockReturnValue({ ...assertion, promote });
+    const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
+    expect(failure).toBeInstanceOf(DurableShareFailure);
+    expect(failure.observation.state).toBe('pending');
+    const original = (await queue.getStatus(failure.observation.jobId))!;
+    expect(original.state).toBe('running');
+    expect(original.commitMarker?.promoteStarted ?? false).toBe(committed);
+    expect(original.attempt.lastError).toBeUndefined();
+    expect(promote).not.toHaveBeenCalled();
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    now += 101;
+    // Reconstruct the queue from its persisted RDF, as after a process restart.
+    const reopened = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100, backoff: () => 0 });
+    vi.spyOn(agent, 'promoteQueue', 'get').mockReturnValue(reopened);
+    const supervisor = createPromoteWorkerSupervisor({ agent, workerConcurrency: 1, pollIntervalMs: 10, heartbeatIntervalMs: 25, bookkeepingRetryBudgetMs: 0, log: () => undefined });
+    try {
+      await supervisor.start();
+      await vi.waitFor(async () => expect((await reopened.getStatus(original.jobId))?.state).toBe('succeeded'));
+      const completed = (await reopened.getStatus(original.jobId))!;
+      expect(completed.request.recoveryBinding).toEqual(original.request.recoveryBinding);
+      expect(promote).toHaveBeenCalledTimes(1);
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+      await expect(queue.succeed(original.jobId, original.lease!.claimToken, { promotedCount: 1, succeededAt: now })).rejects.toThrow();
+    } finally { await supervisor.stop(); await store.close(); }
+  });
+
   it('retires a producer-certified first-attempt size rejection and permits discard', async () => {
     const {store, agent, publisher} = await setup();
     const name = 'oversized';
@@ -445,7 +504,7 @@ describe('durable synchronous share ownership', () => {
     await expect(restarted.assertion.discard(CG, NAME, { agentAddress: AUTHOR }))
       .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
     expect((await restarted.promoteQueue.getStatus(original.jobId)).request.recoveryBinding).toEqual(original.request.recoveryBinding);
-    restarted.commitRfc64SwmAuthorInventoryV1 = async () => ({ status: 'applied', attempts: 1, headObjectDigest: null, kaUal: null });
+    restarted.commitRfc64SwmAuthorInventoryV1 = async () => ({ status: 'applied', attempts: 1, headObjectDigest: 'confirmed-head', kaUal: 'did:dkg:confirmed-asset' });
     restarted.requestRfc64SwmCatalogProjectionV1 = () => true;
     const worker = createPromoteWorkerSupervisor({ agent: restarted, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
     try {

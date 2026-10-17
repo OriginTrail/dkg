@@ -22,15 +22,19 @@ async function commitInventoryUnderAssetLock(agent: DKGAgent, params: BoundDurab
   let result: SwmInventoryWriteOutcome;
   try { result = await agent.commitRfc64SwmAuthorInventoryV1({ ...params, shareOperationId: params.recoveryBinding.intent.operationId }); }
   catch (error) { return throwInventoryRecoveryFailure(error); }
-  if (result.status === 'dormant' && result.dormantReason === 'policy-mismatch') {
-    throw Object.assign(new Error('Catalog policy no longer matches the admitted share'),
-      { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
-  }
-  // Confirmed public VM content is intentionally no longer in the SWM inventory.
-  // Verify the confirmation transfer; a prior observer may have failed to store its owner.
-  if (result.status === 'dormant' && result.dormantReason === 'vm-confirmed') return 'vm-confirmed';
-  if (result.status !== 'applied' && result.status !== 'existing') {
-    throw createPromoteRetryableFailure(new Error(`Durable share inventory remains pending: ${result.dormantReason ?? result.status}`));
+  if (result.status === 'dormant') {
+    const reason = result.dormantReason;
+    switch (reason) {
+      case 'policy-mismatch':
+        throw Object.assign(new Error('Catalog policy no longer matches the admitted share'),
+          { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
+      // A confirmation must transfer ownership before the share can complete.
+      case 'vm-confirmed': return 'vm-confirmed';
+      case 'inactive-lane':
+      case 'authority-transition':
+        throw createPromoteRetryableFailure(new Error(`Durable share inventory remains pending: ${reason}`));
+      default: { const unreachable: never = reason; throw new Error(`Unknown inventory outcome: ${unreachable}`); }
+    }
   }
   agent.requestRfc64SwmCatalogProjectionV1({
     contextGraphId: params.contextGraphId as ContextGraphIdV1,

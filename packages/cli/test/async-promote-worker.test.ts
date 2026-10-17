@@ -103,6 +103,25 @@ describe('runPromoteJob', () => {
     ({ queue, logs, makeRequest, enqueueAndClaim } = fixture);
   });
 
+  it('retries a definitely-not-started marker write without running promotion twice', async () => {
+    const job = await enqueueAndClaim();
+    const marker = queue.recordCommitMarker.bind(queue);
+    const writes = vi.spyOn(queue, 'recordCommitMarker').mockRejectedValueOnce(
+      new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'replaceSubject', outcome: 'not_started' }),
+    );
+    writes.mockImplementationOnce(marker);
+    const promote = vi.fn(async (_request: PromoteRequest, markStarted: () => Promise<void>) => {
+      await markStarted(); return { promotedCount: 1 };
+    });
+    expect(await runPromoteJob({ job, queue, workerId: 'worker-test', runPromote: promote,
+      now: fixture.clock.now, heartbeatIntervalMs: 0, bookkeepingRetryIntervalMs: 0,
+      sleep: async () => undefined, log: message => logs.push(message),
+    })).toMatchObject({ outcome: 'succeeded' });
+    expect(promote).toHaveBeenCalledTimes(1);
+    expect(writes.mock.calls.filter(call => call[2] === 'promoteStarted')).toHaveLength(2);
+    expect((await queue.getStatus(job.jobId))?.state).toBe('succeeded');
+  });
+
   it('on success, records the recovery commit marker and transitions to succeeded', async () => {
     const job = await enqueueAndClaim();
     const result = await runPromoteJob({
