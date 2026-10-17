@@ -71,5 +71,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $script = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:GITHUB_WORKSPACE/packages/cli/scripts/run-mcp-config-wsl.sh").Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          wsl --distribution Ubuntu-24.04 --user root --exec bash $script $fixture $temporary
+          $windowsNode = (Get-Command node.exe).Source
+          wsl --distribution Ubuntu-24.04 --user root --exec bash $script $fixture $temporary $windowsNode
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
