@@ -20,7 +20,7 @@ async function fixture() {
     storeRepair: vi.fn(async () => {}),
     requestPlacement: vi.fn(() => ({ accepted: false })),
     removeInventory: vi.fn(async () => ({ status: 'absent', attempts: 0, snapshot: null })),
-    requestProjection: vi.fn(() => false),
+    requestProjection: vi.fn(() => true),
   };
   const params = {
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -61,6 +61,22 @@ describe('confirmed VM catalog completion certificate', () => {
     deps.removeInventory = vi.fn(async () => (status === 'inactive' ? { status } : { status, attempts: 0, snapshot: null }));
     expect(await transferConfirmedVmCatalogV1(deps, params))
       .toBe(status === 'applied' || status === 'absent' ? 'owned' : 'inactive');
+  });
+
+  it.each(['applied', 'absent'] as const)('strict recovery retains public %s ownership until projection is admitted', async status => {
+    const { deps, params } = await fixture();
+    deps.removeInventory = vi.fn(async () => ({ status, attempts: 0, snapshot: null }));
+    deps.requestProjection = vi.fn(() => false);
+    expect(await transferConfirmedVmCatalogV1(deps, params)).toBe('projection-pending');
+    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true); // Legacy committed-removal result.
+    const readiness = new SwmCatalogAuthorityNotReady('policy-not-accepted');
+    deps.requestProjection = vi.fn(() => { throw readiness; });
+    const failure = await transferConfirmedVmCatalogV1(deps, params).catch(error => error);
+    expect(failure).toMatchObject({ boundary: 'projection', cause: readiness });
+    await expect(throwInventoryRecoveryFailure(failure)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE', cause: readiness });
+    const invalid = new Error('invalid projection authority');
+    deps.requestProjection = vi.fn(() => { throw invalid; });
+    await expect(throwInventoryRecoveryFailure(await transferConfirmedVmCatalogV1(deps, params).catch(error => error))).rejects.toBe(invalid);
   });
 
   it('strict recovery preserves authority refusal and classifies only marker persistence as a write boundary', async () => {

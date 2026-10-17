@@ -31,17 +31,17 @@ export interface ConfirmedVmCatalogObserverDependencies {
   readonly requestProjection: OmitThisParameter<DKGAgent['requestRfc64SwmCatalogProjectionV1']>;
 }
 
-export type ConfirmedVmOwnershipOutcome = 'owned' | 'inactive' | 'pending';
+export type ConfirmedVmOwnershipOutcome = 'owned' | 'inactive' | 'pending' | 'projection-pending';
 
 export class ConfirmedVmOwnershipFailure extends SwmInventoryWriteFailure {
-  constructor(readonly boundary: 'input' | 'authority' | 'marker' | 'removal', cause: unknown) {
+  constructor(readonly boundary: 'input' | 'authority' | 'marker' | 'removal' | 'projection', cause: unknown) {
     super(cause instanceof SwmInventoryWriteFailure ? cause.phase
       : boundary === 'authority' ? 'authority' : boundary === 'input' ? 'preparation-read' : 'inventory-maintenance',
     cause instanceof SwmInventoryWriteFailure ? cause.kaUal : null, cause instanceof SwmInventoryWriteFailure ? cause.cause : cause);
   }
 }
 
-/** The legacy observer owns logging only; a failed transfer never claims ownership. */
+/** Legacy observation preserves committed-removal success; only strict transfer certifies ownership. */
 export async function observeConfirmedVmTransfer(
   log: Logger, params: ObserveRfc64ConfirmedVmParamsV1,
   transfer: () => Promise<ConfirmedVmOwnershipOutcome>,
@@ -58,7 +58,7 @@ export async function observeConfirmedVmTransfer(
           ? `Confirmed ${params.publicationLabel} but RFC-64 finalized-private placement was not recorded, so nothing owes it: ${detail}`
           : `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${detail}`;
     log.warn(params.ctx, message);
-    return false;
+    return boundary === 'projection';
   }
 }
 
@@ -67,7 +67,7 @@ export async function observeConfirmedVmCatalogV1(deps: ConfirmedVmCatalogObserv
 }
 
 /**
- * Certify the catalog part of a confirmed publication only after its public removal commits or
+ * Certify the catalog part only after public removal commits and projection is admitted, or
  * its private placement has a durable repair owner. Supervisor latency never delays this result.
  */
 export async function transferConfirmedVmCatalogV1(
@@ -150,24 +150,22 @@ export async function transferConfirmedVmCatalogV1(
         switch (result.status) {
           case 'applied':
           case 'absent':
-            // Keep notification within the asset lock, but do not revoke the committed removal.
+            // Public removal has no separate repair marker: strict recovery retains its owner
+            // until projection accepts. Legacy observation still reports committed removal.
             try {
-              deps.requestProjection({
+              return deps.requestProjection({
                 contextGraphId: contextGraphId as ContextGraphIdV1,
                 authorAddress: confirmedSeal.authorAddress,
                 ctx: params.ctx,
-              });
-            } catch (cause) {
-              placementWait.observer.released();
-              deps.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`);
-            }
-            return 'owned';
+              }) ? 'owned' : 'projection-pending';
+            } catch (cause) { throw new ConfirmedVmOwnershipFailure('projection', cause); }
           case 'inactive':
             return 'inactive';
         }
       });
     } catch (cause) {
       placementWait.observer.released();
+      if (cause instanceof ConfirmedVmOwnershipFailure) throw cause;
       throw new ConfirmedVmOwnershipFailure('removal', cause);
     }
   } finally {

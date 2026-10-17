@@ -17,7 +17,7 @@ export async function commitConfirmedDurableShareInventory(agent: DKGAgent, para
   if (!candidate || computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal)) !== binding.sealDigest) {
     throw Object.assign(new Error('Confirmed share seal differs from its durable binding'), { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
   }
-  let ownership: 'owned' | 'inactive' | 'pending';
+  let ownership: Awaited<ReturnType<DKGAgent['transferRfc64ConfirmedVmV1']>>;
   try {
     ownership = await agent.transferRfc64ConfirmedVmV1({
       contextGraphId: params.contextGraphId, subGraphName: params.subGraphName,
