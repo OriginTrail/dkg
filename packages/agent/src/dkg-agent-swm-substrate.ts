@@ -177,6 +177,7 @@ import {
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import { connectionCarriesShareDelivery } from './swm/relayed-connection-allowance.js';
 import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
+import { hostsPublicGraphAsCore } from './swm/core-hosted-graph.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
   BEACON_REANNOUNCE_INTERVAL_MS,
@@ -735,8 +736,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   /**
    * Scope-aware materialization authority for the shared legacy wire.
    * Catalog mode owns only the root scope in 10.0.16; a valid named subgraph
-   * is therefore non-overlapping legacy traffic. Validation still belongs to
-   * SharedMemoryHandler, so this predicate makes only the null-vs-named split.
+   * is therefore non-overlapping legacy traffic, applied by a subscriber and by
+   * a Core that hosts the graph (`swm/core-hosted-graph.ts`). Validation still
+   * belongs to SharedMemoryHandler, so this makes only the null-vs-named split.
    */
   rfc64LegacySwmApplyAllowedForScope(
     this: DKGAgent,
@@ -746,7 +748,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
       || (
         subGraphName !== null
-        && this.rfc64LegacySwmMemberTransportAllowedForContextGraph(contextGraphId)
+        && (this.rfc64LegacySwmMemberTransportAllowedForContextGraph(contextGraphId)
+          || hostsPublicGraphAsCore(this, contextGraphId))
       );
   }
 

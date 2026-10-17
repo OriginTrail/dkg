@@ -28,6 +28,13 @@
  * the owner as its author's catalog head, and the owner passes the head's
  * announcement on through the catalog's own delivery. The followers it tells
  * are found the same way ({@link swmChangeRecipients}).
+ *
+ * Members that reach the graph only through Cores (relay-only Edges with no
+ * route to the owner) send their shares to those Cores. A Core that hosts the
+ * graph applies a share into a named sub-graph and sends the same notice to
+ * the graph's owner when it is connected to it, so that the owner pulls the
+ * share from the Core (`core-hosted-graph.ts`). The owner accepts it under the
+ * same rule as any notice.
  */
 
 import { validateContextGraphId, validateSubGraphName } from '@origintrail-official/dkg-core';
@@ -146,6 +153,11 @@ export interface SwmRemoteChange {
 export interface SwmChangeNotifierPorts extends SwmChangeRecipientPorts {
   /** One attempt per recipient, no retries; resolves with how many it reached. */
   readonly deliver: (notice: SwmChangeNoticeV1, recipients: readonly string[]) => Promise<number>;
+  /**
+   * On a Core that hosts the public graph: the peers of the graph's owner it is
+   * connected to, told of a change into a named sub-graph. Empty elsewhere.
+   */
+  readonly hostedGraphOwnerPeers?: (contextGraphId: string) => Promise<readonly string[]>;
   readonly log?: (message: string) => void;
   /** Shortest gap between two notices of one scope; changes within it share one trailing notice. */
   readonly minIntervalMs?: number;
@@ -234,13 +246,21 @@ export class SwmChangeNotifier {
   }
 
   async #fanOut(change: SwmRemoteChange, sources: ReadonlySet<string>): Promise<void> {
-    const recipients = await swmChangeRecipients(this.#ports, change.contextGraphId, sources);
-    if (recipients.length === 0) return;
     const { contextGraphId, subGraphName, hint } = change;
+    let recipients = await swmChangeRecipients(this.#ports, contextGraphId, sources);
+    let told = 'follower(s)';
+    if (recipients.length === 0 && subGraphName !== null && this.#ports.hostedGraphOwnerPeers !== undefined) {
+      // A Core that hosts the graph: its owner, unless the change is the owner's own.
+      const self = this.#ports.selfPeerId();
+      recipients = (await this.#ports.hostedGraphOwnerPeers(contextGraphId))
+        .filter((peerId) => peerId !== self && !sources.has(peerId));
+      told = 'owner peer(s)';
+    }
+    if (recipients.length === 0) return;
     const reached = await this.#ports.deliver({ contextGraphId, subGraphName, hint }, recipients);
     const scope = subGraphName === null ? 'root' : `sub-graph "${subGraphName}"`;
     this.#ports.log?.(
-      `SWM change notice for "${contextGraphId}" ${scope} (${hint}): reached ${reached} of ${recipients.length} follower(s)`,
+      `SWM change notice for "${contextGraphId}" ${scope} (${hint}): reached ${reached} of ${recipients.length} ${told}`,
     );
   }
 }

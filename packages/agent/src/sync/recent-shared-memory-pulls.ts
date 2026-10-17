@@ -42,7 +42,7 @@ export interface RecentSharedMemoryPullSources {
 }
 
 export interface RecentSharedMemoryPullPorts {
-  /** Still a subscription this node should pull: public, always-on, not owned here. */
+  /** Still a subscription this node should pull: public and always-on, its own graphs included. */
   eligible(contextGraphId: string): Promise<boolean>;
   sources(contextGraphId: string): Promise<RecentSharedMemoryPullSources>;
   /** Pull the graph from one peer; resolves to the number of new data triples it stored. */

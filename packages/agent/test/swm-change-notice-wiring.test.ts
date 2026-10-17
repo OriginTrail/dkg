@@ -5,8 +5,10 @@
  * another author's catalog head on, and shutdown. Each agent here is a bare
  * host: its connections, subscriptions, privacy, follower records, curator
  * lookup, sync and sends are set by the test; the notice code is the agent's.
- * The notice logic itself is in `swm-change-notice.test.ts`, and the whole
- * path over real sync in `e2e-swm-relay-only.test.ts`.
+ * A Core that hosts a public graph tells the graph's owner of a member's share
+ * into a named sub-graph. The notice logic itself is in
+ * `swm-change-notice.test.ts`, and the whole path over real sync in
+ * `e2e-swm-relay-only.test.ts`.
  */
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_SWM_CHANGE_NOTICE, ProtocolRouter, type DKGNode } from '@origintrail-official/dkg-core';
@@ -23,6 +25,7 @@ const OWNER_ADDRESS = '0x1111111111111111111111111111111111111111';
 const CG = `${OWNER_ADDRESS}/notice-wiring`;
 const PRIVATE_CG = `${OWNER_ADDRESS}/notice-wiring-private`;
 const UNSUBSCRIBED_CG = `${OWNER_ADDRESS}/notice-wiring-unsubscribed`;
+const HOSTED_CG = `${OWNER_ADDRESS}/notice-wiring-hosted`;
 const SELF = '12D3KooWSelfOfTheHost';
 const CURATOR = '12D3KooWCuratorOfTheGraph';
 const FOLLOWER = '12D3KooWFollowerOfTheGraph';
@@ -46,6 +49,7 @@ function host() {
   const logLines: string[] = [];
   const agent = Object.create(DKGAgent.prototype) as DKGAgent;
   Object.assign(agent, {
+    config: { nodeRole: 'edge' },
     node: {
       peerId: SELF,
       libp2p: { getPeers: () => state.connected.map((peerId) => ({ toString: () => peerId })) },
@@ -54,6 +58,8 @@ function host() {
       [CG, { subscribed: true }],
       [PRIVATE_CG, { subscribed: true }],
       [UNSUBSCRIBED_CG, { subscribed: false }],
+      // Hosted as a Core hosts a public graph it never subscribed to.
+      [HOSTED_CG, { subscribed: false, coreHosted: true }],
     ]),
     log: {
       info: (_ctx: unknown, message: string) => { logLines.push(message); },
@@ -349,6 +355,50 @@ describe('the owner\'s side, as the agent wires it', () => {
 
     expect(target.handoffs).toEqual([]);
     expect(target.logLines).toContain(`Catalog head of "${CG}" not passed on: store closed`);
+  });
+});
+
+describe('a Core that hosts a public graph, as the agent wires it', () => {
+  const MEMBER = '12D3KooWMemberSharingThroughTheCore';
+
+  /** A Core that hosts HOSTED_CG; the graph's owner is CURATOR. */
+  function core(nodeRole: 'core' | 'edge' = 'core') {
+    const target = host();
+    Object.assign(target.agent, { config: { nodeRole } });
+    return target;
+  }
+
+  async function changed(target: ReturnType<typeof host>, change: { cgId?: string; subGraphName?: string }, from = MEMBER) {
+    target.agent.noticeSwmFollowersAfterApplyV1({ ...change, shareOperationId: 'op-9' }, from);
+    await target.agent.whenSwmChangeNoticesSettledV1();
+    return target.sends.map(({ peerId, protocolId }) => [peerId, protocolId]);
+  }
+
+  it('tells the connected owner of a member\'s share into a named sub-graph, on the notice protocol', async () => {
+    const target = core();
+
+    expect(await changed(target, { cgId: HOSTED_CG, subGraphName: 'reports' })).toEqual([[CURATOR, PROTOCOL_SWM_CHANGE_NOTICE]]);
+    expect(decodeSwmChangeNoticeV1(target.sends[0]!.bytes)).toEqual({ contextGraphId: HOSTED_CG, subGraphName: 'reports', hint: 'op-9' });
+    expect(target.logLines).toContain(`SWM change notice for "${HOSTED_CG}" sub-graph "reports" (op-9): reached 1 of 1 owner peer(s)`);
+    expect(target.curatorLookups).toEqual([HOSTED_CG]);
+  });
+
+  it('tells nobody of a share into the root, of the owner\'s own share, or while the owner is not connected', async () => {
+    const offline = core();
+    offline.state.connected = [FOLLOWER, STRANGER];
+
+    expect(await changed(core(), { cgId: HOSTED_CG })).toEqual([]);
+    expect(await changed(core(), { cgId: HOSTED_CG, subGraphName: 'reports' }, CURATOR)).toEqual([]);
+    expect(await changed(offline, { cgId: HOSTED_CG, subGraphName: 'reports' })).toEqual([]);
+  });
+
+  it('tells nobody where it does not host the graph, or on an Edge', async () => {
+    const edge = core('edge');
+    const notHosting = core();
+
+    expect(await changed(edge, { cgId: HOSTED_CG, subGraphName: 'reports' })).toEqual([]);
+    expect(await changed(notHosting, { cgId: UNSUBSCRIBED_CG, subGraphName: 'reports' })).toEqual([]);
+    expect([...edge.curatorLookups, ...notHosting.curatorLookups]).toEqual([]);
   });
 });
 

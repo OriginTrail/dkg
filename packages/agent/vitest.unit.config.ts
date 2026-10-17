@@ -53,6 +53,7 @@ export default defineConfig({
       "test/swm-pull-knowledge-asset-share.test.ts",
       "test/swm-change-notice.test.ts",
       "test/swm-change-notice-wiring.test.ts",
+      "test/core-hosted-sub-graph-share.test.ts",
       "test/shared-memory-sync-fresh-round.test.ts",
       "test/dkg-agent-swm-target-executor-composition.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",
