@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ExactKnowledgeAssetSyncResult } from './durable-recovery-types.js';
+import { vmRecoveryRetryDelay } from './vm-recovery-pass-authority.js';
 import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';
 
 /**
@@ -29,6 +30,8 @@ export interface PublicSnapshotPacingOptions {
   /** Epoch milliseconds at which the job ends. */
   readonly deadline: number;
   readonly signal: AbortSignal;
+  /** The job's ownership fence; a wait ends within one interval once it fails. */
+  readonly isCurrent: () => boolean;
   /** Whether this node's sync admission would take the graph's exact fetch now. */
   readonly canAdmit?: () => boolean;
 }
@@ -82,7 +85,7 @@ export class PublicSnapshotRecoveryPacing {
   async waitForAdmission(): Promise<boolean> {
     const hold = Math.min(PUBLIC_SNAPSHOT_MAX_HOLD_MS, PUBLIC_SNAPSHOT_RETRY_MS * 2 ** (this.refusals - 1));
     if (!(await this.sleep(jitter(hold)))) return false;
-    while (!this.options.signal.aborted && !this.admissionAvailable()) {
+    while (this.current() && !this.admissionAvailable()) {
       if (!(await this.sleep(jitter(PUBLIC_SNAPSHOT_RETRY_MS)))) return false;
     }
     return true;
@@ -90,10 +93,15 @@ export class PublicSnapshotRecoveryPacing {
 
   /** Wait until one of these peers is past its hold-off. False when that cannot happen in time. */
   async waitForPeer(peerIds: readonly string[]): Promise<boolean> {
-    while (!this.options.signal.aborted && peerIds.length > 0 && peerIds.every(peerId => this.heldOff(peerId))) {
+    while (this.current() && peerIds.length > 0 && peerIds.every(peerId => this.heldOff(peerId))) {
       if (!(await this.sleep(jitter(PUBLIC_SNAPSHOT_RETRY_MS)))) return false;
     }
     return true;
+  }
+
+  /** A cancelled job, or one whose graph was unsubscribed or rebound, stops waiting. */
+  private current(): boolean {
+    return !this.options.signal.aborted && this.options.isCurrent();
   }
 
   /** A capacity read that cannot answer falls back to the plain bounded retry. */
@@ -105,20 +113,18 @@ export class PublicSnapshotRecoveryPacing {
     }
   }
 
-  /** Sleep unless the wait would reach into the final read's reserve; cancellation ends it early. */
+  /**
+   * Sleep unless the wait would reach into the final read's reserve. The
+   * sleep runs in slices of one interval, so it ends within one interval of
+   * the job losing its graph, and at once on cancellation.
+   */
   private async sleep(ms: number): Promise<boolean> {
     const { deadline, signal } = this.options;
-    if (Date.now() + ms > deadline - PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS) return false;
-    if (signal.aborted) return true;
-    await new Promise<void>((resolve) => {
-      const done = () => {
-        clearTimeout(timer);
-        signal.removeEventListener('abort', done);
-        resolve();
-      };
-      const timer = setTimeout(done, ms);
-      signal.addEventListener('abort', done, { once: true });
-    });
+    const until = Date.now() + ms;
+    if (until > deadline - PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS) return false;
+    while (this.current() && Date.now() < until) {
+      await vmRecoveryRetryDelay(Math.min(PUBLIC_SNAPSHOT_RETRY_MS, until - Date.now()), signal);
+    }
     return true;
   }
 }

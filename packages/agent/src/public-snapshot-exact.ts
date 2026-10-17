@@ -29,8 +29,8 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
   const committed = new Set<string>();
   let alreadyPresent = 0;
   const ctx = createOperationContext('sync');
-  const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId, deadline, signal, canAdmit: options.canAdmit });
   const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
+  const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId, deadline, signal, isCurrent, canAdmit: options.canAdmit });
   const incomplete = (reason?: string) => new Error(
     `Snapshot recovery incomplete: ${committed.size}/${uals.length} committed${reason ? ` (${reason})` : ''}`);
   const assertActive = () => {

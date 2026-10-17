@@ -20,11 +20,14 @@ type Request = Parameters<typeof exactRecovery.runExactRecovery>[0];
 const selected = (request: Request) => exactAssetUalsForSelection(request.policy.selection);
 
 function recover(options: { deadline?: number; signal?: AbortSignal; peers?: string[]; canAdmit?: () => boolean;
-  holds?: (ual: string) => Promise<boolean> } = {}) {
+  holds?: (ual: string) => Promise<boolean>; owned?: () => boolean } = {}) {
   const signal = options.signal ?? new AbortController().signal;
   return recoverPublicSnapshotExact(host, {
     contextGraphId: graph, peers: options.peers ?? ['core-a'], uals, evidence, signal,
-    assertCurrent: () => { if (signal.aborted) throw new Error('job cancelled'); },
+    assertCurrent: () => {
+      if (signal.aborted) throw new Error('job cancelled');
+      if (options.owned && !options.owned()) throw new Error('Snapshot job ownership changed');
+    },
     deadline: options.deadline ?? Date.now() + 3_600_000,
     ...(options.canAdmit ? { canAdmit: options.canAdmit } : {}),
     ...(options.holds ? { holds: options.holds } : {}),
@@ -126,6 +129,22 @@ describe('public snapshot exact recovery pacing', () => {
     expect(new Set(requests[1])).toEqual(new Set(uals.slice(6, 10)));
   });
 
+  it('ends a wait within one interval when the job loses its graph', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    let owned = true;
+    vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async () => outcome({ streamOutcome: 'responder-busy' }));
+    let rejectedAt = 0;
+    const job = recover({ owned: () => owned });
+    const rejected = expect(job.finally(() => { rejectedAt = Date.now(); })).rejects.toThrow('ownership changed');
+    await vi.advanceTimersByTimeAsync(40_000);
+    owned = false;
+    const lostAt = Date.now();
+    await vi.advanceTimersByTimeAsync(PUBLIC_SNAPSHOT_RETRY_MS);
+    expect(rejectedAt).toBeGreaterThan(0);
+    expect(rejectedAt - lostAt).toBeLessThanOrEqual(PUBLIC_SNAPSHOT_RETRY_MS);
+    await rejected;
+  });
+
   it('ends a wait at once when the job is cancelled', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const controller = new AbortController();
@@ -144,7 +163,7 @@ describe('public snapshot pacing waits', () => {
     const controller = new AbortController();
     controller.abort(new Error('stop'));
     const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId: graph, deadline: Date.now() + 3_600_000,
-      signal: controller.signal, canAdmit: () => false });
+      signal: controller.signal, isCurrent: () => true, canAdmit: () => false });
     const startedAt = performance.now();
     await expect(pacing.waitForAdmission()).resolves.toBe(true);
     await expect(pacing.waitForPeer(['core-a'])).resolves.toBe(true);
@@ -153,7 +172,7 @@ describe('public snapshot pacing waits', () => {
 
   it('refuses a wait that would reach into the final read reserve', async () => {
     const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId: graph,
-      deadline: Date.now() + PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS, signal: new AbortController().signal });
+      deadline: Date.now() + PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS, signal: new AbortController().signal, isCurrent: () => true });
     await expect(pacing.waitForAdmission()).resolves.toBe(false);
     expect(pacing.attemptTimeoutMs()).toBeLessThanOrEqual(PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS);
   });

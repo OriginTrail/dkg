@@ -43,6 +43,21 @@ describe('assets a snapshot job already holds', () => {
     expect(await newer(assets[0]!.ual)).toBe(false);
   });
 
+  it('does not skip a copy whose root differs from the pinned root or whose content was altered', async () => {
+    const assets = makeSnapshotAssets(graph, 2);
+    const store = await storeWith(observe(assets, 'core-cache'), assets);
+    // Same asset and version, another pinned root.
+    const otherRoot = [{ ...assets[0]!, root: `0x${'c'.repeat(64)}` }, assets[1]!];
+    expect(await createPublicSnapshotHeldAssetCheck(store, observe(otherRoot, 'core-cache'))(assets[0]!.ual)).toBe(false);
+    // Metadata and triple count kept, one stored literal replaced.
+    const holds = createPublicSnapshotHeldAssetCheck(store, observe(assets, 'core-cache'));
+    expect(await holds(assets[1]!.ual)).toBe(true);
+    const [original] = assets[1]!.verified.dataQuads;
+    await store.delete([original!]);
+    await store.insert([{ ...original!, object: '"altered"' }]);
+    expect(await holds(assets[1]!.ual)).toBe(false);
+  });
+
   it('lets an rpc-only job relabel copies stored with core-cache evidence', async () => {
     const assets = makeSnapshotAssets(graph, 1);
     const cached = await storeWith(observe(assets, 'core-cache'), assets);

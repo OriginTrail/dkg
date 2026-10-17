@@ -12,6 +12,7 @@ import { createDurableSyncAccumulator, finalizeDurableSyncCompletion } from '../
 import { exactAssetUalsForSelection } from '../src/sync/exact-assets.js';
 import { materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 import { VM_RECOVERY_STREAM_SETBACK_LIMITS } from '../src/vm-recovery-stream-setback-policy.js';
+import { PUBLIC_SNAPSHOT_RETRY_MS } from '../src/public-snapshot-exact-pacing.js';
 import {
   countStoredAssets, makeSnapshotAssets, sealSnapshotOf, type SnapshotAsset,
 } from './helpers/public-snapshot-assets.js';
@@ -42,6 +43,8 @@ function makeAgent(assets: Asset[]) {
       generation++;
       agent.subscribedContextGraphs.set(graph, { subscribed: true, ...binding });
     },
+    // Unsubscribing or rebinding moves the binding generation; it aborts no signal.
+    invalidateBinding: () => { generation++; },
     runContextGraphSyncWithBackpressure: LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure,
     vmRecoverySyncAdmissionAvailable: vi.fn((id: string) => LifecycleSyncMethods.prototype.vmRecoverySyncAdmissionAvailable.call(agent, id)),
   };
@@ -182,6 +185,35 @@ describe('public snapshot job on a node with one sync slot and no queue', () => 
     expect('value' in resumed && resumed.value).toMatchObject({ assets: 20, committed: 20, alreadyPresent: 10, current: true });
     expect(requested.map(selection => new Set(selection))).toEqual([new Set(assets.slice(10).map(asset => asset.ual))]);
     expect(await countStoredAssets(agent.store, assets)).toBe(20);
+  });
+
+  it('stops waiting within one interval when the graph is rebound, and releases the job guard', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const assets = makeAssets(12);
+    const agent = makeAgent(assets);
+    vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph').mockImplementation(deliver(agent.store, assets));
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const competing = agent.runContextGraphSyncWithBackpressure(createOperationContext('sync'), 'other-graph', 'durable',
+      'competing-sync', () => held, { priorityOverride: VM_RECOVERY_SYNC_PRIORITY, source: 'vm-recovery' });
+    try {
+      let rejectedAt = 0;
+      const stale = run(agent).finally(() => { rejectedAt = Date.now(); });
+      const rejected = expect(stale).rejects.toThrow('Snapshot job ownership changed');
+      await vi.advanceTimersByTimeAsync(60_000);
+      agent.invalidateBinding();
+      const reboundAt = Date.now();
+      await vi.advanceTimersByTimeAsync(PUBLIC_SNAPSHOT_RETRY_MS);
+      // Settled within one interval of the rebind, not at the job limit.
+      expect(rejectedAt).toBeGreaterThan(0);
+      expect(rejectedAt - reboundAt).toBeLessThanOrEqual(PUBLIC_SNAPSHOT_RETRY_MS);
+      await rejected;
+      // The node-wide guard is free again: the next job starts and completes once the slot frees.
+      const next = run(agent);
+      await vi.advanceTimersByTimeAsync(10_000);
+      release();
+      expect(await settle(next)).toMatchObject({ value: { committed: 12, current: true } });
+    } finally { release(); await competing; }
   });
 
   it('fails with the committed count when the slot stays in use until the job limit', async () => {
