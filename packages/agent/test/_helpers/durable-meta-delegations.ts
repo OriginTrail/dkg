@@ -29,6 +29,8 @@ export function durableMetaDelegations(contextGraphId: string): {
     member(DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, '0xPaRtIcIpAnT'),
     member(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, '0xReVoKeD'),
     member(DKG_ONTOLOGY.DKG_REVOKED_AGENT, '0xrevoked'),
+    member(DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, '0xReVoKeDpArTiCiPaNt'),
+    member(DKG_ONTOLOGY.DKG_REVOKED_AGENT, '0xrevokedparticipant'),
   ];
   const admitted = [
     ...delegation(subject('active'), '0xactive'),
@@ -42,6 +44,7 @@ export function durableMetaDelegations(contextGraphId: string): {
       ...members,
       ...admitted,
       ...delegation(subject('revoked'), '0xREVOKED'),
+      ...delegation(subject('revoked-participant'), '0xREVOKEDPARTICIPANT'),
       ...delegation(subject('orphan'), '0xorphan'),
       ...delegation(`did:dkg:agent-delegation:${contextGraphId}-foreign:active`, '0xactive'),
       // A revocation in another graph cannot veto this graph's active member.
