@@ -2,8 +2,9 @@
 
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import { StoreReadTransportFailure, StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
+  CuratorRejectedError, CuratorUnconfirmedError,
   createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   PROMOTE_STEP_NAMES,
@@ -27,6 +28,7 @@ describe('diagnosticPromoteStage', () => {
   const EXPECTED_STAGES = [
     'ensureSubGraphRegistered',
     'assertGraphScopedLifecycleWritable',
+    'assertNoUnfinishedBoundShare',
     'knowledgeAssetPrivateQuads',
     'assertionScopedQuads',
     'assertTrustedCatalogTriplesAllowed',
@@ -105,6 +107,17 @@ describe('safePromoteErrorIdentity', () => {
 });
 
 describe('classifyPromoteError', () => {
+  it.each(['network-cg', 'timeout', 'ECONNRESET'])('does not retry a typed curator rejection named %s', graph => {
+    for (const boundRecovery of [false, true]) {
+      expect(classifyPromoteError(new CuratorRejectedError(graph), { boundRecovery }))
+        .toEqual({ classification: 'fatal', retryable: false });
+    }
+    expect(classifyPromoteError(new CuratorUnconfirmedError(graph), { boundRecovery: true }))
+      .toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError(new Error(graph), { boundRecovery: true }))
+      .toEqual({ classification: 'fatal', retryable: false });
+  });
+
   // RFC §10 / plan §10.3 — the three patterns surfaced by the rc.10 Graphify import
   // (`INTEGRATION_NOTES_GRAPHIFY.md`), plus the fatal default.
 
@@ -360,3 +373,12 @@ describe('classifyPromoteError', () => {
     expect(classifyPromoteError(undefined).classification).toBe('fatal');
   });
 });
+
+// A typed read remains safe even when a dependency returns cap-like diagnostic text.
+it.each(['payload too large', 'gossip limit', 'promoted assertion too large'])(
+  'retains bound recovery for proven read failure: %s', message => {
+    expect(classifyPromoteError(new StoreReadTransportFailure(new Error(message)), { boundRecovery: true }))
+      .toEqual({ classification: 'transient', retryable: true });
+    expect(classifyPromoteError(new Error(message), { boundRecovery: true }).retryable).toBe(false);
+  },
+);

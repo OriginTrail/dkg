@@ -1051,6 +1051,7 @@ function makeQueuedAgentHarness(options: {
   agentLike.retireLegacySwmAfterConfirmedLocalPublish =
     (DKGAgent.prototype as any).retireLegacySwmAfterConfirmedLocalPublish;
   agentLike.retireLegacySwmAfterVerifiedVmTwin = recorder(async () => undefined);
+  agentLike.transferRfc64ConfirmedVmV1 = (DKGAgent.prototype as any).transferRfc64ConfirmedVmV1;
   agentLike.observeRfc64ConfirmedVmV1 =
     (DKGAgent.prototype as any).observeRfc64ConfirmedVmV1;
   agentLike.removeRfc64SwmAuthorInventoryShadowV1 = recorder(async () => ({
@@ -1133,7 +1134,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       headObjectDigest: null,
       error: null,
     }));
-    agentLike.removeRfc64SwmAuthorInventoryShadowV1 = removal;
+    agentLike.observeRfc64ConfirmedInventoryRemovalV1 = removal;
     const catalogAuthoring = recorder(async () => null);
     const legacyCatalogAuthoring = recorder(async () => null);
     agentLike.recordRfc64PublicCatalogAssetV1 = catalogAuthoring;
@@ -1197,7 +1198,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     agentLike.resolveRfc64CatalogAuthoringLaneV1 = () => ({
       kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
     });
-    agentLike.removeRfc64SwmAuthorInventoryShadowV1 = recorder(async () => {
+    agentLike.observeRfc64ConfirmedInventoryRemovalV1 = recorder(async () => {
       throw new Error('simulated RFC-64 SWM removal failure');
     });
     const snapshotQuads = [{
