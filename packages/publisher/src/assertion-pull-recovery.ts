@@ -79,8 +79,8 @@ export async function canResumeCompletedSwmPull(input: {
       const parsed = parsePromoteOperationIntent(intent, operationId);
       const alias = head.operationAliases.find(item => item.shareOperationId === operationId)!;
       if ((parsed.publisherPeerId ?? 'unknown') !== head.publisherPeerId
-        || parsed.accessPolicy !== head.accessPolicy
-        || JSON.stringify(parsed.allowedPeers) !== JSON.stringify([...head.allowedPeers].sort())
+        || parsed.accessPolicy !== head.access.accessPolicy
+        || JSON.stringify(parsed.allowedPeers) !== JSON.stringify([...head.access.allowedPeers].sort())
         || alias.publishedAt !== String(parsed.timestampMs)) return false;
     } catch { return false; }
   }
