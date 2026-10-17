@@ -510,6 +510,7 @@ export {
   createKnowledgeAssetVmPublishSnapshotRequest,
 } from './async-lift-publisher-utils.js';
 export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
+export type { SwmAgentGateRefreshOracle, SwmAgentGateRefreshResult } from './swm-write-gate-refresh.js';
 export {
   FileWorkspacePublicSnapshotStore,
   SnapshotStorageCapacityError,
