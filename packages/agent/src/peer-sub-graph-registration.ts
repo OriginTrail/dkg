@@ -114,7 +114,7 @@ interface PeerSubGraphResolutionAgent extends PeerSubGraphRegistrationPorts, Fre
   readonly localContextGraphProvenance: { hasLocalCreate(contextGraphId: string): boolean };
   readonly subscribedContextGraphs: ReadonlyMap<string, { readonly subscribed?: boolean }>;
   resolveCuratorPeerId(contextGraphId: string, options: { signal?: AbortSignal }): Promise<string | undefined>;
-  resolveRfc64UnregisteredAuthoritySeedPeersV1(options: { contextGraphId?: string }): readonly string[];
+  resolveRfc64UnregisteredAuthoritySeedPeersV1(options: { contextGraphId?: string; maxPeers?: number }): readonly string[];
 }
 
 /**
@@ -306,8 +306,6 @@ interface PeerSubGraphResolutionState {
   readonly wanted: Map<string, Set<string>>;
   /** The last resolution of each `<graph>\0<name>` that did not find it. */
   readonly misses: Map<string, RememberedMiss>;
-  /** Resolutions run per graph: each takes the next window of the connected peers. */
-  readonly attempts: Map<string, number>;
 }
 
 const resolutionStates = new WeakMap<object, PeerSubGraphResolutionState>();
@@ -315,7 +313,7 @@ const resolutionStates = new WeakMap<object, PeerSubGraphResolutionState>();
 function resolutionStateOf(agent: object): PeerSubGraphResolutionState {
   let state = resolutionStates.get(agent);
   if (state === undefined) {
-    state = { lookupLocks: new Map(), wanted: new Map(), misses: new Map(), attempts: new Map() };
+    state = { lookupLocks: new Map(), wanted: new Map(), misses: new Map() };
     resolutionStates.set(agent, state);
   }
   return state;
@@ -439,7 +437,7 @@ async function lookUpPeers(
   throwIfOperationAborted(signal);
   // The lookup before this one may have registered it.
   if (await hasSubGraphRegistration(agent.store, contextGraphId, subGraphName)) return { registered: true };
-  const peerIds = await resolutionPeers(agent, state, contextGraphId, signal);
+  const peerIds = await resolutionPeers(agent, contextGraphId, signal);
   let answered = 0;
   let lastFailure = '';
   for (const peerId of peerIds) {
@@ -485,38 +483,30 @@ function rememberMiss(state: PeerSubGraphResolutionState, key: string, miss: Rem
  * The peers to ask, never this node: the graph's owner first when this node
  * can name its peer and is connected to it, then connected peers (the node's
  * selection puts Cores, which keep and serve the owner's definition of the
- * registered graphs they host, before other peers). An owner this node is not
+ * registered graphs they host, before other peers, keeps a slot for a peer
+ * that is not a Core, and rotates its window on each call, so repeated
+ * resolutions reach every connected peer). An owner this node is not
  * connected to is asked last, so a member that reaches the graph only through
  * Cores (an Edge behind NAT) does not spend its budget on a dial before it
  * asks them; a dial to the owner is still tried when no connected peer holds
- * the sub-graph. Each resolution of a graph takes the next window of the
- * connected peers, so repeated resolutions reach every connected peer.
+ * the sub-graph.
  */
 async function resolutionPeers(
   agent: PeerSubGraphResolutionAgent,
-  state: PeerSubGraphResolutionState,
   contextGraphId: string,
   signal: AbortSignal,
 ): Promise<string[]> {
   // An owner this node cannot name still leaves the connected peers to ask.
   const owner = await agent.resolveCuratorPeerId(contextGraphId, { signal }).catch(() => undefined);
   const connected = new Set(agent.node.libp2p.getConnections().map((connection) => connection.remotePeer.toString()));
-  const peers = [...new Set(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId }))]
-    .filter((peerId) => peerId !== agent.peerId && peerId !== owner);
-  const attempt = state.attempts.get(contextGraphId) ?? 0;
-  state.attempts.set(contextGraphId, attempt + 1);
-  const window = (take: number) => rotatedPeerWindow(peers, take, attempt);
-  if (owner === undefined || owner === agent.peerId) return window(SUB_GRAPH_RESOLUTION_MAX_PEERS);
-  if (connected.has(owner)) return [owner, ...window(SUB_GRAPH_RESOLUTION_MAX_PEERS - 1)];
-  return [...window(SUB_GRAPH_RESOLUTION_MAX_PEERS - 1), owner];
-}
-
-/** `take` peers of `peers` starting at window `attempt`, wrapping around; all of them when they fit. */
-function rotatedPeerWindow(peers: readonly string[], take: number, attempt: number): string[] {
-  if (take <= 0) return [];
-  if (take >= peers.length) return [...peers];
-  const start = (attempt * take) % peers.length;
-  return Array.from({ length: take }, (_, i) => peers[(start + i) % peers.length]!);
+  const ownerNamed = owner !== undefined && owner !== agent.peerId;
+  const peers = [...new Set(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({
+    contextGraphId,
+    maxPeers: ownerNamed ? SUB_GRAPH_RESOLUTION_MAX_PEERS - 1 : SUB_GRAPH_RESOLUTION_MAX_PEERS,
+  }))].filter((peerId) => peerId !== agent.peerId && peerId !== owner);
+  if (!ownerNamed) return peers.slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS);
+  if (connected.has(owner)) return [owner, ...peers.slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS - 1)];
+  return [...peers.slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS - 1), owner];
 }
 
 /**

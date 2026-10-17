@@ -45,6 +45,7 @@ import {
 } from '../src/core-hosted-definition.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
 import { Rfc64MetaBootstrapMethods } from '../src/dkg-agent-rfc64-meta-bootstrap.js';
+import { Rfc64SeedFetchMethods } from '../src/dkg-agent-rfc64-seed-fetch.js';
 import {
   PEER_SUB_GRAPH_REGISTRATION_LIMIT,
   SUB_GRAPH_RESOLUTION_MAX_PEERS,
@@ -193,7 +194,11 @@ function nodeSurface(store: OxigraphStore, peerId: string, peers: Peers, connect
       work: () => Promise<T>,
     ): Promise<T> => work()),
     node: {
-      libp2p: { getConnections: () => connected().map((remotePeerId) => ({ remotePeer: { toString: () => remotePeerId } })) },
+      libp2p: {
+        peerId: { toString: () => peerId },
+        getPeers: () => [],
+        getConnections: () => connected().map((remotePeerId) => ({ remotePeer: { toString: () => remotePeerId } })),
+      },
     },
     oversizeTombstoneLog: { record: () => undefined },
     invalidateListContextGraphsCache: vi.fn(),
@@ -213,6 +218,9 @@ interface CoreOptions {
   curatorNode?: string;
   /** The connected peers the Core's seed selection returns; default none. */
   seedPeers?: readonly string[];
+  /** Run the node's real peer selection over the connected peers instead of `seedPeers`; `cores` are the peers it ranks as Cores. */
+  realSelector?: boolean;
+  cores?: readonly string[];
   hosted?: boolean;
   localAuthor?: boolean;
   graphId?: string;
@@ -240,7 +248,10 @@ function coreNode(peers: Peers, options: CoreOptions = {}) {
           : []
       )),
     },
-    resolveRfc64UnregisteredAuthoritySeedPeersV1: vi.fn(() => [...(options.seedPeers ?? [])]),
+    resolveRfc64UnregisteredAuthoritySeedPeersV1: options.realSelector === true
+      ? realSelector
+      : vi.fn(() => [...(options.seedPeers ?? [])]),
+    peerCapabilityRegistry: { supportsCore: (remotePeerId: string) => options.cores?.includes(remotePeerId) === true },
     resolveCuratorPeerId: vi.fn(async () => options.curatorNode),
   };
   const node: PeerNode = { store, answer: 'complete' };
@@ -252,6 +263,14 @@ interface MemberOptions {
   connected?: readonly string[];
   /** The peer the member resolves as the graph's owner; default the owner's node. */
   owner?: string;
+  /** Run the node's real peer selection over the connected peers; `cores` are the peers it ranks as Cores. */
+  realSelector?: boolean;
+  cores?: readonly string[];
+}
+
+/** The node's real peer selection (`Rfc64SeedFetchMethods`), run over a fixture's libp2p surface. */
+function realSelector(this: object, options: { contextGraphId?: string; maxPeers?: number }): readonly string[] {
+  return Rfc64SeedFetchMethods.prototype.resolveRfc64UnregisteredAuthoritySeedPeersV1.call(this as never, options);
 }
 
 /**
@@ -269,7 +288,10 @@ function memberNode(peers: Peers, options: MemberOptions = {}) {
     subscribedContextGraphs: new Map([[contextGraphId, { subscribed: true }]]),
     readAcceptedRfc64CatalogAccessSnapshotV1: () => null,
     hasConfirmedMetaState: vi.fn(async () => true),
-    resolveRfc64UnregisteredAuthoritySeedPeersV1: vi.fn(() => [...connected]),
+    resolveRfc64UnregisteredAuthoritySeedPeersV1: options.realSelector === true
+      ? realSelector
+      : vi.fn(() => [...connected]),
+    peerCapabilityRegistry: { supportsCore: (remotePeerId: string) => options.cores?.includes(remotePeerId) === true },
     resolveCuratorPeerId: vi.fn(async () => owner),
     refreshMetaSyncedFlags: vi.fn(async () => undefined),
     // The chain attests nothing in this fake: a member without a serving peer holds no definition.
@@ -390,7 +412,7 @@ describe('a Core keeps the owner\'s definition of a hosted registered public gra
     const peers = [OTHER_PEER_ID, STRANGER_PEER_ID, SECOND_CORE_PEER_ID, MEMBER_PEER_ID];
     const core = coreNode(
       peersOf(await Promise.all(peers.map(async (peerId) => [peerId, await peerNode()] as [string, PeerNode]))),
-      { connected: peers, ownerNodes: [], seedPeers: peers },
+      { connected: peers, ownerNodes: [], realSelector: true },
     );
     await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
     expect(core.fetchSyncPages).toHaveBeenCalledTimes(CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS);
@@ -617,27 +639,53 @@ describe('a Core keeps the owner\'s definition of a hosted registered public gra
     clock.mockRestore();
     void attempt;
   });
-  it('reaches every connected peer over its retries, the Edges behind the Cores included', async () => {
+  it('reaches every connected peer over its retries through the node\'s real peer selection', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const coreIds = Array.from({ length: 6 }, (_, i) => `12D3KooWCore${String(i).padStart(44, '0')}`);
-    const otherEdge = OTHER_PEER_ID;
-    const peers = peersOf([
-      ...await Promise.all(coreIds.map(async (peerId) => [peerId, await peerNode()] as [string, PeerNode])),
-      [otherEdge, await peerNode()],
-      [OWNER_PEER_ID, await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)])],
-    ]);
-    // The selection lists the Cores first; the owner is not in the agent registry.
-    const selection = [...coreIds, otherEdge, OWNER_PEER_ID];
-    const core = coreNode(peers, { connected: selection, ownerNodes: [], seedPeers: selection });
+    const coreId = (i: number) => `12D3KooWCore${String(i).padStart(44, '0')}`;
+    const edgeId = (i: number) => `12D3KooWEdge${String(i).padStart(44, '0')}`;
+    /** Retries until the Core holds the owner's definition; the attempts it took. */
+    const retryUntilHeld = async (core: ReturnType<typeof coreNode>): Promise<number> => {
+      let attempts = 1;
+      await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+      for (let i = 0; i < 12 && !(await holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)); i += 1) {
+        const delay = CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[Math.min(i, CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS.length - 1)]!;
+        await vi.advanceTimersByTimeAsync(delay);
+        attempts += 1;
+      }
+      await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+      expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+      return attempts;
+    };
 
-    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
-    expect(askedPeers(core.fetchSyncPages)).toEqual(coreIds.slice(0, 3));
-    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
-    expect(askedPeers(core.fetchSyncPages).slice(3)).toEqual(coreIds.slice(3, 6));
-    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[1]!);
-    expect(askedPeers(core.fetchSyncPages).slice(6)).toEqual([otherEdge, OWNER_PEER_ID]);
-    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
-    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+    // Twenty-four Cores and two Edges; only the fourth Core holds the definition; no owner node is named.
+    const cores = Array.from({ length: 24 }, (_, i) => coreId(i));
+    const edges = [edgeId(0), edgeId(1)];
+    const holder = coreId(3);
+    const many = coreNode(
+      peersOf(await Promise.all([...cores, ...edges].map(async (peerId) =>
+        [peerId, await peerNode(peerId === holder ? [...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)] : [])] as [string, PeerNode]))),
+      { connected: [...cores, ...edges], ownerNodes: [], realSelector: true, cores },
+    );
+    const manyAttempts = await retryUntilHeld(many);
+    expect(askedPeers(many.fetchSyncPages)).toContain(holder);
+    // Every attempt asked at most the fallback window, Cores first, with one slot for an Edge.
+    expect(many.fetchSyncPages.mock.calls.length).toBeLessThanOrEqual(manyAttempts * CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS);
+    expect(manyAttempts).toBeLessThanOrEqual(3);
+
+    // Six Cores and eight Edges; the owner is the last Edge and the agent registry lists no node for it.
+    const sixCores = Array.from({ length: 6 }, (_, i) => coreId(i));
+    const eightEdges = [...Array.from({ length: 7 }, (_, i) => edgeId(i)), OWNER_PEER_ID];
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const behind = coreNode(
+      peersOf([
+        ...await Promise.all([...sixCores, ...eightEdges.slice(0, 7)].map(async (peerId) => [peerId, await peerNode()] as [string, PeerNode])),
+        [OWNER_PEER_ID, owner],
+      ]),
+      { connected: [...sixCores, ...eightEdges], ownerNodes: [], realSelector: true, cores: sixCores },
+    );
+    const behindAttempts = await retryUntilHeld(behind);
+    expect(askedPeers(behind.fetchSyncPages).at(-1)).toBe(OWNER_PEER_ID);
+    expect(behindAttempts).toBeLessThanOrEqual(eightEdges.length);
   });
 
   it('schedules the next attempt when a store read fails, and recovers on it', async () => {
@@ -755,25 +803,26 @@ describe('a member that reaches a registered public graph only through Cores', (
   });
 
   it('reaches every connected peer over repeated lookups, and takes a complete registration over an incomplete local one', async () => {
-    const coreIds = Array.from({ length: 6 }, (_, i) => `12D3KooWCore${String(i).padStart(44, '0')}`);
-    const holder = OTHER_PEER_ID;
-    const peers = peersOf([
-      ...await Promise.all(coreIds.map(async (peerId) => [peerId, await peerNode([...OWNER_DECLARATION])] as [string, PeerNode])),
-      [holder, await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)])],
-    ]);
-    const member = memberNode(peers, { connected: [...coreIds, holder], owner: undefined });
+    // Twenty-four Cores; only the fourth holds the registration; the owner cannot be named.
+    const cores = Array.from({ length: 24 }, (_, i) => `12D3KooWCore${String(i).padStart(44, '0')}`);
+    const holder = cores[3]!;
+    const peers = peersOf(await Promise.all(cores.map(async (peerId) =>
+      [peerId, await peerNode(peerId === holder ? [...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)] : [...OWNER_DECLARATION])] as [string, PeerNode])));
+    const member = memberNode(peers, { connected: cores, owner: undefined, realSelector: true, cores });
     await member.store.insert([...OWNER_DECLARATION]);
     const now = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
 
-    await expect(member.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toMatchObject({ registered: false });
-    expect(askedPeers(member.fetchSyncPages)).toEqual(coreIds.slice(0, 3));
-    clock.mockReturnValue(now + 31_000);
-    await expect(member.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toMatchObject({ registered: false });
-    expect(askedPeers(member.fetchSyncPages).slice(3)).toEqual(coreIds.slice(3, 6));
-    clock.mockReturnValue(now + 62_000);
-    await expect(member.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toEqual({ registered: true });
-    expect(askedPeers(member.fetchSyncPages).slice(6, 7)).toEqual([holder]);
+    let lookups = 0;
+    let outcome = await member.agent.resolveSubGraphRegistration(contextGraphId, REPORTS);
+    for (lookups = 1; lookups < 10 && outcome.registered === false; lookups += 1) {
+      clock.mockReturnValue(now + lookups * 31_000);
+      outcome = await member.agent.resolveSubGraphRegistration(contextGraphId, REPORTS);
+    }
+    expect(outcome).toEqual({ registered: true });
+    expect(askedPeers(member.fetchSyncPages)).toContain(holder);
+    expect(member.fetchSyncPages.mock.calls.length).toBeLessThanOrEqual(lookups * SUB_GRAPH_RESOLUTION_MAX_PEERS);
+    expect(lookups).toBeLessThanOrEqual(2);
 
     // An incomplete local row (type and name, no creator) is not a registration: the peer's complete one repairs it.
     const incomplete = memberNode(peersOf([[holder, peers.get(holder)!]]), { connected: [holder], owner: undefined });

@@ -71,7 +71,7 @@ export const CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS = META_REFRESH_COOLDOWN_MS
 export const CORE_HOSTED_DEFINITION_SERVE_REFRESH_BUDGET_MS = 10_000;
 /** Owner nodes asked per attempt (an owner wallet may run several nodes). */
 export const CORE_HOSTED_DEFINITION_MAX_OWNER_PEERS = 3;
-/** Connected peers asked per attempt after the owner's nodes. */
+/** Connected peers asked per attempt after the owner's nodes (the window the node's selection rotates). */
 export const CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS = 3;
 
 export type CoreHostedDefinitionOutcome =
@@ -103,7 +103,7 @@ export interface CoreHostedDefinitionAgent extends CuratorMetaRefreshAgent {
   readonly discovery: {
     findAgents(options: { agentAddress?: string; signal?: AbortSignal }): Promise<Array<{ peerId: string; agentAddress?: string }>>;
   };
-  resolveRfc64UnregisteredAuthoritySeedPeersV1(options: { contextGraphId?: string }): readonly string[];
+  resolveRfc64UnregisteredAuthoritySeedPeersV1(options: { contextGraphId?: string; maxPeers?: number }): readonly string[];
 }
 
 interface CoreHostedDefinitionState {
@@ -287,15 +287,12 @@ async function attemptCoreHostedDefinition(
     return 'held';
   }
   const owners = await ownerPeerIds(agent, state, contextGraphId, hosted.owner, stopSignal);
-  // The node's selection returns up to its own cap, Cores first. Each attempt
-  // takes the next window of it, so over the retries every connected peer is
-  // asked, the Edges behind the Cores included (the owner may be one of them).
-  const fallback = rotatedWindow(
-    agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId })
-      .filter((peerId) => peerId !== agent.peerId && !owners.includes(peerId)),
-    CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS,
-    (state.retries.get(contextGraphId)?.attempt ?? -1) + 1,
-  );
+  // The node's selection rotates its window on each call, so over the
+  // retries every connected peer is asked, the Edges behind the Cores
+  // included (the owner may be one of them).
+  const fallback = agent
+    .resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId, maxPeers: CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS })
+    .filter((peerId) => peerId !== agent.peerId && !owners.includes(peerId));
   for (const peerId of [...owners, ...fallback]) {
     if (stopped(stopSignal)) return 'not-hosted';
     state.lastAttemptAt.set(contextGraphId, Date.now());
@@ -321,14 +318,6 @@ async function attemptCoreHostedDefinition(
     + (delayMs === undefined ? '' : `; next attempt in ${Math.round(delayMs / 1000)} s`),
   );
   return 'not-found';
-}
-
-/** `take` peers of `peers` starting at window `attempt`, wrapping around; all of them when they fit. */
-export function rotatedWindow(peers: readonly string[], take: number, attempt: number): string[] {
-  if (take <= 0) return [];
-  if (take >= peers.length) return [...peers];
-  const start = (attempt * take) % peers.length;
-  return Array.from({ length: take }, (_, i) => peers[(start + i) % peers.length]!);
 }
 
 /** Schedule the next attempt; returns its delay, or undefined when the node is stopping. */

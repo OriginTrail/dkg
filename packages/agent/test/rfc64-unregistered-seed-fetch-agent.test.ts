@@ -530,6 +530,32 @@ describe('Rfc64SeedFetchMethods replica peer selection', () => {
     expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(attempt1);
   });
 
+  it('rotates a smaller window the same way, keeping a slot for a peer that is not a core', () => {
+    // A caller that asks fewer peers per attempt (a write's sub-graph lookup, a
+    // Core's fetch of a hosted definition) gets the smaller window from the
+    // selection itself: one rotation, so successive attempts still tile every
+    // connected peer, and a non-core slot, so an edge behind the cores is reached.
+    const cores = Array.from({ length: 6 }, (_, index) => `peer-core-${index}`);
+    const edges = Array.from({ length: 8 }, (_, index) => `peer-edge-${index}`);
+    const { agent } = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: [...cores, ...edges] }),
+      corePeerIds: cores,
+    });
+    const scope = { contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 3 };
+    const seen = new Set<string>();
+    const windows = Array.from({ length: 8 }, () => agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope));
+    for (const window of windows) {
+      expect(window).toHaveLength(3);
+      expect(window.filter((peerId) => cores.includes(peerId))).toHaveLength(2);
+      expect(window.filter((peerId) => edges.includes(peerId))).toHaveLength(1);
+      for (const peerId of window) seen.add(peerId);
+    }
+    // Eight attempts of one edge slot reach every edge; three of two core slots every core.
+    expect(seen.size).toBe(cores.length + edges.length);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 1 })).toHaveLength(1);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 100 })).toHaveLength(CAP);
+  });
+
   it('asks connected configured complete providers first and ignores absent or rejected pins', () => {
     const { agent } = createFetchAgent({
       libp2p: libp2pWith({
