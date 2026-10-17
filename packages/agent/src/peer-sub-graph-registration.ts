@@ -407,10 +407,12 @@ async function resolveWithinBudget(
 /**
  * Ask the graph's peers, the owner first, until one holds the sub-graph, and
  * register each sub-graph of the graph that a resolution waits for and the
- * answer holds. A peer whose answer broke off is asked again in a later
- * round, after a short jittered wait, until it answers; a peer that answered
- * is not asked again. Runs as the graph's one lookup; stops once `signal`
- * ends the resolution.
+ * answer holds. Each peer has its share of the time left (the time left over
+ * the peers still to ask in the round), so a peer that does not answer cannot
+ * keep the lookup from the ones after it. A peer whose answer broke off or
+ * ran out of its share is asked again in a later round, after a short
+ * jittered wait, until it answers; a peer that answered is not asked again.
+ * Runs as the graph's one lookup; stops once `signal` ends the resolution.
  *
  * An answer breaks off when the peer's metadata session for this node and
  * the graph is superseded, for one: an ordinary durable sync round of the
@@ -438,14 +440,23 @@ async function lookUpPeers(
   for (let round = 0; asking.length > 0; round += 1) {
     if (round > 0) await delay(retryDelayMs(round), undefined, { signal, ref: false });
     const brokenOff: string[] = [];
-    for (const peerId of asking) {
+    for (const [index, peerId] of asking.entries()) {
       throwIfOperationAborted(signal);
+      // A peer gets its share of the time left, so one that does not answer
+      // leaves time for the peers after it.
+      const shareMs = Math.max(1, (deadline - Date.now()) / (asking.length - index));
       let quads: readonly Quad[] | undefined;
       try {
-        quads = await fetchPeerMeta(agent, ctx, peerId, contextGraphId, deadline, signal);
+        quads = await runBoundedOperation(
+          (attempt) => fetchPeerMeta(agent, ctx, peerId, contextGraphId, Date.now() + shareMs, attempt),
+          { timeoutMs: shareMs, label: 'Sub-graph lookup at a peer', signal },
+        );
       } catch (error) {
-        lastFailure = error instanceof Error ? error.message : String(error);
-        if (answerBrokeOff(error)) brokenOff.push(peerId);
+        const outOfShare = isBoundedOperationTimeoutError(error);
+        lastFailure = outOfShare
+          ? `peer ${peerId.slice(-8)} did not answer in time`
+          : error instanceof Error ? error.message : String(error);
+        if (outOfShare || answerBrokeOff(error)) brokenOff.push(peerId);
         continue;
       }
       if (quads === undefined) {
