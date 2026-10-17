@@ -2,6 +2,15 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Git updater quarantine files no longer cause an otherwise clean source build
+  to report `<commit>-dirty` (#3169). Untracked user files and tracked source
+  changes still mark source builds dirty. The `commit` field in `GET /api/status`
+  can therefore still end in `-dirty`; npm build identities are unchanged.
+
 ## [10.0.25] - 2026-10-16
 
 A patch for shared memory between the members of a public Context Graph,
