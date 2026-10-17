@@ -1,3 +1,4 @@
+import { loadCampaign, persistCampaign, campaignCounts } from './campaign-manifest.mjs';
 /* eslint-disable no-constant-condition, unicorn/no-new-array -- Preserve the frozen comparison runner; each loop has an explicit exit. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,12 +16,11 @@ const home = process.env.DKG_HOME;
 const config = JSON.parse(fs.readFileSync(path.join(home, 'config.json')));
 const token = await loadApiClientToken(new DkgHomeFiles(home));
 const base = `http://127.0.0.1:${config.apiPort}`;
-const cg = `0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-${arm}-20261016`;
-const names = ['readiness-smoke', ...Array.from({ length: 179 }, (_, i) => `initial-${String(i + 1).padStart(3, '0')}`)];
-const catalogNames = Array.from({ length: 256 }, (_, i) => `catalog-${String(i).padStart(3, '0')}`);
+const campaign = mode === 'prepare' ? persistCampaign(arm) : loadCampaign(arm), counts = campaignCounts(campaign);
+const cg = campaign.contextGraphId, names = campaign.cohorts.initial, catalogNames = campaign.cohorts.shares;
 const log = (entry) => fs.appendFileSync(path.join(evidence, 'requests.jsonl'), JSON.stringify(entry) + '\n');
 const save = (name, value) => fs.writeFileSync(path.join(evidence, name + '.json'), JSON.stringify(value, null, 2));
-async function request(route, body, label, timeout = 120_000) {
+async function request(route, body, label, timeout = campaign.requestTimeoutMs) {
   const startedAt = new Date().toISOString(), start = performance.now();
   try {
     const r = await fetch(base + route, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(timeout) });
@@ -35,14 +35,14 @@ async function concurrent(items, count, fn) {
   await Promise.all(Array.from({ length: count }, async () => { for (;;) { const i = cursor++; if (i >= items.length) return; out[i] = await fn(items[i], i); } }));
   return out;
 }
-const payload = (name) => Array.from({ length: 8 }, (_, i) => ({ subject: `urn:2963:${arm}:${name}`, predicate: `https://schema.org/p${i}`, object: JSON.stringify(`${name} value ${i}`), graph: '' }));
+const payload = (name) => Array.from({ length: campaign.triplesPerAsset }, (_, i) => ({ subject: `urn:2963:${arm}:${name}`, predicate: `https://schema.org/p${i}`, object: JSON.stringify(`${name} value ${i}`), graph: '' }));
 const create = (name, share) => request('/api/knowledge-assets', { contextGraphId: cg, name, quads: payload(name), finalize: true, alsoShareSwm: share }, `prepare:${name}`);
 if (mode === 'prepare') {
   // The separately captured readiness smoke is initial row zero.
-  const initial = await concurrent(names.slice(1), 2, async (name, i) => { const r = await create(name, true); if ((i + 1) % 20 === 0) console.log('initial', i + 1, r.status); return r; });
+  const initial = await concurrent(names.slice(1), campaign.preparationConcurrency, async (name, i) => { const r = await create(name, true); if ((i + 1) % 20 === 0) console.log('initial', i + 1, r.status); return r; });
   save('initial-preparation', initial);
   if (initial.some(r => r.status !== 201 || r.value.status !== 'swm-shared')) throw new Error('Initial preparation failed; retained without repair');
-  const drafts = await concurrent(catalogNames, 2, async (name, i) => { const r = await create(name, false); if ((i + 1) % 32 === 0) console.log('drafts', i + 1, r.status); return r; });
+  const drafts = await concurrent(catalogNames, campaign.preparationConcurrency, async (name, i) => { const r = await create(name, false); if ((i + 1) % 32 === 0) console.log('drafts', i + 1, r.status); return r; });
   save('catalog-drafts', drafts);
   if (drafts.some(r => r.status !== 201)) throw new Error('Draft preparation failed; retained without repair');
   console.log('Preparation finished; readiness and exact starting inventory must be checked before run.');
@@ -50,33 +50,37 @@ if (mode === 'prepare') {
   const readiness = await request('/api/status', undefined, 'readiness:status');
   const current = readiness.value?.rfc64Catalog?.contextGraphs?.find(c => c.contextGraphId === cg);
   if (!readiness.value?.asyncPublisher?.available || current?.phase !== 'complete'
-    || current.appliedRowCount !== '180' || current.legacyReadOnlyCount !== 0
+    || current.appliedRowCount !== String(counts.initial) || current.legacyReadOnlyCount !== 0
     || current.authorityState !== 'accepted' || current.authorityFreshness !== 'current') {
     throw new Error('Readiness barrier refused workload before any measured mutation');
   }
   let monitoring = true;
   const monitor = (async () => {
     while (monitoring) {
-      for (const name of ['catalog-140', 'catalog-141']) {
+      for (const name of campaign.faults.map(f => f.name)) {
         if (!fs.existsSync(path.join(home, `2963-fault-${name}.json`))) continue;
-        for (const author of [undefined, '0x247B02C301B34E52e9021728F34C3457F81f2dFc']) {
+        for (const author of [undefined, campaign.author]) {
           const params = new URLSearchParams({ contextGraphId: cg, ...(author ? { agentAddress: author } : {}) });
-          await request(`/api/knowledge-assets/${name}?${params}`, undefined, `recovery-observe:${name}:${author ?? 'default'}`, 60_000);
+          await request(`/api/knowledge-assets/${name}?${params}`, undefined, `recovery-observe:${name}:${author ?? 'default'}`, campaign.readTimeoutMs);
         }
       }
-      if (monitoring) await new Promise(resolve => setTimeout(resolve, 15000));
+      if (monitoring) await new Promise(resolve => setTimeout(resolve, campaign.observationIntervalMs));
     }
   })();
   const start = Date.now();
-  const protocol = { arm, cg, startedAt: new Date(start).toISOString(), initialCatalogRows: 180, publications: 48, synchronousShares: 256, triplesPerAsset: 8, publisherWallets: 6, publicationAdmissionConcurrency: 6, shareConcurrency: 4, requestTimeoutMs: 120000, publicationDeadlineMs: 1200000, catalogDrainMs: 1200000, manualRepairs: 0 };
+  const protocol = { arm, cg, startedAt: new Date(start).toISOString(), initialCatalogRows: counts.initial,
+    publications: counts.publications, synchronousShares: counts.shares, triplesPerAsset: campaign.triplesPerAsset,
+    publisherWallets: campaign.publisherWallets, publicationAdmissionConcurrency: campaign.publicationAdmissionConcurrency,
+    shareConcurrency: campaign.shareConcurrency, requestTimeoutMs: campaign.requestTimeoutMs,
+    publicationDeadlineMs: campaign.publicationDeadlineMs, catalogDrainMs: campaign.catalogDrainMs, manualRepairs: 0 };
   save('protocol', protocol);
   const [publications, shares] = await Promise.all([
-    concurrent(names.slice(0, 48), 6, name => request(`/api/knowledge-assets/${name}/vm/publish-async`, { contextGraphId: cg, options: { publishEpochs: 1, publisherNodeIdentityId: '0' } }, `publish:${name}`)),
-    concurrent(catalogNames, 4, name => request(`/api/knowledge-assets/${name}/swm/share`, { contextGraphId: cg }, `share:${name}`)),
+    concurrent(campaign.cohorts.publications, campaign.publicationAdmissionConcurrency, name => request(`/api/knowledge-assets/${name}/vm/publish-async`, { contextGraphId: cg, options: { publishEpochs: 1, publisherNodeIdentityId: '0' } }, `publish:${name}`)),
+    concurrent(catalogNames, campaign.shareConcurrency, name => request(`/api/knowledge-assets/${name}/swm/share`, { contextGraphId: cg }, `share:${name}`)),
   ]);
   save('publication-admissions', publications); save('synchronous-shares', shares);
   const trafficEnd = Date.now(); save('traffic-end', { at: new Date(trafficEnd).toISOString(), elapsedMs: trafficEnd - start });
-  console.log('Traffic complete', publications.filter(x => x.status === 202).length, '/48 publications admitted;', shares.filter(x => x.status === 200).length, '/256 shares HTTP 200');
+  console.log('Traffic complete', publications.filter(x => x.status === 202).length, `/${counts.publications} publications admitted;`, shares.filter(x => x.status === 200).length, `/${counts.shares} shares HTTP 200`);
   let pass = 0;
   do {
     const [jobs, status] = await Promise.all([request('/api/publisher/jobs?limit=1000', undefined, 'observe:jobs'), request('/api/status', undefined, 'observe:status')]);
@@ -85,10 +89,10 @@ if (mode === 'prepare') {
     console.log('observe', pass, catalog?.phase, catalog?.appliedRowCount, catalog?.legacyReadOnlyCount);
     const rows = Array.isArray(jobs.value) ? jobs.value : jobs.value?.jobs ?? [];
     const ids = publications.map(r => r.value?.jobId).filter(Boolean);
-    const complete = ids.length === 48 && ids.every(id => rows.some(j => j.jobId === id && j.status === 'finalized'));
-    if (complete && catalog?.phase === 'complete' && catalog?.appliedRowCount === '436' && catalog?.legacyReadOnlyCount === 0) break;
+    const complete = ids.length === counts.publications && ids.every(id => rows.some(j => j.jobId === id && j.status === 'finalized'));
+    if (complete && catalog?.phase === 'complete' && catalog?.appliedRowCount === String(counts.main) && catalog?.legacyReadOnlyCount === 0) break;
     if (Date.now() >= Math.max(start + protocol.publicationDeadlineMs, trafficEnd + protocol.catalogDrainMs)) break;
-    await new Promise(resolve => setTimeout(resolve, 15000));
+    await new Promise(resolve => setTimeout(resolve, campaign.observationIntervalMs));
   } while (true);
   monitoring = false; await monitor;
   console.log('Observation finished; exact RDF, inventory, identity, receipt and nonce verification still required.');

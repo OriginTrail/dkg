@@ -8430,7 +8430,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     opts?: PublisherAssertionPromoteOptions,
   ): Promise<AssertionPromoteResult> {
-    if (!opts?.recoveryBinding) await assertNoUnfinishedBoundShare(this.promoteOwnershipReader, contextGraphId, name, agentAddress, opts?.subGraphName);
+    if (!opts?.recoveryBinding) await tagPromoteStep('assertNoUnfinishedBoundShare', () => assertNoUnfinishedBoundShare(this.promoteOwnershipReader, contextGraphId, name, agentAddress, opts?.subGraphName));
     const boundEvidence = opts?.recoveryBinding
       ? await assertPromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts) : undefined;
     // #1464 (PR1, diagnostic) — every awaited op below runs BEFORE the

@@ -7,11 +7,11 @@ def rdf_tuple(row):
     return (row['s']['value'], row['p']['value'], obj['type'], obj['value'], obj.get('datatype'), obj.get('xml:lang'))
 
 
-def expected_payload(arm, name):
-    return sorted((f'urn:2963:{arm}:{name}', f'https://schema.org/p{i}', 'literal', f'{name} value {i}', None, None) for i in range(8))
+def expected_payload(arm, name, triples_per_asset):
+    return sorted((f'urn:2963:{arm}:{name}', f'https://schema.org/p{i}', 'literal', f'{name} value {i}', None, None) for i in range(triples_per_asset))
 
 
-def audit_graphs(rows, cg, arm, coordinates, published, on_chain_id=None):
+def audit_graphs(rows, cg, arm, coordinates, published, on_chain_id=None, triples_per_asset=8):
     by_graph = defaultdict(list)
     for row in rows:
         by_graph[row['g']['value']].append(rdf_tuple(row))
@@ -24,7 +24,7 @@ def audit_graphs(rows, cg, arm, coordinates, published, on_chain_id=None):
                   [('wm', '_working_memory'), ('swm', '_shared_memory'), ('vm', '_verifiable_memory')]}
         allowed.update(graphs.values())
         required = 'vm' if name in published else 'swm'
-        expected = expected_payload(arm, name)
+        expected = expected_payload(arm, name, triples_per_asset)
         present = {layer: values for layer, graph in graphs.items() if (values := by_graph.get(graph))}
         assets[name] = {
             'requiredGraph': graphs[required],
@@ -33,7 +33,7 @@ def audit_graphs(rows, cg, arm, coordinates, published, on_chain_id=None):
             'exactContentByGraph': {layer: sorted(values) == expected for layer, values in present.items()},
         }
     materialized = [graph for graph in by_graph if graph.startswith(prefix + 'context/') and '/' not in graph.removeprefix(prefix + 'context/')]
-    expected_union = sorted(row for name in published for row in expected_payload(arm, name))
+    expected_union = sorted(row for name in published for row in expected_payload(arm, name, triples_per_asset))
     materialized_exact = {graph: sorted(by_graph[graph]) == expected_union for graph in materialized}
     unexpected = sorted(graph for graph in by_graph if graph.startswith(tuple(prefix + family + '/' for family in
                         ['_working_memory', '_shared_memory', '_verifiable_memory'])) and graph not in allowed)

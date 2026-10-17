@@ -6,12 +6,14 @@ export async function executePromoteRequest(agent: Pick<DKGAgent, 'assertion'>, 
   markStarted: () => Promise<void>, attempt?: Pick<AssertionPromoteOptions, 'curatorAckTimeoutMs'>,
 ): ReturnType<DKGAgent['assertion']['promote']> {
   await markStarted();
-  return agent.assertion.promote(request.contextGraphId, request.assertionName, {
-    entities: request.entities === undefined || request.entities === 'all' ? request.entities : [...request.entities],
-    recoveryBinding: request.recoveryBinding,
+  const attemptOptions = {
     subGraphName: request.subGraphName,
     ...(request.agentAddress ? { agentAddress: request.agentAddress } : {}),
     ...(request.authorAgentAddress ? { authorAgentAddress: request.authorAgentAddress } : {}),
     ...(attempt?.curatorAckTimeoutMs !== undefined ? { curatorAckTimeoutMs: attempt.curatorAckTimeoutMs } : {}),
-  });
+  };
+  const options: AssertionPromoteOptions = request.recoveryBinding
+    ? { ...attemptOptions, entities: request.entities, recoveryBinding: request.recoveryBinding }
+    : { ...attemptOptions, entities: request.entities === undefined || request.entities === 'all' ? request.entities : [...request.entities] };
+  return agent.assertion.promote(request.contextGraphId, request.assertionName, options);
 }

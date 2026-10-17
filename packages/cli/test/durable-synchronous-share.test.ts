@@ -49,6 +49,32 @@ async function setup() {
 afterEach(() => { daemonState.promoteWorkerAvailable = false; });
 
 describe('durable synchronous share ownership', () => {
+  it.each([{ entities: ['urn:subset'] }, { skipSeal: true }])('rejects contradictory untyped bound execution: %j', async invalid => {
+    const { store, agent, finalized } = await setup();
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    await expect(agent.assertion.promote(CG, NAME, { ...prepared, ...invalid } as any))
+      .rejects.toThrow('Bound recovery requires a sealed, complete Knowledge Asset');
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
+    await store.close();
+  });
+
+  it('normalizes bound execution from its immutable policy without resealing or changing caller options', async () => {
+    const { store, agent, publisher } = await setup();
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    const input = { ...prepared, accessPolicy: 'allowlist', allowedPeers: ['unadmitted-peer'],
+      preSignedAuthorAttestation: { address: 'unadmitted-author' } };
+    const unchanged = JSON.stringify(input);
+    const seal = vi.spyOn(agent, 'prepareAtomicAssertionShare');
+    const promote = vi.spyOn(publisher, 'assertionPromote');
+    await agent.assertion.promote(CG, NAME, input as any);
+    expect(seal).not.toHaveBeenCalled();
+    expect(promote.mock.calls[0][3]).toMatchObject({ recoveryBinding: prepared.recoveryBinding,
+      accessPolicy: prepared.recoveryBinding.intent.accessPolicy, allowedPeers: prepared.recoveryBinding.intent.allowedPeers });
+    expect(JSON.stringify(input)).toBe(unchanged);
+    await store.close();
+  });
+
   it('fences an unbound promotion admitted behind a bound owner and lets its real worker finish', async () => {
     const { store, agent, publisher, finalized } = await setup();
     const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });

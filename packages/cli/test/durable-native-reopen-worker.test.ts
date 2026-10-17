@@ -12,6 +12,48 @@ import { AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, NETWORK_ID, agents, tempDirs,
 import { runPromoteJob, createPromoteWorkerSupervisor } from '../src/daemon/worker/async-promote-worker.js';
 
 describe('native inventory reopen failure retains the original durable worker obligation', () => {
+  it('retains a native corruption failure for inspection instead of unlimited retries', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'bound-native-corrupt-')); tempDirs.push(dataDir);
+    const agent = await startRepairAgentV1({ name: 'native-corruption', dataDir, storePath: join(dataDir, 'store.nq') });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    agent.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+    await agent.whenRfc64CatalogResponsibilitiesIdleV1(); await agent.whenRfc64CatalogSupervisorsIdleV1();
+    await agent.closeRfc64SwmCatalogProjectionSupervisorV1();
+    const seeded = await seedDurableWorkspaceAssetV1(agent, 'native-corruption', 98n);
+    const binding = { version: 1 as const, inventoryRequired: true,
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seeded.seal)),
+      intent: { version: 1 as const, operationId: seeded.shareOperationId, timestampMs: 1,
+        confirmationRequired: false, accessPolicy: 'public' as const, allowedPeers: [] } };
+    const queue = new TripleStoreAsyncPromoteQueue(agent.store, { backoff: () => 0, maxRetries: 1 });
+    const job = await queue.enqueueAndClaim({ contextGraphId: CONTEXT_GRAPH_ID, assertionName: seeded.assertionCoordinate,
+      entities: 'all', agentAddress: AUTHOR, recoveryBinding: binding }, 'inline');
+    const prepare = DatabaseSync.prototype.prepare;
+    let injected = 0;
+    const spy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function(this: DatabaseSync, sql: string) {
+      if (/SELECT/i.test(sql) && /swm_author_inventory/i.test(sql)) {
+        injected++; throw Object.assign(new Error('database disk image is malformed'), { code: 'ERR_SQLITE_ERROR', errcode: 11 });
+      }
+      return prepare.call(this, sql);
+    });
+    try {
+      const result = await runPromoteJob({ job, queue, workerId: 'inline', now: Date.now, heartbeatIntervalMs: 60000, log: () => undefined,
+        runPromote: async (_request, markStarted) => {
+          await markStarted();
+          await commitDurableShareInventory(agent, { contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seeded.assertionCoordinate,
+            lifecycleAgentAddress: AUTHOR, recoveryBinding: binding, ctx: createOperationContext('share') });
+          return { promotedCount: 0 };
+        } });
+      expect(injected).toBeGreaterThan(0);
+      expect(result.outcome).toBe('failed_terminal');
+    } finally { spy.mockRestore(); }
+    expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed', request: { recoveryBinding: binding },
+      attempt: { count: 1, lastError: { classification: 'fatal', retryable: false } } });
+    await queue.recoverOnStartup(); await queue.recoverPostCommitFailures();
+    expect(await queue.claimNext('next')).toBeNull();
+    expect(await queue.clearTerminalJob(job.jobId)).toMatchObject({ outcome: 'rejected' });
+    expect((await queue.getStatus(job.jobId))?.request.recoveryBinding).toEqual(binding);
+  });
+
   it('recovers after a healthy disk reopen without replay or a replacement job', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'bound-native-reopen-')); tempDirs.push(dataDir);
     const storePath = join(dataDir, 'store.nq');

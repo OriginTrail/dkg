@@ -1,5 +1,6 @@
 """Read-only process witness; never signals, starts, or retries the daemon."""
 import pathlib,json,subprocess,sys,time,datetime
+from campaign_manifest import load_campaign
 arm=sys.argv[1]; root=pathlib.Path('.tmp/2963'); d=root/'evidence'/arm/'restart-regression'; d.mkdir(exist_ok=True)
 start=json.loads((root/'evidence'/arm/'startup-process.json').read_text()); parent=start['parentPid']; old=start['daemonPids'][0]
 now=lambda:datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -14,7 +15,8 @@ def processes():
 before={'observedAt':now(),'parentPid':parent,'originalDaemonPid':old,'processes':processes()}
 assert any(x['pid']==old and x['ppid']==parent for x in before['processes'])
 (d/'process-before.json').write_text(json.dumps(before,indent=2));(d/'process-watcher-ready.json').write_text(json.dumps({'at':now()}))
-faultfile=root/f'{arm}-home'/'2963-fault-restart-recovery.json';deadline=time.time()+180
+restart_name=load_campaign(arm)['cohorts']['restart'][0]
+faultfile=root/f'{arm}-home'/f'2963-fault-{restart_name}.json';deadline=time.time()+180
 last=None
 while time.time()<deadline:
  rows=processes()

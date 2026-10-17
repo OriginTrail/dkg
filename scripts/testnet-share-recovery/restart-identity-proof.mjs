@@ -1,3 +1,5 @@
+import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
+import { verifyRestartMetadata } from './restart-metadata-proof.mjs';
 import {verifyIdentityTuples} from './identity-tuples.mjs';
 // Read-only proof around the separately requested process-crash regression.
 import fs from 'node:fs';
@@ -7,10 +9,12 @@ const require=createRequire(new URL('../../packages/cli/package.json',import.met
 const {JsonRpcProvider}=require('ethers');
 const [arm,mode]=process.argv.slice(2),home=process.env.DKG_HOME;
 const root=`.tmp/2963/evidence/${arm}`,dir=`${root}/restart-regression`;
-const cfg=JSON.parse(fs.readFileSync(home+'/config.json')),cg=cfg.contextGraphs[0];
+const cfg=JSON.parse(fs.readFileSync(home+'/config.json')),campaign=loadCampaign(arm),counts=campaignCounts(campaign),cg=campaign.contextGraphId;
+const [restartName]=campaign.cohorts.restart;
+if(cfg.contextGraphs[0]!==cg)throw Error('Runtime graph differs from campaign');
 const query=`SELECT ?payload WHERE { GRAPH <urn:dkg:promote-queue:control-plane> {
  ?job <urn:dkg:promote-queue:contextGraphId> ${JSON.stringify(cg)} ;
- <urn:dkg:promote-queue:assertionName> "restart-recovery" ; <urn:dkg:promote-queue:payload> ?payload
+ <urn:dkg:promote-queue:assertionName> ${JSON.stringify(restartName)} ; <urn:dkg:promote-queue:payload> ?payload
 } } LIMIT 2`;
 const response=await fetch(cfg.store.options.url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/sparql-results+json'},body:new URLSearchParams({query}),signal:AbortSignal.timeout(60000)});
 if(!response.ok)throw Error('Queue evidence read failed');
@@ -26,7 +30,7 @@ if(mode==='before'){
  console.log({jobId:job.jobId,state:job.state,attemptCount:job.attempt.count,leaseExpiresAt:job.lease.expiresAt});
 }else if(mode==='after'){
  const before=JSON.parse(fs.readFileSync(`${dir}/before-raw-job.json`));
- const fault=JSON.parse(fs.readFileSync(home+'/2963-fault-restart-recovery.json'));
+ const fault=JSON.parse(fs.readFileSync(home+`/2963-fault-${restartName}.json`));
  const rows=JSON.parse(fs.readFileSync(`${root}/restart-readback/rdf.json`)).results.bindings;
  const term = value => value.type === 'uri' ? value.value : JSON.stringify(value.value)
    + (value.datatype ? `^^<${value.datatype}>` : value['xml:lang'] ? `@${value['xml:lang']}` : '');
@@ -34,24 +38,14 @@ if(mode==='before'){
  const originalFields=fault.metadataAtFault.quads.filter(q=>identityPredicates.has(q.predicate));
  const identitySubjects=new Set(originalFields.map(q=>q.subject));
  const canonical = values => JSON.stringify(values.sort());
- const originalSealAndIntent = canonical(originalFields.map(q=>JSON.stringify([q.subject,q.predicate,q.object])))
-   === canonical(rows.filter(r=>identitySubjects.has(r.s.value)&&identityPredicates.has(r.p.value))
-     .map(r=>JSON.stringify([r.s.value,r.p.value,term(r.o)])));
+ const {metadataGraph, originalSealAndIntent, lifecycleComplete}=verifyRestartMetadata(fault,rows);
  const graph=fault.intendedMetadataInsert.find(q=>q.predicate==='http://dkg.io/ontology/assertionGraph')?.object;
  if(!graph)throw Error('Missing exact crash graph');
  const publicRows=rows.filter(r=>r.g.value===graph);
- const exactContent=publicRows.length===8 && canonical(fault.contentAtFault.quads.map(q=>JSON.stringify([q.subject,q.predicate,q.object])))
+ const exactContent=publicRows.length===campaign.triplesPerAsset && canonical(fault.contentAtFault.quads.map(q=>JSON.stringify([q.subject,q.predicate,q.object])))
    === canonical(publicRows.map(r=>JSON.stringify([r.s.value,r.p.value,term(r.o)])));
  const dkg='http://dkg.io/ontology/';
- const lifecycle=fault.intendedMetadataInsert.find(q=>q.predicate===dkg+'state')?.subject;
- const lifecycleValues=predicate=>rows.filter(r=>r.s.value===lifecycle&&r.p.value===dkg+predicate).map(r=>r.o.value);
- const lifecycleComplete=canonical(lifecycleValues('state'))===canonical(['promoted'])
-   && canonical(lifecycleValues('memoryLayer'))===canonical(['SWM'])
-   && canonical(lifecycleValues('swmShareComplete'))===canonical(['true'])
-   && canonical(lifecycleValues('swmCurrentAssertion'))===canonical([
-     rows.find(r=>identitySubjects.has(r.s.value)&&r.p.value===dkg+'assertionMerkleRoot')?.o.value,
-   ]);
- const sealValue=predicate=>rows.find(r=>identitySubjects.has(r.s.value)&&r.p.value===dkg+predicate)?.o.value;
+ const sealValue=predicate=>rows.find(r=>r.g.value===metadataGraph&&identitySubjects.has(r.s.value)&&r.p.value===dkg+predicate)?.o.value;
  const scope=createGraphKnowledgeAssetScope(sealValue('kaUal'),sealValue('assertionVersion'));
  const wm=knowledgeAssetLayerGraphUri(cg,MemoryLayer.WorkingMemory,scope);
  const wmCleared=!rows.some(r=>r.g.value===wm||r.g.value.startsWith(wm+'/'));
@@ -64,8 +58,8 @@ if(mode==='before'){
  const crashDigest=computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal);
  const originalBindingSeal=before.request.recoveryBinding.sealDigest===crashDigest;
  const expected=[...JSON.parse(fs.readFileSync(`${root}/seal-proof.json`)),
-   {name:'restart-recovery',seal:canonicalSeal,sealDigest:crashDigest}];
- if(expected.length!==437||expected.some(row=>row.error||row.unchanged===false))throw Error('Incomplete original identity evidence');
+   {name:restartName,seal:canonicalSeal,sealDigest:crashDigest}];
+ if(expected.length!==counts.restart||expected.some(row=>row.error||row.unchanged===false))throw Error('Incomplete original identity evidence');
  const inventory=JSON.parse(fs.readFileSync(`${root}/restart-readback/inventory.json`)).swm;
  const tuples=verifyIdentityTuples(expected,catalogs,inventory);
  const publications=JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-publisher-jobs.json`)).value.jobs;
@@ -79,10 +73,10 @@ if(mode==='before'){
  const sameRuntime=['version','commit','peerId'].every(key=>runtimeBefore[key]===runtimeAfter[key]);
  const originalBuild=JSON.parse(fs.readFileSync(`${root}/startup-status.json`)).value;
  const runtimeBuildTimeUnchanged=originalBuild.buildTime===runtimeAfter.buildTime;
- const result={sameRuntime,runtimeBuildTimeUnchanged,runtimeBuildTime:runtimeAfter.buildTime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
+ const result={metadataGraph,metadataComparison:'authoritative-full-rdf-term-v2',sameRuntime,runtimeBuildTimeUnchanged,runtimeBuildTime:runtimeAfter.buildTime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
  originalBinding:JSON.stringify(job.request)===JSON.stringify(before.request),state:job.state,attempts:job.attempt.count,
- originalBindingSeal,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate==='restart-recovery').length,
- noAdditionalPublicationEffects:publications.length===48&&publications.every(j=>mainPublications.some(old=>old.jobId===j.jobId&&old.finalization.txHash===j.finalization.txHash)),nonces,manualRepairs:0};
+ originalBindingSeal,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate===restartName).length,
+ noAdditionalPublicationEffects:publications.length===counts.publications&&publications.every(j=>mainPublications.some(old=>old.jobId===j.jobId&&old.finalization.txHash===j.finalization.txHash)),nonces,manualRepairs:0};
  fs.writeFileSync(`${dir}/identity-proof.json`,JSON.stringify(result,null,2));console.log(result);
- if(!runtimeBuildTimeUnchanged||!originalBindingSeal||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==437||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
+ if(!runtimeBuildTimeUnchanged||!originalBindingSeal||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==counts.restart||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
 }else throw Error('Expected before or after');

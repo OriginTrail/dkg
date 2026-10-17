@@ -4,8 +4,10 @@ import datetime
 import json
 import pathlib
 import sys
+from campaign_manifest import load_campaign
 
 arm, label = sys.argv[1:3]
+campaign = load_campaign(arm)
 root = pathlib.Path('.tmp/2963/evidence') / arm
 out = pathlib.Path('run-reports/2963-evidence') / arm
 out.mkdir(parents=True, exist_ok=True)
@@ -25,6 +27,7 @@ write('summary.json', {key: value for key, value in verification.items() if key 
     'snapshot': read(f'{label}/manifest.json'),
 })
 write('environment.json', read('environment.json'))
+write('campaign-manifest.json', campaign)
 write('protocol.json', read('protocol.json'))
 write('starting-set-proof.json', read('starting-set-proof.json'))
 write('descriptor-audit.json', [{key: row.get(key) for key in ['name', 'startedAt', 'status', 'error']} for row in read('descriptor-proof.json')])
@@ -71,7 +74,7 @@ for line in (root / 'requests.jsonl').read_text().splitlines():
     if request.get('label', '').startswith('recovery-observe:'):
         probes.append({key: request.get(key) for key in ['label', 'startedAt', 'durationMs', 'status']})
 write('recovery-descriptor-probes.json', probes)
-for name in ['catalog-140', 'catalog-141']:
+for name in [fault['name'] for fault in campaign['faults']]:
     fault_file = pathlib.Path('.tmp/2963') / f'{arm}-home' / f'2963-fault-{name}.json'
     if fault_file.exists():
         fault = json.loads(fault_file.read_text())
@@ -81,10 +84,10 @@ print({'arm': arm, 'requests': len(requests), 'assets': len(seals), 'identityErr
 
 share_jobs = read(f'{label}/-api-knowledge-assets-swm-share-jobs.json')['value']['jobs']
 recovery = []
-for name in ['catalog-140', 'catalog-141']:
+for name in [fault['name'] for fault in campaign['faults']]:
     fault = json.loads((pathlib.Path('.tmp/2963') / f'{arm}-home' / f'2963-fault-{name}.json').read_text())
     job = next((j for j in share_jobs if j['assertionName'] == name), None)
-    success = next((probe for probe in probes if probe['label'] == f'recovery-observe:{name}:0x247B02C301B34E52e9021728F34C3457F81f2dFc' and probe['status'] == 200), None)
+    success = next((probe for probe in probes if probe['label'] == f"recovery-observe:{name}:{campaign['author']}" and probe['status'] == 200), None)
     recovery.append({'name': name, 'faultAt': fault['firedAt'], 'job': job,
                      'durableRecoveryMs': parse_time(job['finishedAt']) - parse_time(fault['firedAt']) if job and job['state'] == 'succeeded' else None,
                      'firstDescriptor200': success, 'manualRepairs': 0})

@@ -1,3 +1,4 @@
+import { loadCampaign } from './campaign-manifest.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -7,7 +8,7 @@ const require = createRequire(new URL('../../packages/cli/package.json', import.
 const Database = require('better-sqlite3');
 const arm = process.argv[2] ?? 'baseline', label = process.argv[3] ?? 'snapshot';
 const home = process.env.DKG_HOME, cfg = JSON.parse(fs.readFileSync(path.join(home, 'config.json')));
-const cg = `0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-${arm}-20261016`;
+const campaign = loadCampaign(arm), cg = campaign.contextGraphId;
 const dir = path.resolve('.tmp/2963/evidence', arm, label); fs.mkdirSync(dir, { recursive: true });
 const save = (name, value) => fs.writeFileSync(path.join(dir, name + '.json'), JSON.stringify(value, null, 2));
 const token = await loadApiClientToken(new DkgHomeFiles(home));

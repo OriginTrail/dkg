@@ -7,7 +7,7 @@ test('successful responses delayed beyond the cutoff cannot pass restart recover
   const deadline = 20 * 60_000;
   let clock = deadline - 1_000, deliver;
   const response = new Promise(resolve => { deliver = resolve; });
-  const poll = observeRestartRecoveryPoll(() => response, deadline, () => clock);
+  const poll = observeRestartRecoveryPoll(() => response, deadline, 437, () => clock);
   clock = deadline + 10_000; deliver(ready);
   const result = await poll;
   assert.equal(result.requestStartedAt, new Date(deadline - 1_000).toISOString());
@@ -16,6 +16,6 @@ test('successful responses delayed beyond the cutoff cannot pass restart recover
   assert.equal(result.succeededBeforeDeadline, false);
 });
 test('complete evidence within the cutoff passes, incomplete evidence does not', async () => {
-  assert.equal((await observeRestartRecoveryPoll(async () => ready, 100, () => 100)).succeededBeforeDeadline, true);
-  assert.equal((await observeRestartRecoveryPoll(async () => ({ ...ready, descriptor: { status: 404 } }), 100, () => 99)).succeededBeforeDeadline, false);
+  assert.equal((await observeRestartRecoveryPoll(async () => ready, 100, 437, () => 100)).succeededBeforeDeadline, true);
+  assert.equal((await observeRestartRecoveryPoll(async () => ({ ...ready, descriptor: { status: 404 } }), 100, 437, () => 99)).succeededBeforeDeadline, false);
 });

@@ -1,7 +1,8 @@
+import { normalizeAssertionPromoteExecution } from './assertion-promote-input.js';
 import { SwmCatalogAuthorityNotReady } from '../swm-inventory-write.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
-import { createPromoteRetryableFailure, validatePromoteRecoveryBinding } from '@origintrail-official/dkg-publisher';
+import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 import { prepareAssertionPromote } from './assertion-promote-precommit.js';
@@ -84,25 +85,18 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
 
 export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, name: string,
   agentAddress: string, opts: AssertionPromoteOptions | undefined, warn: (message: string) => void) {
-  const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
-  if (opts?.recoveryBinding) {
-    if (opts.skipSeal || (opts.entities && opts.entities !== 'all')) {
-      throw new Error('Bound recovery requires a sealed, complete Knowledge Asset');
-    }
-    const binding = validatePromoteRecoveryBinding(opts.recoveryBinding);
-    opts = { ...opts, recoveryBinding: binding, awaitCuratorAck: binding.intent.confirmationRequired || opts.awaitCuratorAck === true,
-      accessPolicy: binding.intent.accessPolicy, allowedPeers: [...binding.intent.allowedPeers] };
-  }
-  if (!opts?.recoveryBinding) await prepareShareSeal(agent, contextGraphId, name, promoteAgentAddress, opts);
+  const execution = normalizeAssertionPromoteExecution(opts), options = execution.options;
+  const promoteAgentAddress = options.agentAddress ?? agentAddress;
+  if (execution.kind === 'ordinary') await prepareShareSeal(agent, contextGraphId, name, promoteAgentAddress, options);
   const sealed = true;
   const { gossipSigner, publisherOptions } = await prepareAssertionPromote(agent, {
     contextGraphId,
     publisherPeerId: agent.node.peerId.toString(),
-    options: opts,
+    options,
   });
-  if (opts?.recoveryBinding) {
-    assertCompatibleAcknowledgement(opts.recoveryBinding.intent.confirmationRequired,
-      opts.awaitCuratorAck === true && publisherOptions.confirmBeforeCommit !== undefined);
+  if (execution.kind === 'bound') {
+    assertCompatibleAcknowledgement(execution.binding.intent.confirmationRequired,
+      options.awaitCuratorAck === true && publisherOptions.confirmBeforeCommit !== undefined);
   }
   const {
     promotedCount,
@@ -113,7 +107,7 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
     contextGraphId,
     name,
     promoteAgentAddress,
-    { ...publisherOptions, recoveryBinding: opts?.recoveryBinding },
+    { ...publisherOptions, recoveryBinding: execution.kind === 'bound' ? execution.binding : undefined },
   );
   if (gossipPayload) {
     try {
@@ -127,7 +121,7 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
         createOperationContext('share'),
         gossipSigner,
         shareOperationId,
-        { subGraphName: opts?.subGraphName ?? null },
+        { subGraphName: options.subGraphName ?? null },
       );
     } catch (err: any) {
       warn(`Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
@@ -142,19 +136,19 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
   if (promotedAllRoots) {
     await agent.afterDurableSwmPromotionV1({
       contextGraphId,
-      subGraphName: opts?.subGraphName,
+      subGraphName: options.subGraphName,
       assertionCoordinate: name,
       lifecycleAgentAddress: promoteAgentAddress,
       ctx: createOperationContext('share'),
-      ...(opts?.recoveryBinding ? { recoveryBinding: opts.recoveryBinding }
+      ...(execution.kind === 'bound' ? { recoveryBinding: execution.binding }
         : { shareOperationId: shareOperationId ?? null }),
     });
   }
-  if (!promotedAllRoots && opts?.recoveryBinding?.inventoryRequired) {
+  if (!promotedAllRoots && execution.kind === 'bound' && execution.binding.inventoryRequired) {
     await commitConfirmedDurableShareInventory(agent, {
-      contextGraphId, subGraphName: opts.subGraphName, assertionCoordinate: name,
+      contextGraphId, subGraphName: options.subGraphName, assertionCoordinate: name,
       lifecycleAgentAddress: promoteAgentAddress,
-      recoveryBinding: opts.recoveryBinding, ctx: createOperationContext('share'),
+      recoveryBinding: execution.binding, ctx: createOperationContext('share'),
     });
   }
   // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE

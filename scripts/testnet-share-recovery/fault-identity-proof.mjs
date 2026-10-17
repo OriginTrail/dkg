@@ -1,3 +1,4 @@
+import { loadCampaign } from './campaign-manifest.mjs';
 import { sameCapturedTerm, capturedTermIdentity, bindingTermIdentity } from './rdf-term-identity.mjs';
 import fs from 'node:fs';
 import { ASSERTION_SEAL_PREDICATES } from '../../packages/core/dist/index.js';
@@ -7,7 +8,7 @@ const final = JSON.parse(fs.readFileSync(`${dir}/${label}/rdf.json`)).results.bi
 const predicates = new Set([...Object.values(ASSERTION_SEAL_PREDICATES),
   'http://dkg.io/ontology/shareOperationId', 'http://dkg.io/ontology/promoteOperationIntent']);
 const proofs = [];
-for (const name of ['catalog-140', 'catalog-141']) {
+for (const name of loadCampaign(arm).faults.map(f => f.name)) {
   const fault = JSON.parse(fs.readFileSync(`.tmp/2963/${arm}-home/2963-fault-${name}.json`));
   const before = fault.metadataAtFault.quads.filter(q => predicates.has(q.predicate));
   const metadataGraph = fault.intendedMetadataInsert[0]?.graph;

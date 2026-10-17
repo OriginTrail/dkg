@@ -1,3 +1,4 @@
+import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
 import { verifyIdentityTuples } from './identity-tuples.mjs';
 import fs from 'node:fs';
 import { parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1 } from '../../packages/core/dist/index.js';
@@ -16,7 +17,7 @@ for (const [subject, quads] of groups) {
   const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(parsed);
   seals.set(subject.split('/').at(-1), {seal,digest:computeCanonicalGraphScopedAuthorSealDigestV1(seal)});
 }
-const names = ['readiness-smoke', ...Array.from({length:179},(_,i)=>`initial-${String(i+1).padStart(3,'0')}`)];
+const campaign = loadCampaign(arm), counts = campaignCounts(campaign), names = campaign.cohorts.initial;
 const inventory = JSON.parse(fs.readFileSync(`${dir}/pre-workload/inventory.json`)).swm;
 const catalog = JSON.parse(fs.readFileSync(`${dir}/pre-workload/catalogs.json`)).flatMap(c=>c.rows);
 const expected = names.map(name => {
@@ -25,6 +26,6 @@ const expected = names.map(name => {
   return {name, seal: entry.seal, sealDigest: entry.digest};
 });
 const identities = verifyIdentityTuples(expected, catalog, inventory);
-if (seals.size !== 436 || !identities.exactInventoryIdentity || !identities.exactCatalogIdentity) throw Error('Starting identity set mismatch');
-fs.writeFileSync(`${dir}/starting-set-proof.json`,JSON.stringify({inventoryExactIdentities:180,catalogExactIdentities:180,allSealDigestsAndVersionsMatch:true,preparedSeals:436},null,2));
+if (seals.size !== counts.main || !identities.exactInventoryIdentity || !identities.exactCatalogIdentity) throw Error('Starting identity set mismatch');
+fs.writeFileSync(`${dir}/starting-set-proof.json`,JSON.stringify({inventoryExactIdentities:counts.initial,catalogExactIdentities:counts.initial,allSealDigestsAndVersionsMatch:true,preparedSeals:counts.main},null,2));
 console.log('Exact starting identity, seal and version sets verified.');

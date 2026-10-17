@@ -170,7 +170,7 @@
     "pattern": "scripts/testnet-share-recovery/test_*.py",
     "lane": "python",
     "reason": "Exact full-graph evidence verifier regressions for the testnet share-recovery campaign",
-    "cadence": "manual",
+    "cadence": "required",
     "command": "python3 -m unittest discover -s scripts/testnet-share-recovery -p test_payload_evidence.py",
     "layer": "evidence validation",
     "prerequisites": [
@@ -181,11 +181,13 @@
     "pattern": "scripts/testnet-share-recovery/*.test.mjs",
     "lane": "scripts",
     "reason": "Exact identity evidence verifier regressions for the testnet share-recovery campaign",
-    "cadence": "manual",
+    "cadence": "required",
     "command": "node --test scripts/testnet-share-recovery/*.test.mjs",
     "layer": "evidence validation",
     "prerequisites": [
-      "Node.js 22"
+      "Node.js 22",
+      "Built core and RDF utility packages",
+      "Python 3.9 or newer"
     ]
   }
 ]

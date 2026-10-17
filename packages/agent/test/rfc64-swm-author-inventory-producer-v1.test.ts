@@ -670,3 +670,18 @@ it.each(['busy', 'filesystem-io', 'integrity'] as const)('retains only storage p
   expect(result.snapshot.rows).toHaveLength(1);
   expect(result.snapshot.head.payload.version).toBe('0');
 });
+
+
+it.each([1, 11, 17, 19, 26, 267])('does not mark native SQLite integrity/schema error %s as replayable persistence', async errcode => {
+  const inventory = await createInventory(), prepare = DatabaseSync.prototype.prepare;
+  const native = Object.assign(new Error('native inventory failure'), { code: 'ERR_SQLITE_ERROR', errcode });
+  const spy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function(this: DatabaseSync, sql: string) {
+    if (/SELECT/i.test(sql) && /swm_author_inventory/i.test(sql)) throw native;
+    return prepare.call(this, sql);
+  });
+  try {
+    const error = await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A)).catch(e => e);
+    expect(error).toMatchObject({ code: 'candidate-database-error', cause: native });
+    expect(isInventoryPersistenceFailure(error)).toBe(false);
+  } finally { spy.mockRestore(); inventory.close(); }
+});
