@@ -33,6 +33,7 @@ const PROMOTE_STEP_TAG_PREFIX = '[promote:';
  * stage is added or renamed in the publisher.
  */
 export const PROMOTE_STEP_NAMES = [
+  'assertNoUnfinishedBoundShare',
   'ensureSubGraphRegistered',
   'assertGraphScopedLifecycleWritable',
   'knowledgeAssetPrivateQuads',
