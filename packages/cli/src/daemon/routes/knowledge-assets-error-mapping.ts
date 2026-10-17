@@ -4,6 +4,7 @@ import type { RequestContext } from './context.js';
 import {
   AMBIGUOUS_ASSERTION_AUTHOR_CODE,
   ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
+  ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
 } from '@origintrail-official/dkg-core';
 import { PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE } from '@origintrail-official/dkg-publisher';
@@ -45,11 +46,14 @@ export function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: a
  *    can retry without a second round-trip.
  *  - `PUBLISH_AUTHOR_NOT_CUSTODIAL`: the selected author's KA needs an UPDATE,
  *    which the node cannot re-sign without that author's custodial key.
+ *  - `ASYNC_PUBLISH_FOREIGN_AUTHOR` (GH#3294): the queued lane cannot take
+ *    another node's KA; the synchronous `vm/publish` can.
  */
 export function respondAuthorSelectionError(res: RequestContext["res"], e: any): boolean {
   if (
     e?.code !== ASSERTION_AUTHOR_NOT_RESIDENT_CODE
     && e?.code !== PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
+    && e?.code !== ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE
   ) {
     return false;
   }

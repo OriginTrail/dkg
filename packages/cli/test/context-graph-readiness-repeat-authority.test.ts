@@ -11,8 +11,7 @@
 // thread.
 import './helpers/catchup-runner-worker-test-harness.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
 import type { CatchupRunner } from '../src/catchup-runner.js';
 import {
   CG,
@@ -20,13 +19,11 @@ import {
   emptyAnswer,
   memberEdge,
   revokedAnswer,
-  waitUntil,
 } from './_helpers/readiness-member-edge.js';
-import { requestAuthentication } from './_helpers/request-authentication.js';
+import { emptyCatchupTracker, nextFinishedJob, startReadinessRoutes } from './_helpers/readiness-subscribe-routes.js';
 
 await import('../src/catchup-runner-worker-impl.js');
 const { createCatchupRunner } = await import('../src/catchup-runner.js');
-const { handleContextGraphRoutes } = await import('../src/daemon/routes/context-graph.js');
 const { daemonState } = await import('../src/daemon/state.js');
 const {
   CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS,
@@ -45,8 +42,6 @@ const REGISTERED_PUBLIC = Object.freeze({
 const RESTORED_UNSYNCED = Object.freeze({
   subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: true, syncMode: 'always-on',
 });
-
-type Tracker = { jobs: Map<string, any>; latestByContextGraph: Map<string, string> };
 
 interface ArmedTimer {
   readonly callback: () => void;
@@ -131,55 +126,7 @@ describe('a registered public graph whose catch-up ran before its authority was 
     };
   }
 
-  async function startRoutes(member: ReturnType<typeof memberEdge>) {
-    const catchupTracker: Tracker = { jobs: new Map(), latestByContextGraph: new Map() };
-    const server = createServer(async (req, res) => {
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      await handleContextGraphRoutes({
-        req,
-        res,
-        agent: member.agent,
-        dashDb: member.store,
-        catchupTracker,
-        url,
-        path: url.pathname,
-        authentication: requestAuthentication({ kind: 'nodeOperator' }),
-      } as any);
-      if (!res.writableEnded) {
-        res.statusCode = 404;
-        res.end();
-      }
-    });
-    servers.push(server);
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const { port } = server.address() as AddressInfo;
-    return {
-      catchupTracker,
-      /** Subscribe; resolves with the job once it has finished. */
-      async subscribe(includeSharedMemory = true): Promise<any> {
-        const response = await fetch(`http://127.0.0.1:${port}/api/context-graph/subscribe`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contextGraphId: CG, includeSharedMemory }),
-        });
-        expect(response.status).toBe(200);
-        const { jobId } = ((await response.json()) as { catchup: { jobId: string } }).catchup;
-        return waitUntil(() => {
-          const job = catchupTracker.jobs.get(jobId);
-          return job?.finishedAt ? job : undefined;
-        }, `job ${jobId}`);
-      },
-    };
-  }
-
-  /** The graph's latest job, other than `previousJobId`, once it has finished. */
-  function nextFinishedJob(catchupTracker: Tracker, previousJobId?: string): Promise<any> {
-    return waitUntil(() => {
-      const latest = catchupTracker.latestByContextGraph.get(CG);
-      const job = latest === undefined || latest === previousJobId ? undefined : catchupTracker.jobs.get(latest);
-      return job?.finishedAt ? job : undefined;
-    }, 'the next job to finish');
-  }
+  const startRoutes = (member: ReturnType<typeof memberEdge>) => startReadinessRoutes(member, servers);
 
   it('repeats the subscribe job once the authority is in place, and the member is proven synced', async () => {
     const { member, asked, acceptAuthority } = registeredMember();
@@ -204,7 +151,7 @@ describe('a registered public graph whose catch-up ran before its authority was 
 
     expect([...asked].sort()).toEqual([...PEERS].sort());
     expect(repeat.selectedLaneFoundInactive).toBeUndefined();
-    expect(repeat.result.cleanPlaneCompletions.sharedMemory).toMatchObject({ emptyPeers: PEERS.length });
+    expect(repeat.result?.cleanPlaneCompletions?.sharedMemory).toMatchObject({ emptyPeers: PEERS.length });
     expect(member.subscription()).toMatchObject({ subscribed: true, synced: true, sharedMemorySynced: true });
     expect(member.readiness()).toMatchObject({ sharedMemoryVerified: true });
     expect(armed()).toEqual([]);
@@ -217,7 +164,7 @@ describe('a registered public graph whose catch-up ran before its authority was 
   it('repeats the job that catches up a restored subscription, while the authority is still on its way', async () => {
     const { member, asked, acceptAuthority } = registeredMember();
     member.restore({ ...RESTORED_UNSYNCED });
-    const catchupTracker: Tracker = { jobs: new Map(), latestByContextGraph: new Map() };
+    const catchupTracker = emptyCatchupTracker();
     stops.push(startActivationCatchups({
       agent: member.agent, store: member.store, catchupTracker, log: () => {},
     }));

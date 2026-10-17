@@ -25,9 +25,7 @@ import {
   type ContextGraphReadinessPatch,
 } from './context-graph-readiness-policy.js';
 export { parseProjectSyncedReadinessPayload, type ProjectSyncedReadinessPayload } from './context-graph-project-synced-payload.js';
-
 export { catchupPlaneCompletedWithoutFailure } from './catchup-proof.js';
-
 export { CONTEXT_GRAPH_READINESS_VERSION, type ContextGraphReadinessPatch } from './context-graph-readiness-policy.js';
 
 /**
@@ -338,6 +336,7 @@ function cleanCompletionHasResponse(
   return (completion?.verifiedDataPeers ?? 0) > 0 ||
     (completion?.verifiedPrivateOnlyPeers ?? 0) > 0 ||
     (completion?.selectedScopeCompletePeers ?? 0) > 0 ||
+    (completion?.heldContentPeers ?? 0) > 0 ||
     (completion?.emptyPeers ?? 0) > 0 ||
     (completion?.authorityEmptyPeers ?? 0) > 0;
 }
@@ -734,13 +733,14 @@ export async function persistCatalogReadiness(input: {
   );
 }
 
-/** Persist ordinary sync completion only with data and confirmed metadata. */
+/** Persist ordinary sync completion only with proof (data, or nothing missing) and confirmed metadata. */
 export async function persistProjectSyncedReadiness(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
   contextGraphId: string;
   dataSynced: number;
   sharedMemorySynced: number;
+  sharedMemoryHeldAssets?: number;
   verifiedPrivateOnlyResponses?: number;
 }): Promise<boolean> {
   const contextGraphId = input.contextGraphId.trim();
@@ -749,8 +749,8 @@ export async function persistProjectSyncedReadiness(input: {
     Number.isFinite(verifiedPrivateOnlyResponses)
     && verifiedPrivateOnlyResponses > 0
   );
-  const sharedMemoryCompleted = Number.isFinite(input.sharedMemorySynced) &&
-    input.sharedMemorySynced > 0;
+  const sharedMemoryCompleted = [input.sharedMemorySynced, input.sharedMemoryHeldAssets ?? 0]
+    .some((count) => Number.isFinite(count) && count > 0);
   if (
     !contextGraphId ||
     (!durableCompleted && !sharedMemoryCompleted) ||

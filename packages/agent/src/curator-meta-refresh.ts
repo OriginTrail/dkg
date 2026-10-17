@@ -440,9 +440,12 @@ async function fetchAuthoritativeMetaSnapshot(
   );
   // A standalone control-plane refresh is real outbound sync work. Admit it
   // through the node-wide scheduler so partitioned mode can route it to fast
-  // capacity and the global cap still bounds it. Nested refreshes deliberately
-  // stay inside their enclosing admission: acquiring twice could deadlock a
-  // saturated partition, and the enclosing trigger remains the honest source.
+  // capacity and the global cap still bounds it; in shared mode it may also
+  // take the one reserved control-plane slot beside that cap (#3280), so a
+  // transfer that holds every general slot does not refuse it. Nested
+  // refreshes deliberately stay inside their enclosing admission: acquiring
+  // twice could deadlock a saturated partition, and the enclosing trigger
+  // remains the honest source.
   const result = await (hasSyncAdmissionSource()
     ? runFetch()
     : agent.runContextGraphSyncWithBackpressure(

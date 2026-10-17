@@ -53,6 +53,13 @@ export const PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE = 'PUBLISH_AUTHOR_NOT_CUSTODIAL';
 export const AMBIGUOUS_ASSERTION_AUTHOR_CODE = 'AMBIGUOUS_ASSERTION_AUTHOR';
 export const ASSERTION_AUTHOR_NOT_RESIDENT_CODE = 'ASSERTION_AUTHOR_NOT_RESIDENT';
 export const PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE = 'PUBLISH_AUTHOR_SELECTION_CONFLICT';
+/**
+ * GH#3294 — the queued VM publish lane cannot take another node's KA. A node
+ * that holds an author's seal and share (a curator keeps both from the share)
+ * does not hold the author's lifecycle record, which the queued lane checks;
+ * the synchronous `vm/publish` publishes from the seal and the share.
+ */
+export const ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE = 'ASYNC_PUBLISH_FOREIGN_AUTHOR';
 
 /** The literal prefix every InsufficientPublisherFundsError message starts with.
  *  The chain formatter builds the message from this; consumers that only have a
