@@ -120,6 +120,26 @@ describe('enabled vector memory search tenant isolation', () => {
     },
   );
 
+  it('ranks each layer by merged vector similarity before allocating fair slots', async () => {
+    const store = createStore();
+    for (const [entityUri, memoryLayer, score] of [
+      ['a', 'wm', 0.9], ['b', 'wm', 0.8], ['b', 'swm', 0.99], ['c', 'swm', 0.95],
+    ] as const) {
+      await store.insert({ embedding: [score, Math.sqrt(1 - score * score)], entityUri, memoryLayer,
+        sourceUri: `source:${entityUri}:${memoryLayer}`, contextGraphId: CG, model: 'test', agentAddress: A });
+    }
+    const { ctx, res } = request(store, { kind: 'agent', agentAddress: A });
+    (ctx.req as any).__dkgPrebufferedBody = Buffer.from(JSON.stringify({
+      contextGraphId: CG, query: 'secret', memoryLayers: ['wm', 'swm'], limit: 2,
+    }));
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).results).toMatchObject([
+      { entityUri: 'b', similarity: 0.99, sourceFile: 'source:b:swm', memoryLayer: 'wm' },
+      { entityUri: 'c', similarity: 0.95, sourceFile: 'source:c:swm', memoryLayer: 'swm' },
+    ]);
+  });
+
   it('keeps SWM vector metadata when the fair slot comes from a WM text duplicate', async () => {
     const store = createStore();
     await insert(store, 'reverse-overlap', 'swm', B);

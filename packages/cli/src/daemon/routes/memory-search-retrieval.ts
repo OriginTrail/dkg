@@ -19,44 +19,39 @@ const layersByView = {
   'working-memory': 'wm', 'shared-working-memory': 'swm', 'verifiable-memory': 'vm',
 } as const;
 
-/** Keep at most `limit` candidates per layer regardless of local-agent count. */
+/** Keep at most `limit` unique candidates per layer and one metadata record per URI. */
 class LayerCandidates {
-  private readonly rows: Map<Layer, Map<string, SearchResult>>;
+  private readonly rows: Map<Layer, Set<string>>;
+  private readonly entities = new Map<string, Omit<SearchResult, 'memoryLayer'>>();
   constructor(private readonly layers: readonly Layer[], private readonly limit: number) {
-    this.rows = new Map(layers.map(layer => [layer, new Map()]));
+    this.rows = new Map(layers.map(layer => [layer, new Set()]));
   }
-  add(row: SearchResult): void {
-    // Producers supply descending vector matches first, then equally ranked
-    // text matches in stable plan order. Retain the first unique rows per layer.
-    // Evidence from a duplicate still enriches retained copies even if this
-    // layer has no remaining slot. Metadata never changes its allocated layer.
-    const retained = [...this.rows.values()].flatMap(rows => {
-      const existing = rows.get(row.entityUri);
-      return existing ? [existing] : [];
+  add({ memoryLayer, ...row }: SearchResult): void {
+    // Producers supply descending vector matches, then stable text plans. Keep
+    // bounded layer membership; an overflow duplicate may still enrich an entity
+    // retained by another layer, without retaining otherwise discarded metadata.
+    const rows = this.rows.get(memoryLayer)!;
+    if (rows.size < this.limit) rows.add(row.entityUri);
+    const previous = this.entities.get(row.entityUri);
+    if (!rows.has(row.entityUri) && !previous) return;
+    const preferred = previous && (previous.similarity ?? -1) >= (row.similarity ?? -1) ? previous : row;
+    this.entities.set(row.entityUri, { ...preferred,
+      sources: [...new Set([...(previous?.sources ?? []), ...row.sources])],
     });
-    const copies = [...retained, row];
-    const preferred = copies.reduce((best, candidate) =>
-      (candidate.similarity ?? -1) > (best.similarity ?? -1) ? candidate : best);
-    const metadata = {
-      label: preferred.label, similarity: preferred.similarity,
-      sourceFile: preferred.sourceFile, snippet: preferred.snippet,
-      sources: [...new Set(copies.flatMap(candidate => candidate.sources))],
-    };
-    for (const copy of copies) Object.assign(copy, metadata);
-    const rows = this.rows.get(row.memoryLayer)!;
-    if (!rows.has(row.entityUri) && rows.size < this.limit) rows.set(row.entityUri, row);
   }
   finish(): SearchResult[] {
-    const queues = this.layers.map(layer => [...this.rows.get(layer)!.values()]);
+    // Cross-layer evidence can raise a retained entity's score. Sort by the
+    // final canonical score; stable ties preserve producer/plan insertion order.
+    const queues = this.layers.map(layer => [...this.rows.get(layer)!].sort((a, b) =>
+      (this.entities.get(b)!.similarity ?? -1) - (this.entities.get(a)!.similarity ?? -1)));
     const selected = new Map<string, SearchResult>();
     // Round-robin gives every nonempty requested layer a slot when the budget permits.
-    // Vector relevance orders results WITHIN each layer; it cannot erase another layer.
     while (selected.size < this.limit && queues.some(queue => queue.length > 0)) {
-      for (const queue of queues) {
-        let row = queue.shift();
-        while (row && selected.has(row.entityUri)) row = queue.shift();
-        if (!row) continue;
-        selected.set(row.entityUri, row);
+      for (const [index, queue] of queues.entries()) {
+        let uri = queue.shift();
+        while (uri !== undefined && selected.has(uri)) uri = queue.shift();
+        if (uri === undefined) continue;
+        selected.set(uri, { ...this.entities.get(uri)!, memoryLayer: this.layers[index] });
         if (selected.size === this.limit) break;
       }
     }
