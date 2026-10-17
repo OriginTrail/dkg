@@ -55,7 +55,12 @@ test('a slow read of one kind does not hold back the retries of the other (the e
   await handle.done;
   const { progress } = handle.pairs[0];
   // The view was asked again 2 s later, while the cross-partition read was still out; both hold within the bound.
+  // Node runs timers on its loop clock, and the observation stamps reads with Date.now(): the 2.5 s timer can end
+  // a millisecond or so early on that clock (seen in CI as 2499), so the slow read's lower bound allows for that.
+  const TIMER_SLACK_MS = 50;
   assert.ok(progress.view !== null && progress.view < 2500, JSON.stringify(progress));
-  assert.ok(progress.partitions !== null && progress.partitions >= 2500 && progress.partitions < 4000, JSON.stringify(progress));
+  assert.ok(progress.partitions !== null && progress.partitions >= 2500 - TIMER_SLACK_MS && progress.partitions < 4000,
+    JSON.stringify(progress));
+  assert.ok(progress.partitions > progress.view, JSON.stringify(progress));
   assert.deepEqual(asked, ['view', 'partitions', 'view']);
 });

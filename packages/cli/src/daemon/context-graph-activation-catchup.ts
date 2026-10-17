@@ -28,6 +28,7 @@ import {
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
 import { startContextGraphCatchupJob } from './context-graph-catchup-job.js';
+import { registerContextGraphCatchupProgress } from './context-graph-catchup-progress.js';
 import {
   CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS,
   followContextGraphCatchupJob,
@@ -71,7 +72,15 @@ export function startActivationCatchups(input: ActivationCatchupInput): () => vo
   const retries = new Map<string, { asked: number; timer?: unknown }>();
   let draining = false;
   let stopped = false;
+  /** The graph `drain` is catching up now, its job included. */
+  let current: string | undefined;
   const live = (): boolean => !stopped;
+  // A write that finds a graph unsynced waits while this has it queued, in
+  // hand, or due for another admission read (`context-graph-write-readiness.ts`).
+  const unregisterProgress = registerContextGraphCatchupProgress({
+    catchingUp: (contextGraphId) => current === contextGraphId
+      || queue.includes(contextGraphId) || retries.get(contextGraphId)?.timer !== undefined,
+  });
 
   const enqueue = (contextGraphId: string): void => {
     if (stopped || queue.includes(contextGraphId)) return;
@@ -116,12 +125,14 @@ export function startActivationCatchups(input: ActivationCatchupInput): () => vo
     try {
       for (let next = queue.shift(); next !== undefined && !stopped; next = queue.shift()) {
         const contextGraphId = next;
+        current = contextGraphId;
         const outcome = await catchUp(input, contextGraphId, live).catch((err: unknown): CatchUpOutcome => {
           input.log(
             `[catchup] could not catch up "${contextGraphId}" after its activation: ${err instanceof Error ? err.message : String(err)}`,
           );
           return 'skipped';
         });
+        current = undefined;
         if (stopped) break;
         if (outcome === 'unavailable') askAgainLater(contextGraphId);
         else forgetRetry(contextGraphId);
@@ -144,6 +155,7 @@ export function startActivationCatchups(input: ActivationCatchupInput): () => vo
   }
   return () => {
     stopped = true;
+    unregisterProgress();
     queue.length = 0;
     for (const retry of retries.values()) {
       if (retry.timer !== undefined) readinessRepeatTimers.clear(retry.timer);
