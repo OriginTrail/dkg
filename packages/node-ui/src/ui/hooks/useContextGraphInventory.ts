@@ -3,7 +3,7 @@ import { api } from '../api-wrapper.js';
 import { currentApiToken } from '../lib/apiToken.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { subscribeNodeEvents } from './useNodeEvents.js';
-import { refreshCurrentAgent } from './useCurrentAgent.js';
+import { ensureCurrentAgent, refreshCurrentAgent, retainCurrentAgent } from './useCurrentAgent.js';
 
 export type InventoryResult = { ok: true; contextGraphs: ContextGraph[] } | { ok: false; error: string };
 type InventoryRequest = {
@@ -17,6 +17,7 @@ let authKey: string | undefined | null = null;
 let active: InventoryRequest | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let unsubscribeEvents: (() => void) | null = null;
+let releaseIdentity: (() => void) | null = null;
 const credentialsChanged: InventoryResult = { ok: false, error: 'Credentials changed while refreshing context graphs' };
 
 /** Every caller follows the current same-credential workflow, including forced supersession. */
@@ -38,7 +39,7 @@ export function refreshContextGraphInventory(force = false): Promise<InventoryRe
   // they need not wait for its superseded network request to finish.
   previous?.settle(promise);
   useProjectsStore.setState({ loading: true });
-  const identity = refreshCurrentAgent();
+  const identity = force ? refreshCurrentAgent() : ensureCurrentAgent();
   const list = Promise.resolve().then(() => api.fetchContextGraphs({ fresh: force }))
     .then(({ contextGraphs }): InventoryResult => {
       if (!Array.isArray(contextGraphs)) throw new Error('Invalid context graph list response');
@@ -66,9 +67,10 @@ export function refreshContextGraphInventory(force = false): Promise<InventoryRe
 
 /** Keep the same workflow alive through modal unmount until its mutation completes. */
 export async function refreshContextGraphInventoryAfterMutation(): Promise<InventoryResult> {
+  const release = retainCurrentAgent();
   mutationOwners++;
   try { return await refreshContextGraphInventory(true); }
-  finally { mutationOwners--; releaseIdleInventory(); }
+  finally { mutationOwners--; releaseIdleInventory(); release(); }
 }
 
 function releaseIdleInventory() {
@@ -84,6 +86,7 @@ function refreshWhenVisible() {
 
 function retainInventory() {
   consumers++;
+  if (consumers === 1) releaseIdentity = retainCurrentAgent();
   if (consumers === 1 || authKey !== currentApiToken()) refreshWhenVisible();
   if (consumers === 1) {
     unsubscribeEvents = subscribeNodeEvents(event => {
@@ -103,6 +106,8 @@ function retainInventory() {
     document.removeEventListener('visibilitychange', refreshWhenVisible);
     // Last consumer unmounted: release the request and settle the shared flag.
     releaseIdleInventory();
+    releaseIdentity?.();
+    releaseIdentity = null;
   };
 }
 

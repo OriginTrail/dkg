@@ -128,3 +128,30 @@ it('two inventory consumers share one membership-event subscription until the la
   await act(async () => { Events.current.emit('project_synced'); });
   expect(listCalls()).toBe(2);
 });
+
+
+it('staggered Header and inventory mounts share one identity cadence until the final owner unmounts', async () => {
+  const { useCurrentAgent } = await import('../src/ui/hooks/useCurrentAgent.js');
+  const { useContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+  const identityCalls = () => http.mock.calls.filter(([url]) => url === '/api/agent/identity').length;
+  function Header() { useCurrentAgent(); return null; }
+  function Inventory() { useContextGraphInventory(); return null; }
+  const render = async (header: boolean, inventory: boolean) => act(async () => root!.render(
+    React.createElement(React.Fragment, {}, header && React.createElement(Header, { key: 'header' }),
+      inventory && React.createElement(Inventory, { key: 'inventory' }))));
+  await render(true, false);
+  expect(identityCalls()).toBe(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+  await render(true, true);
+  expect(identityCalls()).toBe(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+  expect(identityCalls()).toBe(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+  expect(identityCalls()).toBe(2); // inventory's :20 poll does not refresh identity
+  await render(false, true);
+  await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+  expect(identityCalls()).toBe(3); // the non-React-listener owner keeps the :00 cadence
+  await render(false, false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(identityCalls()).toBe(3);
+});
