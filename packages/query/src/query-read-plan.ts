@@ -9,7 +9,7 @@ export type QueryReadPlan = { kind: 'unscoped' } | {
   kind: 'view'; options: QueryOptions & { contextGraphId: string; view: NonNullable<QueryOptions['view']> };
 } | {
   kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
-  execution: ScopedRoute['execution']; draftAccess: DraftAccessPolicy;
+  execution: ScopedRoute['execution']; draftAccess: DraftAccessPolicy; includeSharedMemoryMeta: boolean;
   fallbackPolicy: 'compatibility' | 'preserve-scope'; excludedGraphPrefixes: readonly string[];
   discovery: {
     catalog: { kind: 'none' | 'shared' }
@@ -40,7 +40,7 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     .filter(target => target.family !== 'data' || !graphs.isSwmOnlyRoute)
     .map(({ root, family }) => ({ root, prefix: `${root}/${family === 'data' ? '_verifiable_memory/' : ''}` })) : [];
   return { kind: 'scoped', contextGraphId: options.contextGraphId, graphs, execution,
-    draftAccess: resolveDraftAccessPolicy(options),
+    draftAccess: resolveDraftAccessPolicy(options), includeSharedMemoryMeta: options.includeSharedMemoryMeta === true,
     fallbackPolicy: options.requireCompleteGraphScope ? 'preserve-scope' : 'compatibility',
     excludedGraphPrefixes: [...(options.excludeGraphPrefixes ?? [])],
     discovery: { contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,

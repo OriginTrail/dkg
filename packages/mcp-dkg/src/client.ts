@@ -568,6 +568,8 @@ export class DkgClient {
     subGraphName?: string;
     graphSuffix?: '_shared_memory' | '_shared_memory_meta';
     includeSharedMemory?: boolean;
+    includeContextGraphPartitions?: boolean;
+    includeSharedMemoryMeta?: boolean;
     view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
     verifiedGraph?: string;
     assertionName?: string;
@@ -598,6 +600,8 @@ export class DkgClient {
     if (args.subGraphName) body.subGraphName = args.subGraphName;
     if (args.graphSuffix) body.graphSuffix = args.graphSuffix;
     if (args.includeSharedMemory != null) body.includeSharedMemory = args.includeSharedMemory;
+    if (args.includeContextGraphPartitions != null) body.includeContextGraphPartitions = args.includeContextGraphPartitions;
+    if (args.includeSharedMemoryMeta != null) body.includeSharedMemoryMeta = args.includeSharedMemoryMeta;
     if (args.view != null) body.view = args.view;
     if (args.verifiedGraph != null) body.verifiedGraph = args.verifiedGraph;
     if (args.assertionName) body.assertionName = args.assertionName;

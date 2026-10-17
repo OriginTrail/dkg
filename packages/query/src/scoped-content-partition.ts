@@ -24,6 +24,14 @@ export function classifyScopedContentGraph(
   if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return undefined;
 
   const tail = graph.slice(root.length + 1);
+  // Classify metadata separately so a cached inventory cannot broaden ordinary
+  // content scans. Child-CG exclusion above takes precedence over subgraphs.
+  if (tail === '_shared_memory_meta') return admit('shared-metadata');
+  const segments = tail.split('/');
+  if (segments.length === 2 && segments[1] === '_shared_memory_meta'
+    && registeredSubGraphs.has(segments[0]) && validateSubGraphName(segments[0]).valid) {
+    return admit('shared-metadata', segments[0]);
+  }
   if (
     !tail ||
     isMetadataGraphTail(tail) ||

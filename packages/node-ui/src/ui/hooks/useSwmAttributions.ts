@@ -179,21 +179,8 @@ function subGraphFromMetaGraphUri(gUri: string, cgId: string): string | undefine
   return seg;
 }
 
-export function buildAttributionsQuery(cgId: string): string {
-  // Trailing slash makes this an EXACT CG prefix: every partition graph is
-  // `did:dkg:context-graph:<cg>/[<sg>/]_shared_memory_meta`, so "<cgUri>/"
-  // matches all of this CG's partitions while excluding sibling CGs whose id
-  // merely shares the prefix (cg-1 must not capture cg-10 / cg-1-foo).
-  //
-  // Known limitation: CG ids may themselves contain "/" (validateContextGraphId
-  // allows it; convention is <addr>/<name>), so a hypothetical path-extending
-  // child CG `<cg>/<x>` would still prefix-match. That URI is structurally
-  // identical to a real sub-graph `<sg>=<x>`, so only the sub-graph registry
-  // can disambiguate — i.e. the deferred server-side sub-graph SWM routing
-  // (rc.17 A2/A4). The raw-prefix read is the deliberate client bridge and is
-  // preferred over a client-built registry allow-list, which would re-drop
-  // partitions whose `_meta` registration is missing — a condition seen live.
-  const cgPrefix = `did:dkg:context-graph:${cgId}/`;
+export function buildAttributionsQuery(): string {
+  // The server resolves registered partitions and excludes child Context Graphs.
   return `PREFIX dkg: <http://dkg.io/ontology/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
@@ -203,10 +190,7 @@ SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
         dkg:publishedAt ?publishedAt ;
         prov:wasAttributedTo ?agent .
   }
-  FILTER(
-    STRSTARTS(STR(?g), "${cgPrefix}") &&
-    CONTAINS(STR(?g), "_shared_memory_meta")
-  )
+  FILTER(STRENDS(STR(?g), "/_shared_memory_meta"))
 } ORDER BY DESC(?publishedAt) LIMIT 5000`;
 }
 
@@ -320,14 +304,10 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
             headers: { 'Content-Type': 'application/json', ...authHeaders() },
             signal: controller.signal,
             body: JSON.stringify({
-              // Do NOT send contextGraphId here. The query already scopes to the
-              // CG via its exact STRSTARTS(?g, "<cgUri>/") filter and must read EVERY
-              // sub-graph's <cg>/<sg>/_shared_memory_meta partition. Passing
-              // contextGraphId makes the engine constrain GRAPH ?g to CG-direct
-              // graphs only, dropping per-sub-graph attribution so the legend
-              // under-counts agents (B2). See dkg-query-engine.ts graph-variable
-              // allow-list.
-              sparql: buildAttributionsQuery(contextGraphId),
+              contextGraphId,
+              includeContextGraphPartitions: true,
+              includeSharedMemoryMeta: true,
+              sparql: buildAttributionsQuery(),
             }),
           });
           if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);

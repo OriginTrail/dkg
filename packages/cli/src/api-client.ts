@@ -1722,6 +1722,7 @@ export class ApiClient {
       graphSuffix?: string;
       includeSharedMemory?: boolean;
       includeContextGraphPartitions?: boolean;
+      includeSharedMemoryMeta?: boolean;
       view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
       agentAddress?: string;
       assertionName?: string;
@@ -1744,6 +1745,7 @@ export class ApiClient {
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
       includeContextGraphPartitions: opts?.includeContextGraphPartitions,
+      includeSharedMemoryMeta: opts?.includeSharedMemoryMeta,
       view: opts?.view,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,
