@@ -2,7 +2,7 @@ import type { SendReliableOpts, RequestOwnedSendOpts } from './messenger-send-op
 export type { SendReliableOpts, RequestOwnedSendOpts } from './messenger-send-options.js';
 import { randomUUID } from 'node:crypto';
 import {
-  encodeReliableEnvelope,
+  encodeReliableEnvelope, resolveWithinAbort,
   decodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
@@ -294,7 +294,6 @@ export interface MessengerRegisterOptions {
    */
   maxWireBytes?: number;
 }
-
 
 /**
  * The Universal Messenger substrate.
@@ -826,7 +825,7 @@ export class Messenger {
       }
       if (failurePolicy === 'request-owned') {
         if (requestOptions?.recoverPeerAfterFailure === false) this.firstAttemptAt.delete(sloK);
-        else await this.handleRequestOwnedRecoverableFailure(peerId, errMsg, sloK);
+        else await this.handleRequestOwnedRecoverableFailure(peerId, errMsg, sloK, requestOptions?.signal);
         throw err;
       }
       return this.handleDurableRecoverableFailure({
@@ -1068,11 +1067,12 @@ export class Messenger {
   private async handleRequestOwnedRecoverableFailure(
     peerId: string,
     errMsg: string,
-    sloK: string,
+    sloK: string, signal?: AbortSignal,
   ): Promise<void> {
     this.firstAttemptAt.delete(sloK);
     if (!shouldTriggerDhtWalk(errMsg)) return;
-    await this.resolvePeerOnce(peerId, 'after a request-owned address failure');
+    await resolveWithinAbort(() => this.resolvePeerOnce(peerId, 'after a request-owned address failure'), signal);
+    signal?.throwIfAborted();
   }
 
   /** Durable failures enqueue first, then optionally schedule threshold recovery. */

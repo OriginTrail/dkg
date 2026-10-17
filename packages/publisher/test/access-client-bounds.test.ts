@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { encodeAccessResponse, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { ACCESS_ERROR_CODES, accessError, isAccessError } from '../src/access-errors.js';
-import { AccessClient, type AccessSendSurface } from '../src/access-client.js';
+import { AccessClient, RequestOwnedAccessClient, type RequestOwnedAccessSendSurface } from '../src/access-client.js';
 
 const UAL = 'did:dkg:evm:31337/0x1111111111111111111111111111111111111111/0';
 const result = (response: Uint8Array) => ({ delivered: true as const, response, attempts: 1, messageId: 'owned' });
 
-async function client(send: NonNullable<AccessSendSurface['sendRequestOwned']>) {
-  return new AccessClient({ sendReliable: send, sendRequestOwned: send }, await generateEd25519Keypair(), 'local-peer');
+async function client(send: RequestOwnedAccessSendSurface['sendRequestOwned']) {
+  return new RequestOwnedAccessClient({ sendRequestOwned: send }, await generateEd25519Keypair(), 'local-peer');
 }
 
 describe('caller-owned private access bounds', () => {
@@ -30,38 +30,37 @@ describe('caller-owned private access bounds', () => {
     expect(sends).toBe(0);
   });
 
-  it('rejects bounded calls on legacy-only adapters before any send', async () => {
+  it('requires owned transport explicitly, before any send', async () => {
     let sends = 0;
-    const access = new AccessClient({ sendReliable: async () => { sends++; return result(new Uint8Array()); } },
-      await generateEd25519Keypair(), 'local-peer');
-    await expect(access.requestAccess('publisher-peer', UAL, undefined, { maxResponseBytes: 100 }))
-      .rejects.toMatchObject({ code: 'ACCESS_REQUEST_OWNED_REQUIRED' });
+    const keypair = await generateEd25519Keypair();
+    const legacy = { sendReliable: async () => { sends++; return result(new Uint8Array()); } };
+    expect(() => new RequestOwnedAccessClient(legacy as unknown as RequestOwnedAccessSendSurface, keypair, 'local-peer'))
+      .toThrow('sendRequestOwned');
     expect(sends).toBe(0);
   });
-  it('ignores unrelated enumerable properties when all supported controls are undefined', async () => {
+  it('uses owned transport even without response controls, while legacy calls preserve queued denials', async () => {
     let sends = 0;
-    const denied = encodeAccessResponse({ granted: false, nquads: new Uint8Array(), privateMerkleRoot: new Uint8Array(), rejectionReason: 'denied' });
-    const access = new AccessClient({ sendReliable: async () => { sends++; return result(denied); } },
+    const failure = { delivered: false as const, queued: false, attempts: 1, messageId: 'id', error: 'busy' };
+    const owned = await client(async () => { sends++; return failure; });
+    await expect(owned.requestAccess('publisher-peer', UAL)).rejects.toMatchObject({ code: 'ACCESS_UNAVAILABLE' });
+    const legacy = new AccessClient({ sendReliable: async () => ({ ...failure, queued: true }) },
       await generateEd25519Keypair(), 'local-peer');
-    const options = { signal: undefined, timeoutMs: undefined, maxResponseBytes: undefined,
-      maxQuads: undefined, traceId: 'read-1' };
-    await expect(access.requestAccess('publisher-peer', UAL, undefined, options)).resolves.toMatchObject({ granted: false });
+    await expect(legacy.requestAccess('publisher-peer', UAL)).resolves.toMatchObject({ granted: false, rejectionReason: 'transport: busy' });
     expect(sends).toBe(1);
   });
 
   it('captures the owned send capability once and preserves its receiver across signing', async () => {
     let reads = 0;
     const denied = encodeAccessResponse({ granted: false, nquads: new Uint8Array(), privateMerkleRoot: new Uint8Array(), rejectionReason: 'denied' });
-    const surface: AccessSendSurface = {
-      sendReliable: async () => { throw new Error('legacy path must not run'); },
+    const surface: RequestOwnedAccessSendSurface = {
       get sendRequestOwned() {
         reads++;
-        return reads === 1 ? async function (this: AccessSendSurface) {
+        return reads === 1 ? async function (this: RequestOwnedAccessSendSurface) {
           expect(this).toBe(surface); return result(denied);
-        } : undefined;
+        } : (() => { throw new Error('must capture owned method once'); });
       },
     };
-    const access = new AccessClient(surface, await generateEd25519Keypair(), 'local-peer');
+    const access = new RequestOwnedAccessClient(surface, await generateEd25519Keypair(), 'local-peer');
     await expect(access.requestAccess('publisher-peer', UAL, undefined, { maxQuads: 1 }))
       .resolves.toMatchObject({ granted: false });
     expect(reads).toBe(1);

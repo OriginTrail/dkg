@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { AccessClient } from '@origintrail-official/dkg-publisher';
+import { RequestOwnedAccessClient } from '@origintrail-official/dkg-publisher';
 import { ProtocolRouter, generateEd25519Keypair, InMemoryMessageIdempotencyStore, InMemoryProtocolOutboxStore, type DKGNode } from '@origintrail-official/dkg-core';
 import { Messenger } from '../../agent/src/p2p/messenger.js';
 import { Readable } from 'node:stream';
@@ -119,7 +119,7 @@ describe('operator-owned private access HTTP route', () => {
     } } as unknown as DKGNode);
     const messenger = new Messenger({ router, idempotencyStore: new InMemoryMessageIdempotencyStore(),
       outboxStore: new InMemoryProtocolOutboxStore() });
-    const access = new AccessClient(messenger, await generateEd25519Keypair(), 'local-peer');
+    const access = new RequestOwnedAccessClient(messenger, await generateEd25519Keypair(), 'local-peer');
     f.requestPrivateAccess.mockImplementation(async () => access.requestAccess(PEER, UAL, undefined,
       { maxResponseBytes: 4 }) as unknown as Promise<Record<string, unknown>>);
     await handlePrivateAccessRoutes(f.ctx);

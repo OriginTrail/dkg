@@ -29,3 +29,13 @@ if (isAccessError(unknownFailure)) {
 // @ts-expect-error Consumers must map every shared failure, including deadlines.
 const incompleteStatuses: Record<AccessErrorCode, number> = { ACCESS_UNAVAILABLE: 503 };
 void incompleteStatuses;
+
+import { AccessClient, RequestOwnedAccessClient } from '@origintrail-official/dkg-publisher';
+import type { Ed25519Keypair } from '@origintrail-official/dkg-core';
+declare const keypair: Ed25519Keypair;
+declare const legacyTransport: ConstructorParameters<typeof AccessClient>[0];
+// @ts-expect-error Request-owned clients require an owned transport explicitly.
+new RequestOwnedAccessClient(legacyTransport, keypair, 'peer');
+declare const legacyClient: AccessClient;
+// @ts-expect-error Response controls cannot silently switch legacy delivery ownership.
+legacyClient.requestAccess('publisher', 'ual', undefined, { maxQuads: 1 });

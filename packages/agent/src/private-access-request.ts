@@ -4,7 +4,7 @@ import {
   resolveWithinAbort,
   startRequestAbortLifecycle,
 } from '@origintrail-official/dkg-core';
-import { AccessClient, accessError } from '@origintrail-official/dkg-publisher';
+import { RequestOwnedAccessClient, accessError } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from './dkg-agent.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -49,7 +49,7 @@ export async function requestOwnedPrivateAccess(
   const lifecycle = startRequestAbortLifecycle(TIMEOUT_MS, [options.signal, owner.node.stopSignal]);
   running.add(owner);
   try {
-    const client = new AccessClient(owner.messenger, owner.wallet.keypair, owner.peerId);
+    const client = new RequestOwnedAccessClient(owner.messenger, owner.wallet.keypair, owner.peerId);
     const result = await resolveWithinAbort(() => client.requestAccess(publisherPeerId, kaUal, undefined, {
       signal: lifecycle.signal, timeoutMs: TIMEOUT_MS,
       maxResponseBytes: MAX_RESPONSE_BYTES, maxQuads: MAX_QUADS,
