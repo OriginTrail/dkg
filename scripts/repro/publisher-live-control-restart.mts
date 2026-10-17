@@ -16,10 +16,10 @@ import { addPublisherWallet } from '../../packages/cli/src/publisher-wallets.js'
 const directory = await mkdtemp(join(tmpdir(), 'dkg-live-publisher-campaign-'));
 const token = randomUUID();
 const children: OwnedProcess[] = [];
-async function start() {
+async function start(startPaused = false) {
   const child = spawn(process.execPath, ['--experimental-sqlite', '--import', 'tsx',
-    fileURLToPath(new URL('./publisher-live-control-worker.mts', import.meta.url)), directory, token],
-  { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    fileURLToPath(new URL('./publisher-live-control-worker.mts', import.meta.url)), directory, token, ...(startPaused ? ['startup-pause'] : [])],
+  { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: { ...process.env, DKG_PUBLISHER_START_PAUSED: startPaused ? '1' : '0' } });
   const owner = ownProcess(child, { label: 'Publisher control campaign worker' });
   children.push(owner);
   let sequence = 0;
@@ -70,8 +70,20 @@ try {
   assert.ok(resumed.wallets.every((wallet: any) => !wallet.paused && wallet.generation === 2));
   const execution = await second.wait(m => m.type === 'executing');
   assert.ok(resumed.wallets.some((wallet: any) => wallet.walletId === execution.walletId));
+  await second.owner.stop();
+  // Real daemon construction reads the environment override before starting its wallet loops.
+  const maintenance = await start(true);
+  const overridden = await maintenance.request('control');
+  assert.equal(overridden.desiredState, 'paused'); assert.equal(overridden.generation, 3);
+  assert.equal(overridden.acknowledgedGeneration, 3); assert.equal(overridden.effectiveState, 'paused');
+  const startupAccepted = maintenance.ready.startupAccepted;
+  assert.equal(startupAccepted.job.status, 'accepted');
+  assert.deepEqual(await maintenance.command('status', startupAccepted.jobId), startupAccepted.job);
+  assert.equal((await maintenance.request('resume')).generation, 4);
+  await maintenance.wait(m => m.type === 'executing');
   console.log(JSON.stringify({ status: 'PASS', killedPid: first.ready.pid, restartedPid: second.ready.pid,
     wallets: 2, pausedGeneration: 1, resumedGeneration: 2, acceptedEvidencePreserved: true,
+    startupOverride: { environment: true, pausedGeneration: 3, resumedGeneration: 4, acceptedEvidencePreserved: true },
     resumedExecution: true, backend: 'Oxigraph', chain: 'NoChainAdapter' }));
 } finally {
   for (const owner of children) await owner.stop();

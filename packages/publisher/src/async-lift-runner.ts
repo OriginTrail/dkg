@@ -25,12 +25,6 @@ export interface AsyncLiftRunnerConfig {
   readonly hasIncludedRecoveryResolver?: boolean;
 }
 
-export interface PublisherClaimControlSnapshot {
-  readonly paused: boolean;
-  readonly generation: number;
-  readonly wallets: readonly Readonly<{ walletId: string; paused: boolean; generation: number }>[];
-}
-
 export class AsyncLiftRunner {
   private readonly pollIntervalMs: number;
   private readonly errorBackoffMs: number;
@@ -39,10 +33,7 @@ export class AsyncLiftRunner {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError?: (error: unknown) => void | Promise<void>;
   private claimsHeld = false;
-  private controlGeneration = -1;
-  private controlPaused = false;
   private controlClosed = false;
-  private controlTail: Promise<unknown> = Promise.resolve();
   private started = false;
   private stopped = false;
   private running?: Promise<void>;
@@ -85,18 +76,15 @@ export class AsyncLiftRunner {
     this.onError = config.onError;
   }
 
-  /** Every wallet reads the same claim fence; settlement already in flight continues while its next claim is fenced. */
-  claimControlStatus(): PublisherClaimControlSnapshot {
-    return Object.freeze({ paused: this.controlPaused, generation: this.controlGeneration,
-      wallets: Object.freeze(this.config.walletIds.map(walletId => Object.freeze({ walletId,
-        paused: this.claimsHeld, generation: this.controlGeneration }))) });
+  /** Gate state only; durable generations and transition ordering belong to the runtime owner. */
+  claimGateStatus(): Readonly<{ held: boolean; walletIds: readonly string[] }> {
+    return Object.freeze({ held: this.claimsHeld, walletIds: Object.freeze([...this.config.walletIds]) });
   }
 
-  /** Fail-closed startup/fault fence; does not acknowledge a new durable generation. */
+  /** Synchronously fence wallet loops, then drain claims already inside the publisher claim domain. */
   async holdClaims(): Promise<void> {
     this.claimsHeld = true;
     await this.config.publisher.pause();
-    this.controlPaused = true;
   }
 
   /** Terminal synchronous gate fence, installed before an owner drains pending controls. */
@@ -105,30 +93,16 @@ export class AsyncLiftRunner {
     await this.holdClaims();
   }
 
-  applyClaimControl(paused: boolean, generation: number): Promise<PublisherClaimControlSnapshot> {
-    const applying = this.controlTail.then(async () => {
-      if (this.stopped || this.controlClosed) throw new Error('Publisher runner claim control is closed');
-      if (!Number.isSafeInteger(generation) || generation < 0 || generation < this.controlGeneration
-        || (generation === this.controlGeneration && paused !== this.controlPaused)) {
-        throw new Error('Invalid publisher claim-control generation');
-      }
-      if (generation === this.controlGeneration) return this.claimControlStatus();
-      // Close the shared loop fence first; pause() then drains claims already inside the claim domain.
-      this.claimsHeld = true;
-      if (paused) await this.config.publisher.pause();
-      else await this.config.publisher.resume();
-      if (this.stopped || this.controlClosed) {
-        await this.holdClaims();
-        throw new Error('Publisher runner claim control is closed');
-      }
-      this.claimsHeld = paused;
-      this.controlPaused = paused;
-      this.controlGeneration = generation;
-      if (!paused) for (const walletId of this.config.walletIds) this.wakeWallet(walletId);
-      return this.claimControlStatus();
-    });
-    this.controlTail = applying.catch(() => {});
-    return applying;
+  /** The owner calls this only after its desired running state is durable. */
+  async releaseClaims(): Promise<void> {
+    if (this.stopped || this.controlClosed) throw new Error('Publisher runner claim control is closed');
+    await this.config.publisher.resume();
+    if (this.stopped || this.controlClosed) {
+      await this.holdClaims();
+      throw new Error('Publisher runner claim control is closed');
+    }
+    this.claimsHeld = false;
+    for (const walletId of this.config.walletIds) this.wakeWallet(walletId);
   }
 
   async start(): Promise<void> {

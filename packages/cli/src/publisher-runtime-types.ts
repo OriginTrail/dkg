@@ -5,8 +5,8 @@ import type { PublisherLiveControl } from './publisher-live-control.js';
 export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
   readonly publisher: AsyncLiftPublisher;
-  /** Controls only this runtime’s active wallet loops; absent while unavailable. */
-  readonly control?: PublisherLiveControl;
+  /** Controls only this runtime’s active wallet loops. */
+  readonly control: PublisherLiveControl;
   readonly walletIds: string[];
   readonly wallets: readonly PublisherRuntimeWallet[];
   readonly stop: () => Promise<void>;

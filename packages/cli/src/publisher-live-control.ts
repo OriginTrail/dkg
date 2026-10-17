@@ -14,7 +14,7 @@ export interface PublisherDesiredState {
 export interface PublisherLiveStatus extends PublisherDesiredState {
   readonly effectiveState: Desired | 'unavailable';
   readonly acknowledgedGeneration: number;
-  readonly wallets: ReturnType<AsyncLiftRunner['claimControlStatus']>['wallets'];
+  readonly wallets: readonly Readonly<{ walletId: string; paused: boolean; generation: number }>[];
   readonly fault: 'persistence_or_control_failed' | null;
 }
 export interface PublisherLiveControl {
@@ -77,15 +77,16 @@ export async function createPublisherLiveControl(
     existing = false;
   }
   if (!existing) await saveState(dataDir, state);
-  await runner.applyClaimControl(state.desiredState === 'paused', state.generation);
+  if (state.desiredState === 'running') await runner.releaseClaims();
   let fault: PublisherLiveStatus['fault'] = null;
   let closed = false;
   let tail: Promise<unknown> = Promise.resolve();
   const status = (): PublisherLiveStatus => {
-    const effective = runner.claimControlStatus();
-    return Object.freeze({ ...state, effectiveState: fault || closed ? 'unavailable' : effective.paused ? 'paused' : 'running',
+    const effective = runner.claimGateStatus();
+    return Object.freeze({ ...state, effectiveState: fault || closed ? 'unavailable' : effective.held ? 'paused' : 'running',
       acknowledgedGeneration: state.generation,
-      wallets: effective.wallets, fault });
+      wallets: Object.freeze(effective.walletIds.map(walletId => Object.freeze({ walletId,
+        paused: effective.held, generation: state.generation }))), fault });
   };
   const change = (desiredState: Desired): Promise<PublisherLiveStatus> => {
     const changing = tail.then(async () => {
@@ -95,10 +96,10 @@ export async function createPublisherLiveControl(
         generation: nextGeneration(state.generation), updatedAt: new Date().toISOString() };
       try {
         // Pause first so persistence latency cannot admit additional claims; resume opens last.
-        if (desiredState === 'paused') await runner.applyClaimControl(true, next.generation);
+        if (desiredState === 'paused') await runner.holdClaims();
         await saveState(dataDir, next);
         if (closed) throw new Error('Publisher live control closed during persistence');
-        if (desiredState === 'running') await runner.applyClaimControl(false, next.generation);
+        if (desiredState === 'running') await runner.releaseClaims();
         state = next;
         return status();
       } catch (error) {

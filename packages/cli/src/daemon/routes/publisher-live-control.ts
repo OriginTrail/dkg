@@ -20,11 +20,12 @@ export async function handlePublisherLiveControlRoute(ctx: RequestContext): Prom
       return true;
     }
   }
-  const control = ctx.publisherState.runtime?.control;
-  if (!control) {
+  const runtime = ctx.publisherState.runtime;
+  if (!runtime) {
     jsonResponse(res, 503, { error: 'Publisher live runtime is unavailable.', code: 'PUBLISHER_RUNTIME_UNAVAILABLE' });
     return true;
   }
+  const control = runtime.control;
   try {
     const status = action === 'status' ? control.status() : await control[action]();
     jsonResponse(res, status.effectiveState === 'unavailable' ? 503 : 200, status);
