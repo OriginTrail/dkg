@@ -25,6 +25,7 @@
 import { getMetrics } from '@origintrail-official/dkg-core';
 import type { CatchupJob, CatchupJobState } from './types.js';
 import { isTerminalCatchupJobState } from '../catchup-status.js';
+import { registerContextGraphCatchupProgress } from './context-graph-catchup-progress.js';
 
 /**
  * Grace period the shutdown drain gives in-flight walks to settle normally.
@@ -237,3 +238,18 @@ export function resetCatchupJobLedger(): void {
 export function catchupLedgerSize(): number {
   return ledger.size;
 }
+
+/**
+ * Whether a walk job for the graph is queued or running, under the id it was
+ * asked for or the cleartext id it continued under. A write that finds the
+ * graph not proven synced yet waits for it (`context-graph-write-readiness.ts`).
+ */
+export function catchupJobInFlightFor(contextGraphId: string): boolean {
+  for (const { job } of ledger.values()) {
+    if (isTerminalCatchupJobState(job.status)) continue;
+    if (job.contextGraphId === contextGraphId || job.resolvedContextGraphId === contextGraphId) return true;
+  }
+  return false;
+}
+
+registerContextGraphCatchupProgress({ catchingUp: catchupJobInFlightFor });
