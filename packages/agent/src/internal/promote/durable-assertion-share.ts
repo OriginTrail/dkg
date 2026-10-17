@@ -16,7 +16,7 @@ function assertCompatibleAcknowledgement(required: boolean, requested?: boolean)
 }
 
 async function prepareShareSeal(agent: DKGAgent, contextGraphId: string, name: string,
-  promoteAgentAddress: string, opts?: AssertionPromoteOptions): Promise<void> {
+  promoteAgentAddress: string, opts?: AssertionPromoteOptions, preserveOwner = false): Promise<void> {
   if (opts?.skipSeal) {
     throw Object.assign(
       new Error(
@@ -34,11 +34,12 @@ async function prepareShareSeal(agent: DKGAgent, contextGraphId: string, name: s
     );
   }
   try {
-    await agent.prepareAtomicAssertionShare(contextGraphId, name, promoteAgentAddress, {
-      subGraphName: opts?.subGraphName,
-      authorAgentAddress: opts?.authorAgentAddress,
-      preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-    });
+    await agent.publisher.prepareAssertionShareSeal(contextGraphId, name, promoteAgentAddress, opts?.subGraphName,
+      () => agent.prepareAtomicAssertionShare(contextGraphId, name, promoteAgentAddress, {
+        subGraphName: opts?.subGraphName,
+        authorAgentAddress: opts?.authorAgentAddress,
+        preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+      }), preserveOwner);
   } catch (err: any) {
     const msg = err?.message ?? String(err);
     const isCapabilityGap =
@@ -64,7 +65,7 @@ async function prepareShareSeal(agent: DKGAgent, contextGraphId: string, name: s
 export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraphId: string, name: string,
   agentAddress: string, opts?: AssertionPromoteOptions) {
   const storageLane = opts?.agentAddress ?? agentAddress;
-  await prepareShareSeal(agent, contextGraphId, name, storageLane, opts);
+  await prepareShareSeal(agent, contextGraphId, name, storageLane, opts, true);
   const { publisherOptions } = await prepareAssertionPromote(agent, {
     contextGraphId, publisherPeerId: agent.node.peerId.toString(), options: opts,
   });

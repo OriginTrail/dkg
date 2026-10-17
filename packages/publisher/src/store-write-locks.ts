@@ -27,3 +27,19 @@ export function writeLocksForStore(
   return locks;
 }
 
+export function assertionLifecycleWriteLockKey(
+  contextGraphId: string,
+  name: string,
+  agentAddress: string,
+  subGraphName?: string,
+): string {
+  const normalizedAgentAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
+    ? agentAddress.toLowerCase()
+    : agentAddress;
+  return `assertion-lifecycle:${JSON.stringify([
+    contextGraphId,
+    subGraphName ?? '',
+    normalizedAgentAddress,
+    name,
+  ])}`;
+}

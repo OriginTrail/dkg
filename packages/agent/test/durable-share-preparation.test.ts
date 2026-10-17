@@ -68,6 +68,11 @@ describe('agent durable share preparation and replay', () => {
     const job = await agent.assertion.admitDurableShare({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...prepared }, 'inline');
     expect(job.request.recoveryBinding).toEqual(prepared.recoveryBinding);
     expect((await agent.promoteQueue.getStatus(job.jobId)).state).toBe('running');
+    const finalize = vi.spyOn(agent, 'prepareAtomicAssertionShare');
+    expect((await agent.assertion.prepareDurableShare(CG, NAME)).recoveryBinding.sealDigest).toBe(prepared.recoveryBinding.sealDigest);
+    await expect(agent.assertion.promote(CG, NAME)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: job.jobId });
+    expect(finalize).not.toHaveBeenCalled();
+    expect(await agent.promoteQueue.list({})).toHaveLength(1);
     await expect(agent.assertion.discard(CG, NAME)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
   });
 

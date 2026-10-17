@@ -13,6 +13,7 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/durable-synchronous-share.test.ts',
+          'test/durable-share-preparation-race.test.ts',
           'test/durable-inventory-worker.test.ts',
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',

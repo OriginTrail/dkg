@@ -1,7 +1,7 @@
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
-import { writeLocksForStore } from './store-write-locks.js';
-import { assertNoUnfinishedBoundShare } from './bound-share-mutation-guard.js';
+import { assertionLifecycleWriteLockKey, writeLocksForStore } from './store-write-locks.js';
+import { assertNoUnfinishedBoundShare, unfinishedBoundShareError } from './bound-share-mutation-guard.js';
 import type { BoundPromoteRequest } from './async-promote-queue-types.js';
 import { readAssertionPromoteEvidence, parsePromoteLifecycleLiteral } from './assertion-promote-evidence.js';
 import { verifyCompletedLegacyPromote } from './completed-legacy-promote.js';
@@ -1747,23 +1747,6 @@ export class DKGPublisher implements Publisher {
     return withKeyedLocks(this.writeLocks, keys, fn);
   }
 
-  private assertionLifecycleWriteLockKey(
-    contextGraphId: string,
-    name: string,
-    agentAddress: string,
-    subGraphName?: string,
-  ): string {
-    const normalizedAgentAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
-      ? agentAddress.toLowerCase()
-      : agentAddress;
-    return `assertion-lifecycle:${JSON.stringify([
-      contextGraphId,
-      subGraphName ?? '',
-      normalizedAgentAddress,
-      name,
-    ])}`;
-  }
-
   private withAssertionLifecycleWriteLock<T>(
     contextGraphId: string,
     name: string,
@@ -1772,7 +1755,7 @@ export class DKGPublisher implements Publisher {
     fn: () => Promise<T>,
   ): Promise<T> {
     return this.withWriteLocks([
-      this.assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, subGraphName),
+      assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, subGraphName),
     ], fn);
   }
 
@@ -8367,6 +8350,19 @@ export class DKGPublisher implements Publisher {
       kaUal: scope.ual,
       assertionVersion: scope.assertionVersion,
     };
+  }
+
+  /** Finalization can recreate canonical WM; exclude it from an unfinished owner's cleanup. */
+  async prepareAssertionShareSeal(contextGraphId: string, name: string, agentAddress: string,
+    subGraphName: string | undefined, prepare: () => Promise<void>, preserveOwner = false): Promise<void> {
+    return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, subGraphName, async () => {
+      const owner = await this.promoteOwnershipReader({ contextGraphId, assertionName: name, agentAddress, subGraphName });
+      if (owner) {
+        if (preserveOwner) return; // Read/validate its binding next; never re-finalize its payload.
+        throw unfinishedBoundShareError(owner.jobId);
+      }
+      return prepare();
+    });
   }
 
   /** Validate and persist ownership within the same fence used by seal-changing mutations. */
