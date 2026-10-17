@@ -17,13 +17,17 @@
  *    responder keys a metadata session by requester and graph, so a second
  *    fresh session would supersede the first one's remaining pages. The wait
  *    for that turn comes after the admission: a fetch waiting for its turn holds
- *    no lock that another admitted fetch needs.
+ *    no lock that another admitted fetch needs. A caller that stops waiting
+ *    (its signal aborts) is answered at once and gives its admission back; its
+ *    fetch never starts, and the fetches queued behind it still wait for the
+ *    one ahead of it.
  *
  * What the result is used for (validation, checkpoints afterwards) stays with
  * the caller.
  */
 
 import { contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
+import { throwIfOperationAborted, untilOperationAborted } from '../../bounded-operation.js';
 import { hasSyncAdmissionSource } from '../attempt-telemetry.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
@@ -63,28 +67,38 @@ const freshMetaFetchTurns = new WeakMap<object, Map<string, Promise<void>>>();
 
 /**
  * `fetch` after every earlier one of `key`. Without an earlier one it starts in
- * the caller's turn of the event loop, as a fetch did before turns existed.
+ * the caller's turn of the event loop, as a fetch did before turns existed:
+ * the curator refresh's single-flight is observed in that turn, and
+ * `withKeyedLocks` always starts its work a microtask later. A caller whose
+ * `signal` aborts is answered at once; a fetch still waiting for its turn
+ * then never starts, and the one after it still waits for the one before it.
  */
-function inTurn<T>(turns: Map<string, Promise<void>>, key: string, fetch: () => Promise<T>): Promise<T> {
+function inTurn<T>(
+  turns: Map<string, Promise<void>>,
+  key: string,
+  signal: AbortSignal | undefined,
+  fetch: () => Promise<T>,
+): Promise<T> {
   const previous = turns.get(key);
   let release!: () => void;
   const turn = new Promise<void>((resolve) => { release = resolve; });
   turns.set(key, turn);
   const run = async (): Promise<T> => {
     try {
+      throwIfOperationAborted(signal);
       return await fetch();
     } finally {
       release();
       if (turns.get(key) === turn) turns.delete(key);
     }
   };
-  return previous === undefined ? run() : previous.then(run);
+  return untilOperationAborted(previous === undefined ? run() : previous.then(run), signal);
 }
 
 /**
  * Fetch `peerId`'s complete durable `_meta` of `contextGraphId` in a fresh
- * session. Throws when the caller's signal aborts, including while the fetch
- * waits for its turn.
+ * session. Throws as soon as the caller's signal aborts, including while the
+ * fetch waits for its turn.
  */
 export function fetchFreshContextGraphMeta(
   agent: FreshMetaFetchAgent,
@@ -99,8 +113,7 @@ export function fetchFreshContextGraphMeta(
     freshMetaFetchTurns.set(agent, turns);
   }
   const peerTurns = turns;
-  const runFetch = () => inTurn(peerTurns, `${peerId}\0${contextGraphId}`, async () => {
-    options.signal?.throwIfAborted();
+  const runFetch = () => inTurn(peerTurns, `${peerId}\0${contextGraphId}`, options.signal, () => {
     agent.syncCheckpoints.delete(getSyncCheckpointKey(peerId, contextGraphId, false, 'meta'));
     return agent.fetchSyncPages(
       ctx,

@@ -97,19 +97,61 @@ describe('fetchFreshContextGraphMeta', () => {
     expect(most.get(`${OTHER_PEER}\0${GRAPH}`)).toBe(1);
   });
 
-  it('reads the deadline when its turn starts, and gives up a turn its caller no longer waits for', async () => {
-    const { agent } = fetchAgent({ holdMs: 30 });
+  it('answers a caller that stops waiting for its turn at once, gives its admission back, and never starts its fetch', async () => {
+    const { agent, most } = fetchAgent();
+    const serve = agent.fetchSyncPages.getMockImplementation()!;
+    let finishFirst!: () => void;
+    const firstHeld = new Promise<void>((resolve) => { finishFirst = resolve; });
+    agent.fetchSyncPages.mockImplementationOnce(async (...args) => {
+      await firstHeld;
+      return serve(...args);
+    });
+    let admitted = 0;
+    agent.runContextGraphSyncWithBackpressure.mockImplementation(async <T>(
+      _ctx: OperationContext,
+      _contextGraphId: string,
+      _lane: 'durable',
+      _label: string,
+      work: () => Promise<T>,
+    ): Promise<T> => {
+      admitted += 1;
+      try {
+        return await work();
+      } finally {
+        admitted -= 1;
+      }
+    });
     const first = fetchFreshContextGraphMeta(agent, ctx, PEER, GRAPH, { deadline: () => 1 });
     const deadline = vi.fn(() => 2);
     const controller = new AbortController();
     const second = fetchFreshContextGraphMeta(agent, ctx, PEER, GRAPH, { deadline, signal: controller.signal });
     const third = fetchFreshContextGraphMeta(agent, ctx, PEER, GRAPH, { deadline: () => 3 });
-    controller.abort(new Error('the write gave up'));
 
-    await first;
-    await expect(second).rejects.toThrow('the write gave up');
-    await third;
+    try {
+      await vi.waitFor(() => expect(admitted).toBe(3));
+      controller.abort(new Error('the write gave up'));
+      // Answered while the fetch ahead of it is still running, with its admission given back.
+      await expect(second).rejects.toThrow('the write gave up');
+      expect(admitted).toBe(2);
+      expect(agent.fetchSyncPages).toHaveBeenCalledOnce();
+    } finally {
+      finishFirst();
+    }
+    await Promise.all([first, third]);
     expect(deadline).not.toHaveBeenCalled();
     expect(agent.fetchSyncPages.mock.calls.map((call) => call[6])).toEqual([1, 3]);
+    // The fetch behind the one that gave up still waited for the one ahead of it.
+    expect(most.get(`${PEER}\0${GRAPH}`)).toBe(1);
+  });
+
+  it('never starts a fetch whose caller had stopped waiting before it asked', async () => {
+    const { agent } = fetchAgent();
+    const controller = new AbortController();
+    controller.abort(new Error('the write gave up'));
+
+    await expect(fetchFreshContextGraphMeta(agent, ctx, PEER, GRAPH, { deadline: () => 1, signal: controller.signal }))
+      .rejects.toThrow('the write gave up');
+    await fetchFreshContextGraphMeta(agent, ctx, PEER, GRAPH, { deadline: () => 2 });
+    expect(agent.fetchSyncPages.mock.calls.map((call) => call[6])).toEqual([2]);
   });
 });
