@@ -210,6 +210,10 @@ test('repository support paths route to the lanes that execute them', () => {
     ['.github/PULL_REQUEST_TEMPLATE.md', []],
     ['.github/dependabot.yml', []],
     ['.github/workflows/knip.yml', []],
+    // The node image definition: node-image-check.yml builds and starts it.
+    ['Dockerfile', []],
+    ['.dockerignore', []],
+    ['scripts/docker-entrypoint.sh', []],
   ]) {
     const plan = pullRequestPlan([change(filePath)]);
     assert.equal(plan.mode, 'delta', filePath);

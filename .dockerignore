@@ -1,0 +1,39 @@
+# Build context of the node image (Dockerfile). The image builds from the
+# repository source, so leave out version control, installed dependencies,
+# build output, local node state and secrets, and what no build step reads.
+
+# Root dot-directories and dotfiles: .git, CI and editor settings, and local
+# node homes such as .dkg, .devnet or .dkg-testnet-node, which hold keys.
+.*
+!.npmrc
+**/.env
+**/.env.*
+
+# Dependencies and build output; the image installs and builds its own.
+**/node_modules
+**/dist
+!packages/cli/test-fixtures/sample-route-plugin/dist
+**/dist-ui
+**/.turbo
+**/*.tsbuildinfo
+packages/cli/bin
+packages/cli/build-info.json
+packages/evm-module/artifacts*
+packages/evm-module/cache*
+packages/evm-module/typechain
+packages/evm-module/deployments/localhost
+
+# Test, benchmark and coverage output and local runtime data.
+**/coverage
+**/test-results
+**/playwright-report
+bench/results
+data
+*.log
+
+# Not read by the build.
+*.md
+docs
+misc
+tools
+Dockerfile
