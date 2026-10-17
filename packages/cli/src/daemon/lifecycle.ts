@@ -208,6 +208,8 @@ import {
 import { registerJoinMetadataEmptyVmSettlement } from '../context-graph-empty-vm-readiness.js';
 import { startActivationCatchups } from './context-graph-activation-catchup.js';
 import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
+import { endContextGraphWriteReadinessWaits } from './context-graph-write-readiness.js';
+import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -3367,8 +3369,12 @@ async function runDaemonInnerWithStartupOwnership(
   // A persisted subscription the agent restores unsynced (at start, or later
   // when its authority recovers) gets the subscribe route's catch-up job.
   const stopActivationCatchups = startActivationCatchups({ agent, store: dashDb, catchupTracker, log });
+  // A write that finds its graph unsynced waits while a catch-up job or a
+  // readiness repeat catches the graph up (context-graph-write-readiness.ts).
+  const stopCatchupProgress = startContextGraphCatchupProgress();
   stopCatchupTriggers = () => {
     stopActivationCatchups();
+    stopCatchupProgress();
     cancelContextGraphReadinessRepeats();
   };
 
@@ -3665,6 +3671,7 @@ async function runDaemonInnerWithStartupOwnership(
       removeApiPort,
       log,
       endShareAdmissionWaits: () => agent.endLegacySwmShareAdmissionWaits(),
+      endWriteReadinessWaits: endContextGraphWriteReadinessWaits,
       stopCatchupTriggers,
     });
     const cleanupStateFiles = async () => {

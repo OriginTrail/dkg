@@ -30,8 +30,16 @@
 // the graph's selected shared-memory lane is not active yet, so the walk asks
 // no peer anything, and the authority arrives seconds later. Such a graph is
 // repeated too, for as long as its attempts find the lane not active.
+//
+// Such a repeat has nothing to wait for once the lane is active. The job's
+// own last step refreshes the graph's authority, so the lane is often active
+// by the time the job settles: the repeat then runs at once instead of after
+// its delay. A write that waits for the graph (`context-graph-write-readiness.ts`)
+// starts an armed repeat early the same way, once the lane is active.
 
 import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
+import { selectedSharedMemoryLaneActive } from '../catchup-selected-lane.js';
+import type { ContextGraphCatchupProgressSource } from './context-graph-catchup-progress.js';
 import {
   startContextGraphCatchupJob,
   type ContextGraphCatchupJobInput,
@@ -93,6 +101,17 @@ export function cancelContextGraphReadinessRepeats(): void {
 }
 
 /**
+ * The repeats as catch-up progress (`context-graph-catchup-progress.ts`): a
+ * graph with a sequence is being caught up, an attempt in flight or a repeat
+ * armed, and a write that waits for it starts an armed repeat early when that
+ * repeat waited only for the graph's authority (`expedite`).
+ */
+export const readinessRepeatProgress: ContextGraphCatchupProgressSource = Object.freeze({
+  catchingUp: (contextGraphId: string) => sequences.has(contextGraphId),
+  hurry: (contextGraphId: string) => sequences.get(contextGraphId)?.expedite(),
+});
+
+/**
  * Admission of a graph that repeats: a public graph that is not registered on
  * chain, or a registered public graph whose last attempt found its selected
  * shared-memory lane not active. A registered graph otherwise has its durable
@@ -115,6 +134,8 @@ class ReadinessRepeatSequence {
   #ended = false;
   /** The last attempt found the graph's selected shared-memory lane not active. */
   #laneFoundInactive = false;
+  /** The armed repeat follows a settled attempt, not an admission that could not be read. */
+  #armedAfterAttempt = false;
 
   constructor(caller: ContextGraphReadinessRepeatCaller) {
     this.#caller = caller;
@@ -129,6 +150,26 @@ class ReadinessRepeatSequence {
     if (this.#timer !== undefined) readinessRepeatTimers.clear(this.#timer);
     this.#timer = undefined;
     if (sequences.get(this.#caller.contextGraphId) === this) sequences.delete(this.#caller.contextGraphId);
+  }
+
+  /**
+   * Run the armed repeat now, when it follows an attempt that ran before the
+   * graph's authority and the lane is active by now. Once per attempt: a
+   * repeat armed after an unreadable admission keeps its delay, so the
+   * sequence never spends its repeats faster than its attempts run.
+   */
+  expedite(): void {
+    if (this.#ended || this.#timer === undefined || !this.#armedAfterAttempt || !this.#laneNowActive()) return;
+    readinessRepeatTimers.clear(this.#timer);
+    this.#timer = undefined;
+    this.#armedAfterAttempt = false;
+    void this.#repeat();
+  }
+
+  /** The last attempt found the graph's selected lane not active, and it is active now. */
+  #laneNowActive(): boolean {
+    return this.#laneFoundInactive
+      && selectedSharedMemoryLaneActive(this.#caller.agent, this.#caller.contextGraphId);
   }
 
   /**
@@ -149,7 +190,7 @@ class ReadinessRepeatSequence {
         && job.resolvedContextGraphId === undefined
         && subscription?.subscribed === true
         && subscription.synced !== true;
-      if (unproven) this.#armNext();
+      if (unproven) this.#armNext(true);
       else this.cancel();
     } catch {
       // A repeat is a convenience on top of a settled job; it must not turn
@@ -158,7 +199,7 @@ class ReadinessRepeatSequence {
     }
   }
 
-  #armNext(): void {
+  #armNext(afterAttempt = false): void {
     const delayMs = CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS[this.#repeatsRun];
     if (delayMs === undefined) {
       console.log(
@@ -168,10 +209,14 @@ class ReadinessRepeatSequence {
       this.cancel();
       return;
     }
+    this.#armedAfterAttempt = afterAttempt;
+    // The attempt ran before the graph's authority, which is in place now:
+    // its own authority refresh may have put it there. Nothing to wait for.
+    const dueMs = afterAttempt && this.#laneNowActive() ? 0 : delayMs;
     this.#timer = readinessRepeatTimers.set(() => {
       this.#timer = undefined;
       void this.#repeat();
-    }, delayMs);
+    }, dueMs);
   }
 
   /**
