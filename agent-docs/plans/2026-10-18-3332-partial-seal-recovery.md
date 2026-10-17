@@ -51,3 +51,12 @@ No schema migration or new wire contract. Rollback retains existing data formats
 - Wallet pool configured; Docker available; no batch claimed yet.
 - C1 next: write regression and demonstrate pre-fix rejection.
 - Review rounds: 0. PR/head/deadline: not yet submitted.
+
+### Review and validation update
+
+- PR: https://github.com/OriginTrail/dkg/pull/3341. Initial head `647eb2a9b`; remote reviewer expected from repository PR automation (`otReviewAgent` / `branarakic-agent`, as observed on recent merged PRs). Initial observation deadline 2026-10-18 00:43:38 Europe/Belgrade.
+- C1: pre-fix regression fails at four deletions with `KA_PROMOTE_RECOVERY_REQUIRED`; fixed matrix passes 69 tests. Focused promote/create regression group passes 140 tests. Runtime and publisher builds, SQLite construction and lint pass.
+- C2: real Blazegraph passes the 66-case matrix and 3 archive/consumed-pointer cases; additional container restarts at boundaries 4 and 34 pass. A real multi-statement DELETE/INSERT followed by failing LOAD rolled back to the original subject, confirming backend transaction support. Safe resumption remains required for legacy partial clears and subsequent multi-step draft seeding.
+- Round 1 (CI): file-size guard rejected growth of the publisher monolith. Extracted the recovery proof and existing payload validator into `assertion-seal-recovery.ts`; build and file-size guard pass. No storage-policy change. Revalidate focused tests and push this cohesive revision.
+- C4 prepared: batch-1 claimed for `issue-3332-20261018`; isolated `.scratch/3332/home`, API 19233, Blazegraph 18999. Base Sepolia 84532, expected Hub/token verified, auth 401/200 verified, four peers connected. No scenario transactions submitted yet. Claim remains held.
+- Recovery contract: rejection on an already seeded draft remains intentional. A lost success response does not make `onConflict=reject` idempotently return success; verify both public and private drafts before deciding materialization completed. No new read-only recovery readiness API is introduced.
