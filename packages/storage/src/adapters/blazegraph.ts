@@ -37,9 +37,7 @@ import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
 } from '../store-priority-scheduler.js';
-import {
-  isAtomicGraphReplaceStagingGraph,
-} from '../atomic-graph-replace.js';
+import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
   executeRfc64AuthorCommitCasV1,

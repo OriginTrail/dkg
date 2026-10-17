@@ -50,9 +50,7 @@ import {
   type GraphWriteScope,
 } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
-import {
-  isAtomicGraphReplaceStagingGraph,
-} from '../atomic-graph-replace.js';
+import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
   type Rfc64AuthorCommitCasInputV1,
