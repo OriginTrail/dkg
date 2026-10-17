@@ -87,10 +87,11 @@ sync, query and catalog messages is unchanged. A node on this release
 records, for each verified asset that a sync imports into a named
 sub-graph, which sub-graph it was authenticated for; it never takes that
 record from a peer, and a sync page that carries one from a peer counts it
-among the dropped control rows, which can write the existing warning
+among the dropped control rows, which writes the existing warning
 `Dropped <n> unverified durable sync control metadata triple(s)` where
-nothing is wrong (#3298). This is read from the code and was not seen on a
-node.
+nothing is wrong (#3298). In the devnet suite on this release, with every
+node on the same build, the warning was written 32 times across the nodes'
+logs, for 1 to 30 triples at a time.
 
 ### Upgrading from 10.0.24
 
