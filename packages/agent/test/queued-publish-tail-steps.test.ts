@@ -34,6 +34,10 @@ const QUADS: Quad[] = [{
 }];
 const ROOT = ethers.hexlify(computeFlatKCRootV10(QUADS, [])) as `0x${string}`;
 const UAL = `did:dkg:evm:31337/${AUTHOR}/${KA_NUMBER}`;
+const OPERATIONS = [
+  { kind: 'create', overrides: {} },
+  { kind: 'update', overrides: { vmCurrentAssertion: `0x${'cd'.repeat(32)}` } },
+] as const;
 
 function request(overrides: Partial<KnowledgeAssetVmPublishRequest> = {}): KnowledgeAssetVmPublishRequest {
   return {
@@ -141,7 +145,7 @@ function harness(options: {
     },
     observeRfc64ConfirmedVmV1: async () => {
       await call('catalogObserver()')();
-      return options.catalogCompletion ?? true;
+      return Object.hasOwn(options, 'catalogCompletion') ? options.catalogCompletion : true;
     },
   }, PublishMethods.prototype) as unknown as DKGAgent;
   const publishOptions = {
@@ -280,22 +284,23 @@ describe('the steps a queued executor reports after the confirmation', () => {
     ]);
   });
 
-  it.each(['create', 'update'])('certifies the complete %s lifecycle, including its receipt', async (kind) => {
+  it.each(OPERATIONS)('certifies the complete $kind lifecycle, including its receipt', async ({ overrides }) => {
     const { calls, execute } = harness();
-    const result = await execute(request(kind === 'update'
-      ? { vmCurrentAssertion: `0x${'cd'.repeat(32)}` } : {}));
+    const result = await execute(request(overrides));
     expect(result.localFinalizationComplete).toBe(true);
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
     expect(calls.indexOf('writeReceipt()')).toBeLessThan(calls.indexOf('clearPublishedGraph()'));
   });
 
-  it.each(['writeReceipt()', 'stampLifecycle()', 'clearShareMarker()', 'clearRemainingSharedMemory()'])(
-    'leaves recovery responsible when %s fails, even if an upstream result claims completeness', async (failStep) => {
+  it.each(OPERATIONS.flatMap(operation =>
+    ['writeReceipt()', 'stampLifecycle()', 'clearShareMarker()', 'clearRemainingSharedMemory()']
+      .map(failStep => ({ ...operation, failStep }))))(
+    'leaves $kind recovery responsible when $failStep fails despite an upstream certificate', async ({ overrides, failStep }) => {
       const { calls, execute } = harness({ failStep, publish: async () => ({
         ...publishResult(), localFinalizationComplete: true,
       }) });
-      const result = await execute(request({ clearSharedMemoryAfter: true }));
+      const result = await execute(request({ ...overrides, clearSharedMemoryAfter: true }));
       expect(result.status).toBe('confirmed');
       expect(result.localFinalizationComplete).toBeUndefined();
       expect(calls).toContain('ended:shareMarkerClear');
@@ -332,16 +337,24 @@ describe('the steps a queued executor reports after the confirmation', () => {
     },
   );
 
-  it('does not certify a publication whose catalog completion was not recorded', async () => {
-    const { execute } = harness({ catalogCompletion: false });
-    expect((await execute()).localFinalizationComplete).toBeUndefined();
-  });
+  it.each(OPERATIONS.flatMap(operation => [false, undefined].map(catalogCompletion => ({ ...operation, catalogCompletion }))))(
+    'clears an upstream $kind certificate when catalog completion is $catalogCompletion', async ({ overrides, catalogCompletion }) => {
+      const { execute } = harness({ catalogCompletion, publish: async () => ({
+        ...publishResult(), localFinalizationComplete: true,
+      }) });
+      expect((await execute(request(overrides))).localFinalizationComplete).toBeUndefined();
+    },
+  );
 
-  it.each([false, undefined])('requires an explicit cleanup completion, received %s', async (cleanupCompletion) => {
-    const { calls, execute } = harness({ cleanupCompletion });
-    expect((await execute()).localFinalizationComplete).toBeUndefined();
-    expect(calls).toContain('retireLegacySwm()');
-  });
+  it.each(OPERATIONS.flatMap(operation => [false, undefined].map(cleanupCompletion => ({ ...operation, cleanupCompletion }))))(
+    'clears an upstream $kind certificate when cleanup completion is $cleanupCompletion', async ({ overrides, cleanupCompletion }) => {
+      const { calls, execute } = harness({ cleanupCompletion, publish: async () => ({
+        ...publishResult(), localFinalizationComplete: true,
+      }) });
+      expect((await execute(request(overrides))).localFinalizationComplete).toBeUndefined();
+      expect(calls).toContain('retireLegacySwm()');
+    },
+  );
 
   it.each(['clear', 'retire'])('retains recovery after a swallowed %s failure', async (step) => {
     const fail = async () => { throw new Error('store refused cleanup'); };
@@ -386,26 +399,35 @@ describe('the steps a queued executor reports after the confirmation', () => {
     ]);
   });
 
-  it('reports only the publish call for a result that was not confirmed', async () => {
-    const { calls, execute } = harness({ publish: async () => publishResult('tentative') });
-    await expect(execute()).resolves.toMatchObject({ status: 'tentative' });
+  it.each(OPERATIONS)('clears an upstream certificate for a tentative $kind, even with a chain result', async ({ kind, overrides }) => {
+    const { calls, execute } = harness({ publish: async () => ({
+      ...publishResult(), status: 'tentative', localFinalizationComplete: true,
+    }) });
+    const result = await execute(request(overrides));
+    expect(result.status).toBe('tentative');
+    expect(result.localFinalizationComplete).toBeUndefined();
     // The catalog tail is still called, and returns at once for a result that is not confirmed.
-    expect(calls).toEqual(['readGraphId()', 'publish()', 'ended:publish', 'ended:catalogObserver']);
+    expect(calls).toEqual([
+      ...(kind === 'create' ? ['readGraphId()', 'publish()'] : ['update()']),
+      'ended:publish', 'ended:catalogObserver',
+    ]);
   });
 
-  it.each(['tentative', 'confirmed'] as const)('does not access gossip for %s without a chain result', async (status) => {
-    const { calls, execute, host } = harness({ publish: async () => ({
-      ...publishResult(status), onChainResult: undefined, localFinalizationComplete: true,
-    }) });
-    Object.defineProperty(host, 'gossip', { get: () => { throw new Error('gossip not initialized'); } });
-    const result = await execute();
-    expect(result.status).toBe(status);
-    expect(result.localFinalizationComplete).toBeUndefined();
-    expect(calls).not.toContain('gossip()');
-    expect(calls).not.toContain('writeReceipt()');
-    expect(calls).toContain('ended:catalogObserver');
-    if (status === 'confirmed') expect(calls).toContain('clearShareMarker()');
-  });
+  it.each(OPERATIONS.flatMap(operation => (['tentative', 'confirmed'] as const).map(status => ({ ...operation, status }))))(
+    'does not certify or access gossip for a $status $kind without a chain result', async ({ overrides, status }) => {
+      const { calls, execute, host } = harness({ publish: async () => ({
+        ...publishResult(status), onChainResult: undefined, localFinalizationComplete: true,
+      }) });
+      Object.defineProperty(host, 'gossip', { get: () => { throw new Error('gossip not initialized'); } });
+      const result = await execute(request(overrides));
+      expect(result.status).toBe(status);
+      expect(result.localFinalizationComplete).toBeUndefined();
+      expect(calls).not.toContain('gossip()');
+      expect(calls).not.toContain('writeReceipt()');
+      expect(calls).toContain('ended:catalogObserver');
+      if (status === 'confirmed') expect(calls).toContain('clearShareMarker()');
+    },
+  );
 
   it('propagates an update gossip graph-lookup failure before share and catalog work', async () => {
     const { calls, execute, host } = harness();

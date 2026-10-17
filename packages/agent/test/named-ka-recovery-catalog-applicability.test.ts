@@ -93,9 +93,9 @@ describe('named KA recovery catalog applicability', () => {
     } finally { await h.agent.stop(); }
   });
 
-  it.each(['authority-unavailable', 'active-legacy-seal', 'public-removal-failure', 'private-marker-failure'] as const)(
+  it.each(['authority-unavailable', 'active-public-legacy-seal', 'active-private-legacy-seal', 'public-removal-failure', 'private-marker-failure'] as const)(
     'keeps the canonical transaction held for an actual catalog failure (%s)', async failure => {
-      const h = await fixture(failure === 'active-legacy-seal');
+      const h = await fixture(failure === 'active-public-legacy-seal' || failure === 'active-private-legacy-seal');
       const markerFailure = new Error('durable marker write failed');
       const put = vi.fn(async () => { throw markerFailure; });
       const originalPersistence = Reflect.get(h.agent, 'rfc64PersistenceV1');
@@ -112,7 +112,7 @@ describe('named KA recovery catalog applicability', () => {
           // Active-lane selection is the seam here; the facade and canonical observer stay real.
           // Only the fields the observer consumes are needed; no signing authority is fabricated.
           resolveLane.mockReturnValue({
-            acceptsFinalizedVmRepair: failure === 'private-marker-failure',
+            acceptsFinalizedVmRepair: failure === 'private-marker-failure' || failure === 'active-private-legacy-seal',
             scopeBase: { networkId: 'otp:20430', contextGraphId: h.request.contextGraphId,
               governanceChainId: null, governanceContractAddress: null,
               ownershipTransitionDigest: null, subGraphName: null, era: '1' },
@@ -130,6 +130,7 @@ describe('named KA recovery catalog applicability', () => {
         expect(held && 'broadcast' in held ? held.broadcast?.txHash : undefined).toBe(TX_HASH);
         expect(h.materialize).toHaveBeenCalledOnce();
         expect(h.observer).toHaveBeenCalledOnce();
+        expect(resolveLane).toHaveBeenCalledOnce();
         expect(await h.observer.mock.results[0]?.value).toBe(false);
         expect(h.executor).not.toHaveBeenCalled();
         if (failure === 'public-removal-failure') expect(remove).toHaveBeenCalledOnce();

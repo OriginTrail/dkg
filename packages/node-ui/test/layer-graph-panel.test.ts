@@ -27,6 +27,7 @@ vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
         'data-node-colors': JSON.stringify(props.options?.style?.nodeColors ?? {}),
         'data-triples': String(props.data?.length ?? 0),
         'data-scale-with-degree': String(Boolean(props.options?.hexagon?.scaleWithDegree)),
+        'data-max-nodes': String(props.options?.focus?.maxNodes),
       });
     },
   };
@@ -80,6 +81,20 @@ describe('LayerGraphPanel graph lifecycle', () => {
     container.remove();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it('makes a large graph’s connected-view limit explicit and can show all loaded components', async () => {
+    const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
+    const data = Array.from({ length: 3001 }, (_, i) => ({ subject: `urn:order:${i}`, predicate: 'urn:step', object: 'urn:shared-step' }));
+    data.push({ subject: 'urn:separate-order', predicate: 'urn:step', object: 'urn:separate-step' });
+    await act(async () => root.render(React.createElement(LayerGraphPanel, { layer: 'wm', triples: data, contextGraphId: 'large' })));
+    await waitForAssertion(() => expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy());
+    expect(container.textContent).toContain('one connected view of up to 3,000 nodes');
+    expect(container.querySelector('[data-testid="rdf-graph"]')?.getAttribute('data-max-nodes')).toBe('3000');
+    const button = () => [...container.querySelectorAll('button')].find(element => element.textContent?.startsWith('Show all loaded nodes'))!;
+    await act(async () => button().click());
+    expect(container.querySelector('[data-testid="rdf-graph"]')?.getAttribute('data-max-nodes')).toBe('3004');
+    expect(container.textContent).toContain('Showing all 3,004 loaded nodes');
   });
 
   it('waits for SWM attribution colors before first graph paint', async () => {

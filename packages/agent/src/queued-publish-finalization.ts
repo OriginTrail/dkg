@@ -7,7 +7,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED,
-  type DKGPublisher, type LiftJobTailStep, type LiftJobTailStepObserver, type PublishResult,
+  type AsyncKnowledgeAssetVmPublishExecutionResult, type DKGPublisher,
+  type LiftJobTailStep, type LiftJobTailStepObserver, type PublishResult,
 } from '@origintrail-official/dkg-publisher';
 import type { SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
@@ -87,7 +88,7 @@ interface QueuedPublishFinalizationServices {
 export async function finalizeQueuedKnowledgeAssetVmPublish(
   context: QueuedPublishFinalizationContext,
   services: QueuedPublishFinalizationServices,
-): Promise<true | undefined> {
+): Promise<AsyncKnowledgeAssetVmPublishExecutionResult> {
   const {
     request: originalRequest, seal, result, operationPlan, effectiveAuthor: agentAddress,
     snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
@@ -233,6 +234,9 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
     seal, assertionUri, ctx, publicationLabel: 'queued publish',
   });
   ended('catalogObserver');
-  return result.status === 'confirmed' && Boolean(result.onChainResult) && catalogCompletionRecorded === true
-    && complete ? true : undefined;
+  // Override any upstream marker: only this complete queued lifecycle can certify its tail.
+  if (result.status === 'confirmed' && result.onChainResult && catalogCompletionRecorded === true && complete) {
+    return { ...result, status: 'confirmed', onChainResult: result.onChainResult, localFinalizationComplete: true };
+  }
+  return { ...result, localFinalizationComplete: undefined };
 }

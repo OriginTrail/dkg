@@ -660,10 +660,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     return transferConfirmedVmCatalogV1({
       owner: this,
       log: this.log,
-      finalizedPrivateScope: (_contextGraphId, _subGraphName, authorAddress) => (
-        lane.acceptsFinalizedVmRepair
-          ? Object.freeze({ ...lane.scopeBase, authorAddress }) as SwmAuthorInventoryScopeV1 : null
-      ),
+      finalizedPrivateScopeBase: lane.acceptsFinalizedVmRepair ? lane.scopeBase : null,
       storeRepair: async (repair) => {
         if (this.rfc64PersistenceV1 === undefined) throw new Error('RFC-64 persistence is unavailable');
         await this.rfc64PersistenceV1.finalizedPrivatePlacementRepairs.put(repair);

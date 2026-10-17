@@ -1,12 +1,13 @@
+import { Rfc64CatalogAutoPublishMethods } from '../src/dkg-agent-rfc64-catalog-auto-publish.js';
 import { throwInventoryRecoveryFailure } from '../src/internal/promote/inventory-recovery-failure.js';
 import { requireInventoryRemovalLane, SwmCatalogAuthorityNotReady } from '../src/internal/swm-inventory-write.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import { Logger, createOperationContext, type SwmAuthorInventoryScopeV1 } from '@origintrail-official/dkg-core';
 import { SwmInventoryWriteFailure } from '../src/internal/swm-inventory-write.js';
-import { observeConfirmedVmCatalogV1, transferConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
+import { observeConfirmedVmTransfer, observeConfirmedVmCatalogV1, transferConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
 import { CatalogPlacementTimingV1, installCatalogPlacementTimingV1 } from '../src/internal/catalog-placement-timing.js';
-import { AUTHOR, CONTEXT_GRAPH_ID, NETWORK_ID, assertionSealV1, authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
+import { AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, NETWORK_ID, assertionSealV1, authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
 import { rfc64SwmInventoryAssetKeyV1, rfc64SwmInventoryShadowRuntimeV1 } from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
 
 type Dependencies = { -readonly [Key in keyof Parameters<typeof observeConfirmedVmCatalogV1>[0]]: Parameters<typeof observeConfirmedVmCatalogV1>[0][Key] };
@@ -15,7 +16,7 @@ async function fixture() {
   const deps: Dependencies = {
     owner: {},
     log: new Logger('confirmed-catalog-test'),
-    finalizedPrivateScope: () => null,
+    finalizedPrivateScopeBase: null,
     storeRepair: vi.fn(async () => {}),
     requestPlacement: vi.fn(() => ({ accepted: false })),
     removeInventory: vi.fn(async () => ({ status: 'absent', attempts: 0, snapshot: null })),
@@ -30,12 +31,12 @@ async function fixture() {
     ctx: createOperationContext('publishFromSWM'),
     publicationLabel: 'queued publish' as const,
   };
-  const scope: SwmAuthorInventoryScopeV1 = {
-    networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR,
+  const scopeBase: Readonly<Omit<SwmAuthorInventoryScopeV1, 'authorAddress'>> = Object.freeze({
+    networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID,
     governanceChainId: null, governanceContractAddress: null, ownershipTransitionDigest: null,
     subGraphName: null, era: '1',
-  };
-  return { deps, params, scope };
+  });
+  return { deps, params, scopeBase };
 }
 
 describe('confirmed VM catalog completion certificate', () => {
@@ -63,12 +64,13 @@ describe('confirmed VM catalog completion certificate', () => {
   });
 
   it('strict recovery preserves authority refusal and classifies only marker persistence as a write boundary', async () => {
-    const { deps, params, scope } = await fixture();
+    const { deps, params, scopeBase } = await fixture();
     const refusal = new Error('authority denied');
-    deps.finalizedPrivateScope = () => { throw refusal; };
-    await expect(transferConfirmedVmCatalogV1(deps, params)).rejects.toMatchObject({ phase: 'authority', cause: refusal });
-    expect(deps.storeRepair).not.toHaveBeenCalled();
-    deps.finalizedPrivateScope = () => scope;
+    const transfer = () => Rfc64CatalogAutoPublishMethods.prototype.transferRfc64ConfirmedVmV1.call(
+      { resolveRfc64CatalogAuthoringLaneV1: () => { throw refusal; } } as any, params);
+    await expect(transfer()).rejects.toMatchObject({ phase: 'authority', cause: refusal });
+    expect(await observeConfirmedVmTransfer(deps.log, params, transfer)).toBe(false);
+    deps.finalizedPrivateScopeBase = scopeBase;
     const disk = new Error('disk unavailable');
     deps.storeRepair = vi.fn(async () => { throw disk; });
     const failure = await transferConfirmedVmCatalogV1(deps, params).catch(e => e);
@@ -136,14 +138,19 @@ describe('confirmed VM catalog completion certificate', () => {
   });
 
   it('does not certify a private placement before its durable repair marker commits', async () => {
-    const { deps, params, scope } = await fixture();
-    deps.finalizedPrivateScope = () => scope;
+    const { deps, params, scopeBase } = await fixture();
+    deps.finalizedPrivateScopeBase = scopeBase;
+    params.seal = { ...params.seal, authorAddress: AUTHOR_WALLET.address };
     let release!: () => void;
     deps.storeRepair = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
     let settled = false;
     const pending = observeConfirmedVmCatalogV1(deps, params).then((result) => { settled = true; return result; });
     await Promise.resolve();
     expect(settled).toBe(false);
+    expect(deps.storeRepair).toHaveBeenCalledWith(expect.objectContaining({
+      inventoryScope: { ...scopeBase, authorAddress: AUTHOR },
+    }));
+    expect(deps.removeInventory).not.toHaveBeenCalled();
     expect(deps.requestPlacement).not.toHaveBeenCalled();
     release();
     expect(await pending).toBe(true); // Supervisor refusal leaves a durable independent owner.
@@ -151,33 +158,29 @@ describe('confirmed VM catalog completion certificate', () => {
   });
 
   it('retains the certificate after supervisor failure only when the marker was stored', async () => {
-    const { deps, params, scope } = await fixture();
-    deps.finalizedPrivateScope = () => scope;
+    const { deps, params, scopeBase } = await fixture();
+    deps.finalizedPrivateScopeBase = scopeBase;
     deps.requestPlacement = vi.fn(() => { throw new Error('supervisor unavailable'); });
     expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true);
     deps.storeRepair = vi.fn(async () => { throw new Error('disk unavailable'); });
     expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(false);
   });
 
-  it('does not certify unavailable authority or an escaped public removal failure', async () => {
+  it('does not certify an escaped public removal failure', async () => {
     const { deps, params } = await fixture();
-    deps.finalizedPrivateScope = () => { throw new Error('authority unavailable'); };
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(false);
-    deps.finalizedPrivateScope = () => null;
     deps.removeInventory = vi.fn(async () => { throw new Error('store unavailable'); });
     expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(false);
   });
 
   it.each([
-    ['finalizedPrivateScope', false, 'catalog authority was unavailable'],
     ['storeRepair', false, 'placement was not recorded, so nothing owes it'],
     ['requestPlacement', true, 'placement could not be requested; its durable marker stays'],
     ['removeInventory', false, 'SWM inventory shadow removal escaped its failure boundary'],
     ['requestProjection', true, 'SWM inventory shadow removal escaped its failure boundary'],
   ] as const)('keeps the durable verdict and ends timing when the %s getter throws', async (capability, expected, warning) => {
-    const { deps, params, scope } = await fixture();
+    const { deps, params, scopeBase } = await fixture();
     const privateLane = capability === 'storeRepair' || capability === 'requestPlacement';
-    deps.finalizedPrivateScope = () => privateLane ? scope : null;
+    deps.finalizedPrivateScopeBase = privateLane ? scopeBase : null;
     const stored = deps.storeRepair;
     const requested = deps.requestPlacement;
     const removed = deps.removeInventory;
