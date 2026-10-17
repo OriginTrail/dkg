@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 export async function runMemorySearchRegression({ base, token }) {
   const url = new URL(base);
   assert(['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname), 'This fixture requires a local devnet');
-  const contextGraphId = `memory-search-${randomUUID()}`;
+  const scenarioId = randomUUID();
+  const contextGraphId = `memory-search-${scenarioId}`;
   async function post(path, body, auth = token) {
     const response = await fetch(new URL(path, url), { method: 'POST',
       headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' },
@@ -14,8 +15,8 @@ export async function runMemorySearchRegression({ base, token }) {
     assert(response.ok, `${path}: HTTP ${response.status}: ${JSON.stringify(result)}`);
     return result;
   }
-  const alice = await post('/api/agent/register', { name: 'memory-search-alice', framework: 'devnet-regression' });
-  const bob = await post('/api/agent/register', { name: 'memory-search-bob', framework: 'devnet-regression' });
+  const alice = await post('/api/agent/register', { name: `memory-search-alice-${scenarioId}`, framework: 'devnet-regression' });
+  const bob = await post('/api/agent/register', { name: `memory-search-bob-${scenarioId}`, framework: 'devnet-regression' });
   assert(alice.authToken && bob.authToken);
   await post('/api/context-graph/create', { id: contextGraphId, name: 'Memory search regression', accessPolicy: 0 }, alice.authToken);
   await post('/api/context-graph/register', { id: contextGraphId, accessPolicy: 0 }, alice.authToken);
