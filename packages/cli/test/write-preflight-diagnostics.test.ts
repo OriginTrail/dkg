@@ -155,3 +155,17 @@ it('contains an asynchronously rejected diagnostic observer without delaying HTT
   )).resolves.toBeNull();
   expect(out.status).toBe(503);
 });
+
+
+it.each([qualified, 'bare-name'])('keeps accepted rescue control flow without an unavailable diagnostic for %s', async candidate => {
+  const agent = { ...provider({ storeAvailable: false, storeUnavailable: true }),
+    validateWriteTargetDuringStoreOutage: vi.fn(async () => true),
+  };
+  agent.listContextGraphs.mockRejectedValue(new Error('store down'));
+  const { res, out } = response(); const options = opts();
+  expect(await resolveRequiredWriteContextGraphId(agent, candidate, res, options)).toBe(candidate);
+  expect(agent.validateWriteTargetDuringStoreOutage).toHaveBeenCalledTimes(1);
+  expect(agent.listContextGraphs).toHaveBeenCalledTimes(candidate === qualified ? 0 : 1);
+  expect(options.writePreflightDiagnostics.record).not.toHaveBeenCalled();
+  expect(out.status).toBeUndefined();
+});

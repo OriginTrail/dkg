@@ -983,8 +983,8 @@ async function resolveWriteContextGraphIdOnce(
       message,
       opts.chainRescueTimeoutMs,
     );
-    if (rescue.accepted) return candidateId;
-    return contextGraphValidationUnavailable(res, message, exactDecision.attribution, rescue.outcome, opts.writePreflightDiagnostics);
+    if (rescue === 'accepted') return candidateId;
+    return contextGraphValidationUnavailable(res, message, exactDecision.attribution, rescue, opts.writePreflightDiagnostics);
   }
   if (
     exactDecision.kind !== "listFallback" &&
@@ -1026,13 +1026,13 @@ async function resolveWriteContextGraphIdOnce(
     // else keeps the legacy 503 verbatim.
     const rescue = exactProbeUnavailable
       ? await rescueWriteTargetWithoutStore(agent, candidateId, message, opts.chainRescueTimeoutMs)
-      : { accepted: false, outcome: 'not-attempted' as const };
-    if (rescue.accepted) return candidateId;
+      : 'not-attempted';
+    if (rescue === 'accepted') return candidateId;
     const attribution: WritePreflightFailure[] = [
       ...(exactDecision.kind === 'listUnavailable' ? exactDecision.attribution : []),
       { site: 'list', kind: classifyWritePreflightFailure(err) },
     ];
-    return contextGraphValidationUnavailable(res, message, attribution, rescue.outcome, opts.writePreflightDiagnostics);
+    return contextGraphValidationUnavailable(res, message, attribution, rescue, opts.writePreflightDiagnostics);
   }
 
   const knownIds = contextGraphs

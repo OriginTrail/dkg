@@ -135,23 +135,22 @@ export async function rescueWriteTargetWithoutStore(
   candidateId: string,
   unavailableMessage: string,
   timeoutMs: number = WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS,
-): Promise<{ accepted: boolean; outcome: WritePreflightRescueOutcome }> {
-  if (typeof agent.validateWriteTargetDuringStoreOutage !== 'function') return { accepted: false, outcome: 'unsupported' };
+): Promise<Exclude<WritePreflightRescueOutcome, 'not-attempted'>> {
+  if (typeof agent.validateWriteTargetDuringStoreOutage !== 'function') return 'unsupported';
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let timedOut = false;
   try {
     const activePublic = await Promise.race([
       agent.validateWriteTargetDuringStoreOutage(candidateId),
-      new Promise<false>((resolveTimeout) => {
-        timer = setTimeout(() => { timedOut = true; resolveTimeout(false); }, timeoutMs);
+      new Promise<'deadline'>((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout('deadline'), timeoutMs);
         // Allow the process to exit even if the chain promise never settles.
         timer.unref?.();
       }),
     ]);
-    if (activePublic !== true) return { accepted: false, outcome: timedOut ? 'deadline' : 'denied' };
+    if (activePublic !== true) return activePublic === 'deadline' ? 'deadline' : 'denied';
   } catch {
     // The adapter did not prove public access; do not guess which dependency failed.
-    return { accepted: false, outcome: 'failed' };
+    return 'failed';
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -159,7 +158,7 @@ export async function rescueWriteTargetWithoutStore(
     createOperationContext('resolve'),
     `write preflight: accepting context graph "${candidateId}" via positive on-chain proof it is an active PUBLIC context graph — local store unavailable (${unavailableMessage})`,
   );
-  return { accepted: true, outcome: 'accepted' };
+  return 'accepted';
 }
 
 /**
