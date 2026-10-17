@@ -29,7 +29,9 @@ export async function handlePublisherLiveControlRoute(ctx: RequestContext): Prom
   try {
     const status = action === 'status' ? control.status() : await control[action]();
     jsonResponse(res, status.effectiveState === 'unavailable' ? 503 : 200, status);
-  } catch {
+  } catch (error) {
+    // Daemon stderr retains the Error and its causal chain; the HTTP response stays bounded.
+    console.error(`[publisher] live control ${action} failed`, error);
     jsonResponse(res, 503, { error: 'Publisher control could not commit; inspect the runtime and restart to reload durable intent.',
       code: 'PUBLISHER_CONTROL_UNAVAILABLE' });
   }

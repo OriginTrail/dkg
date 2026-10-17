@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import { Readable } from 'node:stream';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -6,6 +8,9 @@ import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AsyncLiftRunner } from '../../publisher/src/async-lift-runner.js';
 import { TripleStoreAsyncLiftPublisher } from '../../publisher/src/async-lift-publisher-impl.js';
 import { createPublisherLiveControl, publisherDesiredStatePath } from '../src/publisher-live-control.js';
+import { beginGracefulShutdown } from '../src/daemon/teardown.js';
+import { handlePublisherLiveControlRoute } from '../src/daemon/routes/publisher-live-control.js';
+import { createAllowedHttpAuthentication } from '../src/auth.js';
 import { KA_VM_EXECUTOR_TX_HASH, kaVmPublishRequest, stageKnowledgeAssetShareSnapshot } from '../../../scripts/testing/ka-vm-publish.js';
 
 const persistenceBarrier = vi.hoisted(() => ({ directory: null as string | null,
@@ -103,7 +108,21 @@ describe('durable control of the active publisher wallet loops', () => {
     const { control, dataDir, publisher } = await fixture();
     await rename(dataDir, `${dataDir}.held`);
     cleanup.push(() => rm(`${dataDir}.held`, { recursive: true, force: true }));
-    await expect(control.pause()).rejects.toThrow('could not commit');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = { statusCode: 0, body: '', writeHead(code: number) { this.statusCode = code; return this; },
+      end(body: string) { this.body = body; return this; } };
+    try {
+      await handlePublisherLiveControlRoute({
+        req: Object.assign(Readable.from([]), { method: 'POST', __dkgPrebufferedBody: Buffer.from('{}') }),
+        res, path: '/api/publisher/pause', publisherState: { runtime: { control } },
+        authentication: createAllowedHttpAuthentication({ mode: 'authenticated', presentedToken: 'operator',
+          acceptedToken: 'operator', resolveAgentByToken: () => undefined }),
+      } as unknown as Parameters<typeof handlePublisherLiveControlRoute>[0]);
+      expect(res.statusCode).toBe(503);
+      expect(res.body).not.toContain(dataDir); expect(res.body).not.toContain('ENOENT');
+      expect(log).toHaveBeenCalledOnce();
+      expect(log.mock.calls[0]?.[1]).toMatchObject({ cause: { code: 'ENOENT' } });
+    } finally { log.mockRestore(); }
     expect(control.status()).toMatchObject({ effectiveState: 'unavailable', acknowledgedGeneration: 0, fault: 'persistence_or_control_failed' });
     expect(control.status().wallets.every(w => w.paused)).toBe(true);
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -130,6 +149,41 @@ describe('durable control of the active publisher wallet loops', () => {
     expect(await publisher.getStatus(jobId)).toEqual(accepted);
     // The persisted resume is intent for the next incarnation, never permission for this closed one.
     expect(JSON.parse(await readFile(publisherDesiredStatePath(dataDir), 'utf8'))).toMatchObject({ desiredState: 'running', generation: 2 });
+  });
+
+  it('fences an HTTP resume at daemon shutdown entry before HTTP requests drain', async () => {
+    const { dataDir, control, runner, publisher } = await fixture();
+    await control.pause(); await runner.start();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const accepted = await publisher.getStatus(jobId);
+    const server = createServer(async (req, res) => {
+      await handlePublisherLiveControlRoute({ req, res, path: '/api/publisher/resume',
+        authentication: createAllowedHttpAuthentication({ mode: 'authenticated', presentedToken: 'operator',
+          acceptedToken: 'operator', resolveAgentByToken: () => undefined }),
+        publisherState: { runtime: { control } },
+      } as Parameters<typeof handlePublisherLiveControlRoute>[0]);
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    cleanup.push(() => new Promise<void>(resolve => { server.close(resolve); server.closeAllConnections(); }));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('Missing HTTP address');
+    let entered!: () => void; const syncing = new Promise<void>(resolve => { entered = resolve; });
+    let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+    persistenceBarrier.directory = dataDir; persistenceBarrier.entered = entered; persistenceBarrier.release = held;
+    const resuming = fetch(`http://127.0.0.1:${address.port}/api/publisher/resume`, { method: 'POST', body: '{}' });
+    let releasePort!: () => void; const portHeld = new Promise<void>(resolve => { releasePort = resolve; });
+    let shutdown: Promise<void> | undefined;
+    try {
+      await syncing;
+      shutdown = beginGracefulShutdown({ state: { catchupAcceptingJobs: true },
+        publisherControl: control, removeApiPort: () => portHeld, log: () => {} });
+      expect(control.status().effectiveState).toBe('unavailable');
+      release();
+      expect((await resuming).status).toBe(503);
+      expect(await publisher.claimNext('late')).toBeNull();
+      expect(await publisher.getStatus(jobId)).toEqual(accepted);
+      expect(JSON.parse(await readFile(publisherDesiredStatePath(dataDir), 'utf8')))
+        .toMatchObject({ desiredState: 'running', generation: 2 });
+    } finally { release(); releasePort(); await resuming; await shutdown; }
   });
 
   it('cannot release claims when close races the publisher resume await', async () => {

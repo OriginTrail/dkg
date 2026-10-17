@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,9 +16,9 @@ import { addPublisherWallet } from '../../packages/cli/src/publisher-wallets.js'
 const directory = await mkdtemp(join(tmpdir(), 'dkg-live-publisher-campaign-'));
 const token = randomUUID();
 const children: OwnedProcess[] = [];
-async function start(startPaused = false) {
+async function start(startPaused = false, probe = 'startup-pause') {
   const child = spawn(process.execPath, ['--experimental-sqlite', '--import', 'tsx',
-    fileURLToPath(new URL('./publisher-live-control-worker.mts', import.meta.url)), directory, token, ...(startPaused ? ['startup-pause'] : [])],
+    fileURLToPath(new URL('./publisher-live-control-worker.mts', import.meta.url)), directory, token, ...(startPaused ? [probe] : [])],
   { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: { ...process.env, DKG_PUBLISHER_START_PAUSED: startPaused ? '1' : '0' } });
   const owner = ownProcess(child, { label: 'Publisher control campaign worker' });
   children.push(owner);
@@ -35,12 +35,12 @@ async function start(startPaused = false) {
     const response = await wait(m => m.id === id);
     assert.equal(response.error, undefined); return response.result;
   };
-  const request = async (action: string) => {
+  const request = async (action: string, expectedStatus = 200) => {
     const response = await fetch(`${ready.url}/api/publisher/${action}`, {
       method: action === 'control' ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}` },
       ...(action === 'control' ? {} : { body: '{}' }), signal: AbortSignal.timeout(10_000),
     });
-    assert.equal(response.status, 200); return response.json() as Promise<any>;
+    assert.equal(response.status, expectedStatus); return response.json() as Promise<any>;
   };
   return { child, owner, ready, command, request, wait };
 }
@@ -81,9 +81,30 @@ try {
   assert.deepEqual(await maintenance.command('status', startupAccepted.jobId), startupAccepted.job);
   assert.equal((await maintenance.request('resume')).generation, 4);
   await maintenance.wait(m => m.type === 'executing');
+  await maintenance.owner.stop();
+  const retiring = await start(true, 'shutdown-pause');
+  const shutdownAccepted = retiring.ready.startupAccepted;
+  assert.equal((await retiring.request('control')).generation, 5);
+  await retiring.command('hold-resume-fsync');
+  const deniedResume = retiring.request('resume', 503);
+  await retiring.wait(m => m.type === 'control-fsync-held');
+  retiring.child.kill('SIGTERM');
+  assert.equal((await retiring.wait(m => m.type === 'shutdown-fenced')).effectiveState, 'unavailable');
+  await retiring.command('release-resume-fsync');
+  assert.equal((await deniedResume).code, 'PUBLISHER_CONTROL_UNAVAILABLE');
+  await retiring.owner.waitForExit(20_000);
+  const retired = JSON.parse(await readFile(join(directory, 'shutdown-result.json'), 'utf8'));
+  assert.equal(retired.executions, 0);
+  assert.deepEqual(retired.job, shutdownAccepted.job);
+  const saved = JSON.parse(await readFile(join(directory, 'publisher-control.json'), 'utf8'));
+  assert.equal(saved.desiredState, 'running'); assert.equal(saved.generation, 6);
+  const afterShutdown = await start();
+  assert.equal((await afterShutdown.request('control')).generation, 6);
+  await afterShutdown.wait(m => m.type === 'executing');
   console.log(JSON.stringify({ status: 'PASS', killedPid: first.ready.pid, restartedPid: second.ready.pid,
     wallets: 2, pausedGeneration: 1, resumedGeneration: 2, acceptedEvidencePreserved: true,
     startupOverride: { environment: true, pausedGeneration: 3, resumedGeneration: 4, acceptedEvidencePreserved: true },
+    shutdownFence: { signal: 'SIGTERM', resumeStatus: 503, acceptedEvidencePreserved: true, restartRunningGeneration: 6 },
     resumedExecution: true, backend: 'Oxigraph', chain: 'NoChainAdapter' }));
 } finally {
   for (const owner of children) await owner.stop();

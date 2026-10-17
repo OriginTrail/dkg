@@ -16,7 +16,9 @@ async function request(action: 'pause' | 'resume' | 'control', options: { agent?
     end(body = '') { this.body = body; this.writableEnded = true; return this; } };
   const status: PublisherLiveStatus = { version: 1, updatedAt: '2026-10-17T00:00:00.000Z', desiredState: 'paused', effectiveState: options.inactive ? 'unavailable' : 'paused', generation: 3, acknowledgedGeneration: 3,
     wallets: [{ walletId: 'real-runtime', paused: true, generation: 3 }], fault: null };
-  const active = vi.fn(async () => { if (options.failure) throw new Error('secret raw adapter details'); return status; });
+  const cause = Object.assign(new Error('EACCES: secret publisher-control.json path'), { code: 'EACCES' });
+  const failure = new Error('Publisher control could not commit', { cause });
+  const active = vi.fn(async () => { if (options.failure) throw failure; return status; });
   const admission = vi.fn();
   const runtime = { control: { pause: active, resume: active, status: () => status, close: async () => {} } } satisfies Pick<PublisherRuntime, 'control'>;
   const ctx = { req, res: res as unknown as ServerResponse, path, url: new URL(`http://localhost${path}`),
@@ -25,7 +27,7 @@ async function request(action: 'pause' | 'resume' | 'control', options: { agent?
     publisherState: { runtime: options.unavailable ? null : runtime },
   } as unknown as RequestContext;
   await handlePublisherRoutes(ctx);
-  return { code: res.statusCode, body: JSON.parse(res.body), active, admission };
+  return { code: res.statusCode, body: JSON.parse(res.body), active, admission, failure };
 }
 
 describe('node administrator publisher live control routes', () => {
@@ -54,7 +56,12 @@ describe('node administrator publisher live control routes', () => {
     }
   });
   it('exposes bounded failure without adapter details', async () => {
-    const result = await request('pause', { failure: true });
-    expect(result.code).toBe(503); expect(JSON.stringify(result.body)).not.toContain('secret');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await request('pause', { failure: true });
+      expect(result.code).toBe(503); expect(JSON.stringify(result.body)).not.toContain('secret');
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('publisher'), result.failure);
+      expect(result.failure.cause).toMatchObject({ code: 'EACCES' });
+    } finally { log.mockRestore(); }
   });
 });
