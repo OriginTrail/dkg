@@ -1,5 +1,6 @@
+import { canRetireBoundRejection, PROMOTE_NO_EFFECT_REJECTION_CODE } from './promote-no-effect-rejection.js';
+import { isBoundPromoteJob } from './bound-promote-job.js';
 import {
-  ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
   type PromoteAttemptError,
   type PromoteAttemptState,
@@ -39,7 +40,7 @@ export function promoteRetryAttempt(
 ): (PromoteAttemptState & { nextRetryAt: number }) | undefined {
   const withinWindow = error.diagnosticCode === PROMOTE_RETRYABLE_FAILURE_CODE
     && now - job.enqueuedAt < PROMOTE_PREREQUISITE_RETRY_WINDOW_MS;
-  if (attemptCount >= job.attempt.maxRetries && !withinWindow) return undefined;
+  if (attemptCount >= job.attempt.maxRetries && !withinWindow && !isBoundPromoteJob(job)) return undefined;
   return {
     count: attemptCount,
     maxRetries: job.attempt.maxRetries,
@@ -53,13 +54,14 @@ export function isAutomaticallyRecoverablePostCommitFailure(job: PromoteJob): bo
     && job.reason === undefined
     && job.commitMarker?.swmInserted !== true
     && (job.formatVersion ?? 0) >= ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION
+    && (job.formatVersion ?? 0) <= 4
     && !missingStorageLaneForAuthorOnlyJob(job)
     && !requiresManualInspection(job)
     && isPromotePostCommitAttemptError(job.attempt.lastError);
 }
 
 export function missingStorageLaneForAuthorOnlyJob(job: PromoteJob): boolean {
-  return (job.formatVersion ?? 0) < ASYNC_PROMOTE_QUEUE_FORMAT_VERSION
+  return (job.formatVersion ?? 0) < 3
     && job.request.agentAddress === undefined
     && job.request.authorAgentAddress !== undefined;
 }
@@ -84,7 +86,15 @@ export function promoteFailureTransition(
 ): { job: PromoteJob; transition: PromoteFailureTransition } {
   const attemptCount = Math.max(1, job.attempt.count);
   const swmInserted = job.commitMarker?.swmInserted === true;
-  const retryAttempt = error.retryable && !swmInserted
+  const bound = isBoundPromoteJob(job);
+  const retiredNoEffect = error.diagnosticCode === PROMOTE_NO_EFFECT_REJECTION_CODE
+    && error.classification === 'cap_exceeded' && !error.retryable && canRetireBoundRejection(job, error.noEffectProof);
+  if (error.noEffectProof && !retiredNoEffect) {
+    error = {classification: error.classification, retryable: error.retryable,
+      message: error.message, recordedAt: error.recordedAt};
+  }
+  if (bound && isPromotePostCommitAttemptError(error)) error = { ...error, retryable: true };
+  const retryAttempt = error.retryable && (!swmInserted || bound)
     ? promoteRetryAttempt(job, error, attemptCount, now, backoff)
     : undefined;
   if (retryAttempt) {
@@ -101,6 +111,6 @@ export function promoteFailureTransition(
         ? 'partial promote ambiguity: failed after SWM insert; needs operator inspection'
         : job.reason,
     },
-    transition: { state: 'failed', jobId: job.jobId, attemptCount },
+    transition: { state: 'failed', jobId: job.jobId, attemptCount, ...(retiredNoEffect ? {retiredNoEffect: true} : {}) },
   };
 }

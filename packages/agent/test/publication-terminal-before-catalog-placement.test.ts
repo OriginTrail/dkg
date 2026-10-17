@@ -516,10 +516,7 @@ describe('a confirmed publication and its catalog placement', () => {
     fixture.lane.acceptsFinalizedVmRepair = false;
     const path = createPublicationPathV1(fixture);
     const jobId = await path.failAfterBroadcast(asset);
-    const remove = vi.spyOn(agent, 'removeRfc64SwmAuthorInventoryShadowV1').mockResolvedValue({
-      status: 'failed', action: 'remove', attempts: 1, headObjectDigest: null,
-      error: 'inventory store refused removal',
-    });
+    const remove = vi.spyOn(agent, 'commitRfc64ConfirmedInventoryRemovalV1').mockRejectedValue(new Error('inventory store refused removal'));
     fixture.clock.now = 1_000;
     expect(await path.publisher.recover()).toBe(0);
     expect((await path.job(jobId))?.status).toBe('failed');

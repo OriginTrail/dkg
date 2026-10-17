@@ -1,3 +1,4 @@
+import { SwmCatalogAuthorityNotReady } from '../src/internal/swm-inventory-write.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createOperationContext,
@@ -27,6 +28,7 @@ afterEach(async () => {
 function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorParameters<typeof Rfc64SwmCatalogProjectionOwnerV1>[0]> = {}) {
   let revision: CatalogRepairRevisionHintV1 = { scopeIdentity: 'scope-1', headRevision: 'head-1' };
   let available = true;
+  const durableScopes = vi.fn((): {contextGraphId: ContextGraphIdV1; authorAddress: EvmAddressV1}[] => []);
   let privateRepairs: readonly Rfc64FinalizedPrivatePlacementRepairV1[] = [];
   const reconcile = vi.fn(async (): Promise<null> => { throw new Error('unchanged repair failure'); });
   const repairPrivate = vi.fn(async (_repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void> => {
@@ -37,6 +39,7 @@ function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorParamete
   const warn = vi.fn();
   const dependencies = {
     resolvePartition: () => ({ retryIntervalMs, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
+    listDurableInventoryScopes: durableScopes,
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => available,
     acceptsFinalizedPrivateLane: () => available,
@@ -50,7 +53,7 @@ function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorParamete
   const owner = new Rfc64SwmCatalogProjectionOwnerV1(dependencies);
   owners.push(owner);
   return {
-    owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, warn,
+    owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, warn, durableScopes,
     request: () => owner.request({ contextGraphId: CG, authorAddress: AUTHOR, ctx }),
     setRevision: (value: string | CatalogRepairRevisionHintV1) => { revision = typeof value === 'string' ? { scopeIdentity: 'scope-1', headRevision: value } : value; },
     setAvailable: (value: boolean) => { available = value; },
@@ -81,6 +84,49 @@ const retainedFailures = [
 ] as const;
 
 describe('RFC-64 unchanged repair backoff', () => {
+  it('discovers unregistered authors without partition policies and retries unavailable authority', async () => {
+    const f = fixture();
+    const other = `0x${'22'.repeat(20)}` as EvmAddressV1;
+    f.durableScopes.mockReturnValue([{ contextGraphId: CG, authorAddress: other }]);
+    f.setAvailable(false);
+    f.owner.start(ctx); await f.owner.whenIdle();
+    expect(f.reconcile).not.toHaveBeenCalled();
+    expect(f.owner.status()?.repairs).toHaveLength(1);
+    f.setAvailable(true); f.reconcile.mockResolvedValue(null);
+    await f.advance(5_000);
+    expect(f.reconcile).toHaveBeenCalledWith(expect.objectContaining({ contextGraphId: CG, authorAddress: other }));
+  });
+
+  it('wakes a discovered head when accepted policy replaces a typed unavailable hint', async () => {
+    const f = fixture();
+    f.durableScopes.mockReturnValue([{ contextGraphId: CG, authorAddress: AUTHOR }]);
+    const missing = new SwmCatalogAuthorityNotReady('policy-not-accepted');
+    f.readRevision.mockImplementation(() => { throw missing; });
+    f.reconcile.mockRejectedValue(missing);
+    f.owner.start(ctx); await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    expect(f.owner.status()?.repairs[0].nextAttemptAtMs).toBe(5_000);
+    f.readRevision.mockReturnValue({ scopeIdentity: 'accepted', headRevision: 'same-head' });
+    f.reconcile.mockResolvedValue(null);
+    f.request(); await f.owner.whenIdle();
+    expect(Date.now()).toBe(0);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(f.owner.status()?.repairs[0].outcome).toBe('no-inventory');
+  });
+
+  it('retries transient discovery failure even when there are no local author scopes', async () => {
+    const f = fixture();
+    f.durableScopes.mockImplementationOnce(() => { throw new Error('inventory unavailable'); });
+    f.durableScopes.mockReturnValue([{ contextGraphId: CG, authorAddress: AUTHOR }]);
+    f.reconcile.mockResolvedValue(null);
+    f.owner.start(ctx); await f.owner.whenIdle();
+    expect(f.reconcile).not.toHaveBeenCalled();
+    await f.advance(5_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    await f.advance(10_000);
+    expect(f.durableScopes).toHaveBeenCalledTimes(2);
+  });
+
   it('backs unchanged failures off exponentially with a finite cap', async () => {
     const f = fixture();
     const attempts: number[] = [];

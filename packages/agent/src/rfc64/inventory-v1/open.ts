@@ -1,4 +1,6 @@
 import { INVENTORY_SCHEMA_MIGRATIONS_V1, type InventorySchemaMigrationV1 } from './schema-migrations.js';
+import { InventoryV1OpenError } from './open-error.js';
+export { InventoryV1OpenError, type InventoryV1OpenErrorCode } from './open-error.js';
 import type { Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 import {
   closeSync,
@@ -105,28 +107,6 @@ const LEASE_CREATION_RACE_TIMEOUT_MS = 1_000;
 const LEASE_CREATION_RACE_RETRY_MS = 10;
 const RECOVERY_MARKER_MAX_BYTES = 4_096;
 
-export type InventoryV1OpenErrorCode =
-  | 'sqlite-unavailable'
-  | 'foreign-database'
-  | 'newer-schema'
-  | 'ambiguous-database'
-  | 'unsafe-path'
-  | 'pragma-mismatch'
-  | 'database-busy'
-  | 'durability-unavailable'
-  | 'database-closed'
-  | 'database-io';
-
-export class InventoryV1OpenError extends Error {
-  constructor(
-    readonly code: InventoryV1OpenErrorCode,
-    message: string,
-    options: ErrorOptions = {},
-  ) {
-    super(`[${code}] ${message}`, options);
-    this.name = 'InventoryV1OpenError';
-  }
-}
 
 class InventoryV1TargetCloseError extends InventoryV1OpenError {
   constructor(
@@ -292,6 +272,7 @@ async function openInventoryV1WithLifecycleAdapter(
 
 class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   #database: DatabaseSyncV1 | null;
+  #unavailableCause: unknown;
   #candidate: CandidateInventoryV1;
   #lease: InventoryV1Lease | null;
   constructor(
@@ -354,6 +335,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   }
 
   close(): void {
+    this.#unavailableCause = undefined;
     this.#candidate.close();
     const database = this.#database;
     if (database !== null) {
@@ -519,6 +501,11 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.compareAndSwapAppliedCatalogHeadV1(input);
   }
 
+  listSwmAuthorInventoryScopesV1(): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['listSwmAuthorInventoryScopesV1']> {
+    this.requireOpen();
+    return this.#candidate.listSwmAuthorInventoryScopesV1();
+  }
+
   readSwmAuthorInventoryHeadDigestV1(...input: Parameters<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']>): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']> {
     this.requireOpen();
     return this.#candidate.readSwmAuthorInventoryHeadDigestV1(...input);
@@ -597,7 +584,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
 
   private requireOpen(): DatabaseSyncV1 {
     if (this.#database === null) {
-      throw new InventoryV1OpenError('database-closed', 'inventory database is closed');
+      throw new InventoryV1OpenError('database-closed', 'inventory database is closed', { cause: this.#unavailableCause });
     }
     return this.#database;
   }
@@ -627,8 +614,10 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
             this.lifecycle,
           );
           this.#database = reopened;
+          this.#unavailableCause = undefined;
           return reopened;
         } catch (cause) {
+          this.#unavailableCause = cause;
           if (cause instanceof InventoryV1TargetCloseError) this.retainFailStop(cause);
           // Never quarantine, rebuild, or manufacture a candidate outcome on the
           // latency/indeterminate-COMMIT path. The live foundation stays closed.
@@ -640,7 +629,8 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
         }
       },
       undefined,
-      (rejectedDatabase) => {
+      (rejectedDatabase, cause) => {
+        this.#unavailableCause = cause;
         // Candidate validation happens after the provider returns. Detach the
         // adopted replacement before closing it so `closed` and requireOpen()
         // cannot observe a stale closed DatabaseSync handle.
@@ -661,6 +651,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
 
   private retainFailStop(error: unknown): never {
     if (!(error instanceof InventoryV1TargetCloseError)) throw error;
+    this.#unavailableCause = error;
     if (this.#lease !== null) {
       retainInventoryFailStop(this.#lease, error);
       this.#lease = null;
