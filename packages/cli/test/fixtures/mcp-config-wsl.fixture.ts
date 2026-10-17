@@ -77,11 +77,11 @@ async function main(): Promise<void> {
       resolveDkgConfigHome: () => nodeHome,
     };
     const originalBytes = readFileSync(path, 'utf8');
-    await mcpSetupAction(setupOptions, { ...setupDeps, confirmPlan: async planned => {
+    await assert.rejects(mcpSetupAction(setupOptions, { ...setupDeps, confirmPlan: async planned => {
       assert.equal(planned.length, 1, 'one physical leaf must produce one decision');
       assert.equal(planned[0]!.action, 'skip', 'incompatible client runtimes must fail closed');
       return [...planned];
-    } });
+    } }), /No client configs updated.*1 client\(s\) failed:/s);
     assert.equal(readFileSync(path, 'utf8'), originalBytes, 'aliased setup must leave bytes unchanged');
     assert.equal(descriptor(), before, 'aliased setup must leave metadata unchanged');
     // Removing an old shared entry is still valid and must retain NTFS metadata,
@@ -156,7 +156,7 @@ async function main() {
 main().catch(error => { console.error(error); process.exitCode = 1; });
 `);
     const mountedWindowsNode = execFileSync('/usr/bin/wslpath', ['-u', windowsNode], { encoding: 'utf8' }).trim();
-    console.log(execFileSync(mountedWindowsNode, [windowsPath(driver), windowsPath(path), windowsPath(fileURLToPath(new URL('../../package.json', import.meta.url)))], {
+    console.log(execFileSync('/usr/bin/env', ['--', mountedWindowsNode, windowsPath(driver), windowsPath(path), windowsPath(fileURLToPath(new URL('../../package.json', import.meta.url)))], {
       encoding: 'utf8', timeout: 45_000, maxBuffer: 1024 * 1024,
     }).trim());
     await mcpUninstallAction({ yes: true, client: 'cursor:native' }, { detectClients: () => clients, log: () => {} });
