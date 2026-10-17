@@ -75,14 +75,26 @@ describe('assets a snapshot job already holds', () => {
     expect(await createPublicSnapshotHeldAssetCheck(older, observe(newer, 'core-cache', '2'))(newer[0]!.ual)).toBe(false);
   });
 
-  it('lets an rpc-only job relabel copies stored with core-cache evidence', async () => {
+  it('lets an rpc-only job relabel a copy stored with core-cache evidence in the same store', async () => {
     const assets = makeSnapshotAssets(graph, 1);
-    const cached = await storeWith(observe(assets, 'core-cache'), assets);
-    expect(await createPublicSnapshotHeldAssetCheck(cached, observe(assets, 'rpc-only'))(assets[0]!.ual)).toBe(false);
-    const independent = await storeWith(observe(assets, 'rpc-only'), assets);
-    expect(await createPublicSnapshotHeldAssetCheck(independent, observe(assets, 'rpc-only'))(assets[0]!.ual)).toBe(true);
+    const [asset] = assets;
+    const store = await storeWith(observe(assets, 'core-cache'), assets);
+    const labels = async () => {
+      const result = await store.query(`SELECT ?mode ?source WHERE { GRAPH <${asset!.verified.metaGraph}> {
+        <${asset!.ual}> <http://dkg.io/ontology/chainEvidenceMode> ?mode ; <http://dkg.io/ontology/chainEvidenceSource> ?source } }`);
+      return result.type === 'bindings' ? result.bindings : [];
+    };
+    expect(await labels()).toEqual([{ mode: '"core-cache"', source: '"core"' }]);
+    // The rpc-only job does not skip the core-cache copy, so it transfers and imports it as before.
+    const rpcOnly = observe(assets, 'rpc-only');
+    expect(await createPublicSnapshotHeldAssetCheck(store, rpcOnly)(asset!.ual)).toBe(false);
+    expect(await materializeVerifiedGraphScopedAsset({ store, asset: rpcOnly.authenticate(asset!.verified).asset })).toBe('applied');
+    expect(await labels()).toEqual([{ mode: '"rpc-only"', source: '"local-rpc"' }]);
+    // A rerun of the rpc-only job now finds it already present.
+    expect(await createPublicSnapshotHeldAssetCheck(store, observe(assets, 'rpc-only'))(asset!.ual)).toBe(true);
     // A core-cache job may skip a copy with independent evidence: skipping never rewrites it.
-    expect(await createPublicSnapshotHeldAssetCheck(independent, observe(assets, 'core-cache'))(assets[0]!.ual)).toBe(true);
+    expect(await createPublicSnapshotHeldAssetCheck(store, observe(assets, 'core-cache'))(asset!.ual)).toBe(true);
+    expect(await labels()).toEqual([{ mode: '"rpc-only"', source: '"local-rpc"' }]);
   });
 
   it('recognises a copy stored in a sub-graph', async () => {
