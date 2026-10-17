@@ -298,6 +298,12 @@ DELETE FROM rfc64_staged_catalog_heads_v1
 WHERE catalog_scope_digest = :scope
   AND author_address = :author;`,
 
+  listSwmAuthorHeads: `
+SELECT inventory_scope_digest, author_address, current_head_digest,
+       inventory_version_u64be, total_rows_u64be, rows_digest, signed_head_envelope
+FROM rfc64_swm_author_inventory_heads_v1
+ORDER BY inventory_scope_digest, author_address;`,
+
   getSwmAuthorHead: `
 SELECT current_head_digest, inventory_version_u64be, total_rows_u64be,
        rows_digest, signed_head_envelope, expected_head_digest,
@@ -445,6 +451,7 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   deleteAppliedHeadCas: 'rfc64.applied-head.cas-delete.v1',
   upsertStagedHead: 'rfc64.staged-head.upsert.v1',
   deleteStagedHead: 'rfc64.staged-head.delete.v1',
+  listSwmAuthorHeads: 'rfc64.swm-author-inventory.head.list.v1',
   getSwmAuthorHead: 'rfc64.swm-author-inventory.head.get.v1',
   getSwmAuthorRows: 'rfc64.swm-author-inventory.rows.get.v1',
   getSwmAuthorRow: 'rfc64.swm-author-inventory.row.get.v1',
@@ -479,6 +486,7 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'getAppliedHead',
   'listAppliedHeads',
   'getStagedHead',
+  'listSwmAuthorHeads',
   'getSwmAuthorHead',
   'getSwmAuthorRows',
   'getSwmAuthorRow',
