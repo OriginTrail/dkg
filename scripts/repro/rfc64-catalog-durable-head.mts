@@ -20,12 +20,10 @@ const selectedStage = process.argv[2];
 assert.ok(selectedStage === undefined || allStages.some((stage) => stage === selectedStage),
   'optional argument must be before-flush, before-cas or after-cas');
 const stages = allStages.filter((stage) => selectedStage === undefined || stage === selectedStage);
-const testName = 'persists exact SWM and VM before applied-head CAS through a store decorator';
 
 async function run(env: NodeJS.ProcessEnv): Promise<{ code: number | null; output: string }> {
   const child = spawn(process.execPath, [
-    resolve(repo, 'node_modules/vitest/vitest.mjs'), 'run', '--config', 'vitest.unit.config.ts',
-    'test/rfc64-public-catalog-native-gate1.integration.test.ts', '-t', testName,
+    resolve(repo, 'node_modules/vitest/vitest.mjs'), 'run', '--config', 'vitest.catalog-durability.config.ts',
     '--maxWorkers=1', '--no-file-parallelism',
   ], { cwd: resolve(repo, 'packages/agent'), env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
   let output = '';
