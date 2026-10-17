@@ -247,10 +247,16 @@ export function ensureCoreHostedDefinition(
     .catch((error: unknown) => {
       // A refresh cut short by the node's stop is not a failure to report.
       if (error instanceof Error && error.name === 'AbortError') return 'not-hosted' as const;
+      // A store or registry that failed this once: the next attempt is scheduled as after a miss.
+      const stopSignal = agent.node.stopSignal;
+      const delayMs = agent.subscribedContextGraphs.get(contextGraphId)?.coreHosted === true
+        ? scheduleRetry(agent, state, contextGraphId, stopSignal)
+        : undefined;
       agent.log.warn(
         createOperationContext('sync'),
         `Could not keep the definition of hosted context graph "${contextGraphId}": `
-        + `${error instanceof Error ? error.message : String(error)}`,
+        + `${error instanceof Error ? error.message : String(error)}`
+        + (delayMs === undefined ? '' : `; next attempt in ${Math.round(delayMs / 1000)} s`),
       );
       return 'not-found' as const;
     })
@@ -281,9 +287,15 @@ async function attemptCoreHostedDefinition(
     return 'held';
   }
   const owners = await ownerPeerIds(agent, state, contextGraphId, hosted.owner, stopSignal);
-  const fallback = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId })
-    .filter((peerId) => peerId !== agent.peerId && !owners.includes(peerId))
-    .slice(0, CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS);
+  // The node's selection returns up to its own cap, Cores first. Each attempt
+  // takes the next window of it, so over the retries every connected peer is
+  // asked, the Edges behind the Cores included (the owner may be one of them).
+  const fallback = rotatedWindow(
+    agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId })
+      .filter((peerId) => peerId !== agent.peerId && !owners.includes(peerId)),
+    CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS,
+    (state.retries.get(contextGraphId)?.attempt ?? -1) + 1,
+  );
   for (const peerId of [...owners, ...fallback]) {
     if (stopped(stopSignal)) return 'not-hosted';
     state.lastAttemptAt.set(contextGraphId, Date.now());
@@ -309,6 +321,14 @@ async function attemptCoreHostedDefinition(
     + (delayMs === undefined ? '' : `; next attempt in ${Math.round(delayMs / 1000)} s`),
   );
   return 'not-found';
+}
+
+/** `take` peers of `peers` starting at window `attempt`, wrapping around; all of them when they fit. */
+export function rotatedWindow(peers: readonly string[], take: number, attempt: number): string[] {
+  if (take <= 0) return [];
+  if (take >= peers.length) return [...peers];
+  const start = (attempt * take) % peers.length;
+  return Array.from({ length: take }, (_, i) => peers[(start + i) % peers.length]!);
 }
 
 /** Schedule the next attempt; returns its delay, or undefined when the node is stopping. */

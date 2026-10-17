@@ -596,8 +596,11 @@ describe('a Core keeps the owner\'s definition of a hosted registered public gra
     const stalledOwner = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
     await expect(ensureCoreHostedDefinition(stalledOwner.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
     stalledOwner.fetchSyncPages.mockImplementation(() => new Promise(() => undefined));
+    clock.mockReturnValue(now + 2 * (CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1));
     expect(await within(refreshCoreHostedDefinitionBeforeServing(stalledOwner.agent, contextGraphId, undefined, budgetMs)))
       .toBeLessThan(budgetMs * 10);
+    // Past the cooldown (the clock is), the hanging fetch was started and the request did not wait for it.
+    expect(stalledOwner.fetchSyncPages).toHaveBeenCalledTimes(2);
 
     // An attempt already running stalls: the request waits for it only within the budget.
     const stalledAttempt = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
@@ -613,6 +616,52 @@ describe('a Core keeps the owner\'s definition of a hosted registered public gra
       .toBeLessThan(budgetMs);
     clock.mockRestore();
     void attempt;
+  });
+  it('reaches every connected peer over its retries, the Edges behind the Cores included', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const coreIds = Array.from({ length: 6 }, (_, i) => `12D3KooWCore${String(i).padStart(44, '0')}`);
+    const otherEdge = OTHER_PEER_ID;
+    const peers = peersOf([
+      ...await Promise.all(coreIds.map(async (peerId) => [peerId, await peerNode()] as [string, PeerNode])),
+      [otherEdge, await peerNode()],
+      [OWNER_PEER_ID, await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)])],
+    ]);
+    // The selection lists the Cores first; the owner is not in the agent registry.
+    const selection = [...coreIds, otherEdge, OWNER_PEER_ID];
+    const core = coreNode(peers, { connected: selection, ownerNodes: [], seedPeers: selection });
+
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    expect(askedPeers(core.fetchSyncPages)).toEqual(coreIds.slice(0, 3));
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
+    expect(askedPeers(core.fetchSyncPages).slice(3)).toEqual(coreIds.slice(3, 6));
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[1]!);
+    expect(askedPeers(core.fetchSyncPages).slice(6)).toEqual([otherEdge, OWNER_PEER_ID]);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+  });
+
+  it('schedules the next attempt when a store read fails, and recovers on it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    const query = core.store.query.bind(core.store);
+    let failures = 1;
+    core.store.query = (async (...args: Parameters<typeof query>) => {
+      if (failures > 0) {
+        failures -= 1;
+        throw new Error('store unavailable');
+      }
+      return query(...args);
+    }) as typeof core.store.query;
+
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    expect(String(core.log.warn.mock.calls.at(-1)?.[1])).toMatch(/store unavailable; next attempt in 30 s/);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+    expect(core.fetchSyncPages).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
   });
 });
 
@@ -703,5 +752,39 @@ describe('a member that reaches a registered public graph only through Cores', (
     await unnamed.store.insert([...OWNER_DECLARATION]);
     await expect(unnamed.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toMatchObject({ registered: false });
     expect(askedPeers(unnamed.fetchSyncPages)).toEqual([OTHER_PEER_ID, SECOND_CORE_PEER_ID]);
+  });
+
+  it('reaches every connected peer over repeated lookups, and takes a complete registration over an incomplete local one', async () => {
+    const coreIds = Array.from({ length: 6 }, (_, i) => `12D3KooWCore${String(i).padStart(44, '0')}`);
+    const holder = OTHER_PEER_ID;
+    const peers = peersOf([
+      ...await Promise.all(coreIds.map(async (peerId) => [peerId, await peerNode([...OWNER_DECLARATION])] as [string, PeerNode])),
+      [holder, await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)])],
+    ]);
+    const member = memberNode(peers, { connected: [...coreIds, holder], owner: undefined });
+    await member.store.insert([...OWNER_DECLARATION]);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+
+    await expect(member.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toMatchObject({ registered: false });
+    expect(askedPeers(member.fetchSyncPages)).toEqual(coreIds.slice(0, 3));
+    clock.mockReturnValue(now + 31_000);
+    await expect(member.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toMatchObject({ registered: false });
+    expect(askedPeers(member.fetchSyncPages).slice(3)).toEqual(coreIds.slice(3, 6));
+    clock.mockReturnValue(now + 62_000);
+    await expect(member.agent.resolveSubGraphRegistration(contextGraphId, REPORTS)).resolves.toEqual({ registered: true });
+    expect(askedPeers(member.fetchSyncPages).slice(6, 7)).toEqual([holder]);
+
+    // An incomplete local row (type and name, no creator) is not a registration: the peer's complete one repairs it.
+    const incomplete = memberNode(peersOf([[holder, peers.get(holder)!]]), { connected: [holder], owner: undefined });
+    await incomplete.store.insert([
+      ...OWNER_DECLARATION,
+      { subject: `${contextGraphUri}/drafts`, predicate: DKG_ONTOLOGY.RDF_TYPE, object: 'http://dkg.io/ontology/SubGraph', graph: metaGraph },
+      { subject: `${contextGraphUri}/drafts`, predicate: NAME, object: '"drafts"', graph: metaGraph },
+    ]);
+    await peers.get(holder)!.store.insert(subGraphRegistration('drafts'));
+    await expect(hasSubGraphRegistration(incomplete.store, contextGraphId, 'drafts')).resolves.toBe(false);
+    await expect(incomplete.agent.resolveSubGraphRegistration(contextGraphId, 'drafts')).resolves.toEqual({ registered: true });
+    await expect(hasSubGraphRegistration(incomplete.store, contextGraphId, 'drafts')).resolves.toBe(true);
   });
 });
