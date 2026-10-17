@@ -751,8 +751,34 @@ describe('a Core keeps the owner\'s definition of a hosted registered public gra
     expect(performance.now() - startedAt).toBeLessThan(110);
     expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
     await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(false);
-    await pendingCoreHostedDefinitionRefresh(core.agent);
+    await pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId);
     await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+  });
+
+  it('shares one refresh between requests that arrive together, and with a background attempt', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    await owner.store.insert(subGraphRegistration(REPORTS));
+    const serve = core.fetchSyncPages.getMockImplementation()!;
+    core.fetchSyncPages.mockImplementation(async (...args) => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return serve(...args);
+    });
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+
+    // Three requests at once: one owner lookup, one fetch; the background attempt joins the same task.
+    await Promise.all([
+      refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId),
+      refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId),
+      refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId),
+      ensureCoreHostedDefinition(core.agent, contextGraphId, 'restored'),
+    ]);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
+    expect(core.surface.discovery.findAgents).toHaveBeenCalledTimes(2);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId)).toBeUndefined();
   });
 });
 

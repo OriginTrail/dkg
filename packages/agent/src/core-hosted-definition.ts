@@ -115,8 +115,6 @@ interface CoreHostedDefinitionState {
   readonly lastAttemptAt: Map<string, number>;
   /** The peer each graph's definition was last installed from. */
   readonly sources: Map<string, string>;
-  /** The latest refresh a serving request started (it may outlive the request's wait). */
-  serveRefresh?: Promise<unknown>;
 }
 
 const states = new WeakMap<object, CoreHostedDefinitionState>();
@@ -388,35 +386,48 @@ export async function refreshCoreHostedDefinitionBeforeServing(
   // One budget for the whole refresh, the owner lookup included: a slow
   // agent registry or owner must not hold a subscriber's request.
   const budget = AbortSignal.timeout(budgetMs);
-  const running = state.inFlight.get(contextGraphId);
-  const work = running ?? refreshFromConnectedOwner(agentObject, agent, state, contextGraphId, hosted.owner, budget);
-  if (running === undefined) state.serveRefresh = work;
+  // One task per graph, shared with the background attempts: requests that
+  // arrive together join it instead of each starting a refresh, and a request
+  // that stops waiting leaves it running.
+  let work = state.inFlight.get(contextGraphId);
+  if (work === undefined) {
+    const started: Promise<CoreHostedDefinitionOutcome> = refreshFromConnectedOwner(agent, state, contextGraphId, hosted.owner, budget)
+      .finally(() => {
+        if (state.inFlight.get(contextGraphId) === started) state.inFlight.delete(contextGraphId);
+      })
+      .then((outcome) => {
+        if (outcome !== 'missing') return outcome;
+        // No owner node connected and no definition held: a background attempt
+        // (owner lookup, connected peers, retries) takes the graph's slot now.
+        void ensureCoreHostedDefinition(agentObject, contextGraphId, 'serve');
+        return 'not-found';
+      });
+    state.inFlight.set(contextGraphId, started);
+    work = started;
+  }
   await withinBudget(work.catch(() => undefined), budget, signal);
 }
 
-/** The refresh a serving request started and may have stopped waiting for; for tests. */
-export function pendingCoreHostedDefinitionRefresh(agent: object): Promise<unknown> | undefined {
-  return states.get(agent)?.serveRefresh;
+/** The graph's running attempt or refresh, which a request may have stopped waiting for; for tests. */
+export function pendingCoreHostedDefinitionRefresh(agent: object, contextGraphId: string): Promise<unknown> | undefined {
+  return states.get(agent)?.inFlight.get(contextGraphId);
 }
 
+/** The serve-time refresh's outcome: as an attempt's, or `missing` when no owner node is connected and nothing is held. */
 async function refreshFromConnectedOwner(
-  agentObject: object,
   agent: CoreHostedDefinitionAgent,
   state: CoreHostedDefinitionState,
   contextGraphId: string,
   owner: string,
   budget: AbortSignal,
-): Promise<void> {
+): Promise<CoreHostedDefinitionOutcome | 'missing'> {
   const lastAttemptAt = state.lastAttemptAt.get(contextGraphId);
-  if (lastAttemptAt !== undefined && Date.now() - lastAttemptAt < CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS) return;
+  if (lastAttemptAt !== undefined && Date.now() - lastAttemptAt < CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS) return 'held';
   const connected = connectedPeerIds(agent);
   const ownerPeer = (await ownerPeerIds(agent, state, contextGraphId, owner, budget).catch(() => []))
     .find((peerId) => connected.has(peerId));
   if (ownerPeer === undefined) {
-    if (!(await holdsCoreHostedOwnerDefinition(agent.store, contextGraphId, owner).catch(() => true))) {
-      void ensureCoreHostedDefinition(agentObject, contextGraphId, 'serve');
-    }
-    return;
+    return await holdsCoreHostedOwnerDefinition(agent.store, contextGraphId, owner).catch(() => true) ? 'held' : 'missing';
   }
   state.lastAttemptAt.set(contextGraphId, Date.now());
   // The refresh runs to its own end (the metadata fetch's deadline), not the
@@ -424,10 +435,11 @@ async function refreshFromConnectedOwner(
   // installed, and the requests after the wait serve it. Only the wait is
   // bounded, by the caller.
   const refreshed = await refreshFromPeer(agent, contextGraphId, owner, ownerPeer, undefined).catch(() => false);
-  if (refreshed && await holdsCoreHostedOwnerDefinition(agent.store, contextGraphId, owner).catch(() => false)) {
-    state.sources.set(contextGraphId, ownerPeer);
-    cancelRetry(state, contextGraphId);
-  }
+  if (!refreshed) return 'not-found';
+  if (!(await holdsCoreHostedOwnerDefinition(agent.store, contextGraphId, owner).catch(() => false))) return 'not-found';
+  state.sources.set(contextGraphId, ownerPeer);
+  cancelRetry(state, contextGraphId);
+  return 'fetched';
 }
 
 /** `work`'s settlement, or the end of `budget` or `signal`, whichever comes first. */
