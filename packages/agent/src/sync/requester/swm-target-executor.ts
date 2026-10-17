@@ -439,7 +439,8 @@ async function getSharedMemorySubGraphAdmission(
   return { registered, excluded };
 }
 
-async function isKnownContextGraphUri(
+/** True when `contextGraphUri` is declared as a context graph of its own on this node. */
+export async function isKnownContextGraphUri(
   store: TripleStore,
   contextGraphUri: string,
 ): Promise<boolean> {

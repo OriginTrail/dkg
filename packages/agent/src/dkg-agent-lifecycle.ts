@@ -521,6 +521,7 @@ import {
   type SyncPeerResolution,
 } from './dkg-agent-cg-resolve.js';
 import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
+import { ensureCoreHostedDefinition, refreshCoreHostedDefinitionBeforeServing } from './core-hosted-definition.js';
 import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
 import { projectDormantContextGraphIdentities } from './context-graph-dormant-identity.js';
@@ -2547,6 +2548,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // reversible at runtime (no restart).
       shouldWithholdDurableMeta: (contextGraphId) =>
         shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
+      // A Core refreshes the owner's definition of a hosted graph before it serves it.
+      beforeServingDurableMeta: (contextGraphId, signal) =>
+        refreshCoreHostedDefinitionBeforeServing(this, contextGraphId, signal),
       servingWithheld: (contextGraphId) => this.contextGraphServingWithheld(contextGraphId),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logInfo: (ctx, message) => this.log.info(ctx, message),
@@ -9445,6 +9449,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               }
             : {}),
         });
+        // A restored hosted graph gets the owner's definition back (or keeps it current).
+        if (row.coreHosted) void ensureCoreHostedDefinition(this, row.id, 'restored');
         if (
           !row.coreHosted
           && cap > 0

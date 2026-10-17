@@ -131,7 +131,9 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
+  hasSubGraphRegistration, type UnregisteredSubGraphResolution,
 } from '@origintrail-official/dkg-publisher';
+import { resolveUnregisteredSubGraphFromPeers } from './peer-sub-graph-registration.js';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
@@ -2341,6 +2343,15 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     description?: string;
   }>> {
     return (await this.getCgMeta(contextGraphId)).subGraphs;
+  }
+
+  /**
+   * Whether a write may go into `subGraphName`: registered here, or found and
+   * registered by asking the graph's owner and connected peers (#3293).
+   */
+  async resolveSubGraphRegistration(this: DKGAgent, contextGraphId: string, subGraphName: string): Promise<UnregisteredSubGraphResolution> {
+    if (await hasSubGraphRegistration(this.store, contextGraphId, subGraphName)) return { registered: true };
+    return resolveUnregisteredSubGraphFromPeers(this, contextGraphId, subGraphName);
   }
 
   /**

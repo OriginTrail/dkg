@@ -119,6 +119,12 @@ export interface QueryOptions {
   maxResponseBytes?: number;
   /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
   maxLiteralHydrationBytes?: number;
+  /**
+   * Named graphs the query must not read: each IRI and every graph below it. The
+   * query runs over the default graph and every other named graph, replacing any
+   * dataset it names; a store that cannot restrict its dataset refuses it.
+   */
+  withheldGraphRoots?: readonly string[];
 }
 
 export type TripleStoreQueryOptions = QueryOptions;

@@ -1574,6 +1574,9 @@ export class DKGAgent extends DKGAgentBase {
       kaAllocator: config.kaNumberAllocator,
       // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
       provenanceEvents: config.metadataProvenanceEvents,
+      // A member writes into a sub-graph the graph's owner registered (#3293).
+      resolveUnregisteredSubGraph: async (contextGraphId, subGraphName) =>
+        await agentRef?.resolveSubGraphRegistration(contextGraphId, subGraphName) ?? { registered: false },
       resolveDurableRootPromotionAtomicCompanion: Object.assign((
         input: Readonly<DurableRootPromotionIdentity>,
       ) => {

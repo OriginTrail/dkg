@@ -132,6 +132,8 @@ interface RegisterSyncHandlerParams {
    * caller reads `process.env` fresh per call, keeping the switch runtime-hot.
    */
   shouldWithholdDurableMeta?: (contextGraphId: string) => boolean;
+  /** Awaited before the first page of a durable `_meta` snapshot is read (a Core refreshes a hosted graph's definition). Must not throw. */
+  beforeServingDurableMeta?: (contextGraphId: string, signal?: AbortSignal) => Promise<void>;
   /**
    * Return `true` while `contextGraphId` must not be served in any phase yet
    * (production: `ontology` until the startup metadata relocation finishes).
@@ -859,6 +861,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeA
             `Sync responder withholding durable meta for "${contextGraphId}" (serve-skip policy)`,
           );
         } else {
+          if (offset === 0 && assetUals === undefined) await params.beforeServingDurableMeta?.(contextGraphId, signal);
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(
             'Durable meta',
