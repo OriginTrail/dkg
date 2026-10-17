@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { encodeAccessResponse, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { ACCESS_ERROR_CODES, accessError, isAccessError } from '../src/access-errors.js';
 import { AccessClient, type AccessSendSurface } from '../src/access-client.js';
 
 const UAL = 'did:dkg:evm:31337/0x1111111111111111111111111111111111111111/0';
@@ -10,6 +11,16 @@ async function client(send: NonNullable<AccessSendSurface['sendRequestOwned']>) 
 }
 
 describe('caller-owned private access bounds', () => {
+  it('recognizes declared cross-package failures and rejects unknown codes', () => {
+    for (const code of ACCESS_ERROR_CODES) {
+      expect(isAccessError(accessError(code, 'local detail'))).toBe(true);
+      expect(isAccessError(Object.assign(new Error('other package'), { code }))).toBe(true);
+      expect(isAccessError({ code })).toBe(true);
+    }
+    for (const error of [null, new Error('ordinary'), Object.assign(new Error('typo'), { code: 'ACCESS_TIMOUT' })]) {
+      expect(isAccessError(error)).toBe(false);
+    }
+  });
   it('does not send an already cancelled request', async () => {
     let sends = 0;
     const access = await client(async () => { sends++; return result(new Uint8Array()); });

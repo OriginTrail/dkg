@@ -17,3 +17,15 @@ if (response.granted) {
 const missingRoot: PrivateAccessResponse = { granted: true, quads: [], storedInGraph: false,
   verification: { kind: 'peer-root-self-check', matches: true, chainAnchored: false } };
 void missingRoot;
+
+import { accessError, isAccessError, type AccessErrorCode } from '@origintrail-official/dkg-publisher';
+// @ts-expect-error Failure producers must use a declared code.
+accessError('ACCESS_TIMOUT', 'typo');
+declare const unknownFailure: unknown;
+if (isAccessError(unknownFailure)) {
+  const knownCode: AccessErrorCode = unknownFailure.code;
+  void knownCode;
+}
+// @ts-expect-error Consumers must map every shared failure, including deadlines.
+const incompleteStatuses: Record<AccessErrorCode, number> = { ACCESS_UNAVAILABLE: 503 };
+void incompleteStatuses;

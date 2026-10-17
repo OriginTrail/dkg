@@ -8,6 +8,7 @@ import {
   type Ed25519Keypair,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { accessError } from './access-errors.js';
 import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 
@@ -89,9 +90,7 @@ export class AccessClient {
       || maxResponseBytes !== undefined || maxQuads !== undefined;
     const sendOwned = requestOwned ? this.messenger.sendRequestOwned?.bind(this.messenger) : undefined;
     if (requestOwned && !sendOwned) {
-      throw Object.assign(new Error('Bounded private access requires sendRequestOwned transport'), {
-        code: 'ACCESS_REQUEST_OWNED_REQUIRED',
-      });
+      throw accessError('ACCESS_REQUEST_OWNED_REQUIRED', 'Bounded private access requires sendRequestOwned transport');
     }
     const message = new TextEncoder().encode(
       kaUal + toHex(paymentProof),
@@ -116,9 +115,7 @@ export class AccessClient {
         : this.messenger.sendReliable(publisherPeerId, PROTOCOL_ACCESS, requestData), signal);
     } catch (error) {
       if (error instanceof ProtocolReadLimitError) {
-        throw Object.assign(new Error('Private access response exceeds byte limit', { cause: error }), {
-          code: 'ACCESS_RESPONSE_TOO_LARGE',
-        });
+        throw accessError('ACCESS_RESPONSE_TOO_LARGE', 'Private access response exceeds byte limit', { cause: error });
       }
       throw error;
     }
@@ -126,7 +123,7 @@ export class AccessClient {
     if (!sendResult) throw new Error('Private access cancelled');
 
     if (!sendResult.delivered) {
-      if (requestOwned) throw Object.assign(new Error('Private access transport is busy'), { code: 'ACCESS_UNAVAILABLE' });
+      if (requestOwned) throw accessError('ACCESS_UNAVAILABLE', 'Private access transport is busy');
       // Access is synchronous-by-design — surface queued as a
       // rejection so the caller can retry with a fresh request rather
       // than waiting for a background outbox flush. The substrate
@@ -140,7 +137,7 @@ export class AccessClient {
     }
 
     if (maxResponseBytes !== undefined && sendResult.response.byteLength > maxResponseBytes) {
-      throw Object.assign(new Error('Private access response exceeds byte limit'), { code: 'ACCESS_RESPONSE_TOO_LARGE' });
+      throw accessError('ACCESS_RESPONSE_TOO_LARGE', 'Private access response exceeds byte limit');
     }
     const response = decodeAccessResponse(sendResult.response);
 
@@ -156,7 +153,7 @@ export class AccessClient {
     const nquadsStr = new TextDecoder().decode(response.nquads);
     const quads = parseSimpleNQuads(nquadsStr);
     if (maxQuads !== undefined && quads.length > maxQuads) {
-      throw Object.assign(new Error('Private access response exceeds quad limit'), { code: 'ACCESS_RESPONSE_TOO_LARGE' });
+      throw accessError('ACCESS_RESPONSE_TOO_LARGE', 'Private access response exceeds quad limit');
     }
 
     // Verify merkle root of received private triples

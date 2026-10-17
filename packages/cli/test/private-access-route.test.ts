@@ -76,14 +76,31 @@ describe('operator-owned private access HTTP route', () => {
   it.each([
     ['ACCESS_INTEGRITY_FAILED', 502], ['ACCESS_RESPONSE_TOO_LARGE', 413],
     ['ACCESS_INVALID_REQUEST', 400], ['ACCESS_TIMEOUT', 504],
+    ['ACCESS_BUSY', 429], ['ACCESS_UNAVAILABLE', 503], ['ACCESS_REQUEST_OWNED_REQUIRED', 503],
   ])('maps %s without returning peer payload', async (code, status) => {
     const f = fixture();
     f.requestPrivateAccess.mockRejectedValue(Object.assign(new Error('untrusted remote detail'), { code }));
     await handlePrivateAccessRoutes(f.ctx);
     expect(f.res.statusCode).toBe(status);
+    expect(JSON.parse(f.res.body).code).toBe(code === 'ACCESS_REQUEST_OWNED_REQUIRED' ? 'ACCESS_UNAVAILABLE' : code);
     expect(f.res.body).not.toContain('untrusted remote detail');
     expect(JSON.parse(f.res.body)).not.toHaveProperty('quads');
   });
+  it('retains the structured known-code error boundary', async () => {
+    const f = fixture();
+    f.requestPrivateAccess.mockRejectedValue({ code: 'ACCESS_BUSY', detail: 'private peer detail' });
+    await handlePrivateAccessRoutes(f.ctx);
+    expect(f.res.statusCode).toBe(429);
+    expect(JSON.parse(f.res.body)).toEqual({ code: 'ACCESS_BUSY', error: 'A private access request is already running' });
+  });
+  it.each([new Error('private peer detail'), Object.assign(new Error('private peer detail'), { code: 'ACCESS_TIMOUT' }), null])
+    ('keeps unknown failures sanitized: %j', async error => {
+      const f = fixture();
+      f.requestPrivateAccess.mockRejectedValue(error);
+      await handlePrivateAccessRoutes(f.ctx);
+      expect(f.res.statusCode).toBe(503);
+      expect(JSON.parse(f.res.body)).toEqual({ code: 'ACCESS_UNAVAILABLE', error: 'Private access is unavailable' });
+    });
   it('returns HTTP 413 when the real router rejects an oversized Messenger response early', async () => {
     const f = fixture();
     let yielded = 0;

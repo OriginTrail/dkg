@@ -4,7 +4,7 @@ import {
   resolveWithinAbort,
   startRequestAbortLifecycle,
 } from '@origintrail-official/dkg-core';
-import { AccessClient } from '@origintrail-official/dkg-publisher';
+import { AccessClient, accessError } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from './dkg-agent.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -27,10 +27,6 @@ const TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_QUADS = 10_000;
 
-function failure(code: string, message: string): Error & { code: string } {
-  return Object.assign(new Error(message), { code });
-}
-
 /** Manual bounded read; peer policy is enforced by the publisher's AccessHandler. */
 export async function requestOwnedPrivateAccess(
   owner: Owner,
@@ -47,9 +43,9 @@ export async function requestOwnedPrivateAccess(
     publisherPeerId = peerIdFromString(input.publisherPeerId).toString();
     kaUal = parseDeterministicKnowledgeAssetUal(input.kaUal).ual;
   } catch {
-    throw failure('ACCESS_INVALID_REQUEST', 'A valid publisher peer ID and current KA UAL are required');
+    throw accessError('ACCESS_INVALID_REQUEST', 'A valid publisher peer ID and current KA UAL are required');
   }
-  if (running.has(owner)) throw failure('ACCESS_BUSY', 'A private access request is already running');
+  if (running.has(owner)) throw accessError('ACCESS_BUSY', 'A private access request is already running');
   const lifecycle = startRequestAbortLifecycle(TIMEOUT_MS, [options.signal, owner.node.stopSignal]);
   running.add(owner);
   try {
@@ -59,12 +55,12 @@ export async function requestOwnedPrivateAccess(
       maxResponseBytes: MAX_RESPONSE_BYTES, maxQuads: MAX_QUADS,
     }), lifecycle.signal);
     lifecycle.signal.throwIfAborted();
-    if (!result) throw failure('ACCESS_UNAVAILABLE', 'Private access did not complete');
+    if (!result) throw accessError('ACCESS_UNAVAILABLE', 'Private access did not complete');
     if (!result.granted) return {
       granted: false, quads: [], storedInGraph: false,
       verification: { kind: 'not-checked', matches: false, chainAnchored: false },
     };
-    if (!result.verified) throw failure('ACCESS_INTEGRITY_FAILED', 'The peer payload does not match its supplied root');
+    if (!result.verified) throw accessError('ACCESS_INTEGRITY_FAILED', 'The peer payload does not match its supplied root');
     return {
       granted: true, quads: result.quads, storedInGraph: false,
       privateMerkleRoot: `0x${Buffer.from(result.privateMerkleRoot!).toString('hex')}`,
@@ -72,8 +68,8 @@ export async function requestOwnedPrivateAccess(
     };
   } catch (error) {
     if (options.signal?.aborted) throw options.signal.reason;
-    if (lifecycle.deadline.aborted) throw failure('ACCESS_TIMEOUT', 'Private access timed out');
-    if (lifecycle.signal.aborted) throw failure('ACCESS_UNAVAILABLE', 'Node is stopping');
+    if (lifecycle.deadline.aborted) throw accessError('ACCESS_TIMEOUT', 'Private access timed out');
+    if (lifecycle.signal.aborted) throw accessError('ACCESS_UNAVAILABLE', 'Node is stopping');
     throw error;
   } finally {
     lifecycle.release();
@@ -84,7 +80,7 @@ export async function requestOwnedPrivateAccess(
 export class PrivateAccessMethods extends DKGAgentBase {
   /** Explicit private read; a peer-root self-check is not chain authentication. */
   async requestPrivateAccess(this: DKGAgent, input: PrivateAccessRequest, options: { signal?: AbortSignal } = {}) {
-    if (!this.started) throw Object.assign(new Error('Node is not started'), { code: 'ACCESS_UNAVAILABLE' });
+    if (!this.started) throw accessError('ACCESS_UNAVAILABLE', 'Node is not started');
     return requestOwnedPrivateAccess(this, input, options);
   }
 }
