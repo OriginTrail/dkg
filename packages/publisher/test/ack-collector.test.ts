@@ -122,6 +122,32 @@ describe('ACKCollector', () => {
     }
   });
 
+  it.each(['publish', 'update'] as const)('reports discovered unattempted candidates on early %s quorum failure', async operation => {
+    const events: unknown[] = [];
+    let sends = 0;
+    const collector = new ACKCollector({
+      gossipPublish: async () => {},
+      sendP2P: async () => { sends++; throw new Error('must not dial an impossible quorum'); },
+      getConnectedCorePeers: () => ['candidate-a', 'candidate-b'],
+    });
+    const onDiagnostic = (event: unknown) => { events.push(event); };
+    const attempt = operation === 'publish'
+      ? collector.collect({ merkleRoot, contextGraphId: testCGId, contextGraphIdStr: testCGIdStr,
+          publisherPeerId: 'publisher', publicByteSize: 100n, isPrivate: false, kaCount: 1,
+          rootEntities: ['urn:a'], chainId: TEST_CHAIN_ID, kav10Address: TEST_KAV10_ADDR,
+          merkleLeafCount, ackMode: { kind: 'public' }, requiredACKs: 3, onDiagnostic })
+      : collector.collectUpdate({ kaId: 1n, contextGraphId: testCGId, preUpdateMerkleRootCount: 1n,
+          newMerkleRoot: merkleRoot, newByteSize: 100n, newTokenAmount: 1n, mintAmount: 0n,
+          burnTokenIds: [], newMerkleLeafCount: merkleLeafCount, chainId: TEST_CHAIN_ID,
+          kav10Address: TEST_KAV10_ADDR, publisherPeerId: 'publisher', requiredACKs: 3, onDiagnostic });
+    await expect(attempt).rejects.toMatchObject({ collected: 0, required: 3, dialled: 2,
+      peerOutcomes: [ { peerId: 'candidate-a', reason: 'pool_below_quorum' },
+        { peerId: 'candidate-b', reason: 'pool_below_quorum' } ] });
+    expect(sends).toBe(0);
+    expect(events).toEqual([{ kind: 'outcomes', counts: { total: 2, ack: 0,
+      declined: 0, invalid: 0, unsupported: 0, transport: 0, pending: 2 } }]);
+  });
+
   it('surfaces async publish and update candidate-provider failures as typed quorum errors', async () => {
     const candidateFailure = new Error('admission preflight unavailable');
     const deps: ACKCollectorDeps = {

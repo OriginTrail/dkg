@@ -24,7 +24,9 @@ contains no peer IDs, graph IDs, payloads, credentials, or peer-supplied text.
 - `backoffs`, `backoffMs`, `transportBackoffs`, `transientDeclineBackoffs`:
   completed retry sleeps, their summed durations and the two retry causes.
 - `candidates`: bounded terminal counts (ACK, decline, invalid, unsupported,
-  transport failure, pending) when the collector resolves or rejects.
+  transport failure, pending) when the collector resolves or rejects. A discovered
+  pool below quorum retains its actual total; unattempted candidates are pending.
+  Counts come from typed peer states, independently of operator reason strings.
 - `outcome`: succeeded, failed, cancelled or preflight_failed.
 
 A high gate wait behind another round's long collector/backoff time identifies

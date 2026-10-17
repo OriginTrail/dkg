@@ -8,10 +8,25 @@ type PeerStatus =
   | { kind: 'protocol-unsupported'; message: string }
   | { kind: 'transport-error'; message: string };
 
+export interface ACKCandidateCounts {
+  total: number;
+  ack: number;
+  declined: number;
+  invalid: number;
+  unsupported: number;
+  transport: number;
+  pending: number;
+}
+
+const counterByStatus = {
+  ack: 'ack', 'storage-decline': 'declined', 'ack-validation': 'invalid',
+  'protocol-unsupported': 'unsupported', 'transport-error': 'transport',
+} satisfies Record<PeerStatus['kind'], Exclude<keyof ACKCandidateCounts, 'total' | 'pending'>>;
+
 /**
  * Owns the terminal status for every peer participating in one ACK round.
  * Recording a new status replaces stale evidence from an earlier attempt, and
- * the two projections keep structured telemetry and legacy operator text in
+ * its projections keep structured telemetry and legacy operator text in
  * sync as new status categories are added.
  */
 export class PeerStatusLedger {
@@ -39,6 +54,18 @@ export class PeerStatusLedger {
 
   clear(peerId: string): void {
     this.statuses.delete(peerId);
+  }
+
+  /** Aggregate the frozen candidate scope directly from typed terminal states. */
+  counts(corePeers: readonly string[]): ACKCandidateCounts {
+    const counts: ACKCandidateCounts = { total: corePeers.length, ack: 0, declined: 0,
+      invalid: 0, unsupported: 0, transport: 0, pending: 0 };
+    for (const peerId of corePeers) {
+      const status = this.statuses.get(peerId);
+      if (status) counts[counterByStatus[status.kind]]++;
+      else counts.pending++;
+    }
+    return counts;
   }
 
   snapshot(corePeers: string[]): PeerOutcome[] {

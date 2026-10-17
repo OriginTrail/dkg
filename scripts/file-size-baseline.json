@@ -128,7 +128,7 @@
     "packages/node-ui/src/ui/views/project/components/subgraph.tsx": 1808,
     "packages/node-ui/src/ui/views/project/helpers.ts": 895,
     "packages/node-ui/src/ui/views/ProjectView.tsx": 1010,
-    "packages/publisher/src/ack-collector.ts": 1239,
+    "packages/publisher/src/ack-collector.ts": 1206,
     "packages/publisher/src/async-lift-claim-session.ts": 1027,
     "packages/publisher/src/async-lift-publisher-impl.ts": 3821,
     "packages/publisher/src/async-lift-publisher-types.ts": 913,

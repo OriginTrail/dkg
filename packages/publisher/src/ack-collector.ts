@@ -24,7 +24,7 @@ import {
   type SubscriptionSource,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import { QuorumUnmetError, type PeerOutcome } from './ack-errors.js';
+import { QuorumUnmetError, assertACKCandidateQuorum, type PeerOutcome } from './ack-errors.js';
 import type { V10ACKMode } from './publisher.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
 import { PeerStatusLedger } from './ack-peer-status-ledger.js';
@@ -513,28 +513,10 @@ export class ACKCollector {
     log(`[ACKCollector] Collecting ACKs via direct P2P (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
 
     const corePeers = await this.resolveConnectedCorePeers(ackProtocolId, REQUIRED_ACKS);
-    if (corePeers.length === 0) {
-      // Pre-dial impossibility — wrap in the typed surface but preserve
-      // the legacy `ACK collection failed: no connected core peers` text
-      // so log greps + existing tests keep matching.
-      throw new QuorumUnmetError({
-        collected: 0,
-        required: REQUIRED_ACKS,
-        dialled: 0,
-        peerOutcomes: [],
-        legacyMessage: 'ACK collection failed: no connected core peers',
-      });
-    }
     if (corePeers.length < REQUIRED_ACKS) {
-      throw new QuorumUnmetError({
-        collected: 0,
-        required: REQUIRED_ACKS,
-        dialled: corePeers.length,
-        peerOutcomes: corePeers.map((peerId) => ({ peerId, reason: 'pool_below_quorum' })),
-        legacyMessage:
-          `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
-      });
+      new ACKRoundDiagnostics(params.onDiagnostic).finish(new PeerStatusLedger().counts(corePeers));
     }
+    assertACKCandidateQuorum(corePeers, REQUIRED_ACKS);
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
     const catalogRoot = catalogCommitment?.catalogRoot
@@ -687,25 +669,10 @@ export class ACKCollector {
       ? PROTOCOL_STORAGE_UPDATE_ACK_V2
       : PROTOCOL_STORAGE_UPDATE_ACK;
     const corePeers = await this.resolveConnectedCorePeers(updateAckProtocolId, REQUIRED_ACKS);
-    if (corePeers.length === 0) {
-      throw new QuorumUnmetError({
-        collected: 0,
-        required: REQUIRED_ACKS,
-        dialled: 0,
-        peerOutcomes: [],
-        legacyMessage: 'ACK collection failed: no connected core peers',
-      });
-    }
     if (corePeers.length < REQUIRED_ACKS) {
-      throw new QuorumUnmetError({
-        collected: 0,
-        required: REQUIRED_ACKS,
-        dialled: corePeers.length,
-        peerOutcomes: corePeers.map((peerId) => ({ peerId, reason: 'pool_below_quorum' })),
-        legacyMessage:
-          `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
-      });
+      new ACKRoundDiagnostics(params.onDiagnostic).finish(new PeerStatusLedger().counts(corePeers));
     }
+    assertACKCandidateQuorum(corePeers, REQUIRED_ACKS);
     log(`[ACKCollector] Requesting UPDATE ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
     // 13-field UPDATE ACK digest — byte-identical to what the peer signs
@@ -1187,7 +1154,7 @@ export class ACKCollector {
       // any `requestACK` loops still sleeping between retries to abandon on
       // wake rather than keep dialing after the caller has its answer.
       roundSettled = true;
-      diagnostics.finish(snapshotPeerOutcomes());
+      diagnostics.finish(peerStatuses.counts(corePeers));
     }
 
     if (collected.length < REQUIRED_ACKS) {
