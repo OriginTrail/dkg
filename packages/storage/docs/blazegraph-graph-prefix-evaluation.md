@@ -15,12 +15,15 @@ BLAZEGRAPH_TEST_URL=http://127.0.0.1:9999/bigdata/namespace/kb/sparql \
 BLAZEGRAPH_TEST_URL=http://127.0.0.1:9999/bigdata/namespace/kb/sparql \
   pnpm --filter @origintrail-official/dkg-storage exec vitest run \
   test/blazegraph-prefix.test.ts test/blazegraph-prefix.integration.test.ts
+BLAZEGRAPH_TEST_URL=http://127.0.0.1:9999/bigdata/namespace/kb/sparql \
+  pnpm --filter @origintrail-official/dkg-storage exec vitest run \
+  --config vitest.blazegraph-prefix.config.ts
 ```
 
 Each run creates and finally removes its own namespace. The benchmark refuses
 non-loopback endpoints. No shared graph inventory or persistent cache is used.
-The differential tests always run against a real Oxigraph HTTP oracle; setting
-`BLAZEGRAPH_TEST_URL` additionally runs them against real Blazegraph.
+The differential tests always run against a real Oxigraph HTTP oracle; the dedicated live config runs the same checks against real Blazegraph and
+fails if `BLAZEGRAPH_TEST_URL` is missing. CI runs it in `tornado-blazegraph`.
 
 ## Measured setup and results
 
