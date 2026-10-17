@@ -11,13 +11,14 @@ interface CompletedLegacyHost {
   store: TripleStore;
   privateStore: PrivateContentStore;
   scopedQuads(graph: string): Promise<Quad[]>;
+  cleanupVm(wmGraph: string): Promise<void>;
   hasMarker(): Promise<boolean>;
   hasTail(scope: GraphKnowledgeAssetScope, operationId: string): Promise<boolean>;
   validatePayload(publicQuads: Quad[], privateQuads: Quad[]): Promise<unknown>;
 }
 
 /** A completed pre-intent operation is readable, but can never authorize replay.
- * Called under the lifecycle lock. Every check is read-only, including refusal.
+ * Called under the lifecycle lock. Exact VM validation precedes stale WM cleanup.
  */
 export async function verifyCompletedLegacyPromote(
   host: CompletedLegacyHost, contextGraphId: string, name: string, author: string,
@@ -44,5 +45,6 @@ export async function verifyCompletedLegacyPromote(
   const payload = (quads: Quad[]) => quads.filter(q => !isReservedSubject(q.subject) && !isTrustLevelQuad(q));
   await host.validatePayload(payload(await host.scopedQuads(source)),
     payload(await host.privateStore.getKnowledgeAssetPrivateTriples(contextGraphId, scope, subGraphName)));
+  if (isVm) await host.cleanupVm(knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.WorkingMemory, scope, subGraphName));
   return { promotedCount: 0, promotedAllRoots: false, ...(isSwm ? { shareOperationId: operationId } : {}) };
 }

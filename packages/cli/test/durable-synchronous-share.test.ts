@@ -449,8 +449,8 @@ describe('durable synchronous share ownership', () => {
     await store.close();
   });
 
-  it('keeps a complete pre-intent VM asset a read-only no-op', async () => {
-    const { store, agent, finalized } = await setup();
+  it.each([false, true])('finishes a pre-intent VM no-op with leftover WM=%s', async leftover => {
+    const { store, agent, publisher, finalized } = await setup();
     daemonState.promoteWorkerAvailable = true;
     await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR });
     const vm = finalized.sharedGraphUri.replace('/_shared_memory/', '/_verifiable_memory/');
@@ -458,13 +458,36 @@ describe('durable synchronous share ownership', () => {
     await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/promoteOperationIntent' });
     await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer' });
     await store.insert([{ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"VM"' }]);
+    await publisher.clearSwmShareComplete(CG, NAME, AUTHOR);
+    if (leftover) await store.insert(finalized.publicQuads.map(q => ({ ...q, graph: finalized.graphUri })));
     const admission = vi.spyOn(agent.promoteQueue, 'enqueueAndClaim');
     const insert = vi.spyOn(store, 'insert');
+    const drop = vi.spyOn(store, 'dropGraph');
+    const remove = vi.spyOn(store, 'deleteByPattern');
     expect(await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR })).toEqual({ promotedCount: 0, sealed: true, publishReady: false });
     expect(admission).not.toHaveBeenCalled();
     expect(insert).not.toHaveBeenCalled();
-    await store.insert([{ graph: vm, subject: 'urn:extra', predicate: 'urn:p', object: '"corrupt"' }]);
+    expect(await store.countQuads(finalized.graphUri)).toBe(0);
+    if (!leftover) { expect(drop).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled(); }
+    expect(await agent.assertion.pullFrom(CG, NAME, 'vm', { agentAddress: AUTHOR })).toMatchObject({ seeded: 1 });
+    await store.close();
+  });
+
+  it.each(['invalid-vm', 'cleanup-failure'])('refuses a legacy VM success before safe cleanup: %s', async failure => {
+    const { store, agent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR });
+    const vm = finalized.sharedGraphUri.replace('/_shared_memory/', '/_verifiable_memory/');
+    await store.insert(finalized.publicQuads.map(q => ({ ...q, graph: vm })));
+    await store.insert(finalized.publicQuads.map(q => ({ ...q, graph: finalized.graphUri })));
+    await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/promoteOperationIntent' });
+    await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer' });
+    await store.insert([{ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"VM"' }]);
+    if (failure === 'cleanup-failure') vi.spyOn(store, 'dropGraph').mockRejectedValueOnce(new Error('cleanup unavailable'));
+    else await store.insert([{ graph: vm, subject: 'urn:extra', predicate: 'urn:p', object: '"corrupt"' }]);
     await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR })).rejects.toThrow();
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
+    expect(await agent.promoteQueue.list({})).toHaveLength(0);
     await store.close();
   });
 

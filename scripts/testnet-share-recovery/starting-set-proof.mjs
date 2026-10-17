@@ -1,23 +1,26 @@
 import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
+import { indexAuthoritativeMetadata } from './authoritative-metadata.mjs';
 import { verifyIdentityTuples } from './identity-tuples.mjs';
 import fs from 'node:fs';
 import { parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1 } from '../../packages/core/dist/index.js';
 const arm = process.argv[2], dir = `.tmp/2963/evidence/${arm}`;
 const rdf = JSON.parse(fs.readFileSync(`${dir}/pre-workload/rdf.json`)).results.bindings;
-const groups = new Map();
+const campaign = loadCampaign(arm), counts = campaignCounts(campaign), names = campaign.cohorts.initial;
+const metadataGraph = `did:dkg:context-graph:${campaign.contextGraphId}/_meta`;
+const groups = indexAuthoritativeMetadata(rdf, metadataGraph);
+const prepared = [...names, ...campaign.cohorts.shares];
+const expectedSubjects = new Set(prepared.map(name => `did:dkg:context-graph:${campaign.contextGraphId}/assertion/${campaign.author}/${name}`));
 const term = t => t.type === 'uri' ? t.value : JSON.stringify(t.value) + (t.datatype ? `^^<${t.datatype}>` : t['xml:lang'] ? '@' + t['xml:lang'] : '');
-for (const r of rdf) {
-  if (!r.s.value.includes('/assertion/')) continue;
-  if (!groups.has(r.s.value)) groups.set(r.s.value, []);
-  groups.get(r.s.value).push({subject:r.s.value,predicate:r.p.value,object:term(r.o),graph:r.g.value});
-}
 const seals = new Map();
-for (const [subject, quads] of groups) {
-  const parsed = parseAssertionSealQuads(quads, subject); if (!parsed) continue;
+for (const [subject, rows] of groups) {
+  if (!subject.includes('/assertion/')) continue;
+  if (!expectedSubjects.has(subject) || rows.some(r => r.s.type !== 'uri' || r.p.type !== 'uri')) throw Error('Unexpected prepared seal subject');
+  const parsed = parseAssertionSealQuads(rows.map(r => ({subject:r.s.value,predicate:r.p.value,object:term(r.o),graph:r.g.value})), subject);
+  if (!parsed) throw Error(`Invalid prepared seal: ${subject}`);
   const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(parsed);
   seals.set(subject.split('/').at(-1), {seal,digest:computeCanonicalGraphScopedAuthorSealDigestV1(seal)});
 }
-const campaign = loadCampaign(arm), counts = campaignCounts(campaign), names = campaign.cohorts.initial;
+for (const name of prepared) if (!seals.has(name)) throw Error(`Missing prepared seal: ${name}`);
 const inventory = JSON.parse(fs.readFileSync(`${dir}/pre-workload/inventory.json`)).swm;
 const catalog = JSON.parse(fs.readFileSync(`${dir}/pre-workload/catalogs.json`)).flatMap(c=>c.rows);
 const expected = names.map(name => {

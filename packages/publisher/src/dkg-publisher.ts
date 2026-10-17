@@ -8393,6 +8393,11 @@ export class DKGPublisher implements Publisher {
     seal: AssertionSeal, subGraphName?: string, operationId?: string): Promise<AssertionPromoteResult | null> {
     return verifyCompletedLegacyPromote({ store: this.store, privateStore: this.privateStore,
       scopedQuads: graph => this.assertionScopedQuads(graph),
+      cleanupVm: async graph => {
+        if ((await this.assertionScopedQuads(graph)).length) await this.dropAssertionScopedGraphs(graph);
+        if (await this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName))
+          await this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName);
+      },
       hasMarker: () => this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName),
       hasTail: (scope, id) => this.hasDurableAssertionPromoteTail(contextGraphId, id, scope.ual, scope.assertionVersion, subGraphName),
       validatePayload: async (publicQuads, privateQuads) => {
@@ -8552,13 +8557,6 @@ export class DKGPublisher implements Publisher {
       // Validate the exact VM payload before accepting the stale retry as a no-op.
       const completed = await this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName);
       if (!completed) throw new Error('Cannot verify completed VM promotion');
-      // A legacy marker-before-cleanup promotion may leave this exact WM
-      // family behind after publish. VM has just been seal-verified, so retire
-      // only that stale copy under the lifecycle lock before reporting success.
-      // Propagate cleanup errors: proven non-started drops retry, while typed
-      // indeterminate drops remain terminal under the existing storage contract.
-      await this.dropAssertionScopedGraphs(graphUri);
-      await maintainMarker(false);
       return { promotedCount: 0, promotedAllRoots: false };
     }
     if (assertionQuads.length === 0) {

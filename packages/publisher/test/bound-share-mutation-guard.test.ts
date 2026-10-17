@@ -1,7 +1,7 @@
 import { literal, uniquenessKey, PROMOTE_UNIQUENESS_KEY, PROMOTE_STATE, PROMOTE_PAYLOAD } from '../src/async-promote-queue-utils.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { TypedEventBus, generateEd25519Keypair, assertionLifecycleUri, contextGraphMetaUri, SwmGossipPayloadTooLargeError } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, TripleStoreAsyncPromoteQueue, getPromoteFailureDisposition } from '../src/index.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
@@ -43,6 +43,37 @@ describe('bound ownership extends the publisher lifecycle mutation fence', () =>
     await publisher.assertionDiscard(CG,name,AUTHOR);
     await expect(queue.recover(job.jobId)).rejects.toThrow('retired no-effect rejection');
     expect(await queue.clearTerminalJob(job.jobId)).toEqual({outcome:'cleared'});
+  });
+
+  it.each(['intent', 'swm', 'intent-and-swm'])('does not certify rejection with %s before the outer commit marker', async persisted => {
+    const {publisher,store,queue}=await setup(); const name='partial-too-large';
+    await publisher.assertionCreate(CG,name,AUTHOR);
+    await publisher.assertionWrite(CG,name,AUTHOR,Array.from({length:80},(_,i)=>({subject:'urn:large',predicate:`urn:p:${i}`,object:JSON.stringify('x'.repeat(55_000))})));
+    const seal=await finalizeRootlessAssertionForTest({publisher,store,contextGraphId:CG,name,agentAddress:AUTHOR});
+    const binding=await publisher.prepareAssertionPromoteRecovery(CG,name,AUTHOR,{publisherPeerId:'12D3KooWRecovery'},false);
+    if('completedResult' in binding)throw new Error('Expected fresh binding');
+    const request={contextGraphId:CG,assertionName:name,agentAddress:AUTHOR,entities:'all' as const,recoveryBinding:binding};
+    const job=await queue.enqueueAndClaim(request,'inline');
+    await queue.recordCommitMarker(job.jobId,job.lease!.claimToken,'promoteStarted');
+    // Persist the actual producer's partial-commit records; leave queue.swmInserted false.
+    if(persisted.includes('intent'))await store.insert([
+      {subject:assertionLifecycleUri(CG,AUTHOR,name),predicate:'http://dkg.io/ontology/shareOperationId',object:JSON.stringify(binding.intent.operationId),graph:contextGraphMetaUri(CG)},
+      {subject:assertionLifecycleUri(CG,AUTHOR,name),predicate:'http://dkg.io/ontology/promoteOperationIntent',object:JSON.stringify(JSON.stringify(binding.intent)),graph:contextGraphMetaUri(CG)},
+    ]);
+    if(persisted.includes('swm'))await store.insert(seal.publicQuads.map(q=>({...q,graph:seal.sharedGraphUri})));
+    const error=await publisher.assertionPromote(CG,name,AUTHOR,{recoveryBinding:binding}).catch(e=>e);
+    const disposition=getPromoteFailureDisposition(error);
+    expect(error).toBeInstanceOf(SwmGossipPayloadTooLargeError);
+    const noEffectProof=disposition?.classification==='cap_exceeded'?disposition.noEffectProof:undefined;
+    expect(noEffectProof).toBeUndefined();
+    expect((await queue.getStatus(job.jobId))?.commitMarker).toMatchObject({promoteStarted:true,swmInserted:false});
+    const failed=await queue.fail(job.jobId,job.lease!.claimToken,{classification:'cap_exceeded',
+      retryable:false,diagnosticCode:error.code,noEffectProof,
+      message:error.message,recordedAt:Date.now()});
+    expect(failed).not.toHaveProperty('retiredNoEffect',true);
+    expect(await queue.clearTerminalJob(job.jobId)).toMatchObject({outcome:'rejected'});
+    await expect(publisher.assertionDiscard(CG,name,AUTHOR)).rejects.toMatchObject({code:'KA_PROMOTE_RECOVERY_REQUIRED',recoveryJobId:job.jobId});
+    expect(await store.countQuads(seal.sharedGraphUri)).toBe(persisted.includes('swm')?80:0);
   });
 
   it('does not acquire authority over a different graph when another queue is constructed', async () => {
