@@ -39,3 +39,15 @@ new RequestOwnedAccessClient(legacyTransport, keypair, 'peer');
 declare const legacyClient: AccessClient;
 // @ts-expect-error Response controls cannot silently switch legacy delivery ownership.
 legacyClient.requestAccess('publisher', 'ual', undefined, { maxQuads: 1 });
+
+import type { RequestOwnedAccessSendSurface } from '@origintrail-official/dkg-publisher';
+import type { Messenger } from '../src/p2p/messenger.js';
+declare const messenger: Messenger;
+const ownedTransport: RequestOwnedAccessSendSurface = {
+  sendRequestOwned: messenger.sendRequestOwned.bind(messenger),
+};
+const durableTransport: RequestOwnedAccessSendSurface = {
+  // @ts-expect-error Durable failures may be queued; owned failures must have queued:false.
+  sendRequestOwned: messenger.sendReliable.bind(messenger),
+};
+void [ownedTransport, durableTransport];

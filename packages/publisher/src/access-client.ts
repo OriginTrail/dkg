@@ -23,9 +23,10 @@ export interface AccessResult {
   rejectionReason?: string;
 }
 
-type AccessSendResult =
-  | { delivered: true; response: Uint8Array; attempts: number; messageId: string }
-  | { delivered: false; queued: boolean; attempts: number; messageId: string; error: string };
+type AccessDeliveredResult = { delivered: true; response: Uint8Array; attempts: number; messageId: string };
+type AccessSendFailure = { delivered: false; queued: boolean; attempts: number; messageId: string; error: string };
+type AccessSendResult = AccessDeliveredResult | AccessSendFailure;
+type RequestOwnedAccessSendResult = AccessDeliveredResult | (AccessSendFailure & { queued: false });
 
 /** Compatibility boundary for the existing optionless AccessClient. */
 export interface AccessSendSurface {
@@ -37,7 +38,7 @@ export interface AccessSendSurface {
 export interface RequestOwnedAccessSendSurface {
   sendRequestOwned(peerId: string, protocolId: string, payload: Uint8Array,
     opts?: { messageId?: string; timeoutMs?: number; signal?: AbortSignal; maxReadBytes?: number;
-      recoverPeerAfterFailure?: boolean }): Promise<AccessSendResult>;
+      recoverPeerAfterFailure?: boolean }): Promise<RequestOwnedAccessSendResult>;
 }
 
 /** Legacy optionless access. Existing queued transport failures remain denials. */
@@ -78,7 +79,7 @@ export class RequestOwnedAccessClient {
     }
     const payload = await encodeRequest(this.keypair, this.peerId, kaUal, paymentProof);
     signal?.throwIfAborted();
-    let result: AccessSendResult | null;
+    let result: RequestOwnedAccessSendResult | null;
     try {
       result = await resolveWithinAbort(() => this.send(publisherPeerId, PROTOCOL_ACCESS, payload,
         { timeoutMs, signal, maxReadBytes: maxResponseBytes, recoverPeerAfterFailure: false }), signal);

@@ -40,7 +40,7 @@ describe('caller-owned private access bounds', () => {
   });
   it('uses owned transport even without response controls, while legacy calls preserve queued denials', async () => {
     let sends = 0;
-    const failure = { delivered: false as const, queued: false, attempts: 1, messageId: 'id', error: 'busy' };
+    const failure = { delivered: false as const, queued: false as const, attempts: 1, messageId: 'id', error: 'busy' };
     const owned = await client(async () => { sends++; return failure; });
     await expect(owned.requestAccess('publisher-peer', UAL)).rejects.toMatchObject({ code: 'ACCESS_UNAVAILABLE' });
     const legacy = new AccessClient({ sendReliable: async () => ({ ...failure, queued: true }) },
