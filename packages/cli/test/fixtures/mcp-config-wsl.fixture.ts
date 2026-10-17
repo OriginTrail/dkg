@@ -131,12 +131,13 @@ async function main(): Promise<void> {
     writeFileSync(driver, String.raw`const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { createRequire } = require('node:module');
+const { pathToFileURL } = require('node:url');
 assert.equal(process.platform, 'win32');
 const entry = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).mcpServers.dkg;
 const cliRequire = createRequire(process.argv[3]);
 async function main() {
-  const { Client } = await import(cliRequire.resolve('@modelcontextprotocol/sdk/client/index.js'));
-  const { StdioClientTransport } = await import(cliRequire.resolve('@modelcontextprotocol/sdk/client/stdio.js'));
+  const { Client } = await import(pathToFileURL(cliRequire.resolve('@modelcontextprotocol/sdk/client/index.js')).href);
+  const { StdioClientTransport } = await import(pathToFileURL(cliRequire.resolve('@modelcontextprotocol/sdk/client/stdio.js')).href);
   const transport = new StdioClientTransport({command:entry.command,args:entry.args,env:{...process.env,...entry.env},stderr:'pipe'});
   let stderr = ''; transport.stderr.on('data', data => { stderr += data; });
   const client = new Client({name:'native-wsl-regression',version:'1'});
