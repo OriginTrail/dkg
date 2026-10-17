@@ -107,50 +107,55 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
     contextGraphId,
     name,
     promoteAgentAddress,
-    { ...publisherOptions, recoveryBinding: execution.kind === 'bound' ? execution.binding : undefined },
+    { ...publisherOptions, recoveryBinding: execution.kind === 'bound' ? execution.binding : undefined,
+      executionAuthority: execution.kind === 'bound' ? execution.authority : undefined },
   );
-  if (gossipPayload) {
-    try {
-      // Preserve the immutable operation id through the fan-out seam.
-      // Direct share() already does this; assertion promotion previously
-      // dropped it, so receiver acknowledgements/watchdog retries could
-      // not be correlated for imported (including Markdown) KAs.
-      await agent.publishWorkspaceGossip(
-        contextGraphId,
-        gossipPayload,
-        createOperationContext('share'),
-        gossipSigner,
-        shareOperationId,
-        { subGraphName: options.subGraphName ?? null },
-      );
-    } catch (err: any) {
-      warn(`Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
+  const finish = async () => {
+    if (gossipPayload) {
+      try {
+        // Preserve the immutable operation id through the fan-out seam.
+        // Direct share() already does this; assertion promotion previously
+        // dropped it, so receiver acknowledgements/watchdog retries could
+        // not be correlated for imported (including Markdown) KAs.
+        await agent.publishWorkspaceGossip(
+          contextGraphId,
+          gossipPayload,
+          createOperationContext('share'),
+          gossipSigner,
+          shareOperationId,
+          { subGraphName: options.subGraphName ?? null },
+        );
+      } catch (err: any) {
+        warn(`Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
+      }
     }
-  }
-  // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
-  // lifecycle URN so the SWM pointer is observable (and can diverge from
-  // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
-  // The hook classifies its own pointer stamp (canonical durable-finalization
-  // boundary): a failure never reports success, and a replay of this same
-  // committed operation repairs it.
-  if (promotedAllRoots) {
-    await agent.afterDurableSwmPromotionV1({
-      contextGraphId,
-      subGraphName: options.subGraphName,
-      assertionCoordinate: name,
-      lifecycleAgentAddress: promoteAgentAddress,
-      ctx: createOperationContext('share'),
-      ...(execution.kind === 'bound' ? { recoveryBinding: execution.binding }
-        : { shareOperationId: shareOperationId ?? null }),
-    });
-  }
-  if (!promotedAllRoots && execution.kind === 'bound' && execution.binding.inventoryRequired) {
-    await commitConfirmedDurableShareInventory(agent, {
-      contextGraphId, subGraphName: options.subGraphName, assertionCoordinate: name,
-      lifecycleAgentAddress: promoteAgentAddress,
-      recoveryBinding: execution.binding, ctx: createOperationContext('share'),
-    });
-  }
+    // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
+    // lifecycle URN so the SWM pointer is observable (and can diverge from
+    // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
+    // The hook classifies its own pointer stamp (canonical durable-finalization
+    // boundary): a failure never reports success, and a replay of this same
+    // committed operation repairs it.
+    if (promotedAllRoots) {
+      await agent.afterDurableSwmPromotionV1({
+        contextGraphId,
+        subGraphName: options.subGraphName,
+        assertionCoordinate: name,
+        lifecycleAgentAddress: promoteAgentAddress,
+        ctx: createOperationContext('share'),
+        ...(execution.kind === 'bound' ? { recoveryBinding: execution.binding }
+          : { shareOperationId: shareOperationId ?? null }),
+      });
+    }
+    if (!promotedAllRoots && execution.kind === 'bound' && execution.binding.inventoryRequired) {
+      await commitConfirmedDurableShareInventory(agent, {
+        contextGraphId, subGraphName: options.subGraphName, assertionCoordinate: name,
+        lifecycleAgentAddress: promoteAgentAddress,
+        recoveryBinding: execution.binding, ctx: createOperationContext('share'),
+      });
+    }
+  };
+  if (execution.kind === 'bound' && execution.authority) await execution.authority.run(finish);
+  else await finish();
   // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
   // assertionPromote (co-located with the member-row REPLACE, gated on the
   // same isFullCompletePromote), so it stays in lockstep with the rows for

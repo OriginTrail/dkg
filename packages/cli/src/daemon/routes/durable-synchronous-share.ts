@@ -1,7 +1,7 @@
 import { executePromoteRequest } from '../worker/execute-promote-request.js';
 import { DurableShareFailure, observeShareRecovery } from './durable-share-failure.js';
 import { randomUUID } from 'node:crypto';
-import { PromoteJobConflictError, PromoteAdmissionUncertainError, type PromoteJob } from '@origintrail-official/dkg-publisher';
+import { PromoteStaleAdmissionError, PromoteJobConflictError, PromoteAdmissionUncertainError, type PromoteJob } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent, AssertionPromoteOptions } from '@origintrail-official/dkg-agent';
 import { runPromoteJob } from '../worker/async-promote-worker.js';
 import { daemonState } from '../state.js';
@@ -21,6 +21,17 @@ export async function durableSynchronousShare(
   try { job = await agent.assertion.admitDurableShare({ contextGraphId, assertionName: name, entities: 'all',
     subGraphName: options?.subGraphName, authorAgentAddress: options?.authorAgentAddress, ...prepared,
   }, workerId); } catch (error) {
+    if (error instanceof PromoteStaleAdmissionError) {
+      // The winner may already be complete. Observe only an exact durable owner;
+      // inability to read one must not invent a recovery promise or retry a mutation.
+      const owners = await queue.list({ contextGraphId }).catch(() => []);
+      const owner = owners.find(candidate => candidate.request.assertionName === name
+        && candidate.request.agentAddress === prepared.agentAddress
+        && candidate.request.subGraphName === options?.subGraphName
+        && candidate.request.recoveryBinding?.intent.operationId === error.existingOperationId);
+      if (owner) throw new DurableShareFailure(error, await observeShareRecovery(queue, owner.jobId));
+      throw error;
+    }
     if (error instanceof PromoteJobConflictError) {
       throw new DurableShareFailure(error, await observeShareRecovery(queue, error.existingJobId));
     }
@@ -32,8 +43,8 @@ export async function durableSynchronousShare(
   const outcome = await runPromoteJob({ job, queue, workerId, now: Date.now,
     heartbeatIntervalMs: Math.min(60_000, Math.floor(queue.effectiveLeaseMs / 4)),
     log: message => console.warn(message),
-    runPromote: (request) => executePromoteRequest(agent, request,
-      { curatorAckTimeoutMs: options?.curatorAckTimeoutMs }),
+    runPromote: (request, executionAuthority) => executePromoteRequest(agent, request,
+      { curatorAckTimeoutMs: options?.curatorAckTimeoutMs, executionAuthority }),
   });
   if (outcome.outcome === 'succeeded') return outcome.result;
   if (outcome.outcome === 'failed_terminal' && outcome.retiredNoEffect) throw outcome.cause;

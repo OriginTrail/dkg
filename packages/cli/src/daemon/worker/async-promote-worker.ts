@@ -1,3 +1,4 @@
+import { createPromoteExecutionAuthority } from './promote-execution-authority.js';
 import { executePromoteRequest } from './execute-promote-request.js';
 /**
  * Async-promote queue worker supervisor.
@@ -46,7 +47,7 @@ import {
   type AsyncPromoteQueue,
   type PromoteAttemptError,
   type PromoteJob,
-  type PromoteRequest,
+  type PromoteRequest, type PromoteExecutionAuthority,
 } from '@origintrail-official/dkg-publisher';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
 import { logPromoteAttemptFailure } from './async-promote-attempt-diagnostics.js';
@@ -258,9 +259,7 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
     job: PromoteJob;
     queue: AsyncPromoteQueue;
     workerId: string;
-    runPromote: (
-      request: PromoteRequest,
-    ) => Promise<T>;
+    runPromote: (request: PromoteRequest, authority?: PromoteExecutionAuthority) => Promise<T>;
     now: () => number;
     heartbeatIntervalMs: number;
     bookkeepingRetryIntervalMs?: number;
@@ -425,7 +424,8 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
     }
     let result: T;
     try {
-      result = await runPromote(job.request);
+      result = await runPromote(job.request, job.request.recoveryBinding
+        ? createPromoteExecutionAuthority(queue, job.jobId, claimToken, now, throwIfShutdownInterrupted) : undefined);
     } catch (err: unknown) {
       return await recordPromotionFailure(err, true);
     }
@@ -661,7 +661,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           job: claimed,
           queue: config.agent.promoteQueue,
           workerId: slot.workerId,
-          runPromote: (request) => executePromoteRequest(config.agent, request),
+          runPromote: (request, executionAuthority) => executePromoteRequest(config.agent, request, { executionAuthority }),
           now,
           heartbeatIntervalMs,
           bookkeepingRetryIntervalMs: config.bookkeepingRetryIntervalMs,

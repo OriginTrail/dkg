@@ -1,4 +1,4 @@
-import { PromoteJobConflictError, PromoteAdmissionUncertainError } from '@origintrail-official/dkg-publisher';
+import { PromoteStaleAdmissionError, PromoteJobConflictError, PromoteAdmissionUncertainError } from '@origintrail-official/dkg-publisher';
 import { classifyAssertionError } from './knowledge-assets-error-mapping.js';
 import { sanitizeRpcMessage } from '../http-utils.js';
 import type { AssertionFailureResponse } from './assertion-failure-response.js';
@@ -30,7 +30,9 @@ export function classifySynchronousShareFailure(error: unknown, context: Promote
 export function synchronousShareFailureDecision(error: unknown, context: PromoteRecoveryContext): SynchronousShareFailureDecision {
   const cause: any = error instanceof DurableShareFailure ? error.cause : error;
   let failure: AssertionFailureResponse;
-  if (cause?.code === 'UNSEALED_SHARE_BLOCKED') {
+  if (cause instanceof PromoteStaleAdmissionError) {
+    failure = { status: 409, body: { code: 'SHARE_ADMISSION_STALE', error: cause.message, retryable: false } };
+  } else if (cause?.code === 'UNSEALED_SHARE_BLOCKED') {
     failure = { status: 409, body: { code: cause.code, error: cause.message, recovery: cause.recovery } };
   } else if (cause?.code === 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED') {
     failure = { status: 409, body: { code: cause.code, error: cause.message,

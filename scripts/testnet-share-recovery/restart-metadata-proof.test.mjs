@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { verifyRestartMetadata, unchangedCohortMetadata } from './restart-metadata-proof.mjs';
+import { verifyRestartMetadata, unchangedCohortMetadata, bindingMatchesCapturedOperation } from './restart-metadata-proof.mjs';
 import { faultEvidenceFixture } from './fault-evidence-fixture.mjs';
 const { graph, subject, fault, rows } = faultEvidenceFixture();
 const dkg = 'http://dkg.io/ontology/';
@@ -43,4 +43,18 @@ test('incomplete original capture cannot certify restart identity', () => {
     partial.metadataAtFault.quads = missing === 'all' ? [] : partial.metadataAtFault.quads.filter(q => q.predicate !== dkg + missing);
     assert.equal(verifyRestartMetadata(partial, rows).originalSealAndIntent, false);
   }
+});
+
+test('restart queue binding must match the complete captured operation', () => {
+  const intent = JSON.parse(JSON.parse(fault.metadataAtFault.quads.find(q => q.predicate === dkg + 'promoteOperationIntent').object));
+  const binding = { version: 1, sealDigest: '0x' + 'ab'.repeat(32), inventoryRequired: true, intent };
+  assert.equal(bindingMatchesCapturedOperation(fault, binding), true);
+  for (const change of [{ operationId: 'replacement' }, { timestampMs: 2 }, { confirmationRequired: true },
+    { accessPolicy: 'ownerOnly' }, { allowedPeers: ['different'] }, { publisherPeerId: 'different' }]) {
+    assert.equal(bindingMatchesCapturedOperation(fault, { ...binding, intent: { ...intent, ...change } }), false);
+  }
+  assert.equal(bindingMatchesCapturedOperation(fault, undefined), false);
+  const incomplete = structuredClone(fault);
+  incomplete.metadataAtFault.quads = incomplete.metadataAtFault.quads.filter(q => q.predicate !== dkg + 'shareOperationId');
+  assert.equal(bindingMatchesCapturedOperation(incomplete, binding), false);
 });

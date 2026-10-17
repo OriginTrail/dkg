@@ -8415,13 +8415,12 @@ export class DKGPublisher implements Publisher {
     opts?: PublisherAssertionPromoteOptions,
   ): Promise<AssertionPromoteResult> {
     const stableOpts = snapshotPublisherPromoteOptions(opts);
-    return this.withAssertionLifecycleWriteLock(
-      contextGraphId,
-      name,
-      agentAddress,
-      stableOpts?.subGraphName,
-      () => this.assertionPromoteUnlocked(contextGraphId, name, agentAddress, stableOpts),
-    );
+    const promote = () => this.withAssertionLifecycleWriteLock(
+      contextGraphId, name, agentAddress, stableOpts?.subGraphName, async () => {
+        await stableOpts?.executionAuthority?.assertCurrent();
+        return this.assertionPromoteUnlocked(contextGraphId, name, agentAddress, stableOpts);
+      });
+    return stableOpts?.executionAuthority ? stableOpts.executionAuthority.run(promote) : promote();
   }
 
   private async assertionPromoteUnlocked(

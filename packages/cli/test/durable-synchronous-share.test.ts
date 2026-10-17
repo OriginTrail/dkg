@@ -1,9 +1,14 @@
+import { createServer } from 'node:http';
+import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
+import { executePromoteRequest } from '../src/daemon/worker/execute-promote-request.js';
 import { inventoryPersistenceFailure } from '../../agent/src/rfc64/inventory-persistence-failure.js';
 import { SwmInventoryWriteFailure } from '../../agent/src/internal/swm-inventory-write.js';
 import { resolveRfc64CatalogAuthoringPolicyV1 } from '../../agent/src/rfc64/public-catalog-activation-config-v1.js';
 import { classifySynchronousShareFailure } from '../src/daemon/routes/durable-share-response.js';
 import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/durable-share-failure.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-agent', () => import('../../agent/src/index.js'));
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, StoreOperationTimeoutError, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
@@ -588,6 +593,62 @@ describe('durable synchronous share ownership', () => {
     } finally { await worker.stop(); await store.close(); }
   });
 
+  it.each([true, false])('returns a defined HTTP conflict for concurrent prepared shares (owner readable=%s)', async readable => {
+    const { store, agent, publisher } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    vi.spyOn(agent, 'listContextGraphs').mockResolvedValue([{ id: CG, uri: `did:dkg:context-graph:${CG}`, name: CG, subscribed: true, synced: true }] as any);
+    vi.spyOn(agent, 'contextGraphExists').mockResolvedValue(true);
+    const assertion = agent.assertion;
+    let calls = 0, releaseSecond!: () => void, bothPrepared!: () => void;
+    const ready = new Promise<void>(resolve => { bothPrepared = resolve; });
+    const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
+    vi.spyOn(agent, 'assertion', 'get').mockReturnValue({ ...assertion, prepareDurableShare: async (...args) => {
+      const index = ++calls, prepared = await assertion.prepareDurableShare(...args);
+      if (index === 1) await ready;
+      else { bothPrepared(); await secondGate; }
+      return prepared;
+    } });
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url!, 'http://127.0.0.1');
+      try {
+        await handleKnowledgeAssetsRoutes({ req, res, url, path: url.pathname, agent,
+          requestAgentAddress: AUTHOR, authentication: requestAuthentication({ kind: 'anonymous' }),
+          extractionStatus: new Map(), assertionImportLocks: new Map(), emitMemoryGraphChanged: () => {}, publisherControl: {},
+        } as any);
+        if (!res.writableEnded) { res.writeHead(404); res.end('{}'); }
+      } catch (error) { res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as { port: number };
+    const post = () => fetch(`http://127.0.0.1:${address.port}/api/knowledge-assets/${NAME}/swm/share`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contextGraphId: CG }),
+    });
+    try {
+      const winner = post();
+      await vi.waitFor(() => expect(calls).toBe(1));
+      const stale = post();
+      const success = await winner;
+      expect(success.status).toBe(200);
+      const original = await success.json();
+      const jobs = await agent.promoteQueue.list();
+      if (!readable) vi.spyOn(agent.promoteQueue, 'list').mockRejectedValue(new Error('queue observation unavailable'));
+      releaseSecond();
+      const conflict = await stale, body = await conflict.json();
+      expect(conflict.status).toBe(409);
+      expect(jobs).toHaveLength(1);
+      expect(body).toMatchObject({ code: 'SHARE_ADMISSION_STALE', retryable: false });
+      if (readable) expect(body).toMatchObject({ recoveryState: 'completed', recoveryJobId: jobs[0].jobId });
+      else expect(body).not.toHaveProperty('recoveryJobId');
+      expect(body).not.toHaveProperty('recoveryBinding'); expect(body).not.toHaveProperty('claimToken');
+      expect(jobs[0].request.recoveryBinding?.intent.operationId).toBe(original.shareOperationId);
+      expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+      await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR })).resolves.toBeDefined();
+    } finally {
+      releaseSecond(); server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve())); await store.close();
+    }
+  });
+
   it('rejects a stale prepared admission without revoking the completed winner', async()=>{
     const {store,agent,publisher}=await setup();
     const first=await agent.assertion.prepareDurableShare(CG,NAME,{agentAddress:AUTHOR});
@@ -640,6 +701,58 @@ describe('durable synchronous share ownership', () => {
     await expect(publisher.assertionPromote(CG,NAME,AUTHOR,bound)).rejects.toThrow();
     vi.mocked(store.query).mockImplementation(query);
     expect(await publisher.hasSwmShareComplete(CG,NAME,AUTHOR)).toBe(true);
+    await store.close();
+  });
+
+  it.each(['before-publisher', 'inside-publisher'])('fences an expired executor %s across real queue takeover', async pause => {
+    const { store, agent, publisher, finalized } = await setup();
+    let now = Date.now(), entered = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const queue = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100, backoff: () => 0 });
+    const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    const job = await queue.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...bound }, 'old');
+    if (pause === 'before-publisher') {
+      const promote = publisher.assertionPromote.bind(publisher);
+      vi.spyOn(publisher, 'assertionPromote').mockImplementationOnce(async (...args) => {
+        entered = true; await gate; return promote(...args);
+      });
+    } else {
+      const insert = store.insert.bind(store);
+      vi.spyOn(store, 'insert').mockImplementation(async quads => {
+        if (!entered && quads.some(q => q.subject === lifecycle && q.predicate.endsWith('/state') && q.object === '"promoted"')) {
+          entered = true; await gate; throw new Error('old lifecycle write failed');
+        }
+        return insert(quads);
+      });
+    }
+    const execute = (q: typeof queue, claim: typeof job) => runPromoteJob({ job: claim, queue: q,
+      workerId: claim.lease!.workerId, now: () => now, heartbeatIntervalMs: 60_000, bookkeepingRetryBudgetMs: 0,
+      log: () => undefined, runPromote: (request, executionAuthority) => executePromoteRequest(agent, request, { executionAuthority }) });
+    const old = execute(queue, job);
+    await vi.waitFor(() => expect(entered).toBe(true));
+    now += 101;
+    const reopened = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100, backoff: () => 0 });
+    const replacement = (await reopened.claimNext('new'))!;
+    expect(replacement.jobId).toBe(job.jobId);
+    let replacementDone = false;
+    const next = execute(reopened, replacement).finally(() => { replacementDone = true; });
+    if (pause === 'inside-publisher') {
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(replacementDone).toBe(false);
+      release();
+    }
+    expect((await next).outcome).toBe('succeeded');
+    const publishable = await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+    const tail = vi.spyOn(agent, 'afterDurableSwmPromotionV1');
+    if (pause === 'before-publisher') { store.remaining = 1; release(); }
+    expect((await old).outcome).toBe('failure_bookkeeping_uncertain');
+    expect(tail).not.toHaveBeenCalled();
+    if (pause === 'before-publisher') expect(store.remaining).toBe(1);
+    expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    expect(await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR })).toEqual(publishable);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    expect(await store.countQuads(finalized.graphUri)).toBe(0);
+    expect(await reopened.getStatus(job.jobId)).toMatchObject({ state: 'succeeded', attempt: { count: 2 }, request: { recoveryBinding: bound.recoveryBinding } });
     await store.close();
   });
 

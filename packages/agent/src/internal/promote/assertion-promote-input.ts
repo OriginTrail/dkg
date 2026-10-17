@@ -1,4 +1,4 @@
-import { validatePromoteRecoveryBinding, type PublisherAssertionPromoteOptions } from '@origintrail-official/dkg-publisher';
+import { validatePromoteRecoveryBinding, type PromoteExecutionAuthority, type PublisherAssertionPromoteOptions } from '@origintrail-official/dkg-publisher';
 import type { PreSignedAuthorAttestation } from '../../dkg-agent-types.js';
 
 type Binding = NonNullable<PublisherAssertionPromoteOptions['recoveryBinding']>;
@@ -17,6 +17,7 @@ export interface OrdinaryAssertionPromoteOptions extends PromoteAttemptOptions, 
 }
 export interface BoundAssertionPromoteOptions extends PromoteAttemptOptions {
   recoveryBinding: Binding;
+  executionAuthority?: PromoteExecutionAuthority;
   entities?: 'all';
   skipSeal?: never;
   preSignedAuthorAttestation?: never;
@@ -26,7 +27,7 @@ export interface BoundAssertionPromoteOptions extends PromoteAttemptOptions {
 export type AssertionPromoteOptions = OrdinaryAssertionPromoteOptions | BoundAssertionPromoteOptions;
 export type AssertionPromoteExecution =
   | { kind: 'ordinary'; options: OrdinaryAssertionPromoteOptions }
-  | { kind: 'bound'; binding: Binding; options: OrdinaryAssertionPromoteOptions };
+  | { kind: 'bound'; binding: Binding; authority?: PromoteExecutionAuthority; options: OrdinaryAssertionPromoteOptions };
 
 /** Normalize once: bound policy comes exclusively from its validated immutable intent. */
 export function normalizeAssertionPromoteExecution(input?: AssertionPromoteOptions): AssertionPromoteExecution {
@@ -36,7 +37,7 @@ export function normalizeAssertionPromoteExecution(input?: AssertionPromoteOptio
     throw new Error('Bound recovery requires a sealed, complete Knowledge Asset');
   }
   const binding = validatePromoteRecoveryBinding(input.recoveryBinding);
-  return { kind: 'bound', binding, options: {
+  return { kind: 'bound', binding, authority: input.executionAuthority, options: {
     agentAddress: input.agentAddress, authorAgentAddress: input.authorAgentAddress, subGraphName: input.subGraphName,
     entities: 'all', curatorAckTimeoutMs: input.curatorAckTimeoutMs,
     awaitCuratorAck: binding.intent.confirmationRequired || input.awaitCuratorAck === true,

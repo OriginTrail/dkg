@@ -1,3 +1,5 @@
+import { validatePromoteRecoveryBinding } from '../../packages/publisher/dist/promote-recovery-binding.js';
+import { parsePromoteOperationIntent, serializePromoteOperationIntent } from '../../packages/publisher/dist/promote-operation-intent.js';
 import { validateCapturedShareIdentity } from './captured-share-identity.mjs';
 import { indexAuthoritativeMetadata } from './authoritative-metadata.mjs';
 import { ASSERTION_SEAL_PREDICATES } from '../../packages/core/dist/index.js';
@@ -39,4 +41,16 @@ export function unchangedCohortMetadata(before, after, metadataGraph, subjects) 
   const original = indexAuthoritativeMetadata(before, metadataGraph, predicates);
   const current = indexAuthoritativeMetadata(after, metadataGraph, predicates);
   return subjects.length > 0 && subjects.every(subject => sameBindingQuads(original.get(subject) ?? [], current.get(subject) ?? []));
+}
+
+/** Link the queue's execution authority to the captured original RDF operation. */
+export function bindingMatchesCapturedOperation(fault, binding) {
+  try {
+    const { original, captureComplete } = validateCapturedShareIdentity(fault);
+    if (!captureComplete) return false;
+    const value = predicate => capturedTermIdentity(original.find(q => q.predicate === DKG + predicate).object)[1];
+    const intent = parsePromoteOperationIntent(value('promoteOperationIntent'), value('shareOperationId'));
+    return serializePromoteOperationIntent(validatePromoteRecoveryBinding(binding).intent)
+      === serializePromoteOperationIntent(intent);
+  } catch { return false; }
 }

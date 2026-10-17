@@ -1,6 +1,6 @@
 import { sameCapturedQuads } from './rdf-term-identity.mjs';
 import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
-import { verifyRestartMetadata, unchangedCohortMetadata } from './restart-metadata-proof.mjs';
+import { verifyRestartMetadata, unchangedCohortMetadata, bindingMatchesCapturedOperation } from './restart-metadata-proof.mjs';
 import {verifyIdentityTuples} from './identity-tuples.mjs';
 // Read-only proof around the separately requested process-crash regression.
 import fs from 'node:fs';
@@ -63,6 +63,8 @@ if(mode==='before'){
  if(!crashSeal)throw Error('Missing original crash seal');
  const canonicalSeal=canonicalGraphScopedAuthorSealFromAssertionSealV1(crashSeal);
  const crashDigest=computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal);
+ const originalBindingOperation=bindingMatchesCapturedOperation(fault,before.request.recoveryBinding)
+   && bindingMatchesCapturedOperation(fault,job.request.recoveryBinding);
  const originalBindingSeal=before.request.recoveryBinding.sealDigest===crashDigest;
  const expected=[...JSON.parse(fs.readFileSync(`${root}/seal-proof.json`)),
    {name:restartName,seal:canonicalSeal,sealDigest:crashDigest}];
@@ -82,8 +84,8 @@ if(mode==='before'){
  const runtimeBuildTimeUnchanged=originalBuild.buildTime===runtimeAfter.buildTime;
  const result={originalCohortMetadataUnchanged,wholeCohortContentUnchanged,metadataGraph,metadataComparison:'authoritative-full-rdf-term-v2',sameRuntime,runtimeBuildTimeUnchanged,runtimeBuildTime:runtimeAfter.buildTime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
  originalBinding:JSON.stringify(job.request)===JSON.stringify(before.request),state:job.state,attempts:job.attempt.count,
- originalBindingSeal,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate===restartName).length,
+ originalBindingSeal,originalBindingOperation,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate===restartName).length,
  noAdditionalPublicationEffects:publications.length===counts.publications&&publications.every(j=>mainPublications.some(old=>old.jobId===j.jobId&&old.finalization.txHash===j.finalization.txHash)),nonces,manualRepairs:0};
  fs.writeFileSync(`${dir}/identity-proof.json`,JSON.stringify(result,null,2));console.log(result);
- if(!originalCohortMetadataUnchanged||!wholeCohortContentUnchanged||!runtimeBuildTimeUnchanged||!originalBindingSeal||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==counts.restart||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
+ if(!originalCohortMetadataUnchanged||!wholeCohortContentUnchanged||!runtimeBuildTimeUnchanged||!originalBindingSeal||!originalBindingOperation||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==counts.restart||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;
 }else throw Error('Expected before or after');

@@ -3,9 +3,16 @@ import { validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './p
 import type { WorkspaceAgentRecipientResolver } from './workspace-agent-recipients.js';
 import type { ConfirmWorkspaceGossipBeforeCommit, EncodedWorkspaceGossipPayload } from './workspace-gossip-payload.js';
 
+/** Ephemeral worker authority; never serialized in a recovery binding or accepted from HTTP. */
+export interface PromoteExecutionAuthority {
+  assertCurrent(): Promise<void>;
+  run<T>(mutation: () => Promise<T>): Promise<T>;
+}
+
 /** Publisher-owned contract for assertion promotion after agent prerequisites resolve. */
 export type PublisherAssertionPromoteOptions = {
   recoveryBinding?: PromoteRecoveryBinding;
+  executionAuthority?: PromoteExecutionAuthority;
   entities?: readonly string[] | 'all';
   subGraphName?: string;
   publisherPeerId?: string;

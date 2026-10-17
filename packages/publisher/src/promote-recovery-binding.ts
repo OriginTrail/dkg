@@ -20,6 +20,15 @@ export function recoveryBindingConflict(message: string): Error {
   return Object.assign(new Error(message), { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
 }
 
+/** A different valid operation won before this request acquired ownership. */
+export class PromoteStaleAdmissionError extends Error {
+  readonly code = 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT';
+  constructor(readonly existingOperationId: string) {
+    super('Another share operation completed admission before this prepared request');
+    this.name = 'PromoteStaleAdmissionError';
+  }
+}
+
 function assertBindingHeader(value: unknown): asserts value is Omit<PromoteRecoveryBinding, 'intent'> & { intent: { operationId: string } } {
   const candidate = value as Partial<PromoteRecoveryBinding> | undefined;
   if (candidate?.version !== 1 || typeof candidate.sealDigest !== 'string'
@@ -114,7 +123,8 @@ export async function assertPromoteRecoveryBinding(
     && serializePromoteOperationIntent(operation.intent) !== serializePromoteOperationIntent(binding.intent)) {
     // Another request can win between preparation and admission. Its valid
     // operation is not corrupt merely because this unadmitted binding is stale.
-    if (phase === 'replay') await retireCompletion();
+    if (phase === 'admission') throw new PromoteStaleAdmissionError(operation.intent.operationId);
+    await retireCompletion();
     throw recoveryBindingConflict('The immutable share operation changed after durable admission');
   }
   return current;

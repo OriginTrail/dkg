@@ -548,8 +548,10 @@ export {
 
 export { DEFAULT_PROMOTE_RETRY_TUNING, createDefaultPromoteBackoff, resolvePromoteRetryTuning, type PromoteRetryTuning } from './promote-retry-policy.js';
 
-export { validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';
+export { PromoteStaleAdmissionError, validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';
 export { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from './graph-knowledge-asset-metadata.js';
 
 export { withMaterializationLocks } from './materialization-lock-group.js';
 export { readCurrentAssertionVersion } from './materialization-assertion-version.js';
+
+export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
