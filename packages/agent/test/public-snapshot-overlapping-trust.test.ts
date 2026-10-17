@@ -3,7 +3,7 @@ import { expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import { createRemoteQueryHandler } from '../src/remote-query-handler.js';
-import { assertPublicSnapshotQueryTrust, markCoreTrustedGraph, withPublicSnapshotQueryTrust, SNAPSHOT_TRUST_GRAPH } from '../src/public-snapshot-evidence.js';
+import { assertPublicSnapshotQueryTrust, markCoreTrustedGraph, queryWithPublicSnapshotTrust, SNAPSHOT_TRUST_GRAPH } from '../src/public-snapshot-evidence.js';
 
 it('refuses remote descendant aliases of imported partitions and preserves unrelated scopes', async () => {
   const store = new OxigraphStore();
@@ -43,10 +43,11 @@ it('refuses remote descendant aliases of imported partitions and preserves unrel
 it('withholds a descendant result when an ancestor import starts during the read', async () => {
   const store = new OxigraphStore();
   try {
-    await expect(withPublicSnapshotQueryTrust(store, 'example/code', undefined, async () => {
+    await expect(queryWithPublicSnapshotTrust(store, { query: async () => {
       await markCoreTrustedGraph(store, 'example');
-      return 'must not escape';
-    })).rejects.toMatchObject({ code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
+      return { bindings: [{ value: '"must not escape"' }] };
+    } }, 'SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'example/code' }, undefined))
+      .rejects.toMatchObject({ code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
   } finally { await store.close(); }
 });
 
