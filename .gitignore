@@ -78,3 +78,6 @@ test-systems/.runtime/
 
 # Disposable regression proof artifacts
 .regression-proofs/
+
+# Isolated agent/testnet homes, credentials and raw local evidence.
+.tmp/
