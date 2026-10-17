@@ -43,6 +43,19 @@ describe.each([
     expect(await values(store, `SELECT ?o WHERE { GRAPH <${ROOT}/_meta> { ?s <urn:p> ?o } }`, withheld)).toEqual([]);
   });
 
+  it('keeps a readable named graph that a delete emptied', async () => {
+    const store = create();
+    stores.push(store);
+    await store.insert(QUADS);
+    await store.deleteByPattern({ graph: 'did:dkg:context-graph:open' });
+    const ask = async (options?: { withheldGraphRoots: string[] }) => {
+      const result = await store.query('ASK { GRAPH <did:dkg:context-graph:open> { } }', options);
+      return result.type === 'boolean' && result.value;
+    };
+    expect(await ask()).toBe(true);
+    expect(await ask(withheld)).toBe(true);
+  });
+
   it('refuses an empty root', async () => {
     const store = create();
     stores.push(store);
