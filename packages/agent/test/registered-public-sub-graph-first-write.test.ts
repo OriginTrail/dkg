@@ -762,27 +762,30 @@ describe('a member\'s first write into a sub-graph of a registered public graph 
     expect(member.fetchSyncPages).toHaveBeenCalledTimes(2);
   });
 
-  it('asks no further peer once the time is up, without waiting for the late answer', async () => {
+  it('asks the next peer when the owner does not answer in its share of the time, and the write goes through', async () => {
     const owner = await peerNode([...OWNER_DECLARATION]);
-    const core = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
+    const core = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH, CORE_PEER_ID)]);
     const member = memberNode(peersOf([[OWNER_PEER_ID, owner], [CORE_PEER_ID, core]]), { connected: [OWNER_PEER_ID, CORE_PEER_ID] });
+    await expect(bootstrap(member)).resolves.toBe('fetched');
+    member.fetchSyncPages.mockClear();
     let answer!: () => void;
-    const late = new Promise<void>((resolve) => { answer = resolve; });
-    // The owner answers only when the test lets it, after the budget has run out.
+    const stalled = new Promise<void>((resolve) => { answer = resolve; });
+    // The owner stops answering, and its fetch does not stop when asked to.
     member.fetchSyncPages.mockImplementationOnce(async () => {
-      await late;
+      await stalled;
       throw new Error('late');
     });
 
     try {
-      await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 20 }))
-        .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
+      // Two peers to ask: the owner has half of the time, the connected peer the rest.
+      await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 2_000 }))
+        .resolves.toEqual({ registered: true });
     } finally {
       answer();
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(member.fetchSyncPages).toHaveBeenCalledOnce();
-    await expect(hasSubGraphRegistration(member.store, contextGraphId, SUB_GRAPH)).resolves.toBe(false);
+    expect(member.fetchSyncPages.mock.calls.map((call) => call[1])).toEqual([OWNER_PEER_ID, CORE_PEER_ID]);
+    await expect(createdByOf(member.store, SUB_GRAPH)).resolves.toEqual([`did:dkg:agent:${CORE_PEER_ID}`]);
+    await expect(firstWrite(await memberPublisher(member), 'report-1', SUB_GRAPH)).resolves.toBeUndefined();
   });
 });
 
