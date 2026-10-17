@@ -58,6 +58,23 @@ describe('assets a snapshot job already holds', () => {
     expect(await holds(assets[1]!.ual)).toBe(false);
   });
 
+  it('counts a newer stored version whose own content verifies, as a catch-up does', async () => {
+    const pinned = makeSnapshotAssets(graph, 2);
+    const newer = makeSnapshotAssets(graph, 2, { version: 2 });
+    const store = await storeWith(observe(newer, 'core-cache', '2'), newer);
+    // An older snapshot never replaces a newer stored version, so the asset is held in either mode.
+    for (const mode of ['core-cache', 'rpc-only'] as const)
+      expect(await createPublicSnapshotHeldAssetCheck(store, observe(pinned, mode))(pinned[0]!.ual)).toBe(true);
+    // Unless the newer version's own content no longer verifies.
+    const [original] = newer[1]!.verified.dataQuads;
+    await store.delete([original!]);
+    await store.insert([{ ...original!, object: '"altered"' }]);
+    expect(await createPublicSnapshotHeldAssetCheck(store, observe(pinned, 'core-cache'))(pinned[1]!.ual)).toBe(false);
+    // An older stored version is not held: the job fetches the pinned one.
+    const older = await storeWith(observe(pinned, 'core-cache'), pinned);
+    expect(await createPublicSnapshotHeldAssetCheck(older, observe(newer, 'core-cache', '2'))(newer[0]!.ual)).toBe(false);
+  });
+
   it('lets an rpc-only job relabel copies stored with core-cache evidence', async () => {
     const assets = makeSnapshotAssets(graph, 1);
     const cached = await storeWith(observe(assets, 'core-cache'), assets);

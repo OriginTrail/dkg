@@ -10,25 +10,27 @@ import type { VerifiedGraphScopedAsset } from '../../src/sync/requester/graph-sc
 export const SNAPSHOT_AUTHOR = `0x${'ab'.repeat(20)}`;
 
 /** Graph-scoped public assets as a core serves them: confirmed metadata whose root matches the content. */
-export function makeSnapshotAssets(graph: string, count: number, options: { subGraphName?: string } = {}) {
+export function makeSnapshotAssets(graph: string, count: number, options: { subGraphName?: string; version?: number } = {}) {
+  const version = options.version ?? 1;
   const metaGraph = `did:dkg:context-graph:${graph}/_meta`;
   return Array.from({ length: count }, (_, index) => {
     const number = index + 1;
     const ual = `did:dkg:evm:31337/${SNAPSHOT_AUTHOR}/${number}`;
     const assertionGraph = knowledgeAssetLayerGraphUri(graph, MemoryLayer.VerifiableMemory,
-      createGraphKnowledgeAssetScope(ual, 1), options.subGraphName);
-    const dataQuads: Quad[] = [{ subject: `urn:entity:${number}`, predicate: 'urn:value', object: `"asset ${number}"`, graph: assertionGraph }];
+      createGraphKnowledgeAssetScope(ual, version), options.subGraphName);
+    const dataQuads: Quad[] = [{ subject: `urn:entity:${number}`, predicate: 'urn:value',
+      object: version === 1 ? `"asset ${number}"` : `"asset ${number} v${version}"`, graph: assertionGraph }];
     const root = computeFlatKCRootV10(dataQuads, []);
     const kaId = (BigInt(SNAPSHOT_AUTHOR) << 96n) | BigInt(number);
     const metadataQuads = generateGraphKnowledgeAssetMetadata({
-      ual, contextGraphId: graph, assertionGraph, assertionVersion: '1', merkleRoot: root, publisherPeerId: 'core',
+      ual, contextGraphId: graph, assertionGraph, assertionVersion: String(version), merkleRoot: root, publisherPeerId: 'core',
       accessPolicy: 'public', timestamp: new Date(0), publicTripleCount: dataQuads.length, privateTripleCount: 0,
       ...(options.subGraphName ? { subGraphName: options.subGraphName } : {}),
     }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
       batchId: kaId, materializedVersion: { blockNumber: 10, txIndex: 0 },
     } } });
     const verified: VerifiedGraphScopedAsset = {
-      contextGraphId: graph, ual, assertionVersion: 1n, assertionGraph, metaGraph,
+      contextGraphId: graph, ual, assertionVersion: BigInt(version), assertionGraph, metaGraph,
       merkleRootHex: ethers.hexlify(root).slice(2), dataQuads, metadataQuads,
       ...(options.subGraphName ? { subGraphName: options.subGraphName } : {}),
     };

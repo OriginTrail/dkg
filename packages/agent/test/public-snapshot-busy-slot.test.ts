@@ -119,6 +119,42 @@ describe('public snapshot job on a node with one sync slot and no queue', () => 
     expect(agent.log.info).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('waiting for local sync capacity'));
   });
 
+  it('shares the node with metadata refreshes, which keep their reserved control-plane slot', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const assets = makeAssets(12);
+    const agent = makeAgent(assets);
+    const serve = deliver(agent.store, assets);
+    const attempts = vi.spyOn(exactRecovery, 'runExactRecovery');
+    let releaseTransfer!: () => void, entered = false;
+    const transferHeld = new Promise<void>(resolve => { releaseTransfer = resolve; });
+    vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph').mockImplementation(async request => {
+      entered = true;
+      await transferHeld;
+      return serve(request);
+    });
+    // A curator metadata refresh that no sync encloses, as the requester and responder run it.
+    const refresh = <T>(work: () => Promise<T>) => agent.runContextGraphSyncWithBackpressure(createOperationContext('sync'),
+      'other-graph', 'durable', 'durable:control-plane', work, { source: 'control-plane' });
+    try {
+      // A refresh that finds the general slot free takes it first; the job's batch waits it out.
+      let releaseRefresh!: () => void;
+      const firstRefresh = refresh(() => new Promise<void>(resolve => { releaseRefresh = resolve; }));
+      const job = run(agent);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await attempts.mock.results[0]!.value).toMatchObject({ admission: 'local-admission-deferred' });
+      releaseRefresh();
+      await firstRefresh;
+      for (let step = 0; step < 100 && !entered; step++) await vi.advanceTimersByTimeAsync(500);
+      expect(entered).toBe(true);
+      // While the batch holds the only general slot, a refresh runs in the reserved slot, which
+      // the job's admission does not count.
+      await expect(refresh(async () => 'refreshed')).resolves.toBe('refreshed');
+      expect(agent.vmRecoverySyncAdmissionAvailable(graph)).toBe(false);
+      releaseTransfer();
+      expect(await settle(job)).toMatchObject({ value: { committed: 12, current: true } });
+    } finally { releaseTransfer(); }
+  });
+
   it('asks a core that answers BUSY again after its hold-off until it serves', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const assets = makeAssets(12);
