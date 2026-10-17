@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { isWithheldGraphQueryError, WithheldGraphQueryError } from '../src/withheld-graph-scope.js';
 
@@ -13,95 +13,93 @@ const GRAPHS: Record<string, string> = {
   open: 'did:dkg:context-graph:open/_meta',
 };
 const withheld = { withheldGraphRoots: [ROOT] };
+const isWithheld = (graph: string) => graph === ROOT || graph.startsWith(`${ROOT}/`);
+const QUADS: Quad[] = [
+  ...Object.entries(GRAPHS).map(([name, graph]) => ({ subject: `urn:s:${name}`, predicate: 'urn:p', object: `"${name}"`, graph })),
+  // One subject described in a readable graph and in a withheld one.
+  { subject: 'urn:shared', predicate: 'urn:p', object: '"visible"', graph: GRAPHS.open },
+  { subject: 'urn:shared', predicate: 'urn:secret', object: '"withheld"', graph: GRAPHS.meta },
+  { subject: 'urn:s:default', predicate: 'urn:p', object: '"default"', graph: '' },
+];
 
-let store: OxigraphStore;
-let engine: DKGQueryEngine;
+let full: OxigraphStore;
+let oracle: OxigraphStore;
 beforeEach(async () => {
-  store = new OxigraphStore();
-  engine = new DKGQueryEngine(store);
-  await store.insert([
-    ...Object.entries(GRAPHS).map(([name, graph]) => ({ subject: `urn:s:${name}`, predicate: 'urn:p', object: `"${name}"`, graph })),
-    { subject: 'urn:s:default', predicate: 'urn:p', object: '"default"', graph: '' },
-  ]);
+  full = new OxigraphStore();
+  oracle = new OxigraphStore();
+  await full.insert(QUADS);
+  // The behavioural oracle: the same store with the withheld graphs physically absent.
+  await oracle.insert(QUADS.filter(quad => !isWithheld(quad.graph)));
 });
-afterEach(async () => { await store.close(); });
+afterEach(async () => { await full.close(); await oracle.close(); });
 
-const values = (result: { bindings: Array<Record<string, string>> }, name: string) =>
-  result.bindings.map(row => row[name]).sort();
+function normalize(result: { bindings: Array<Record<string, string>>; quads?: Quad[] }) {
+  return JSON.stringify({
+    bindings: result.bindings.map(row => JSON.stringify(Object.entries(row).sort())).sort(),
+    quads: (result.quads ?? []).map(quad => JSON.stringify([quad.subject, quad.predicate, quad.object, quad.graph])).sort(),
+  });
+}
+
+// Shapes where a per-pattern rewrite would lose readable rows or let a
+// subquery read a withheld graph; the dataset restriction answers them all.
+const SHAPES = [
+  'SELECT ?o WHERE { GRAPH ?g { ?s <urn:p> ?o } }',
+  'SELECT ?o WHERE { GRAPH $g { ?s <urn:p> ?o } }',
+  'SELECT DISTINCT ?g WHERE { GRAPH ?g { } }',
+  'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }',
+  'SELECT ?x WHERE { VALUES ?x { "probe" } FILTER EXISTS { GRAPH ?g { ?s <urn:p> "meta" } } }',
+  'SELECT ?x WHERE { VALUES ?x { "probe" } FILTER NOT EXISTS { GRAPH ?g { ?s <urn:p> "meta" } } }',
+  'SELECT ?s WHERE { VALUES ?s { <urn:s:meta> <urn:s:open> } MINUS { GRAPH ?g { ?s <urn:p> ?o } } }',
+  'SELECT ?s ?o WHERE { VALUES ?s { <urn:s:meta> } OPTIONAL { GRAPH ?g { ?s <urn:p> ?o } } }',
+  'SELECT ?c WHERE { { SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } } } }',
+  'SELECT ?g ?o WHERE { GRAPH ?g { { SELECT ?o WHERE { ?s <urn:p> ?o } } } }',
+  'SELECT ?g ?o WHERE { GRAPH ?g { OPTIONAL { { SELECT ?o WHERE { ?s <urn:p> ?o } } } } }',
+  'SELECT ?x WHERE { VALUES ?x { "probe" } FILTER NOT EXISTS { GRAPH ?g { { SELECT ?o WHERE { ?s <urn:p> "meta" } } } } }',
+  'SELECT ?o WHERE { GRAPH ?g { GRAPH ?h { ?s <urn:p> ?o } } }',
+  `SELECT ?o WHERE { VALUES ?g { <${GRAPHS.meta}> } GRAPH ?g { ?s <urn:p> ?o } }`,
+  'SELECT ?o ?q WHERE { GRAPH ?g { ?s <urn:p> ?o }GRAPH ?h { ?t <urn:p> ?q } }',
+  `SELECT ?o WHERE { GRAPH <${GRAPHS.meta}> { ?s ?p ?o } }`,
+  `SELECT ?o WHERE { GRAPH <${GRAPHS.sibling}> { ?s ?p ?o } }`,
+  'PREFIX cg: <did:dkg:context-graph:> SELECT ?o WHERE { GRAPH cg:marked\\/_meta { ?s ?p ?o } }',
+  'BASE <did:dkg:context-graph:> SELECT ?o WHERE { GRAPH <marked/_meta> { ?s ?p ?o } }',
+  'SELECT ?o WHERE { ?s <urn:p> ?o }',
+  'ASK { GRAPH ?g { ?s <urn:secret> ?o } }',
+  'DESCRIBE <urn:shared>',
+  'DESCRIBE ?s WHERE { GRAPH ?g { ?s <urn:p> "visible" } }',
+  'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }',
+];
 
 describe('unscoped queries with withheld graphs', () => {
-  it('answers over the dataset without the withheld root and every graph below it', async () => {
-    const sparql = 'SELECT ?o WHERE { GRAPH ?g { ?s <urn:p> ?o } }';
-    expect(values(await engine.query(sparql), 'o')).toEqual(['"child"', '"meta"', '"open"', '"root"', '"sibling"', '"vm"']);
-    expect(values(await engine.query(sparql, withheld), 'o')).toEqual(['"open"', '"sibling"']);
-    expect(values(await engine.query('SELECT ?o WHERE { GRAPH $g { ?s <urn:p> ?o } }', withheld), 'o')).toEqual(['"open"', '"sibling"']);
-    expect(values(await engine.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { } }', withheld), 'g')).toEqual([GRAPHS.sibling, GRAPHS.open]);
+  it('answers each shape as the same query over a store without the withheld graphs', async () => {
+    const engine = new DKGQueryEngine(full);
+    const reference = new DKGQueryEngine(oracle);
+    for (const sparql of SHAPES) {
+      expect(normalize(await engine.query(sparql, withheld)), sparql).toBe(normalize(await reference.query(sparql)));
+    }
+    // The withheld content is there: without roots the same store returns it.
+    expect(normalize(await engine.query(SHAPES[0]!))).toContain('meta');
+    expect((await engine.query('ASK { GRAPH ?g { ?s <urn:secret> ?o } }')).bindings).toEqual([{ result: 'true' }]);
   });
 
-  it('counts the default graph and the remaining named graphs, as the node metrics do', async () => {
-    const count = 'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
-    expect((await engine.query(count)).bindings[0]!.c).toContain('"7"');
-    expect((await engine.query(count, withheld)).bindings[0]!.c).toContain('"3"');
-  });
-
-  it('leaves withheld graphs out wherever a GRAPH pattern stands', async () => {
-    const run = async (sparql: string) => (await engine.query(sparql, withheld)).bindings;
-    // EXISTS / NOT EXISTS see a dataset without the withheld graphs.
-    expect(await run('SELECT ?x WHERE { VALUES ?x { "probe" } FILTER EXISTS { GRAPH ?g { ?s <urn:p> "meta" } } }')).toEqual([]);
-    expect(await run('SELECT ?x WHERE { VALUES ?x { "probe" } FILTER NOT EXISTS { GRAPH ?g { ?s <urn:p> "meta" } } }')).toEqual([{ x: '"probe"' }]);
-    // MINUS removes only what a visible graph holds.
-    expect(await run('SELECT ?s WHERE { VALUES ?s { <urn:s:meta> <urn:s:open> } MINUS { GRAPH ?g { ?s <urn:p> ?o } } }')).toEqual([{ s: 'urn:s:meta' }]);
-    expect(await run('SELECT ?s ?o WHERE { VALUES ?s { <urn:s:meta> } OPTIONAL { GRAPH ?g { ?s <urn:p> ?o } } }')).toEqual([{ s: 'urn:s:meta' }]);
-    expect(await run('SELECT ?c WHERE { { SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } } } }')).toEqual([{ c: expect.stringContaining('"2"') }]);
-    // Oxigraph leaves ?g unbound for these groups although they read named
-    // graphs; such rows are dropped, so nothing from a withheld graph escapes.
-    expect(values(await engine.query('SELECT ?o WHERE { GRAPH ?g { { SELECT ?o WHERE { ?s <urn:p> ?o } } } }'), 'o'))
-      .toEqual(['"child"', '"meta"', '"open"', '"root"', '"sibling"', '"vm"']);
-    expect(await run('SELECT ?o WHERE { GRAPH ?g { { SELECT ?o WHERE { ?s <urn:p> ?o } } } }')).toEqual([]);
-    expect(await run('SELECT ?o WHERE { GRAPH ?g { GRAPH ?h { ?s <urn:p> ?o } } }')).toEqual([]);
-    expect(values({ bindings: await run('SELECT ?o WHERE { GRAPH ?g { ?x ?y ?z GRAPH ?h { ?s <urn:p> ?o } } }') }, 'o'))
-      .toEqual(['"open"', '"open"', '"sibling"', '"sibling"']);
-    expect(await run(`SELECT ?o WHERE { VALUES ?g { <${GRAPHS.meta}> } GRAPH ?g { ?s <urn:p> ?o } }`)).toEqual([]);
-    expect(values({ bindings: await run('SELECT ?o WHERE { { GRAPH ?g { ?s <urn:p> ?o } } UNION { GRAPH ?h { ?s <urn:p> ?o } } }') }, 'o'))
-      .toEqual(['"open"', '"open"', '"sibling"', '"sibling"']);
-    // Two adjacent patterns: one's closing edit and the next one's opening edit share a position.
-    expect(await run('SELECT ?o ?q WHERE { GRAPH ?g { ?s <urn:p> ?o }GRAPH ?h { ?t <urn:p> ?q } }')).toHaveLength(4);
-  });
-
-  it('refuses a query that names a withheld graph or a graph it cannot place', async () => {
-    const refused = [
-      `SELECT ?o WHERE { GRAPH <${GRAPHS.meta}> { ?s <urn:p> ?o } }`,
-      `SELECT ?o WHERE { GRAPH <${ROOT}> { ?s <urn:p> ?o } }`,
-      'PREFIX cg: <did:dkg:context-graph:> SELECT ?o WHERE { GRAPH cg:marked { ?s <urn:p> ?o } }',
-      `SELECT ?o FROM <${GRAPHS.vm}> WHERE { ?s <urn:p> ?o }`,
-      `SELECT ?o FROM NAMED <${GRAPHS.child}> WHERE { GRAPH ?g { ?s <urn:p> ?o } }`,
-      'BASE <did:dkg:context-graph:> SELECT ?o WHERE { GRAPH <marked/_meta> { ?s <urn:p> ?o } }',
-      'SELECT ?o WHERE { GRAPH <marked/_meta> { ?s <urn:p> ?o } }',
-      'SELECT ?o WHERE { GRAPH undeclared:graph { ?s <urn:p> ?o } }',
-      'SELECT ?o FROM undeclared:graph WHERE { ?s <urn:p> ?o }',
-      'SELECT ?o WHERE { GRAPH ?g ?s }',
-    ];
-    for (const sparql of refused) {
+  it('refuses a query that names its own dataset while graphs are withheld', async () => {
+    const engine = new DKGQueryEngine(full);
+    for (const sparql of [
+      `SELECT ?o FROM <${GRAPHS.open}> WHERE { ?s <urn:p> ?o }`,
+      `SELECT ?o FROM NAMED <${GRAPHS.meta}> WHERE { GRAPH ?g { ?s <urn:p> ?o } }`,
+    ]) {
       const error = await engine.query(sparql, withheld).then(() => undefined, (cause: unknown) => cause);
       expect(error, sparql).toBeInstanceOf(WithheldGraphQueryError);
       expect(isWithheldGraphQueryError(error)).toBe(true);
+      // Without withheld graphs the query runs as before.
+      await expect(engine.query(sparql)).resolves.toBeDefined();
     }
     expect(isWithheldGraphQueryError(new Error('other'))).toBe(false);
   });
 
-  it('keeps explicit graphs and datasets outside the withheld roots', async () => {
-    expect(values(await engine.query(`SELECT ?o WHERE { GRAPH <${GRAPHS.sibling}> { ?s <urn:p> ?o } }`, withheld), 'o')).toEqual(['"sibling"']);
-    expect(values(await engine.query(`SELECT ?o FROM <${GRAPHS.open}> WHERE { ?s <urn:p> ?o }`, withheld), 'o')).toEqual(['"open"']);
-    expect(values(await engine.query('PREFIX open: <did:dkg:context-graph:open/> SELECT ?o FROM NAMED open:_meta WHERE { GRAPH ?g { ?s <urn:p> ?o } }', withheld), 'o'))
-      .toEqual(['"open"']);
-    expect(values(await engine.query('SELECT ?o WHERE { ?s <urn:p> ?o }', withheld), 'o')).toEqual(['"default"']);
-    expect(values(await engine.query('SELECT ?o WHERE { GRAPH ?g { ?s <urn:p> ?o } }', { withheldGraphRoots: [] }), 'o')).toHaveLength(6);
-  });
-
-  it('rejects withheld roots on scoped queries and unsafe roots', async () => {
+  it('runs as before without roots and rejects roots on scoped queries', async () => {
+    const engine = new DKGQueryEngine(full);
+    expect(normalize(await engine.query(SHAPES[0]!, { withheldGraphRoots: [] }))).toBe(normalize(await engine.query(SHAPES[0]!)));
     await expect(engine.query('SELECT ?o WHERE { ?s <urn:p> ?o }', { contextGraphId: 'open', ...withheld }))
       .rejects.toThrow('only to queries without a contextGraphId');
-    await expect(engine.query('SELECT ?o WHERE { GRAPH ?g { ?s <urn:p> ?o } }', { withheldGraphRoots: ['did:dkg:context-graph:x> } <urn:y'] }))
-      .rejects.toThrow('Unsafe');
   });
 });

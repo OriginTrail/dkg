@@ -1,5 +1,5 @@
 import type { AgentQueryOptions } from './agent-query-options.js';
-import { withPublicSnapshotQueryTrust } from './public-snapshot-evidence.js';
+import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -635,9 +635,8 @@ export class QueryMethods extends DKGAgentBase {
 
     const execute = () => {
       opts.signal?.throwIfAborted();
-      return withPublicSnapshotQueryTrust(this.store, opts.contextGraphId, opts.chainEvidenceMode, ({ withheldGraphRoots }) => this.queryEngine.query(sparql, {
+      return queryWithPublicSnapshotTrust(this.store, this.queryEngine, sparql, {
       contextGraphId: opts.contextGraphId,
-      withheldGraphRoots,
       requireCompleteGraphScope: opts.requireCompleteGraphScope,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
@@ -661,7 +660,7 @@ export class QueryMethods extends DKGAgentBase {
       // callers on the legacy shape still get the trust gate without
       // engines needing to know about both names.
       minTrust: opts.minTrust ?? opts._minTrust,
-      }), { signal: opts.signal, priority: opts.priority, source: opts.source });
+      }, opts.chainEvidenceMode, { signal: opts.signal, priority: opts.priority, source: opts.source });
     };
     // Arbitrary unscoped SPARQL can reveal private data through aggregates or
     // projections without a graph column. The executor owns admission and both

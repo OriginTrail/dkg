@@ -1,7 +1,7 @@
 import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
-import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
+import { createQueryStoreReadContext, createStoreReadLane, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
@@ -72,7 +72,7 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
-import { withholdGraphsFromUnscopedQuery } from './withheld-graph-scope.js';
+import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
 /** Upstream statuses that mean the SUBMITTED query was malformed. */
@@ -360,9 +360,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
         plan.options.contextGraphId, plan.options, reads, reads.catalog);
-      case 'unscoped': return this.execWithExclusions(
-        withholdGraphsFromUnscopedQuery(initialGraphScope, options?.withheldGraphRoots ?? []),
-        reads, options?.excludeGraphPrefixes);
+      case 'unscoped': {
+        // The store answers over its dataset without the withheld graphs.
+        const withheld = options?.withheldGraphRoots ?? [];
+        if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
+        return this.execWithExclusions(initialGraphScope, withheld.length
+          ? createStoreReadLane(this.store, { ...storeOptions(options), withheldGraphRoots: withheld }) : reads,
+        options?.excludeGraphPrefixes);
+      }
     }
   }
 

@@ -1,4 +1,5 @@
 import { withAdmittedReadCancellation, type AdmittedReadDeadline } from '../admitted-read-cancellation.js';
+import { refuseWithheldGraphQuery } from '../withheld-graph-query.js';
 import { executeReceiptConfirmedPublication } from '../receipt-confirmed-execution.js';
 import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
@@ -605,6 +606,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   // -------------------------------------------------------------------
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
+    refuseWithheldGraphQuery(options, 'BlazegraphStore');
     return this.queryWithOperation(sparql, options);
   }
 

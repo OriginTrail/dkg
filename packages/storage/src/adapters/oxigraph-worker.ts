@@ -827,7 +827,8 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
+    const withheld = options?.withheldGraphRoots?.length ? [{ withheldGraphRoots: [...options.withheldGraphRoots] }] : [];
+    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql, ...withheld);
   }
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);

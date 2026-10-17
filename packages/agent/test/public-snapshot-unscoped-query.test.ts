@@ -37,7 +37,11 @@ describe('agent.query after a core-cache snapshot job marked a graph', () => {
     // Unscoped reads keep working, with the marked graph and its descendants left out.
     expect(values(await agent.query(sparql))).toEqual(['"local"']);
     expect((await agent.query(count)).bindings?.[0]?.c).toContain('"1"');
-    await expect(agent.query(`SELECT ?value WHERE { GRAPH <${imported}> { ?s <urn:value> ?value } }`))
+    // Whatever the query's shape, the store answers over its dataset without the marked graphs.
+    expect(values(await agent.query(`SELECT ?value WHERE { GRAPH <${imported}> { ?s <urn:value> ?value } }`))).toEqual([]);
+    expect(values(await agent.query('SELECT ?value WHERE { GRAPH ?g { OPTIONAL { { SELECT ?value WHERE { ?s <urn:value> ?value } } } } }')))
+      .not.toContain('"imported"');
+    await expect(agent.query(`SELECT ?value FROM <${imported}> WHERE { ?s <urn:value> ?value }`))
       .rejects.toMatchObject({ code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
     await expect(agent.query(sparql, { chainEvidenceMode: 'core-cache' })).rejects.toThrow('explicit context graph');
 

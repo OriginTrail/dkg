@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { markCoreTrustedGraph, withPublicSnapshotQueryTrust } from '../../agent/src/public-snapshot-evidence.js';
+import { markCoreTrustedGraph, queryWithPublicSnapshotTrust } from '../../agent/src/public-snapshot-evidence.js';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import {
   buildContextGraphDeclarationsSparql,
@@ -265,8 +265,7 @@ describe('createStoreCountMetrics', () => {
     try {
       const engine = new DKGQueryEngine(store);
       // The composition agent.query uses for a query without a context graph.
-      const metrics = createStoreCountMetrics((sparql) => withPublicSnapshotQueryTrust(store, undefined, undefined,
-        ({ withheldGraphRoots }) => engine.query(sparql, { withheldGraphRoots })));
+      const metrics = createStoreCountMetrics((sparql) => queryWithPublicSnapshotTrust(store, engine, sparql, {}, undefined));
       const DKG = 'http://dkg.io/ontology/';
       await store.insert([
         { subject: 'did:dkg:evm:31337/0xab/1', predicate: `${DKG}status`, object: '"confirmed"', graph: 'did:dkg:context-graph:local/_meta' },

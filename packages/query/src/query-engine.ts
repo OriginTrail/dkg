@@ -85,9 +85,9 @@ export interface QueryOptions {
   excludeGraphPrefixes?: string[];
   /**
    * Graph IRIs a query without `contextGraphId` must not read, each with every
-   * graph below it (`<iri>/...`). The query is answered over the dataset without
-   * them; one that names such a graph, or a graph that cannot be placed, is
-   * refused with `WithheldGraphQueryError`. Rejected on scoped queries.
+   * graph below it (`<iri>/...`). The store answers over its default graph and
+   * every other named graph, whatever the query's patterns; FROM / FROM NAMED
+   * are refused with `WithheldGraphQueryError`. Rejected on scoped queries.
    */
   withheldGraphRoots?: readonly string[];
   /**

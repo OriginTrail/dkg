@@ -8,7 +8,7 @@ import {
   contextGraphMetaUri,
   sparqlString,
 } from "@origintrail-official/dkg-core";
-import { isWithheldGraphQueryError } from "@origintrail-official/dkg-query";
+import { isWithheldGraphQueryError, type QueryEngine, type QueryOptions, type QueryResult } from "@origintrail-official/dkg-query";
 import type { TripleStore } from "@origintrail-official/dkg-storage";
 import type {
   VerifiedGraphScopedAsset,
@@ -58,7 +58,7 @@ function coreCacheTrustRequired(message = "This graph contains core-trusted chai
  * Refuse a read of a marked graph without explicit acceptance. Without a
  * context graph it refuses while any graph is marked: that is the check for a
  * caller that cannot leave marked graphs out of what it reads (remote UAL
- * lookups). Local unscoped queries use `withPublicSnapshotQueryTrust`, which
+ * lookups). Local unscoped queries use `queryWithPublicSnapshotTrust`, which
  * leaves the marked graphs out instead.
  */
 export async function assertPublicSnapshotQueryTrust(
@@ -207,53 +207,40 @@ export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
   }
 }
 
-export interface PublicSnapshotQueryScope {
-  /**
-   * Graph IRIs the query must not read, each with every graph below it. Empty
-   * for a scoped query, whose own graph passed the check.
-   */
-  readonly withheldGraphRoots: readonly string[];
-}
 /**
- * Run only after the normal read-authority gate. Recheck before releasing results to close a concurrent-import race.
+ * Run one local query under the chain evidence policy, after the normal
+ * read-authority gate. Evidence is rechecked before the result is released,
+ * which closes a race with an import that starts during the query.
  *
- * A scoped query of a marked graph needs explicit acceptance. An unscoped
- * query never fails because some graph is marked: `execute` receives the
- * marked graphs and must answer over the dataset without them, so no
- * core-cache evidence reaches a caller that did not accept it. Acceptance
- * itself stays per graph and needs a context graph.
+ * A scoped query of a marked graph needs explicit acceptance. A query without
+ * a context graph never fails only because some graph is marked: it runs over
+ * the store's dataset without the marked graphs, which this function hands to
+ * the engine itself, so no core-cache evidence reaches a caller that did not
+ * accept it. Acceptance stays per graph and needs a context graph.
  */
-export async function withPublicSnapshotQueryTrust<T>(
+export async function queryWithPublicSnapshotTrust(
   store: TripleStore,
-  contextGraphId: string | undefined,
+  engine: Pick<QueryEngine, "query">,
+  sparql: string,
+  options: QueryOptions,
   mode: PublicSnapshotMode | undefined,
-  execute: (scope: PublicSnapshotQueryScope) => Promise<T>,
-  queryOptions?: import("@origintrail-official/dkg-storage").QueryOptions,
-): Promise<T> {
+  readOptions?: import("@origintrail-official/dkg-storage").QueryOptions,
+): Promise<QueryResult> {
+  const { contextGraphId } = options;
   if (contextGraphId) {
-    await assertPublicSnapshotQueryTrust(
-      store,
-      contextGraphId,
-      mode,
-      queryOptions,
-    );
-    const result = await execute({ withheldGraphRoots: [] });
-    await assertPublicSnapshotQueryTrust(
-      store,
-      contextGraphId,
-      mode,
-      queryOptions,
-    );
+    await assertPublicSnapshotQueryTrust(store, contextGraphId, mode, readOptions);
+    const result = await engine.query(sparql, options);
+    await assertPublicSnapshotQueryTrust(store, contextGraphId, mode, readOptions);
     return result;
   }
   acceptsCoreCache(contextGraphId, mode);
-  const withheldGraphRoots = await readCoreCacheWithheldGraphRoots(store, queryOptions);
-  const result = await execute({ withheldGraphRoots }).catch((error: unknown) => {
+  const withheldGraphRoots = await readCoreCacheWithheldGraphRoots(store, readOptions);
+  const result = await engine.query(sparql, { ...options, withheldGraphRoots }).catch((error: unknown) => {
     if (!isWithheldGraphQueryError(error)) throw error;
-    throw coreCacheTrustRequired("This query names a graph that holds core-trusted chain evidence. Scope the query to that context graph and explicitly accept core-cache evidence, or use an independent profile.");
+    throw coreCacheTrustRequired("While graphs hold core-trusted chain evidence, a query without a context graph cannot name its own dataset. Scope the query to a context graph.");
   });
   // A graph marked while the query ran was not left out of it.
-  const after = await readCoreCacheWithheldGraphRoots(store, queryOptions);
+  const after = await readCoreCacheWithheldGraphRoots(store, readOptions);
   if (after.some(root => !withheldGraphRoots.includes(root))) throw coreCacheTrustRequired();
   return result;
 }
