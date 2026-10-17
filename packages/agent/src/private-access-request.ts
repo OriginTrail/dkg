@@ -1,7 +1,6 @@
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
   parseDeterministicKnowledgeAssetUal,
-  resolveWithinAbort,
   startRequestAbortLifecycle,
 } from '@origintrail-official/dkg-core';
 import { RequestOwnedAccessClient, accessError } from '@origintrail-official/dkg-publisher';
@@ -50,12 +49,10 @@ export async function requestOwnedPrivateAccess(
   running.add(owner);
   try {
     const client = new RequestOwnedAccessClient(owner.messenger, owner.wallet.keypair, owner.peerId);
-    const result = await resolveWithinAbort(() => client.requestAccess(publisherPeerId, kaUal, undefined, {
+    const result = await client.requestAccess(publisherPeerId, kaUal, undefined, {
       signal: lifecycle.signal, timeoutMs: TIMEOUT_MS,
       maxResponseBytes: MAX_RESPONSE_BYTES, maxQuads: MAX_QUADS,
-    }), lifecycle.signal);
-    lifecycle.signal.throwIfAborted();
-    if (!result) throw accessError('ACCESS_UNAVAILABLE', 'Private access did not complete');
+    });
     if (!result.granted) return {
       granted: false, quads: [], storedInGraph: false,
       verification: { kind: 'not-checked', matches: false, chainAnchored: false },

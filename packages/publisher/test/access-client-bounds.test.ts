@@ -1,7 +1,13 @@
-import { describe, expect, it } from 'vitest';
-import { encodeAccessResponse, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ed25519Sign, encodeAccessResponse, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { ACCESS_ERROR_CODES, accessError, isAccessError } from '../src/access-errors.js';
 import { AccessClient, RequestOwnedAccessClient, type RequestOwnedAccessSendSurface } from '../src/access-client.js';
+
+vi.mock('@origintrail-official/dkg-core', async importOriginal => {
+  const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
+  return { ...actual, ed25519Sign: vi.fn(actual.ed25519Sign) };
+});
+afterEach(() => vi.mocked(ed25519Sign).mockRestore());
 
 const UAL = 'did:dkg:evm:31337/0x1111111111111111111111111111111111111111/0';
 const result = (response: Uint8Array) => ({ delivered: true as const, response, attempts: 1, messageId: 'owned' });
@@ -28,6 +34,25 @@ describe('caller-owned private access bounds', () => {
     await expect(access.requestAccess('publisher-peer', UAL, undefined, { signal }))
       .rejects.toThrow('caller ended');
     expect(sends).toBe(0);
+  });
+
+  it('cancels during signing and never sends when the signer later settles', async () => {
+    let release!: (signature: Uint8Array) => void;
+    const signing = new Promise<Uint8Array>(resolve => { release = resolve; });
+    vi.mocked(ed25519Sign).mockImplementationOnce(() => signing);
+    const send = vi.fn(async () => result(new Uint8Array()));
+    const access = await client(send);
+    const controller = new AbortController(); const reason = new Error('cancelled while signing');
+    let outcome: unknown = 'pending';
+    const request = access.requestAccess('publisher-peer', UAL, undefined, { signal: controller.signal })
+      .then(value => { outcome = value; }, error => { outcome = error; });
+    try {
+      await vi.waitFor(() => expect(ed25519Sign).toHaveBeenCalledTimes(1));
+      controller.abort(reason);
+      await vi.waitFor(() => expect(outcome).toBe(reason), { timeout: 150 });
+      expect(send).not.toHaveBeenCalled();
+    } finally { release(new Uint8Array(64)); await request; }
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('requires owned transport explicitly, before any send', async () => {

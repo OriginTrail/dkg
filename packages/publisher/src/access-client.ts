@@ -77,12 +77,17 @@ export class RequestOwnedAccessClient {
         throw new RangeError('Private access limits must be positive safe integers');
       }
     }
-    const payload = await encodeRequest(this.keypair, this.peerId, kaUal, paymentProof);
-    signal?.throwIfAborted();
-    let result: RequestOwnedAccessSendResult | null;
+    let result: AccessResult | null;
     try {
-      result = await resolveWithinAbort(() => this.send(publisherPeerId, PROTOCOL_ACCESS, payload,
-        { timeoutMs, signal, maxReadBytes: maxResponseBytes, recoverPeerAfterFailure: false }), signal);
+      result = await resolveWithinAbort(async () => {
+        const payload = await encodeRequest(this.keypair, this.peerId, kaUal, paymentProof);
+        signal?.throwIfAborted();
+        const sent = await this.send(publisherPeerId, PROTOCOL_ACCESS, payload,
+          { timeoutMs, signal, maxReadBytes: maxResponseBytes, recoverPeerAfterFailure: false });
+        signal?.throwIfAborted();
+        if (!sent.delivered) throw accessError('ACCESS_UNAVAILABLE', 'Private access transport is busy');
+        return decodeResult(sent.response, { maxResponseBytes, maxQuads });
+      }, signal);
     } catch (error) {
       if (error instanceof ProtocolReadLimitError) {
         throw accessError('ACCESS_RESPONSE_TOO_LARGE', 'Private access response exceeds byte limit', { cause: error });
@@ -90,8 +95,8 @@ export class RequestOwnedAccessClient {
       throw error;
     }
     signal?.throwIfAborted();
-    if (!result || !result.delivered) throw accessError('ACCESS_UNAVAILABLE', 'Private access transport is busy');
-    return decodeResult(result.response, { maxResponseBytes, maxQuads });
+    if (result === null) throw accessError('ACCESS_UNAVAILABLE', 'Private access did not complete');
+    return result;
   }
 }
 
