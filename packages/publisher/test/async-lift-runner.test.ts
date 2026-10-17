@@ -104,14 +104,17 @@ describe('AsyncLiftRunner', () => {
     await expect(runner.stop()).resolves.toBeUndefined();
   });
 
-  it('can recover in paused maintenance mode before wallet processing starts', async () => {
+  it('uses the same claim gate for startup maintenance and later live pause/resume', async () => {
     const order: string[] = [];
     let paused = false;
-    let runner!: AsyncLiftRunner;
     const publisher = createPublisher({
       pause: async () => {
         paused = true;
         order.push('pause');
+      },
+      resume: async () => {
+        paused = false;
+        order.push('resume');
       },
       recover: async () => {
         order.push('recover');
@@ -123,18 +126,26 @@ describe('AsyncLiftRunner', () => {
       },
     } as any);
 
-    runner = new AsyncLiftRunner({
+    const runner = new AsyncLiftRunner({
       publisher,
       walletIds: ['wallet-1'],
       startPaused: true,
-      sleep: async () => { void runner.stop(); },
+      pollIntervalMs: 60_000,
     });
 
-    await runner.start();
-    await waitFor(() => expect(order).toContain('process-paused'));
-    await runner.stop();
-
-    expect(order.slice(0, 3)).toEqual(['pause', 'recover', 'process-paused']);
+    try {
+      await runner.start();
+      expect(runner.claimGateStatus().held).toBe(true);
+      expect(order).toEqual(['pause', 'recover']);
+      await runner.releaseClaims();
+      await waitFor(() => expect(order).toContain('process-active'));
+      expect(runner.claimGateStatus().held).toBe(false);
+      await runner.holdClaims();
+      expect(runner.claimGateStatus().held).toBe(true);
+      await runner.releaseClaims();
+      await waitFor(() => expect(order.filter(step => step === 'process-active')).toHaveLength(2));
+      expect(order).not.toContain('process-paused');
+    } finally { await runner.stop(); }
   });
 
   it('runs recovery before processing wallets', async () => {

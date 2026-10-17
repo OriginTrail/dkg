@@ -5,22 +5,26 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
-import { AsyncLiftRunner } from '../../publisher/src/async-lift-runner.js';
+import { AsyncLiftRunner, type AsyncLiftRunnerConfig } from '../../publisher/src/async-lift-runner.js';
 import { TripleStoreAsyncLiftPublisher } from '../../publisher/src/async-lift-publisher-impl.js';
 import { createPublisherLiveControl, publisherDesiredStatePath } from '../src/publisher-live-control.js';
 import { beginGracefulShutdown } from '../src/daemon/teardown.js';
 import { handlePublisherLiveControlRoute } from '../src/daemon/routes/publisher-live-control.js';
 import { createAllowedHttpAuthentication } from '../src/auth.js';
-import { KA_VM_EXECUTOR_TX_HASH, kaVmPublishRequest, stageKnowledgeAssetShareSnapshot } from '../../../scripts/testing/ka-vm-publish.js';
+import { KA_VM_EXECUTOR_TX_HASH, kaVmPublishRequest, kaVmRecoveryEvidence, recoveredResolution,
+  stageKnowledgeAssetShareSnapshot } from '../../../scripts/testing/ka-vm-publish.js';
 
 const persistenceBarrier = vi.hoisted(() => ({ directory: null as string | null,
+  parentDirectory: null as string | null,
   entered: null as (() => void) | null, release: null as Promise<void> | null }));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
     const file = await actual.open(...args);
-    if (args[1] === 'wx' && persistenceBarrier.directory && String(args[0]).startsWith(persistenceBarrier.directory)) {
+    if ((args[1] === 'wx' && persistenceBarrier.directory && String(args[0]).startsWith(persistenceBarrier.directory))
+      || (args[1] === 'r' && String(args[0]) === persistenceBarrier.parentDirectory)) {
       persistenceBarrier.directory = null;
+      persistenceBarrier.parentDirectory = null;
       const sync = file.sync.bind(file);
       file.sync = async () => { persistenceBarrier.entered?.(); await persistenceBarrier.release; await sync(); };
     }
@@ -30,13 +34,14 @@ vi.mock('node:fs/promises', async importOriginal => {
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-async function fixture(directory?: string, publisher?: TripleStoreAsyncLiftPublisher, startPaused = false) {
+async function fixture(directory?: string, publisher?: TripleStoreAsyncLiftPublisher, startPaused = false,
+  runnerOptions: Partial<AsyncLiftRunnerConfig> = {}) {
   const dataDir = directory ?? await mkdtemp(join(tmpdir(), 'dkg-publisher-control-'));
   if (!directory) cleanup.push(() => rm(dataDir, { recursive: true, force: true }));
   const store = new OxigraphStore();
   cleanup.push(() => store.close());
   publisher ??= new TripleStoreAsyncLiftPublisher(store);
-  const runner = new AsyncLiftRunner({ publisher, walletIds: ['one', 'two'], pollIntervalMs: 60_000 });
+  const runner = new AsyncLiftRunner({ publisher, walletIds: ['one', 'two'], pollIntervalMs: 60_000, ...runnerOptions });
   cleanup.push(() => runner.stop());
   const control = await createPublisherLiveControl(runner, dataDir, startPaused);
   cleanup.push(() => control.close());
@@ -245,6 +250,79 @@ describe('durable control of the active publisher wallet loops', () => {
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     expect(await publisher.claimNext('two')).toBeNull();
     expect(runner.claimGateStatus().held).toBe(true);
+  });
+
+  it('honors the platform durability boundary before acknowledging renamed resume intent', async () => {
+    const { dataDir, control, runner, publisher } = await fixture();
+    await control.pause(); await runner.start();
+    if (process.platform === 'win32') {
+      // Windows uses file fsync (also held by the preceding test), and must not attempt an
+      // unsupported directory open/sync before acknowledging the committed rename.
+      expect(await control.resume()).toMatchObject({ desiredState: 'running', effectiveState: 'running',
+        generation: 2, acknowledgedGeneration: 2 });
+      expect(runner.claimGateStatus().held).toBe(false);
+      expect(JSON.parse(await readFile(publisherDesiredStatePath(dataDir), 'utf8')))
+        .toMatchObject({ desiredState: 'running', generation: 2 });
+      return;
+    }
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const accepted = await publisher.getStatus(jobId);
+    let entered!: () => void; const syncing = new Promise<void>(resolve => { entered = resolve; });
+    let rejectSync!: (error: Error) => void; const held = new Promise<void>((_, reject) => { rejectSync = reject; });
+    persistenceBarrier.parentDirectory = dataDir; persistenceBarrier.entered = entered; persistenceBarrier.release = held;
+    let settled = false;
+    const resuming = control.resume().finally(() => { settled = true; });
+    const rejected = expect(resuming).rejects.toThrow('could not commit');
+    try {
+      await syncing;
+      // Rename is already visible, but visibility alone does not acknowledge durable intent.
+      expect(JSON.parse(await readFile(publisherDesiredStatePath(dataDir), 'utf8')))
+        .toMatchObject({ desiredState: 'running', generation: 2 });
+      expect(settled).toBe(false);
+      expect(control.status()).toMatchObject({ desiredState: 'paused', generation: 1, acknowledgedGeneration: 1 });
+      expect(runner.claimGateStatus().held).toBe(true);
+      expect(await publisher.claimNext('probe')).toBeNull();
+      expect(await publisher.getStatus(jobId)).toEqual(accepted);
+    } finally { rejectSync(Object.assign(new Error('directory fsync failed'), { code: 'EIO' })); await rejected; }
+    expect(control.status()).toMatchObject({ desiredState: 'paused', effectiveState: 'unavailable',
+      generation: 1, acknowledgedGeneration: 1, fault: 'persistence_or_control_failed' });
+    expect(control.status().wallets.every(wallet => wallet.paused)).toBe(true);
+    expect(await publisher.claimNext('after-failure')).toBeNull();
+    expect(await publisher.getStatus(jobId)).toEqual(accepted);
+    await expect(control.resume()).rejects.toThrow('unavailable');
+  });
+
+  it('finishes broadcast recovery on the running scheduler while live pause keeps accepted work unclaimed', async () => {
+    const store = new OxigraphStore(); cleanup.push(() => store.close());
+    let evidenceReady = false;
+    const execute = vi.fn(async input => {
+      await input.publishOptions.onBeforeBroadcast?.({ txHash: KA_VM_EXECUTOR_TX_HASH });
+      throw new Error('submission acknowledgement lost');
+    });
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      chainProofResolver: async () => evidenceReady ? recoveredResolution() : { status: 'pending-mempool' },
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
+      knowledgeAssetVmPublishHandler: { execute, finalizeRecovered: async () => {} },
+    });
+    await stageKnowledgeAssetShareSnapshot({ store });
+    const broadcastJob = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const { control, runner } = await fixture(undefined, publisher, false,
+      { recoveryIntervalMs: 20, activeRecoveryIntervalMs: 20, hasIncludedRecoveryResolver: true });
+    await runner.start();
+    await vi.waitFor(async () => expect((await publisher.getStatus(broadcastJob))?.status).toBe('broadcast'));
+    await publisher.drainDetachedExecutions();
+    expect((await control.pause()).effectiveState).toBe('paused');
+    const acceptedJob = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'albums-next' }));
+    const accepted = await publisher.getStatus(acceptedJob);
+    expect(accepted?.status).toBe('accepted');
+    // No manual recover/reconcile call: only the already-running scheduler can consume this evidence.
+    evidenceReady = true;
+    await vi.waitFor(async () => expect((await publisher.getStatus(broadcastJob))?.status).toBe('finalized'));
+    expect((await publisher.getStatus(broadcastJob))?.finalization?.txHash).toBe(KA_VM_EXECUTOR_TX_HASH);
+    expect(control.status()).toMatchObject({ desiredState: 'paused', effectiveState: 'paused', generation: 1 });
+    expect(await publisher.getStatus(acceptedJob)).toEqual(accepted);
+    expect(await publisher.claimNext('probe')).toBeNull();
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it('lets an execution already in flight record broadcast evidence after pause acknowledgement', async () => {

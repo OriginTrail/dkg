@@ -18,7 +18,7 @@ export interface AsyncLiftRunnerConfig {
    * a consumer that already checks pending transactions faster than 5s keeps that rate.
    */
   readonly activeRecoveryIntervalMs?: number;
-  /** Start recovery, but do not claim accepted jobs until an operator restarts unpaused. */
+  /** Start recovery, but do not claim accepted jobs until the owner releases claims. */
   readonly startPaused?: boolean;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly onError?: (error: unknown) => void | Promise<void>;
@@ -116,7 +116,7 @@ export class AsyncLiftRunner {
     this.stopped = false;
     try {
       if (this.config.startPaused === true) {
-        await this.config.publisher.pause();
+        await this.holdClaims();
       }
       // Startup recovery IS the first pass: with the scheduling capability its outcome seeds
       // the cadence choice directly — one inventory, no second boot-time outlook read. Without
