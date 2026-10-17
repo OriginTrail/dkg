@@ -2,9 +2,20 @@
 // No product source changes. Launch only the owned daemon with this preload.
 import fs from 'node:fs';
 import path from 'node:path';
-import { BlazegraphStore, StoreSchedulerBusyError } from '../../packages/storage/dist/index.js';
-import { assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri } from '../../packages/core/dist/index.js';
+import { pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
+// Resolve against the launched runtime, never against this harness checkout.
+const runtimeRoot = fs.realpathSync(process.env.DKG_TEST_RUNTIME_ROOT ?? process.cwd());
+if (runtimeRoot !== fs.realpathSync(process.cwd())) throw new Error('Fault runtime must match the daemon working directory');
+const storageModule = path.join(runtimeRoot, 'packages/storage/dist/index.js');
+const coreModule = path.join(runtimeRoot, 'packages/core/dist/index.js');
+const { BlazegraphStore, StoreSchedulerBusyError } = await import(pathToFileURL(storageModule).href);
+const { assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri } = await import(pathToFileURL(coreModule).href);
 const home = process.env.DKG_HOME;
+if (home) fs.writeFileSync(path.join(home, `2963-fault-runtime-${process.pid}.json`), JSON.stringify({
+  at: new Date().toISOString(), pid: process.pid, runtimeRoot,
+  modules: [storageModule, coreModule].map(file => ({ file, sha256: createHash('sha256').update(fs.readFileSync(file)).digest('hex') })),
+}), { mode: 0o600 });
 const armFile = home && path.join(home, '2963-faults.json');
 const insert = BlazegraphStore.prototype.insert;
 BlazegraphStore.prototype.insert = async function(quads, ...args) {

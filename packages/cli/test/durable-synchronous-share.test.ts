@@ -786,6 +786,40 @@ describe('durable synchronous share ownership', () => {
     await store.close();
   });
 
+  it('fences a claim that expires while waiting for the publisher lifecycle lock', async () => {
+    const { store, agent, publisher, finalized } = await setup();
+    let now = Date.now(), release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const queue = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100, backoff: () => 0 });
+    const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    const job = await queue.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...bound }, 'old');
+    const locked = (publisher as any).withAssertionLifecycleWriteLock(CG, NAME, AUTHOR, undefined, () => gate);
+    const lockEntry = vi.spyOn(publisher as any, 'withAssertionLifecycleWriteLock');
+    const clear = vi.spyOn(publisher as any, 'clearSwmShareCompleteUnlocked');
+    const tail = vi.spyOn(agent, 'afterDurableSwmPromotionV1');
+    const execute = (q: typeof queue, claim: typeof job) => runPromoteJob({ job: claim, queue: q,
+      workerId: claim.lease!.workerId, now: () => now, heartbeatIntervalMs: 60_000, bookkeepingRetryBudgetMs: 0,
+      log: () => undefined, runPromote: (request, executionAuthority) => executePromoteRequest(agent, request, { executionAuthority }) });
+    const old = execute(queue, job);
+    // Entry into this lock is after the execution section's first claim check.
+    await vi.waitFor(() => expect(lockEntry).toHaveBeenCalled());
+    now += 101;
+    const reopened = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100, backoff: () => 0 });
+    const replacement = (await reopened.claimNext('new'))!;
+    expect(replacement.jobId).toBe(job.jobId);
+    release(); await locked;
+    expect((await old).outcome).toBe('failure_bookkeeping_uncertain');
+    expect(clear).not.toHaveBeenCalled(); expect(tail).not.toHaveBeenCalled();
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
+    expect((await execute(reopened, replacement)).outcome).toBe('succeeded');
+    expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    expect(await store.countQuads(finalized.graphUri)).toBe(0);
+    expect(await reopened.getStatus(job.jobId)).toMatchObject({ state: 'succeeded', attempt: { count: 2 }, request: { recoveryBinding: bound.recoveryBinding } });
+    await store.close();
+  });
+
   it.each(['before-tail', 'inside-tail'])('fences expired domain work %s independently of the publisher lock', async pause => {
     const { store, agent, publisher, finalized } = await setup();
     let now = Date.now(), entered = false, release!: () => void;
