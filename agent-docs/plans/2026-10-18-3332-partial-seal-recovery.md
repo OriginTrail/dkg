@@ -80,3 +80,9 @@ A subsequent finalized-unpublished-edit -> discard -> pull failed with a source 
 ### Remote review round 3
 
 The next remote review requested a neutral promote-state inspection instead of a mode flag on the ordinary mutation guard, and reuse of the canonical Blazegraph namespace lifecycle. `assertNoUnfinishedAssertionPromote` again returns void and rejects any non-mutable inspection. A dedicated `resolveAssertionPullSource` owns normal candidate selection and archive recovery, returning the same complete `ResolvedAssertionSource` in both cases. The test factory now uses `BlazegraphNamespaceManager` acquisition/disposal with a fresh namespace per test. The build, 142 focused tests, lint and file-size checks pass; the complete 71-case real-Blazegraph matrix, including process restarts at boundaries 4 and 34, passes. The full publisher suite passes all 2,211 tests across 120 files. No approval boundaries or data formats change.
+
+### Remote review round 4 and final live replay
+
+A new reply on a resolved thread requested independent coverage of the head's private commitment. Added an operation-only private-root mismatch while retaining archive, source and counts; strict head resolution succeeds, and pull rejects without storage changes. Removing only the private-root comparison makes the case fail. All 72 pull tests pass on Oxigraph; the new case also passes on real Blazegraph. Production code is unchanged from `3ba00cdd7`.
+
+A third native testnet run on `3ba00cdd7` completed async share on attempt 1/5, reproduced four committed active-seal deletions, restarted daemon and Blazegraph, recovered exact public/private content and retained the 409 conflict. Final job inspection: three shares succeeded, zero VM jobs, zero due/deferred finalizations. Owned daemon/store stopped, listeners closed, all nine signer nonces unchanged with pending=latest, and the reacquired batch-1 claim released. Review and required CI gates remain pending; do not merge.

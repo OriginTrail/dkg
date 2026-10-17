@@ -211,7 +211,7 @@ describe('rootless assertionPullFrom', () => {
   );
 
   it.each(['marker', 'archive-root', 'archive-version', 'remaining-field', 'operation-digest',
-    'head-version', 'operation-id', 'orphan-intent', 'private-source', 'public-source', 'lifecycle-ual'])(
+    'head-version', 'operation-private-root', 'operation-id', 'orphan-intent', 'private-source', 'public-source', 'lifecycle-ual'])(
     'rejects invalid recovery proof: %s without changing storage (#3332)', async (damage) => {
       const { publisher, store } = await makePublisher();
       const finalized = await seedShared(publisher, store, { privateQuads: [q(ENTITY_1, 'urn:secret', '"Private"')] });
@@ -232,6 +232,13 @@ describe('rootless assertionPullFrom', () => {
       if (damage === 'remaining-field') await replace(meta, subject, ASSERTION_SEAL_PREDICATES.AUTHOR_SCHEME_VERSION, '"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
       if (damage === 'operation-digest') await store.update!(`DELETE { GRAPH <${swmMeta}> { ?s <${DKG}publicQuadsDigest> ?o } } INSERT { GRAPH <${swmMeta}> { ?s <${DKG}publicQuadsDigest> "wrong" } } WHERE { GRAPH <${swmMeta}> { ?s <${DKG}publicQuadsDigest> ?o } }`);
       if (damage === 'head-version') await replace(swmMeta, `${finalized.kaUal}#dkg-swm-head`, `${DKG}assertionVersion`, '"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+      if (damage === 'operation-private-root') {
+        const differentRoot = `0x${'ff'.repeat(32)}`;
+        await store.update!(`DELETE { GRAPH <${swmMeta}> { ?s <${DKG}privateMerkleRoot> ?o } } INSERT { GRAPH <${swmMeta}> { ?s <${DKG}privateMerkleRoot> "${differentRoot}" } } WHERE { GRAPH <${swmMeta}> { ?s <${DKG}privateMerkleRoot> ?o } }`);
+        await expect(resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store),
+          contextGraphId: CG, kaUal: finalized.kaUal }))
+          .resolves.toMatchObject({ assertionVersion: '1', privateMerkleRoot: differentRoot });
+      }
       if (damage === 'operation-id') await replace(meta, lifecycle, `${DKG}shareOperationId`, '"unrelated"');
       if (damage === 'orphan-intent') {
         await store.deleteByPattern({ graph: meta, subject: lifecycle, predicate: `${DKG}shareOperationId` });
