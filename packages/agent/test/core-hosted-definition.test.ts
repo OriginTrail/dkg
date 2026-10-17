@@ -41,6 +41,7 @@ import {
   ensureCoreHostedDefinition,
   hasPendingCoreHostedDefinitionRetry,
   holdsCoreHostedOwnerDefinition,
+  pendingCoreHostedDefinitionRefresh,
   refreshCoreHostedDefinitionBeforeServing,
 } from '../src/core-hosted-definition.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
@@ -221,6 +222,8 @@ interface CoreOptions {
   /** Run the node's real peer selection over the connected peers instead of `seedPeers`; `cores` are the peers it ranks as Cores. */
   realSelector?: boolean;
   cores?: readonly string[];
+  /** The graph's configured complete providers, which the real selection asks first. */
+  pinnedProviders?: readonly string[];
   hosted?: boolean;
   localAuthor?: boolean;
   graphId?: string;
@@ -252,6 +255,7 @@ function coreNode(peers: Peers, options: CoreOptions = {}) {
       ? realSelector
       : vi.fn(() => [...(options.seedPeers ?? [])]),
     peerCapabilityRegistry: { supportsCore: (remotePeerId: string) => options.cores?.includes(remotePeerId) === true },
+    rfc64SwmRecoveryRuntimeV1: { resolveConfiguredCompleteProviderPeerIds: () => [...(options.pinnedProviders ?? [])] },
     resolveCuratorPeerId: vi.fn(async () => options.curatorNode),
   };
   const node: PeerNode = { store, answer: 'complete' };
@@ -710,6 +714,45 @@ describe('a Core keeps the owner\'s definition of a hosted registered public gra
     await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
     await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
     expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+  });
+  it('reaches a peer behind the graph\'s pinned providers when they would fill the window', async () => {
+    const providers = ['12D3KooWProviderA000000000000000000000000000000000000', '12D3KooWProviderB000000000000000000000000000000000000', '12D3KooWProviderC000000000000000000000000000000000000'];
+    const holder = OTHER_PEER_ID;
+    const core = coreNode(
+      peersOf([
+        ...await Promise.all(providers.map(async (peerId) => [peerId, await peerNode()] as [string, PeerNode])),
+        [holder, await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)])],
+      ]),
+      { connected: [...providers, holder], ownerNodes: [], realSelector: true, pinnedProviders: providers },
+    );
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    const asked = askedPeers(core.fetchSyncPages);
+    expect(asked).toHaveLength(CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS);
+    expect(asked.slice(0, 2).every((peerId) => providers.includes(peerId))).toBe(true);
+    expect(asked.at(-1)).toBe(holder);
+  });
+
+  it('lets a refresh that outlasts a subscriber\'s wait finish, so the next request serves what it installed', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    await owner.store.insert(subGraphRegistration(REPORTS));
+    const serve = core.fetchSyncPages.getMockImplementation()!;
+    core.fetchSyncPages.mockImplementation(async (...args) => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return serve(...args);
+    });
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+
+    // The request stops waiting at its budget; the fetch, started, goes on.
+    const startedAt = performance.now();
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId, undefined, 30);
+    expect(performance.now() - startedAt).toBeLessThan(110);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(false);
+    await pendingCoreHostedDefinitionRefresh(core.agent);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
   });
 });
 

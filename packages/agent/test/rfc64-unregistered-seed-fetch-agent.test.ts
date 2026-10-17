@@ -556,6 +556,39 @@ describe('Rfc64SeedFetchMethods replica peer selection', () => {
     expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 100 })).toHaveLength(CAP);
   });
 
+  it('leaves one slot of a window that provider hints would fill, and rotates the hints', () => {
+    // Pinned providers lead the window, but a graph with as many pins as the
+    // window would otherwise never reach another connected peer, the one
+    // holding the registration a write names, for instance.
+    const providers = ['peer-provider-a', 'peer-provider-b', 'peer-provider-c'];
+    const { agent } = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: [...providers, 'peer-edge-holder'] }),
+      completeProviders: { [CONTEXT_GRAPH_ID]: providers },
+    });
+    const seenProviders = new Set<string>();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const window = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 2 });
+      expect(window).toHaveLength(2);
+      expect(window[1]).toBe('peer-edge-holder');
+      expect(providers).toContain(window[0]);
+      seenProviders.add(window[0]!);
+    }
+    expect(seenProviders.size).toBe(providers.length);
+    const three = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 3 });
+    expect(three.slice(0, 2).every((peerId) => providers.includes(peerId))).toBe(true);
+    expect(three[2]).toBe('peer-edge-holder');
+    // Pins that fit the window with room to spare are all taken, as before.
+    const whole = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(whole).toEqual([...providers, 'peer-edge-holder']);
+    // With no other peer connected, the hints fill the window.
+    const only = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: providers }),
+      completeProviders: { [CONTEXT_GRAPH_ID]: providers },
+    }).agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 2 });
+    expect(only).toHaveLength(2);
+    expect(only.every((peerId) => providers.includes(peerId))).toBe(true);
+  });
+
   it('asks connected configured complete providers first and ignores absent or rejected pins', () => {
     const { agent } = createFetchAgent({
       libp2p: libp2pWith({

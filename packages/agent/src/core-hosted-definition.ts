@@ -67,7 +67,7 @@ export const CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS: readonly number[] = Object.
 ]);
 /** A copy refreshed (or refused) this recently is served as it is. */
 export const CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS = META_REFRESH_COOLDOWN_MS;
-/** The most a subscriber's request waits for the Core's refresh from the owner. */
+/** The most a subscriber's request waits for the Core's refresh from the owner; the refresh itself goes on. */
 export const CORE_HOSTED_DEFINITION_SERVE_REFRESH_BUDGET_MS = 10_000;
 /** Owner nodes asked per attempt (an owner wallet may run several nodes). */
 export const CORE_HOSTED_DEFINITION_MAX_OWNER_PEERS = 3;
@@ -115,6 +115,8 @@ interface CoreHostedDefinitionState {
   readonly lastAttemptAt: Map<string, number>;
   /** The peer each graph's definition was last installed from. */
   readonly sources: Map<string, string>;
+  /** The latest refresh a serving request started (it may outlive the request's wait). */
+  serveRefresh?: Promise<unknown>;
 }
 
 const states = new WeakMap<object, CoreHostedDefinitionState>();
@@ -366,9 +368,10 @@ export function hasPendingCoreHostedDefinitionRetry(agent: object, contextGraphI
  * than {@link CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS}, the Core refreshes
  * it from a connected owner node first, within
  * {@link CORE_HOSTED_DEFINITION_SERVE_REFRESH_BUDGET_MS}, so the page carries
- * what the owner registered since. No owner node connected: the copy is served
- * as it is, and a missing definition is fetched in the background. Never
- * throws; never dials.
+ * what the owner registered since; a refresh that takes longer goes on after
+ * the wait and the next requests serve what it installed. No owner node
+ * connected: the copy is served as it is, and a missing definition is fetched
+ * in the background. Never throws; never dials.
  */
 export async function refreshCoreHostedDefinitionBeforeServing(
   agentObject: object,
@@ -387,7 +390,13 @@ export async function refreshCoreHostedDefinitionBeforeServing(
   const budget = AbortSignal.timeout(budgetMs);
   const running = state.inFlight.get(contextGraphId);
   const work = running ?? refreshFromConnectedOwner(agentObject, agent, state, contextGraphId, hosted.owner, budget);
+  if (running === undefined) state.serveRefresh = work;
   await withinBudget(work.catch(() => undefined), budget, signal);
+}
+
+/** The refresh a serving request started and may have stopped waiting for; for tests. */
+export function pendingCoreHostedDefinitionRefresh(agent: object): Promise<unknown> | undefined {
+  return states.get(agent)?.serveRefresh;
 }
 
 async function refreshFromConnectedOwner(
@@ -410,7 +419,11 @@ async function refreshFromConnectedOwner(
     return;
   }
   state.lastAttemptAt.set(contextGraphId, Date.now());
-  const refreshed = await refreshFromPeer(agent, contextGraphId, owner, ownerPeer, budget).catch(() => false);
+  // The refresh runs to its own end (the metadata fetch's deadline), not the
+  // subscriber's: a `_meta` that takes longer than one request's wait is still
+  // installed, and the requests after the wait serve it. Only the wait is
+  // bounded, by the caller.
+  const refreshed = await refreshFromPeer(agent, contextGraphId, owner, ownerPeer, undefined).catch(() => false);
   if (refreshed && await holdsCoreHostedOwnerDefinition(agent.store, contextGraphId, owner).catch(() => false)) {
     state.sources.set(contextGraphId, ownerPeer);
     cancelRetry(state, contextGraphId);
