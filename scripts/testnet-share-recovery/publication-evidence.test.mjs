@@ -10,6 +10,8 @@ import { defineCampaign } from './campaign-manifest.mjs';
 import { validatePublicationCohort } from './publication-evidence.mjs';
 const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
 const { Interface } = require('ethers');
+const txHash = '0x' + '99'.repeat(32);
+const blockHash = '0x' + '77'.repeat(32);
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const script = name => fileURLToPath(new URL(name, import.meta.url));
 
@@ -27,8 +29,8 @@ function fixture() {
       shareOperationId: `operation-${name}`, intentKey: `intent-${name}` } }));
   const jobs = admissions.map(({ value }) => ({ jobId: value.jobId, status: 'finalized',
     request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: { ...value } },
-    timestamps: { acceptedAt: 0, finalizedAt: 1 }, broadcast: { txHash: 'tx', nonce: 0, walletId: campaign.author },
-    inclusion: { txHash: 'tx' }, finalization: { txHash: 'tx', ual: value.kaUal } }));
+    timestamps: { acceptedAt: 0, finalizedAt: 1 }, broadcast: { txHash, nonce: 0, walletId: campaign.author },
+    inclusion: { txHash }, finalization: { txHash, ual: value.kaUal } }));
   return { campaign, admissions, jobs, seals };
 }
 const validate = f => validatePublicationCohort(f.campaign, f.admissions, f.jobs, f.seals);
@@ -103,14 +105,14 @@ test('proof entry points reject a different published asset with unchanged count
       }
       const abi = JSON.parse(fs.readFileSync(path.join(repo, 'packages/chain/abi/DKGKnowledgeAssets.json'))), iface = new Interface(abi.abi ?? abi);
       const event = iface.encodeEventLog(iface.getEvent('KnowledgeAssetCreated'), [i + 1, author, 'publish', seals[i].seal.assertionMerkleRoot, 1, 1, 2, 1, false]);
-      write('reconciliation.json', { receipts: [{ jobId: job.jobId, hash: 'tx', from: author, nonce: 0, blockNumber: 123,
-        logs: [{ address: contract, ...event }] }] });
+      write('reconciliation.json', { receipts: [{ jobId: job.jobId, hash: txHash, status: 1, blockHash, from: author, nonce: 0, blockNumber: 123,
+        logs: [{ address: contract, blockNumber: 123, blockHash, transactionHash: txHash, ...event }] }] });
     };
     const hub = '0x6666666666666666666666666666666666666666';
     fs.mkdirSync(path.dirname(root), { recursive: true });
     fs.writeFileSync(path.join(root, '..', 'baseline-balances-nonces.json'), JSON.stringify({ chainId: 84532, hub }));
-    write('chain-deployment.json', { arm, chainId: '84532', hub, provenance: 'historical-hub-read-at-receipt-block',
-      blocks: [{ blockNumber: 123, blockHash: '0x' + '77'.repeat(32), knowledgeAssets: expectedContract }] });
+    write('chain-deployment.json', { arm, chainId: '84532', hub, provenance: 'historical-hub-read-at-canonical-receipt-hash',
+      blocks: [{ blockNumber: 123, blockHash, knowledgeAssets: expectedContract }] });
     write('campaign-manifest.json', campaign); write('seal-proof.json', seals); write('pre-workload/rdf.json', rdf(before));
     write('publication-admissions.json', [admission]); write('synchronous-shares.json', []);
     write('protocol.json', { startedAt: '1970-01-01T00:00:00Z' }); write('context-graph.json', { value: { onChainId: 1 } });
@@ -137,6 +139,27 @@ test('proof entry points reject a different published asset with unchanged count
       assert.notEqual(run('chain-proof.mjs', [arm, 'fixed-deadline']).status, 0, 'accepted invalid deployment binding');
     }
     write('chain-deployment.json', binding);
+    const validReceipt = JSON.parse(fs.readFileSync(path.join(root, 'reconciliation.json')));
+    for (const source of ['deployment', 'receipt', 'log']) {
+      for (const hash of [undefined, '0x123', '0x' + '88'.repeat(32)]) {
+        const receipt = structuredClone(validReceipt), deployment = structuredClone(binding);
+        const target = source === 'deployment' ? deployment.blocks[0]
+          : source === 'receipt' ? receipt.receipts[0] : receipt.receipts[0].logs[0];
+        target.blockHash = hash;
+        write('reconciliation.json', receipt); write('chain-deployment.json', deployment);
+        assert.notEqual(run('chain-proof.mjs', [arm, 'fixed-deadline']).status, 0, `accepted ${source} block hash ${hash}`);
+      }
+    }
+    write('chain-deployment.json', binding);
+    for (const mutate of [
+      r => { r.status = 0; }, r => { r.blockNumber = -1; },
+      r => { r.logs[0].blockNumber = 124; }, r => { r.logs[0].transactionHash = '0x' + '88'.repeat(32); },
+      r => { r.logs[0].removed = true; },
+    ]) {
+      const receipt = structuredClone(validReceipt); mutate(receipt.receipts[0]); write('reconciliation.json', receipt);
+      assert.notEqual(run('chain-proof.mjs', [arm, 'fixed-deadline']).status, 0, 'accepted invalid receipt/log identity');
+    }
+    write('reconciliation.json', validReceipt);
     install('A', '0x8888888888888888888888888888888888888888');
     const foreign = run('chain-proof.mjs', [arm, 'fixed-deadline']);
     assert.notEqual(foreign.status, 0, 'chain proof accepted an otherwise identical foreign-contract event');

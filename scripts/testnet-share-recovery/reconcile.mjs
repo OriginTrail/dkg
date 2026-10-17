@@ -14,7 +14,7 @@ for(const j of snap){
  await new Promise(resolve=>setTimeout(resolve,400));
  const h=j.finalization.txHash; const r=await p.getTransactionReceipt(h); const t=await p.getTransaction(h);
  if(!r||r.status!==1||!t) throw Error('Unsettled receipt '+h);
- receipts.push({jobId:j.jobId,hash:h,status:r.status,blockNumber:r.blockNumber,from:t.from,nonce:t.nonce,logs:r.logs});
+ receipts.push({jobId:j.jobId,hash:h,status:r.status,blockNumber:r.blockNumber,blockHash:r.blockHash,from:t.from,nonce:t.nonce,logs:r.logs});
 }
 const wallets=[];
 for(const {address} of prior.wallets){
