@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import type { ContextGraph } from '../stores/projects.js';
 import { belongsInMyProjectsSidebar, toSidebarIdentity, type AgentSidebarIdentity } from '../lib/contextGraphSidebar.js';
 import { useHiddenContextGraphIds } from './useHiddenContextGraphIds.js';
-import { useCurrentAgent, refreshCurrentAgent } from './useCurrentAgent.js';
+import { useCurrentAgent } from './useCurrentAgent.js';
 import { useContextGraphInventory, refreshContextGraphInventory } from './useContextGraphInventory.js';
 
 /**
@@ -27,12 +27,7 @@ export function useMyContextGraphs(): {
   const { hidden } = useHiddenContextGraphIds();
   const currentAgent = useCurrentAgent();
   const identity = useMemo(() => currentAgent.data ? toSidebarIdentity(currentAgent.data) : null, [currentAgent.data]);
-  // Preserve graph-change refreshes while sharing identity retention/coalescing
-  // with the sidebar. Retry is independent of graph-cache array identity.
-  useEffect(() => { void refreshCurrentAgent(); }, [contextGraphs]);
-  const retry = useCallback(async () => {
-    await Promise.all([refreshContextGraphInventory(true), refreshCurrentAgent()]);
-  }, []);
+  const retry = useCallback(() => refreshContextGraphInventory(true), []);
 
   const myCgs = useMemo(
     () => contextGraphs

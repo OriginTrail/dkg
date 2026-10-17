@@ -36,8 +36,6 @@ interface ProjectsState {
   inventoryError: string | null;
   activeProjectId: string | null;
 
-  setContextGraphs: (cgs: ContextGraph[]) => void;
-  setLoading: (v: boolean) => void;
   setActiveProject: (id: string | null) => void;
 }
 
@@ -48,7 +46,5 @@ export const useProjectsStore = create<ProjectsState>((set) => ({
   inventoryError: null,
   activeProjectId: null,
 
-  setContextGraphs: (cgs) => set({ contextGraphs: cgs }),
-  setLoading: (v) => set({ loading: v }),
   setActiveProject: (id) => set({ activeProjectId: id }),
 }));

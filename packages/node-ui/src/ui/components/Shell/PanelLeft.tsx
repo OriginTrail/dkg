@@ -21,7 +21,7 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
-import { refreshCurrentAgent, useCurrentAgent } from '../../hooks/useCurrentAgent.js';
+import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -268,7 +268,7 @@ export function PanelLeft() {
         <div className="v10-journey-empty-card" role="alert">
           <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
           <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
-          <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); void refreshCurrentAgent(); }}>Retry</button>
+          <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
         </div>
       )}
       {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}

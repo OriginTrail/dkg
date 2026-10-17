@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  fetchContextGraphs,
   signJoinRequest, submitJoinRequest, fetchCurrentAgent,
   connectToPeerWithTimeout, connectToPeerIdWithTimeout,
   subscribeToContextGraph,
   HttpError,
 } from '../../api.js';
+import { refreshContextGraphInventoryAfterMutation } from '../../hooks/useContextGraphInventory.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
@@ -333,7 +333,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const [wiredCgId, setWiredCgId] = useState<string | null>(null);
   const [wiredProjectName, setWiredProjectName] = useState<string>('');
 
-  const { contextGraphs, setContextGraphs, setActiveProject } = useProjectsStore();
+  const { contextGraphs, setActiveProject } = useProjectsStore();
   const { openTab } = useTabsStore();
 
   useEffect(() => {
@@ -359,13 +359,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     cgId: string,
     fallback?: ContextGraph,
   ): Promise<ContextGraph | undefined> => {
-    const { contextGraphs: freshList } = await fetchContextGraphs({ fresh: true });
-    const freshContextGraphs: ContextGraph[] = freshList ?? [];
-    setContextGraphs(freshContextGraphs);
+    const freshContextGraphs = await refreshContextGraphInventoryAfterMutation();
     const graph = freshContextGraphs.find((candidate) => candidate.id === cgId) ?? fallback;
     if (graph) activateContextGraph(graph);
     return graph;
-  }, [setContextGraphs, activateContextGraph]);
+  }, [activateContextGraph]);
 
   // Drive the post-approval flow: refresh the sidebar, focus the new
   // CG's tab, and hand off to the wire-workspace step. Idempotent —
