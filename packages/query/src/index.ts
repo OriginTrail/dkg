@@ -14,6 +14,11 @@ export {
 } from './caller-sparql-error.js';
 export { QueryHandler, type QueryHandlerDeps } from './query-handler.js';
 export {
+  WITHHELD_GRAPH_QUERY_CODE,
+  WithheldGraphQueryError,
+  isWithheldGraphQueryError,
+} from './withheld-graph-scope.js';
+export {
   validateReadOnlySparql,
   detectSparqlQueryForm,
   emptyResultForForm,

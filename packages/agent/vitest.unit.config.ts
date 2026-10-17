@@ -24,9 +24,13 @@ export default defineConfig({
       "test/prepared-content-cache.test.ts",
       "test/sync-prepared-content-export.test.ts",
       "test/public-snapshot-evidence.test.ts",
+      "test/public-snapshot-unscoped-query.test.ts",
       "test/public-snapshot-discovery.test.ts",
       "test/public-snapshot-job-ownership.test.ts",
       "test/public-snapshot-partial-persistence.test.ts",
+      "test/public-snapshot-busy-slot.test.ts",
+      "test/public-snapshot-exact-pacing.test.ts",
+      "test/public-snapshot-held-assets.test.ts",
       "test/public-snapshot-serving-runtime.test.ts",
       "test/public-snapshot-admission.test.ts",
       "test/public-snapshot-repair-contention.test.ts",
@@ -45,6 +49,10 @@ export default defineConfig({
       "test/private-swm-recovery-budget.test.ts",
       "test/swm-target-executor.test.ts",
       "test/swm-sync-sub-graph-registration.test.ts",
+      "test/registered-public-sub-graph-first-write.test.ts",
+      "test/core-hosted-definition.test.ts",
+      "test/fresh-meta-fetch.test.ts",
+      "test/swm-pull-knowledge-asset-share.test.ts",
       "test/swm-change-notice.test.ts",
       "test/swm-change-notice-wiring.test.ts",
       "test/shared-memory-sync-fresh-round.test.ts",
@@ -189,6 +197,8 @@ export default defineConfig({
       "test/swm-late-joiner-deferred-gossip.test.ts",
       "test/context-graph-metadata-placement.test.ts",
       "test/swm-plaintext-oracle-wiring.test.ts",
+      "test/swm-write-gate-refresh.test.ts",
+      "test/swm-write-gate-refresh-wiring.test.ts",
       "test/oversize-filter.test.ts",
       "test/cg-registration-oversize-guard.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",
@@ -223,6 +233,8 @@ export default defineConfig({
       "test/sync-backpressure.test.ts",
       // #3251 — the reserved shared-memory slot and its own bounded queue.
       "test/sync-shared-memory-reserve.test.ts",
+      // #3280 — the reserved control-plane slot and its own bounded queue.
+      "test/sync-control-plane-reserve.test.ts",
       // #3251 — the safety-net pull of public graphs in use on an Edge.
       "test/recent-shared-memory-pulls.test.ts",
       "test/sync-policy.test.ts",
@@ -400,6 +412,8 @@ export default defineConfig({
       "test/approved-private-replica.test.ts",
       "test/approved-private-replica-proof-runs.test.ts",
       "test/swm-snapshot-materializer.test.ts",
+      // #3296 — a newer stored head proves an asset held only with its content.
+      "test/swm-stored-head-proof.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count
       // gate that keeps it self-healing, and the digest binding that makes an

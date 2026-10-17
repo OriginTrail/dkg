@@ -1747,6 +1747,36 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         expect(enqueued).toHaveLength(0);
       });
 
+      // GH#3294 — the agent raises it only on the queued lane, for a KA whose seal and
+      // share this node holds without the author's lifecycle record (a curator's view).
+      it(`${lane} maps a raised ASYNC_PUBLISH_FOREIGN_AUTHOR to 409 and enqueues nothing`, async () => {
+        const foreignAuthor = () => {
+          throw Object.assign(
+            new Error('this node holds the seal and the share of the author, not its lifecycle record'),
+            { code: 'ASYNC_PUBLISH_FOREIGN_AUTHOR' },
+          );
+        };
+        const enqueued: unknown[] = [];
+        await startWith({}, {
+          publishFromFinalizedAssertion: foreignAuthor,
+          resolveFinalizedAssertionVmPublishIntent: foreignAuthor,
+        }, {}, {
+          enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+            enqueued.push(intent);
+            return 'job-should-not-exist';
+          },
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          selectedAuthorAgentAddress: SELECTED,
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('ASYNC_PUBLISH_FOREIGN_AUTHOR');
+        expect(enqueued).toHaveLength(0);
+      });
+
       // `null` included deliberately: a present-but-null selector is a common client
       // serialization of "nothing selected", and treating it as absent would fall back
       // to normal author resolution and could publish a different author with 200.

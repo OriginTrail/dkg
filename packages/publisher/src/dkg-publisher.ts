@@ -42,6 +42,7 @@ import {
   classifyPromoteCompanionSettlementFailure,
 } from './promote-replay-safety.js';
 import { finalizeCommittedAssertionPromote } from './assertion-promote-finalization.js';
+import { SWM_SHARE_COMPLETE_PRED, sharedMemoryAuthorSealFields } from './shared-memory-author-seal.js';
 import {
   createShareOperationId,
   createPromoteOperationIntent,
@@ -103,7 +104,7 @@ import {
   type KAMetadata,
   type OnChainProvenance,
 } from './metadata.js';
-import { hasSubGraphRegistration } from './sub-graph-registration.js';
+import { hasSubGraphRegistration, requireSubGraphRegistration, type UnregisteredSubGraphResolver } from './sub-graph-registration.js';
 import {
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
@@ -173,12 +174,6 @@ export {
   CuratorRejectedError,
   type CASCondition,
 };
-
-// #1116 (review A1) — marker predicate stamped on the lifecycle URN when a KA
-// has been FULLY shared to SWM (entities:"all", all roots landed). It gates
-// finalize(layer:"swm") so a subset share — which also stamps dkg:rootEntity
-// member rows — cannot be sealed-in-SWM and published as a partial asset.
-const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 
 
 
@@ -526,6 +521,8 @@ export interface DKGPublisherConfig {
   resolveDurableRootPromotionAtomicCompanion?: DurableRootPromotionAtomicCompanionResolver;
   /** Atomic late-boundary companion for root SWM staging/update writes. */
   resolveDurableRootMaterializationAtomicCompanion?: DurableRootAtomicCompanionResolver;
+  /** Asked before a write into a sub-graph this node has not registered is refused (#3293). */
+  resolveUnregisteredSubGraph?: UnregisteredSubGraphResolver;
   /**
    * RFC ka-metadata-trim Phase 3 (P3.3) — `metadata.provenanceEvents` config.
    * Default `true`. When `false` ("lite mode"), the lifecycle writers skip the
@@ -1146,6 +1143,7 @@ export class DKGPublisher implements Publisher {
   private readonly resolveDurableRootPromotionAtomicCompanion?: DurableRootPromotionAtomicCompanionResolver;
   private readonly resolveDurableRootMaterializationAtomicCompanion?:
     DurableRootAtomicCompanionResolver;
+  private readonly resolveUnregisteredSubGraph?: UnregisteredSubGraphResolver;
   /** Authors whose allocator floor has been reconciled against the chain this process. */
   private readonly reconciledKaAuthors = new Set<string>();
   /** RFC ka-metadata-trim P3.3 — gate for the lifecycle PROV event rows (default true). */
@@ -1160,6 +1158,7 @@ export class DKGPublisher implements Publisher {
       config.resolveDurableRootPromotionAtomicCompanion;
     this.resolveDurableRootMaterializationAtomicCompanion =
       config.resolveDurableRootMaterializationAtomicCompanion;
+    this.resolveUnregisteredSubGraph = config.resolveUnregisteredSubGraph;
     this.provenanceEvents = config.provenanceEvents !== false;
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
@@ -2728,12 +2727,7 @@ export class DKGPublisher implements Publisher {
       if (!sgValidation.valid) throw new Error(`Invalid sub-graph name: ${sgValidation.reason}`);
 
       const sgUri = contextGraphSubGraphUri(options.contextGraphId, options.subGraphName);
-      if (!(await this.isSubGraphRegistered(options.contextGraphId, options.subGraphName))) {
-        throw new Error(
-          `Sub-graph "${options.subGraphName}" has not been registered in context graph "${options.contextGraphId}". ` +
-          `Call createSubGraph() first.`,
-        );
-      }
+      await requireSubGraphRegistration(this.store, options.contextGraphId, options.subGraphName, this.resolveUnregisteredSubGraph);
 
       options = {
         ...options,
@@ -6852,7 +6846,8 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
-   * Throws if `subGraphName` is provided but not registered in the CG's `_meta` graph.
+   * Throws `SubGraphNotFoundError` if `subGraphName` is provided, not registered
+   * in the CG's `_meta` graph, and not found by the configured resolver.
    * Mirrors the registration check in `publish()` for mutation paths that would
    * otherwise create new orphaned sub-graph state.
    */
@@ -6862,12 +6857,7 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     if (subGraphName === undefined) return;
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    if (!(await this.isSubGraphRegistered(contextGraphId, subGraphName))) {
-      throw new Error(
-        `Sub-graph "${subGraphName}" has not been registered in context graph "${contextGraphId}". ` +
-        `Register it first via DKGAgent.createSubGraph() or by inserting the sub-graph registration into the context graph "_meta" graph.`,
-      );
-    }
+    await requireSubGraphRegistration(this.store, contextGraphId, subGraphName, this.resolveUnregisteredSubGraph);
   }
 
   clearSubGraphOwnership(ownershipKey: string): void {
@@ -8842,6 +8832,9 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: normalizedPrivateQuads.length,
         accessPolicy,
         allowedPeers: [...allowedPeers],
+        // GH#3294 — the seal travels with the share, so a curator can publish
+        // this asset as the author's.
+        ...sharedMemoryAuthorSealFields(name, seal),
       });
 
       // Wrap the plaintext publish-request in the encrypted envelope

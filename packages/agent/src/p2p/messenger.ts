@@ -110,7 +110,7 @@ const DHT_WALK_TRIGGER_ERRORS = [
   'all multiaddr dials failed',
 ];
 
-function shouldTriggerDhtWalk(errMsg: string): boolean {
+export function shouldTriggerDhtWalk(errMsg: string): boolean {
   const lower = errMsg.toLowerCase();
   return DHT_WALK_TRIGGER_ERRORS.some((needle) => lower.includes(needle));
 }

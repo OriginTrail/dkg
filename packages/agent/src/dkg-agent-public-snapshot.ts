@@ -2,6 +2,7 @@ import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js
 import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
 import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
+import { createPublicSnapshotHeldAssetCheck } from './public-snapshot-held-assets.js';
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { PublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
@@ -141,8 +142,12 @@ export class PublicSnapshotMethods extends DKGAgentBase {
               onCommitted: () => this.invalidateListContextGraphsCache(),
               log: message => this.log.info(createOperationContext('sync'), message),
             });
-          } else recovered = await recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), recovery);
-          const { committed, bulkChunks } = recovered;
+          } else recovered = await recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), {
+            ...recovery, deadline: startedAt + 3_600_000,
+            canAdmit: () => this.vmRecoverySyncAdmissionAvailable(contextGraphId),
+            holds: createPublicSnapshotHeldAssetCheck(this.store, evidence),
+          });
+          const { committed, bulkChunks, alreadyPresent } = recovered;
 
           // A new inventory/root comparison is required before claiming current coverage.
           const fresh = await read(true);
@@ -162,6 +167,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
             inventoryDigest: snapshot.inventoryDigest,
             assets: uals.length,
             committed: committed.size,
+            ...(alreadyPresent === undefined ? {} : { alreadyPresent }),
             completeAsOfSnapshot: true,
             current,
             startedAt,

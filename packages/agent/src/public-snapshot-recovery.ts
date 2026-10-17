@@ -8,5 +8,7 @@ export interface PublicSnapshotRecoveryOptions {
 }
 export interface PublicSnapshotRecoveryResult {
   committed: Set<string>;
+  /** Assets found already stored as the snapshot pins them, counted in `committed` without a transfer. */
+  alreadyPresent?: number;
   bulkChunks?: BulkGraphMetrics[];
 }

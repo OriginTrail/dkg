@@ -1,6 +1,7 @@
 import { isReadOnlyStoreOperation } from '../store-operation-outcome.js';
 import { classifyStoreReadTransport } from '../store-read-transport-failure.js';
 import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
+import { refuseWithheldGraphQuery } from '../withheld-graph-query.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { prepareAtomicGraphReplace, prepareAtomicGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
 import { SparqlHttpResponseError, isDefinitiveSparqlUpdateRejectionV1 } from './sparql-http-response-error.js';
@@ -1057,6 +1058,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
+    refuseWithheldGraphQuery(options, 'SparqlHttpStore');
     return this.queryWithOperation(sparql, options);
   }
 

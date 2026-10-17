@@ -1,14 +1,17 @@
 import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { DKGQueryEngine } from "../../query/src/dkg-query-engine.js";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { ethers } from "ethers";
 import { OxigraphStore } from "@origintrail-official/dkg-storage";
 import { normalizePublicGraphSnapshot, sealPublicGraphSnapshot } from "@origintrail-official/dkg-chain";
+import { contextGraphMetaUri } from "@origintrail-official/dkg-core";
 import {
   PublicSnapshotEvidence,
-  withPublicSnapshotQueryTrust,
+  queryWithPublicSnapshotTrust,
   markCoreTrustedGraph,
   assertPublicSnapshotQueryTrust,
+  readCoreCacheWithheldGraphRoots,
+  SNAPSHOT_TRUST_GRAPH,
 } from "../src/public-snapshot-evidence.js";
 import {
   materializeVerifiedGraphScopedAsset,
@@ -120,7 +123,7 @@ describe("job-scoped public snapshot evidence", () => {
       ).toThrow("pinned");
     },
   );
-  it("guards scoped and unscoped queries durably and preserves the existing stale-write gate", async () => {
+  it("guards scoped queries durably and preserves the existing stale-write gate", async () => {
     const store = new OxigraphStore();
     try {
       await assertPublicSnapshotQueryTrust(store, graph);
@@ -128,6 +131,8 @@ describe("job-scoped public snapshot evidence", () => {
       await expect(
         assertPublicSnapshotQueryTrust(store, graph),
       ).rejects.toThrow("core-trusted");
+      // The assert-only form serves callers that cannot leave marked graphs out
+      // of what they read (remote UAL lookups): without a graph it still refuses.
       await expect(assertPublicSnapshotQueryTrust(store)).rejects.toThrow(
         "core-trusted",
       );
@@ -160,14 +165,91 @@ describe("job-scoped public snapshot evidence", () => {
       await store.close();
     }
   });
+  it("answers unscoped queries without the marked graph and keeps acceptance per graph", async () => {
+    const store = new OxigraphStore();
+    try {
+      const engine = new DKGQueryEngine(store);
+      await markCoreTrustedGraph(store, graph);
+      const imported = new PublicSnapshotEvidence({snapshot, mode: "core-cache", sourceCore: "core"}, () => true).authenticate(asset());
+      expect(await materializeVerifiedGraphScopedAsset({ store, asset: imported.asset })).toBe("applied");
+      await store.insert([{ subject: "urn:entity:open", predicate: "urn:value", object: '"open"',
+        graph: `did:dkg:context-graph:${graph}-other/_verifiable_memory/${address}/1` }]);
+      const sparql = "SELECT ?value WHERE { GRAPH ?g { ?s <urn:value> ?value } }";
+      const unscoped = (mode?: "core-cache" | "rpc-only", text = sparql) => queryWithPublicSnapshotTrust(store, engine, text, {}, mode);
+      // Succeeds, and returns no triple from the marked graph.
+      expect((await unscoped()).bindings).toEqual([{ value: '"open"' }]);
+      expect((await unscoped("rpc-only")).bindings).toEqual([{ value: '"open"' }]);
+      const raw = await store.query(sparql);
+      expect(raw.type === "bindings" ? raw.bindings : []).toHaveLength(2);
+      // Acceptance stays per graph: it needs an explicit context graph, as documented.
+      await expect(unscoped("core-cache")).rejects.toThrow("explicit context graph");
+      await expect(queryWithPublicSnapshotTrust(store, engine, sparql, {}, "other" as never)).rejects.toThrow("Unknown chain evidence mode");
+      // Naming the marked graph reads nothing from it: it is not in the dataset.
+      expect((await unscoped(undefined, `SELECT ?value WHERE { GRAPH <${assertionGraph}> { ?s <urn:value> ?value } }`)).bindings).toEqual([]);
+      // The store replaces any dataset the query names, so naming one is refused.
+      await expect(unscoped(undefined, `SELECT ?value FROM NAMED <${assertionGraph}> WHERE { GRAPH ?g { ?s <urn:value> ?value } }`))
+        .rejects.toMatchObject({ code: "CORE_CACHE_QUERY_TRUST_REQUIRED" });
+      // A scoped read of the marked graph still needs explicit acceptance.
+      const scoped = (mode?: "core-cache" | "rpc-only") => queryWithPublicSnapshotTrust(store, engine,
+        "SELECT ?value WHERE { ?s <urn:value> ?value }", { contextGraphId: graph, view: "verifiable-memory" }, mode);
+      for (const mode of [undefined, "rpc-only"] as const)
+        await expect(scoped(mode)).rejects.toMatchObject({ code: "CORE_CACHE_QUERY_TRUST_REQUIRED" });
+      expect((await scoped("core-cache")).bindings).toEqual([{ value: '"safe"' }]);
+    } finally {
+      await store.close();
+    }
+  });
+  it("withholds an unscoped result if a graph is marked while the query runs", async () => {
+    const store = new OxigraphStore();
+    try {
+      const engine = { query: vi.fn(async () => {
+        await markCoreTrustedGraph(store, graph);
+        return { bindings: [{ value: '"must not escape"' }] };
+      }) };
+      await expect(queryWithPublicSnapshotTrust(store, engine, "SELECT * WHERE { ?s ?p ?o }", {}, undefined))
+        .rejects.toMatchObject({ code: "CORE_CACHE_QUERY_TRUST_REQUIRED" });
+      expect(engine.query).toHaveBeenCalledWith("SELECT * WHERE { ?s ?p ?o }", { withheldGraphRoots: [] });
+    } finally {
+      await store.close();
+    }
+  });
+  it("leaves out whole graphs for legacy markers and refuses unscoped reads it cannot place", async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{ subject: contextGraphMetaUri(`${graph}/legacy`), predicate: "http://dkg.io/ontology/chainEvidenceMode",
+        object: '"core-cache"', graph: SNAPSHOT_TRUST_GRAPH }]);
+      await markCoreTrustedGraph(store, graph);
+      expect(await readCoreCacheWithheldGraphRoots(store)).toEqual([
+        `did:dkg:context-graph:${graph}`, `did:dkg:context-graph:${graph}/legacy`,
+      ]);
+      await store.insert([{ subject: "urn:not-a-context-graph", predicate: "http://dkg.io/ontology/chainEvidenceMode",
+        object: '"core-cache"', graph: SNAPSHOT_TRUST_GRAPH }]);
+      await expect(queryWithPublicSnapshotTrust(store, new DKGQueryEngine(store), "SELECT * WHERE { ?s ?p ?o }", {}, undefined))
+        .rejects.toMatchObject({ code: "CORE_CACHE_QUERY_TRUST_REQUIRED" });
+    } finally {
+      await store.close();
+    }
+  });
+  it("refuses unscoped reads beyond the bound on marked graphs", async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(Array.from({ length: 257 }, (_, index) => ({ subject: `did:dkg:context-graph:bulk-${index}`,
+        predicate: "http://dkg.io/ontology/chainEvidenceMode", object: '"core-cache"', graph: SNAPSHOT_TRUST_GRAPH })));
+      await expect(readCoreCacheWithheldGraphRoots(store)).rejects.toMatchObject({ code: "CORE_CACHE_QUERY_TRUST_REQUIRED" });
+      vi.spyOn(store, "query").mockResolvedValueOnce({ type: "boolean", value: true });
+      await expect(readCoreCacheWithheldGraphRoots(store)).rejects.toThrow("Chain evidence metadata is unavailable");
+    } finally {
+      await store.close();
+    }
+  });
   it("withholds a query result if a cache import starts during execution", async () => {
     const store = new OxigraphStore();
     try {
       await expect(
-        withPublicSnapshotQueryTrust(store, graph, undefined, async () => {
+        queryWithPublicSnapshotTrust(store, { query: async () => {
           await markCoreTrustedGraph(store, graph);
-          return "must not escape";
-        }),
+          return { bindings: [{ value: '"must not escape"' }] };
+        } }, "SELECT * WHERE { ?s ?p ?o }", { contextGraphId: graph }, undefined),
       ).rejects.toThrow("core-trusted");
     } finally {
       await store.close();
@@ -209,9 +291,9 @@ it("guards parent queries that resolve imported child VM partitions", async () =
     const imported = new PublicSnapshotEvidence({snapshot:normalizePublicGraphSnapshot(childSnapshot, { ...childSnapshot, now: 1000 }),mode:"core-cache",sourceCore:"core"},()=>true).authenticate(a);
     expect(await materializeVerifiedGraphScopedAsset({store,asset:imported.asset})).toBe("applied");
     const engine = new DKGQueryEngine(store);
-    const read = (mode?: "core-cache" | "rpc-only") => withPublicSnapshotQueryTrust(store,graph,mode,()=>engine.query(
+    const read = (mode?: "core-cache" | "rpc-only") => queryWithPublicSnapshotTrust(store,engine,
       'SELECT ?value WHERE { <urn:entity> <urn:value> ?value }',
-      {contextGraphId:graph,view:"verifiable-memory",subGraphName:"v1"}));
+      {contextGraphId:graph,view:"verifiable-memory",subGraphName:"v1"},mode);
     for (const mode of [undefined,"rpc-only"] as const) await expect(read(mode)).rejects.toMatchObject({code:"CORE_CACHE_QUERY_TRUST_REQUIRED"});
     const result = await read("core-cache");
     expect(result.bindings).toEqual([{value:'"safe"'}]);

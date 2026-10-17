@@ -298,6 +298,10 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async (contextGraphId) => (
         await this.#getSubGraphAdmission(contextGraphId)
       ).excluded,
+      isOwnContextGraph: (contextGraphId, name) => isKnownContextGraphUri(
+        this.#ports.store,
+        `${contextGraphDataGraphUri(contextGraphId)}/${name}`,
+      ),
       includeRootScope: target.includeRootScope,
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
@@ -435,7 +439,8 @@ async function getSharedMemorySubGraphAdmission(
   return { registered, excluded };
 }
 
-async function isKnownContextGraphUri(
+/** True when `contextGraphUri` is declared as a context graph of its own on this node. */
+export async function isKnownContextGraphUri(
   store: TripleStore,
   contextGraphUri: string,
 ): Promise<boolean> {
