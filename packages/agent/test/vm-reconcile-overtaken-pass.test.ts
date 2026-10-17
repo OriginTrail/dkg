@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 /**
  * A VM reconcile pass works on the graph's subscription row as it was when
  * the pass resolved its target, and checks at every step that the row is
@@ -49,7 +50,7 @@ interface HostSeams {
   ): unknown;
   startVmRefreshWorker: () => void;
   healStrandedScopedKCs: () => Promise<undefined>;
-  vmReconcileLifecycleGeneration: number;
+  workLifetime: AgentWorkLifetime;
   log: Record<'info' | 'debug' | 'warn', (context: unknown, message: string) => void>;
   ensureVmReconcileScheduling(): VmReconcileSchedulingRuntime<ContextGraphReconcileResult>;
 }
@@ -365,7 +366,7 @@ describe('VM reconcile pass overtaken by a store of its graph\'s row', () => {
       runtime.triggerLive(localCgId);
       await host.passIsRunning(1);
       // The reconcile lifecycle the pass started in has ended.
-      seams.vmReconcileLifecycleGeneration += 1;
+      seams.workLifetime.close();
       host.answer();
       await runtime.waitForIdle();
       expect(logged.info()).toEqual([]);

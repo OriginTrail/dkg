@@ -104,7 +104,9 @@ describe('catalog replay to readiness persistence', () => {
     eventBus.emit(DKGEvent.PROJECT_SYNCED, { contextGraphId: CG, dataSynced: 1, sharedMemorySynced: 0 });
     await vi.waitFor(() => expect(log).toHaveBeenCalledTimes(2));
     expect(verifyCatalog).toHaveBeenCalledWith(CG);
-    expect(persistProject).toHaveBeenCalledWith({ contextGraphId: CG, dataSynced: 1, sharedMemorySynced: 0, verifiedPrivateOnlyResponses: 0 });
+    expect(persistProject).toHaveBeenCalledWith({
+      contextGraphId: CG, dataSynced: 1, sharedMemorySynced: 0, sharedMemoryHeldAssets: 0, verifiedPrivateOnlyResponses: 0,
+    });
     expect(log).toHaveBeenCalledWith('[warn] Failed to verify catalog readiness: storage unavailable');
     expect(log).toHaveBeenCalledWith('[warn] Failed to persist PROJECT_SYNCED readiness: storage unavailable');
   });

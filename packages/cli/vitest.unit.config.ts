@@ -12,6 +12,7 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/public-snapshot-job.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
@@ -45,9 +46,12 @@ export default defineConfig({
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
           'test/backpressure-route.test.ts',
+          'test/notifications-route-bounded.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
+      'test/bounded-query.test.ts',
+      'test/entity-search.test.ts',
       'test/query-catalog-profile-route.test.ts',
           'test/context-graph-route-read-authority.test.ts',
           'test/knowledge-assets-local-curator-read.test.ts',
@@ -90,6 +94,24 @@ export default defineConfig({
           // Private-CG bootstrap readiness: clean-empty responses are only
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
+          // A public graph its subscribe job left unproven gets the job again
+          // (#3207). The real catch-up worker behind a fake thread; no hardhat.
+          'test/context-graph-readiness-repeat.test.ts',
+          // So does a registered public graph whose job ran before its RFC-64
+          // authority was accepted (#3281). Same worker and fake thread.
+          'test/context-graph-readiness-repeat-authority.test.ts',
+          // A member that already holds the graph is proven synced by a
+          // catch-up that finds nothing missing (#3296). Same worker and fake thread.
+          'test/context-graph-held-content-readiness.test.ts',
+          // A persisted subscription restored unsynced gets a catch-up job
+          // (#3251). Agent double and stub runner; no hardhat.
+          'test/context-graph-activation-catchup.test.ts',
+          // A write into a graph this node is still catching up waits for the
+          // catch-up, bounded; a restarted owner's first write into its own
+          // registered graph goes through. Same worker and fake thread.
+          'test/context-graph-write-readiness.test.ts',
+          'test/context-graph-owner-write-after-restart.test.ts',
+          'test/context-graph-write-readiness-shutdown.test.ts',
           'test/context-graph-authority-attribution.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
           // Subscribing by an on-chain name hash (Base #33): route, catch-up
@@ -149,6 +171,8 @@ export default defineConfig({
           // producer-quiescent shutdown drain. Real WorkerCatchupRunner behind
           // a fake worker thread; no hardhat.
           'test/daemon-catchup-telemetry-shutdown.test.ts',
+          // #3052 — graceful shutdown ends the share admission waits before its first await.
+          'test/daemon-share-admission-shutdown.test.ts',
           'test/catchup-runner-worker-killswitch.test.ts',
           // #2050 — `DKG_SWM_CATCHUP_PASS_BUDGET_MS=0` continuation-pass kill
           // switch, end to end through the worker with per-job config resolution.
@@ -179,6 +203,7 @@ export default defineConfig({
           'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
+          'test/knowledge-assets-sub-graph-refusal.test.ts',
           'test/import-artifact-routes.test.ts',
           'test/shared-memory-catchup-durable.test.ts',
           'test/skill-endpoint.test.ts',

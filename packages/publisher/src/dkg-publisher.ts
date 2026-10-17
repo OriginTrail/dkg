@@ -1,3 +1,4 @@
+import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
@@ -31,6 +32,7 @@ import {
   classifyPromoteCompanionSettlementFailure,
 } from './promote-replay-safety.js';
 import { finalizeCommittedAssertionPromote } from './assertion-promote-finalization.js';
+import { SWM_SHARE_COMPLETE_PRED, sharedMemoryAuthorSealFields } from './shared-memory-author-seal.js';
 import {
   createPromoteOperationIntent,
   parsePromoteOperationIntent,
@@ -92,6 +94,7 @@ import {
   type KAMetadata,
   type OnChainProvenance,
 } from './metadata.js';
+import { hasSubGraphRegistration, requireSubGraphRegistration, type UnregisteredSubGraphResolver } from './sub-graph-registration.js';
 import {
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
@@ -161,12 +164,6 @@ export {
   CuratorRejectedError,
   type CASCondition,
 };
-
-// #1116 (review A1) — marker predicate stamped on the lifecycle URN when a KA
-// has been FULLY shared to SWM (entities:"all", all roots landed). It gates
-// finalize(layer:"swm") so a subset share — which also stamps dkg:rootEntity
-// member rows — cannot be sealed-in-SWM and published as a partial asset.
-const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 
 
 /** Publisher-owned contract for assertion promotion after agent prerequisites resolve. */
@@ -544,6 +541,8 @@ export interface DKGPublisherConfig {
   resolveDurableRootPromotionAtomicCompanion?: DurableRootPromotionAtomicCompanionResolver;
   /** Atomic late-boundary companion for root SWM staging/update writes. */
   resolveDurableRootMaterializationAtomicCompanion?: DurableRootAtomicCompanionResolver;
+  /** Asked before a write into a sub-graph this node has not registered is refused (#3293). */
+  resolveUnregisteredSubGraph?: UnregisteredSubGraphResolver;
   /**
    * RFC ka-metadata-trim Phase 3 (P3.3) — `metadata.provenanceEvents` config.
    * Default `true`. When `false` ("lite mode"), the lifecycle writers skip the
@@ -1189,6 +1188,7 @@ export class DKGPublisher implements Publisher {
   private readonly resolveDurableRootPromotionAtomicCompanion?: DurableRootPromotionAtomicCompanionResolver;
   private readonly resolveDurableRootMaterializationAtomicCompanion?:
     DurableRootAtomicCompanionResolver;
+  private readonly resolveUnregisteredSubGraph?: UnregisteredSubGraphResolver;
   /** Authors whose allocator floor has been reconciled against the chain this process. */
   private readonly reconciledKaAuthors = new Set<string>();
   /** RFC ka-metadata-trim P3.3 — gate for the lifecycle PROV event rows (default true). */
@@ -1202,6 +1202,7 @@ export class DKGPublisher implements Publisher {
       config.resolveDurableRootPromotionAtomicCompanion;
     this.resolveDurableRootMaterializationAtomicCompanion =
       config.resolveDurableRootMaterializationAtomicCompanion;
+    this.resolveUnregisteredSubGraph = config.resolveUnregisteredSubGraph;
     this.provenanceEvents = config.provenanceEvents !== false;
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
@@ -1323,7 +1324,8 @@ export class DKGPublisher implements Publisher {
         const nameHash = await this.chain.getContextGraphNameHash(BigInt(normalizedOnChainId));
         return typeof nameHash === 'string' &&
           nameHash.toLowerCase() === ethers.keccak256(ethers.toUtf8Bytes(normalizedContextGraphId)).toLowerCase();
-      } catch {
+      } catch (error) {
+        throwIfCatalogFloorAuthorityUnavailable(error, 'name-binding');
         return false;
       }
     };
@@ -1361,7 +1363,8 @@ export class DKGPublisher implements Publisher {
             ).toLowerCase();
           return idMatches && creation.accessPolicy === 1;
         }
-      } catch {
+      } catch (error) {
+        throwIfCatalogFloorAuthorityUnavailable(error, 'finalized-proof');
         // A failed atomic proof is fail-closed. Do not splice either field
         // with a separate latest-state read from a potentially different fork.
         return false;
@@ -1371,7 +1374,8 @@ export class DKGPublisher implements Publisher {
     if (!await this.onChainContextGraphMatchesLocalId(contextGraphId, onChainContextGraphId)) return false;
     try {
       return Number(await this.chain.getContextGraphAccessPolicy(BigInt(onChainContextGraphId))) === 1;
-    } catch {
+    } catch (error) {
+      throwIfCatalogFloorAuthorityUnavailable(error, 'access-policy');
       return false;
     }
   }
@@ -2767,12 +2771,7 @@ export class DKGPublisher implements Publisher {
       if (!sgValidation.valid) throw new Error(`Invalid sub-graph name: ${sgValidation.reason}`);
 
       const sgUri = contextGraphSubGraphUri(options.contextGraphId, options.subGraphName);
-      if (!(await this.isSubGraphRegistered(options.contextGraphId, options.subGraphName))) {
-        throw new Error(
-          `Sub-graph "${options.subGraphName}" has not been registered in context graph "${options.contextGraphId}". ` +
-          `Call createSubGraph() first.`,
-        );
-      }
+      await requireSubGraphRegistration(this.store, options.contextGraphId, options.subGraphName, this.resolveUnregisteredSubGraph);
 
       options = {
         ...options,
@@ -6850,15 +6849,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async isSubGraphRegistered(contextGraphId: string, subGraphName: string): Promise<boolean> {
-    const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
-    const registered = await this.store.query(
-      `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta> {
-        <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
-          <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
-          <http://dkg.io/ontology/createdBy> ?createdBy .
-      } }`,
-    );
-    return registered.type === 'boolean' && registered.value;
+    return hasSubGraphRegistration(this.store, contextGraphId, subGraphName);
   }
 
   /**
@@ -6899,7 +6890,8 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
-   * Throws if `subGraphName` is provided but not registered in the CG's `_meta` graph.
+   * Throws `SubGraphNotFoundError` if `subGraphName` is provided, not registered
+   * in the CG's `_meta` graph, and not found by the configured resolver.
    * Mirrors the registration check in `publish()` for mutation paths that would
    * otherwise create new orphaned sub-graph state.
    */
@@ -6909,12 +6901,7 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     if (subGraphName === undefined) return;
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    if (!(await this.isSubGraphRegistered(contextGraphId, subGraphName))) {
-      throw new Error(
-        `Sub-graph "${subGraphName}" has not been registered in context graph "${contextGraphId}". ` +
-        `Register it first via DKGAgent.createSubGraph() or by inserting the sub-graph registration into the context graph "_meta" graph.`,
-      );
-    }
+    await requireSubGraphRegistration(this.store, contextGraphId, subGraphName, this.resolveUnregisteredSubGraph);
   }
 
   clearSubGraphOwnership(ownershipKey: string): void {
@@ -7518,7 +7505,7 @@ export class DKGPublisher implements Publisher {
    * holds the per-KA SWM write lock and runs only while the head it finds is
    * at or below that version: a newer head keeps its graph, operation rows,
    * snapshot and StorageACK copies, and so does a head that cannot be
-   * resolved. Without a version the caller must already hold that lock and
+   * resolved (returning false). Without a version the caller must hold that lock and
    * have ruled out a newer head itself.
    */
   async clearPublishedKnowledgeAssetSwm(
@@ -7528,7 +7515,7 @@ export class DKGPublisher implements Publisher {
     ctx: OperationContext,
     kaUal: string,
     finalizedAssertionVersion?: string | number | bigint,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (scope.kind !== 'named-lifecycle') {
       throw new Error('Graph-scoped KA SWM cleanup requires an exact named-lifecycle scope');
     }
@@ -7540,13 +7527,12 @@ export class DKGPublisher implements Publisher {
       throw new Error('Graph-scoped KA SWM cleanup UAL does not match the named-lifecycle scope');
     }
     if (finalizedAssertionVersion === undefined) {
-      await this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope);
-      return;
+      return this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope).then(() => true);
     }
     const finalizedVersion = BigInt(
       createGraphKnowledgeAssetScope(kaUal, finalizedAssertionVersion).assertionVersion,
     );
-    await this.withWriteLocks(
+    return await this.withWriteLocks(
       [swmKaWriteLockKey(contextGraphId, subGraphName, kaScope.ual)],
       async () => {
         const headResolution = await tryResolveKnowledgeAssetWorkspaceHead({
@@ -7564,7 +7550,7 @@ export class DKGPublisher implements Publisher {
             `Kept graph-scoped KA SWM ${kaScope.ual} after finalized version ${finalizedVersion}: ` +
               `its head cannot be resolved (${headResolution.error.message})`,
           );
-          return;
+          return false;
         }
         if (
           headResolution.status === 'resolved'
@@ -7575,9 +7561,9 @@ export class DKGPublisher implements Publisher {
             `Kept graph-scoped KA SWM ${kaScope.ual} after finalized version ${finalizedVersion}: ` +
               `its head is at version ${headResolution.head.assertionVersion}`,
           );
-          return;
+          return true;
         }
-        await this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope);
+        return this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope).then(() => true);
       },
     );
   }
@@ -9012,6 +8998,9 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: normalizedPrivateQuads.length,
         accessPolicy,
         allowedPeers: [...allowedPeers],
+        // GH#3294 — the seal travels with the share, so a curator can publish
+        // this asset as the author's.
+        ...sharedMemoryAuthorSealFields(name, seal),
       });
 
       // Wrap the plaintext publish-request in the encrypted envelope
@@ -9115,7 +9104,7 @@ export class DKGPublisher implements Publisher {
     // failed promotion cannot strand a durable false-incomplete witness. The
     // resolver itself may conservatively hydrate process-local state and must be
     // idempotent because retries reuse operationId. A resolver that can refuse
-    // for a passing reason is first given its short wait.
+    // for a passing reason is first given its wait.
     if (opts?.subGraphName === undefined) {
       await this.resolveDurableRootPromotionAtomicCompanion?.awaitAdmission?.({
         contextGraphId, kaUal: contentScope.ual,

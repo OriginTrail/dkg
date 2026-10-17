@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { NoChainAdapter, RpcEndpointsExhaustedError } from '@origintrail-official/dkg-chain';
 import {
   TRUST_LEVEL_PREDICATE,
   TrustLevel,
@@ -453,6 +453,81 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     })).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
     expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
   });
+
+  it.each(['finalized-proof', 'name-binding', 'access-policy'] as const)(
+    'distinguishes a transient %s read from denial on the same private binding', async (site) => {
+      const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+      const unavailable = new RpcEndpointsExhaustedError('catalog proof read failed', { rpcUrls: [] });
+      const chain = privatePolicyChain({ nameHash });
+      let fail = false;
+      let nameReads = 0;
+      let policyReads = 0;
+      chain.getContextGraphFinalizedCreation = async () => {
+        if (site !== 'finalized-proof') return undefined;
+        if (fail) throw unavailable;
+        return { nameHash, accessPolicy: 1 };
+      };
+      chain.getContextGraphNameHash = async () => {
+        nameReads += 1;
+        if (fail && site === 'name-binding') throw unavailable;
+        return nameHash;
+      };
+      chain.getContextGraphAccessPolicy = async () => {
+        policyReads += 1;
+        if (fail && site === 'access-policy') throw unavailable;
+        return 1;
+      };
+      const { publisher, store, publishSpy } = await makePublisher(chain);
+      // Deliberately omit local on-chain metadata: an explicit matching binding is sufficient.
+      await store.insert([q('urn:test:root:one'), ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH)]);
+      const publish = () => publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+        rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+      }, {
+        onChainContextGraphId: '1',
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      });
+      await expect(publish()).resolves.toMatchObject({ status: 'tentative' });
+      expect(publishSpy.calls).toHaveLength(1);
+      fail = true;
+      await expect(publish()).rejects.toMatchObject({
+        code: 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE', site, cause: unavailable,
+      });
+      expect(publishSpy.calls).toHaveLength(1);
+      // Failure of an atomic proof must never splice in latest-state point reads.
+      if (site === 'finalized-proof') expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
+    },
+  );
+
+  it.each(['public', 'wrong-slot', 'unknown-permanent'] as const)(
+    'does not turn %s catalog refusal into transient authority unavailability', async (reason) => {
+      const chain = privatePolicyChain();
+      chain.getContextGraphFinalizedCreation = async () => {
+        if (reason === 'unknown-permanent') throw new Error('unsupported proof implementation');
+        return {
+          nameHash: ethers.keccak256(ethers.toUtf8Bytes(reason === 'wrong-slot' ? 'another-context' : CONTEXT_GRAPH)),
+          accessPolicy: reason === 'public' ? 0 : 1,
+        };
+      };
+      let fallbackReads = 0;
+      chain.getContextGraphNameHash = async () => {
+        fallbackReads += 1;
+        return ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+      };
+      chain.getContextGraphAccessPolicy = async () => { fallbackReads += 1; return 1; };
+      const { publisher, store, publishSpy } = await makePublisher(chain);
+      await store.insert([q('urn:test:root:one'), ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH)]);
+      const refused = publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+        rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+      }, {
+        onChainContextGraphId: '1',
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      });
+      await expect(refused).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+      await expect(refused).rejects.not.toHaveProperty('code', 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE');
+      expect(publishSpy.calls).toHaveLength(0);
+      expect(fallbackReads).toBe(0);
+    },
+  );
 
   it('keeps the live point-read fallback when the owner fast pair is unavailable', async () => {
     const expectedNameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));

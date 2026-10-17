@@ -1,3 +1,11 @@
+export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
+export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
+export {
+  QueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from '@origintrail-official/dkg-query';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
   authorityIndexTrustDomain,
@@ -642,6 +650,7 @@ export {
   mergeFleetSharedMemoryDiagnostics,
   mergeSamePeerSharedMemoryDiagnostics,
   selectSwmSnapshotCoverage,
+  sharedMemoryRoundFoundNothingMissing,
 } from './sync/shared-memory-diagnostics.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves

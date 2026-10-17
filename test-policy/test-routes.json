@@ -1,5 +1,18 @@
 [
   {
+    "pattern": "packages/node-ui/browser-regressions/pr3236/*.spec.ts",
+    "lane": "browser",
+    "reason": "Standalone scoped-store and WebGL regressions run in the first required browser CI shard",
+    "cadence": "required",
+    "command": "pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts",
+    "layer": "browser regression fixtures",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies",
+      "Playwright Chromium"
+    ]
+  },
+  {
     "pattern": "packages/node-ui/e2e/specs/devnet-local/**",
     "lane": "browser-local",
     "reason": "Heavy destructive scenarios use isolated devnet in scheduled main CI or explicit local runs",

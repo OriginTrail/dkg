@@ -39,7 +39,7 @@ import {
   type ContextGraphReadAuthorityAttribution,
 } from './read-authority-diagnostics.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
-
+import { knownNotWritableAnswer, resolveAwaitingWriteReadiness, type ContextGraphSubscriptionReader, type KnownNotWritable, type WriteReadinessOutcome } from './context-graph-write-readiness.js';
 import type { CorsAllowlist } from './state.js';
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
@@ -582,10 +582,11 @@ export function jsonResponse(
   corsOrigin?: string | null,
   extraHeaders?: Record<string, string>,
 ): void {
-  const origin =
-    corsOrigin !== undefined
-      ? corsOrigin
-      : (((res as any).__corsOrigin as string | null) ?? null);
+  sendSerializedJsonResponse(res, status, serializeJsonResponse(status, data), corsOrigin, extraHeaders);
+}
+
+/** The body {@link jsonResponse} sends, for a route that must finish its answer before it decides to send it. */
+export function serializeJsonResponse(status: number, data: unknown): string {
   const scrubbed = scrubResponseBody(data);
   const rawBody = JSON.stringify(scrubbed, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,
@@ -664,7 +665,7 @@ export function jsonResponse(
   // the CodeQL silence on the flagged sink while making
   // success-path payload corruption impossible.
   const isErrorResponse = status >= 400;
-  const body = isErrorResponse
+  return isErrorResponse
     ? rawBody
         .replace(/\\n\s+at [^"\n]+/g, "")
         .replace(
@@ -673,6 +674,17 @@ export function jsonResponse(
         )
         .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "")
     : rawBody;
+}
+
+/** Sends a body {@link serializeJsonResponse} made. */
+export function sendSerializedJsonResponse(
+  res: ServerResponse,
+  status: number,
+  body: string,
+  corsOrigin?: string | null,
+  extraHeaders?: Record<string, string>,
+): void {
+  const origin = corsOrigin !== undefined ? corsOrigin : (((res as any).__corsOrigin as string | null) ?? null);
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),
@@ -824,16 +836,9 @@ async function contextGraphRowIsWritable(
   return false;
 }
 
-function rejectKnownNonWritableContextGraph(
-  res: ServerResponse,
-  raw: string,
-): null {
-  jsonResponse(res, 400, {
-    code: "CONTEXT_GRAPH_NOT_WRITABLE",
-    error:
-      `Context graph "${raw}" is known but is not locally synced for writes. ` +
-      `Subscribe/sync the context graph first, then retry the write.`,
-  });
+function rejectKnownNonWritableContextGraph(res: ServerResponse, raw: string, outcome: WriteReadinessOutcome): null {
+  const answer = knownNotWritableAnswer(raw, outcome);
+  jsonResponse(res, answer.status, answer.body, undefined, answer.headers);
   return null;
 }
 
@@ -1147,8 +1152,17 @@ async function evaluateExactWritePreflight(
  * The storage layer auto-materializes named graphs on first insert, so syntax
  * validation is not enough for mutation routes. This helper fail-closes before
  * callers reach agent/publisher/storage code that would create a shadow CG.
+ * A known graph that this node is still catching up is waited for, bounded,
+ * and resolved once more (`context-graph-write-readiness.ts`).
  */
-export async function resolveRequiredWriteContextGraphId(
+export function resolveRequiredWriteContextGraphId(...args: Parameters<typeof resolveWriteContextGraphIdOnce>): Promise<string | null> {
+  const [agent, , res] = args;
+  return resolveAwaitingWriteReadiness(agent, () => resolveWriteContextGraphIdOnce(...args),
+    (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome), res);
+}
+
+/** One pass of {@link resolveRequiredWriteContextGraphId}: a known graph that is not writable here is returned, not answered. */
+async function resolveWriteContextGraphIdOnce(
   agent: {
     listContextGraphs(opts?: {
       callerAgentAddress?: string | null;
@@ -1166,6 +1180,8 @@ export async function resolveRequiredWriteContextGraphId(
      * locally.
      */
     validateWriteTargetDuringStoreOutage?: (contextGraphId: string) => Promise<boolean>;
+    /** Live subscription rows: a write waits on them while this node catches its graph up. */
+    getSubscribedContextGraphs?: ContextGraphSubscriptionReader['getSubscribedContextGraphs'];
   },
   contextGraphId: unknown,
   res: ServerResponse,
@@ -1186,7 +1202,7 @@ export async function resolveRequiredWriteContextGraphId(
      */
     chainRescueTimeoutMs?: number;
   } = {},
-): Promise<string | null> {
+): Promise<string | KnownNotWritable | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
 
   const raw = (contextGraphId as string).trim();
@@ -1218,7 +1234,7 @@ export async function resolveRequiredWriteContextGraphId(
     return rejectUnknownContextGraph(res, raw);
   }
   if (exactDecision.kind === "rejectNonWritable") {
-    return rejectKnownNonWritableContextGraph(res, raw);
+    return { notWritable: candidateId, raw };
   }
   if (exactDecision.kind === "validationUnavailable") {
     return contextGraphValidationUnavailable(res, exactDecision.errorMessage);
@@ -1330,7 +1346,7 @@ export async function resolveRequiredWriteContextGraphId(
       !isShadowLikeBareContextGraphRow(exact)
     ) {
       if (requireLocalWritable && !exactWritable) {
-        return rejectKnownNonWritableContextGraph(res, raw);
+        return { notWritable: exact.id, raw };
       }
       return exact.id;
     }
@@ -1360,7 +1376,7 @@ export async function resolveRequiredWriteContextGraphId(
     }
     if (exact?.id && typeof exact.id === "string") {
       if (requireLocalWritable && !exactWritable) {
-        return rejectKnownNonWritableContextGraph(res, raw);
+        return { notWritable: exact.id, raw };
       }
       return exact.id;
     }
@@ -1368,7 +1384,7 @@ export async function resolveRequiredWriteContextGraphId(
 
   if (exact?.id && typeof exact.id === "string") {
     if (requireLocalWritable && !exactWritable) {
-      return rejectKnownNonWritableContextGraph(res, raw);
+      return { notWritable: exact.id, raw };
     }
     return exact.id;
   }

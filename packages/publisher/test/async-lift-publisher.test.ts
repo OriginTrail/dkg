@@ -1,3 +1,6 @@
+import type { WorkerLiftJobClaimSession } from '../src/lift-job-transition-scope.js';
+import type { AsyncLiftJournalCompletion, JournalOperation } from '../src/async-lift-journal-completion.js';
+import type { ActiveLiftJobClaim } from '../src/async-lift-publisher-types.js';
 import { beforeAll, beforeEach, afterAll, describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
@@ -148,6 +151,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       maxRetries: options.config?.maxRetries,
       graphUri: options.config?.graphUri,
     });
+  }
+
+  function recordAcceptedWithinOperation(publisher: unknown, claim: ActiveLiftJobClaim, txHash: string): Promise<void> {
+    const internal = publisher as {
+      journalCompletion: AsyncLiftJournalCompletion;
+      claimCoordinator: { openWorkerSession(owner: JournalOperation, claim: ActiveLiftJobClaim): WorkerLiftJobClaimSession };
+      recordRpcAccepted(session: WorkerLiftJobClaimSession, record: { txHash: string; nonce: number }): Promise<void>;
+    };
+    return internal.journalCompletion.runPublicOperation((owner) =>
+      internal.recordRpcAccepted(internal.claimCoordinator.openWorkerSession(owner, claim), { txHash, nonce: 4 }));
   }
 
   function confirmedPublishResult() {
@@ -1450,8 +1463,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
     const writtenStatuses: string[] = [];
-    const originalReplaceSubject = store.replaceSubject.bind(store);
-    store.replaceSubject = async (...args) => {
+    const originalReplaceSubject = store.replaceSubjectAndInsert.bind(store);
+    store.replaceSubjectAndInsert = async (...args) => {
       if (args[0] === DEFAULT_CONTROL_GRAPH_URI && args[1] === jobSubject(jobId)) {
         const status = args[2].find((entry) => entry.predicate === CONTROL_STATUS)?.object;
         if (status) writtenStatuses.push(status);
@@ -2087,7 +2100,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
 
     await expect(Promise.all([
-      (publisher as any).recordRpcAccepted(claim, { txHash, nonce: 4 }),
+      recordAcceptedWithinOperation(publisher, claim!, txHash),
       publisher.reconcileTransactions(),
     ])).resolves.toBeDefined();
     expect(await publisher.getStatus(jobId)).toMatchObject({
@@ -2134,7 +2147,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     expect(await reconciler.reconcileTransactions()).toBe(1);
     await expect(
-      (worker as any).recordRpcAccepted(claim, { txHash, nonce: 4 }),
+      recordAcceptedWithinOperation(worker, claim, txHash),
     ).resolves.toBeUndefined();
     expect(await worker.getStatus(jobId)).toMatchObject({
       jobId,

@@ -22,26 +22,37 @@ function markReloadedFor401(): boolean {
   }
 }
 
-/** Fetch data on mount and optionally on a polling interval. */
+/** Fetch on mount or an interval. A scope may be a string or a stable opaque request identity. */
 export function useFetch<T>(
   fetcher: () => Promise<T>,
   deps: unknown[] = [],
   intervalMs = 0,
+  options: { scope?: unknown; retention?: 'keep' | 'scope'; enabled?: boolean } = {},
 ): { data: T | null; loading: boolean; error: string | null; refresh: () => void } {
-  const [data, setData] = useState<T | null>(null);
+  const { scope, retention = 'keep', enabled = true } = options;
+  const [data, setData] = useState<{ scope?: unknown; value: T } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ scope?: unknown; message: string } | null>(null);
+  const startedScope = useRef(scope);
   const mountedRef = useRef(true);
+  const generationRef = useRef(0);
+  const inFlightRef = useRef<number | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = true) => {
+    if (!enabled) return;
+    // A slow poll must still be allowed to publish its result. Interval ticks
+    // coalesce while it runs; explicit refreshes may supersede an old read.
+    if (!force && inFlightRef.current !== null) return;
+    const generation = ++generationRef.current;
+    inFlightRef.current = generation;
     try {
       const result = await fetcher();
-      if (mountedRef.current) {
-        setData(result);
+      if (mountedRef.current && generation === generationRef.current) {
+        setData({ scope, value: result });
         setError(null);
       }
     } catch (err: any) {
-      if (mountedRef.current) {
+      if (mountedRef.current && generation === generationRef.current) {
         if (err?.status === 401) {
           const hasToken = currentApiToken() !== undefined;
           // Reload once to pick up a rotated token — but only when the token
@@ -50,27 +61,30 @@ export function useFetch<T>(
             window.location.reload();
             return;
           }
-          setError(hasToken
+          setError({ scope, message: hasToken
             ? 'Authentication expired — please refresh the page.'
-            : 'API token required — enter it at the top of the page.');
+            : 'API token required — enter it at the top of the page.' });
           return;
         }
-        setError(err.message);
+        setError({ scope, message: err.message });
       }
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (inFlightRef.current === generation) inFlightRef.current = null;
+      if (mountedRef.current && generation === generationRef.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, [enabled, scope, ...deps]);
 
   useEffect(() => {
+    generationRef.current++;
     mountedRef.current = true;
-    setLoading(true);
-    load();
+    startedScope.current = scope;
+    setLoading(enabled);
+    if (enabled) load();
     let timer: ReturnType<typeof setInterval> | null = null;
     const startTimer = () => {
-      if (intervalMs <= 0 || timer) return;
-      timer = setInterval(load, intervalMs);
+      if (!enabled || intervalMs <= 0 || timer) return;
+      timer = setInterval(() => { void load(false); }, intervalMs);
     };
     const stopTimer = () => {
       if (!timer) return;
@@ -86,18 +100,27 @@ export function useFetch<T>(
     const onVisibility = () => {
       if (typeof document === 'undefined') return;
       if (document.hidden) stopTimer();
-      else { load(); startTimer(); }
+      else { void load(false); startTimer(); }
     };
     if (typeof document === 'undefined' || !document.hidden) startTimer();
-    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
+    if (enabled && typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      generationRef.current++;
+      inFlightRef.current = null;
       mountedRef.current = false;
       stopTimer();
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [load, intervalMs]);
 
-  return { data, loading, error, refresh: load };
+  // Scoped reads retain data during a refresh, but never expose another
+  // selection's data or error, including the render before effects run.
+  return {
+    data: retention === 'scope' && data?.scope !== scope ? null : data?.value ?? null,
+    loading: enabled && (loading || (retention === 'scope' && startedScope.current !== scope)),
+    error: retention === 'scope' && error?.scope !== scope ? null : error?.message ?? null,
+    refresh: load,
+  };
 }
 
 /** Format bytes to human-readable string. */
