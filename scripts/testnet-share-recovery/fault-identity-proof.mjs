@@ -1,5 +1,5 @@
 import { loadCampaign } from './campaign-manifest.mjs';
-import { sameCapturedTerm, sameCapturedQuads } from './rdf-term-identity.mjs';
+import { sameCapturedTerm, sameCapturedQuads, capturedTermIdentity } from './rdf-term-identity.mjs';
 import fs from 'node:fs';
 import { validateCapturedShareIdentity } from './captured-share-identity.mjs';
 const [arm, label] = process.argv.slice(2);
@@ -20,7 +20,9 @@ for (const name of loadCampaign(arm).faults.map(f => f.name)) {
   if (!graph) throw Error('Fault evidence lacks its exact SWM graph');
   const payload = fault.contentAtFault.quads;
   const contentMatches = sameCapturedQuads(payload, final.filter(r => r.g.value === graph), graph);
-  proofs.push({ name, comparison: 'full-rdf-term-v2', metadataGraph, captureComplete, captureErrors, firedAt: fault.firedAt, fields: matches, contentTriplesAtFault: payload.length,
+  const operation = before.find(q => q.predicate === 'http://dkg.io/ontology/shareOperationId');
+  const originalOperationId = captureComplete && operation ? capturedTermIdentity(operation.object)[1] : null;
+  proofs.push({ name, originalOperationId, comparison: 'full-rdf-term-v2', metadataGraph, captureComplete, captureErrors, firedAt: fault.firedAt, fields: matches, contentTriplesAtFault: payload.length,
     originalSealOperationAndContentPreserved: captureComplete && matches.every(m => m.matches) && contentMatches });
 }
 fs.writeFileSync(`${dir}/fault-identity-proof.json`, JSON.stringify(proofs, null, 2));

@@ -45,6 +45,7 @@ for (const exporter of ['reviewer-evidence.py', 'export-restart.py']) {
         const inventoryFile = exporter === 'export-restart.py' ? 'inventory.json' : 'inventory-identities.json';
         assert.equal(read(catalogFile).length, catalogRows.length, `${exporter} exported obsolete catalog identities`);
         assert.equal(read(inventoryFile).length, rows.length, `${exporter} exported obsolete inventory identities`);
+        assert.deepEqual(read(inventoryFile).map(r => r.share_operation_id), current.capture.swm.map(r => r.share_operation_id));
         const evidence = read('inventory-scope-proof.json');
         assert.equal(evidence.catalogHeadDigest, provenance.catalogHeadDigest); assert.equal(evidence.rowCommitmentsVerified, true);
         assert.equal(evidence.excludedInventoryScopes.length, 1); assert.equal(evidence.excludedCatalogHeads.length, 1);

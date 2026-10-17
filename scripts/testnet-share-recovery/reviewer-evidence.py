@@ -42,7 +42,7 @@ write('fault-identity-proof.json', read('fault-identity-proof.json'))
 write('nonce-accounting.json', read('nonce-proof.json'))
 write('assets.json', verification['assets'])
 write('seals.json', list(seals.values()))
-write('inventory-identities.json', [{key: row[key] for key in ['assertion_coordinate', 'ka_ual', 'assertion_version_u64be', 'seal_digest']} for row in inventory])
+write('inventory-identities.json', [{key: row[key] for key in ['assertion_coordinate', 'ka_ual', 'assertion_version_u64be', 'seal_digest', 'share_operation_id']} for row in inventory])
 write('catalog-identities.json', [{key: row[key] for key in ['assertionCoordinate', 'assertionVersion', 'kaId', 'sealDigest']} for row in rows])
 requests = read('publication-admissions.json') + read('synchronous-shares.json')
 with (out / 'requests.csv').open('w') as handle:

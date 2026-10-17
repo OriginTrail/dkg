@@ -1,4 +1,4 @@
-import { inventoryScopeFixture } from './inventory-scope-fixture.mjs';
+import { inventoryScopeFixture, operationRowsFixture } from './inventory-scope-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -25,7 +25,7 @@ test('starting gate requires the exact authoritative prepared seal subjects', ()
     const digest = computeCanonicalGraphScopedAuthorSealDigestV1(seal);
     const term = value => { const [type, text, datatype, language] = capturedTermIdentity(value);
       return { type, value: text, ...(type === 'literal' && datatype !== 'http://www.w3.org/2001/XMLSchema#string' ? { datatype } : {}), ...(language ? { 'xml:lang': language } : {}) }; };
-    const rows = quads.map(q => ({ s: term(q.subject), p: term(q.predicate), o: term(q.object), g: term(q.graph) }));
+    const rows = [...quads.map(q => ({ s: term(q.subject), p: term(q.predicate), o: term(q.object), g: term(q.graph) })), ...operationRowsFixture(campaign, name)];
     const dir = path.join(cwd, '.tmp/2963/evidence', arm); fs.mkdirSync(path.join(dir, 'pre-workload'), { recursive: true });
     const write = (file, value) => fs.writeFileSync(path.join(dir, file), JSON.stringify(value));
     write('campaign-manifest.json', campaign);

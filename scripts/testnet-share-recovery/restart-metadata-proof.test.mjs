@@ -67,3 +67,21 @@ test('restart lifecycle fields require IRI subjects and predicates', () => {
     assert.equal(proof.originalSealAndIntent, true); assert.equal(proof.lifecycleComplete, false);
   }
 });
+
+test('restart inventory must name the operation in the original validated recovery binding', async () => {
+  const { verifyInventoryOperations } = await import('./inventory-operation-proof.mjs');
+  const { inventoryScopeFixture } = await import('./inventory-scope-fixture.mjs');
+  const { verifyInventoryScope } = await import('./inventory-scope.mjs');
+  const campaign = { contextGraphId: 'restart-operation', author: '0x' + '11'.repeat(20) }, name = 'restart';
+  const intent = JSON.parse(JSON.parse(fault.metadataAtFault.quads.find(q => q.predicate === dkg + 'promoteOperationIntent').object));
+  const binding = { version: 1, sealDigest: '0x' + 'ab'.repeat(32), inventoryRequired: true, intent };
+  const valid = bindingMatchesCapturedOperation(fault, binding); assert.equal(valid, true);
+  const rdf = rows.map(r => ({ ...r, g: { type: 'uri', value: `did:dkg:context-graph:${campaign.contextGraphId}/_meta` },
+    s: r.s.value === subject ? { type: 'uri', value: `urn:dkg:assertion:${campaign.contextGraphId}:${campaign.author}:${name}` } : r.s }));
+  for (const operation of [intent.operationId, 'replacement-operation']) {
+    const f = inventoryScopeFixture(campaign, [{ assertion_coordinate: name, share_operation_id: operation }], [{ assertionCoordinate: name }]);
+    assert.equal(verifyInventoryScope(campaign, f.capture, f.catalogs, f.status).valid, true);
+    const proof = verifyInventoryOperations(campaign, [name], f.capture.swm, rdf, [{ name, operationId: binding.intent.operationId, valid }]);
+    assert.equal(proof.exact, operation === intent.operationId);
+  }
+});

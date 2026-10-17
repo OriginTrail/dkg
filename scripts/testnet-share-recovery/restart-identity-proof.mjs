@@ -1,3 +1,4 @@
+import { verifyInventoryOperations, faultOperationWitnesses } from './inventory-operation-proof.mjs';
 import { verifyInventoryScope } from './inventory-scope.mjs';
 import { requirePublicationCohort } from './publication-evidence.mjs';
 import { sameCapturedQuads } from './rdf-term-identity.mjs';
@@ -80,6 +81,10 @@ if(mode==='before'){
  if(expected.length!==counts.restart||expected.some(row=>row.error||row.unchanged===false))throw Error('Incomplete original identity evidence');
  const inventory=inventoryScope.rows;
  const tuples=verifyIdentityTuples(expected,catalogs,inventory);
+ const operations=verifyInventoryOperations(campaign,expected.map(s=>s.name),inventory,rows,[
+  ...faultOperationWitnesses(campaign,JSON.parse(fs.readFileSync(`${root}/fault-identity-proof.json`))),
+  {name:restartName,operationId:before.request.recoveryBinding.intent.operationId,valid:originalBindingOperation}]);
+ tuples.exactInventoryIdentity &&= operations.exact;
  const publications=JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-publisher-jobs.json`)).value.jobs;
  const mainPublications=JSON.parse(fs.readFileSync(`${root}/fixed-deadline/-api-publisher-jobs.json`)).value.jobs;
  const receipts=JSON.parse(fs.readFileSync(`${root}/reconciliation.json`));
@@ -93,7 +98,7 @@ if(mode==='before'){
  const runtimeBuildTimeUnchanged=originalBuild.buildTime===runtimeAfter.buildTime;
  const result={inventoryScope:{...inventoryScope,rows:undefined,catalogRows:undefined},originalCohortMetadataUnchanged,wholeCohortContentUnchanged,metadataGraph,metadataComparison:'authoritative-full-rdf-term-v2',sameRuntime,runtimeBuildTimeUnchanged,runtimeBuildTime:runtimeAfter.buildTime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
  originalBinding:JSON.stringify(job.request)===JSON.stringify(before.request),state:job.state,attempts:job.attempt.count,
- originalBindingSeal,originalBindingOperation,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate===restartName).length,
+ originalBindingSeal,originalBindingOperation,inventoryOperations:operations,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate===restartName).length,
  noAdditionalPublicationEffects:publications.length===counts.publications&&publications.every(j=>mainPublications.some(old=>old.jobId===j.jobId&&old.finalization.txHash===j.finalization.txHash)),nonces,manualRepairs:0};
  fs.writeFileSync(`${dir}/identity-proof.json`,JSON.stringify(result,null,2));console.log(result);
  if(!originalCohortMetadataUnchanged||!wholeCohortContentUnchanged||!runtimeBuildTimeUnchanged||!originalBindingSeal||!originalBindingOperation||!tuples.exactCatalogIdentity||!tuples.exactInventoryIdentity||!sameRuntime||!result.originalJob||!result.originalBinding||job.state!=='succeeded'||!originalSealAndIntent||!exactContent||!lifecycleComplete||!wmCleared||catalogs.length!==counts.restart||result.restartCatalogOccurrences!==1||!result.noAdditionalPublicationEffects||nonces.some(n=>!n.unchanged))process.exitCode=1;

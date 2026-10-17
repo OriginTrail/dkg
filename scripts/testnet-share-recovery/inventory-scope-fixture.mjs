@@ -38,3 +38,12 @@ export function inventoryScopeFixture(campaign, inventoryRows, catalogRows, era 
     applied: [{ catalog_scope_digest: catalogScopeDigest, author_address: scope.authorAddress, current_catalog_head_digest: headDigest }], swm },
     catalogs: [catalog], status: { status: 200, value: { rfc64Catalog: { contextGraphs: [authority] } } } };
 }
+
+export function operationRowsFixture(campaign, name, operationId = `operation-${name}`) {
+  const intent = { version: 1, operationId, timestampMs: 1, confirmationRequired: false, accessPolicy: 'public', allowedPeers: [] };
+  return [['shareOperationId', operationId], ['promoteOperationIntent', JSON.stringify(intent)]].map(([predicate, value]) => ({
+    g: { type: 'uri', value: `did:dkg:context-graph:${campaign.contextGraphId}/_meta` },
+    s: { type: 'uri', value: `urn:dkg:assertion:${campaign.contextGraphId}:${campaign.author}:${name}` },
+    p: { type: 'uri', value: 'http://dkg.io/ontology/' + predicate }, o: { type: 'literal', value },
+  }));
+}

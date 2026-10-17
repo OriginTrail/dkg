@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { defineCampaign } from './campaign-manifest.mjs';
 import { createRequire } from 'node:module';
 import { collectInventoryScopes, encodeInventory, verifyInventoryScope } from './inventory-scope.mjs';
-import { inventoryScopeFixture } from './inventory-scope-fixture.mjs';
+import { inventoryScopeFixture, operationRowsFixture } from './inventory-scope-fixture.mjs';
 import { verifyIdentityTuples } from './identity-tuples.mjs';
 const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
 const Database = require('better-sqlite3');
@@ -87,7 +87,8 @@ test('identity entry point recomputes current scope rather than trusting a stale
     const current = inventoryScopeFixture(campaign, [], catalogRows, '1');
     const capture = { ...collect([...old.capture.scopes, ...current.capture.scopes], current.capture.applied), swm: old.capture.swm };
     const dir = path.join(cwd, '.tmp/2963/evidence/fixture'); fs.mkdirSync(path.join(dir, 'fixed-deadline'), { recursive: true });
-    for (const [name, value] of [['campaign-manifest.json', campaign], ['seal-proof.json', expected],
+    for (const [name, value] of [['campaign-manifest.json', { ...campaign, faults: [] }], ['seal-proof.json', expected], ['fault-identity-proof.json', []],
+      ['fixed-deadline/rdf.json', { results: { bindings: operationRowsFixture(campaign, 'asset') } }],
       ['fixed-deadline/inventory.json', capture], ['fixed-deadline/catalogs.json', current.catalogs], ['fixed-deadline/-api-status.json', current.status]]) {
       fs.writeFileSync(path.join(dir, name), JSON.stringify(value));
     }

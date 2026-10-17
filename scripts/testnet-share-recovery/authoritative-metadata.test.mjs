@@ -55,7 +55,7 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     const rdf = bindings => ({ results: { bindings } });
     write('campaign-manifest.json', campaign); write('pre-workload/rdf.json', rdf(before));
     write('fixed-deadline/rdf.json', rdf([...metadata, ...payload]));
-    const scopeFixture = inventoryScopeFixture(campaign, [{ assertion_coordinate: name }], [{ assertionCoordinate: name }]);
+    const scopeFixture = inventoryScopeFixture(campaign, [{ assertion_coordinate: name, share_operation_id: 'original' }], [{ assertionCoordinate: name }]);
     write('fixed-deadline/inventory.json', scopeFixture.capture); write('fixed-deadline/catalogs.json', scopeFixture.catalogs); write('fixed-deadline/-api-status.json', scopeFixture.status);
     write('fixed-deadline/-api-publisher-jobs.json', { value: { jobs: [] } });
     write('synchronous-shares.json', [{ label: `share:${name}`, status: 200 }]); write('publication-admissions.json', []);
@@ -116,6 +116,12 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     // Newly shared assets have no original operation, but their final authority must be valid.
     write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...operation]));
     assert.deepEqual(run().proof.operationErrors, []);
+    const wrongOperation = inventoryScopeFixture(campaign, [{ assertion_coordinate: name, share_operation_id: 'replacement' }], [{ assertionCoordinate: name }]);
+    write('fixed-deadline/inventory.json', wrongOperation.capture);
+    const mismatched = run().proof;
+    assert.equal(mismatched.inventory.scope.valid, true); assert.deepEqual(mismatched.operationErrors, [name]);
+    assert.equal(mismatched.assets[0].inventoryOperationValid, false);
+    write('fixed-deadline/inventory.json', scopeFixture.capture);
     for (const invalid of [
       [], [operation[0]], [operation[1]],
       [operation[0], { ...operation[1], o: { type: 'literal', value: 'not-json' } }],
@@ -154,7 +160,12 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     const incomplete = run().proof;
     assert.deepEqual(incomplete.lifecycleErrors, [name]);
     assert.deepEqual(incomplete.contentErrors, []);
-    assert.deepEqual(incomplete.operationErrors, []);
+    assert.deepEqual(incomplete.operationErrors, [name], 'A present inventory row without operation authority must fail');
+    const absent = inventoryScopeFixture(campaign, [], [{ assertionCoordinate: name }]);
+    write('fixed-deadline/inventory.json', absent.capture);
+    const absentProof = run().proof; assert.deepEqual(absentProof.inventory.missing, [name]);
+    assert.deepEqual(absentProof.operationErrors, [], 'Missing baseline rows stay explicit without invented operation mismatches');
+    write('fixed-deadline/inventory.json', scopeFixture.capture);
     for (const object of [{ type: 'literal', value: 'promoted', 'xml:lang': 'fr' }, { type: 'uri', value: 'promoted' }]) {
       write('fixed-deadline/rdf.json', rdf([...metadata.map(r => r.s.value === life && r.p.value.endsWith('/state') ? { ...r, o: object } : r), ...payload]));
       assert.deepEqual(run().proof.lifecycleErrors, [name]);
