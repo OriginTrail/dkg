@@ -103,11 +103,10 @@ describe('ACKCollector', () => {
     });
 
     expect(result.acks).toHaveLength(3);
-    expect(diagnosticEvents).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'attempt_started' }),
-      expect.objectContaining({ kind: 'attempt', durationMs: expect.any(Number) }),
-      expect.objectContaining({ kind: 'outcomes', counts: expect.objectContaining({ total: 4 }) }),
-    ]));
+    expect(diagnosticEvents).toEqual([expect.objectContaining({
+      completedPeerAttempts: expect.any(Number), perRoundPeakPeerRequests: expect.any(Number),
+      peerAttemptMs: expect.any(Number), candidates: expect.objectContaining({ total: 4 }),
+    })]);
     expect(JSON.stringify(diagnosticEvents)).not.toContain('peer-');
     expect(gossipCalls).toHaveLength(0);
     expect(result.merkleRoot).toBe(merkleRoot);
@@ -144,8 +143,8 @@ describe('ACKCollector', () => {
       peerOutcomes: [ { peerId: 'candidate-a', reason: 'pool_below_quorum' },
         { peerId: 'candidate-b', reason: 'pool_below_quorum' } ] });
     expect(sends).toBe(0);
-    expect(events).toEqual([{ kind: 'outcomes', counts: { total: 2, ack: 0,
-      declined: 0, invalid: 0, unsupported: 0, transport: 0, pending: 2 } }]);
+    expect(events).toEqual([expect.objectContaining({ completedPeerAttempts: 0, perRoundPeakPeerRequests: 0,
+      candidates: { total: 2, ack: 0, declined: 0, invalid: 0, unsupported: 0, transport: 0, pending: 2 } })]);
   });
 
   it('surfaces async publish and update candidate-provider failures as typed quorum errors', async () => {

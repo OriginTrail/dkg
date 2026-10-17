@@ -1,4 +1,4 @@
-import type { ACKDiagnosticEvent } from '@origintrail-official/dkg-publisher';
+import type { ACKDiagnosticSummary } from '@origintrail-official/dkg-publisher';
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
 import type { StorageACKAdmission, StorageACKAdmissionEvent } from './storage-ack-admission.js';
 
@@ -13,15 +13,12 @@ export class StorageACKDiagnostics {
   private workMs = 0;
   private queued = 0;
   private active = 0;
-  private attempts = 0;
-  private peakPeerRequests = 0;
-  private attemptMs = 0;
-  private backoffs = 0;
-  private backoffMs = 0;
-  private transportBackoffs = 0;
-  private transientDeclineBackoffs = 0;
   private outcome: 'preflight_failed' | 'failed' | 'cancelled' | 'succeeded' = 'preflight_failed';
-  private candidates = { total: 0, ack: 0, declined: 0, invalid: 0, unsupported: 0, transport: 0, pending: 0 };
+  private collectorSummary: ACKDiagnosticSummary = {
+    completedPeerAttempts: 0, perRoundPeakPeerRequests: 0, peerAttemptMs: 0,
+    backoffs: 0, backoffMs: 0, transportBackoffs: 0, transientDeclineBackoffs: 0,
+    candidates: { total: 0, ack: 0, declined: 0, invalid: 0, unsupported: 0, transport: 0, pending: 0 },
+  };
 
   constructor(private readonly operation: 'publish' | 'update', private readonly log: (message: string) => void,
     private readonly now = () => performance.now()) { this.started = now(); }
@@ -38,15 +35,7 @@ export class StorageACKDiagnostics {
     if (event.stage === 'released') this.workMs = event.workMs;
     if (event.stage === 'cancelled') this.outcome = 'cancelled';
   };
-  readonly collector = (event: ACKDiagnosticEvent): void => {
-    if (event.kind === 'attempt_started') this.peakPeerRequests = Math.max(this.peakPeerRequests, event.active);
-    if (event.kind === 'attempt') { this.attempts++; this.attemptMs += event.durationMs; }
-    if (event.kind === 'backoff') {
-      this.backoffs++; this.backoffMs += event.durationMs;
-      if (event.reason === 'transport') this.transportBackoffs++; else this.transientDeclineBackoffs++;
-    }
-    if (event.kind === 'outcomes') this.candidates = event.counts;
-  };
+  readonly collector = (summary: ACKDiagnosticSummary): void => { this.collectorSummary = summary; };
   finish(signal?: AbortSignal): void {
     const totalMs = this.now() - this.started;
     const round = (value: number) => Math.round(Math.max(0, value) * 1000) / 1000;
@@ -58,15 +47,15 @@ export class StorageACKDiagnostics {
         gateAcquiredAfterMs: this.acquiredAt === undefined ? null : round(this.acquiredAt),
         gateReleasedAfterMs: this.releasedAt === undefined ? null : round(this.releasedAt),
         collectorMs: round(this.workMs), totalMs: round(totalMs), maxQueued: this.queued, maxActive: this.active,
-        completedPeerAttempts: this.attempts, perRoundPeakPeerRequests: this.peakPeerRequests, peerAttemptMs: round(this.attemptMs), backoffs: this.backoffs,
-        backoffMs: round(this.backoffMs), transportBackoffs: this.transportBackoffs,
-        transientDeclineBackoffs: this.transientDeclineBackoffs, candidates: this.candidates })}`);
+        ...this.collectorSummary,
+        peerAttemptMs: round(this.collectorSummary.peerAttemptMs),
+        backoffMs: round(this.collectorSummary.backoffMs) })}`);
     } catch { /* diagnostics must not change the publication outcome */ }
   }
 }
 
 
-type Admit = <T>(collect: (observe: (event: ACKDiagnosticEvent) => void) => Promise<T>) => Promise<T>;
+type Admit = <T>(collect: (observe: (summary: ACKDiagnosticSummary) => void) => Promise<T>) => Promise<T>;
 
 /** Capture the lifetime before preflight; drain physical work before store teardown. */
 export function runStorageACKOperation<T>(

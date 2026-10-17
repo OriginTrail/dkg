@@ -28,7 +28,7 @@ import { QuorumUnmetError, assertACKCandidateQuorum, type PeerOutcome } from './
 import type { V10ACKMode } from './publisher.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
 import { PeerStatusLedger } from './ack-peer-status-ledger.js';
-import { ACKRoundDiagnostics, type ACKDiagnosticEvent } from './ack-diagnostics.js';
+import { ACKRoundDiagnostics, type ACKDiagnosticSummary } from './ack-diagnostics.js';
 
 /**
  * Why an ACK signer pre-flight rejected a recovered signer. Mirrors
@@ -105,7 +105,7 @@ export interface ACKCollectionResult {
 
 export interface ACKCollectorParams {
   /** Bounded aggregate instrumentation; exceptions are ignored. */
-  onDiagnostic?: (event: ACKDiagnosticEvent) => void;
+  onDiagnostic?: (summary: ACKDiagnosticSummary) => void;
   merkleRoot: Uint8Array;
   contextGraphId: bigint;
   contextGraphIdStr: string;
@@ -568,7 +568,7 @@ export class ACKCollector {
    * tx reverts if wrong).
    */
   async collectUpdate(params: {
-    onDiagnostic?: (event: ACKDiagnosticEvent) => void;
+    onDiagnostic?: (summary: ACKDiagnosticSummary) => void;
     kaId: bigint;
     /** TARGET on-chain numeric context graph id. */
     contextGraphId: bigint;
@@ -729,7 +729,7 @@ export class ACKCollector {
     contextGraphId: bigint;
     corePeers: string[];
     requiredACKs: number;
-    onDiagnostic?: (event: ACKDiagnosticEvent) => void;
+    onDiagnostic?: (summary: ACKDiagnosticSummary) => void;
     log: (msg: string) => void;
   }): Promise<ACKCollectionResult> {
     const {

@@ -75,11 +75,17 @@ describe('StorageACK admission lifecycle and pressure', () => {
   it('separates monotonic preflight, wait and collector spans in one bounded summary', () => {
     let now = 10; const logs: string[] = []; const diag = new StorageACKDiagnostics('publish', m => logs.push(m), () => now);
     now = 20; diag.preflightComplete();
+    diag.collector({ completedPeerAttempts: 3, perRoundPeakPeerRequests: 2, peerAttemptMs: 12.3456,
+      backoffs: 2, backoffMs: 7.8901, transportBackoffs: 1, transientDeclineBackoffs: 1,
+      candidates: { total: 3, ack: 2, declined: 1, invalid: 0, unsupported: 0, transport: 0, pending: 0 } });
     const event = (stage: StorageACKAdmissionEvent['stage'], waitMs = 0, workMs = 0) => diag.admission({ stage, waitMs, workMs, active: 1, queued: 2 });
     event('queued'); now = 50; event('acquired', 30); now = 100; event('released', 30, 50); diag.succeeded(); diag.finish();
     const summary = JSON.parse(logs[0].slice('[StorageACKAdmission] '.length));
     expect(summary).toMatchObject({ preflightMs: 10, gateWaitMs: 30, collectorMs: 50, totalMs: 90,
-      gateQueuedAfterMs: 10, gateAcquiredAfterMs: 40, gateReleasedAfterMs: 90, outcome: 'succeeded' });
+      gateQueuedAfterMs: 10, gateAcquiredAfterMs: 40, gateReleasedAfterMs: 90, outcome: 'succeeded',
+      completedPeerAttempts: 3, perRoundPeakPeerRequests: 2, peerAttemptMs: 12.346,
+      backoffs: 2, backoffMs: 7.89, transportBackoffs: 1, transientDeclineBackoffs: 1,
+      candidates: { total: 3, ack: 2, declined: 1, invalid: 0, unsupported: 0, transport: 0, pending: 0 } });
     expect(logs).toHaveLength(1); expect(logs[0].length).toBeLessThan(1024);
   });
 });
