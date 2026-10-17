@@ -17,6 +17,7 @@ vi.mock('../src/ui/hooks/useMyContextGraphs.js', () => ({
   useMyContextGraphs: () => ({
     myCgs: probes.graphs, identity: null, identityLoading: false, cgsLoading: false,
     cgsError: probes.cgsError, identityError: probes.identityError, retry: probes.retry,
+    inventoryLoading: false, inventoryError: probes.cgsError || probes.identityError,
   }),
 }));
 vi.mock('../src/ui/hooks/useMemoryEntities.js', async (importOriginal) => ({

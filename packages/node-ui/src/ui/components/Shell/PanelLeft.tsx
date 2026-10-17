@@ -21,7 +21,6 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
-import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -210,15 +209,13 @@ export function PanelLeft() {
   const integrationsBodyId = useId();
   const { openTab, activeTabId, setActiveTab } = useTabsStore();
   const { activeProjectId, setActiveProject } = useProjectsStore();
-  const { contextGraphs, loading: listLoading, error: listError } = useContextGraphInventory();
+  const { contextGraphs, error: listError, identity: sharedAgent,
+    inventoryLoading, inventoryError } = useContextGraphInventory();
   const stage = useJourneyStore((s) => s.stage);
   const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
-  const sharedAgent = useCurrentAgent();
   const agentIdentity: AgentSidebarIdentity | null = sharedAgent.data ? toSidebarIdentity(sharedAgent.data) : null;
-  const inventoryError = listError || sharedAgent.error;
-  const inventoryLoading = listLoading || sharedAgent.loading;
 
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
   const myProjects = visibleContextGraphs.filter((cg) =>

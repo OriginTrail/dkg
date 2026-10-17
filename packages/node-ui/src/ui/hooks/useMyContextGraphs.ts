@@ -2,7 +2,6 @@ import { useCallback, useMemo } from 'react';
 import type { ContextGraph } from '../stores/projects.js';
 import { belongsInMyProjectsSidebar, toSidebarIdentity, type AgentSidebarIdentity } from '../lib/contextGraphSidebar.js';
 import { useHiddenContextGraphIds } from './useHiddenContextGraphIds.js';
-import { useCurrentAgent } from './useCurrentAgent.js';
 import { useContextGraphInventory, refreshContextGraphInventory, type InventoryResult } from './useContextGraphInventory.js';
 
 /**
@@ -21,11 +20,13 @@ export function useMyContextGraphs(): {
   cgsLoading: boolean;
   cgsError: string | null;
   identityError: string | null;
+  inventoryLoading: boolean;
+  inventoryError: string | null;
   retry: () => Promise<InventoryResult>;
 } {
-  const { contextGraphs, loading: cgsLoading, error: cgsError } = useContextGraphInventory();
+  const { contextGraphs, loading: cgsLoading, error: cgsError, identity: currentAgent,
+    inventoryLoading, inventoryError } = useContextGraphInventory();
   const { hidden } = useHiddenContextGraphIds();
-  const currentAgent = useCurrentAgent();
   const identity = useMemo(() => currentAgent.data ? toSidebarIdentity(currentAgent.data) : null, [currentAgent.data]);
   const retry = useCallback(() => refreshContextGraphInventory(true), []);
 
@@ -36,5 +37,5 @@ export function useMyContextGraphs(): {
     [contextGraphs, hidden, identity],
   );
 
-  return { myCgs, identity, identityLoading: currentAgent.loading, cgsLoading, cgsError, identityError: currentAgent.error, retry };
+  return { myCgs, identity, identityLoading: currentAgent.loading, cgsLoading, cgsError, identityError: currentAgent.error, inventoryLoading, inventoryError, retry };
 }

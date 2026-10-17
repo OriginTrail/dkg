@@ -150,8 +150,48 @@ it('staggered Header and inventory mounts share one identity cadence until the f
   expect(identityCalls()).toBe(2); // inventory's :20 poll does not refresh identity
   await render(false, true);
   await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
-  expect(identityCalls()).toBe(3); // the non-React-listener owner keeps the :00 cadence
+  expect(identityCalls()).toBe(3); // the composed inventory identity hook keeps the :00 cadence
   await render(false, false);
   await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
   expect(identityCalls()).toBe(3);
+});
+
+
+it.each(['list', 'identity'])('composed inventory reports %s failure and recovery while retaining both snapshots', async endpoint => {
+  const { useContextGraphInventory, refreshContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+  let inventory!: ReturnType<typeof useContextGraphInventory>;
+  function Probe() { inventory = useContextGraphInventory(); return null; }
+  await act(async () => { root!.render(React.createElement(Probe)); });
+  expect(inventory.identity.data).toEqual(agent);
+  expect(inventory.contextGraphs).toEqual(rows('healthy').contextGraphs);
+  expect(inventory.inventoryLoading).toBe(false);
+  expect(inventory.inventoryError).toBeNull();
+
+  let release!: (response: Response) => void;
+  const failedRead = () => new Promise<Response>(resolve => { release = resolve; });
+  if (endpoint === 'list') list = failedRead;
+  else identity = failedRead;
+  let retry!: Promise<unknown>;
+  await act(async () => { retry = refreshContextGraphInventory(true); });
+  expect(inventory.inventoryLoading).toBe(true);
+  expect(inventory.identity.data).toEqual(agent);
+  expect(inventory.contextGraphs).toEqual(rows('healthy').contextGraphs);
+  await act(async () => {
+    release(new Response(JSON.stringify({ error: `${endpoint} unavailable` }), { status: 503 }));
+    await retry;
+  });
+  expect(inventory.inventoryLoading).toBe(false);
+  expect(inventory.inventoryError).toBe(`${endpoint} unavailable`);
+  expect(inventory.error).toBe(endpoint === 'list' ? 'list unavailable' : null);
+  expect(inventory.identity.error).toBe(endpoint === 'identity' ? 'identity unavailable' : null);
+  expect(inventory.identity.data).toEqual(agent);
+  expect(inventory.contextGraphs).toEqual(rows('healthy').contextGraphs);
+
+  list = async () => json(rows('recovered'));
+  identity = async () => json({ ...agent, peerId: 'recovered-peer' });
+  await act(async () => { await refreshContextGraphInventory(true); });
+  expect(inventory.inventoryError).toBeNull();
+  expect(inventory.inventoryLoading).toBe(false);
+  expect(inventory.contextGraphs).toEqual(rows('recovered').contextGraphs);
+  expect(inventory.identity.data?.peerId).toBe('recovered-peer');
 });

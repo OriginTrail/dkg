@@ -471,9 +471,9 @@ export function DashboardView() {
   const { data: wb, loading: wbLoading, error: wbError } = useFetch(api.fetchWalletsBalances, [], 30_000);
   const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
-  const { myCgs, identity, identityLoading, cgsLoading, cgsError, identityError, retry } = useMyContextGraphs();
-  const inventoryFailed = Boolean(cgsError || identityError);
-  const cgsResolving = (identityLoading || cgsLoading) && myCgs.length === 0;
+  const { myCgs, identity, identityLoading, cgsError, identityError, inventoryLoading, inventoryError, retry } = useMyContextGraphs();
+  const inventoryFailed = Boolean(inventoryError);
+  const cgsResolving = inventoryLoading && myCgs.length === 0;
   const graphCount = inventoryFailed ? (myCgs.length ? `~${myCgs.length}` : '—') : myCgs.length;
   const emptyInventoryMessage = inventoryFailed ? 'Context graph inventory is unavailable.'
     : cgsResolving ? 'Loading context graphs…' : 'No context graphs yet.';
@@ -619,7 +619,7 @@ export function DashboardView() {
           {cgsError ? 'Context graph list could not be loaded. ' : ''}
           {identityError ? 'Agent identity could not be loaded. ' : ''}
           {myCgs.length ? 'Showing the last available graphs; counts may be incomplete. ' : 'Graph availability is unknown. '}
-          <button type="button" disabled={cgsLoading || identityLoading} onClick={() => { void retry(); }}>Retry</button>
+          <button type="button" disabled={inventoryLoading} onClick={() => { void retry(); }}>Retry</button>
         </div>
       ) : null}
       <div className="v10-dash-stats v10-dash-stats-3">

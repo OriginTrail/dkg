@@ -3,7 +3,7 @@ import { api } from '../api-wrapper.js';
 import { currentApiToken } from '../lib/apiToken.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { subscribeNodeEvents } from './useNodeEvents.js';
-import { ensureCurrentAgent, refreshCurrentAgent, retainCurrentAgent } from './useCurrentAgent.js';
+import { ensureCurrentAgent, refreshCurrentAgent, retainCurrentAgent, useCurrentAgent } from './useCurrentAgent.js';
 
 export type InventoryResult = { ok: true; contextGraphs: ContextGraph[] } | { ok: false; error: string };
 type InventoryRequest = {
@@ -17,7 +17,6 @@ let authKey: string | undefined | null = null;
 let active: InventoryRequest | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let unsubscribeEvents: (() => void) | null = null;
-let releaseIdentity: (() => void) | null = null;
 const credentialsChanged: InventoryResult = { ok: false, error: 'Credentials changed while refreshing context graphs' };
 
 /** Every caller follows the current same-credential workflow, including forced supersession. */
@@ -86,7 +85,6 @@ function refreshWhenVisible() {
 
 function retainInventory() {
   consumers++;
-  if (consumers === 1) releaseIdentity = retainCurrentAgent();
   if (consumers === 1 || authKey !== currentApiToken()) refreshWhenVisible();
   if (consumers === 1) {
     unsubscribeEvents = subscribeNodeEvents(event => {
@@ -106,16 +104,17 @@ function retainInventory() {
     document.removeEventListener('visibilitychange', refreshWhenVisible);
     // Last consumer unmounted: release the request and settle the shared flag.
     releaseIdleInventory();
-    releaseIdentity?.();
-    releaseIdentity = null;
   };
 }
 
 export function useContextGraphInventory() {
+  const identity = useCurrentAgent();
   const contextGraphs = useProjectsStore(state => state.contextGraphs);
   const loading = useProjectsStore(state => state.loading);
   const loaded = useProjectsStore(state => state.inventoryLoaded);
   const error = useProjectsStore(state => state.inventoryError);
   useEffect(retainInventory, []);
-  return { contextGraphs, loading: loading || (!loaded && contextGraphs.length === 0), error };
+  const listLoading = loading || (!loaded && contextGraphs.length === 0);
+  return { contextGraphs, loading: listLoading, error, identity,
+    inventoryLoading: listLoading || identity.loading, inventoryError: error || identity.error };
 }
