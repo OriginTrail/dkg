@@ -19,10 +19,6 @@ const layersByView = {
   'working-memory': 'wm', 'shared-working-memory': 'swm', 'verifiable-memory': 'vm',
 } as const;
 
-function compare(a: SearchResult, b: SearchResult): number {
-  return (b.similarity ?? -1) - (a.similarity ?? -1);
-}
-
 /** Keep at most `limit` candidates per layer regardless of local-agent count. */
 class LayerCandidates {
   private readonly rows: Map<Layer, Map<string, SearchResult>>;
@@ -30,30 +26,28 @@ class LayerCandidates {
     this.rows = new Map(layers.map(layer => [layer, new Map()]));
   }
   add(row: SearchResult): void {
-    // A duplicate may be evicted from this layer while remaining eligible in
-    // another. Preserve its evidence on all retained copies before trimming.
+    // Producers supply descending vector matches first, then equally ranked
+    // text matches in stable plan order. Retain the first unique rows per layer.
+    // Evidence from a duplicate still enriches retained copies even if this
+    // layer has no remaining slot. Metadata never changes its allocated layer.
     const retained = [...this.rows.values()].flatMap(rows => {
       const existing = rows.get(row.entityUri);
       return existing ? [existing] : [];
     });
-    row.sources = [...new Set([...retained.flatMap(existing => existing.sources), ...row.sources])];
-    for (const existing of retained) existing.sources = row.sources;
+    const copies = [...retained, row];
+    const preferred = copies.reduce((best, candidate) =>
+      (candidate.similarity ?? -1) > (best.similarity ?? -1) ? candidate : best);
+    const metadata = {
+      label: preferred.label, similarity: preferred.similarity,
+      sourceFile: preferred.sourceFile, snippet: preferred.snippet,
+      sources: [...new Set(copies.flatMap(candidate => candidate.sources))],
+    };
+    for (const copy of copies) Object.assign(copy, metadata);
     const rows = this.rows.get(row.memoryLayer)!;
-    const previous = rows.get(row.entityUri);
-    if (previous) {
-      const preferred = compare(previous, row) <= 0 ? previous : row;
-      rows.set(row.entityUri, { ...preferred, sources: [...new Set([...previous.sources, ...row.sources])] });
-    } else {
-      rows.set(row.entityUri, row);
-    }
-    if (rows.size > this.limit) {
-      // Stable ordering retains earlier equal-ranked results, independent of completion order.
-      const ranked = [...rows.values()].sort(compare);
-      rows.delete(ranked[ranked.length - 1].entityUri);
-    }
+    if (!rows.has(row.entityUri) && rows.size < this.limit) rows.set(row.entityUri, row);
   }
   finish(): SearchResult[] {
-    const queues = this.layers.map(layer => [...this.rows.get(layer)!.values()].sort(compare));
+    const queues = this.layers.map(layer => [...this.rows.get(layer)!.values()]);
     const selected = new Map<string, SearchResult>();
     // Round-robin gives every nonempty requested layer a slot when the budget permits.
     // Vector relevance orders results WITHIN each layer; it cannot erase another layer.
@@ -64,12 +58,6 @@ class LayerCandidates {
         if (!row) continue;
         selected.set(row.entityUri, row);
         if (selected.size === this.limit) break;
-      }
-    }
-    for (const [uri, selectedRow] of selected) {
-      for (const rows of this.rows.values()) {
-        const other = rows.get(uri);
-        if (other) selectedRow.sources = [...new Set([...selectedRow.sources, ...other.sources])];
       }
     }
     return [...selected.values()];

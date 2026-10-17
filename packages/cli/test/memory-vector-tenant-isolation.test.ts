@@ -120,7 +120,26 @@ describe('enabled vector memory search tenant isolation', () => {
     },
   );
 
-  it('preserves text evidence when its layer evicts a duplicate retained in another layer', async () => {
+  it('keeps SWM vector metadata when the fair slot comes from a WM text duplicate', async () => {
+    const store = createStore();
+    await insert(store, 'reverse-overlap', 'swm', B);
+    const { ctx, res, agent } = request(store, { kind: 'agent', agentAddress: A });
+    (ctx.req as any).__dkgPrebufferedBody = Buffer.from(JSON.stringify({
+      contextGraphId: CG, query: 'secret', memoryLayers: ['wm', 'swm'], limit: 1,
+    }));
+    agent.query.mockImplementation(async (_sparql, options) => ({
+      bindings: options?.view === 'working-memory'
+        ? [{ entity: 'reverse-overlap', name: 'text label', desc: 'text description' }] : [],
+    }));
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ resultCount: 1, results: [{
+      entityUri: 'reverse-overlap', label: 'label:reverse-overlap', sources: ['vector', 'sparql'],
+      similarity: 1, sourceFile: 'source:reverse-overlap', snippet: 'secret:reverse-overlap', memoryLayer: 'wm',
+    }] });
+  });
+
+  it('preserves text evidence when its full layer rejects a duplicate retained in another layer', async () => {
     const store = createStore();
     await insert(store, 'retained', 'wm', A);
     await insert(store, 'competing', 'swm', B);
