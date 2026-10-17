@@ -238,14 +238,18 @@ describe('a write waits for the catch-up of its graph', () => {
       expect(await waiting).toBe('ready');
     });
 
-    it('ends when the catch-up stops without proving the graph', async () => {
-      const { agent } = agentWith({ [CG]: { subscribed: true, synced: false } });
+    it('ends when the catch-up stops without proving the graph, or the subscription goes', async () => {
+      const { agent, subscriptions } = agentWith({ [CG]: { subscribed: true, synced: false } });
       const job = inFlight(walkJob());
 
-      const waiting = awaitContextGraphWriteReadiness(agent, CG);
+      const stopping = awaitContextGraphWriteReadiness(agent, CG);
       setTimeout(() => { job.job.status = 'unreachable'; }, 30);
+      expect(await stopping).toBe('stopped');
 
-      expect(await waiting).toBe('not-catching-up');
+      inFlight(walkJob());
+      const leaving = awaitContextGraphWriteReadiness(agent, CG);
+      setTimeout(() => subscriptions.set(CG, { subscribed: false, synced: false }), 30);
+      expect(await leaving).toBe('stopped');
     });
 
     it('ends when the bound passes while the graph is still being caught up', async () => {
@@ -288,7 +292,7 @@ describe('a write waits for the catch-up of its graph', () => {
       expect(refused).toEqual([['raw-id-again', 'ready']]);
     });
 
-    it('refuses without a second pass when the wait did not end ready', async () => {
+    it('resolves the target again when the bound passes, and refuses it if it is still not writable', async () => {
       writeReadinessWait.timeoutMs = 30;
       const { agent } = agentWith({ [CG]: { subscribed: true, synced: false } });
       inFlight(walkJob());
@@ -302,8 +306,24 @@ describe('a write waits for the catch-up of its graph', () => {
       );
 
       expect(resolved).toBeNull();
-      expect(passes).toBe(1);
+      expect(passes).toBe(2);
       expect(refused).toEqual([['raw-id', 'timed-out']]);
+    });
+
+    it('refuses without a second pass when there is nothing to wait for', async () => {
+      const { agent } = agentWith({ [CG]: { subscribed: true, synced: false } });
+      let passes = 0;
+      const refused: Array<[string, WriteReadinessOutcome]> = [];
+
+      const resolved = await resolveAwaitingWriteReadiness(
+        agent,
+        async () => { passes += 1; return { notWritable: CG, raw: 'raw-id' }; },
+        (raw, outcome) => { refused.push([raw, outcome]); return null; },
+      );
+
+      expect(resolved).toBeNull();
+      expect(passes).toBe(1);
+      expect(refused).toEqual([['raw-id', 'not-catching-up']]);
     });
 
     /** A write preflight's response, as the resolver writes it. */
@@ -322,13 +342,20 @@ describe('a write waits for the catch-up of its graph', () => {
       for (const row of rows) {
         if (row.subscribed === true) subscriptions.set(row.id as string, { subscribed: true, synced: row.synced === true });
       }
+      const holdsContent = new Set<string>();
       return {
-        agent: { listContextGraphs: async () => rows, getSubscribedContextGraphs: () => subscriptions },
+        agent: {
+          listContextGraphs: async () => rows,
+          getSubscribedContextGraphs: () => subscriptions,
+          contextGraphHasLocalContent: async (contextGraphId: string) => holdsContent.has(contextGraphId),
+        },
         /** The catch-up proves the graph: the listing and the subscription say synced. */
         prove: (contextGraphId: string) => {
           for (const row of rows) if (row.id === contextGraphId) row.synced = true;
           subscriptions.set(contextGraphId, { subscribed: true, synced: true });
         },
+        /** The catch-up stores some of the graph's content, and proves nothing. */
+        storeContent: (contextGraphId: string) => { holdsContent.add(contextGraphId); },
       };
     }
 
@@ -342,6 +369,24 @@ describe('a write waits for the catch-up of its graph', () => {
 
       const resolving = resolveRequiredWriteContextGraphId(agent, qualified, res);
       setTimeout(() => prove(qualified), 30);
+
+      expect(await resolving).toBe(qualified);
+      expect(out).toEqual({});
+    });
+
+    it('lets a waiting write through when the catch-up stops unproven but left content', async () => {
+      const qualified = '0x1111111111111111111111111111111111111111/partly-caught-up';
+      const { agent, storeContent } = listingAgent([
+        { id: qualified, uri: `did:dkg:context-graph:${qualified}`, subscribed: true, synced: false },
+      ]);
+      const job = inFlight(walkJob({ contextGraphId: qualified }));
+      const { res, out } = captureResponse();
+
+      const resolving = resolveRequiredWriteContextGraphId(agent, qualified, res);
+      setTimeout(() => {
+        storeContent(qualified);
+        job.job.status = 'partial';
+      }, 30);
 
       expect(await resolving).toBe(qualified);
       expect(out).toEqual({});
@@ -373,7 +418,7 @@ describe('a write waits for the catch-up of its graph', () => {
         },
         headers: { 'Retry-After': '5' },
       });
-      for (const outcome of ['not-catching-up', 'ready'] as const) {
+      for (const outcome of ['not-catching-up', 'stopped', 'ready'] as const) {
         expect(knownNotWritableAnswer('graph-x', outcome)).toEqual({
           status: 400,
           body: {

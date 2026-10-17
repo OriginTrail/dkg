@@ -39,7 +39,7 @@ import {
   type ContextGraphReadAuthorityAttribution,
 } from './read-authority-diagnostics.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
-import { knownNotWritableAnswer, resolveAwaitingWriteReadiness, type KnownNotWritable, type WriteReadinessOutcome } from './context-graph-write-readiness.js';
+import { knownNotWritableAnswer, resolveAwaitingWriteReadiness, type ContextGraphSubscriptionReader, type KnownNotWritable, type WriteReadinessOutcome } from './context-graph-write-readiness.js';
 import type { CorsAllowlist } from './state.js';
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
@@ -1180,6 +1180,8 @@ async function resolveWriteContextGraphIdOnce(
      * locally.
      */
     validateWriteTargetDuringStoreOutage?: (contextGraphId: string) => Promise<boolean>;
+    /** Live subscription rows: a write waits on them while this node catches its graph up. */
+    getSubscribedContextGraphs?: ContextGraphSubscriptionReader['getSubscribedContextGraphs'];
   },
   contextGraphId: unknown,
   res: ServerResponse,

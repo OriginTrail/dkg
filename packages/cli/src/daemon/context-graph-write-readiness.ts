@@ -16,15 +16,16 @@
 // later.
 //
 // So a write that finds its graph subscribed and unsynced, while this daemon
-// is catching that graph up, waits until the subscription is proven synced,
-// at most `writeReadinessWait.timeoutMs`, and is then resolved once more, with
-// every check. Catching up means (`context-graph-catchup-progress.ts`): a
-// catch-up job for the graph is queued or running, its readiness repeat
-// follows one or is armed, or an activation catch-up has the graph in hand or
-// will read its admission again. While it waits, the write starts the graph's
-// armed repeat at once when that repeat waited only for the graph's authority
-// and the authority is in place. When the bound passes, the write is refused
-// as not writable yet, retryable.
+// is catching that graph up, waits until the subscription is proven synced or
+// the catch-up stops, at most `writeReadinessWait.timeoutMs`, and is then
+// resolved once more, with every check. Catching up means
+// (`context-graph-catchup-progress.ts`): a catch-up job for the graph is
+// queued or running, its readiness repeat follows one or is armed, or an
+// activation catch-up has the graph in hand or will read its admission again.
+// While it waits, the write starts the graph's armed repeat at once when that
+// repeat waited only for the graph's authority and the authority is in place.
+// When the bound passes and the graph is still not writable, the write is
+// refused as not writable yet, retryable.
 //
 // Nothing else changes. A graph that nothing is catching up is refused at once,
 // as before. So is every write this node may not make: the preflight refuses
@@ -41,12 +42,19 @@ export const writeReadinessWait = {
 
 /** How a write's wait for its graph ended. */
 export type WriteReadinessOutcome =
-  /** The subscription is proven synced: the write is resolved again. */
+  /** The subscription is proven synced. */
   | 'ready'
-  /** The graph is not subscribed, or nothing is catching it up (any more). */
+  /** Nothing to wait for: the graph is not subscribed, or nothing is catching it up. */
   | 'not-catching-up'
+  /** The write waited, and the catch-up stopped without proving the graph, or the subscription went. */
+  | 'stopped'
   /** The graph was still being caught up when the bound passed. */
   | 'timed-out';
+
+/** The agent's live subscription rows, as far as a write's wait reads them. */
+export interface ContextGraphSubscriptionReader {
+  getSubscribedContextGraphs?(): ReadonlyMap<string, { readonly subscribed?: boolean; readonly synced?: boolean }>;
+}
 
 /** A known graph that the preflight found not writable on this node. */
 export interface KnownNotWritable {
@@ -63,57 +71,50 @@ export interface KnownNotWritableAnswer {
   readonly headers?: Record<string, string>;
 }
 
-type SubscriptionFlags = { readonly subscribed?: unknown; readonly synced?: unknown };
-
-/** Reads the agent's live subscription row of a graph; undefined for an agent without subscriptions. */
-function subscriptionReader(agent: object): ((contextGraphId: string) => SubscriptionFlags | undefined) | undefined {
-  const { getSubscribedContextGraphs } = agent as {
-    getSubscribedContextGraphs?: () => ReadonlyMap<string, SubscriptionFlags>;
-  };
-  if (typeof getSubscribedContextGraphs !== 'function') return undefined;
-  return (contextGraphId) => getSubscribedContextGraphs.call(agent).get(contextGraphId);
-}
-
 /**
  * Wait while this daemon catches up a subscribed graph that is not proven
  * synced yet, at most `writeReadinessWait.timeoutMs`. Returns at once when
  * there is nothing to wait for.
  */
 export async function awaitContextGraphWriteReadiness(
-  agent: object,
+  agent: ContextGraphSubscriptionReader,
   contextGraphId: string,
 ): Promise<WriteReadinessOutcome> {
-  const read = subscriptionReader(agent);
-  if (read === undefined) return 'not-catching-up';
   const deadline = Date.now() + writeReadinessWait.timeoutMs;
+  let waited = false;
   for (;;) {
-    const subscription = read(contextGraphId);
-    if (subscription?.subscribed !== true) return 'not-catching-up';
-    if (subscription.synced === true) return 'ready';
-    if (!contextGraphCatchupInProgress(contextGraphId)) return 'not-catching-up';
+    const subscription = agent.getSubscribedContextGraphs?.().get(contextGraphId);
+    if (subscription?.subscribed === true && subscription.synced === true) return 'ready';
+    if (subscription?.subscribed !== true || !contextGraphCatchupInProgress(contextGraphId)) {
+      return waited ? 'stopped' : 'not-catching-up';
+    }
     hurryContextGraphCatchup(contextGraphId);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) return 'timed-out';
     await new Promise<void>((resolve) => {
       setTimeout(resolve, Math.min(writeReadinessWait.pollMs, remainingMs)).unref?.();
     });
+    waited = true;
   }
 }
 
 /**
  * Resolve a write target once; when that finds a known graph not writable on
- * this node, wait for its catch-up as above and, once it is proven synced,
- * resolve the target once more. `refuse` answers a graph still not writable.
+ * this node, wait for its catch-up as above and resolve the target once more,
+ * with every check, however the wait ended: a catch-up that stops without
+ * proving the graph may still have left content that makes it writable.
+ * `refuse` answers a graph still not writable. A write with nothing to wait
+ * for is refused without a second pass.
  */
 export async function resolveAwaitingWriteReadiness(
-  agent: object,
+  agent: ContextGraphSubscriptionReader,
   resolveOnce: () => Promise<string | KnownNotWritable | null>,
   refuse: (raw: string, outcome: WriteReadinessOutcome) => null,
 ): Promise<string | null> {
   const first = await resolveOnce();
   if (first === null || typeof first === 'string') return first;
   const outcome = await awaitContextGraphWriteReadiness(agent, first.notWritable);
-  const again = outcome === 'ready' ? await resolveOnce() : first;
+  const again = outcome === 'not-catching-up' ? first : await resolveOnce();
   if (again === null || typeof again === 'string') return again;
   return refuse(again.raw, outcome);
 }
