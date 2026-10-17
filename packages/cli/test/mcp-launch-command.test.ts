@@ -25,7 +25,8 @@ describe('MCP client launch boundary', () => {
       args: ['-e', 'process.stdout.write(JSON.stringify({home:process.env.DKG_HOME,args:process.argv.slice(1)}))', 'a b;$HOME'] },
     selection('windows-wsl'), 'wsl');
     const execIndex = entry.args.indexOf('--exec') + 1;
-    const output = execFileSync(entry.args[execIndex], entry.args.slice(execIndex + 1), { encoding: 'utf8' });
+    expect(entry.args[execIndex]).toBe('/usr/bin/env');
+    const output = execFileSync('/usr/bin/env', entry.args.slice(execIndex + 1), { encoding: 'utf8' });
     expect(JSON.parse(output)).toEqual({ home: canonical.env.DKG_HOME, args: ['a b;$HOME'] });
   });
   it.each(['linux', 'windows', 'posix'] as const)('leaves native %s registrations unchanged', runtime => {
