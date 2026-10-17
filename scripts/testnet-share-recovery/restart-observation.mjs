@@ -5,7 +5,8 @@ export async function observeRestartRecoveryPoll(read, deadline, expectedRows, n
   const completedAt = now();
   const succeededBeforeDeadline = completedAt <= deadline && values.job?.state === 'succeeded'
     && values.descriptor.status === 200 && values.catalog?.appliedRowCount === String(expectedRows)
-    && values.catalog?.legacyReadOnlyCount === 0;
+    && values.catalog?.legacyReadOnlyCount === 0 && values.catalog.phase === 'complete'
+    && values.catalog.authorityState === 'accepted' && values.catalog.authorityFreshness === 'current';
   return { requestStartedAt, at: new Date(completedAt).toISOString(), ...values,
     completedWithinDeadline: completedAt <= deadline, succeededBeforeDeadline };
 }

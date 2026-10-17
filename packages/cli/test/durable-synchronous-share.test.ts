@@ -1,3 +1,4 @@
+import { RemoteSignerError } from '@origintrail-official/dkg-chain';
 import { createServer } from 'node:http';
 import { Wallet } from 'ethers';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
@@ -343,6 +344,70 @@ describe('durable synchronous share ownership', () => {
       expect(await store.countQuads(finalized.graphUri)).toBe(0);
     } finally { fetchSpy.mockRestore(); await supervisor.stop(); await remoteRead.close(); await store.close(); }
   });
+
+  it.each(['REMOTE_SIGNER_TIMEOUT', 'REMOTE_SIGNER_UNAVAILABLE', 'REMOTE_SIGNER_HTTP_ERROR'] as const)(
+    'automatically recovers curator envelope signing %s before dispatch with the original owner', async code => {
+      const { store, agent, finalized } = await setup();
+      daemonState.promoteWorkerAvailable = true;
+      agent.buildCuratorAckConfirmer = Object.getPrototypeOf(agent).buildCuratorAckConfirmer;
+      agent.resolveCuratorAckTarget = async () => ({ peerIds: ['curator'], timeoutMs: 100 });
+      let available = false;
+      const signMessage = vi.fn(async (bytes: Uint8Array) => {
+        if (!available) throw new RemoteSignerError(code, 'temporary external signer failure', { httpStatus: 503 });
+        return signer.signMessage(bytes);
+      });
+      agent.resolveWorkspaceGossipSigningAgent = async () => ({ agentAddress: AUTHOR, signMessage });
+      const dispatch = vi.fn(async () => ({ applied: true }));
+      agent.confirmCuratorApplied = dispatch;
+      const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true }).catch(e => e);
+      expect(failure).toBeInstanceOf(DurableShareFailure);
+      const original = await agent.promoteQueue.getStatus(failure.observation.jobId);
+      expect(original.state).toBe('failed_retrying');
+      expect(original.request.recoveryBinding.intent.confirmationRequired).toBe(true);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+      expect(await store.countQuads(finalized.graphUri)).toBe(1);
+      const seal = vi.spyOn(agent, 'prepareAtomicAssertionShare');
+      // Reopen the durable queue before starting its real polling worker.
+      const reopened = new TripleStoreAsyncPromoteQueue(store, { backoff: () => 0, maxRetries: 1 });
+      vi.spyOn(agent, 'promoteQueue', 'get').mockReturnValue(reopened);
+      available = true;
+      const supervisor = createPromoteWorkerSupervisor({ agent, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
+      try {
+        await supervisor.start();
+        await vi.waitFor(async () => expect((await reopened.getStatus(original.jobId))?.state).toBe('succeeded'));
+        const completed = await reopened.getStatus(original.jobId);
+        expect(completed.request.recoveryBinding).toEqual(original.request.recoveryBinding);
+        expect(completed.attempt.count).toBe(2);
+        expect(await reopened.list({})).toHaveLength(1);
+        expect(signMessage).toHaveBeenCalledTimes(2);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(seal).not.toHaveBeenCalled();
+        expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+        expect(await store.countQuads(finalized.graphUri)).toBe(0);
+      } finally { await supervisor.stop(); await store.close(); }
+    });
+
+  it.each(['REMOTE_SIGNER_UNAUTHORIZED', 'REMOTE_SIGNER_INVALID_SIGNATURE', 'REMOTE_SIGNER_REJECTED'] as const)(
+    'keeps permanent curator envelope refusal %s terminal without dispatch', async code => {
+      const { store, agent, finalized } = await setup();
+      daemonState.promoteWorkerAvailable = true;
+      agent.buildCuratorAckConfirmer = Object.getPrototypeOf(agent).buildCuratorAckConfirmer;
+      agent.resolveCuratorAckTarget = async () => ({ peerIds: ['curator'], timeoutMs: 100 });
+      const signMessage = vi.fn(async () => { throw new RemoteSignerError(code, 'permanent refusal'); });
+      agent.resolveWorkspaceGossipSigningAgent = async () => ({ agentAddress: AUTHOR, signMessage });
+      const dispatch = vi.fn(); agent.confirmCuratorApplied = dispatch;
+      const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, awaitCuratorAck: true }).catch(e => e);
+      expect(failure).toBeInstanceOf(DurableShareFailure);
+      const original = await agent.promoteQueue.getStatus(failure.observation.jobId);
+      expect(original.state).toBe('failed');
+      expect(await agent.promoteQueue.claimNext('worker')).toBeNull();
+      expect(signMessage).toHaveBeenCalledTimes(1);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+      expect(await store.countQuads(finalized.graphUri)).toBe(1);
+      await store.close();
+    });
 
   it('automatically retries curator non-confirmation with the original required acknowledgement', async () => {
     const { store, agent, finalized } = await setup();
