@@ -563,9 +563,9 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     this.requireOpen();
     return this.#candidate.readFinalizedPrivatePlacementFailure(...input);
   }
-  writeFinalizedPrivatePlacementFailure(...input: Parameters<Rfc64InventoryV1CandidateApi['writeFinalizedPrivatePlacementFailure']>): void {
+  writeFinalizedPrivatePlacementFailures(...input: Parameters<Rfc64InventoryV1CandidateApi['writeFinalizedPrivatePlacementFailures']>): void {
     this.requireOpen();
-    this.#candidate.writeFinalizedPrivatePlacementFailure(...input);
+    this.#candidate.writeFinalizedPrivatePlacementFailures(...input);
   }
 
   readUnregisteredAuthoritySeedV1(

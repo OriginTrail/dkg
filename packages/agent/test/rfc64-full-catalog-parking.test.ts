@@ -147,7 +147,7 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
     acceptsFinalizedPrivateLane: () => laneActive,
     readRepairRevision: () => revision,
     readPrivateFailure: () => null,
-    writePrivateFailure: () => {},
+    writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: () => model.state.markers,
     repairFinalizedPrivatePlacement: model.place,
     reconcile,

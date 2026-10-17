@@ -255,15 +255,20 @@ function hasConsistentShadowSafetyEvidenceV1(
     && receiver.stageOnlyInvariantSatisfied === (authoritativeApplyCount === 0);
 }
 
+// The HTTP boundary independently validates every kind in the public agent contract.
+const PRIVATE_PLACEMENT_FAILURE_KINDS = {
+  queue_wait: true, queue_full: true, store_timeout_not_started: true, store_timeout_indeterminate: true,
+  transport: true, cancelled: true, integrity: true, lane_inactive: true, catalog_full: true, unknown: true,
+  policy_conflict: true, version_conflict: true, signer_mismatch: true, persistence_unavailable: true,
+} satisfies Record<NonNullable<FinalizedPrivatePlacementQueueStatusV1['failures']>['kinds'][number]['kind'], true>;
+
 /** Rebuild the bounded aggregate; no marker identity or dependency text crosses the route. */
 function sanitizePrivatePlacementFailures(input: unknown): NonNullable<FinalizedPrivatePlacementQueueStatusV1['failures']> | undefined {
   if (!isRecordV1(input) || !hasNonNegativeSafeIntegersV1(input,
     ['failedMarkers', 'parkedMarkers', 'maxConsecutiveFailures'])
     || !isNullableNonNegativeSafeIntegerV1(input.oldestFailureAgeMs)
-    || !Array.isArray(input.kinds) || input.kinds.length > 14) return undefined;
-  const allowed = new Set(['queue_wait', 'queue_full', 'store_timeout_not_started', 'store_timeout_indeterminate',
-    'transport', 'cancelled', 'integrity', 'lane_inactive', 'catalog_full', 'unknown',
-    'policy_conflict', 'version_conflict', 'signer_mismatch', 'persistence_unavailable']);
+    || !Array.isArray(input.kinds) || input.kinds.length > Object.keys(PRIVATE_PLACEMENT_FAILURE_KINDS).length) return undefined;
+  const allowed = new Set(Object.keys(PRIVATE_PLACEMENT_FAILURE_KINDS));
   const counts: NonNullable<FinalizedPrivatePlacementQueueStatusV1['failures']>['kinds'][number][] = [];
   for (const row of input.kinds) {
     if (!isRecordV1(row) || typeof row.kind !== 'string' || !allowed.delete(row.kind)

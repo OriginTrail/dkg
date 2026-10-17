@@ -6,6 +6,7 @@ import {
   parseRfc64FinalizedPrivatePlacementRepairV1,
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
+  type Rfc64PrivatePlacementFailureWriteV1,
 } from '../finalized-private-placement-repair-store-v1.js';
 import { parsePrivatePlacementFailureStateV1, type PrivatePlacementFailureStateV1 } from '../private-placement-failure-state-v1.js';
 import { sqlBlobsEqualV1 } from './scalars.js';
@@ -146,26 +147,33 @@ export class FinalizedPrivateRepairPersistenceV1 {
     return this.host.read(() => this.readFailure(digest));
   }
 
-  writeFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null): void {
-    const digest = digestRfc64FinalizedPrivatePlacementRepairV1(encodeRfc64FinalizedPrivatePlacementRepairV1(repair));
-    const validated = state === null ? null : parsePrivatePlacementFailureStateV1(state);
-    if (state !== null && validated === null) throw new TypeError('Invalid private placement failure state');
-    const json = validated === null ? null : JSON.stringify(validated);
+  writeFinalizedPrivatePlacementFailures(entries: readonly Rfc64PrivatePlacementFailureWriteV1[]): void {
+    this.host.assertOpen();
+    // Validate the entire batch before opening one owned transaction.
+    const rows = entries.map(({ repair, state }) => {
+      const digest = digestRfc64FinalizedPrivatePlacementRepairV1(encodeRfc64FinalizedPrivatePlacementRepairV1(repair));
+      const validated = state === null ? null : parsePrivatePlacementFailureStateV1(state);
+      if (state !== null && validated === null) throw new TypeError('Invalid private placement failure state');
+      return { digest, validated, json: validated === null ? null : JSON.stringify(validated) };
+    });
+    if (rows.length === 0) return;
     const write = () => {
-      if (json === null) {
-        const remove = this.host.prepare('DELETE FROM rfc64_private_placement_failures_v1 WHERE repair_digest = :digest');
-        this.host.statement(() => remove.run({ digest }));
-      } else {
-        // INSERT-SELECT cannot resurrect a completed marker. The FK cleans up successful deletion.
-        const save = this.host.prepare(`INSERT INTO rfc64_private_placement_failures_v1 (repair_digest, state_json)
-          SELECT repair_digest, :json FROM rfc64_finalized_private_placement_repairs_v1 WHERE repair_digest = :digest
-          ON CONFLICT(repair_digest) DO UPDATE SET state_json = excluded.state_json`);
-        this.host.statement(() => save.run({ digest, json }));
+      for (const { digest, json } of rows) {
+        if (json === null) {
+          const remove = this.host.prepare('DELETE FROM rfc64_private_placement_failures_v1 WHERE repair_digest = :digest');
+          this.host.statement(() => remove.run({ digest }));
+        } else {
+          // INSERT-SELECT cannot resurrect a completed marker. The FK cleans up successful deletion.
+          const save = this.host.prepare(`INSERT INTO rfc64_private_placement_failures_v1 (repair_digest, state_json)
+            SELECT repair_digest, :json FROM rfc64_finalized_private_placement_repairs_v1 WHERE repair_digest = :digest
+            ON CONFLICT(repair_digest) DO UPDATE SET state_json = excluded.state_json`);
+          this.host.statement(() => save.run({ digest, json }));
+        }
       }
     };
-    this.host.write('record private placement failure', write, {
-      resolve: () => this.readFinalizedPrivatePlacementRepairRow(digest) === null
-        || JSON.stringify(this.readFailure(digest)) === JSON.stringify(validated) ? 'committed' : 'not-committed',
+    this.host.write('record private placement failures', write, {
+      resolve: () => rows.every(({ digest, validated }) => this.readFinalizedPrivatePlacementRepairRow(digest) === null
+        || JSON.stringify(this.readFailure(digest)) === JSON.stringify(validated)) ? 'committed' : 'not-committed',
       retry: write,
     });
   }

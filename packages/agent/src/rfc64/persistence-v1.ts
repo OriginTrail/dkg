@@ -96,6 +96,10 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
         this.requireOpen();
         finalizedPrivatePlacementRepairs.writeFailure(...args);
       },
+      writeFailures: (...args: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['writeFailures']>) => {
+        this.requireOpen();
+        finalizedPrivatePlacementRepairs.writeFailures(...args);
+      },
       list: () => {
         this.requireOpen();
         return finalizedPrivatePlacementRepairs.list();

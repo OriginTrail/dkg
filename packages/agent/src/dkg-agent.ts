@@ -1059,7 +1059,7 @@ export class DKGAgent extends DKGAgentBase {
         },
         listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
         readPrivateFailure: (repair) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.readFailure(repair) ?? null,
-        writePrivateFailure: (repair, state) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.writeFailure(repair, state),
+        writePrivateFailures: entries => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.writeFailures(entries),
         repairFinalizedPrivatePlacement: async (repair, placement) => {
           await this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement); },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),

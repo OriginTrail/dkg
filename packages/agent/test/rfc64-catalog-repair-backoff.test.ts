@@ -45,7 +45,7 @@ function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorParamete
     acceptsFinalizedPrivateLane: () => available,
     readRepairRevision: readRevision,
     readPrivateFailure: () => null,
-    writePrivateFailure: () => {},
+    writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: listPrivateRepairs,
     repairFinalizedPrivatePlacement: repairPrivate,
     reconcile,
@@ -757,27 +757,40 @@ it('reduces the repeated private-marker retry cost beyond the old one-minute cei
 });
 
 
-it('schedules successful operator retries even if a later diagnostic write fails with periodic work disabled', async () => {
-  let writes = 0;
-  const f = fixture(0, {
-    readPrivateFailure: () => ({ kind: 'signer_mismatch', consecutiveFailures: 3, sameKindFailures: 3,
-      firstFailedAtMs: 0, lastFailedAtMs: 0, nextAttemptAtMs: null, parked: true }),
-    writePrivateFailure: () => { if (++writes === 2) throw new Error('second row unavailable'); },
+it('atomically persists all operator resets before changing any scheduling generation', async () => {
+  const failure = { kind: 'signer_mismatch' as const, consecutiveFailures: 3, sameKindFailures: 3,
+    firstFailedAtMs: 0, lastFailedAtMs: 0, nextAttemptAtMs: null, parked: true };
+  let rejectBatch = true;
+  const write = vi.fn((entries: readonly import('../src/rfc64/finalized-private-placement-repair-store-v1.js').Rfc64PrivatePlacementFailureWriteV1[]) => {
+    expect(entries).toHaveLength(2);
+    if (rejectBatch) throw new Error('atomic batch unavailable');
   });
+  const f = fixture(0, { readPrivateFailure: () => failure, writePrivateFailures: write });
   const a = privateRepair(), b = { ...privateRepair(), assertionCoordinate: 'other' };
   f.setPrivateRepairs([a, b]); f.owner.start(ctx); await f.owner.whenIdle();
+  const before = f.owner.status()?.finalizedPrivatePlacement;
   expect(f.repairPrivate).not.toHaveBeenCalled();
-  expect(() => f.owner.retryFailedPrivate(ctx)).toThrow('second row unavailable');
+  expect(() => f.owner.retryFailedPrivate(ctx)).toThrow('atomic batch unavailable');
   await f.advance(0);
-  expect(f.repairPrivate).toHaveBeenCalledTimes(1);
-  expect(f.repairPrivate.mock.calls[0][0]).toEqual(a);
+  expect(f.repairPrivate).not.toHaveBeenCalled();
+  expect(f.owner.status()?.finalizedPrivatePlacement).toEqual(before);
+  expect(write).toHaveBeenCalledTimes(1);
+  rejectBatch = false;
+  f.repairPrivate.mockResolvedValue(undefined);
+  expect(f.owner.retryFailedPrivate(ctx)).toBe(2);
+  expect(write).toHaveBeenCalledTimes(2);
+  expect(write.mock.calls[1][0].map(entry => entry.state)).toEqual([a, b].map(() => ({ ...failure,
+    consecutiveFailures: 0, sameKindFailures: 0, nextAttemptAtMs: null, parked: false })));
+  await f.advance(0);
+  expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+  expect(f.repairPrivate.mock.calls.map(call => call[0])).toEqual([a, b]);
   expect(f.listPrivateRepairs()).toEqual([a, b]);
 });
 
 it.each(['unknown', 'catalog_full'] as const)('operator retry fences an in-flight %s failure through the owner', async kind => {
   const { AuthorCatalogFullErrorV1 } = await import('../src/internal/author-catalog-capacity.js');
   let persisted: import('../src/rfc64/private-placement-failure-state-v1.js').PrivatePlacementFailureStateV1 | null = null;
-  const f = fixture(0, { readPrivateFailure: () => persisted, writePrivateFailure: (_repair, state) => { persisted = state; } });
+  const f = fixture(0, { readPrivateFailure: () => persisted, writePrivateFailures: entries => { for (const entry of entries) persisted = entry.state; } });
   const repair = privateRepair(); f.setPrivateRepairs([repair]);
   await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
   let rejectOld!: () => void; const old = new Promise<void>(resolve => { rejectOld = resolve; });
@@ -806,7 +819,7 @@ it.each(['unknown', 'catalog_full'] as const)('operator retry fences an in-fligh
 it('keeps a capacity-refused owed marker visible without introducing a generic cooldown', async () => {
   const { AuthorCatalogFullErrorV1 } = await import('../src/internal/author-catalog-capacity.js');
   let persisted: import('../src/rfc64/private-placement-failure-state-v1.js').PrivatePlacementFailureStateV1 | null = null;
-  const f = fixture(0, { readPrivateFailure: () => persisted, writePrivateFailure: (_repair, state) => { persisted = state; } });
+  const f = fixture(0, { readPrivateFailure: () => persisted, writePrivateFailures: entries => { for (const entry of entries) persisted = entry.state; } });
   const repair = privateRepair(); f.setPrivateRepairs([repair]);
   f.repairPrivate.mockRejectedValue(new AuthorCatalogFullErrorV1(Array.from({ length: 1024 }, (_, i) => ({ seal: { kaUal: `held-${i}` } })), 1));
   await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
@@ -816,7 +829,7 @@ it('keeps a capacity-refused owed marker visible without introducing a generic c
   expect(f.repairPrivate).toHaveBeenCalledTimes(1);
   expect(f.owner.status()?.finalizedPrivatePlacement.failures).toMatchObject({ failedMarkers: 1, oldestFailureAgeMs: 60_000, kinds: [{ kind: 'catalog_full', count: 1 }] });
   await f.owner.close();
-  const restarted = fixture(0, { readPrivateFailure: () => persisted, writePrivateFailure: (_repair, state) => { persisted = state; } });
+  const restarted = fixture(0, { readPrivateFailure: () => persisted, writePrivateFailures: entries => { for (const entry of entries) persisted = entry.state; } });
   restarted.setPrivateRepairs([repair]);
   restarted.repairPrivate.mockRejectedValue(new AuthorCatalogFullErrorV1(Array.from({ length: 1024 }, (_, i) => ({ seal: { kaUal: `held-${i}` } })), 1));
   restarted.owner.start(ctx); await restarted.owner.whenIdle();

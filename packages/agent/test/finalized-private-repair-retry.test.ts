@@ -29,7 +29,7 @@ describe('exact private placement retry scheduling', () => {
     expect(retry.sameKindFailures).toBe(1); expect(retry.nextAttemptAtMs).toBe(now + 5000);
   });
   it('does not use a malformed or unknown-kind hint to park, and bounds backwards-clock recovery', () => {
-    const retry = new FinalizedPrivateRepairRetryV1(); retry.fail(0, 1e6, 5000, 'unknown');
+    const retry = new FinalizedPrivateRepairRetryV1(); retry.fail(0, 3_600_000, 5000, 'unknown');
     const state = retry.snapshot()!;
     for (const bad of [{ ...state, kind: 'secret', parked: true }, { ...state, parked: true },
       { ...state, firstFailedAtMs: NaN }, { ...state, nextAttemptAtMs: Number.MAX_SAFE_INTEGER }]) {
@@ -37,7 +37,10 @@ describe('exact private placement retry scheduling', () => {
       const current = new FinalizedPrivateRepairRetryV1(); current.restore(bad, 0); expect(current.eligible(0)).toBe(true);
     }
     const reopened = new FinalizedPrivateRepairRetryV1(); reopened.restore(state, 0);
-    expect(reopened.nextAttemptAtMs).toBeLessThanOrEqual(PRIVATE_REPAIR_MAX_BACKOFF_MS);
+    expect(state.nextAttemptAtMs).toBe(3_605_000);
+    expect(reopened.nextAttemptAtMs).toBe(PRIVATE_REPAIR_MAX_BACKOFF_MS);
+    expect(reopened.eligible(PRIVATE_REPAIR_MAX_BACKOFF_MS - 1)).toBe(false);
+    expect(reopened.eligible(PRIVATE_REPAIR_MAX_BACKOFF_MS)).toBe(true);
   });
 });
 

@@ -410,6 +410,7 @@ export async function startPlacementAgentV1(
     list: () => markerStore.list(),
     readFailure: repair => markerStore.readFailure(repair),
     writeFailure: (repair, state) => markerStore.writeFailure(repair, state),
+    writeFailures: entries => markerStore.writeFailures(entries),
     put: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
       if (hooks.failMarkerWrite !== undefined) throw hooks.failMarkerWrite;
       await markerStore.put(repair);

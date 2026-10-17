@@ -26,7 +26,7 @@ import type { Rfc64CatalogBootstrapPartitionV1 } from
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64CatalogWorkloadOwnerV1 } from './rfc64/catalog-runtime-v1.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
-import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
+import type { Rfc64FinalizedPrivatePlacementRepairV1, Rfc64PrivatePlacementFailureWriteV1 } from
   './rfc64/finalized-private-placement-repair-store-v1.js';
 import {
   catalogRepairDiagnosticV1,
@@ -135,7 +135,7 @@ export interface Rfc64FinalizedPrivatePlacementRepairRequestV1 {
 
 interface ProjectionOwnerDependenciesV1 {
   readonly readPrivateFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1) => PrivatePlacementFailureStateV1 | null;
-  readonly writePrivateFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null) => void;
+  readonly writePrivateFailures: (entries: readonly Rfc64PrivatePlacementFailureWriteV1[]) => void;
   readonly resolvePartition: () => Rfc64CatalogBootstrapPartitionV1 | undefined;
   readonly listDurableInventoryScopes: () => readonly Readonly<{ contextGraphId: ContextGraphIdV1; authorAddress: EvmAddressV1 }>[];
   readonly listLocalAuthorAddresses: () => readonly EvmAddressV1[];
@@ -364,18 +364,20 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
   retryFailedPrivate(ctx: OperationContext): number {
     if (this.#admissionClosed) throw new Error('Catalog repair owner is closed');
     const state = this.#ensureState(ctx);
-    let requested = 0;
+    const resets: Rfc64PrivatePlacementFailureWriteV1[] = [];
     for (const repair of this.#dependencies.listFinalizedPrivateRepairs()) {
       const entry = state.finalizedPrivateRetries.get(finalizedPrivateRepairKeyV1(repair));
       const previous = entry?.retry.snapshot() ?? this.#dependencies.readPrivateFailure(repair);
       if (!previous) continue;
-      this.#dependencies.writePrivateFailure(repair, { ...previous, consecutiveFailures: 0,
-        sameKindFailures: 0, nextAttemptAtMs: null, parked: false });
-      entry?.retry.retryNow();
-      requested += 1;
-      state.finalizedPrivateRunner.requestNextTurn(); // Coalesced, including partial success before a later persistence error.
+      resets.push({ repair, state: { ...previous, consecutiveFailures: 0,
+        sameKindFailures: 0, nextAttemptAtMs: null, parked: false } });
     }
-    return requested;
+    if (resets.length === 0) return 0;
+    this.#dependencies.writePrivateFailures(resets);
+    // A failed transaction leaves every in-memory generation and wakeup unchanged.
+    for (const { repair } of resets) state.finalizedPrivateRetries.get(finalizedPrivateRepairKeyV1(repair))?.retry.retryNow();
+    state.finalizedPrivateRunner.requestNextTurn();
+    return resets.length;
   }
 
   async whenIdle(): Promise<void> {
@@ -506,7 +508,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       acceptsLane: this.#dependencies.acceptsFinalizedPrivateLane,
       repair: this.#dependencies.repairFinalizedPrivatePlacement,
       warn: (error, attempts, retry) => this.#warnFailure('catalog_private_repair_failed', error, attempts, retry),
-      readFailure: this.#dependencies.readPrivateFailure, writeFailure: this.#dependencies.writePrivateFailure,
+      readFailure: this.#dependencies.readPrivateFailure, writeFailure: (repair, failure) => this.#dependencies.writePrivateFailures([{ repair, state: failure }]),
     });
   }
 

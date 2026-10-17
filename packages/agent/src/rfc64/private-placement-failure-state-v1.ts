@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { CatalogRepairFailureKindV1 } from './catalog-repair-diagnostics-v1.js';
+import { isCatalogRepairFailureKindV1, type CatalogRepairFailureKindV1 } from './catalog-repair-diagnostics-v1.js';
 
 export const PRIVATE_REPAIR_MAX_BACKOFF_MS = 30 * 60_000;
 export const isDeterministicPrivateRepairFailureV1 = (kind: CatalogRepairFailureKindV1): boolean =>
   kind === 'policy_conflict' || kind === 'version_conflict' || kind === 'signer_mismatch';
-const kinds = new Set<CatalogRepairFailureKindV1>([
-  'queue_wait', 'queue_full', 'store_timeout_not_started', 'store_timeout_indeterminate',
-  'transport', 'cancelled', 'integrity', 'lane_inactive', 'catalog_full', 'unknown',
-  'policy_conflict', 'version_conflict', 'signer_mismatch', 'persistence_unavailable',
-]);
+
 
 /** Scheduling evidence only, keyed by the unchanged canonical owed-marker digest. */
 export interface PrivatePlacementFailureStateV1 {
@@ -53,7 +49,7 @@ export function parsePrivatePlacementFailureStateV1(input: unknown): PrivatePlac
     if (Object.keys(input).sort().join(',') !== 'consecutiveFailures,firstFailedAtMs,kind,lastFailedAtMs,nextAttemptAtMs,parked,sameKindFailures') return null;
     const { kind, parked, consecutiveFailures, sameKindFailures, firstFailedAtMs,
       lastFailedAtMs, nextAttemptAtMs } = input as PrivatePlacementFailureStateV1;
-    if (!kinds.has(kind) || typeof parked !== 'boolean') return null;
+    if (!isCatalogRepairFailureKindV1(kind) || typeof parked !== 'boolean') return null;
     if (![consecutiveFailures, sameKindFailures, firstFailedAtMs, lastFailedAtMs]
       .every(value => Number.isSafeInteger(value) && value >= 0)) return null;
     if (sameKindFailures > consecutiveFailures || firstFailedAtMs > lastFailedAtMs) return null;

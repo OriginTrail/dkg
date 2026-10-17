@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
-import { CatalogRepairConditionErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
+import { CatalogRepairConditionErrorV1, CATALOG_REPAIR_FAILURE_KINDS_V1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import type {
   AssertionCoordinateV1,
   CanonicalDeterministicUalV1,
@@ -150,7 +150,7 @@ it('restores real SQLite failure age, cooldown and parking, then retries only by
       listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
       acceptsFinalizedPrivateLane: () => true, readRepairRevision: () => null,
       listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
-      writePrivateFailure: (row, state) => store.writeFailure(row, state),
+      writePrivateFailures: entries => store.writeFailures(entries),
       repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
     });
     owners.push(owner); return owner;
@@ -183,4 +183,45 @@ it('restores real SQLite failure age, cooldown and parking, then retries only by
   expect(store.readFailure(repair)).toBeNull();
   expect(owner.status()?.finalizedPrivatePlacement.failures?.failedMarkers).toBe(0);
   await owner.close(); expect(() => owner.retryFailedPrivate(ctx)).toThrow('closed');
+});
+
+
+it('rolls back the entire reset batch when SQLite rejects its second row', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-batch-')); roots.push(dataDir);
+  const store = await openStore(dataDir);
+  const other = { ...repair, assertionCoordinate: 'asset-2' };
+  await store.put(repair); await store.put(other);
+  store.writeFailure(repair, failure); store.writeFailure(other, { ...failure, firstFailedAtMs: 2000 });
+  const db = new DatabaseSync(join(dataDir, 'rfc64-sync', 'inventory-v1.sqlite3'));
+  try {
+    const canonical = db.prepare('SELECT repair_digest, repair_json FROM rfc64_finalized_private_placement_repairs_v1 ORDER BY repair_digest').all();
+    db.exec(`CREATE TRIGGER reject_second_reset BEFORE UPDATE ON rfc64_private_placement_failures_v1
+      WHEN json_extract(OLD.state_json, '$.firstFailedAtMs') = 2000
+      BEGIN SELECT RAISE(ABORT, 'second reset rejected'); END;`);
+    const reset = { ...failure, consecutiveFailures: 0, sameKindFailures: 0, parked: false };
+    const entries = [{ repair, state: reset }, { repair: other, state: { ...reset, firstFailedAtMs: 2000 } }];
+    expect(() => store.writeFailures(entries)).toThrow();
+    expect(store.readFailure(repair)).toEqual(failure);
+    expect(store.readFailure(other)).toEqual({ ...failure, firstFailedAtMs: 2000 });
+    db.exec('DROP TRIGGER reject_second_reset');
+    store.writeFailures(entries);
+    expect(store.readFailure(repair)).toEqual(entries[0].state);
+    expect(store.readFailure(other)).toEqual(entries[1].state);
+    expect(db.prepare('SELECT repair_digest, repair_json FROM rfc64_finalized_private_placement_repairs_v1 ORDER BY repair_digest').all()).toEqual(canonical);
+    inventories.pop()!.close();
+    const reopened = await openStore(dataDir);
+    expect(reopened.readFailure(repair)).toEqual(entries[0].state);
+    expect(reopened.readFailure(other)).toEqual(entries[1].state);
+  } finally { db.close(); }
+});
+
+it('round-trips every declared failure kind through real SQLite and restart', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-kind-')); roots.push(dataDir);
+  let store = await openStore(dataDir);
+  const entries = CATALOG_REPAIR_FAILURE_KINDS_V1.map(kind => ({ repair: { ...repair, assertionCoordinate: `kind-${kind}` },
+    state: { ...failure, kind, parked: false } }));
+  for (const entry of entries) await store.put(entry.repair);
+  store.writeFailures(entries); inventories.pop()!.close(); store = await openStore(dataDir);
+  for (const entry of entries) expect(store.readFailure(entry.repair)).toEqual(entry.state);
 });

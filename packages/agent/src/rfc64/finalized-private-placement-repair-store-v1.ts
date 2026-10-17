@@ -39,11 +39,16 @@ export interface Rfc64FinalizedPrivatePlacementRepairV1
   readonly sealDigest: Digest32V1;
 }
 
+export interface Rfc64PrivatePlacementFailureWriteV1 {
+  readonly repair: Rfc64FinalizedPrivatePlacementRepairV1;
+  readonly state: PrivatePlacementFailureStateV1 | null;
+}
+
 /** The repair queue is implemented by the single owned inventory connection. */
 export interface Rfc64FinalizedPrivatePlacementRepairOperationsV1 {
   listFinalizedPrivatePlacementRepairs(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[];
   readFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1): PrivatePlacementFailureStateV1 | null;
-  writeFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null): void;
+  writeFinalizedPrivatePlacementFailures(entries: readonly Rfc64PrivatePlacementFailureWriteV1[]): void;
   putFinalizedPrivatePlacementRepair(
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
   ): void;
@@ -56,6 +61,7 @@ export interface Rfc64FinalizedPrivatePlacementRepairStoreV1 {
   list(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[];
   readFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1): PrivatePlacementFailureStateV1 | null;
   writeFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null): void;
+  writeFailures(entries: readonly Rfc64PrivatePlacementFailureWriteV1[]): void;
   put(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void>;
   delete(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void>;
 }
@@ -66,7 +72,8 @@ export function createRfc64FinalizedPrivatePlacementRepairStoreV1(
   return Object.freeze({
     list: () => operations.listFinalizedPrivatePlacementRepairs(),
     readFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1) => operations.readFinalizedPrivatePlacementFailure(repair),
-    writeFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null) => operations.writeFinalizedPrivatePlacementFailure(repair, state),
+    writeFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1 | null) => operations.writeFinalizedPrivatePlacementFailures([{ repair, state }]),
+    writeFailures: (entries: readonly Rfc64PrivatePlacementFailureWriteV1[]) => operations.writeFinalizedPrivatePlacementFailures(entries),
     put: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
       operations.putFinalizedPrivatePlacementRepair(repair);
     },
