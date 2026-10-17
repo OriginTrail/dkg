@@ -3,11 +3,9 @@
 /**
  * The owner's change notice of a public graph, as agent methods: the owner
  * tells its followers that the graph's shared memory changed, and a follower
- * pulls the graph from the sender. A Core that hosts the graph tells the
- * graph's owner of a share into a named sub-graph (`swm/core-hosted-graph.ts`).
- * The protocol logic lives in `swm/shared-memory-change-notice.ts`. `start()`
- * (`dkg-agent-lifecycle.ts`) registers the protocol, and `stop()`
- * (`dkg-agent.ts`) stops both sides.
+ * pulls the graph from the sender. The protocol logic lives in
+ * `swm/shared-memory-change-notice.ts`. `start()` (`dkg-agent-lifecycle.ts`)
+ * registers the protocol, and `stop()` (`dkg-agent.ts`) stops both sides.
  */
 
 import { createOperationContext, PROTOCOL_SWM_CHANGE_NOTICE } from '@origintrail-official/dkg-core';
@@ -25,7 +23,6 @@ import {
   type SwmChangeNoticeDisposition,
   type SwmChangeRecipientPorts,
 } from './swm/shared-memory-change-notice.js';
-import { hostsPublicGraphAsCore } from './swm/core-hosted-graph.js';
 import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
 
 /** One agent's two sides of the notice, and its forwards of catalog heads that are still choosing their recipients. */
@@ -68,8 +65,7 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
 
   /**
    * A share from another peer was applied here. On the owner of a public
-   * graph, tell the graph's followers so that they pull it now; on a Core that
-   * hosts the graph, tell the graph's owner of a share into a named sub-graph
+   * graph, tell the graph's followers so that they pull it now
    * (`swm/shared-memory-change-notice.ts`). Never throws, never waits.
    */
   noticeSwmFollowersAfterApplyV1(this: DKGAgent, outcome: {
@@ -154,31 +150,14 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
     if (existing !== undefined) return existing;
     const shareCtx = createOperationContext('share');
     const syncCtx = createOperationContext('sync');
-    // The peers of a graph's owner, looked up at most once per graph in 5 min.
-    const ownerPeers = new Map<string, { readonly at: number; readonly peerIds: readonly string[] }>();
-    const ownerPeerIds = async (contextGraphId: string): Promise<readonly string[]> => {
-      const cached = ownerPeers.get(contextGraphId);
-      if (cached !== undefined && Date.now() - cached.at < 5 * 60_000) return cached.peerIds;
-      const owner = await this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16 }).catch(() => undefined);
-      const peerIds = owner?.peerIds ?? [];
-      ownerPeers.delete(contextGraphId);
-      if (ownerPeers.size >= 256) ownerPeers.delete(ownerPeers.keys().next().value as string);
-      ownerPeers.set(contextGraphId, { at: Date.now(), peerIds });
-      return peerIds;
-    };
     const notifier = new SwmChangeNotifier({
       ...this.swmChangeRecipientPortsV1(),
-      hostedGraphOwnerPeers: async (contextGraphId) => {
-        if (!hostsPublicGraphAsCore(this, contextGraphId)) return [];
-        const connected = new Set(this.node.libp2p.getPeers().map((peer) => peer.toString()));
-        const peerIds = await ownerPeerIds(this.rfc64AuthorityContextGraphIdV1(contextGraphId));
-        return peerIds.filter((peerId) => connected.has(peerId));
-      },
       deliver: (notice, recipients) => sendSwmChangeNotice(notice, recipients, (peerId, bytes) => this.messenger.sendToPeer(
         peerId, PROTOCOL_SWM_CHANGE_NOTICE, bytes, { timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS },
       )),
       log: (message) => this.log.info(shareCtx, message),
     });
+    const ownerPeers = new Map<string, { readonly at: number; readonly peerIds: readonly string[] }>();
     const receiver = new SwmChangeNoticeReceiver({
       follows: async (contextGraphId) => (
         this.subscribedContextGraphs.get(this.rfc64AuthorityContextGraphIdV1(contextGraphId))?.subscribed === true
@@ -190,7 +169,14 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
       acceptsSender: async (contextGraphId, peerId) => {
         if (!this.node.libp2p.getPeers().some((peer) => peer.toString() === peerId)) return false;
         if (sharedMemoryFollowersOf(this).followers(contextGraphId).includes(peerId)) return true;
-        return (await ownerPeerIds(contextGraphId)).includes(peerId);
+        const cached = ownerPeers.get(contextGraphId);
+        if (cached !== undefined && Date.now() - cached.at < 5 * 60_000) return cached.peerIds.includes(peerId);
+        const owner = await this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16 }).catch(() => undefined);
+        const peerIds = owner?.peerIds ?? [];
+        ownerPeers.delete(contextGraphId);
+        if (ownerPeers.size >= 256) ownerPeers.delete(ownerPeers.keys().next().value as string);
+        ownerPeers.set(contextGraphId, { at: Date.now(), peerIds });
+        return peerIds.includes(peerId);
       },
       // The pull the reconciler would make, brought forward: classed and
       // measured as one. It never joins a sync of the graph from the sender

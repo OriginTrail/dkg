@@ -616,6 +616,74 @@ describe('a share into a public graph that has followers', () => {
       expect(await share(undefined)).toEqual([PEER_B]);
     });
   });
+
+  // An author that connects only to Cores has no route to the graph's owner:
+  // GossipSub does not run over a relayed connection, and the owner never asked
+  // it for the graph. The owner needs the share itself, with its author's seal.
+  describe('to the graph\'s owner', () => {
+    const OWNER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+
+    /** The graph's owner is OWNER; `connected` lists the peers this node holds a connection to. */
+    async function withOwner(options: {
+      connected?: string[];
+      reachable?: boolean;
+      owners?: string[];
+      isPrivate?: boolean;
+    } = {}) {
+      const target = await agentWith({ subscribers: [PEER_A], followers: [] });
+      const connected = options.connected ?? [];
+      const connects: string[] = [];
+      Object.assign(target.host, {
+        isPrivateContextGraph: async () => options.isPrivate === true,
+        resolveCuratorPeerIdsForCg: async () => ({
+          peerIds: options.owners ?? [OWNER], curatorIsLocal: false, legacyTripleResolved: true,
+        }),
+        ensurePeerConnected: async (peerId: string) => {
+          connects.push(peerId);
+          if (options.reachable === false) throw new Error('no route to the owner');
+          connected.push(peerId);
+        },
+      });
+      Object.defineProperty(target.host.node, 'libp2p', {
+        value: {
+          getPeers: () => connected.map((peerId) => ({ toString: () => peerId })),
+          peerStore: { get: async () => ({ protocols: [SHARE_PROTOCOL] }) },
+        },
+        configurable: true,
+      });
+      return { ...target, connects };
+    }
+
+    it('goes to an owner this node is not connected to, through a connection made for it', async () => {
+      const { share, connects } = await withOwner();
+      expect(await share('reports')).toEqual([PEER_A, OWNER].sort());
+      expect(connects).toEqual([OWNER]);
+    });
+
+    it('goes to a connected owner without connecting again', async () => {
+      const { share, connects } = await withOwner({ connected: [OWNER] });
+      expect(await share('reports')).toEqual([PEER_A, OWNER].sort());
+      expect(connects).toEqual([]);
+    });
+
+    it('still goes to the others when the owner cannot be reached, and the next share does not wait for it', async () => {
+      const { share, connects } = await withOwner({ reachable: false });
+      expect(await share('reports')).toEqual([PEER_A]);
+      expect(await share('reports')).toEqual([PEER_A]);
+      expect(connects).toEqual([OWNER]);
+    });
+
+    it('is not routed for a root the catalog owns, on the graph\'s own node, or for a private graph', async () => {
+      const root = await withOwner();
+      root.host.rfc64LegacySwmApplyAllowedForScope = (_contextGraphId, subGraphName) => subGraphName !== null;
+      expect(await root.share(null)).toEqual([PEER_A]);
+      const ownNode = await withOwner({ owners: [] });
+      expect(await ownNode.share('reports')).toEqual([PEER_A]);
+      const privateGraph = await withOwner({ isPrivate: true });
+      await privateGraph.agent.routeShareToPublicGraphOwnerV1(GRAPH);
+      expect([...root.connects, ...ownNode.connects, ...privateGraph.connects]).toEqual([]);
+    });
+  });
 });
 
 describe('the sync responder reports who follows a graph', () => {

@@ -152,24 +152,6 @@ describe('the owner\'s notifier', () => {
     expect(alone.deliveries).toEqual([]);
   });
 
-  it('on a Core that hosts the graph, tells the owner of a sub-graph change but neither the source nor itself, and of a root change nobody', async () => {
-    const hostedGraphOwnerPeers = vi.fn(async () => [OWNER, MEMBER_2, MEMBER_3]);
-    const ports = { ownsPublicGraph: async () => false, hostedGraphOwnerPeers, selfPeerId: () => MEMBER_3 };
-    const subGraph = notifier(ports);
-    subGraph.owner.afterRemoteChange(change(MEMBER_2, 'op-1'));
-    await subGraph.owner.settled();
-    const root = notifier(ports);
-    root.owner.afterRemoteChange(change(MEMBER_1, 'op-2', null));
-    await root.owner.settled();
-
-    expect(subGraph.deliveries).toEqual([{ notice: notice('notes', 'op-1'), recipients: [OWNER] }]);
-    expect(subGraph.log).toHaveBeenCalledWith(
-      `SWM change notice for "${CG}" sub-graph "notes" (op-1): reached 1 of 1 owner peer(s)`,
-    );
-    expect(root.deliveries).toEqual([]);
-    expect(hostedGraphOwnerPeers).toHaveBeenCalledTimes(1);
-  });
-
   it('coalesces the changes of one scope into one trailing notice with the latest change', async () => {
     vi.useFakeTimers();
     const { owner, deliveries } = notifier();
