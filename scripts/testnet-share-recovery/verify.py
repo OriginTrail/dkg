@@ -1,9 +1,10 @@
 """Read-only full-denominator evidence reduction; never repairs a failed operation."""
-import json,pathlib,sys,collections,datetime,hashlib,math,subprocess
+import json,pathlib,sys,collections,datetime,hashlib,math
 from payload_evidence import audit_graphs
 from metadata_evidence import index_authoritative_metadata, preserves_original_operation, valid_operation_record
 from campaign_manifest import load_campaign, campaign_counts
 from publication_evidence import validate_publication_cohort
+from scope_evidence import load_scope_evidence
 arm,label=sys.argv[1:3]; root=pathlib.Path('.tmp/2963/evidence')/arm; end=root/label
 read=lambda p:json.load(open(p))
 rdf=read(end/'rdf.json')['results']['bindings']; pre=read(root/'pre-workload/rdf.json')['results']['bindings']
@@ -23,7 +24,7 @@ def exact_property(rows,p,expected,kind='literal'):
   and value.get('datatype','http://www.w3.org/2001/XMLSchema#string')=='http://www.w3.org/2001/XMLSchema#string'
   and not value.get('xml:lang'))
 catalogs=read(end/'catalogs.json')
-inventory_scope=json.loads(subprocess.check_output(['node',str(pathlib.Path(__file__).with_name('inventory-scope.mjs'))],input=json.dumps({'campaign':campaign,'capture':read(end/'inventory.json'),'catalogs':catalogs,'status':read(end/'-api-status.json')}),text=True))
+inventory_scope=load_scope_evidence(campaign,end)
 inv=inventory_scope.pop('rows'); cr=inventory_scope.pop('catalogRows')
 invnames=collections.Counter(r['assertion_coordinate'] for r in inv);catnames=collections.Counter(r['assertionCoordinate'] for r in cr)
 jobs=read(end/'-api-publisher-jobs.json')['value']['jobs']

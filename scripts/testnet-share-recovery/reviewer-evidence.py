@@ -5,6 +5,7 @@ import json
 import pathlib
 import sys
 from campaign_manifest import load_campaign
+from scope_evidence import load_scope_evidence, public_scope_evidence, require_matching_scope
 
 arm, label = sys.argv[1:3]
 campaign = load_campaign(arm)
@@ -17,9 +18,11 @@ def write(name, value):
     (out / name).write_text(text + '\n')
 verification = read('verification.json')
 seals = {row['name']: row for row in read('seal-proof.json')}
-rows = [row for catalog in read(f'{label}/catalogs.json') for row in catalog['rows']]
-inventory = read(f'{label}/inventory.json')['swm']
+scope = load_scope_evidence(campaign, root / label)
+write('inventory-scope-proof.json', public_scope_evidence(scope))
+rows, inventory = scope['catalogRows'], scope['rows']
 identities = read('identity-proof.json')
+require_matching_scope(scope, identities)
 identity_errors = identities['identityErrors']
 write('identity-proof.json', identities)
 write('summary.json', {key: value for key, value in verification.items() if key != 'assets'} | {
@@ -39,6 +42,7 @@ write('fault-identity-proof.json', read('fault-identity-proof.json'))
 write('nonce-accounting.json', read('nonce-proof.json'))
 write('assets.json', verification['assets'])
 write('seals.json', list(seals.values()))
+write('inventory-identities.json', [{key: row[key] for key in ['assertion_coordinate', 'ka_ual', 'assertion_version_u64be', 'seal_digest']} for row in inventory])
 write('catalog-identities.json', [{key: row[key] for key in ['assertionCoordinate', 'assertionVersion', 'kaId', 'sealDigest']} for row in rows])
 requests = read('publication-admissions.json') + read('synchronous-shares.json')
 with (out / 'requests.csv').open('w') as handle:

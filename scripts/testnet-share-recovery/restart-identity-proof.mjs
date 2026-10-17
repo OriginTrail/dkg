@@ -91,7 +91,7 @@ if(mode==='before'){
  const sameRuntime=['version','commit','peerId'].every(key=>runtimeBefore[key]===runtimeAfter[key]);
  const originalBuild=JSON.parse(fs.readFileSync(`${root}/startup-status.json`)).value;
  const runtimeBuildTimeUnchanged=originalBuild.buildTime===runtimeAfter.buildTime;
- const result={originalCohortMetadataUnchanged,wholeCohortContentUnchanged,metadataGraph,metadataComparison:'authoritative-full-rdf-term-v2',sameRuntime,runtimeBuildTimeUnchanged,runtimeBuildTime:runtimeAfter.buildTime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
+ const result={inventoryScope:{...inventoryScope,rows:undefined,catalogRows:undefined},originalCohortMetadataUnchanged,wholeCohortContentUnchanged,metadataGraph,metadataComparison:'authoritative-full-rdf-term-v2',sameRuntime,runtimeBuildTimeUnchanged,runtimeBuildTime:runtimeAfter.buildTime,runtime:runtimeBefore,observedAt:new Date().toISOString(),originalJob:job.jobId===before.jobId,
  originalBinding:JSON.stringify(job.request)===JSON.stringify(before.request),state:job.state,attempts:job.attempt.count,
  originalBindingSeal,originalBindingOperation,identityTuples:tuples,originalSealAndIntent,exactContent,lifecycleComplete,wmCleared,catalogCount:catalogs.length,restartCatalogOccurrences:catalogs.filter(r=>r.assertionCoordinate===restartName).length,
  noAdditionalPublicationEffects:publications.length===counts.publications&&publications.every(j=>mainPublications.some(old=>old.jobId===j.jobId&&old.finalization.txHash===j.finalization.txHash)),nonces,manualRepairs:0};
