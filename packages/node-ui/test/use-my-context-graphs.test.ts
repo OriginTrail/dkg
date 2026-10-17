@@ -39,7 +39,10 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
 }));
 // The hook now subscribes to node events for live CG/membership
 // refresh; stub it so the test doesn't need an EventSource.
-vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({ useNodeEvents: (handler: (event: any) => void) => { nodeEventHandler = handler; } }));
+vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({ subscribeNodeEvents: (handler: (event: any) => void) => {
+  nodeEventHandler = handler;
+  return () => { nodeEventHandler = undefined; };
+} }));
 
 async function importHooks() {
   const hidden = await import('../src/ui/hooks/useHiddenContextGraphIds.js');

@@ -1,8 +1,8 @@
-import { useCallback, useEffect } from 'react';
+import { useEffect } from 'react';
 import { api } from '../api-wrapper.js';
 import { currentApiToken } from '../lib/apiToken.js';
 import { useProjectsStore } from '../stores/projects.js';
-import { useNodeEvents } from './useNodeEvents.js';
+import { subscribeNodeEvents } from './useNodeEvents.js';
 import { refreshCurrentAgent } from './useCurrentAgent.js';
 
 let consumers = 0;
@@ -11,7 +11,7 @@ let generation = 0;
 let authKey: string | undefined | null = null;
 let inFlight: Promise<void> | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-let invalidationQueued = false;
+let unsubscribeEvents: (() => void) | null = null;
 
 /** One request owner for the shared graph array, freshness and errors. */
 export function refreshContextGraphInventory(force = false): Promise<void> {
@@ -79,20 +79,7 @@ function releaseIdleInventory() {
   if (consumers || mutationOwners) return;
   generation++;
   inFlight = null;
-  invalidationQueued = false;
   useProjectsStore.setState({ loading: false });
-}
-
-function invalidateInventory() {
-  // Both mounted consumers may receive the same SSE event. Supersede the old
-  // snapshot once per event turn, after the API cache has been invalidated.
-  if (invalidationQueued) return;
-  invalidationQueued = true;
-  queueMicrotask(() => {
-    if (!invalidationQueued) return;
-    invalidationQueued = false;
-    if (consumers > 0) void refreshContextGraphInventory(true);
-  });
 }
 
 function refreshWhenVisible() {
@@ -103,11 +90,18 @@ function retainInventory() {
   consumers++;
   if (consumers === 1 || authKey !== currentApiToken()) refreshWhenVisible();
   if (consumers === 1) {
+    unsubscribeEvents = subscribeNodeEvents(event => {
+      if (event.type === 'join_approved' || event.type === 'join_rejected' || event.type === 'project_synced') {
+        void refreshContextGraphInventory(true);
+      }
+    });
     pollTimer = setInterval(refreshWhenVisible, 60_000);
     document.addEventListener('visibilitychange', refreshWhenVisible);
   }
   return () => {
     if (--consumers !== 0) return;
+    unsubscribeEvents?.();
+    unsubscribeEvents = null;
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
     document.removeEventListener('visibilitychange', refreshWhenVisible);
@@ -123,10 +117,5 @@ export function useContextGraphInventory() {
   const loaded = useProjectsStore(state => state.inventoryLoaded);
   const error = useProjectsStore(state => state.inventoryError);
   useEffect(retainInventory, []);
-  useNodeEvents(useCallback(event => {
-    if (event.type === 'join_approved' || event.type === 'join_rejected' || event.type === 'project_synced') {
-      invalidateInventory();
-    }
-  }, []));
   return { contextGraphs, loading: loading || (!loaded && contextGraphs.length === 0), error };
 }
