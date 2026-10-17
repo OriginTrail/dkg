@@ -106,7 +106,7 @@ import {
   type StageKnowledgeAssetSharedWorkingMemoryInputV1,
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
-import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
 import { ethers } from 'ethers';
@@ -7028,6 +7028,7 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
+    allowPullRecovery = false,
   ): Promise<void> {
     const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
@@ -7082,10 +7083,20 @@ export class DKGPublisher implements Publisher {
           GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(sealSubject)}> ?p ?o }
         }`,
       );
-      const seal = parseAssertionSealQuads(
-        sealResult.type === 'quads' ? sealResult.quads : [],
-        sealSubject,
-      );
+      let seal: AssertionSeal | undefined;
+      try {
+        seal = parseAssertionSealQuads(
+          sealResult.type === 'quads' ? sealResult.quads : [],
+          sealSubject,
+        );
+      } catch (error) {
+        if (!allowPullRecovery) throw error;
+      }
+      if (!seal && allowPullRecovery && (operationId || (!hasOperationId && !hasIntent))) {
+        if (await this.hasVerifiedPullRecoverySeal(
+          contextGraphId, name, agentAddress, operationId, subGraphName,
+        )) return;
+      }
       // A completed promote consumes its provisional lifecycle pointer. The
       // monotonic SWM head is then the authoritative recovery pointer. Resolve
       // it only for the clean completed shape; an intent without its matching
@@ -7129,6 +7140,61 @@ export class DKGPublisher implements Publisher {
       ),
       { code: 'KA_PROMOTE_RECOVERY_REQUIRED' },
     );
+  }
+
+  /** Only pull-from may use this proof; ordinary draft mutations stay frozen. */
+  private async hasVerifiedPullRecoverySeal(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    operationId: string | undefined,
+    subGraphName?: string,
+  ): Promise<boolean> {
+    const recoverySubject = this.assertionRecoverySealSubject(contextGraphId, name, agentAddress, subGraphName);
+    const archived = (await this.loadAssertionSeals(contextGraphId, name, agentAddress, subGraphName))
+      .find((candidate) => candidate.subject === recoverySubject);
+    if (!archived || archived.seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) return false;
+    const { seal } = archived;
+    if (!seal.kaUal || !seal.assertionVersion) return false;
+    const lifecycle = await readAssertionLifecycleRecord(
+      this.store, contextGraphId, agentAddress, name, subGraphName, 'strict-reservation',
+    );
+    const reservedUals = lifecycle.bindings.filter((row) => row.p === 'http://dkg.io/ontology/reservedUal');
+    const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+    if (reservedUals.length !== 1 || lifecycle.reservedUal !== scope.ual
+      || lifecycle.number !== BigInt(scope.kaNumber)) return false;
+    if (!await this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName)) return false;
+
+    // A partial clear can only REMOVE fields. Conflicting surviving fields may
+    // belong to a newer finalized draft and must never authorize its replacement.
+    const predicates = new Set<string>(Object.values(ASSERTION_SEAL_PREDICATES));
+    const archivedTerms = new Set(archived.quads.map((quad) => JSON.stringify([quad.predicate, quad.object])));
+    for (const subject of await this.activeAssertionSealSubjects(contextGraphId, name, agentAddress, subGraphName)) {
+      const result = await this.store.query(
+        `CONSTRUCT { <${assertSafeIri(subject)}> ?p ?o } WHERE {
+          GRAPH <${assertSafeIri(contextGraphMetaUri(contextGraphId))}> { <${assertSafeIri(subject)}> ?p ?o }
+        }`,
+      );
+      if (result.type !== 'quads' || result.quads.some((quad) => predicates.has(quad.predicate)
+        && !archivedTerms.has(JSON.stringify([quad.predicate, quad.object])))) return false;
+    }
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store: this.store, graphManager: this.graphManager, contextGraphId, kaUal: seal.kaUal, subGraphName,
+    });
+    if (!head || head.assertionVersion !== String(seal.assertionVersion)
+      || (operationId && !head.operationAliases.some((alias) => alias.shareOperationId === operationId))
+      || head.publicTripleCount !== seal.publicTripleCount
+      || head.privateTripleCount !== seal.privateTripleCount) return false;
+    const sourcePublic = (await this.assertionScopedQuads(head.assertionGraph))
+      .filter((quad) => !isSwmMerkleExcludedQuad(quad));
+    if (workspacePublicQuadsDigest(sourcePublic) !== head.publicQuadsDigest) return false;
+    const sourcePrivate = await this.privateStore.getKnowledgeAssetPrivateTriples(
+      contextGraphId, createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion), subGraphName,
+    );
+    const validated = await validateGraphScopedPayloadAgainstSeal(seal, sourcePublic, sourcePrivate, 'swm-recovery');
+    const privateRoot = validated.privateMerkleRoot ? ethers.hexlify(validated.privateMerkleRoot) : undefined;
+    return privateRoot?.replace(/^0x/i, '').toLowerCase()
+      === head.privateMerkleRoot?.replace(/^0x/i, '').toLowerCase();
   }
 
   private async hasDurableAssertionPromoteTail(
@@ -8241,6 +8307,7 @@ export class DKGPublisher implements Publisher {
       name,
       agentAddress,
       subGraphName,
+      true,
     );
     const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const loadedSeals = await this.loadAssertionSeals(
