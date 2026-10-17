@@ -1158,7 +1158,7 @@ async function evaluateExactWritePreflight(
 export function resolveRequiredWriteContextGraphId(...args: Parameters<typeof resolveWriteContextGraphIdOnce>): Promise<string | null> {
   const [agent, , res] = args;
   return resolveAwaitingWriteReadiness(agent, () => resolveWriteContextGraphIdOnce(...args),
-    (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome));
+    (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome), res);
 }
 
 /** One pass of {@link resolveRequiredWriteContextGraphId}: a known graph that is not writable here is returned, not answered. */

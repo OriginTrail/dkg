@@ -111,6 +111,7 @@ export default defineConfig({
           // registered graph goes through. Same worker and fake thread.
           'test/context-graph-write-readiness.test.ts',
           'test/context-graph-owner-write-after-restart.test.ts',
+          'test/context-graph-write-readiness-shutdown.test.ts',
           'test/context-graph-authority-attribution.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
           // Subscribing by an on-chain name hash (Base #33): route, catch-up
