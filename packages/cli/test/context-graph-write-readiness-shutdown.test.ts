@@ -28,18 +28,29 @@ const CG = '0x1111111111111111111111111111111111111111/being-caught-up';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** The node subscribes the graph, has not proven it yet, and holds nothing of it. */
+/**
+ * The node subscribes the graph, has not proven it yet, and holds nothing of
+ * it at the first look. From the second look on, the preflight finds content
+ * of the graph and so finds it writable, while its subscription stays
+ * unsynced: a write that is resolved again after its wait ends goes through,
+ * so a write that shutdown or a closed request ended must be refused after
+ * exactly one look.
+ */
 function nodeCatchingUp() {
   const subscriptions = new Map([[CG, { subscribed: true, synced: false }]]);
+  let probes = 0;
   return {
+    /** How often the preflight looked at the graph. */
+    probes: () => probes,
     async listContextGraphs() {
       return [];
     },
     async probeContextGraphWritePreflight() {
+      probes += 1;
       return {
         storeAvailable: true as const,
         exists: true,
-        hasLocalContent: false,
+        hasLocalContent: probes > 1,
         declarationFound: true,
         accessPolicy: 'public' as const,
         inMemorySubscription: { subscribed: true, synced: false },
@@ -107,7 +118,7 @@ describe('a write that waits for its graph does not outlive shutdown or its requ
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const { port } = server.address() as AddressInfo;
-    return { server, port, handled };
+    return { server, port, handled, agent };
   }
 
   /** One write, on a connection of its own. */
@@ -136,7 +147,7 @@ describe('a write that waits for its graph does not outlive shutdown or its requ
 
   it('is refused at once when shutdown begins, and the teardown reaches the catch-up drain well inside its deadline', async () => {
     catchupRunning();
-    const { server, port, handled } = await writeServer();
+    const { server, port, handled, agent } = await writeServer();
     const { answered } = post(port);
 
     // The write waits for the graph's catch-up, which keeps running.
@@ -185,6 +196,8 @@ describe('a write that waits for its graph does not outlive shutdown or its requ
     });
     expect(answer.at - shutdownAt).toBeLessThan(500);
     expect(handled.map(({ accepted }) => accepted)).toEqual([null]);
+    // Not looked at again: a second look would have found the graph writable.
+    expect(agent.probes()).toBe(1);
 
     // The server closes long before the shutdown deadline, and the drain still runs after it.
     const outcome = await teardown;
@@ -205,17 +218,19 @@ describe('a write that waits for its graph does not outlive shutdown or its requ
       end(body?: string) { if (body) answer.body = JSON.parse(body); },
     } as unknown as ServerResponse;
     const startedAt = Date.now();
+    const node = nodeCatchingUp();
 
-    const accepted = await resolveRequiredWriteContextGraphId(nodeCatchingUp(), CG, res);
+    const accepted = await resolveRequiredWriteContextGraphId(node, CG, res);
 
     expect(accepted).toBeNull();
+    expect(node.probes()).toBe(1);
     expect(Date.now() - startedAt).toBeLessThan(writeReadinessWait.pollMs);
     expect(answer).toMatchObject({ status: 503, body: { code: 'CONTEXT_GRAPH_NOT_WRITABLE', retryable: true } });
   });
 
   it('stops waiting when its client disconnects, and is not resolved', async () => {
     catchupRunning();
-    const { port, handled } = await writeServer();
+    const { port, handled, agent } = await writeServer();
     const { request, answered } = post(port);
     answered.catch(() => {});
 
@@ -226,7 +241,23 @@ describe('a write that waits for its graph does not outlive shutdown or its requ
 
     await expect.poll(() => handled.length, { timeout: 2_000, interval: 10 }).toBe(1);
     expect(handled[0].accepted).toBeNull();
+    expect(agent.probes()).toBe(1);
     expect(handled[0].at - goneAt).toBeLessThan(writeReadinessWait.pollMs * 2);
+  });
+
+  it('goes through, by contrast, when its wait runs out and the second look finds the graph writable', async () => {
+    // The control for the cases above: with the same node, a wait that ends
+    // by running out is resolved again, and that second look lets it through.
+    writeReadinessWait.timeoutMs = 100;
+    writeReadinessWait.pollMs = 10;
+    catchupRunning();
+    const { port, handled, agent } = await writeServer();
+
+    const answer = await post(port).answered;
+
+    expect(answer.status).toBe(200);
+    expect(handled.map(({ accepted }) => accepted)).toEqual([CG]);
+    expect(agent.probes()).toBe(2);
   });
 
   it('ends the waits before the first await of shutdown, and carries on when ending them fails', async () => {
