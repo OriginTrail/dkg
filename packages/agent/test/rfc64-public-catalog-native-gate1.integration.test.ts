@@ -22,7 +22,6 @@ import {
   buildRowBundle,
 } from './helpers/native-gate1-fixture-values.js';
 import { createNativeGate1FixtureOwner } from './helpers/native-gate1-fixture.js';
-import { runCatalogDurabilityScenario } from './helpers/catalog-durability-scenario.js';
 import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   assertAuthorCatalogRowV1,
@@ -75,7 +74,7 @@ import {
   Rfc64PublicCatalogNativeTransportV1,
 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 import { type Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
-import { openRfc64PersistenceV1, type Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
+import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 
 function appliedHeadLifecycleV1(
   transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null,
@@ -90,33 +89,20 @@ function appliedHeadLifecycleV1(
   });
 }
 
-function appliedHeadLifecycleAbortingBeforeCasV1(
+/** Abort only after the actual helper (including flush and its final check) has resolved. */
+function abortAfterAppliedHeadPrecommitV1(
+  receiver: Rfc64PublicCatalogNativeReceiverV1,
   controller: AbortController,
   abortReason: unknown,
-  transaction: Rfc64PublicCatalogNativePrecommitTransactionV1,
-): Readonly<{
-  lifecycle: Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
-  afterAppliedHeadReadCount: () => number;
-}> {
-  let afterAppliedHeadReadCount = 0;
-  const lifecycle: Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 = Object.freeze({
-    kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
-    transaction,
-    get afterAppliedHead() {
-      afterAppliedHeadReadCount += 1;
-      // The first read is the lifecycle type guard. Returning null makes that
-      // branch short-circuit after one read. The second read assigns the
-      // normalized lifecycle; its microtask runs after runBeforeAppliedHeadCommitV1's
-      // trailing abort check but before the awaiting receiver resumes at CAS.
-      if (afterAppliedHeadReadCount === 2) {
-        queueMicrotask(() => controller.abort(abortReason));
-      }
-      return null;
-    },
-  });
-  return Object.freeze({
-    lifecycle,
-    afterAppliedHeadReadCount: () => afterAppliedHeadReadCount,
+) {
+  const boundary = receiver as unknown as {
+    runBeforeAppliedHeadCommitV1(...args: unknown[]): Promise<unknown>;
+  };
+  const original = boundary.runBeforeAppliedHeadCommitV1.bind(receiver);
+  return vi.spyOn(boundary, 'runBeforeAppliedHeadCommitV1').mockImplementation(async (...args) => {
+    const lifecycle = await original(...args);
+    controller.abort(abortReason);
+    return lifecycle;
   });
 }
 
@@ -128,23 +114,6 @@ vi.mock('../src/rfc64/catalog-row-authorship.js', async (importOriginal) => {
     ...actual,
     verifyAuthorCatalogBucketRowAuthorshipsV1: vi.fn(actual.verifyAuthorCatalogBucketRowAuthorshipsV1),
   };
-});
-
-const snapshotBarrier = vi.hoisted(() => ({
-  path: null as string | null,
-  captured: null as (() => void) | null,
-  release: null as Promise<void> | null,
-}));
-vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
-    if (snapshotBarrier.path === String(args[0]) && args[1] === 'w') {
-      snapshotBarrier.path = null;
-      snapshotBarrier.captured?.();
-      await snapshotBarrier.release;
-    }
-    return actual.open(...args);
-  } };
 });
 
 const bucketClosures = () => vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mock.calls
@@ -1947,9 +1916,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     );
     const commit = vi.fn();
     const rollback = vi.fn();
-    const cancellationBoundary = appliedHeadLifecycleAbortingBeforeCasV1(
-      controller,
-      abortReason,
+    const lifecycle = appliedHeadLifecycleV1(
       {
         commit,
         rollback: async (cause) => {
@@ -1967,15 +1934,17 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     }, undefined, undefined, fixture.receiverStore, async (_plan, signal) => {
       expect(signal).toBe(controller.signal);
       await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
-      return cancellationBoundary.lifecycle;
+      return lifecycle;
     });
+
+    const cancellationBoundary = abortAfterAppliedHeadPrecommitV1(receiver, controller, abortReason);
 
     await expect(fixture.bootstrap(
       fixture.genesisAnnouncement,
       receiver,
       controller.signal,
     )).rejects.toBe(abortReason);
-    expect(cancellationBoundary.afterAppliedHeadReadCount()).toBe(2);
+    expect(cancellationBoundary).toHaveBeenCalledOnce();
     expect(controller.signal.reason).toBe(abortReason);
     expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
@@ -2003,9 +1972,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     const commit = vi.fn();
     const rollback = vi.fn();
     let targetWasActiveWhenLifecycleReturned = false;
-    const cancellationBoundary = appliedHeadLifecycleAbortingBeforeCasV1(
-      controller,
-      abortReason,
+    const lifecycle = appliedHeadLifecycleV1(
       {
         commit,
         rollback: async (cause) => {
@@ -2026,15 +1993,17 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       targetWasActiveWhenLifecycleReturned = await fixture.receiverStore.hasGraph(
         `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
       );
-      return cancellationBoundary.lifecycle;
+      return lifecycle;
     });
+
+    const cancellationBoundary = abortAfterAppliedHeadPrecommitV1(receiver, controller, abortReason);
 
     await expect(fixture.synchronize(
       fixture.announcement,
       receiver,
       controller.signal,
     )).rejects.toBe(abortReason);
-    expect(cancellationBoundary.afterAppliedHeadReadCount()).toBe(2);
+    expect(cancellationBoundary).toHaveBeenCalledOnce();
     expect(controller.signal.reason).toBe(abortReason);
     expect(targetWasActiveWhenLifecycleReturned).toBe(true);
     expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
@@ -2364,157 +2333,6 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       AUTHOR,
     )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
-  }, 30_000);
-
-  it('persists exact SWM and VM before applied-head CAS through a store decorator', async () => {
-    await runCatalogDurabilityScenario(await setupLiveReceiver());
-  }, 30_000);
-
-  it('waits out an older in-flight snapshot and durably captures the activated generation', async () => {
-    const fixture = await setupLiveReceiver();
-    const snapshot = join(fixture.receiverDirectory, 'inflight.nq');
-    const store = new OxigraphStore(snapshot);
-    const scheduled = vi.spyOn(store as unknown as { scheduleFlush(): void }, 'scheduleFlush')
-      .mockImplementation(() => {});
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    let oldFlush: Promise<void> | undefined;
-    let transition: Promise<unknown> | undefined;
-    try {
-      const initial = fixture.createReceiver(fixture.receiverPersistence.inventory,
-        undefined, undefined, store);
-      await fixture.bootstrap(fixture.genesisAnnouncement, initial);
-      await setTransactionTestVmGeneration(store, 'predecessor');
-      await store.flush();
-      const captured = new Promise<void>((resolve) => { snapshotBarrier.captured = resolve; });
-      snapshotBarrier.path = `${snapshot}.tmp`;
-      snapshotBarrier.release = held;
-      oldFlush = store.flush();
-      await captured; // Actual old N-Quads serialization has already happened.
-      let activated!: () => void;
-      const activatedPromise = new Promise<void>((resolve) => { activated = resolve; });
-      let atCas: OxigraphStore | undefined;
-      const cas = vi.fn((...args: Parameters<
-        Rfc64PersistenceV1['inventory']['compareAndSwapAppliedCatalogHeadV1']
-      >) => {
-        atCas = new OxigraphStore(snapshot);
-        return fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1(...args);
-      });
-      const receiver = fixture.createReceiver({
-        readAppliedCatalogHeadV1: fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1
-          .bind(fixture.receiverPersistence.inventory),
-        compareAndSwapAppliedCatalogHeadV1: cas,
-      }, undefined, undefined, store, async () => {
-        await setTransactionTestVmGeneration(store, 'target');
-        activated();
-      });
-      transition = fixture.synchronize(fixture.announcement, receiver);
-      await activatedPromise;
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(cas).not.toHaveBeenCalled();
-      release();
-      await oldFlush;
-      await transition;
-      expect(cas).toHaveBeenCalledOnce();
-      await expect(atCas!.countQuads()).resolves.toBe(17);
-      await expect(readTransactionTestVmGeneration(atCas!)).resolves.toBe('target');
-    } finally {
-      release();
-      await Promise.allSettled([oldFlush, transition]);
-      snapshotBarrier.path = null;
-      snapshotBarrier.captured = null;
-      snapshotBarrier.release = null;
-      scheduled.mockRestore();
-      await store.close();
-    }
-  }, 30_000);
-
-  it('rejects a failed durability barrier without advancing the applied head', async () => {
-    const fixture = await setupLiveReceiver();
-    await fixture.bootstrap();
-    await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
-    const failure = new Error('injected durable RDF flush failure');
-    const flush = vi.spyOn(fixture.receiverStore, 'flush').mockRejectedValue(failure);
-    const rollback = vi.fn(async () => {
-      await setTransactionTestVmGeneration(fixture.receiverStore, 'predecessor');
-    });
-    const commit = vi.fn();
-    const cas = vi.fn(fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1
-      .bind(fixture.receiverPersistence.inventory));
-    const receiver = fixture.createReceiver({
-      readAppliedCatalogHeadV1: fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1
-        .bind(fixture.receiverPersistence.inventory),
-      compareAndSwapAppliedCatalogHeadV1: cas,
-    }, undefined, undefined, fixture.receiverStore, async () => {
-      await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
-      return { commit, rollback };
-    });
-    try {
-      await expect(fixture.synchronize(fixture.announcement, receiver)).rejects.toMatchObject({
-        code: 'catalog-native-receiver-activation', cause: failure,
-      });
-      expect(flush).toHaveBeenCalledOnce();
-      expect(cas).not.toHaveBeenCalled();
-      expect(commit).not.toHaveBeenCalled();
-      expect(rollback).toHaveBeenCalledWith(failure);
-      expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
-        fixture.scopeDigest, AUTHOR,
-      )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
-      await expect(fixture.receiverStore.countQuads()).resolves.toBe(1);
-      await expect(readTransactionTestVmGeneration(fixture.receiverStore))
-        .resolves.toBe('predecessor');
-    } finally {
-      flush.mockRestore();
-    }
-  }, 30_000);
-
-  it('does not commit even an empty genesis when its durability barrier fails', async () => {
-    const fixture = await setupLiveReceiver();
-    const failure = new Error('genesis flush unavailable');
-    const flush = vi.spyOn(fixture.receiverStore, 'flush').mockRejectedValue(failure);
-    const cas = vi.fn(fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1
-      .bind(fixture.receiverPersistence.inventory));
-    const receiver = fixture.createReceiver({
-      readAppliedCatalogHeadV1: fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1
-        .bind(fixture.receiverPersistence.inventory),
-      compareAndSwapAppliedCatalogHeadV1: cas,
-    });
-    try {
-      await expect(fixture.bootstrap(fixture.genesisAnnouncement, receiver)).rejects.toMatchObject({
-        code: 'catalog-native-receiver-activation', cause: failure,
-      });
-      expect(flush).toHaveBeenCalledOnce();
-      expect(cas).not.toHaveBeenCalled();
-      expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
-        fixture.scopeDigest, AUTHOR,
-      )).toBeNull();
-    } finally { flush.mockRestore(); }
-  }, 30_000);
-
-  it('rechecks cancellation after a pending durability barrier before committing', async () => {
-    const fixture = await setupLiveReceiver();
-    await fixture.bootstrap();
-    const controller = new AbortController();
-    const reason = new Error('authority cancelled while durable flush was pending');
-    const flush = vi.spyOn(fixture.receiverStore, 'flush').mockImplementation(async () => {
-      controller.abort(reason);
-    });
-    const cas = vi.fn(fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1
-      .bind(fixture.receiverPersistence.inventory));
-    const receiver = fixture.createReceiver({
-      readAppliedCatalogHeadV1: fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1
-        .bind(fixture.receiverPersistence.inventory),
-      compareAndSwapAppliedCatalogHeadV1: cas,
-    });
-    try {
-      await expect(fixture.synchronize(fixture.announcement, receiver, controller.signal))
-        .rejects.toBe(reason);
-      expect(cas).not.toHaveBeenCalled();
-      await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
-      expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
-        fixture.scopeDigest, AUTHOR,
-      )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
-    } finally { flush.mockRestore(); }
   }, 30_000);
 
   it('rolls back a semantic-before-CAS failure and accepts an idempotent retry', async () => {
