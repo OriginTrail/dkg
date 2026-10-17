@@ -8375,12 +8375,14 @@ export class DKGPublisher implements Publisher {
 
   async prepareAssertionPromoteRecovery(
     contextGraphId: string, name: string, agentAddress: string,
-    opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean, beforeNewOperation?: () => Promise<void>,
+    opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean, beforeUncommittedAdmission?: () => Promise<void>,
   ): Promise<PromoteRecoveryAdmission> {
     return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, opts?.subGraphName,
       () => preparePromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts, inventoryRequired, this.promoteOwnershipReader,
         () => this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, opts?.subGraphName),
-        (seal, operationId) => this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName, operationId), beforeNewOperation));
+        (seal, operationId) => this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName, operationId), beforeUncommittedAdmission,
+        async seal => (await this.assertionScopedQuads(knowledgeAssetLayerGraphUri(contextGraphId,
+          MemoryLayer.SharedWorkingMemory, createGraphKnowledgeAssetScope(seal.kaUal!, seal.assertionVersion!), opts?.subGraphName))).length > 0));
   }
 
   private verifyCompletedAssertionPromote(contextGraphId: string, name: string, agentAddress: string,

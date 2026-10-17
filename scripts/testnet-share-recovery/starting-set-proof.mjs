@@ -1,3 +1,4 @@
+import { verifyInventoryProjections } from './inventory-projection-proof.mjs';
 import { verifyInventoryOperations } from './inventory-operation-proof.mjs';
 import { verifyInventoryScope } from './inventory-scope.mjs';
 import { assertUnambiguousSealFields } from './seal-cardinality.mjs';
@@ -36,7 +37,8 @@ const expected = names.map(name => {
   return {name, seal: entry.seal, sealDigest: entry.digest};
 });
 const operations = verifyInventoryOperations(campaign, names, inventory, rdf);
+const projections = verifyInventoryProjections(campaign, expected, inventory, catalog, rdf);
 const identities = verifyIdentityTuples(expected, catalog, inventory);
-if (!operations.exact || seals.size !== counts.main || !identities.exactInventoryIdentity || !identities.exactCatalogIdentity) throw Error('Starting identity set mismatch');
-fs.writeFileSync(`${dir}/starting-set-proof.json`,JSON.stringify({inventoryOperations:operations,inventoryExactIdentities:counts.initial,catalogExactIdentities:counts.initial,allSealDigestsAndVersionsMatch:true,preparedSeals:counts.main},null,2));
+if (!projections.exactInventory || !projections.exactCatalog || !operations.exact || seals.size !== counts.main || !identities.exactInventoryIdentity || !identities.exactCatalogIdentity) throw Error('Starting identity set mismatch');
+fs.writeFileSync(`${dir}/starting-set-proof.json`,JSON.stringify({inventoryProjections:projections,inventoryOperations:operations,inventoryExactIdentities:counts.initial,catalogExactIdentities:counts.initial,allSealDigestsAndVersionsMatch:true,preparedSeals:counts.main},null,2));
 console.log('Exact starting identity, seal and version sets verified.');

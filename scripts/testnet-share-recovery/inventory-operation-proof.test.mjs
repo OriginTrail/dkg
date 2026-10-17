@@ -1,3 +1,4 @@
+import { projectionProofFixture } from './projection-proof-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
@@ -36,13 +37,12 @@ test('actual main identity command rejects a self-consistent wrong operation and
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'inventory-operation-'));
   try {
     const root = path.join(cwd, '.tmp/2963/evidence/fixture'); fs.mkdirSync(path.join(root, 'final'), { recursive: true });
-    const f = fixture('operation-B'), row = f.capture.swm[0], cat = f.catalogs[0].rows[0];
-    const expected = [{ name: 'asset', sealDigest: row.seal_digest, seal: { kaUal: row.ka_ual, assertionVersion: '1', reservedKaId: cat.kaId } }];
+    const f = projectionProofFixture(campaign, 'asset', 'operation-B'), expected = f.expected;
     // The old tuple predicate alone incorrectly certifies exactly this internally consistent capture.
     assert.equal(verifyIdentityTuples(expected, f.catalogs[0].rows, f.capture.swm).exactInventoryIdentity, true);
     const write = (name, value) => fs.writeFileSync(path.join(root, name), JSON.stringify(value));
     for (const [name, value] of [['campaign-manifest.json', campaign], ['seal-proof.json', expected], ['final/inventory.json', f.capture],
-      ['final/catalogs.json', f.catalogs], ['final/-api-status.json', f.status], ['final/rdf.json', { results: { bindings: lifecycle } }],
+      ['final/catalogs.json', f.catalogs], ['final/-api-status.json', f.status], ['final/rdf.json', { results: { bindings: [...f.rdf.filter(r => !r.p.value.endsWith('/shareOperationId') && !r.p.value.endsWith('/promoteOperationIntent')), ...lifecycle] } }],
       ['fault-identity-proof.json', [{ name: 'asset', originalOperationId: 'operation-A', captureComplete: true, originalSealOperationAndContentPreserved: true }]]]) write(name, value);
     const run = spawnSync(process.execPath, [fileURLToPath(new URL('./identity-proof.mjs', import.meta.url)), 'fixture', 'final'], { cwd, encoding: 'utf8' });
     assert.equal(run.status, 1, run.stderr);

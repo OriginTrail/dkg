@@ -13,9 +13,9 @@ function start(phase: string, directory: string) {
 }
 
 describe('pre-signed unregistered authors through built worker and native persistence', () => {
-  it('rejects missing inventory signing before owner admission and WM consumption', async () => {
+  it.each(['reject', 'intent-reject'])('rejects missing inventory signing before owner admission and WM consumption (%s)', async phase => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-presigned-reject-'));
-    const process = start('reject', directory);
+    const process = start(phase, directory);
     try {
       await process.waitForExit(60_000);
       expect(JSON.parse(await readFile(join(directory, 'rejected.json'), 'utf8')))

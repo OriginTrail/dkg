@@ -76,7 +76,8 @@ export async function preparePromoteRecoveryBinding(
   opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean, readOwner: PromoteOwnershipReader,
   retireCompletion: () => Promise<void>,
   verifyCompleted?: (seal: AssertionSeal, operationId?: string) => Promise<AssertionPromoteResult | null>,
-  beforeNewOperation?: () => Promise<void>,
+  beforeUncommittedAdmission?: () => Promise<void>,
+  hasCommittedContent?: (seal: AssertionSeal) => Promise<boolean>,
 ): Promise<PromoteRecoveryAdmission> {
   const evidence = await readPromoteRecoveryEvidence(store, contextGraphId, name, agentAddress, opts);
   const { seal, sealDigest } = evidence;
@@ -102,7 +103,15 @@ export async function preparePromoteRecoveryBinding(
     await retireCompletion();
     throw recoveryBindingConflict('The existing share operation lacks a complete immutable intent');
   }
-  if (operation.kind === 'absent') await beforeNewOperation?.();
+  if (beforeUncommittedAdmission) {
+    // A failed pre-commit attempt can persist its intent without owning recovery.
+    // Content presence only exempts admission preflight; replay still validates the seal/payload.
+    const owner = operation.kind === 'complete'
+      ? await readOwner({ contextGraphId, assertionName: name, agentAddress, subGraphName: opts?.subGraphName }) : undefined;
+    const committed = operation.kind === 'complete' && (layer === 'SWM' || layer === 'VM'
+      || (!owner && await hasCommittedContent?.(seal)));
+    if (!owner && !committed) await beforeUncommittedAdmission();
+  }
   const intent = operation.kind === 'complete' ? operation.intent
     : createPromoteOperationIntent({ operationId: createShareOperationId(), timestampMs: Date.now(),
       publisherPeerId: opts?.publisherPeerId, confirmationRequired: opts?.confirmBeforeCommit !== undefined,

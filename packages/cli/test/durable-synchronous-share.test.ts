@@ -14,7 +14,7 @@ vi.mock('@origintrail-official/dkg-agent', () => import('../../agent/src/index.j
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, StoreOperationTimeoutError, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, PromoteAdmissionUncertainError } from '@origintrail-official/dkg-publisher';
+import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, CuratorUnconfirmedError, PromoteAdmissionUncertainError } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
@@ -80,6 +80,30 @@ async function serveShares(agent: Awaited<ReturnType<typeof setup>>['agent']) {
 afterEach(() => { daemonState.promoteWorkerAvailable = false; });
 
 describe('durable synchronous share ownership', () => {
+  it.each(['unowned-precommit', 'bound-precommit', 'committed-missing-layer'])('preflights only new uncommitted admission (%s)', async state => {
+    const { store, agent, publisher, finalized } = await setup();
+    const opts = { publisherPeerId: agent.node.peerId.toString(), confirmBeforeCommit: async () => { throw new CuratorUnconfirmedError(CG); } };
+    await expect(publisher.assertionPromote(CG, NAME, AUTHOR, opts)).rejects.toMatchObject({ code: 'CURATOR_UNCONFIRMED' });
+    const original = await publisher.prepareAssertionPromoteRecovery(CG, NAME, AUTHOR, opts, true);
+    expect('completedResult' in original).toBe(false);
+    if (state === 'bound-precommit') await agent.promoteQueue.enqueue({ contextGraphId: CG, assertionName: NAME, entities: 'all', agentAddress: AUTHOR, recoveryBinding: original as any });
+    if (state === 'committed-missing-layer') {
+      await publisher.assertionPromote(CG, NAME, AUTHOR, { ...opts, confirmBeforeCommit: async () => ({ applied: true }) });
+      await store.delete([{ subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"SWM"', graph: contextGraphMetaUri(CG) }]);
+    }
+    const before = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${contextGraphMetaUri(CG)}> { ?s ?p ?o } }`);
+    const preflight = vi.fn(async () => { throw new Error('author inventory signer unavailable'); });
+    const admission = publisher.prepareAssertionPromoteRecovery(CG, NAME, AUTHOR, opts, true, preflight);
+    if (state === 'unowned-precommit') await expect(admission).rejects.toThrow('author inventory signer unavailable');
+    else await expect(admission).resolves.toEqual(original);
+    expect(preflight).toHaveBeenCalledTimes(state === 'unowned-precommit' ? 1 : 0);
+    expect(await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${contextGraphMetaUri(CG)}> { ?s ?p ?o } }`)).toEqual(before);
+    expect(await store.countQuads(finalized.graphUri)).toBe(state === 'committed-missing-layer' ? 0 : 1);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(state === 'committed-missing-layer' ? 1 : 0);
+    expect(await agent.promoteQueue.list()).toHaveLength(state === 'bound-precommit' ? 1 : 0);
+    await store.close();
+  });
+
   it.each([{ entities: ['urn:subset'] }, { skipSeal: true }])('rejects contradictory untyped bound execution: %j', async invalid => {
     const { store, agent, finalized } = await setup();
     const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });

@@ -23,7 +23,7 @@ processes=source/'process-observations.jsonl'
 if processes.exists():write('process-observations.json',[json.loads(l) for l in processes.read_text().splitlines()])
 fault=pathlib.Path('.tmp/2963')/f'{arm}-home'/'2963-fault-restart-recovery.json'
 if fault.exists():write('fault.json',{k:v for k,v in json.loads(fault.read_text()).items() if k!='pid'})
-for name,keys in [('catalogs.json',['assertionCoordinate','kaId','assertionVersion','sealDigest']),('inventory.json',['assertion_coordinate','ka_ual','assertion_version_u64be','seal_digest','share_operation_id'])]:
+for name,keys in [('catalogs.json',['assertionCoordinate','kaId','assertionVersion','sealDigest','projectionId','projectionDigest','transfer']),('inventory.json',['assertion_coordinate','ka_ual','assertion_version_u64be','seal_digest','share_operation_id','projection_digest','public_triple_count_u64be','private_triple_count_u64be'])]:
  p=root/'restart-readback'/name
  if p.exists():
   rows=scope['catalogRows'] if name=='catalogs.json' else scope['rows'];write(name,[{k:r[k] for k in keys} for r in rows])

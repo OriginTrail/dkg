@@ -1,3 +1,4 @@
+import { projectionProofFixture } from './projection-proof-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { defineCampaign } from './campaign-manifest.mjs';
 import { createRequire } from 'node:module';
 import { collectInventoryScopes, encodeInventory, verifyInventoryScope } from './inventory-scope.mjs';
-import { inventoryScopeFixture, operationRowsFixture } from './inventory-scope-fixture.mjs';
+import { inventoryScopeFixture } from './inventory-scope-fixture.mjs';
 import { verifyIdentityTuples } from './identity-tuples.mjs';
 const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
 const Database = require('better-sqlite3');
@@ -83,12 +84,14 @@ test('scope proof rejects wrong author, stale authority, ambiguous/missing scope
 test('identity entry point recomputes current scope rather than trusting a stale flat inventory export', () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'inventory-scope-'));
   try {
-    const old = inventoryScopeFixture(campaign, [row], catalogRows, '0');
-    const current = inventoryScopeFixture(campaign, [], catalogRows, '1');
+    const payload = projectionProofFixture(campaign);
+    const expected = payload.expected;
+    const old = inventoryScopeFixture(campaign, payload.capture.swm, payload.catalogs[0].rows, '0');
+    const current = inventoryScopeFixture(campaign, [], payload.catalogs[0].rows, '1');
     const capture = { ...collect([...old.capture.scopes, ...current.capture.scopes], current.capture.applied), swm: old.capture.swm };
     const dir = path.join(cwd, '.tmp/2963/evidence/fixture'); fs.mkdirSync(path.join(dir, 'fixed-deadline'), { recursive: true });
     for (const [name, value] of [['campaign-manifest.json', { ...campaign, faults: [] }], ['seal-proof.json', expected], ['fault-identity-proof.json', []],
-      ['fixed-deadline/rdf.json', { results: { bindings: operationRowsFixture(campaign, 'asset') } }],
+      ['fixed-deadline/rdf.json', { results: { bindings: payload.rdf } }],
       ['fixed-deadline/inventory.json', capture], ['fixed-deadline/catalogs.json', current.catalogs], ['fixed-deadline/-api-status.json', current.status]]) {
       fs.writeFileSync(path.join(dir, name), JSON.stringify(value));
     }

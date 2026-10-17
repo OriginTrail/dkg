@@ -8,7 +8,7 @@ import { OxigraphStore } from '../../../storage/dist/index.js';
 import { buildAuthorAttestationTypedData, computeAuthorCatalogScopeDigestV1, computeSwmAuthorInventoryScopeDigestV1,
   createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, contextGraphAssertionUri,
   contextGraphMetaUri } from '../../../core/dist/index.js';
-import { computeFlatKCRootV10 } from '../../../publisher/dist/index.js';
+import { computeFlatKCRootV10, CuratorUnconfirmedError } from '../../../publisher/dist/index.js';
 import { durableSynchronousShare } from '../../dist/daemon/routes/durable-synchronous-share.js';
 import { createPromoteWorkerSupervisor } from '../../dist/daemon/worker/async-promote-worker.js';
 import { daemonState } from '../../dist/daemon/state.js';
@@ -39,7 +39,7 @@ const agent = await DKGAgent.create({ name: `unregistered-${phase}`, dataDir, st
     rfc64CatalogDeploymentProfile: { networkId, assertedAtChainId: '20430', assertedAtKav10Address: kav10 },
     rfc64PublicCatalogAutoPublish: { peers: [], catalogIssuerDelegationExpiresAt: '1893456000000' },
   }),
-  ...(['reject', 'legacy'].includes(phase) ? {} : { authorSigners: {
+  ...(['reject', 'intent-reject', 'legacy'].includes(phase) ? {} : { authorSigners: {
     addresses: [wallet.address], signerFor: async address => address.toLowerCase() === author ? wallet : undefined,
     firstSignerOf: async addresses => {
       const address = addresses.find(value => value.toLowerCase() === author);
@@ -99,9 +99,26 @@ if (phase === 'recover') {
   await agent.assertion.write(cg, name, quads, { agentAddress: author });
   await agent.assertion.finalize(cg, name, options);
   daemonState.promoteWorkerAvailable = true;
-  if (phase === 'reject') {
+  if (phase === 'intent-reject') {
+    await assert.rejects(agent.publisher.assertionPromote(cg, name, author, {
+      publisherPeerId: agent.node.peerId.toString(),
+      confirmBeforeCommit: async () => { throw new CuratorUnconfirmedError(cg); },
+    }), { code: 'CURATOR_UNCONFIRMED' });
+    const existing = await snapshot();
+    assert.ok(existing.bindings.some(r => r.p === 'http://dkg.io/ontology/promoteOperationIntent'));
+    assert.equal((await agent.promoteQueue.list({ contextGraphId: cg })).length, 0);
+    options.awaitCuratorAck = true;
+    agent.buildCuratorAckConfirmer = async () => async () => ({ applied: true });
+  }
+  if (phase === 'reject' || phase === 'intent-reject') {
     const before = await snapshot();
-    await assert.rejects(durableSynchronousShare(agent, cg, name, options), { code: 'KA_SHARE_INVENTORY_SIGNER_UNAVAILABLE' });
+    const failure = await durableSynchronousShare(agent, cg, name, options).catch(error => error);
+    if (failure.code !== 'KA_SHARE_INVENTORY_SIGNER_UNAVAILABLE') {
+      const jobs = await agent.promoteQueue.list({ contextGraphId: cg });
+      const wmGraph = knowledgeAssetLayerGraphUri(cg, MemoryLayer.WorkingMemory, createGraphKnowledgeAssetScope(`did:dkg:${networkId}/${author}/7`, '1'));
+      console.error(JSON.stringify({ phase, owners: jobs.length, states: jobs.map(j => j.state), wmTriples: await store.countQuads(wmGraph), swmTriples: await store.countQuads(payloadGraph), code: failure.cause?.code ?? failure.code }));
+    }
+    assert.equal(failure.code, 'KA_SHARE_INVENTORY_SIGNER_UNAVAILABLE');
     assert.equal((await agent.promoteQueue.list({ contextGraphId: cg })).length, 0);
     assert.deepEqual(await snapshot(), before);
     await record('rejected.json', { noOwner: true, wmAndSealUnchanged: true });
