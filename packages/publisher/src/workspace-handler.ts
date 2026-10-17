@@ -2079,7 +2079,7 @@ export class SharedMemoryHandler {
       const selfConsistent = await this.verifyAgentEnvelope(
         envelope, signedPayload, contextGraphId, [ethers.getAddress(envelope.agentAddress)], ctx, { requireLocalMembership: false },
       );
-      if (!selfConsistent) {
+      if (selfConsistent.kind !== 'verified') {
         return { accepted: false, reasonCode: 'SIG_VERIFY_FAILED', reason: 'public-CG envelope failed signature/freshness verification' };
       }
       // A public self-signed host-mode entry is later applied via host catchup

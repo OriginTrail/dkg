@@ -31,13 +31,15 @@ const RATIONED = { kind: 'unavailable', reason: SWM_WRITE_GATE_REFRESH_RATIONED_
 
 /**
  * A receiver whose canonical gate answers from `gates` in order (the last answer
- * repeats), and whose curator refresh answers `refresh`.
+ * repeats), whose curator refresh answers `refresh`, and whose roster revision
+ * moves on `rosterChanged()`.
  */
 function host(
   gates: ContextGraphAgentGateAuthority[],
   refresh: () => Promise<boolean> = async () => false,
 ) {
   let reads = 0;
+  let revision = 0;
   const resolveAgentGate = vi.fn<SwmWriteGateRefreshHost['resolveAgentGate']>(async () => {
     const gate = gates[Math.min(reads, gates.length - 1)];
     reads += 1;
@@ -45,8 +47,14 @@ function host(
     return gate;
   });
   const refreshMetaFromCurator = vi.fn<SwmWriteGateRefreshHost['refreshMetaFromCurator']>(refresh);
-  return { resolveAgentGate, refreshMetaFromCurator };
+  return {
+    resolveAgentGate,
+    refreshMetaFromCurator,
+    readRosterRevision: (cg: string) => `${cg}:${revision}`,
+    rosterChanged: () => { revision += 1; },
+  };
 }
+const unchangingRevision = () => 0;
 
 describe('SWM write gate refresh oracle: the second look', () => {
   it('a member added to the chain roster after the receiver last refreshed: the canonical gate admits it without a refresh', async () => {
@@ -118,6 +126,7 @@ describe('SWM write gate refresh oracle: the second look', () => {
         signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       }),
       refreshMetaFromCurator: async () => false,
+      readRosterRevision: unchangingRevision,
     };
     const oracle = createSwmWriteGateRefreshOracle(receiver, { timeoutMs: 20 });
 
@@ -135,6 +144,7 @@ describe('SWM write gate refresh oracle: the second look', () => {
       refreshMetaFromCurator: (_cg, { signal }) => new Promise((_resolve, reject) => {
         signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       }),
+      readRosterRevision: unchangingRevision,
     };
     const oracle = createSwmWriteGateRefreshOracle(receiver, { timeoutMs: 20 });
 
@@ -193,6 +203,48 @@ describe('SWM write gate refresh oracle: what one window remembers', () => {
     expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(4);
   });
 
+  it('a writer revoked after the fresh gate was learned is not re-admitted from memory: the roster revision voids it', async () => {
+    const receiver = host([available(CURATOR, MEMBER, JOINER), available(CURATOR, MEMBER)]);
+    const oracle = createSwmWriteGateRefreshOracle(receiver);
+
+    // An outsider's look warms the graph's fresh gate, which contains the writer.
+    await expect(oracle(CG, ethers.Wallet.createRandom().address, OTHER_PEER)).resolves.toMatchObject({ kind: 'available' });
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available', agentAddresses: [CURATOR, MEMBER, JOINER] });
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(1);
+
+    // The writer is revoked in the local metadata: the projected gate now
+    // rejects it and the oracle is asked again, within the window.
+    receiver.rosterChanged();
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available', agentAddresses: [CURATOR, MEMBER] });
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
+  });
+
+  it('a signer remembered as excluded is read again once the roster revision moves', async () => {
+    const receiver = host([available(CURATOR, MEMBER), available(CURATOR, MEMBER, JOINER)]);
+    const oracle = createSwmWriteGateRefreshOracle(receiver);
+
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ agentAddresses: [CURATOR, MEMBER] });
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ agentAddresses: [CURATOR, MEMBER] });
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(1);
+
+    receiver.rosterChanged();
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ agentAddresses: [CURATOR, MEMBER, JOINER] });
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
+  });
+
+  it('a roster change that lands during a look voids what the look learned', async () => {
+    const receiver = host([available(CURATOR, MEMBER, JOINER)]);
+    receiver.resolveAgentGate.mockImplementationOnce(async () => {
+      receiver.rosterChanged();
+      return available(CURATOR, MEMBER, JOINER);
+    });
+    const oracle = createSwmWriteGateRefreshOracle(receiver);
+
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
+  });
+
   it('an unavailable answer is not remembered', async () => {
     const receiver = host([
       { kind: 'unavailable', reason: 'chain-participant-authority-unavailable' },
@@ -229,6 +281,7 @@ describe('SWM write gate refresh oracle: what one window remembers', () => {
         return available(CURATOR, JOINER);
       }),
       refreshMetaFromCurator: async () => false,
+      readRosterRevision: unchangingRevision,
     };
     const oracle = createSwmWriteGateRefreshOracle(receiver);
 

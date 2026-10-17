@@ -1309,6 +1309,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         agentGateRefreshOracle: createSwmWriteGateRefreshOracle({
           resolveAgentGate: (cgId, options) => this.resolveContextGraphAgentGateAuthority(cgId, options),
           refreshMetaFromCurator: (cgId, options) => this.refreshMetaFromCurator(cgId, options),
+          readRosterRevision: (cgId) => this.contextGraphMetaProjection.peerGateRevision.read(cgId),
         }),
         // Same predicate the SENDER uses to decide plaintext vs encrypted SWM
         // (`resolveWorkspaceRecipientsGated`), so both sides of the wire stay

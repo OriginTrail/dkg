@@ -43,7 +43,9 @@ import {
  * retryable, which costs the receiver nothing and lets a member whose approval
  * raced the window land on the sender's next attempt. Within the window the
  * last fresh gate of a graph answers every signer it contains without a read,
- * and a signer it excluded is remembered.
+ * and a signer it excluded is remembered; both only while the graph's roster
+ * revision has not moved, so a revocation or an approval that reaches the local
+ * metadata is never overridden by what an earlier look saw.
  */
 export interface SwmWriteGateRefreshHost {
   /** The canonical agent gate, read fresh (no cached roster). */
@@ -56,6 +58,12 @@ export interface SwmWriteGateRefreshHost {
     contextGraphId: string,
     options: { signal: AbortSignal },
   ): Promise<boolean>;
+  /**
+   * The graph's roster revision: moves whenever a fact of its local roster
+   * (allowed, participant or revoked agents) may have changed. A memory of
+   * this oracle answers only while it is unchanged.
+   */
+  readRosterRevision(contextGraphId: string): number | string;
 }
 
 export interface SwmWriteGateRefreshOptions {
@@ -163,6 +171,8 @@ async function secondLook(
 
 interface Remembered<T> {
   readonly expiresAt: number;
+  /** The graph's roster revision when the value was learned. */
+  readonly revision: number | string;
   readonly value: T;
 }
 
@@ -191,15 +201,15 @@ export function createSwmWriteGateRefreshOracle(
   const excluded = new Map<string, Remembered<SwmAgentGateRefreshResult>>();
   const rations = new Map<string, Ration>();
 
-  const recall = <T>(memory: Map<string, Remembered<T>>, key: string): T | undefined => {
+  const recall = <T>(memory: Map<string, Remembered<T>>, key: string, revision: number | string): T | undefined => {
     const remembered = memory.get(key);
     if (remembered === undefined) return undefined;
-    if (remembered.expiresAt > now()) return remembered.value;
+    if (remembered.expiresAt > now() && remembered.revision === revision) return remembered.value;
     memory.delete(key);
     return undefined;
   };
-  const remember = <T>(memory: Map<string, Remembered<T>>, key: string, value: T): void => {
-    rememberBounded(memory, key, { expiresAt: now() + windowMs, value }, memoryMax);
+  const remember = <T>(memory: Map<string, Remembered<T>>, key: string, revision: number | string, value: T): void => {
+    rememberBounded(memory, key, { expiresAt: now() + windowMs, revision, value }, memoryMax);
   };
   /** Take one look from the ration of `key`, or refuse it. */
   const takeLook = (key: string, limit: number): boolean => {
@@ -217,9 +227,10 @@ export function createSwmWriteGateRefreshOracle(
   return async (contextGraphId, signerAddress, fromPeerId) => {
     const signer = signerAddress.toLowerCase();
     const signerKey = `${contextGraphId}\u0000${signer}`;
-    const freshGate = recall(freshGates, contextGraphId);
+    const revision = host.readRosterRevision(contextGraphId);
+    const freshGate = recall(freshGates, contextGraphId, revision);
     if (freshGate !== undefined && gateContains(freshGate, signer)) return freshGate;
-    const remembered = recall(excluded, signerKey);
+    const remembered = recall(excluded, signerKey, revision);
     if (remembered !== undefined) return remembered;
     const pending = inFlight.get(signerKey);
     if (pending !== undefined) return pending;
@@ -232,9 +243,11 @@ export function createSwmWriteGateRefreshOracle(
       .finally(() => { inFlight.delete(signerKey); });
     inFlight.set(signerKey, look);
     const result = await look;
+    // Remembered under the revision read before the look: a roster change that
+    // landed during it moves the revision past this one, so the memory is void.
     if (result.kind === 'available') {
-      remember(freshGates, contextGraphId, result);
-      if (!gateContains(result, signer)) remember(excluded, signerKey, result);
+      remember(freshGates, contextGraphId, revision, result);
+      if (!gateContains(result, signer)) remember(excluded, signerKey, revision, result);
     }
     return result;
   };
