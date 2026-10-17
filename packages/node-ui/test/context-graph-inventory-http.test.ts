@@ -71,7 +71,7 @@ it.each(['headers', 'body'])('bounds stalled identity %s so mutation completion 
   expect(listCalls()).toBe(2);
   try {
     await act(async () => { await vi.advanceTimersByTimeAsync(10_001); });
-    expect(outcome).toEqual(rows('healthy').contextGraphs);
+    expect(outcome).toEqual({ ok: true, contextGraphs: rows('healthy').contextGraphs });
     expect(latest.identityLoading).toBe(false);
     expect(latest.identityError).toContain('timed out');
     expect(signal?.aborted).toBe(true);
@@ -98,7 +98,7 @@ it('Retry starts fresh HTTP through the real wrapper/cache and keeps the new sna
   list = () => new Promise(resolve => { pending.push(resolve); });
   await mount();
   expect(listCalls()).toBe(1);
-  let retry!: Promise<void>;
+  let retry!: Promise<unknown>;
   await act(async () => { retry = latest.retry(); });
   try {
     expect(listCalls()).toBe(2);

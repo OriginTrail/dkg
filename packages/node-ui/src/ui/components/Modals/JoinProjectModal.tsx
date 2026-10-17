@@ -359,8 +359,9 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     cgId: string,
     fallback?: ContextGraph,
   ): Promise<ContextGraph | undefined> => {
-    const freshContextGraphs = await refreshContextGraphInventoryAfterMutation();
-    const graph = freshContextGraphs.find((candidate) => candidate.id === cgId) ?? fallback;
+    const inventory = await refreshContextGraphInventoryAfterMutation();
+    if (!inventory.ok) throw new Error(inventory.error);
+    const graph = inventory.contextGraphs.find((candidate) => candidate.id === cgId) ?? fallback;
     if (graph) activateContextGraph(graph);
     return graph;
   }, [activateContextGraph]);

@@ -2,6 +2,7 @@ import { randomUUID } from '../../../lib/randomUUID.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useJourneyStore } from '../../../stores/journey.js';
 import { useProjectsStore } from '../../../stores/projects.js';
+import { useContextGraphInventory } from '../../../hooks/useContextGraphInventory.js';
 import {
   importFile,
   type LocalAgentChatAttachmentRef,
@@ -95,8 +96,7 @@ export function PanelRight() {
   const localMessagesByConversationRef = useRef<Record<string, LocalAgentMessage[]>>({});
   const selectedIntegrationIdRef = useRef('openclaw');
   const selectedSessionIdRef = useRef<string | null>(getDefaultLocalAgentSessionId('openclaw'));
-  const availableProjects = useProjectsStore((state) => state.contextGraphs);
-  const projectsLoading = useProjectsStore((state) => state.loading);
+  const { contextGraphs: availableProjects, loading: projectsLoading } = useContextGraphInventory();
   const activeProjectId = useProjectsStore((state) => state.activeProjectId);
   const setActiveProject = useProjectsStore((state) => state.setActiveProject);
 

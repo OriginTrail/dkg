@@ -3,7 +3,7 @@ import type { ContextGraph } from '../stores/projects.js';
 import { belongsInMyProjectsSidebar, toSidebarIdentity, type AgentSidebarIdentity } from '../lib/contextGraphSidebar.js';
 import { useHiddenContextGraphIds } from './useHiddenContextGraphIds.js';
 import { useCurrentAgent } from './useCurrentAgent.js';
-import { useContextGraphInventory, refreshContextGraphInventory } from './useContextGraphInventory.js';
+import { useContextGraphInventory, refreshContextGraphInventory, type InventoryResult } from './useContextGraphInventory.js';
 
 /**
  * The user's "My Context Graphs" set — the EXACT same membership the
@@ -21,7 +21,7 @@ export function useMyContextGraphs(): {
   cgsLoading: boolean;
   cgsError: string | null;
   identityError: string | null;
-  retry: () => Promise<void>;
+  retry: () => Promise<InventoryResult>;
 } {
   const { contextGraphs, loading: cgsLoading, error: cgsError } = useContextGraphInventory();
   const { hidden } = useHiddenContextGraphIds();

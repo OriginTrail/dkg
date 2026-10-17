@@ -228,7 +228,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       }
 
       setProgress('Refreshing context graph list…');
-      await refreshContextGraphInventoryAfterMutation();
+      const inventory = await refreshContextGraphInventoryAfterMutation();
+      if (!inventory.ok) throw new Error(inventory.error);
 
       setActiveProject(result.created);
       openTab({ id: `project:${result.created}`, label: trimmedName, closable: true });

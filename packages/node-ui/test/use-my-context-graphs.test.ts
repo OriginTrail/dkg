@@ -218,6 +218,69 @@ describe('useMyContextGraphs (sidebar/dashboard membership parity)', () => {
     } finally { unsubscribe(); delete window.__DKG_TOKEN__; await h.unmount(); }
   });
 
+  it('all refresh callers follow the current typed outcome without waiting for superseded network IO', async () => {
+    fetchContextGraphsMock.mockResolvedValue({ contextGraphs: [] });
+    const { useMyContextGraphs, useProjectsStore } = await importHooks();
+    const { refreshContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+    const h = await renderHook(() => useMyContextGraphs());
+    let old!: (value: any) => void, newer!: (value: any) => void;
+    fetchContextGraphsMock.mockReturnValueOnce(new Promise(resolve => { old = resolve; }))
+      .mockReturnValueOnce(new Promise(resolve => { newer = resolve; }));
+    let result: unknown = 'pending';
+    const first = refreshContextGraphInventory(true).then(value => { result = value; });
+    try {
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { nodeEventHandler?.({ type: 'join_approved', data: {} }); });
+      const contextGraphs = [cg('current', { callerInvolved: true })];
+      await act(async () => { newer({ contextGraphs }); });
+      expect(result).toEqual({ ok: true, contextGraphs });
+      expect(useProjectsStore.getState().contextGraphs).toEqual(contextGraphs);
+      await act(async () => { old({ contextGraphs: [cg('old')] }); await first; });
+      expect(result).toEqual({ ok: true, contextGraphs });
+    } finally { old({ contextGraphs: [] }); newer({ contextGraphs: [] }); await first; await h.unmount(); }
+  });
+
+  it('returns the superseding failure directly while retaining the last good inventory', async () => {
+    const contextGraphs = [cg('retained', { callerInvolved: true })];
+    fetchContextGraphsMock.mockResolvedValue({ contextGraphs });
+    const { useMyContextGraphs, useProjectsStore } = await importHooks();
+    const { refreshContextGraphInventoryAfterMutation, refreshContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+    const h = await renderHook(() => useMyContextGraphs());
+    let old!: (value: any) => void;
+    fetchContextGraphsMock.mockReturnValueOnce(new Promise(resolve => { old = resolve; }));
+    let mutation!: ReturnType<typeof refreshContextGraphInventoryAfterMutation>;
+    try {
+      await act(async () => { mutation = refreshContextGraphInventoryAfterMutation(); });
+      fetchContextGraphsMock.mockRejectedValueOnce(new Error('list unavailable'));
+      await act(async () => { await refreshContextGraphInventory(true); });
+      expect(await mutation).toEqual({ ok: false, error: 'list unavailable' });
+      expect(useProjectsStore.getState().contextGraphs).toEqual(contextGraphs);
+      expect(useProjectsStore.getState().inventoryError).toBe('list unavailable');
+    } finally { old({ contextGraphs: [] }); await mutation; await h.unmount(); }
+  });
+
+  it('does not transfer mutation completion across credentials', async () => {
+    fetchContextGraphsMock.mockResolvedValue({ contextGraphs: [] });
+    window.__DKG_TOKEN__ = 'old-token';
+    const { useMyContextGraphs, useProjectsStore } = await importHooks();
+    const { refreshContextGraphInventoryAfterMutation, refreshContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+    const h = await renderHook(() => useMyContextGraphs());
+    let old!: (value: any) => void;
+    fetchContextGraphsMock.mockReturnValueOnce(new Promise(resolve => { old = resolve; }));
+    let mutation!: ReturnType<typeof refreshContextGraphInventoryAfterMutation>;
+    try {
+      await act(async () => { mutation = refreshContextGraphInventoryAfterMutation(); });
+      window.__DKG_TOKEN__ = 'new-token';
+      const contextGraphs = [cg('new-session', { callerInvolved: true })];
+      fetchContextGraphsMock.mockResolvedValue({ contextGraphs });
+      await act(async () => { await refreshContextGraphInventory(true); });
+      expect(await mutation).toEqual({ ok: false, error: 'Credentials changed while refreshing context graphs' });
+      expect(useProjectsStore.getState().contextGraphs).toEqual(contextGraphs);
+      await act(async () => { old({ contextGraphs: [cg('old-session')] }); });
+      expect(useProjectsStore.getState().contextGraphs).toEqual(contextGraphs);
+    } finally { old({ contextGraphs: [] }); delete window.__DKG_TOKEN__; await mutation; await h.unmount(); }
+  });
+
   it('mutation recovery follows a newer event refresh instead of returning stale inventory', async () => {
     fetchContextGraphsMock.mockResolvedValue({ contextGraphs: [cg('old', { callerInvolved: true })] });
     const { useMyContextGraphs } = await importHooks();
@@ -234,7 +297,8 @@ describe('useMyContextGraphs (sidebar/dashboard membership parity)', () => {
       await act(async () => { first({ contextGraphs: [cg('superseded', { callerInvolved: true })] }); });
       expect(settled).toBe(false);
       await act(async () => { second({ contextGraphs: [cg('current', { callerInvolved: true })] }); });
-      expect((await mutation).map(cg => cg.id)).toEqual(['current']);
+      const result = await mutation;
+      expect(result.ok && result.contextGraphs.map(cg => cg.id)).toEqual(['current']);
     } finally {
       first({ contextGraphs: [] }); second({ contextGraphs: [] });
       await mutation; await h.unmount();
@@ -251,7 +315,8 @@ describe('useMyContextGraphs (sidebar/dashboard membership parity)', () => {
     const mutation = refreshContextGraphInventoryAfterMutation();
     await h.unmount();
     reply({ contextGraphs: [cg('created', { callerInvolved: true })] });
-    expect((await mutation).map(cg => cg.id)).toEqual(['created']);
+    const result = await mutation;
+    expect(result.ok && result.contextGraphs.map(cg => cg.id)).toEqual(['created']);
   });
 
   it('coalesced inventory callers also await the associated identity refresh', async () => {
@@ -291,7 +356,7 @@ describe('useMyContextGraphs (sidebar/dashboard membership parity)', () => {
     fetchContextGraphsMock.mockReturnValueOnce(new Promise(resolve => { reply = resolve; }));
     fetchCurrentAgentMock.mockClear();
     try {
-      let retry!: Promise<void>;
+      let retry!: Promise<unknown>;
       await act(async () => { retry = h.current().retry(); });
       expect(fetchCurrentAgentMock).toHaveBeenCalledTimes(1);
       await act(async () => { reply({ contextGraphs: [cg('after-retry', { callerInvolved: true })] }); await retry; });

@@ -1,84 +1,80 @@
 import { useEffect } from 'react';
 import { api } from '../api-wrapper.js';
 import { currentApiToken } from '../lib/apiToken.js';
-import { useProjectsStore } from '../stores/projects.js';
+import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { subscribeNodeEvents } from './useNodeEvents.js';
 import { refreshCurrentAgent } from './useCurrentAgent.js';
 
+export type InventoryResult = { ok: true; contextGraphs: ContextGraph[] } | { ok: false; error: string };
+type InventoryRequest = {
+  promise: Promise<InventoryResult>;
+  settle: (result: InventoryResult | Promise<InventoryResult>) => void;
+};
+
 let consumers = 0;
 let mutationOwners = 0;
-let generation = 0;
 let authKey: string | undefined | null = null;
-let inFlight: Promise<void> | null = null;
+let active: InventoryRequest | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let unsubscribeEvents: (() => void) | null = null;
+const credentialsChanged: InventoryResult = { ok: false, error: 'Credentials changed while refreshing context graphs' };
 
-/** One request owner for the shared graph array, freshness and errors. */
-export function refreshContextGraphInventory(force = false): Promise<void> {
+/** Every caller follows the current same-credential workflow, including forced supersession. */
+export function refreshContextGraphInventory(force = false): Promise<InventoryResult> {
   const token = currentApiToken();
   if (authKey !== null && authKey !== token) {
-    generation++;
-    inFlight = null;
+    active?.settle(credentialsChanged);
+    active = null;
     useProjectsStore.setState({ contextGraphs: [], inventoryLoaded: false, inventoryError: null });
   }
   authKey = token;
-  if (inFlight && !force) return inFlight;
-  const identity = refreshCurrentAgent();
-  const request = ++generation;
+  if (active && !force) return active.promise;
+  const previous = active;
+  let settle!: InventoryRequest['settle'];
+  const promise = new Promise<InventoryResult>(resolve => { settle = resolve; });
+  const request = { promise, settle };
+  active = request;
+  // Promise adoption transfers all existing callers to the replacing workflow;
+  // they need not wait for its superseded network request to finish.
+  previous?.settle(promise);
   useProjectsStore.setState({ loading: true });
+  const identity = refreshCurrentAgent();
   const list = Promise.resolve().then(() => api.fetchContextGraphs({ fresh: force }))
-    .then(({ contextGraphs }) => {
-      if (request !== generation || token !== currentApiToken()) return;
+    .then(({ contextGraphs }): InventoryResult => {
       if (!Array.isArray(contextGraphs)) throw new Error('Invalid context graph list response');
-      useProjectsStore.setState({ contextGraphs, inventoryError: null, inventoryLoaded: true });
+      return { ok: true, contextGraphs };
     })
-    .catch(error => {
-      if (request !== generation || token !== currentApiToken()) return;
-      useProjectsStore.setState({ inventoryLoaded: true,
-        inventoryError: error instanceof Error ? error.message : String(error) });
-    })
-    .finally(() => {
-      if (request !== generation) return;
-      if (token !== currentApiToken() && consumers > 0) {
-        void refreshContextGraphInventory();
-      } else {
-        useProjectsStore.setState({ loading: false });
-      }
-    });
-  const promise = Promise.all([list, identity]).then(() => undefined).finally(() => {
-    if (request === generation) inFlight = null;
+    .catch((error): InventoryResult => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+  void Promise.all([list, identity]).then(([result]) => {
+    if (active !== request) return;
+    active = null;
+    if (token !== currentApiToken()) {
+      settle(credentialsChanged);
+      useProjectsStore.setState({ loading: false });
+      if (consumers > 0) void refreshContextGraphInventory();
+      return;
+    }
+    // The store and awaiters receive the same outcome. Failure retains the last
+    // successful graphs; callers never reconstruct completion from that cache.
+    useProjectsStore.setState(result.ok
+      ? { contextGraphs: result.contextGraphs, inventoryError: null, inventoryLoaded: true, loading: false }
+      : { inventoryError: result.error, inventoryLoaded: true, loading: false });
+    settle(result);
   });
-  inFlight = promise;
   return promise;
 }
 
-/** Mutation completion shares ordering, auth isolation, freshness and error state with Retry. */
-export async function refreshContextGraphInventoryAfterMutation() {
-  const token = currentApiToken();
+/** Keep the same workflow alive through modal unmount until its mutation completes. */
+export async function refreshContextGraphInventoryAfterMutation(): Promise<InventoryResult> {
   mutationOwners++;
-  try {
-    await refreshContextGraphInventory(true);
-    // An SSE/Retry can supersede this request. Wait for the current same-auth
-    // workflow before returning inventory to the mutation's navigation step.
-    for (;;) {
-      if (token !== currentApiToken()) throw new Error('Credentials changed while refreshing context graphs');
-      const current = inFlight;
-      if (!current) break;
-      await current;
-    }
-    const state = useProjectsStore.getState();
-    if (state.inventoryError) throw new Error(state.inventoryError);
-    return state.contextGraphs;
-  } finally {
-    mutationOwners--;
-    releaseIdleInventory();
-  }
+  try { return await refreshContextGraphInventory(true); }
+  finally { mutationOwners--; releaseIdleInventory(); }
 }
 
 function releaseIdleInventory() {
   if (consumers || mutationOwners) return;
-  generation++;
-  inFlight = null;
+  active?.settle({ ok: false, error: 'Context graph inventory has no remaining consumers' });
+  active = null;
   useProjectsStore.setState({ loading: false });
 }
 
@@ -105,8 +101,7 @@ function retainInventory() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
     document.removeEventListener('visibilitychange', refreshWhenVisible);
-    // Last consumer unmounted: invalidate stale replies and settle the shared
-    // flag even if the request never finishes. Chat must not remain disabled.
+    // Last consumer unmounted: release the request and settle the shared flag.
     releaseIdleInventory();
   };
 }

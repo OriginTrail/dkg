@@ -14,7 +14,8 @@
  * grows past ~10 projects.
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
+import type { ContextGraph } from '../stores/projects.js';
+import { useContextGraphInventory } from '../hooks/useContextGraphInventory.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryCounts } from './project/helpers.js';
@@ -45,7 +46,7 @@ const TS_PREDS = [
 ];
 
 export function MemoryStackView() {
-  const { contextGraphs } = useProjectsStore();
+  const { contextGraphs } = useContextGraphInventory();
   // Shared hidden-CG preference (same set as PanelLeft + Dashboard).
   const { hidden } = useHiddenContextGraphIds();
   const visible = useMemo(
