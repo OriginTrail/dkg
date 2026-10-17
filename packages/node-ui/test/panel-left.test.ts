@@ -118,6 +118,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
           { id: 'cg-1', name: 'My First CG', assetCount: 42, callerInvolved: true } as any,
         ],
         loading: false,
+        inventoryError: null,
+        inventoryLoaded: false,
         activeProjectId: null,
       });
       useLayoutStore.setState({
@@ -219,6 +221,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     apiFetchContextGraphsMock.mockImplementationOnce(() => new Promise(() => {}));
     const { container } = await renderPanel({ graphs: [], stage: 1 });
     expect(container.textContent).toContain('Loading context graphs');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(container.textContent).not.toContain('No context graphs yet');
   });
 
@@ -299,6 +302,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       useProjectsStore.setState({
         contextGraphs: [{ id: 'cg-x', name: 'Catalog Only CG', callerInvolved: false } as any],
         loading: false,
+        inventoryError: null,
+        inventoryLoaded: false,
         activeProjectId: null,
       });
       useLayoutStore.setState({
