@@ -49,11 +49,15 @@ import {
   type UnregisteredSubGraphResolution,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { setTimeout as delay } from 'node:timers/promises';
 import { rememberBounded } from './bounded-map.js';
 import { isBoundedOperationTimeoutError, runBoundedOperation, throwIfOperationAborted } from './bounded-operation.js';
 import { stripLiteral } from './dkg-agent-utils.js';
+import { shouldTriggerDhtWalk } from './p2p/messenger.js';
 import { runSyncSingleFlight, syncSingleFlightKey } from './sync-single-flight.js';
+import { isKnownRetryableSyncTransportInterruption } from './sync/error-tags.js';
 import { fetchFreshContextGraphMeta, type FreshMetaFetchAgent } from './sync/requester/fresh-meta-fetch.js';
+import { isSyncResponderSessionInvalidError } from './sync/requester/page-fetch.js';
 import { isKnownContextGraphUri } from './sync/requester/swm-target-executor.js';
 
 /** The most sub-graph registrations taken from one peer's `_meta`. */
@@ -77,6 +81,13 @@ export const SUB_GRAPH_RESOLUTION_MISS_COOLDOWN_MS = 30_000;
 export const SUB_GRAPH_RESOLUTION_FAILURE_COOLDOWN_MS = 5_000;
 /** Resolutions remembered at most; the oldest is forgotten first. */
 export const SUB_GRAPH_RESOLUTION_REMEMBERED_MISSES = 1024;
+/**
+ * The wait before a lookup asks again a peer whose answer broke off: up to
+ * this much in the first round, doubling each round up to
+ * {@link RETRY_MAX_DELAY_MS}, at least half of it (jittered).
+ */
+const RETRY_FIRST_DELAY_MS = 300;
+const RETRY_MAX_DELAY_MS = 2_000;
 
 // The terms `generateSubGraphRegistration` writes and the responder serves.
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -326,6 +337,8 @@ function resolutionStateOf(agent: object): PeerSubGraphResolutionState {
  * follows and did not create (the creator registers its own sub-graphs). One
  * resolution of a sub-graph runs at a time, and a write that comes meanwhile
  * shares it; one lookup of a graph runs at a time.
+ * A peer whose answer breaks off (its metadata session superseded, for one)
+ * is asked again after a short wait while the time lasts.
  * Never throws for a peer that cannot be asked, or for running out of its
  * `timeoutMs` (default {@link SUB_GRAPH_RESOLUTION_TIMEOUT_MS}), which bounds
  * the whole resolution; the outcome says what was found. A sub-graph that no
@@ -421,8 +434,16 @@ async function resolveWithinBudget(
 /**
  * Ask the graph's peers, the owner first, until one holds the sub-graph, and
  * register each sub-graph of the graph that a resolution waits for and the
- * answer holds. Runs as the graph's one lookup; stops once `signal` ends the
- * resolution.
+ * answer holds. A peer whose answer broke off is asked again in a later
+ * round, after a short jittered wait, until it answers; a peer that answered
+ * is not asked again. Runs as the graph's one lookup; stops once `signal`
+ * ends the resolution.
+ *
+ * An answer breaks off when the peer's metadata session for this node and
+ * the graph is superseded, for one: an ordinary durable sync round of the
+ * graph from the same peer opens a session of its own. The peer's refusal
+ * mostly reaches this node as a reset stream, so a retryable interruption of
+ * the transport counts too ({@link answerBrokeOff}).
  */
 async function lookUpPeers(
   agent: PeerSubGraphResolutionAgent,
@@ -440,29 +461,56 @@ async function lookUpPeers(
   const peerIds = await resolutionPeers(agent, contextGraphId, signal);
   let answered = 0;
   let lastFailure = '';
-  for (const peerId of peerIds) {
-    throwIfOperationAborted(signal);
-    let quads: readonly Quad[] | undefined;
-    try {
-      quads = await fetchPeerMeta(agent, ctx, peerId, contextGraphId, deadline, signal);
-    } catch (error) {
-      lastFailure = error instanceof Error ? error.message : String(error);
-      continue;
+  let asking = peerIds;
+  for (let round = 0; asking.length > 0; round += 1) {
+    if (round > 0) await delay(retryDelayMs(round), undefined, { signal, ref: false });
+    const brokenOff: string[] = [];
+    for (const peerId of asking) {
+      throwIfOperationAborted(signal);
+      let quads: readonly Quad[] | undefined;
+      try {
+        quads = await fetchPeerMeta(agent, ctx, peerId, contextGraphId, deadline, signal);
+      } catch (error) {
+        lastFailure = error instanceof Error ? error.message : String(error);
+        if (answerBrokeOff(error)) brokenOff.push(peerId);
+        continue;
+      }
+      if (quads === undefined) {
+        lastFailure = `peer ${peerId.slice(-8)} sent an incomplete answer`;
+        continue;
+      }
+      answered += 1;
+      const wanted = new Set(state.wanted.get(contextGraphId)).add(subGraphName);
+      const found = readRequestedPeerSubGraphRegistrations(contextGraphId, quads, wanted);
+      await registerPeerSubGraphs(agent, contextGraphId, found, peerId, ctx);
+      if (found.some((registration) => registration.name === subGraphName)
+        && await hasSubGraphRegistration(agent.store, contextGraphId, subGraphName)) {
+        return { registered: true };
+      }
     }
-    if (quads === undefined) {
-      lastFailure = `peer ${peerId.slice(-8)} sent an incomplete answer`;
-      continue;
-    }
-    answered += 1;
-    const wanted = new Set(state.wanted.get(contextGraphId)).add(subGraphName);
-    const found = readRequestedPeerSubGraphRegistrations(contextGraphId, quads, wanted);
-    await registerPeerSubGraphs(agent, contextGraphId, found, peerId, ctx);
-    if (found.some((registration) => registration.name === subGraphName)
-      && await hasSubGraphRegistration(agent.store, contextGraphId, subGraphName)) {
-      return { registered: true };
-    }
+    asking = brokenOff;
   }
   return { registered: false, asked: peerIds.length, answered, lastFailure };
+}
+
+/**
+ * Whether a fetch that failed with `error` broke off a peer's answer, so that
+ * asking again can help: a session the peer refused (its own words, when they
+ * get through) or a retryable interruption of the transport. A peer this node
+ * found no address for is not asked again within the lookup.
+ */
+function answerBrokeOff(error: unknown): boolean {
+  if (isSyncResponderSessionInvalidError(error)) return true;
+  // The failures that start the messenger's DHT walk are the ones in which
+  // the dialer found no address for the peer.
+  return isKnownRetryableSyncTransportInterruption(error)
+    && !shouldTriggerDhtWalk(error instanceof Error ? error.message : String(error));
+}
+
+/** The wait before round `round` (1 and up) of a lookup asks again the peers whose answer broke off. */
+function retryDelayMs(round: number): number {
+  const ceiling = Math.min(RETRY_MAX_DELAY_MS, RETRY_FIRST_DELAY_MS * 2 ** (round - 1));
+  return ceiling / 2 + Math.random() * (ceiling / 2);
 }
 
 /** Note that a resolution waits for `subGraphName`; the returned function ends that. */
