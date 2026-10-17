@@ -310,6 +310,8 @@ export interface PromoteTerminalJobClearer {
 }
 
 export interface AsyncPromoteQueueConfig {
+  /** Queue admission budget, including mutex wait. Defaults to 10 seconds. */
+  admissionTimeoutMs?: number;
   /** Defaults to `urn:dkg:promote-queue:control-plane` per RFC §4.1. */
   graphUri?: string;
   /** Defaults to 5 — promote retries are cheap. RFC §4.2. */
@@ -345,10 +347,12 @@ export class PromoteJobConflictError extends Error {
   constructor(
     readonly existingJobId: string,
     readonly key: { contextGraphId: string; subGraphName?: string; assertionName: string; agentAddress?: string },
+    readonly observedAdmission = false,
   ) {
     const lane = key.agentAddress ? `, agentAddress=${key.agentAddress}` : '';
     super(
-      `Promote job already active for (${key.contextGraphId}, ${key.subGraphName ?? '<no-sub>'}, ${key.assertionName}${lane}): ${existingJobId}`,
+      observedAdmission ? `Previously observed share admission: ${existingJobId}; inspect job status for its current state`
+      : `Promote job already active for (${key.contextGraphId}, ${key.subGraphName ?? '<no-sub>'}, ${key.assertionName}${lane}): ${existingJobId}`,
     );
   }
 }

@@ -1,3 +1,4 @@
+import { promoteConflictResponse } from './promote-admission-response.js';
 import { partialDurableShareFailure, classifySynchronousShareFailure, synchronousShareFailureDecision } from './durable-share-response.js';
 import { durableSynchronousShare, synchronousShareSuccessBody } from './durable-synchronous-share.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
@@ -1445,10 +1446,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {
-          return jsonResponse(res, 409, {
-            error: err.message,
-            existingJobId: err.existingJobId,
-          });
+          return jsonResponse(res, 409, promoteConflictResponse(err));
         }
         if (
           err.message?.includes("required") ||
