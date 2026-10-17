@@ -1142,18 +1142,14 @@ export class SharedMemoryHandler {
 
       if (agentGateAddresses !== null) {
         const verdict = await this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, agentGateAddresses, ctx, {
-          // LU-6 host-catchup replay (PR #610 Codex round-2 #1): the 5-minute
-          // `GOSSIP_ENVELOPE_FRESHNESS_MS` window protects live gossip against
-          // replay, but a member that comes online hours/days after a curator
-          // wrote to SWM legitimately replays far older envelopes. Skipping the
-          // check on trusted replays is safe: the signature + decryption chain
-          // still verifies, and host catalog `seqno` monotonicity prevents
-          // re-applying already-seen entries.
+          // LU-6 host-catchup replay (PR #610 Codex round-2 #1): the 5-minute `GOSSIP_ENVELOPE_FRESHNESS_MS`
+          // window protects live gossip against replay, but a member that comes online hours/days after a curator
+          // wrote to SWM legitimately replays far older envelopes. Skipping the check on trusted replays is safe: the
+          // signature + decryption chain still verifies, and host catalog `seqno` monotonicity prevents re-applying.
           skipTimestampFreshness: trustedReplay,
         });
         if (verdict.kind !== 'verified') {
-          // Logged at WARN already. An invalid envelope is permanent; an authenticated
-          // signer the projected gate lacked gets one fresh look (`swm-write-gate-refresh.ts`).
+          // Logged at WARN. Invalid is permanent; a signer the projected gate lacked gets one fresh look.
           const retry = await retryAgentEnvelopeWithRefreshedGate({
             verdict, oracle: this.agentGateRefreshOracle, contextGraphId, fromPeerId, trustedReplay, allowedPeers,
             localAgentAddresses: this.localAgentAddresses?.bind(this),
@@ -2234,8 +2230,7 @@ export class SharedMemoryHandler {
       return AGENT_ENVELOPE_INVALID;
     }
 
-    // Authenticated. Roster admission is separate so a fresh gate can re-admit
-    // the same signer without a second signature verification.
+    // Authenticated; admission is separate so a fresh gate can re-admit the signer without verifying it again.
     return admitAgentSigner({
       signer: recovered,
       contextGraphId,
@@ -2317,10 +2312,8 @@ export class SharedMemoryHandler {
       .map(stripRdfLiteral);
   }
 
-  /**
-   * Revoked tombstones, lowercased: the projection when it carried the field, otherwise
-   * `_meta`. Applied to whichever source an allowlist comes from (a projected revocation kicks a store member).
-   */
+  /** Revoked tombstones, lowercased: the projection when it carried the field, otherwise `_meta`.
+   * Applied to whichever source an allowlist comes from (a projected revocation kicks a store member). */
   private async getContextGraphRevokedAgents(
     contextGraphId: string,
     projected: ContextGraphMetaOracleRecord | null | undefined,
