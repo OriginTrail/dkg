@@ -1,3 +1,4 @@
+import { assessAssertionPromote, assertionPromoteRecoveryRequired } from './assertion-promote-assessment.js';
 import { canResumeCompletedSwmPull, clearAssertionSealPredicates } from './assertion-pull-recovery.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
@@ -98,7 +99,6 @@ import {
 import { hasSubGraphRegistration, requireSubGraphRegistration, type UnregisteredSubGraphResolver } from './sub-graph-registration.js';
 import {
   resolveKnowledgeAssetOperationPublicQuads,
-  resolveKnowledgeAssetWorkspaceHead,
   storeWorkspaceOperationPublicQuads,
   tryResolveKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
@@ -7021,106 +7021,14 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     subGraphName?: string,
   ): Promise<void> {
-    const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const [operationIdResult, intentResult, layerResult] = await Promise.all([
-      this.store.query(
-        `SELECT ?id WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
-          <${assertSafeIri(lifecycle)}> <${SHARE_OPERATION_ID_PRED}> ?id
-        } } LIMIT 2`,
-      ),
-      this.store.query(
-        `ASK { GRAPH <${assertSafeIri(metaGraph)}> {
-          <${assertSafeIri(lifecycle)}> <${PROMOTE_OPERATION_INTENT_PRED}> ?intent
-        } }`,
-      ),
-      this.store.query(
-        `SELECT ?layer WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
-          <${assertSafeIri(lifecycle)}> <http://dkg.io/ontology/memoryLayer> ?layer
-        } } LIMIT 2`,
-      ),
-    ]);
-    const operationIdBindings = operationIdResult.type === 'bindings'
-      ? operationIdResult.bindings
-      : undefined;
-    const hasOperationId = operationIdBindings === undefined || operationIdBindings.length > 0;
-    const hasIntent = intentResult.type !== 'boolean' || intentResult.value;
-    const layer = layerResult.type === 'bindings' && layerResult.bindings.length === 1
-      ? stripOptionalLiteral(layerResult.bindings[0]?.['layer'])
-      : undefined;
-    if (layer === MemoryLayer.VerifiableMemory) return;
-    if (!hasOperationId && !hasIntent && layer !== MemoryLayer.SharedWorkingMemory) return;
-    if (layer === MemoryLayer.SharedWorkingMemory) {
-      const rawOperationId = operationIdBindings?.length === 1
-        ? operationIdBindings[0]?.['id']
-        : undefined;
-      let operationId: string | undefined;
-      try {
-        const parsed: unknown = rawOperationId === undefined
-          ? undefined
-          : JSON.parse(rawOperationId);
-        operationId = typeof parsed === 'string' && parsed.length > 0 ? parsed : undefined;
-      } catch {
-        operationId = undefined;
-      }
-      const sealSubject = contextGraphAssertionUri(
-        contextGraphId,
-        agentAddress,
-        name,
-        subGraphName,
-      );
-      const sealResult = await this.store.query(
-        `CONSTRUCT { <${assertSafeIri(sealSubject)}> ?p ?o } WHERE {
-          GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(sealSubject)}> ?p ?o }
-        }`,
-      );
-      const seal = parseAssertionSealQuads(
-        sealResult.type === 'quads' ? sealResult.quads : [],
-        sealSubject,
-      );
-      // A completed promote consumes its provisional lifecycle pointer. The
-      // monotonic SWM head is then the authoritative recovery pointer. Resolve
-      // it only for the clean completed shape; an intent without its matching
-      // lifecycle ID remains corrupt and must fail closed below.
-      if (
-        !operationId
-        && !hasOperationId
-        && !hasIntent
-        && seal?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
-        && seal.kaUal
-      ) {
-        const head = await resolveKnowledgeAssetWorkspaceHead({
-          store: this.store,
-          graphManager: this.graphManager,
-          contextGraphId,
-          kaUal: seal.kaUal,
-          subGraphName,
-        });
-        operationId = head?.shareOperationId;
-      }
-      if (
-        operationId
-        && seal?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
-        && seal.kaUal
-        && seal.assertionVersion
-        && await this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName)
-        && await this.hasDurableAssertionPromoteTail(
-          contextGraphId,
-          operationId,
-          seal.kaUal,
-          seal.assertionVersion,
-          subGraphName,
-        )
-      ) {
-        return;
-      }
-    }
-    throw Object.assign(
-      new Error(
-        `Assertion "${name}" has an unfinished promote; retry assertionPromote before mutating its draft`,
-      ),
-      { code: 'KA_PROMOTE_RECOVERY_REQUIRED' },
-    );
+    const assessment = await this.assessAssertionPromote(contextGraphId, name, agentAddress, subGraphName);
+    if (assessment.status === 'recovery-required') throw assertionPromoteRecoveryRequired(name);
+  }
+
+  private assessAssertionPromote(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string) {
+    return assessAssertionPromote({ store: this.store, graphManager: this.graphManager,
+      contextGraphId, name, agentAddress, subGraphName,
+      hasDurableTail: (id, ual, version) => this.hasDurableAssertionPromoteTail(contextGraphId, id, ual, version, subGraphName) });
   }
 
   private async hasDurableAssertionPromoteTail(
@@ -8228,13 +8136,9 @@ export class DKGPublisher implements Publisher {
   }> {
     const subGraphName = opts?.subGraphName;
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
-    let interruptedPromote: unknown;
-    try {
-      await this.assertNoUnfinishedAssertionPromote(contextGraphId, name, agentAddress, subGraphName);
-    } catch (error) {
-      if (sourceLayer !== 'swm' || (error as { code?: string })?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') throw error;
-      interruptedPromote = error;
-    }
+    const promote = await this.assessAssertionPromote(contextGraphId, name, agentAddress, subGraphName);
+    const needsRecoveryProof = promote.status === 'recovery-required';
+    if (needsRecoveryProof && sourceLayer !== 'swm') throw assertionPromoteRecoveryRequired(name);
     const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const loadedSeals = await this.loadAssertionSeals(
       contextGraphId,
@@ -8243,7 +8147,7 @@ export class DKGPublisher implements Publisher {
       subGraphName,
     );
     if (loadedSeals.length === 0) {
-      if (interruptedPromote) throw interruptedPromote;
+      if (needsRecoveryProof) throw assertionPromoteRecoveryRequired(name);
       throw Object.assign(
         new Error(
           `Cannot pull "${name}" from ${sourceLayer.toUpperCase()}: rootless mutation requires a finalized v2 assertion seal`,
@@ -8310,14 +8214,14 @@ export class DKGPublisher implements Publisher {
           sourcePrivateQuads,
           `${sourceLayer}-memory`,
         );
-        if (interruptedPromote && (loadedSeal.subject !== this.assertionRecoverySealSubject(
+        if (needsRecoveryProof && (loadedSeal.subject !== this.assertionRecoverySealSubject(
           contextGraphId, name, agentAddress, subGraphName,
         ) || !await canResumeCompletedSwmPull({
           store: this.store, graphManager: this.graphManager, contextGraphId, name, agentAddress, subGraphName,
-          archivedSeal: seal, archivedQuads: loadedSeal.quads,
+          promote, archivedSeal: seal, archivedQuads: loadedSeal.quads,
           activeSubjects: await this.activeAssertionSealSubjects(contextGraphId, name, agentAddress, subGraphName),
           normalizedPublicQuads: candidatePayload.normalizedPublicQuads,
-        }))) throw interruptedPromote;
+        }))) continue;
         selectedSeal = loadedSeal;
         selectedScope = scope;
         validated = candidatePayload;
@@ -8328,7 +8232,8 @@ export class DKGPublisher implements Publisher {
     }
 
     if (!selectedSeal || !selectedScope || !validated) {
-      if (interruptedPromote || candidateError) throw interruptedPromote || candidateError;
+      if (needsRecoveryProof) throw assertionPromoteRecoveryRequired(name);
+      if (candidateError) throw candidateError;
       if (sawLegacySeal) throw new LegacyKnowledgeAssetReadOnlyError();
       throw Object.assign(
         new Error(

@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
-  ASSERTION_SEAL_PREDICATES, MemoryLayer, assertSafeIri, assertionLifecycleUri,
+  ASSERTION_SEAL_PREDICATES, MemoryLayer, assertSafeIri,
   contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri,
   type AssertionSeal,
 } from '@origintrail-official/dkg-core';
-import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs,
   type GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { parsePromoteOperationIntent } from './promote-operation-intent.js';
 import { resolveKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 
-const DKG = 'http://dkg.io/ontology/';
+import { lifecycleTerms, lifecycleLiteral, type AssertionPromoteAssessment } from './assertion-promote-assessment.js';
 const sealPredicates = new Set<string>(Object.values(ASSERTION_SEAL_PREDICATES));
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 
@@ -41,22 +40,16 @@ export async function clearAssertionSealPredicates(
 export async function canResumeCompletedSwmPull(input: {
   store: TripleStore; graphManager: GraphManager; contextGraphId: string;
   name: string; agentAddress: string; subGraphName?: string;
-  archivedSeal: AssertionSeal; archivedQuads: readonly Quad[];
+  promote: AssertionPromoteAssessment; archivedSeal: AssertionSeal; archivedQuads: readonly Quad[];
   activeSubjects: readonly string[]; normalizedPublicQuads: readonly Quad[];
 }): Promise<boolean> {
-  const { store, graphManager, contextGraphId, name, agentAddress, subGraphName,
+  const { store, graphManager, contextGraphId, subGraphName,
     archivedSeal: seal } = input;
   if (!seal.kaUal || !seal.assertionVersion) return false;
   const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
   const meta = assertSafeIri(contextGraphMetaUri(contextGraphId));
-  const lifecycle = assertSafeIri(assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName));
-  const rows = await store.query(`SELECT ?p ?o WHERE { GRAPH <${meta}> { <${lifecycle}> ?p ?o } }`);
-  if (rows.type !== 'bindings') return false;
-  const terms = (predicate: string) => rows.bindings.filter(row => row['p'] === `${DKG}${predicate}`);
-  const literal = (predicate: string) => {
-    const values = terms(predicate);
-    return values.length === 1 ? parseRdfLiteralTerm(values[0]?.['o'] ?? '')?.value : undefined;
-  };
+  const terms = (predicate: string) => lifecycleTerms(input.promote, predicate);
+  const literal = (predicate: string) => lifecycleLiteral(input.promote, predicate);
   if (literal('memoryLayer') !== MemoryLayer.SharedWorkingMemory
     || literal('swmShareComplete') !== 'true'
     || literal('reservedUal') !== scope.ual

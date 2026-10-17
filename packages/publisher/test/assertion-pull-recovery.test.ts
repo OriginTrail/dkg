@@ -14,9 +14,10 @@ const content = (quads: { subject: string; predicate: string; object: string }[]
 const DKG = 'http://dkg.io/ontology/';
 const lifecycle = assertionLifecycleUri(CG, AUTHOR, NAME);
 async function inventory(store: OxigraphStore) {
-  const result = await store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }');
-  if (result.type !== 'quads') throw new Error('Fixture inventory unavailable');
-  return result.quads.map(q => JSON.stringify(q)).sort();
+  // sparql-scan-allow: R2 -- Complete snapshot of this small, isolated test fixture only.
+  const result = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }');
+  if (result.type !== 'bindings') throw new Error('Fixture inventory unavailable');
+  return result.bindings.map(q => JSON.stringify([q.g, q.s, q.p, q.o])).sort();
 }
 async function replace(store: OxigraphStore, graph: string, subject: string, predicate: string, object?: string) {
   await store.deleteByPattern({ graph, subject, predicate });
@@ -24,6 +25,17 @@ async function replace(store: OxigraphStore, graph: string, subject: string, pre
 }
 
 describe('interrupted SWM pull recovery', () => {
+  it.each(['copy', 'move'])('inventory detects %s of identical content across SWM and WM', async action => {
+    const store = new OxigraphStore();
+    const { finalized } = await seedRecoveryAsset(store);
+    const before = await inventory(store);
+    const quad = finalized.publicQuads[0]!;
+    await store.insert([{ ...quad, graph: finalized.graphUri }]);
+    if (action === 'move') await store.delete([{ ...quad, graph: finalized.sharedGraphUri }]);
+    expect(await inventory(store)).not.toEqual(before);
+    await store.close();
+  });
+
   it.each(RECOVERY_PREDICATES.map((_, index) => index + 1))(
     'recovers after %i legacy active-seal predicate deletions with a fresh publisher', async deletedCount => {
       const store = new OxigraphStore();
@@ -196,12 +208,24 @@ describe('interrupted SWM pull recovery', () => {
     const store = new OxigraphStore();
     const { publisher, finalized } = await seedRecoveryAsset(store);
     const unrelated: Quad = { subject: RECOVERY_SUBJECT, predicate: 'urn:test:annotation', object: '"keep"', graph: RECOVERY_META };
-    await store.insert([unrelated]);
+    const active = await store.query(`CONSTRUCT { <${RECOVERY_SUBJECT}> ?p ?o } WHERE {
+      GRAPH <${RECOVERY_META}> { <${RECOVERY_SUBJECT}> ?p ?o } }`);
+    if (active.type !== 'quads') throw new Error('Missing active seal');
+    const sealQuads = active.quads.filter(q => RECOVERY_PREDICATES.includes(q.predicate));
+    expect(sealQuads.length).toBeGreaterThan(0);
+    await store.insert([unrelated, ...sealQuads.map(q => ({ ...q, subject: finalized.graphUri, graph: RECOVERY_META }))]);
     const update = vi.spyOn(store, 'update');
     await publisher.assertionPullFrom(CG, NAME, AUTHOR, 'swm');
     const clears = update.mock.calls.filter(([, options]) => options?.source === 'publisher.pullFrom.clearActiveSeal');
     expect(clears).toHaveLength(1);
-    expect(clears[0]![0]).toContain(finalized.graphUri);
+    for (const subject of [RECOVERY_SUBJECT, finalized.graphUri]) {
+      const remaining = await store.query(`SELECT ?p ?o WHERE { GRAPH <${RECOVERY_META}> { <${subject}> ?p ?o } }`);
+      if (remaining.type !== 'bindings') throw new Error('Missing metadata query result');
+      expect(remaining.bindings.filter(row => RECOVERY_PREDICATES.includes(row['p']!))).toEqual([]);
+    }
+    await expect(publisher.assertionWrite(CG, NAME, AUTHOR, [
+      { subject: 'urn:test:next-draft', predicate: 'urn:test:value', object: '"editable"', graph: '' },
+    ])).resolves.toBeUndefined();
     expect(await store.query(`ASK { GRAPH <${RECOVERY_META}> { <${RECOVERY_SUBJECT}> <urn:test:annotation> "keep" } }`)).toMatchObject({ type: 'boolean', value: true });
     vi.restoreAllMocks();
     await store.close();
