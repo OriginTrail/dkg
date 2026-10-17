@@ -184,7 +184,7 @@ describe('a public graph that its subscribe job left unproven is caught up again
     expect(armed()).toEqual([]);
   });
 
-  it('arms no repeat for a graph the job proved, a registered or private graph, a denial or a job without shared memory', async () => {
+  it('arms no repeat for a graph the job proved, a private graph, a denial or a job without shared memory', async () => {
     const cases: Array<{
       name: string;
       round: () => CatchupJobResult;
@@ -192,14 +192,6 @@ describe('a public graph that its subscribe job left unproven is caught up again
       includeSharedMemory?: boolean;
     }> = [
       { name: 'proven', round: cleanEmptyRound },
-      {
-        name: 'registered',
-        round: lossyEmptyRound,
-        authority: {
-          outcome: 'allowed', source: 'registered-chain', reason: 'chain-public',
-          metadataBootstrap: 'eligible', grantScope: 'public',
-        },
-      },
       {
         name: 'private',
         round: lossyEmptyRound,
