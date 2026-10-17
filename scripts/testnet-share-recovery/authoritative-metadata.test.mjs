@@ -106,6 +106,13 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
       assert.equal(invalidProof.assets[0].finalOperationValid, false);
       assert.deepEqual(invalidProof.operationErrors, [name]);
     }
+    for (const term of ['s', 'p']) {
+      const fields = new Set(['state', 'memoryLayer', 'swmShareComplete', 'swmCurrentAssertion', 'assertionGraph'].map(p => 'http://dkg.io/ontology/' + p));
+      const invalid = metadata.map(r => r.s.value === life && fields.has(r.p.value) ? { ...r, [term]: { ...r[term], type: 'bnode' } } : r);
+      write('fixed-deadline/rdf.json', rdf([...invalid, ...payload, ...operation]));
+      const proof = run().proof;
+      assert.deepEqual(proof.lifecycleErrors, [name]); assert.equal(proof.assets[0].finalOperationValid, true);
+    }
     const wmPayload = payload.map(r => ({ ...r, g: { type: 'uri', value: swmGraph.replace('_shared_memory', '_working_memory') } }));
     write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...wmPayload]));
     assert.deepEqual(run().proof.contentErrors, [name]);

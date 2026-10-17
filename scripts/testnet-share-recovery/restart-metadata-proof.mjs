@@ -26,7 +26,7 @@ export function verifyRestartMetadata(fault, rows) {
   const rootPointer = root === undefined ? undefined : JSON.stringify(capturedTermIdentity(root)[1]);
   const graph = fault.intendedMetadataInsert.find(q => q.predicate === DKG + 'assertionGraph')?.object;
   const one = (predicate, expected) => {
-    const found = metadata.filter(r => r.s.value === lifecycle && r.p.value === DKG + predicate);
+    const found = metadata.filter(r => r.s.type === 'uri' && r.s.value === lifecycle && r.p.type === 'uri' && r.p.value === DKG + predicate);
     return expected !== undefined && found.length === 1 && sameCapturedTerm(expected, found[0].o);
   };
   const lifecycleComplete = !!lifecycle && one('state', '"promoted"') && one('memoryLayer', '"SWM"')

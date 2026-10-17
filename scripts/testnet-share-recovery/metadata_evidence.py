@@ -5,7 +5,8 @@ from collections import defaultdict
 def index_authoritative_metadata(rows, metadata_graph):
     index = defaultdict(list)
     for row in rows:
-        if row['g']['type'] == 'uri' and row['g']['value'] == metadata_graph:
+        if (row['g']['type'] == 'uri' and row['g']['value'] == metadata_graph
+                and row['s']['type'] == 'uri' and row['p']['type'] == 'uri'):
             index[row['s']['value']].append(row)
     return index
 

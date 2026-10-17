@@ -1,3 +1,4 @@
+import type { PromoteOwnershipReader } from './async-promote-ownership.js';
 import { readAssertionPromoteEvidence } from './assertion-promote-evidence.js';
 import {
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
@@ -72,7 +73,7 @@ async function readPromoteRecoveryEvidence(
 /** Called under the lifecycle lock; only admission may create a new intent. */
 export async function preparePromoteRecoveryBinding(
   store: TripleStore, contextGraphId: string, name: string, agentAddress: string,
-  opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean,
+  opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean, readOwner: PromoteOwnershipReader,
   retireCompletion: () => Promise<void>,
   verifyCompleted?: (seal: AssertionSeal, operationId?: string) => Promise<AssertionPromoteResult | null>,
 ): Promise<PromoteRecoveryAdmission> {
@@ -87,6 +88,12 @@ export async function preparePromoteRecoveryBinding(
     throw error;
   }
   if ((operation.kind === 'legacy' || (operation.kind === 'absent' && layer === 'VM')) && verifyCompleted) {
+    const owner = await readOwner({ contextGraphId, assertionName: name, agentAddress, subGraphName: opts?.subGraphName });
+    if (owner) {
+      await retireCompletion();
+      throw Object.assign(new Error('The admitted share lost its immutable intent; its original recovery owner requires inspection'),
+        { code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: owner.jobId });
+    }
     const completedResult = await verifyCompleted(seal, operation.kind === 'legacy' ? operation.operationId : undefined);
     if (completedResult) return { completedResult };
   }

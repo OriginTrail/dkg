@@ -58,3 +58,12 @@ test('restart queue binding must match the complete captured operation', () => {
   incomplete.metadataAtFault.quads = incomplete.metadataAtFault.quads.filter(q => q.predicate !== dkg + 'shareOperationId');
   assert.equal(bindingMatchesCapturedOperation(incomplete, binding), false);
 });
+
+test('restart lifecycle fields require IRI subjects and predicates', () => {
+  const fields = new Set(['state', 'memoryLayer', 'swmShareComplete', 'swmCurrentAssertion', 'assertionGraph'].map(p => dkg + p));
+  for (const term of ['s', 'p']) {
+    const changed = rows.map(r => fields.has(r.p.value) ? { ...r, [term]: { ...r[term], type: 'bnode' } } : r);
+    const proof = verifyRestartMetadata(fault, changed);
+    assert.equal(proof.originalSealAndIntent, true); assert.equal(proof.lifecycleComplete, false);
+  }
+});

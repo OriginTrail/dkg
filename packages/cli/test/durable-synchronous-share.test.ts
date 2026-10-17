@@ -51,6 +51,28 @@ async function setup() {
   const finalized = await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR });
   return { store, agent, publisher, freshAgent, finalized };
 }
+async function serveShares(agent: Awaited<ReturnType<typeof setup>>['agent']) {
+  vi.spyOn(agent, 'listContextGraphs').mockResolvedValue([{ id: CG, uri: `did:dkg:context-graph:${CG}`, name: CG, subscribed: true, synced: true }] as any);
+  vi.spyOn(agent, 'contextGraphExists').mockResolvedValue(true);
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url!, 'http://127.0.0.1');
+    try {
+      await handleKnowledgeAssetsRoutes({ req, res, url, path: url.pathname, agent,
+        requestAgentAddress: AUTHOR, authentication: requestAuthentication({ kind: 'anonymous' }),
+        extractionStatus: new Map(), assertionImportLocks: new Map(), emitMemoryGraphChanged: () => {}, publisherControl: {},
+      } as any);
+      if (!res.writableEnded) { res.writeHead(404); res.end('{}'); }
+    } catch (error) { res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address() as { port: number };
+  const post = () => fetch(`http://127.0.0.1:${address.port}/api/knowledge-assets/${NAME}/swm/share`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contextGraphId: CG }),
+  });
+  return { post, async close() {
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+  } };
+}
 afterEach(() => { daemonState.promoteWorkerAvailable = false; });
 
 describe('durable synchronous share ownership', () => {
@@ -596,8 +618,6 @@ describe('durable synchronous share ownership', () => {
   it.each([true, false])('returns a defined HTTP conflict for concurrent prepared shares (owner readable=%s)', async readable => {
     const { store, agent, publisher } = await setup();
     daemonState.promoteWorkerAvailable = true;
-    vi.spyOn(agent, 'listContextGraphs').mockResolvedValue([{ id: CG, uri: `did:dkg:context-graph:${CG}`, name: CG, subscribed: true, synced: true }] as any);
-    vi.spyOn(agent, 'contextGraphExists').mockResolvedValue(true);
     const assertion = agent.assertion;
     let calls = 0, releaseSecond!: () => void, bothPrepared!: () => void;
     const ready = new Promise<void>(resolve => { bothPrepared = resolve; });
@@ -608,21 +628,7 @@ describe('durable synchronous share ownership', () => {
       else { bothPrepared(); await secondGate; }
       return prepared;
     } });
-    const server = createServer(async (req, res) => {
-      const url = new URL(req.url!, 'http://127.0.0.1');
-      try {
-        await handleKnowledgeAssetsRoutes({ req, res, url, path: url.pathname, agent,
-          requestAgentAddress: AUTHOR, authentication: requestAuthentication({ kind: 'anonymous' }),
-          extractionStatus: new Map(), assertionImportLocks: new Map(), emitMemoryGraphChanged: () => {}, publisherControl: {},
-        } as any);
-        if (!res.writableEnded) { res.writeHead(404); res.end('{}'); }
-      } catch (error) { res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
-    });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    const address = server.address() as { port: number };
-    const post = () => fetch(`http://127.0.0.1:${address.port}/api/knowledge-assets/${NAME}/swm/share`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contextGraphId: CG }),
-    });
+    const { post, close } = await serveShares(agent);
     try {
       const winner = post();
       await vi.waitFor(() => expect(calls).toBe(1));
@@ -644,9 +650,33 @@ describe('durable synchronous share ownership', () => {
       expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
       await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR })).resolves.toBeDefined();
     } finally {
-      releaseSecond(); server.closeAllConnections();
-      await new Promise<void>(resolve => server.close(() => resolve())); await store.close();
+      releaseSecond(); await close(); await store.close();
     }
+  });
+
+  it('refuses the legacy shortcut over HTTP when a bound inventory obligation lost its intent', async () => {
+    const { store, agent, publisher, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false });
+    agent.commitRfc64SwmAuthorInventoryV1 = async () => {
+      throw new SwmInventoryWriteFailure('inventory-maintenance', null, inventoryPersistenceFailure(new Error('inventory CAS unavailable')));
+    };
+    const { post, close } = await serveShares(agent);
+    try {
+      const interrupted = await post(); expect(interrupted.status).toBe(503);
+      const failure = await interrupted.json(), original = await agent.promoteQueue.getStatus(failure.recoveryJobId);
+      expect(original.state).toBe('failed_retrying');
+      expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+      await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: 'http://dkg.io/ontology/promoteOperationIntent' });
+      const repeated = await post(); expect(repeated.status).toBe(409);
+      expect(await repeated.json()).toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+      expect(await agent.promoteQueue.getStatus(original.jobId)).toEqual(original);
+      expect(await agent.promoteQueue.list()).toHaveLength(1);
+      expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+      await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR })).rejects.toMatchObject({ code: 'PUBLISH_NOT_FULL_SHARE' });
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+      expect(await agent.promoteQueue.clearTerminalJob(original.jobId)).toMatchObject({ outcome: 'rejected' });
+    } finally { await close(); await store.close(); }
   });
 
   it('rejects a stale prepared admission without revoking the completed winner', async()=>{
@@ -753,6 +783,59 @@ describe('durable synchronous share ownership', () => {
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
     expect(await store.countQuads(finalized.graphUri)).toBe(0);
     expect(await reopened.getStatus(job.jobId)).toMatchObject({ state: 'succeeded', attempt: { count: 2 }, request: { recoveryBinding: bound.recoveryBinding } });
+    await store.close();
+  });
+
+  it.each(['before-tail', 'inside-tail'])('fences expired domain work %s independently of the publisher lock', async pause => {
+    const { store, agent, publisher, finalized } = await setup();
+    let now = Date.now(), entered = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false });
+    const inventory = vi.fn(async () => {
+      if (pause === 'inside-tail' && !entered) { entered = true; await gate; }
+      return { status: 'applied', attempts: 1, headObjectDigest: 'same-head', kaUal: 'did:dkg:confirmed-asset' };
+    });
+    agent.commitRfc64SwmAuthorInventoryV1 = inventory;
+    agent.requestRfc64SwmCatalogProjectionV1 = () => true;
+    if (pause === 'before-tail') {
+      const promote = publisher.assertionPromote.bind(publisher);
+      vi.spyOn(publisher, 'assertionPromote').mockImplementationOnce(async (...args) => {
+        const result = await promote(...args); entered = true; await gate; return result;
+      });
+    }
+    const queue = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100, backoff: () => 0 });
+    const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    const job = await queue.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME, entities: 'all', ...bound }, 'old');
+    const execute = (q: typeof queue, claim: typeof job, heartbeatIntervalMs: number) => runPromoteJob({ job: claim, queue: q,
+      workerId: claim.lease!.workerId, now: () => now, heartbeatIntervalMs, bookkeepingRetryBudgetMs: 0,
+      log: () => undefined, runPromote: (request, executionAuthority) => executePromoteRequest(agent, request, { executionAuthority }) });
+    const old = execute(queue, job, 60_000);
+    await vi.waitFor(() => expect(entered).toBe(true)); now += 101;
+    const reopened = new TripleStoreAsyncPromoteQueue(store, { now: () => now, leaseMs: 100, backoff: () => 0 });
+    const replacement = (await reopened.claimNext('new'))!;
+    const heartbeat = vi.spyOn(reopened, 'heartbeat');
+    const clear = vi.spyOn(publisher as any, 'clearSwmShareCompleteUnlocked');
+    let done = false;
+    const next = execute(reopened, replacement, 10).finally(() => { done = true; });
+    if (pause === 'inside-tail') {
+      now += 50;
+      await vi.waitFor(() => expect(heartbeat).toHaveBeenCalled());
+      expect((await reopened.getStatus(job.jobId))?.lease?.expiresAt).toBeGreaterThan(now);
+      expect(done).toBe(false); expect(clear).not.toHaveBeenCalled();
+      release();
+    }
+    expect((await next).outcome).toBe('succeeded');
+    const publishable = await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+    const tail = vi.spyOn(agent, 'afterDurableSwmPromotionV1');
+    vi.mocked(agent.publishWorkspaceGossip).mockClear(); inventory.mockClear(); clear.mockClear();
+    if (pause === 'before-tail') release();
+    expect((await old).outcome).toBe(pause === 'before-tail' ? 'failure_bookkeeping_uncertain' : 'partial_promote_ambiguity');
+    expect(tail).not.toHaveBeenCalled(); expect(inventory).not.toHaveBeenCalled();
+    expect(agent.publishWorkspaceGossip).not.toHaveBeenCalled(); expect(clear).not.toHaveBeenCalled();
+    expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    expect(await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR })).toEqual(publishable);
+    expect(await reopened.getStatus(job.jobId)).toMatchObject({ state: 'succeeded', attempt: { count: 2 }, request: { recoveryBinding: bound.recoveryBinding } });
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
     await store.close();
   });
 
