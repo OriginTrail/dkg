@@ -64,6 +64,7 @@ describe('ACKCollector', () => {
   ];
 
   it('collects 3 valid ACKs from core peers', async () => {
+    const diagnosticEvents: unknown[] = [];
     const gossipCalls: Uint8Array[] = [];
 
     const deps: ACKCollectorDeps = {
@@ -86,6 +87,7 @@ describe('ACKCollector', () => {
 
     const collector = new ACKCollector(deps);
     const result = await collector.collect({
+      onDiagnostic: event => { diagnosticEvents.push(event); },
       merkleRoot,
       contextGraphId: testCGId,
       contextGraphIdStr: testCGIdStr,
@@ -101,6 +103,12 @@ describe('ACKCollector', () => {
     });
 
     expect(result.acks).toHaveLength(3);
+    expect(diagnosticEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'attempt_started' }),
+      expect.objectContaining({ kind: 'attempt', durationMs: expect.any(Number) }),
+      expect.objectContaining({ kind: 'outcomes', counts: expect.objectContaining({ total: 4 }) }),
+    ]));
+    expect(JSON.stringify(diagnosticEvents)).not.toContain('peer-');
     expect(gossipCalls).toHaveLength(0);
     expect(result.merkleRoot).toBe(merkleRoot);
     expect(result.contextGraphId).toBe(testCGId);

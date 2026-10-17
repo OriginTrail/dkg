@@ -548,3 +548,5 @@ export { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from './grap
 
 export { withMaterializationLocks } from './materialization-lock-group.js';
 export { readCurrentAssertionVersion } from './materialization-assertion-version.js';
+
+export type { ACKDiagnosticEvent } from './ack-diagnostics.js';

@@ -1,3 +1,5 @@
+import { StorageACKAdmission } from './storage-ack-admission.js';
+import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { resolvePreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
 import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
@@ -1168,39 +1170,9 @@ export class DKGAgent extends DKGAgentBase {
    * small public core nodes before any chain transaction is submitted. Keep a
    * node-local FIFO gate for ACK rounds. Chain submission remains concurrent.
    */
-  private activeStorageACKCollections = 0;
-  private readonly storageACKCollectionWaiters: Array<() => void> = [];
-
-  private async acquireStorageACKCollectionSlot(): Promise<void> {
-    const limit = this.config.storageAckTiming.maxConcurrentCollections;
-    if (this.activeStorageACKCollections < limit) {
-      this.activeStorageACKCollections += 1;
-      return;
-    }
-    await new Promise<void>((resolve) => {
-      this.storageACKCollectionWaiters.push(resolve);
-    });
-  }
-
-  private releaseStorageACKCollectionSlot(): void {
-    const next = this.storageACKCollectionWaiters.shift();
-    if (next) {
-      // Transfer the active slot directly to the oldest waiter. The active
-      // count stays unchanged, so a new caller cannot take the same slot.
-      next();
-      return;
-    }
-    this.activeStorageACKCollections = Math.max(0, this.activeStorageACKCollections - 1);
-  }
-
-  private async withStorageACKCollectionSlot<T>(work: () => Promise<T>): Promise<T> {
-    await this.acquireStorageACKCollectionSlot();
-    try {
-      return await work();
-    } finally {
-      this.releaseStorageACKCollectionSlot();
-    }
-  }
+  private readonly storageACKAdmission = new StorageACKAdmission(
+    () => this.config.storageAckTiming.maxConcurrentCollections,
+  );
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
     const log = new Logger('DKGAgent');
@@ -3445,7 +3417,9 @@ export class DKGAgent extends DKGAgentBase {
 
     const chain = this.chain;
 
-    return async (params: V10ACKProviderParams) => {
+    return (params: V10ACKProviderParams) => runStorageACKOperation(
+      this.workLifetime, this.storageACKAdmission, 'publish',
+      message => this.log.info(createOperationContext('publish'), message), async admit => {
       // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
       // a real on-chain context graph and the contract rejects `cgId == 0`
       // with `ZeroContextGraphId`. Reject `<= 0n` (not `=== 0n`) because
@@ -3523,8 +3497,9 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await this.withStorageACKCollectionSlot(async () => {
+      const result = await admit(onDiagnostic => {
         return collector.collect({
+          onDiagnostic,
           merkleRoot: params.merkleRoot,
           contextGraphId: cgIdBigInt,
           contextGraphIdStr: params.contextGraphId,
@@ -3555,7 +3530,7 @@ export class DKGAgent extends DKGAgentBase {
         });
       });
       return result.acks;
-    };
+    });
   }
 
   /**
@@ -3638,7 +3613,9 @@ export class DKGAgent extends DKGAgentBase {
       publicTripleCount?: number;
       privateMerkleRoot?: Uint8Array;
       privateTripleCount?: number;
-    }): Promise<V10CoreNodeACK[]> => {
+    }): Promise<V10CoreNodeACK[]> => runStorageACKOperation(
+      this.workLifetime, this.storageACKAdmission, 'update',
+      message => this.log.info(createOperationContext('update'), message), async admit => {
       // The TARGET cgId for the digest is the on-chain numeric id the
       // adapter resolved (`params.contextGraphId`). Reject non-numeric /
       // non-positive ids the same way the publish provider does — the
@@ -3695,8 +3672,9 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await this.withStorageACKCollectionSlot(async () => {
+      const result = await admit(onDiagnostic => {
         return collector.collectUpdate({
+          onDiagnostic,
           kaId: params.kaId,
           contextGraphId: cgIdBigInt,
           preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
@@ -3727,7 +3705,7 @@ export class DKGAgent extends DKGAgentBase {
         });
       });
       return result.acks;
-    };
+    });
   }
 
   async broadcastPublish(

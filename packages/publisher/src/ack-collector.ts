@@ -27,6 +27,8 @@ import { ethers } from 'ethers';
 import { QuorumUnmetError, type PeerOutcome } from './ack-errors.js';
 import type { V10ACKMode } from './publisher.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
+import { PeerStatusLedger } from './ack-peer-status-ledger.js';
+import { ACKRoundDiagnostics, type ACKDiagnosticEvent } from './ack-diagnostics.js';
 
 /**
  * Why an ACK signer pre-flight rejected a recovered signer. Mirrors
@@ -102,6 +104,8 @@ export interface ACKCollectionResult {
 }
 
 export interface ACKCollectorParams {
+  /** Bounded aggregate instrumentation; exceptions are ignored. */
+  onDiagnostic?: (event: ACKDiagnosticEvent) => void;
   merkleRoot: Uint8Array;
   contextGraphId: bigint;
   contextGraphIdStr: string;
@@ -214,111 +218,6 @@ function sanitizeDeclineField(value: string, maxChars: number): string {
 
 function declineLogMessage(message: string): string {
   return sanitizeDeclineField(message, MAX_DECLINE_LOG_MESSAGE_CHARS);
-}
-
-type PeerStatus =
-  | { kind: 'ack'; ack: CollectedACK }
-  | { kind: 'storage-decline'; code: string; message: string }
-  | { kind: 'ack-validation'; reason: string }
-  | { kind: 'protocol-unsupported'; message: string }
-  | { kind: 'transport-error'; message: string };
-
-/**
- * Owns the terminal status for every peer participating in one ACK round.
- * Recording a new status replaces stale evidence from an earlier attempt, and
- * the two projections keep structured telemetry and legacy operator text in
- * sync as new status categories are added.
- */
-class PeerStatusLedger {
-  private readonly statuses = new Map<string, PeerStatus>();
-
-  recordACK(ack: CollectedACK): void {
-    this.statuses.set(ack.peerId, { kind: 'ack', ack });
-  }
-
-  recordStorageDecline(peerId: string, code: string, message: string): void {
-    this.statuses.set(peerId, { kind: 'storage-decline', code, message });
-  }
-
-  recordACKValidation(peerId: string, reason: string): void {
-    this.statuses.set(peerId, { kind: 'ack-validation', reason });
-  }
-
-  recordProtocolUnsupported(peerId: string, message: string): void {
-    this.statuses.set(peerId, { kind: 'protocol-unsupported', message });
-  }
-
-  recordTransportError(peerId: string, message: string): void {
-    this.statuses.set(peerId, { kind: 'transport-error', message });
-  }
-
-  clear(peerId: string): void {
-    this.statuses.delete(peerId);
-  }
-
-  snapshot(corePeers: string[]): PeerOutcome[] {
-    return corePeers.map((peerId): PeerOutcome => {
-      const status = this.statuses.get(peerId);
-      if (!status) return { peerId, reason: 'no_response' };
-      switch (status.kind) {
-        case 'ack': {
-          const advertised = status.ack.subscriptionSource !== undefined ? true : undefined;
-          return {
-            peerId,
-            dialOk: true,
-            protocolSupported: true,
-            ...(advertised !== undefined ? { swmHostModeAdvertised: advertised } : {}),
-            reason: status.ack.subscriptionSource
-              ? `ACK:${status.ack.subscriptionSource}`
-              : 'ACK',
-          };
-        }
-        case 'storage-decline':
-          return {
-            peerId,
-            dialOk: true,
-            protocolSupported: true,
-            reason: `STORAGE_ACK_DECLINE:${status.code}`,
-          };
-        case 'ack-validation':
-          return {
-            peerId,
-            dialOk: true,
-            protocolSupported: true,
-            reason: status.reason,
-          };
-        case 'protocol-unsupported':
-          return {
-            peerId,
-            dialOk: true,
-            protocolSupported: false,
-            reason: 'PROTOCOL_UNSUPPORTED',
-          };
-        case 'transport-error':
-          return { peerId, dialOk: false, reason: 'TRANSPORT_ERROR' };
-      }
-    });
-  }
-
-  formatLegacyDetail(): string {
-    const declineDetails: string[] = [];
-    const terminalDetails: string[] = [];
-    for (const [peerId, status] of this.statuses) {
-      const tagPrefix = peerId.slice(-8);
-      if (status.kind === 'storage-decline') {
-        const tag = `${tagPrefix}→${status.code}`;
-        declineDetails.push(status.message ? `${tag} (${status.message})` : tag);
-      } else if (status.kind === 'protocol-unsupported' || status.kind === 'transport-error') {
-        const code = status.kind === 'protocol-unsupported'
-          ? 'PROTOCOL_UNSUPPORTED'
-          : 'TRANSPORT_ERROR';
-        const tag = `${tagPrefix}→${code}`;
-        terminalDetails.push(status.message ? `${tag} (${status.message})` : tag);
-      }
-    }
-    const formatted = [...declineDetails, ...terminalDetails].join('; ');
-    return formatted ? ` Declines: ${formatted}.` : '';
-  }
 }
 
 /**
@@ -665,6 +564,7 @@ export class ACKCollector {
       corePeers,
       requiredACKs: REQUIRED_ACKS,
       log,
+      onDiagnostic: params.onDiagnostic,
     });
   }
 
@@ -686,6 +586,7 @@ export class ACKCollector {
    * tx reverts if wrong).
    */
   async collectUpdate(params: {
+    onDiagnostic?: (event: ACKDiagnosticEvent) => void;
     kaId: bigint;
     /** TARGET on-chain numeric context graph id. */
     contextGraphId: bigint;
@@ -836,6 +737,7 @@ export class ACKCollector {
       corePeers,
       requiredACKs: REQUIRED_ACKS,
       log,
+      onDiagnostic: params.onDiagnostic,
     });
   }
 
@@ -860,6 +762,7 @@ export class ACKCollector {
     contextGraphId: bigint;
     corePeers: string[];
     requiredACKs: number;
+    onDiagnostic?: (event: ACKDiagnosticEvent) => void;
     log: (msg: string) => void;
   }): Promise<ACKCollectionResult> {
     const {
@@ -867,6 +770,7 @@ export class ACKCollector {
       merkleRoot, contextGraphId, corePeers, log,
     } = args;
     const REQUIRED_ACKS = args.requiredACKs;
+    const diagnostics = new ACKRoundDiagnostics(args.onDiagnostic);
 
     const collected: CollectedACK[] = [];
     const seenPeers = new Set<string>();
@@ -904,7 +808,9 @@ export class ACKCollector {
     let roundSettled = false;
     const roundIsOver = () => roundSettled || collected.length >= REQUIRED_ACKS;
 
-    const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
+    const sleepImpl = this.deps.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
+    const sleep = (ms: number, reason: 'transport' | 'transient_decline') =>
+      diagnostics.measure('backoff', () => sleepImpl(ms), reason);
 
     const requestACK = async (peerId: string): Promise<CollectedACK | null> => {
       // #887: transient SWM declines and transport errors now have
@@ -925,7 +831,7 @@ export class ACKCollector {
           const ack: StorageACKMsg = await withSpan(
             'publisher.ack_peer_request',
             async (span) => {
-              const response = await this.deps.sendP2P(peerId, ackProtocolId, intentBytes);
+              const response = await diagnostics.measure('attempt', () => this.deps.sendP2P(peerId, ackProtocolId, intentBytes));
               // A ZERO-LENGTH reply is not a StorageACK — it is what the
               // requester reads when the responder aborts the stream
               // mid-handler (protocol-router stream.abort → clean EOF →
@@ -1017,7 +923,7 @@ export class ACKCollector {
                 `; retrying because ${retryReason} ` +
                 `(retry ${declineRetries}/${MAX_TRANSIENT_DECLINE_RETRIES}, waiting ${waitMs}ms)`,
               );
-              await sleep(waitMs);
+              await sleep(waitMs, 'transient_decline');
               // #896 review: quorum may have settled DURING the backoff above
               // (collect() resolves the instant the last needed ACK lands on
               // another peer). Re-check before re-dialing so a decided round
@@ -1168,7 +1074,7 @@ export class ACKCollector {
               return null;
             }
             log(`[ACKCollector] Retry ${transportAttempts}/${MAX_RETRIES} for ${peerId.slice(-8)}: ${msg}`);
-            await sleep(transportAttempts * 1000);
+            await sleep(transportAttempts * 1000, 'transport');
             // #896 review: re-check after the backoff too — quorum may have
             // settled while we waited, so don't re-dial a decided round.
             if (roundIsOver()) {
@@ -1281,6 +1187,7 @@ export class ACKCollector {
       // any `requestACK` loops still sleeping between retries to abandon on
       // wake rather than keep dialing after the caller has its answer.
       roundSettled = true;
+      diagnostics.finish(snapshotPeerOutcomes());
     }
 
     if (collected.length < REQUIRED_ACKS) {

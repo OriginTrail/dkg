@@ -438,6 +438,33 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await expect(second).resolves.toEqual([]);
   });
 
+  it('cancels queued ACK admission when shutdown closes the work lifetime', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const provider = boot.internals.createV10ACKProvider('test-cg') as V10ACKProviderObject;
+    let entered = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    publishCollectHook = async () => { entered++; await blocked; return { acks: [] }; };
+    const input = { merkleRoot: new Uint8Array(32), contextGraphId: '42', kaCount: 1,
+      rootEntities: [], publicByteSize: 10n, merkleLeafCount: 1, ackMode: { kind: 'public' as const } };
+    const first = provider(input).then(() => 'success', () => 'cancelled');
+    await vi.waitFor(() => expect(entered).toBe(1));
+    let queuedState = 'pending';
+    const second = provider(input).then(() => { queuedState = 'success'; }, () => { queuedState = 'cancelled'; });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    (agent as any).workLifetime.close(new Error('node shutdown'));
+    try {
+      await vi.waitFor(() => expect(queuedState).toBe('cancelled'));
+      expect(entered).toBe(1);
+    } finally {
+      release();
+      await second;
+    }
+    expect(await first).toBe('cancelled');
+    expect(entered).toBe(1);
+  });
+
   it('preflights confirmed cores and exposes newly admitted cores to publish, update, and async pools', async () => {
     const boot = await bootProviderAgent();
     agent = boot.agent;
