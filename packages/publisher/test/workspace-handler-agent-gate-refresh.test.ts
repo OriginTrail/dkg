@@ -114,7 +114,7 @@ async function writeBy(
 /** A receiving member of a private graph whose projected gate is the join-time roster. */
 function createHandler(
   agentGateRefreshOracle?: SwmAgentGateRefreshOracle,
-  overrides: { allowedPeers?: string[]; localAgentAddresses?: string[] } = {},
+  overrides: { allowedPeers?: string[]; localAgentAddresses?: string[]; allowedAgents?: string[]; revokedAgents?: string[] } = {},
 ): SharedMemoryHandler {
   return new SharedMemoryHandler(store, new TypedEventBus(), {
     sharedMemoryOwnedEntities: new Map(),
@@ -122,9 +122,9 @@ function createHandler(
     workspaceRecipientPrivateKeys: () => [recipientKey],
     contextGraphMetaOracle: async () => ({
       accessPolicy: 'private',
-      allowedAgents: PROJECTED_GATE,
+      allowedAgents: overrides.allowedAgents ?? PROJECTED_GATE,
       participantAgents: [],
-      revokedAgents: [],
+      revokedAgents: overrides.revokedAgents ?? [],
       ...(overrides.allowedPeers === undefined ? {} : { allowedPeers: overrides.allowedPeers }),
     }),
     ...(agentGateRefreshOracle === undefined ? {} : { agentGateRefreshOracle }),
@@ -266,8 +266,43 @@ describe('SharedMemoryHandler: second look at the agent gate for a signer the pr
 
     const outcome = await handler.handle(await writeBy(newMember, 'Peer Removed During Refresh'), PEER_ID);
 
-    expect(outcome).toMatchObject({ applied: false, retryable: false });
-    expect(outcome.reason).toContain(`peer "${PEER_ID}" not in allowlist`);
+    expect(outcome).toMatchObject(PERMANENT);
+    expect(oracle).toHaveBeenCalledTimes(1);
+    await expect(storedName()).resolves.toBeUndefined();
+  });
+
+  it('never consults the oracle for a signer the local metadata explicitly revoked: a tombstone stands', async () => {
+    // Re-invited on chain, but the local allowlist write failed and the
+    // revocation tombstone is still there: the fresh chain roster must not lift it.
+    const oracle = freshGateOracle();
+    const handler = createHandler(oracle, { allowedAgents: FRESH_GATE, revokedAgents: [newMember.address] });
+
+    const outcome = await handler.handle(await writeBy(newMember, 'Revoked Locally'), PEER_ID);
+
+    expect(outcome).toMatchObject(PERMANENT);
+    expect(oracle).not.toHaveBeenCalled();
+    await expect(storedName()).resolves.toBeUndefined();
+  });
+
+  it('rejects when the metadata the refresh installs revokes the signer the fresh gate contains', async () => {
+    let revokedAgents: string[] = [];
+    const oracle = vi.fn<SwmAgentGateRefreshOracle>(async () => {
+      revokedAgents = [newMember.address];
+      return { kind: 'available', agentAddresses: FRESH_GATE };
+    });
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: new Map(),
+      localAgentAddresses: () => [localMember.address],
+      workspaceRecipientPrivateKeys: () => [recipientKey],
+      contextGraphMetaOracle: async () => ({
+        accessPolicy: 'private', allowedAgents: PROJECTED_GATE, participantAgents: [], revokedAgents,
+      }),
+      agentGateRefreshOracle: oracle,
+    });
+
+    const outcome = await handler.handle(await writeBy(newMember, 'Revoked During Refresh'), PEER_ID);
+
+    expect(outcome).toMatchObject(PERMANENT);
     expect(oracle).toHaveBeenCalledTimes(1);
     await expect(storedName()).resolves.toBeUndefined();
   });
@@ -354,12 +389,16 @@ describe('admitAgentSigner', () => {
 
 describe('retryAgentEnvelopeWithRefreshedGate', () => {
   const gateMiss: AgentEnvelopeVerdict = { kind: 'gate-miss', signer: newMember.address.toLowerCase() };
+  const noRevocations = async () => new Set<string>();
   const base = {
     verdict: gateMiss,
     contextGraphId: CONTEXT_GRAPH_ID,
     fromPeerId: PEER_ID,
-    peerAdmitted: true,
+    trustedReplay: false,
+    allowedPeers: null,
     localAgentAddresses: () => [localMember.address],
+    readRevokedAgents: noRevocations,
+    readAllowedPeers: async () => null,
     logWarn: () => {},
     logInfo: () => {},
   };
@@ -386,9 +425,32 @@ describe('retryAgentEnvelopeWithRefreshedGate', () => {
       .resolves.toEqual({ accepted: false, retryable: false });
     await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, oracle: undefined }))
       .resolves.toEqual({ accepted: false, retryable: false });
-    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, peerAdmitted: false, oracle }))
+    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, allowedPeers: [OTHER_PEER_ID], oracle }))
       .resolves.toEqual({ accepted: false, retryable: false });
+    await expect(retryAgentEnvelopeWithRefreshedGate({
+      ...base, oracle, readRevokedAgents: async () => new Set([newMember.address.toLowerCase()]),
+    })).resolves.toEqual({ accepted: false, retryable: false });
     expect(oracle).not.toHaveBeenCalled();
+  });
+
+  it('on trusted replay the relaying host need not be in the peer allowlist, before or after the refresh', async () => {
+    const oracle = freshGateOracle();
+    await expect(retryAgentEnvelopeWithRefreshedGate({
+      ...base, oracle, trustedReplay: true, allowedPeers: [OTHER_PEER_ID], readAllowedPeers: async () => [OTHER_PEER_ID],
+    })).resolves.toEqual({ accepted: true });
+    expect(oracle).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-runs the peer allowlist and the revocations on the metadata the refresh installed', async () => {
+    const oracle = freshGateOracle();
+    await expect(retryAgentEnvelopeWithRefreshedGate({
+      ...base, oracle, allowedPeers: [PEER_ID], readAllowedPeers: async () => [OTHER_PEER_ID],
+    })).resolves.toEqual({ accepted: false, retryable: false });
+    let reads = 0;
+    await expect(retryAgentEnvelopeWithRefreshedGate({
+      ...base, oracle, readRevokedAgents: async () => (reads++ === 0 ? new Set() : new Set([newMember.address.toLowerCase()])),
+    })).resolves.toEqual({ accepted: false, retryable: false });
+    expect(oracle).toHaveBeenCalledTimes(2);
   });
 
   it.each<[string, SwmAgentGateRefreshResult, boolean]>([

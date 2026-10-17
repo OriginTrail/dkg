@@ -36,16 +36,15 @@ import {
  * sender's fan-out timeout, since an answer that arrives after that timeout is
  * worse than a retryable rejection.
  *
- * A valid signature proves control of a key, not membership, and keys are
- * free: a peer the roster excludes could otherwise buy a chain read per fresh
- * key. So the looks themselves are rationed per graph and per sending peer
- * within a window; a miss the ration refuses is answered as unavailable and
- * retryable, which costs the receiver nothing and lets a member whose approval
- * raced the window land on the sender's next attempt. Within the window the
- * last fresh gate of a graph answers every signer it contains without a read,
- * and a signer it excluded is remembered; both only while the graph's roster
- * revision has not moved, so a revocation or an approval that reaches the local
- * metadata is never overridden by what an earlier look saw.
+ * Nothing is cached and no look is shared between requests: a roster can
+ * change on chain, in an accepted private authority or in local metadata
+ * independently of one another, so any memory of a look would need a fence
+ * on all of them. Instead every miss is judged from a read of its own, and the
+ * reads are rationed. A valid signature proves control of a key, not
+ * membership, and keys are free, so the looks are rationed per graph and per
+ * sending peer within a window; a miss the ration refuses is answered as
+ * unavailable and retryable, which costs the receiver nothing and lets the
+ * sender's next attempt be judged afresh.
  */
 export interface SwmWriteGateRefreshHost {
   /** The canonical agent gate, read fresh (no cached roster). */
@@ -58,28 +57,19 @@ export interface SwmWriteGateRefreshHost {
     contextGraphId: string,
     options: { signal: AbortSignal },
   ): Promise<boolean>;
-  /**
-   * The graph's roster revision: moves whenever a fact of its local roster
-   * (allowed, participant or revoked agents) may have changed. A memory of
-   * this oracle answers only while it is unchanged.
-   */
-  readRosterRevision(contextGraphId: string): number | string;
 }
 
 export interface SwmWriteGateRefreshOptions {
   /** One deadline for both gate reads and the curator refresh. */
   timeoutMs?: number;
-  /**
-   * The window: how long a fresh gate answers for its graph, how long an
-   * excluded signer is remembered, and over which the looks are rationed.
-   */
+  /** The window over which the looks are rationed. */
   windowMs?: number;
   /** Looks one sending peer may start on one graph per window. */
   looksPerPeer?: number;
   /** Looks all peers together may start on one graph per window. */
   looksPerGraph?: number;
-  /** How many remembered graphs, signers and peers at most, each. */
-  memoryMax?: number;
+  /** How many rations (graphs, and graph-peer pairs) are tracked at most. */
+  rationMemoryMax?: number;
   now?: () => number;
 }
 
@@ -92,34 +82,20 @@ export const DEFAULT_SWM_WRITE_GATE_REFRESH_WINDOW_MS = 10_000;
 /** A node hosting two late members may need two looks in one window. */
 export const DEFAULT_SWM_WRITE_GATE_LOOKS_PER_PEER = 2;
 export const DEFAULT_SWM_WRITE_GATE_LOOKS_PER_GRAPH = 4;
-export const DEFAULT_SWM_WRITE_GATE_MEMORY_MAX = 1_024;
+export const DEFAULT_SWM_WRITE_GATE_RATION_MEMORY_MAX = 1_024;
 
 /** Unavailable reasons of the second look itself, beside the authority's own. */
 export const SWM_WRITE_GATE_REFRESH_TIMEOUT_REASON = 'swm-write-gate-refresh-timeout';
 export const SWM_WRITE_GATE_REFRESH_FAILED_REASON = 'swm-write-gate-refresh-failed';
 export const SWM_WRITE_GATE_REFRESH_RATIONED_REASON = 'swm-write-gate-refresh-rationed';
-export const SWM_WRITE_GATE_REFRESH_ROSTER_CHANGED_REASON = 'swm-write-gate-refresh-roster-changed';
 
 const RATIONED: SwmAgentGateRefreshResult = Object.freeze({
   kind: 'unavailable',
   reason: SWM_WRITE_GATE_REFRESH_RATIONED_REASON,
   retryable: true,
 });
-/**
- * The graph's roster changed while the look was in flight: what it read may
- * predate a revocation or an approval the local metadata already holds, so it
- * admits nobody. The sender's next attempt is judged from coherent gates.
- */
-const ROSTER_CHANGED: SwmAgentGateRefreshResult = Object.freeze({
-  kind: 'unavailable',
-  reason: SWM_WRITE_GATE_REFRESH_ROSTER_CHANGED_REASON,
-  retryable: true,
-});
 
-function gateContains(
-  gate: ContextGraphAgentGateAuthority | SwmAgentGateRefreshResult,
-  signerAddress: string,
-): boolean {
+function gateContains(gate: ContextGraphAgentGateAuthority, signerAddress: string): boolean {
   if (gate.kind !== 'available') return false;
   const signer = signerAddress.toLowerCase();
   return gate.agentAddresses.some((address) => address.toLowerCase() === signer);
@@ -180,13 +156,6 @@ async function secondLook(
   }
 }
 
-interface Remembered<T> {
-  readonly expiresAt: number;
-  /** The graph's roster revision when the value was learned. */
-  readonly revision: number | string;
-  readonly value: T;
-}
-
 /** Looks started within the current window, per graph and per (graph, peer). */
 interface Ration {
   windowEndsAt: number;
@@ -202,33 +171,16 @@ export function createSwmWriteGateRefreshOracle(
   const windowMs = options.windowMs ?? DEFAULT_SWM_WRITE_GATE_REFRESH_WINDOW_MS;
   const looksPerPeer = options.looksPerPeer ?? DEFAULT_SWM_WRITE_GATE_LOOKS_PER_PEER;
   const looksPerGraph = options.looksPerGraph ?? DEFAULT_SWM_WRITE_GATE_LOOKS_PER_GRAPH;
-  const memoryMax = options.memoryMax ?? DEFAULT_SWM_WRITE_GATE_MEMORY_MAX;
+  const rationMemoryMax = options.rationMemoryMax ?? DEFAULT_SWM_WRITE_GATE_RATION_MEMORY_MAX;
   const now = options.now ?? Date.now;
-
-  /** The look in flight for a signer, with the roster revision it started under. */
-  const inFlight = new Map<string, { revision: number | string; look: Promise<SwmAgentGateRefreshResult> }>();
-  /** The last fresh gate of a graph. */
-  const freshGates = new Map<string, Remembered<SwmAgentGateRefreshResult>>();
-  /** Signers a fresh gate excluded, by graph and signer. */
-  const excluded = new Map<string, Remembered<SwmAgentGateRefreshResult>>();
   const rations = new Map<string, Ration>();
 
-  const recall = <T>(memory: Map<string, Remembered<T>>, key: string, revision: number | string): T | undefined => {
-    const remembered = memory.get(key);
-    if (remembered === undefined) return undefined;
-    if (remembered.expiresAt > now() && remembered.revision === revision) return remembered.value;
-    memory.delete(key);
-    return undefined;
-  };
-  const remember = <T>(memory: Map<string, Remembered<T>>, key: string, revision: number | string, value: T): void => {
-    rememberBounded(memory, key, { expiresAt: now() + windowMs, revision, value }, memoryMax);
-  };
   /** Take one look from the ration of `key`, or refuse it. */
   const takeLook = (key: string, limit: number): boolean => {
     const at = now();
     const ration = rations.get(key);
     if (ration === undefined || ration.windowEndsAt <= at) {
-      rememberBounded(rations, key, { windowEndsAt: at + windowMs, looks: 1 }, memoryMax);
+      rememberBounded(rations, key, { windowEndsAt: at + windowMs, looks: 1 }, rationMemoryMax);
       return true;
     }
     if (ration.looks >= limit) return false;
@@ -237,35 +189,10 @@ export function createSwmWriteGateRefreshOracle(
   };
 
   return async (contextGraphId, signerAddress, fromPeerId) => {
-    const signer = signerAddress.toLowerCase();
-    const signerKey = `${contextGraphId}\u0000${signer}`;
-    const revision = host.readRosterRevision(contextGraphId);
-    const freshGate = recall(freshGates, contextGraphId, revision);
-    if (freshGate !== undefined && gateContains(freshGate, signer)) return freshGate;
-    const remembered = recall(excluded, signerKey, revision);
-    if (remembered !== undefined) return remembered;
-    // A look in flight is shared only within its roster revision: a request
-    // whose projected gate already reflects a later revocation must not
-    // inherit what an earlier look read.
-    const pending = inFlight.get(signerKey);
-    let look: Promise<SwmAgentGateRefreshResult>;
-    if (pending !== undefined && pending.revision === revision) {
-      look = pending.look;
-    } else {
-      // The graph's ration is taken only when the peer's allows the look, so one
-      // refused peer does not consume what another peer's late member needs.
-      if (!takeLook(`${contextGraphId}\u0000${fromPeerId}`, looksPerPeer)) return RATIONED;
-      if (!takeLook(contextGraphId, looksPerGraph)) return RATIONED;
-      const entry = { revision, look: secondLook(host, contextGraphId, signer, timeoutMs) };
-      look = entry.look.finally(() => { if (inFlight.get(signerKey) === entry) inFlight.delete(signerKey); });
-      inFlight.set(signerKey, entry);
-    }
-    const result = await look;
-    if (host.readRosterRevision(contextGraphId) !== revision) return ROSTER_CHANGED;
-    if (result.kind === 'available') {
-      remember(freshGates, contextGraphId, revision, result);
-      if (!gateContains(result, signer)) remember(excluded, signerKey, revision, result);
-    }
-    return result;
+    // The graph's ration is taken only when the peer's allows the look, so one
+    // refused peer does not consume what another peer's late member needs.
+    if (!takeLook(`${contextGraphId}\u0000${fromPeerId}`, looksPerPeer)) return RATIONED;
+    if (!takeLook(contextGraphId, looksPerGraph)) return RATIONED;
+    return secondLook(host, contextGraphId, signerAddress, timeoutMs);
   };
 }

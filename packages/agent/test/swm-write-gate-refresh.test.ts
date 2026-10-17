@@ -13,7 +13,6 @@ import {
   createSwmWriteGateRefreshOracle,
   SWM_WRITE_GATE_REFRESH_FAILED_REASON,
   SWM_WRITE_GATE_REFRESH_RATIONED_REASON,
-  SWM_WRITE_GATE_REFRESH_ROSTER_CHANGED_REASON,
   SWM_WRITE_GATE_REFRESH_TIMEOUT_REASON,
   type SwmWriteGateRefreshHost,
 } from '../src/internal/context-graph-authority/swm-write-gate-refresh.js';
@@ -32,15 +31,13 @@ const RATIONED = { kind: 'unavailable', reason: SWM_WRITE_GATE_REFRESH_RATIONED_
 
 /**
  * A receiver whose canonical gate answers from `gates` in order (the last answer
- * repeats), whose curator refresh answers `refresh`, and whose roster revision
- * moves on `rosterChanged()`.
+ * repeats), and whose curator refresh answers `refresh`.
  */
 function host(
   gates: ContextGraphAgentGateAuthority[],
   refresh: () => Promise<boolean> = async () => false,
 ) {
   let reads = 0;
-  let revision = 0;
   const resolveAgentGate = vi.fn<SwmWriteGateRefreshHost['resolveAgentGate']>(async () => {
     const gate = gates[Math.min(reads, gates.length - 1)];
     reads += 1;
@@ -48,14 +45,8 @@ function host(
     return gate;
   });
   const refreshMetaFromCurator = vi.fn<SwmWriteGateRefreshHost['refreshMetaFromCurator']>(refresh);
-  return {
-    resolveAgentGate,
-    refreshMetaFromCurator,
-    readRosterRevision: (cg: string) => `${cg}:${revision}`,
-    rosterChanged: () => { revision += 1; },
-  };
+  return { resolveAgentGate, refreshMetaFromCurator };
 }
-const unchangingRevision = () => 0;
 
 describe('SWM write gate refresh oracle: the second look', () => {
   it('a member added to the chain roster after the receiver last refreshed: the canonical gate admits it without a refresh', async () => {
@@ -127,7 +118,6 @@ describe('SWM write gate refresh oracle: the second look', () => {
         signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       }),
       refreshMetaFromCurator: async () => false,
-      readRosterRevision: unchangingRevision,
     };
     const oracle = createSwmWriteGateRefreshOracle(receiver, { timeoutMs: 20 });
 
@@ -145,7 +135,6 @@ describe('SWM write gate refresh oracle: the second look', () => {
       refreshMetaFromCurator: (_cg, { signal }) => new Promise((_resolve, reject) => {
         signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       }),
-      readRosterRevision: unchangingRevision,
     };
     const oracle = createSwmWriteGateRefreshOracle(receiver, { timeoutMs: 20 });
 
@@ -168,171 +157,30 @@ describe('SWM write gate refresh oracle: the second look', () => {
   });
 });
 
-describe('SWM write gate refresh oracle: what one window remembers', () => {
-  it('the last fresh gate of a graph admits every signer it contains without a read, then expires', async () => {
-    let clock = 1_000;
-    const receiver = host([available(CURATOR, MEMBER, JOINER)]);
-    const oracle = createSwmWriteGateRefreshOracle(receiver, { now: () => clock, windowMs: 5_000 });
-
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
-    // The same member again, and another member the same gate contains.
-    await expect(oracle(CG, JOINER.toLowerCase(), PEER)).resolves.toMatchObject({ kind: 'available' });
-    await expect(oracle(CG, MEMBER, OTHER_PEER)).resolves.toMatchObject({ kind: 'available' });
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(1);
-
-    clock += 5_000;
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
-  });
-
-  it('a signer a fresh gate excluded is answered from memory for the window, then read again', async () => {
-    let clock = 1_000;
-    const receiver = host([available(CURATOR, MEMBER)], async () => true);
-    const oracle = createSwmWriteGateRefreshOracle(receiver, { now: () => clock, windowMs: 5_000 });
-
-    const excluded = { kind: 'available', agentAddresses: [CURATOR, MEMBER] };
-    await expect(oracle(CG, JOINER, PEER)).resolves.toEqual(excluded);
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
-    expect(receiver.refreshMetaFromCurator).toHaveBeenCalledTimes(1);
-
-    clock += 4_999;
-    await expect(oracle(CG, JOINER.toLowerCase(), PEER)).resolves.toEqual(excluded);
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
-
-    clock += 1;
-    await expect(oracle(CG, JOINER, PEER)).resolves.toEqual(excluded);
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(4);
-  });
-
-  it('a writer revoked after the fresh gate was learned is not re-admitted from memory: the roster revision voids it', async () => {
+describe('SWM write gate refresh oracle: nothing is remembered between looks', () => {
+  it('a revocation on chain after an admitting look is seen by the very next look, within any window', async () => {
     const receiver = host([available(CURATOR, MEMBER, JOINER), available(CURATOR, MEMBER)]);
     const oracle = createSwmWriteGateRefreshOracle(receiver);
 
-    // An outsider's look warms the graph's fresh gate, which contains the writer.
-    await expect(oracle(CG, ethers.Wallet.createRandom().address, OTHER_PEER)).resolves.toMatchObject({ kind: 'available' });
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available', agentAddresses: [CURATOR, MEMBER, JOINER] });
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(1);
-
-    // The writer is revoked in the local metadata: the projected gate now
-    // rejects it and the oracle is asked again, within the window.
-    receiver.rosterChanged();
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available', agentAddresses: [CURATOR, MEMBER] });
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
-  });
-
-  it('a signer remembered as excluded is read again once the roster revision moves', async () => {
-    const receiver = host([available(CURATOR, MEMBER), available(CURATOR, MEMBER, JOINER)]);
-    const oracle = createSwmWriteGateRefreshOracle(receiver);
-
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ agentAddresses: [CURATOR, MEMBER] });
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ agentAddresses: [CURATOR, MEMBER] });
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(1);
-
-    receiver.rosterChanged();
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ agentAddresses: [CURATOR, MEMBER, JOINER] });
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
-  });
-
-  it('a roster change that lands during a look admits nobody from that look: its requester is told to retry', async () => {
-    const receiver = host([available(CURATOR, MEMBER, JOINER)]);
-    receiver.resolveAgentGate.mockImplementationOnce(async () => {
-      receiver.rosterChanged();
-      return available(CURATOR, MEMBER, JOINER);
-    });
-    const oracle = createSwmWriteGateRefreshOracle(receiver);
-
-    await expect(oracle(CG, JOINER, PEER)).resolves.toEqual({
-      kind: 'unavailable',
-      reason: SWM_WRITE_GATE_REFRESH_ROSTER_CHANGED_REASON,
-      retryable: true,
-    });
-    // Nothing of it was remembered: the next attempt reads the authority again.
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
-  });
-
-  it('a request arriving after a revocation does not inherit the admission of a look that started before it', async () => {
-    // A chain read captured the writer's membership, but its answer is delayed.
-    let release: (() => void) | undefined;
-    const delayed = new Promise<void>((resolve) => { release = resolve; });
-    const receiver = host([available(CURATOR, MEMBER)]);
-    receiver.resolveAgentGate.mockImplementationOnce(async () => {
-      await delayed;
-      return available(CURATOR, MEMBER, JOINER);
-    });
-    const oracle = createSwmWriteGateRefreshOracle(receiver);
-
-    const before = oracle(CG, JOINER, PEER);
-    // The writer is revoked in the local metadata while that read is pending;
-    // its next envelope misses the projected gate and asks again.
-    receiver.rosterChanged();
-    const after = oracle(CG, JOINER, PEER);
-    release?.();
-
-    // The later request got its own look at the current authority, which
-    // excludes the writer; the earlier one is told to retry, not admitted from
-    // a roster read before the revocation.
-    await expect(after).resolves.toEqual({ kind: 'available', agentAddresses: [CURATOR, MEMBER] });
-    await expect(before).resolves.toEqual({
-      kind: 'unavailable',
-      reason: SWM_WRITE_GATE_REFRESH_ROSTER_CHANGED_REASON,
-      retryable: true,
-    });
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
-    // The later look is what is remembered: the writer stays excluded without a read.
+    await expect(oracle(CG, JOINER, PEER)).resolves.toEqual({ kind: 'available', agentAddresses: [CURATOR, MEMBER, JOINER] });
     await expect(oracle(CG, JOINER, PEER)).resolves.toEqual({ kind: 'available', agentAddresses: [CURATOR, MEMBER] });
     expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
   });
 
-  it('an unavailable answer is not remembered', async () => {
-    const receiver = host([
-      { kind: 'unavailable', reason: 'chain-participant-authority-unavailable' },
-      available(CURATOR, JOINER),
-    ]);
+  it('an approval on chain after an excluding look is seen by the very next look, within any window', async () => {
+    const receiver = host([available(CURATOR, MEMBER), available(CURATOR, MEMBER, JOINER)]);
     const oracle = createSwmWriteGateRefreshOracle(receiver);
 
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'unavailable' });
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
+    await expect(oracle(CG, JOINER, PEER)).resolves.toEqual({ kind: 'available', agentAddresses: [CURATOR, MEMBER] });
+    await expect(oracle(CG, JOINER, PEER)).resolves.toEqual({ kind: 'available', agentAddresses: [CURATOR, MEMBER, JOINER] });
     expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
   });
 
-  it('remembers only so many signers, forgetting the oldest first', async () => {
-    const receiver = host([available(CURATOR)]);
-    const oracle = createSwmWriteGateRefreshOracle(receiver, { memoryMax: 2, looksPerPeer: 10, looksPerGraph: 10 });
-    const signers = ['44', '55', '66'].map(address);
-
-    for (const signer of signers) await oracle(CG, signer, PEER);
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(3);
-
-    await oracle(CG, signers[2]!, PEER);
-    await oracle(CG, signers[1]!, PEER);
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(3);
-    await oracle(CG, signers[0]!, PEER);
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(4);
-  });
-
-  it('concurrent misses by one signer on one graph share one second look', async () => {
-    let release: (() => void) | undefined;
-    const gateRead = new Promise<void>((resolve) => { release = resolve; });
-    const receiver: SwmWriteGateRefreshHost = {
-      resolveAgentGate: vi.fn(async () => {
-        await gateRead;
-        return available(CURATOR, JOINER);
-      }),
-      refreshMetaFromCurator: async () => false,
-      readRosterRevision: unchangingRevision,
-    };
+  it('concurrent misses by one signer each take a look of their own', async () => {
+    const receiver = host([available(CURATOR, JOINER)]);
     const oracle = createSwmWriteGateRefreshOracle(receiver);
 
-    const first = oracle(CG, JOINER, PEER);
-    const second = oracle(CG, JOINER.toLowerCase(), PEER);
-    const other = oracle(CG, MEMBER, OTHER_PEER);
-    release?.();
-    await expect(Promise.all([first, second])).resolves.toEqual([
-      { kind: 'available', agentAddresses: [CURATOR, JOINER] },
-      { kind: 'available', agentAddresses: [CURATOR, JOINER] },
-    ]);
-    await other;
+    await Promise.all([oracle(CG, JOINER, PEER), oracle(CG, JOINER.toLowerCase(), PEER)]);
     expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(2);
   });
 });
@@ -383,13 +231,30 @@ describe('SWM write gate refresh oracle: the ration of looks', () => {
     expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(4);
   });
 
-  it('a member the remembered fresh gate contains is admitted even when the ration is spent', async () => {
+  it('a late member writing repeatedly within one window takes its ration, then is told to retry', async () => {
+    let clock = 1_000;
     const receiver = host([available(CURATOR, MEMBER, JOINER)]);
-    const oracle = createSwmWriteGateRefreshOracle(receiver, { looksPerPeer: 1, looksPerGraph: 1 });
+    const oracle = createSwmWriteGateRefreshOracle(receiver, { now: () => clock, windowMs: 10_000, looksPerPeer: 2 });
 
-    await expect(oracle(CG, ethers.Wallet.createRandom().address, OTHER_PEER)).resolves.toMatchObject({ kind: 'available' });
-    await expect(oracle(CG, ethers.Wallet.createRandom().address, PEER)).resolves.toEqual(RATIONED);
-    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available', agentAddresses: [CURATOR, MEMBER, JOINER] });
-    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(1);
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
+    await expect(oracle(CG, JOINER, PEER)).resolves.toEqual(RATIONED);
+    clock += 10_000;
+    await expect(oracle(CG, JOINER, PEER)).resolves.toMatchObject({ kind: 'available' });
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(3);
+  });
+
+  it('tracks only so many rations, forgetting the oldest first', async () => {
+    const receiver = host([available(CURATOR)]);
+    const oracle = createSwmWriteGateRefreshOracle(receiver, { looksPerPeer: 1, looksPerGraph: 10, rationMemoryMax: 3 });
+    const freshKey = () => ethers.Wallet.createRandom().address;
+
+    await expect(oracle(CG, freshKey(), 'peer-a')).resolves.toMatchObject({ kind: 'available' });
+    await expect(oracle(CG, freshKey(), 'peer-a')).resolves.toEqual(RATIONED);
+    // Two more peers push peer-a's ration out of the bounded memory.
+    await expect(oracle(CG, freshKey(), 'peer-b')).resolves.toMatchObject({ kind: 'available' });
+    await expect(oracle(CG, freshKey(), 'peer-c')).resolves.toMatchObject({ kind: 'available' });
+    await expect(oracle(CG, freshKey(), 'peer-a')).resolves.toMatchObject({ kind: 'available' });
+    expect(receiver.resolveAgentGate).toHaveBeenCalledTimes(4);
   });
 });

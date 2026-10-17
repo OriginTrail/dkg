@@ -15,15 +15,17 @@ import { ethers } from 'ethers';
  * already refreshes the metadata and re-reads its gate on the same miss; this
  * module gives the write path the same second look.
  *
- * The oracle is injected by the agent. It refreshes the graph's metadata from
- * the curator and re-resolves the canonical gate (the chain roster for a
- * registered graph), under admission limits per graph and per sending peer so
- * a peer cannot buy chain reads by rotating signing keys. Its answer separates
- * three cases the projected gate could not tell apart: the fresh gate contains
- * the signer (admitted again against it), the fresh gate excludes the signer
- * (permanent rejection), or no fresh gate could be obtained (a retryable
- * rejection, so the sender's fan-out tries again on its watchdog instead of
- * dropping the share).
+ * The oracle is injected by the agent. It reads the canonical gate fresh (the
+ * chain roster for a registered graph, after a curator metadata refresh where
+ * the gate rests on local metadata), rationed per graph and per sending peer
+ * so a peer cannot buy chain reads by rotating signing keys. Nothing of its
+ * answer is cached or shared: every miss that the ration admits is judged from
+ * a read of its own. The whole admission is then re-run on that fresh answer:
+ * an explicit local revocation stands, the signer must be in the fresh gate,
+ * the local node must hold an agent of it, and the sender must pass the peer
+ * allowlist of the metadata the refresh may have installed. An authority that
+ * could not be read is a retryable rejection, so the sender's fan-out tries
+ * again on its watchdog instead of dropping the share.
  */
 
 /**
@@ -84,9 +86,9 @@ export type SwmAgentGateRefreshResult =
 /**
  * Fresh agent gate for one authenticated signer the projected gate lacked,
  * sent by `fromPeerId`. Called at most once per rejected envelope, only after
- * the envelope's signature verified and the peer allowlist admitted the sender,
- * so only an authenticated, peer-admitted sender can make the receiver read;
- * the oracle bounds how often per graph and per peer.
+ * the envelope's signature verified, the signer was found not to be revoked
+ * locally and the peer allowlist admitted the sender, so only such a sender
+ * can make the receiver read; the oracle bounds how often per graph and peer.
  */
 export type SwmAgentGateRefreshOracle = (
   contextGraphId: string,
@@ -104,27 +106,49 @@ export interface RetryAgentEnvelopeInput {
   oracle: SwmAgentGateRefreshOracle | undefined;
   contextGraphId: string;
   fromPeerId: string;
-  /** Whether the graph's peer allowlist admits the sender (a peer it excludes is refused without a read). */
-  peerAdmitted: boolean;
+  /** Host catch-up replay: the relaying host need not be in the peer allowlist. */
+  trustedReplay: boolean;
+  /** The peer allowlist the envelope was first judged by (null: no allowlist). */
+  allowedPeers: readonly string[] | null;
   localAgentAddresses: LocalAgentAddressesSource | undefined;
+  /** The graph's explicitly revoked agents, lowercased, read fresh. */
+  readRevokedAgents: () => Promise<ReadonlySet<string>>;
+  /** The graph's peer allowlist, read fresh. */
+  readAllowedPeers: () => Promise<readonly string[] | null>;
   logWarn: (message: string) => void;
   logInfo: (message: string) => void;
 }
 
+const PERMANENT: AgentEnvelopeRetryVerdict = Object.freeze({ accepted: false, retryable: false });
+
 /**
- * The second look. Only a `gate-miss` verdict from a peer-admitted sender asks
- * the oracle; the signer is then admitted against the fresh gate, with the
- * local-membership check of the first verification.
+ * The second look, owning everything from the gate miss to the final
+ * admission. Only a `gate-miss` verdict from a sender the peer allowlist admits
+ * asks the oracle, and never for a signer the local metadata explicitly
+ * revoked; the fresh gate then admits the signer under the same checks as the
+ * first verification, plus the peer allowlist of the current metadata.
  */
 export async function retryAgentEnvelopeWithRefreshedGate(
   input: RetryAgentEnvelopeInput,
 ): Promise<AgentEnvelopeRetryVerdict> {
-  const { verdict, oracle, contextGraphId, fromPeerId, peerAdmitted, localAgentAddresses, logWarn, logInfo } = input;
+  const {
+    verdict, oracle, contextGraphId, fromPeerId, trustedReplay, allowedPeers,
+    localAgentAddresses, readRevokedAgents, readAllowedPeers, logWarn, logInfo,
+  } = input;
   if (verdict.kind === 'verified') return { accepted: true };
-  if (verdict.kind === 'invalid' || oracle === undefined || !peerAdmitted) {
-    return { accepted: false, retryable: false };
-  }
+  if (verdict.kind === 'invalid' || oracle === undefined) return PERMANENT;
+  const peerAdmits = (peers: readonly string[] | null): boolean =>
+    trustedReplay || peers === null || peers.includes(fromPeerId);
+  if (!peerAdmits(allowedPeers)) return PERMANENT;
   const signer = ethers.getAddress(verdict.signer);
+  const signerKey = signer.toLowerCase();
+  // A signer the local metadata explicitly revoked is not a signer the
+  // metadata has not heard of: no authority read can lift a tombstone.
+  if ((await readRevokedAgents()).has(signerKey)) {
+    logWarn(`SWM write by ${signer} to context graph "${contextGraphId}" rejected: the agent is revoked locally`);
+    return PERMANENT;
+  }
+
   let fresh: SwmAgentGateRefreshResult;
   try {
     fresh = await oracle(contextGraphId, signer, fromPeerId);
@@ -135,33 +159,45 @@ export async function retryAgentEnvelopeWithRefreshedGate(
     );
     return { accepted: false, retryable: true };
   }
-  switch (fresh.kind) {
-    case 'unavailable':
-      logWarn(
-        `SWM write by ${signer} to context graph "${contextGraphId}" ${fresh.retryable ? 'deferred' : 'rejected'}: `
-          + `agent gate authority is unavailable (${fresh.reason})`,
-      );
-      return { accepted: false, retryable: fresh.retryable };
-    case 'ungated':
-      logWarn(
-        `SWM write by ${signer} to context graph "${contextGraphId}" rejected: the refreshed gate has no agent roster`,
-      );
-      return { accepted: false, retryable: false };
-    case 'available': {
-      const admitted = await admitAgentSigner({
-        signer,
-        contextGraphId,
-        agentGateAddresses: fresh.agentAddresses,
-        requireLocalMembership: true,
-        localAgentAddresses,
-        logWarn,
-      });
-      if (admitted.kind !== 'verified') return { accepted: false, retryable: false };
-      logInfo(
-        `SWM write by ${signer} to context graph "${contextGraphId}" accepted after an agent gate refresh `
-          + `(gateCount=${fresh.agentAddresses.length})`,
-      );
-      return { accepted: true };
-    }
+  if (fresh.kind === 'unavailable') {
+    logWarn(
+      `SWM write by ${signer} to context graph "${contextGraphId}" ${fresh.retryable ? 'deferred' : 'rejected'}: `
+        + `agent gate authority is unavailable (${fresh.reason})`,
+    );
+    return { accepted: false, retryable: fresh.retryable };
   }
+  if (fresh.kind === 'ungated') {
+    logWarn(
+      `SWM write by ${signer} to context graph "${contextGraphId}" rejected: the refreshed gate has no agent roster`,
+    );
+    return PERMANENT;
+  }
+
+  // The look may have installed new metadata: every local check is re-run on
+  // the metadata as it is now, not on the snapshot the envelope was first judged by.
+  if ((await readRevokedAgents()).has(signerKey)) {
+    logWarn(`SWM write by ${signer} to context graph "${contextGraphId}" rejected: the refreshed metadata revokes the agent`);
+    return PERMANENT;
+  }
+  const admitted = await admitAgentSigner({
+    signer,
+    contextGraphId,
+    agentGateAddresses: fresh.agentAddresses,
+    requireLocalMembership: true,
+    localAgentAddresses,
+    logWarn,
+  });
+  if (admitted.kind !== 'verified') return PERMANENT;
+  if (!peerAdmits(await readAllowedPeers())) {
+    logWarn(
+      `SWM write by ${signer} to context graph "${contextGraphId}" rejected: `
+        + `peer "${fromPeerId}" is not in the refreshed peer allowlist`,
+    );
+    return PERMANENT;
+  }
+  logInfo(
+    `SWM write by ${signer} to context graph "${contextGraphId}" accepted after an agent gate refresh `
+      + `(gateCount=${fresh.agentAddresses.length})`,
+  );
+  return { accepted: true };
 }

@@ -1123,7 +1123,7 @@ export class SharedMemoryHandler {
         CG_AUTH_RPC_SITES.workspaceApply,
         () => this.getContextGraphAgentGateAddresses(contextGraphId, readProjectedMeta),
       );
-      let allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
+      const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
       const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(
         contextGraphId,
         readProjectedMeta,
@@ -1155,17 +1155,15 @@ export class SharedMemoryHandler {
         if (verdict.kind !== 'verified') {
           // verifyAgentEnvelope logged the reason at WARN. An invalid envelope is
           // permanent; an authenticated signer the projected gate lacked gets one
-          // fresh look, unless the peer allowlist (checked below) excludes the sender.
+          // fresh look, with the whole admission re-run on it (`swm-write-gate-refresh.ts`).
           const retry = await retryAgentEnvelopeWithRefreshedGate({
-            verdict, oracle: this.agentGateRefreshOracle, contextGraphId, fromPeerId,
-            peerAdmitted: trustedReplay || allowedPeers === null || allowedPeers.includes(fromPeerId),
+            verdict, oracle: this.agentGateRefreshOracle, contextGraphId, fromPeerId, trustedReplay, allowedPeers,
             localAgentAddresses: this.localAgentAddresses?.bind(this),
+            readRevokedAgents: async () => this.getContextGraphRevokedAgents(contextGraphId, await this.createContextGraphMetaOracleRead(contextGraphId)?.()),
+            readAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId, this.createContextGraphMetaOracleRead(contextGraphId)),
             logWarn: (message) => this.log.warn(ctx, message), logInfo: (message) => this.log.info(ctx, message),
           });
           if (!retry.accepted) return { applied: false, reason: 'agent envelope verification failed', retryable: retry.retryable };
-          // The second look may have installed new metadata: the peer gate below
-          // must judge the sender from that metadata, not the earlier snapshot.
-          allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, this.createContextGraphMetaOracleRead(contextGraphId));
         }
       } else if (trustedReplay && !hasPrivateAccessPolicy && !decoded.senderKeyMessage && !decoded.encryptedPayload) {
         // GH #1124 (otReviewAgent #1239) — PUBLIC-CG host-catchup forgery gate.
@@ -2319,6 +2317,21 @@ export class SharedMemoryHandler {
   }
 
   /**
+   * Revoked tombstones, lowercased: the projection when it carried the field,
+   * otherwise `_meta`. Applied to whichever source an allowlist comes from, so
+   * a projected revocation kicks a store-resolved member and vice versa.
+   */
+  private async getContextGraphRevokedAgents(
+    contextGraphId: string,
+    projected: ContextGraphMetaOracleRecord | null | undefined,
+  ): Promise<ReadonlySet<string>> {
+    const revokedAgents = projected?.revokedAgents ?? await this.queryMetaAgents(contextGraphId, DKG_ONTOLOGY.DKG_REVOKED_AGENT);
+    return new Set(revokedAgents
+      .filter((v): v is string => typeof v === 'string' && ethers.isAddress(v))
+      .map((v) => v.toLowerCase()));
+  }
+
+  /**
    * Returns the accepted SWM writer agent addresses for a context graph, or
    * null if the graph is not agent-gated. Includes DKG_ALLOWED_AGENT and
    * DKG_PARTICIPANT_AGENT metadata.
@@ -2337,19 +2350,7 @@ export class SharedMemoryHandler {
     // whole truthy record here would let a partial projection fall
     // back to a *stale store allowlist with no revocation applied*.
     const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
-
-    // Revoked tombstones: prefer the projection when it carried the
-    // field, otherwise read `_meta`. Applied to whichever source the
-    // allowlist comes from, so a projected revocation kicks a store-
-    // resolved member and vice versa.
-    const revoked = new Set<string>(
-      (projected?.revokedAgents !== undefined
-        ? projected.revokedAgents
-        : await this.queryMetaAgents(contextGraphId, DKG_ONTOLOGY.DKG_REVOKED_AGENT)
-      )
-        .filter((v): v is string => typeof v === 'string' && ethers.isAddress(v))
-        .map((v) => v.toLowerCase()),
-    );
+    const revoked = await this.getContextGraphRevokedAgents(contextGraphId, projected);
 
     // Resolve EACH allowlist field (allowed, participant) INDEPENDENTLY:
     // projection-if-that-specific-field-was-projected, else `_meta` store
