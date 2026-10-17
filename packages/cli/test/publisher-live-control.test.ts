@@ -107,11 +107,41 @@ describe('durable control of the active publisher wallet loops', () => {
     expect(JSON.parse(await readFile(publisherDesiredStatePath(dataDir), 'utf8'))).toMatchObject({ desiredState: 'running', generation: 2 });
   });
 
+  it('keeps accepted work fenced until resumed intent finishes fsync', async () => {
+    const store = new OxigraphStore(); cleanup.push(() => store.close());
+    const execute = vi.fn(async () => { throw new Error('test execution boundary reached'); });
+    const publisher = new TripleStoreAsyncLiftPublisher(store, { knowledgeAssetVmPublishHandler: { execute } });
+    await stageKnowledgeAssetShareSnapshot({ store, graphManager: new GraphManager(store) });
+    const { dataDir, control, runner } = await fixture(undefined, publisher);
+    await control.pause();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const accepted = await publisher.getStatus(jobId);
+    await runner.start();
+    let entered!: () => void; const syncing = new Promise<void>(resolve => { entered = resolve; });
+    let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+    persistenceBarrier.directory = dataDir; persistenceBarrier.entered = entered; persistenceBarrier.release = held;
+    const resuming = control.resume();
+    try {
+      await syncing;
+      expect(runner.claimControlStatus().wallets.every(wallet => wallet.paused)).toBe(true);
+      expect(await publisher.claimNext('probe')).toBeNull();
+      expect(await publisher.getStatus(jobId)).toEqual(accepted);
+      expect(execute).not.toHaveBeenCalled();
+    } finally { release(); await resuming; }
+    expect(JSON.parse(await readFile(publisherDesiredStatePath(dataDir), 'utf8'))).toMatchObject({ desiredState: 'running', generation: 2 });
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+  });
+
   it('fails startup closed on corrupt persisted state instead of silently resuming', async () => {
-    const { dataDir, control, runner, publisher } = await fixture();
-    await control.close();
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-corrupt-'));
+    cleanup.push(() => rm(dataDir, { recursive: true, force: true }));
     await writeFile(publisherDesiredStatePath(dataDir), '{broken');
-    await expect(createPublisherLiveControl(runner, dataDir)).rejects.toThrow();
+    const store = new OxigraphStore(); cleanup.push(() => store.close());
+    const publisher = new TripleStoreAsyncLiftPublisher(store);
+    const runner = new AsyncLiftRunner({ publisher, walletIds: ['one', 'two'] });
+    cleanup.push(() => runner.stop());
+    expect(runner.claimControlStatus().wallets.every(w => !w.paused)).toBe(true);
+    await expect(createPublisherLiveControl(runner, dataDir)).rejects.toBeInstanceOf(SyntaxError);
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     expect(await publisher.claimNext('two')).toBeNull();
     expect(runner.claimControlStatus().wallets.every(w => w.paused)).toBe(true);

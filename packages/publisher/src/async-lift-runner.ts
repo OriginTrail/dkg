@@ -38,7 +38,7 @@ export class AsyncLiftRunner {
   private readonly activeRecoveryIntervalMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError?: (error: unknown) => void | Promise<void>;
-  private readonly claimGates = new Map<string, { paused: boolean; generation: number }>();
+  private claimsHeld = false;
   private controlGeneration = -1;
   private controlPaused = false;
   private controlClosed = false;
@@ -83,18 +83,18 @@ export class AsyncLiftRunner {
     assertNodeTimerDelayMs(this.activeRecoveryIntervalMs, 'AsyncLiftRunner activeRecoveryIntervalMs');
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
-    for (const walletId of config.walletIds) this.claimGates.set(walletId, { paused: false, generation: -1 });
   }
 
-  /** Every wallet owns a gate; settlement already in flight continues while its next claim is fenced. */
+  /** Every wallet reads the same claim fence; settlement already in flight continues while its next claim is fenced. */
   claimControlStatus(): PublisherClaimControlSnapshot {
     return Object.freeze({ paused: this.controlPaused, generation: this.controlGeneration,
-      wallets: Object.freeze([...this.claimGates].map(([walletId, state]) => Object.freeze({ walletId, ...state }))) });
+      wallets: Object.freeze(this.config.walletIds.map(walletId => Object.freeze({ walletId,
+        paused: this.claimsHeld, generation: this.controlGeneration }))) });
   }
 
   /** Fail-closed startup/fault fence; does not acknowledge a new durable generation. */
   async holdClaims(): Promise<void> {
-    for (const gate of this.claimGates.values()) gate.paused = true;
+    this.claimsHeld = true;
     await this.config.publisher.pause();
     this.controlPaused = true;
   }
@@ -113,20 +113,18 @@ export class AsyncLiftRunner {
         throw new Error('Invalid publisher claim-control generation');
       }
       if (generation === this.controlGeneration) return this.claimControlStatus();
-      // Close every loop gate first; pause() then drains claims already inside the claim domain.
-      for (const gate of this.claimGates.values()) gate.paused = true;
+      // Close the shared loop fence first; pause() then drains claims already inside the claim domain.
+      this.claimsHeld = true;
       if (paused) await this.config.publisher.pause();
       else await this.config.publisher.resume();
       if (this.stopped || this.controlClosed) {
         await this.holdClaims();
         throw new Error('Publisher runner claim control is closed');
       }
-      for (const [walletId, gate] of this.claimGates) {
-        gate.paused = paused; gate.generation = generation;
-        if (!paused) this.wakeWallet(walletId);
-      }
+      this.claimsHeld = paused;
       this.controlPaused = paused;
       this.controlGeneration = generation;
+      if (!paused) for (const walletId of this.config.walletIds) this.wakeWallet(walletId);
       return this.claimControlStatus();
     });
     this.controlTail = applying.catch(() => {});
@@ -212,7 +210,7 @@ export class AsyncLiftRunner {
   private async walletLoop(walletId: string): Promise<void> {
     while (!this.stopped) {
       try {
-        if (this.claimGates.get(walletId)?.paused) { await this.idleWalletWait(walletId); continue; }
+        if (this.claimsHeld) { await this.idleWalletWait(walletId); continue; }
         const processed = await this.config.publisher.processNext(walletId);
         if (!processed && !this.stopped) {
           // Interruptible idle wait: a wallet-release poke ends it early, and one that landed
