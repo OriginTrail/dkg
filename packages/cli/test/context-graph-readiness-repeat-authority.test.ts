@@ -5,6 +5,7 @@
 // the walk asked no peer anything; the authority arrived about a second later,
 // and nothing ran the job again. After a restart, the job that catches up the
 // restored subscription met the same race, the authority 21 s after the walk.
+// A walk that had the lane and still did not complete was not repeated either.
 //
 // First: the harness mocks `node:worker_threads`, so the catch-up runner loaded
 // below runs its real worker, and its real wait for the selected lane, in this
@@ -193,9 +194,12 @@ describe('a registered public graph whose catch-up ran before its authority was 
     expect(armed()).toEqual([]);
   });
 
-  it('does not repeat a registered graph whose walk had its lane', async () => {
-    // The walk had the lane, and a revoked sync left the round incomplete.
-    // That is not this race: a registered graph is not repeated for it.
+  it('repeats a registered graph whose walk had its lane and still did not complete', async () => {
+    // The walk had the lane, and a revoked sync left the round incomplete, as
+    // when the job's own metadata pull installs the graph's definition from
+    // the chain and the lane's activation revokes the walk's recovery leases.
+    // Before the fix a registered graph was not repeated for it, and stayed
+    // unsynced for good.
     const { member, asked, acceptAuthority } = registeredMember();
     acceptAuthority();
     member.node.answer = (peerId) => (peerId === 'peer-1' ? revokedAnswer() : emptyAnswer(peerId));
@@ -206,6 +210,15 @@ describe('a registered public graph whose catch-up ran before its authority was 
     expect(asked).toHaveLength(PEERS.length);
     expect(job.selectedLaneFoundInactive).toBeUndefined();
     expect(member.subscription()).toMatchObject({ subscribed: true, synced: false });
+    expect(armed().map((timer) => timer.delayMs)).toEqual([CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS[0]]);
+
+    // The revocation is over when the repeat comes due: every peer answers empty.
+    member.node.answer = (peerId) => emptyAnswer(peerId);
+    fire(armed()[0]);
+    const repeat = await nextFinishedJob(api.catchupTracker, job.jobId);
+
+    expect(repeat.result?.cleanPlaneCompletions?.sharedMemory).toMatchObject({ emptyPeers: PEERS.length });
+    expect(member.subscription()).toMatchObject({ subscribed: true, synced: true, sharedMemorySynced: true });
     expect(armed()).toEqual([]);
   });
 
