@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
-import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -397,6 +397,39 @@ describe('memory search bounded fair retrieval (#2656)', () => {
     expect(calls.length).toBeLessThanOrEqual(4);
   });
 
+  it('aborts all four pending reads on disconnect without starting a fifth', async () => {
+    const req = Object.assign(new EventEmitter(), {
+      method: 'POST', headers: {}, aborted: false,
+      __dkgPrebufferedBody: Buffer.from(JSON.stringify({ query: 'needle', contextGraphId: CG, memoryLayers: ['wm'] })),
+    });
+    const aborted: AbortSignal[] = [];
+    const cleanup: Array<() => void> = [];
+    const { ctx, calls } = buildCtx({
+      body: {}, authentication: requestAuthentication({ kind: 'nodeOperator' }),
+      localAgents: Array.from({ length: 20 }, (_, n) => `agent-${n}`),
+      bindingsFor: call => new Promise((resolve, reject) => {
+        const signal = call.signal as AbortSignal;
+        const onAbort = () => { aborted.push(signal); reject(signal.reason); };
+        signal.addEventListener('abort', onAbort, { once: true });
+        cleanup.push(() => { signal.removeEventListener('abort', onAbort); resolve([]); });
+      }),
+    });
+    ctx.req = req as any;
+    const pending = handleMemoryRoutes(ctx).then(() => null, error => error);
+    try {
+      await vi.waitFor(() => expect(calls).toHaveLength(4));
+      req.aborted = true; req.emit('aborted');
+      await vi.waitFor(() => expect(aborted).toHaveLength(4));
+      expect(aborted.every(signal => signal.aborted)).toBe(true);
+      expect(await pending).toMatchObject({ code: 'API_QUERY_CALLER_DISCONNECTED' });
+      expect(calls).toHaveLength(4);
+    } finally {
+      req.aborted = true; req.emit('aborted');
+      cleanup.forEach(release => release());
+      await pending;
+    }
+  });
+
   it('explains refused SWM separately from an admitted empty layer', async () => {
     const { ctx, res, calls } = buildCtx({
       body: { query: 'needle', contextGraphId: CG },
@@ -413,29 +446,28 @@ describe('memory search bounded fair retrieval (#2656)', () => {
 describe('memory search through real agent admission and query engine', () => {
   it('reports a refused SWM layer and searches VM root/per-id content without WM or metadata leakage', async () => {
     const store = new OxigraphStore();
+    let agent: DKGAgent | undefined;
     try {
       const root = `did:dkg:context-graph:${CG}`;
       const graphs = [root, `${root}/context/7`, `${root}/_verifiable_memory/owner/7`,
         `${root}/_meta`, `${root}/_working_memory/${CALLER}/7`, `${root}/_shared_memory`];
       await store.insert(graphs.map((graph, n) => ({ graph, subject: `urn:needle:${n}`,
         predicate: 'http://schema.org/name', object: '"needle"' })));
-      const agent = Object.create(DKGAgent.prototype) as DKGAgent;
-      Object.assign(agent, {
-        defaultAgentAddress: CALLER, config: {}, store, queryEngine: new DKGQueryEngine(store),
-        log: { info() {}, warn() {}, debug() {}, error() {} }, subscribedContextGraphs: new Map(),
-        listLocalAgents: () => [{ agentAddress: CALLER }],
-        resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'caller',
-          source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'eligible' }),
-        // Supply the authority outcome at its boundary; both actual agent methods
-        // (the route preflight and query admission) interpret it themselves.
-        resolveSharedMemoryReadAdmission: async () => ({ outcome: 'denied' }),
-      });
-      Object.defineProperty(agent, 'peerId', { value: 'MemorySearchScopePeer' });
+      agent = await DKGAgent.create({ name: 'MemorySearchScope', store,
+        chainAdapter: new MockChainAdapter(), listenHost: '127.0.0.1', nodeRole: 'edge',
+        rfc64CatalogActivation: { enabled: false } });
+      await agent.start();
+      vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({ outcome: 'allowed', grantScope: 'caller',
+        source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'eligible' });
+      // Only public authority boundaries are overridden; the factory owns all
+      // identity, query-engine, subscription and configuration initialization.
+      vi.spyOn(agent, 'resolveSharedMemoryReadAdmission').mockResolvedValue({ outcome: 'denied' });
       const { ctx, res } = buildCtx({
         body: { query: 'needle', contextGraphId: CG, memoryLayers: ['swm', 'vm'] },
         authentication: requestAuthentication({ kind: 'agent', agentAddress: CALLER }),
       });
       ctx.agent = agent;
+      expect((await agent.query('SELECT ?s WHERE { GRAPH ?g { ?s <http://schema.org/name> ?o } }', { contextGraphId: CG, view: 'verifiable-memory', callerAgentAddress: CALLER })).bindings).toHaveLength(3);
       await handleMemoryRoutes(ctx);
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
@@ -445,6 +477,6 @@ describe('memory search through real agent admission and query engine', () => {
       expect(await agent.query('SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }', {
         contextGraphId: CG, view: 'shared-working-memory', callerAgentAddress: CALLER,
       })).toEqual({ bindings: [] });
-    } finally { await store.close(); }
+    } finally { await agent?.stop(); await store.close(); }
   });
 });
