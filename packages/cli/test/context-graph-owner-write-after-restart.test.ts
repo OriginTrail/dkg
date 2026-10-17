@@ -36,6 +36,7 @@ const {
 const { startActivationCatchups } = await import('../src/daemon/context-graph-activation-catchup.js');
 const { beginWalkCatchupJob, releaseCatchupJob } = await import('../src/daemon/catchup-telemetry.js');
 const { writeReadinessWait } = await import('../src/daemon/context-graph-write-readiness.js');
+const { startContextGraphCatchupProgress } = await import('../src/daemon/context-graph-catchup-progress-sources.js');
 const { resolveRequiredWriteContextGraphId } = await import('../src/daemon/http-utils.js');
 
 /** The owner's agent: the curator its graph ids are scoped to. */
@@ -85,6 +86,8 @@ describe('the first write of a restarted owner into its own registered public gr
   const stops: Array<() => void> = [];
 
   beforeEach(() => {
+    // As the daemon does when its catch-up runner starts.
+    stops.push(startContextGraphCatchupProgress());
     // Repeats are armed on recorded timers that only the test fires.
     readinessRepeatTimers.set = (callback: () => void, delayMs: number) => {
       const timer: ArmedTimer = { callback, delayMs, cleared: false, fired: false };

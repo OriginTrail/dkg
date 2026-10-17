@@ -25,7 +25,6 @@
 import { getMetrics } from '@origintrail-official/dkg-core';
 import type { CatchupJob, CatchupJobState } from './types.js';
 import { isTerminalCatchupJobState } from '../catchup-status.js';
-import { registerContextGraphCatchupProgress } from './context-graph-catchup-progress.js';
 
 /**
  * Grace period the shutdown drain gives in-flight walks to settle normally.
@@ -251,5 +250,3 @@ export function catchupJobInFlightFor(contextGraphId: string): boolean {
   }
   return false;
 }
-
-registerContextGraphCatchupProgress({ catchingUp: catchupJobInFlightFor });

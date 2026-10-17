@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import type { CatchupRunner } from '../src/catchup-runner.js';
 import { beginWalkCatchupJob, catchupJobInFlightFor, releaseCatchupJob } from '../src/daemon/catchup-telemetry.js';
+import { DAEMON_DEFAULT_TIMEOUT_MS } from '../../adapter-openclaw/src/dkg-client.js';
 import { startActivationCatchups } from '../src/daemon/context-graph-activation-catchup.js';
+import { startContextGraphCatchupProgress } from '../src/daemon/context-graph-catchup-progress-sources.js';
 import {
   contextGraphCatchupInProgress,
   hurryContextGraphCatchup,
@@ -63,8 +65,11 @@ describe('a write waits for the catch-up of its graph', () => {
   const timers: ArmedTimer[] = [];
   const ledger: Array<ReturnType<typeof beginWalkCatchupJob>> = [];
   const stops: Array<() => void> = [];
+  let stopProgress = () => {};
 
   beforeEach(() => {
+    // As the daemon does when its catch-up runner starts.
+    stopProgress = startContextGraphCatchupProgress();
     writeReadinessWait.timeoutMs = 2_000;
     writeReadinessWait.pollMs = 5;
     readinessRepeatTimers.set = (callback: () => void, delayMs: number) => {
@@ -78,6 +83,7 @@ describe('a write waits for the catch-up of its graph', () => {
   });
 
   afterEach(() => {
+    stopProgress();
     for (const stop of stops.splice(0)) stop();
     for (const entry of ledger.splice(0)) releaseCatchupJob(entry);
     cancelContextGraphReadinessRepeats();
@@ -111,6 +117,18 @@ describe('a write waits for the catch-up of its graph', () => {
 
       inFlight(walkJob({ contextGraphId: '0xabc-name-hash', resolvedContextGraphId: CG }));
       expect(catchupJobInFlightFor(CG)).toBe(true);
+    });
+
+    it('counts jobs and repeats only while the daemon reports them, never on import alone', () => {
+      inFlight(walkJob());
+      expect(contextGraphCatchupInProgress(CG)).toBe(true);
+
+      stopProgress();
+      expect(catchupJobInFlightFor(CG)).toBe(true);
+      expect(contextGraphCatchupInProgress(CG)).toBe(false);
+
+      stopProgress = startContextGraphCatchupProgress();
+      expect(contextGraphCatchupInProgress(CG)).toBe(true);
     });
 
     it('is a readiness repeat that follows the graph', async () => {
@@ -406,6 +424,12 @@ describe('a write waits for the catch-up of its graph', () => {
 
       expect(await resolving).toBe(bare);
       expect(out).toEqual({});
+    });
+
+    it('waits less than a quick write gives the daemon, so the client gets the answer', () => {
+      // The OpenClaw adapter gives reads and quick writes 30 s; the wait leaves
+      // at least 5 s of it for the write itself and the preflight around it.
+      expect(originalWait.timeoutMs).toBeLessThanOrEqual(DAEMON_DEFAULT_TIMEOUT_MS - 5_000);
     });
 
     it('answers not writable yet, retryable, only when the bound passed while catching up', () => {

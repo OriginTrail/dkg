@@ -41,8 +41,12 @@ import { contextGraphCatchupInProgress, hurryContextGraphCatchup } from './conte
 
 /** How long a write waits for its graph's catch-up, and how often it looks. Test seam. */
 export const writeReadinessWait = {
-  /** As long as a share waits for a recipient key or for the legacy shared-memory fence. */
-  timeoutMs: 30_000,
+  /**
+   * Well inside the 30 s that clients give a quick write (the OpenClaw
+   * adapter's default deadline), with room left for the write itself: a write
+   * that waits this long still gets its answer, never the client's own timeout.
+   */
+  timeoutMs: 20_000,
   pollMs: 250,
 };
 

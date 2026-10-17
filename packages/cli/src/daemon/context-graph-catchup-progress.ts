@@ -8,7 +8,11 @@
 // the agent with it. The write preflight lives in `http-utils.ts`, which every
 // route imports and which must load neither. So each kind of catch-up work
 // tells this registry what it has in hand, and the preflight asks the
-// registry. Nothing here imports anything.
+// registry. The daemon registers its catch-up jobs and readiness repeats when
+// its catch-up runner starts and removes them at shutdown
+// (`context-graph-catchup-progress-sources.ts`); each activation catch-up
+// registers its queue for as long as it runs. Nothing registers on import,
+// and nothing here imports anything.
 
 /** One kind of catch-up work this daemon does. */
 export interface ContextGraphCatchupProgressSource {

@@ -1,7 +1,7 @@
 // A write that waits for its graph's catch-up (`context-graph-write-readiness.ts`)
 // must not outlive the daemon's shutdown or its own request. Graceful shutdown
 // closes the HTTP server before it drains catch-up jobs, within a hard deadline
-// (15 s by default); a write that waited out its 30 s bound for a running job
+// (15 s by default); a write that waited out its 20 s bound for a running job
 // would hold that close until the deadline cut the shutdown off before the
 // drain and the cleanup ran. So shutdown ends every wait before its first
 // await, and a write whose client disconnects stops waiting too.
@@ -19,6 +19,7 @@ import {
   resumeContextGraphWriteReadinessWaits,
   writeReadinessWait,
 } from '../src/daemon/context-graph-write-readiness.js';
+import { startContextGraphCatchupProgress } from '../src/daemon/context-graph-catchup-progress-sources.js';
 import { resolveRequiredWriteContextGraphId } from '../src/daemon/http-utils.js';
 import { DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS } from '../src/daemon/shutdown-policy.js';
 import { beginGracefulShutdown, runProducerQuiescentTeardown } from '../src/daemon/teardown.js';
@@ -59,14 +60,17 @@ describe('a write that waits for its graph does not outlive shutdown or its requ
   const originalWait = { ...writeReadinessWait };
   const ledger: Array<ReturnType<typeof beginWalkCatchupJob>> = [];
   const servers: Server[] = [];
+  let stopProgress = () => {};
 
   beforeEach(() => {
     // The production bound: a wait that ran it out would show in every timing below.
-    writeReadinessWait.timeoutMs = 30_000;
-    writeReadinessWait.pollMs = 250;
+    Object.assign(writeReadinessWait, originalWait);
+    // As the daemon does when its catch-up runner starts.
+    stopProgress = startContextGraphCatchupProgress();
   });
 
   afterEach(async () => {
+    stopProgress();
     resumeContextGraphWriteReadinessWaits();
     Object.assign(writeReadinessWait, originalWait);
     for (const entry of ledger.splice(0)) releaseCatchupJob(entry);

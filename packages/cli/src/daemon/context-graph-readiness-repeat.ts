@@ -39,7 +39,7 @@
 
 import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
 import { selectedSharedMemoryLaneActive } from '../catchup-selected-lane.js';
-import { registerContextGraphCatchupProgress } from './context-graph-catchup-progress.js';
+import type { ContextGraphCatchupProgressSource } from './context-graph-catchup-progress.js';
 import {
   startContextGraphCatchupJob,
   type ContextGraphCatchupJobInput,
@@ -100,12 +100,15 @@ export function cancelContextGraphReadinessRepeats(): void {
   sequences.clear();
 }
 
-// A graph with a sequence is being caught up: an attempt is in flight, or a
-// repeat is armed. A write that waits for it starts an armed repeat early
-// when that repeat waited only for the graph's authority (`expedite`).
-registerContextGraphCatchupProgress({
-  catchingUp: (contextGraphId) => sequences.has(contextGraphId),
-  hurry: (contextGraphId) => sequences.get(contextGraphId)?.expedite(),
+/**
+ * The repeats as catch-up progress (`context-graph-catchup-progress.ts`): a
+ * graph with a sequence is being caught up, an attempt in flight or a repeat
+ * armed, and a write that waits for it starts an armed repeat early when that
+ * repeat waited only for the graph's authority (`expedite`).
+ */
+export const readinessRepeatProgress: ContextGraphCatchupProgressSource = Object.freeze({
+  catchingUp: (contextGraphId: string) => sequences.has(contextGraphId),
+  hurry: (contextGraphId: string) => sequences.get(contextGraphId)?.expedite(),
 });
 
 /**
