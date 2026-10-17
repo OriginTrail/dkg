@@ -48,7 +48,13 @@ import {
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
-import { retryAgentEnvelopeWithRefreshedGate, type SwmAgentGateRefreshOracle } from './swm-write-gate-refresh.js';
+import {
+  AGENT_ENVELOPE_INVALID,
+  admitAgentSigner,
+  retryAgentEnvelopeWithRefreshedGate,
+  type AgentEnvelopeVerdict,
+  type SwmAgentGateRefreshOracle,
+} from './swm-write-gate-refresh.js';
 import { computeFlatKCRootV10 } from './merkle.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
@@ -1136,8 +1142,7 @@ export class SharedMemoryHandler {
       }
 
       if (agentGateAddresses !== null) {
-        let gateMissSigner: string | undefined;
-        const verified = await this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, agentGateAddresses, ctx, {
+        const verdict = await this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, agentGateAddresses, ctx, {
           // LU-6 host-catchup replay (PR #610 Codex round-2 #1): the 5-minute
           // `GOSSIP_ENVELOPE_FRESHNESS_MS` window protects live gossip against
           // replay, but a member that comes online hours/days after a curator
@@ -1146,14 +1151,15 @@ export class SharedMemoryHandler {
           // still verifies, and host catalog `seqno` monotonicity prevents
           // re-applying already-seen entries.
           skipTimestampFreshness: trustedReplay,
-          onAgentGateMiss: (signer) => { gateMissSigner = signer; },
         });
-        if (!verified) {
-          // verifyAgentEnvelope logged the reason at WARN. A bad signature is
-          // permanent; a signer the projected gate lacked gets one fresh look.
+        if (verdict.kind !== 'verified') {
+          // verifyAgentEnvelope logged the reason at WARN. An invalid envelope is
+          // permanent; an authenticated signer the projected gate lacked gets one
+          // fresh look, unless the peer allowlist (checked below) excludes the sender.
           const retry = await retryAgentEnvelopeWithRefreshedGate({
-            oracle: this.agentGateRefreshOracle, contextGraphId, signerAddress: gateMissSigner,
-            verify: (freshGate) => this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, freshGate, ctx, { skipTimestampFreshness: trustedReplay }),
+            verdict, oracle: this.agentGateRefreshOracle, contextGraphId, fromPeerId,
+            peerAdmitted: trustedReplay || allowedPeers === null || allowedPeers.includes(fromPeerId),
+            localAgentAddresses: this.localAgentAddresses?.bind(this),
             logWarn: (message) => this.log.warn(ctx, message), logInfo: (message) => this.log.info(ctx, message),
           });
           if (!retry.accepted) return { applied: false, reason: 'agent envelope verification failed', retryable: retry.retryable };
@@ -1191,7 +1197,7 @@ export class SharedMemoryHandler {
           envelope, signedPayload, contextGraphId, [ethers.getAddress(envelope.agentAddress)], ctx,
           { requireLocalMembership: false, skipTimestampFreshness: true },
         );
-        if (!selfConsistent) {
+        if (selfConsistent.kind !== 'verified') {
           return { applied: false, reason: 'public-CG host-catchup envelope failed signature verification', retryable: false };
         }
       }
@@ -2120,7 +2126,7 @@ export class SharedMemoryHandler {
       ctx,
       { requireLocalMembership: false },
     );
-    if (!verified) {
+    if (verified.kind !== 'verified') {
       return { accepted: false, reasonCode: 'SIG_VERIFY_FAILED', reason: 'agent envelope verification failed (see preceding WARN log)' };
     }
     return { accepted: true };
@@ -2153,13 +2159,11 @@ export class SharedMemoryHandler {
        * actual replay attacks. Codex PR #610 round-2 finding #1.
        */
       skipTimestampFreshness?: boolean;
-      /** Told the verified signer that `agentGateAddresses` did not contain. */
-      onAgentGateMiss?: (recoveredSigner: string) => void;
     },
-  ): Promise<boolean> {
+  ): Promise<AgentEnvelopeVerdict> {
     if (!envelope) {
       this.log.warn(ctx, `SWM write rejected: unsigned workspace gossip for agent-gated context graph "${contextGraphId}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
     // OT-RFC-38 LU-11: accept both the legacy single-blob type
@@ -2173,25 +2177,25 @@ export class SharedMemoryHandler {
         && envelope.type !== GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED)
     ) {
       this.log.warn(ctx, `SWM write rejected: invalid gossip envelope type/version for context graph "${contextGraphId}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
     if (envelope.contextGraphId !== contextGraphId) {
       this.log.warn(ctx, `SWM write rejected: envelope contextGraphId "${envelope.contextGraphId}" does not match payload "${contextGraphId}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
     if (!envelope.signature || envelope.signature.length === 0) {
       this.log.warn(ctx, `SWM write rejected: missing agent signature for context graph "${contextGraphId}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
     const timestampMs = Date.parse(envelope.timestamp);
     if (!Number.isFinite(timestampMs)) {
       this.log.warn(ctx, `SWM write rejected: invalid gossip timestamp "${envelope.timestamp}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
     if (!options?.skipTimestampFreshness && Math.abs(this.now() - timestampMs) > GOSSIP_ENVELOPE_FRESHNESS_MS) {
       this.log.warn(ctx, `SWM write rejected: stale or invalid gossip timestamp "${envelope.timestamp}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
     let claimedAgent: string;
@@ -2220,32 +2224,24 @@ export class SharedMemoryHandler {
       recovered = ethers.verifyMessage(signingPayload, ethers.hexlify(envelope.signature));
     } catch (err) {
       this.log.warn(ctx, `SWM write rejected: invalid agent signature (${err instanceof Error ? err.message : String(err)})`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
     if (recovered.toLowerCase() !== claimedAgent.toLowerCase()) {
       this.log.warn(ctx, `SWM write rejected: recovered signer ${recovered} does not match envelope agent ${claimedAgent}`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
-    const agentGateSet = new Set(agentGateAddresses.map((agent) => agent.toLowerCase()));
-    if (!agentGateSet.has(recovered.toLowerCase())) {
-      this.log.warn(ctx, `SWM write rejected: agent ${recovered} is not allowed for context graph "${contextGraphId}"`);
-      options?.onAgentGateMiss?.(recovered);
-      return false;
-    }
-
-    const requireLocalMembership = options?.requireLocalMembership !== false;
-    if (requireLocalMembership && this.localAgentAddresses) {
-      const localAgents = await this.localAgentAddresses();
-      const localAllowed = localAgents.some((agent) => agentGateSet.has(agent.toLowerCase()));
-      if (!localAllowed) {
-        this.log.warn(ctx, `SWM write rejected: local node has no allowed agent for context graph "${contextGraphId}"`);
-        return false;
-      }
-    }
-
-    return true;
+    // Authenticated. Roster admission is separate so a fresh gate can re-admit
+    // the same signer without a second signature verification.
+    return admitAgentSigner({
+      signer: recovered,
+      contextGraphId,
+      agentGateAddresses,
+      requireLocalMembership: options?.requireLocalMembership !== false,
+      localAgentAddresses: this.localAgentAddresses?.bind(this),
+      logWarn: (message) => this.log.warn(ctx, message),
+    });
   }
 
   /**

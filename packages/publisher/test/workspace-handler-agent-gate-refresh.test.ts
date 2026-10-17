@@ -21,11 +21,16 @@ import {
   generateWorkspaceRecipientEncryptionKey,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  type GossipEnvelopeMsg,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import { SharedMemoryHandler } from '../src/index.js';
 import {
+  AGENT_ENVELOPE_INVALID,
+  AGENT_ENVELOPE_VERIFIED,
+  admitAgentSigner,
   retryAgentEnvelopeWithRefreshedGate,
+  type AgentEnvelopeVerdict,
   type SwmAgentGateRefreshOracle,
   type SwmAgentGateRefreshResult,
 } from '../src/swm-write-gate-refresh.js';
@@ -35,6 +40,7 @@ const CONTEXT_GRAPH_ID = 'workspace-handler-agent-gate-refresh';
 const DATA_GRAPH = contextGraphDataUri(CONTEXT_GRAPH_ID);
 const WORKSPACE_GRAPH = contextGraphSharedMemoryUri(CONTEXT_GRAPH_ID);
 const PEER_ID = '12D3KooWAgentGateRefreshPeer';
+const OTHER_PEER_ID = '12D3KooWAgentGateRefreshOtherPeer';
 const ENTITY = 'urn:test:workspace-handler-agent-gate-refresh';
 
 const localMember = ethers.Wallet.createRandom();
@@ -42,6 +48,7 @@ const curator = ethers.Wallet.createRandom();
 const newMember = ethers.Wallet.createRandom();
 const PROJECTED_GATE = [localMember.address, curator.address];
 const FRESH_GATE = [...PROJECTED_GATE, newMember.address];
+const PERMANENT = { applied: false, retryable: false, reason: 'agent envelope verification failed' };
 
 let store: OxigraphStore;
 let recipientKey: WorkspaceRecipientEncryptionKey;
@@ -59,9 +66,9 @@ function workspaceMessage(name: string, operationId: string): Uint8Array {
 }
 
 async function signWorkspaceMessage(
-  wallet: ethers.Wallet | ethers.HDNodeWallet,
+  wallet: ethers.HDNodeWallet,
   payload: Uint8Array,
-  claimedAgentAddress = wallet.address,
+  overrides: Partial<GossipEnvelopeMsg> = {},
 ): Promise<Uint8Array> {
   const timestamp = new Date().toISOString();
   const signature = await wallet.signMessage(
@@ -71,10 +78,11 @@ async function signWorkspaceMessage(
     version: GOSSIP_ENVELOPE_VERSION,
     type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
     contextGraphId: CONTEXT_GRAPH_ID,
-    agentAddress: claimedAgentAddress,
+    agentAddress: wallet.address,
     timestamp,
     signature: ethers.getBytes(signature),
     payload,
+    ...overrides,
   });
 }
 
@@ -92,31 +100,39 @@ async function encryptWorkspaceMessage(senderAddress: string, payload: Uint8Arra
   }));
 }
 
-/** A signed, encrypted write by `writer` (claimed as `claimedAgentAddress`). */
+/** A signed, encrypted write by `writer`, with envelope `overrides` applied after signing. */
 async function writeBy(
   writer: ethers.HDNodeWallet,
   name: string,
-  claimedAgentAddress = writer.address,
+  overrides: Partial<GossipEnvelopeMsg> = {},
 ): Promise<Uint8Array> {
-  const encrypted = await encryptWorkspaceMessage(writer.address, workspaceMessage(name, `ws-gate-refresh-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`));
-  return signWorkspaceMessage(writer, encrypted, claimedAgentAddress);
+  const operationId = `ws-gate-refresh-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+  const encrypted = await encryptWorkspaceMessage(writer.address, workspaceMessage(name, operationId));
+  return signWorkspaceMessage(writer, encrypted, overrides);
 }
 
 /** A receiving member of a private graph whose projected gate is the join-time roster. */
-function createHandler(agentGateRefreshOracle?: SwmAgentGateRefreshOracle): SharedMemoryHandler {
+function createHandler(
+  agentGateRefreshOracle?: SwmAgentGateRefreshOracle,
+  overrides: { allowedPeers?: string[]; localAgentAddresses?: string[] } = {},
+): SharedMemoryHandler {
   return new SharedMemoryHandler(store, new TypedEventBus(), {
     sharedMemoryOwnedEntities: new Map(),
-    localAgentAddresses: () => [localMember.address],
+    localAgentAddresses: () => overrides.localAgentAddresses ?? [localMember.address],
     workspaceRecipientPrivateKeys: () => [recipientKey],
     contextGraphMetaOracle: async () => ({
       accessPolicy: 'private',
       allowedAgents: PROJECTED_GATE,
       participantAgents: [],
       revokedAgents: [],
+      ...(overrides.allowedPeers === undefined ? {} : { allowedPeers: overrides.allowedPeers }),
     }),
     ...(agentGateRefreshOracle === undefined ? {} : { agentGateRefreshOracle }),
   });
 }
+
+const freshGateOracle = () =>
+  vi.fn<SwmAgentGateRefreshOracle>(async () => ({ kind: 'available', agentAddresses: FRESH_GATE }));
 
 async function storedName(): Promise<string | undefined> {
   const result = await store.query(
@@ -136,15 +152,15 @@ describe('SharedMemoryHandler: second look at the agent gate for a signer the pr
     );
   });
 
-  it('applies a write by a member the refreshed gate contains, asking the oracle once for that signer', async () => {
-    const oracle = vi.fn<SwmAgentGateRefreshOracle>(async () => ({ kind: 'available', agentAddresses: FRESH_GATE }));
+  it('applies a write by a member the refreshed gate contains, asking the oracle once for that signer and peer', async () => {
+    const oracle = freshGateOracle();
     const handler = createHandler(oracle);
 
     const outcome = await handler.handle(await writeBy(newMember, 'Late Member'), PEER_ID);
 
     expect(outcome).toMatchObject({ applied: true });
     expect(oracle).toHaveBeenCalledTimes(1);
-    expect(oracle).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, ethers.getAddress(newMember.address));
+    expect(oracle).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, ethers.getAddress(newMember.address), PEER_ID);
     await expect(storedName()).resolves.toBe('"Late Member"');
   });
 
@@ -170,7 +186,7 @@ describe('SharedMemoryHandler: second look at the agent gate for a signer the pr
 
     const outcome = await handler.handle(await writeBy(newMember, 'Gate Unsupported'), PEER_ID);
 
-    expect(outcome).toMatchObject({ applied: false, retryable: false });
+    expect(outcome).toMatchObject(PERMANENT);
     await expect(storedName()).resolves.toBeUndefined();
   });
 
@@ -180,7 +196,7 @@ describe('SharedMemoryHandler: second look at the agent gate for a signer the pr
 
     const outcome = await handler.handle(await writeBy(newMember, 'Still Excluded'), PEER_ID);
 
-    expect(outcome).toMatchObject({ applied: false, retryable: false, reason: 'agent envelope verification failed' });
+    expect(outcome).toMatchObject(PERMANENT);
     expect(oracle).toHaveBeenCalledTimes(1);
     await expect(storedName()).resolves.toBeUndefined();
   });
@@ -190,7 +206,7 @@ describe('SharedMemoryHandler: second look at the agent gate for a signer the pr
 
     const outcome = await handler.handle(await writeBy(newMember, 'Ungated'), PEER_ID);
 
-    expect(outcome).toMatchObject({ applied: false, retryable: false });
+    expect(outcome).toMatchObject(PERMANENT);
     await expect(storedName()).resolves.toBeUndefined();
   });
 
@@ -203,21 +219,58 @@ describe('SharedMemoryHandler: second look at the agent gate for a signer the pr
     await expect(storedName()).resolves.toBeUndefined();
   });
 
-  it('does not consult the oracle for an envelope whose signature does not verify', async () => {
-    const oracle = vi.fn<SwmAgentGateRefreshOracle>(async () => ({ kind: 'available', agentAddresses: FRESH_GATE }));
+  it('does not consult the oracle for a sender the peer allowlist excludes, whatever key it signs with', async () => {
+    const oracle = freshGateOracle();
+    const handler = createHandler(oracle, { allowedPeers: [OTHER_PEER_ID] });
+
+    for (const key of [newMember, ethers.Wallet.createRandom(), ethers.Wallet.createRandom()]) {
+      const outcome = await handler.handle(await writeBy(key, `Excluded Peer ${key.address.slice(2, 8)}`), PEER_ID);
+      expect(outcome).toMatchObject(PERMANENT);
+    }
+    expect(oracle).not.toHaveBeenCalled();
+    await expect(storedName()).resolves.toBeUndefined();
+  });
+
+  it('still consults the oracle for a sender the peer allowlist admits', async () => {
+    const oracle = freshGateOracle();
+    const handler = createHandler(oracle, { allowedPeers: [PEER_ID] });
+
+    const outcome = await handler.handle(await writeBy(newMember, 'Admitted Peer'), PEER_ID);
+
+    expect(outcome).toMatchObject({ applied: true });
+    expect(oracle).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the local-membership check on the fresh gate', async () => {
+    const oracle = freshGateOracle();
+    const stranger = ethers.Wallet.createRandom();
+    const handler = createHandler(oracle, { localAgentAddresses: [stranger.address] });
+
+    const outcome = await handler.handle(await writeBy(newMember, 'No Local Member'), PEER_ID);
+
+    expect(outcome).toMatchObject(PERMANENT);
+    expect(oracle).toHaveBeenCalledTimes(1);
+    await expect(storedName()).resolves.toBeUndefined();
+  });
+
+  it.each<[string, (wallet: ethers.HDNodeWallet) => Partial<GossipEnvelopeMsg>]>([
+    ['the claimed agent is not the signer', () => ({ agentAddress: curator.address })],
+    ['the signature is missing', () => ({ signature: new Uint8Array() })],
+    ['the signature is not a signature', () => ({ signature: new Uint8Array(65).fill(7) })],
+    ['the timestamp is not a date', () => ({ timestamp: 'yesterday-ish' })],
+  ])('does not consult the oracle when %s', async (_label, overrides) => {
+    const oracle = freshGateOracle();
     const handler = createHandler(oracle);
 
-    // Signed by the new member but claiming the curator: the recovered signer
-    // does not match the envelope agent, which no fresh gate can repair.
-    const outcome = await handler.handle(await writeBy(newMember, 'Spoofed', curator.address), PEER_ID);
+    const outcome = await handler.handle(await writeBy(newMember, `Invalid ${_label}`, overrides(newMember)), PEER_ID);
 
-    expect(outcome).toMatchObject({ applied: false, retryable: false });
+    expect(outcome).toMatchObject(PERMANENT);
     expect(oracle).not.toHaveBeenCalled();
     await expect(storedName()).resolves.toBeUndefined();
   });
 
   it('does not consult the oracle for a writer the projected gate already contains', async () => {
-    const oracle = vi.fn<SwmAgentGateRefreshOracle>(async () => ({ kind: 'available', agentAddresses: FRESH_GATE }));
+    const oracle = freshGateOracle();
     const handler = createHandler(oracle);
 
     const outcome = await handler.handle(await writeBy(curator, 'Known Writer'), PEER_ID);
@@ -232,46 +285,78 @@ describe('SharedMemoryHandler: second look at the agent gate for a signer the pr
 
     const outcome = await handler.handle(await writeBy(newMember, 'No Oracle'), PEER_ID);
 
-    expect(outcome).toMatchObject({ applied: false, retryable: false, reason: 'agent envelope verification failed' });
+    expect(outcome).toMatchObject(PERMANENT);
     await expect(storedName()).resolves.toBeUndefined();
   });
 });
 
+describe('admitAgentSigner', () => {
+  const base = { contextGraphId: CONTEXT_GRAPH_ID, agentGateAddresses: FRESH_GATE, logWarn: () => {} };
+
+  it('admits a signer of the gate when the local node holds an agent of the gate', async () => {
+    await expect(admitAgentSigner({
+      ...base, signer: newMember.address, requireLocalMembership: true, localAgentAddresses: () => [localMember.address],
+    })).resolves.toEqual(AGENT_ENVELOPE_VERIFIED);
+  });
+
+  it('reports a gate miss with the signer, before any local-membership read', async () => {
+    const localAgentAddresses = vi.fn(() => [localMember.address]);
+    await expect(admitAgentSigner({
+      ...base, signer: ethers.Wallet.createRandom().address.toLowerCase(), requireLocalMembership: true, localAgentAddresses,
+    })).resolves.toMatchObject({ kind: 'gate-miss' });
+    expect(localAgentAddresses).not.toHaveBeenCalled();
+  });
+
+  it('is invalid when the local node holds no agent of the gate, unless local membership is not required', async () => {
+    const stranger = ethers.Wallet.createRandom().address;
+    await expect(admitAgentSigner({
+      ...base, signer: newMember.address, requireLocalMembership: true, localAgentAddresses: async () => [stranger],
+    })).resolves.toEqual(AGENT_ENVELOPE_INVALID);
+    await expect(admitAgentSigner({
+      ...base, signer: newMember.address, requireLocalMembership: false, localAgentAddresses: async () => [stranger],
+    })).resolves.toEqual(AGENT_ENVELOPE_VERIFIED);
+    await expect(admitAgentSigner({
+      ...base, signer: newMember.address, requireLocalMembership: true, localAgentAddresses: undefined,
+    })).resolves.toEqual(AGENT_ENVELOPE_VERIFIED);
+  });
+});
+
 describe('retryAgentEnvelopeWithRefreshedGate', () => {
+  const gateMiss: AgentEnvelopeVerdict = { kind: 'gate-miss', signer: newMember.address.toLowerCase() };
   const base = {
+    verdict: gateMiss,
     contextGraphId: CONTEXT_GRAPH_ID,
-    signerAddress: newMember.address,
+    fromPeerId: PEER_ID,
+    peerAdmitted: true,
+    localAgentAddresses: () => [localMember.address],
     logWarn: () => {},
     logInfo: () => {},
   };
 
-  it('verifies again against the fresh gate and reports its answer', async () => {
-    const verify = vi.fn(async (gate: string[]) => gate.includes(newMember.address));
+  it('admits the signer against the fresh gate and reports its answer', async () => {
     const info = vi.fn();
-    await expect(retryAgentEnvelopeWithRefreshedGate({
-      ...base,
-      logInfo: info,
-      oracle: async () => ({ kind: 'available', agentAddresses: FRESH_GATE }),
-      verify,
-    })).resolves.toEqual({ accepted: true });
-    expect(verify).toHaveBeenCalledWith(FRESH_GATE);
+    const oracle = freshGateOracle();
+    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, logInfo: info, oracle }))
+      .resolves.toEqual({ accepted: true });
+    expect(oracle).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, ethers.getAddress(newMember.address), PEER_ID);
     expect(info).toHaveBeenCalledTimes(1);
 
     await expect(retryAgentEnvelopeWithRefreshedGate({
       ...base,
       oracle: async () => ({ kind: 'available', agentAddresses: PROJECTED_GATE }),
-      verify,
     })).resolves.toEqual({ accepted: false, retryable: false });
   });
 
-  it('does nothing without an oracle or without a gate miss', async () => {
-    const verify = vi.fn(async () => true);
-    const oracle = vi.fn<SwmAgentGateRefreshOracle>(async () => ({ kind: 'ungated' }));
-    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, oracle: undefined, verify }))
+  it('passes a verified verdict through and never asks for anything else', async () => {
+    const oracle = freshGateOracle();
+    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, verdict: AGENT_ENVELOPE_VERIFIED, oracle }))
+      .resolves.toEqual({ accepted: true });
+    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, verdict: AGENT_ENVELOPE_INVALID, oracle }))
       .resolves.toEqual({ accepted: false, retryable: false });
-    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, oracle, signerAddress: undefined, verify }))
+    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, oracle: undefined }))
       .resolves.toEqual({ accepted: false, retryable: false });
-    expect(verify).not.toHaveBeenCalled();
+    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, peerAdmitted: false, oracle }))
+      .resolves.toEqual({ accepted: false, retryable: false });
     expect(oracle).not.toHaveBeenCalled();
   });
 
@@ -280,11 +365,9 @@ describe('retryAgentEnvelopeWithRefreshedGate', () => {
     ['a terminal unavailable authority is permanent', { kind: 'unavailable', reason: 'chain-participant-authority-invalid', retryable: false }, false],
     ['no roster at all is permanent', { kind: 'ungated' }, false],
   ])('%s', async (_label, fresh, retryable) => {
-    const verify = vi.fn(async () => true);
     const warn = vi.fn();
-    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, logWarn: warn, oracle: async () => fresh, verify }))
+    await expect(retryAgentEnvelopeWithRefreshedGate({ ...base, logWarn: warn, oracle: async () => fresh }))
       .resolves.toEqual({ accepted: false, retryable });
-    expect(verify).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
   });
 });

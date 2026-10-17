@@ -9,6 +9,7 @@ import type {
   SwmAgentGateRefreshResult,
 } from '@origintrail-official/dkg-publisher';
 
+import { rememberBounded } from '../../bounded-map.js';
 import { isBoundedOperationTimeoutError, runBoundedOperation } from '../../bounded-operation.js';
 import {
   isRetryableContextGraphAuthorityUnavailableReason,
@@ -33,9 +34,16 @@ import {
  * publisher answers the first with a retryable rejection and only the second
  * with a permanent one. Everything is bounded by one deadline well inside the
  * sender's fan-out timeout, since an answer that arrives after that timeout is
- * worse than a retryable rejection. Only an authenticated signer reaches this
- * oracle, and a signer a fresh gate excluded is remembered for a short while so
- * one non-member cannot make the receiver read the chain on every write.
+ * worse than a retryable rejection.
+ *
+ * A valid signature proves control of a key, not membership, and keys are
+ * free: a peer the roster excludes could otherwise buy a chain read per fresh
+ * key. So the looks themselves are rationed per graph and per sending peer
+ * within a window; a miss the ration refuses is answered as unavailable and
+ * retryable, which costs the receiver nothing and lets a member whose approval
+ * raced the window land on the sender's next attempt. Within the window the
+ * last fresh gate of a graph answers every signer it contains without a read,
+ * and a signer it excluded is remembered.
  */
 export interface SwmWriteGateRefreshHost {
   /** The canonical agent gate, read fresh (no cached roster). */
@@ -53,10 +61,17 @@ export interface SwmWriteGateRefreshHost {
 export interface SwmWriteGateRefreshOptions {
   /** One deadline for both gate reads and the curator refresh. */
   timeoutMs?: number;
-  /** How long a fresh gate that excluded a signer answers for that signer. */
-  excludedSignerTtlMs?: number;
-  /** How many excluded signers are remembered at most. */
-  excludedSignerCacheMax?: number;
+  /**
+   * The window: how long a fresh gate answers for its graph, how long an
+   * excluded signer is remembered, and over which the looks are rationed.
+   */
+  windowMs?: number;
+  /** Looks one sending peer may start on one graph per window. */
+  looksPerPeer?: number;
+  /** Looks all peers together may start on one graph per window. */
+  looksPerGraph?: number;
+  /** How many remembered graphs, signers and peers at most, each. */
+  memoryMax?: number;
   now?: () => number;
 }
 
@@ -65,12 +80,22 @@ export interface SwmWriteGateRefreshOptions {
  * inside its second look at that point looks failed, which drops the peer.
  */
 export const DEFAULT_SWM_WRITE_GATE_REFRESH_TIMEOUT_MS = 8_000;
-export const DEFAULT_SWM_WRITE_GATE_EXCLUDED_SIGNER_TTL_MS = 10_000;
-export const DEFAULT_SWM_WRITE_GATE_EXCLUDED_SIGNER_CACHE_MAX = 1_024;
+export const DEFAULT_SWM_WRITE_GATE_REFRESH_WINDOW_MS = 10_000;
+/** A node hosting two late members may need two looks in one window. */
+export const DEFAULT_SWM_WRITE_GATE_LOOKS_PER_PEER = 2;
+export const DEFAULT_SWM_WRITE_GATE_LOOKS_PER_GRAPH = 4;
+export const DEFAULT_SWM_WRITE_GATE_MEMORY_MAX = 1_024;
 
 /** Unavailable reasons of the second look itself, beside the authority's own. */
 export const SWM_WRITE_GATE_REFRESH_TIMEOUT_REASON = 'swm-write-gate-refresh-timeout';
 export const SWM_WRITE_GATE_REFRESH_FAILED_REASON = 'swm-write-gate-refresh-failed';
+export const SWM_WRITE_GATE_REFRESH_RATIONED_REASON = 'swm-write-gate-refresh-rationed';
+
+const RATIONED: SwmAgentGateRefreshResult = Object.freeze({
+  kind: 'unavailable',
+  reason: SWM_WRITE_GATE_REFRESH_RATIONED_REASON,
+  retryable: true,
+});
 
 function gateContains(
   gate: ContextGraphAgentGateAuthority | SwmAgentGateRefreshResult,
@@ -136,42 +161,80 @@ async function secondLook(
   }
 }
 
-/**
- * One oracle per receiver. Concurrent misses by the same signer on the same
- * graph share one second look; a fresh gate that excluded the signer answers
- * again for `excludedSignerTtlMs` without new reads.
- */
+interface Remembered<T> {
+  readonly expiresAt: number;
+  readonly value: T;
+}
+
+/** Looks started within the current window, per graph and per (graph, peer). */
+interface Ration {
+  windowEndsAt: number;
+  looks: number;
+}
+
+/** One oracle per receiver. */
 export function createSwmWriteGateRefreshOracle(
   host: SwmWriteGateRefreshHost,
   options: SwmWriteGateRefreshOptions = {},
 ): SwmAgentGateRefreshOracle {
   const timeoutMs = options.timeoutMs ?? DEFAULT_SWM_WRITE_GATE_REFRESH_TIMEOUT_MS;
-  const excludedTtlMs = options.excludedSignerTtlMs ?? DEFAULT_SWM_WRITE_GATE_EXCLUDED_SIGNER_TTL_MS;
-  const excludedMax = options.excludedSignerCacheMax ?? DEFAULT_SWM_WRITE_GATE_EXCLUDED_SIGNER_CACHE_MAX;
+  const windowMs = options.windowMs ?? DEFAULT_SWM_WRITE_GATE_REFRESH_WINDOW_MS;
+  const looksPerPeer = options.looksPerPeer ?? DEFAULT_SWM_WRITE_GATE_LOOKS_PER_PEER;
+  const looksPerGraph = options.looksPerGraph ?? DEFAULT_SWM_WRITE_GATE_LOOKS_PER_GRAPH;
+  const memoryMax = options.memoryMax ?? DEFAULT_SWM_WRITE_GATE_MEMORY_MAX;
   const now = options.now ?? Date.now;
-  const inFlight = new Map<string, Promise<SwmAgentGateRefreshResult>>();
-  const excluded = new Map<string, { expiresAt: number; result: SwmAgentGateRefreshResult }>();
 
-  return async (contextGraphId, signerAddress) => {
-    const key = `${contextGraphId}\u0000${signerAddress.toLowerCase()}`;
-    const remembered = excluded.get(key);
-    if (remembered !== undefined) {
-      if (remembered.expiresAt > now()) return remembered.result;
-      excluded.delete(key);
+  const inFlight = new Map<string, Promise<SwmAgentGateRefreshResult>>();
+  /** The last fresh gate of a graph. */
+  const freshGates = new Map<string, Remembered<SwmAgentGateRefreshResult>>();
+  /** Signers a fresh gate excluded, by graph and signer. */
+  const excluded = new Map<string, Remembered<SwmAgentGateRefreshResult>>();
+  const rations = new Map<string, Ration>();
+
+  const recall = <T>(memory: Map<string, Remembered<T>>, key: string): T | undefined => {
+    const remembered = memory.get(key);
+    if (remembered === undefined) return undefined;
+    if (remembered.expiresAt > now()) return remembered.value;
+    memory.delete(key);
+    return undefined;
+  };
+  const remember = <T>(memory: Map<string, Remembered<T>>, key: string, value: T): void => {
+    rememberBounded(memory, key, { expiresAt: now() + windowMs, value }, memoryMax);
+  };
+  /** Take one look from the ration of `key`, or refuse it. */
+  const takeLook = (key: string, limit: number): boolean => {
+    const at = now();
+    const ration = rations.get(key);
+    if (ration === undefined || ration.windowEndsAt <= at) {
+      rememberBounded(rations, key, { windowEndsAt: at + windowMs, looks: 1 }, memoryMax);
+      return true;
     }
-    const pending = inFlight.get(key);
+    if (ration.looks >= limit) return false;
+    ration.looks += 1;
+    return true;
+  };
+
+  return async (contextGraphId, signerAddress, fromPeerId) => {
+    const signer = signerAddress.toLowerCase();
+    const signerKey = `${contextGraphId}\u0000${signer}`;
+    const freshGate = recall(freshGates, contextGraphId);
+    if (freshGate !== undefined && gateContains(freshGate, signer)) return freshGate;
+    const remembered = recall(excluded, signerKey);
+    if (remembered !== undefined) return remembered;
+    const pending = inFlight.get(signerKey);
     if (pending !== undefined) return pending;
-    const look = secondLook(host, contextGraphId, signerAddress, timeoutMs)
-      .finally(() => { inFlight.delete(key); });
-    inFlight.set(key, look);
+    // The graph's ration is taken only when the peer's allows the look, so one
+    // refused peer does not consume what another peer's late member needs.
+    if (!takeLook(`${contextGraphId}\u0000${fromPeerId}`, looksPerPeer)) return RATIONED;
+    if (!takeLook(contextGraphId, looksPerGraph)) return RATIONED;
+
+    const look = secondLook(host, contextGraphId, signer, timeoutMs)
+      .finally(() => { inFlight.delete(signerKey); });
+    inFlight.set(signerKey, look);
     const result = await look;
-    if (result.kind === 'available' && !gateContains(result, signerAddress)) {
-      while (excluded.size >= excludedMax) {
-        const oldest = excluded.keys().next().value;
-        if (oldest === undefined) break;
-        excluded.delete(oldest);
-      }
-      excluded.set(key, { expiresAt: now() + excludedTtlMs, result });
+    if (result.kind === 'available') {
+      remember(freshGates, contextGraphId, result);
+      if (!gateContains(result, signer)) remember(excluded, signerKey, result);
     }
     return result;
   };
