@@ -3,6 +3,7 @@ import {
   encodeAccessRequest,
   decodeAccessResponse,
   ed25519Sign,
+  resolveWithinAbort,
   type Ed25519Keypair,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -29,25 +30,22 @@ export interface AccessResult {
  * Minimal substrate-shaped send surface AccessClient depends on.
  * Lets callers inject any object with a `sendReliable` method —
  * production wires in the agent's Universal Messenger; tests can
- * wire in a Messenger fixture or a mock. We don't import the
+ * wire in a Messenger fixture or a mock. Bounded calls additionally require
+ * sendRequestOwned, which the standard Messenger provides. We don't import the
  * Messenger class directly to avoid the publisher → agent dep cycle.
  */
+type AccessSendResult =
+  | { delivered: true; response: Uint8Array; attempts: number; messageId: string }
+  | { delivered: false; queued: boolean; attempts: number; messageId: string; error: string };
+
 export interface AccessSendSurface {
-  sendReliable(
-    peerId: string,
-    protocolId: string,
-    payload: Uint8Array,
-    opts?: { messageId?: string; timeoutMs?: number; signal?: AbortSignal; maxReadBytes?: number },
-  ): Promise<
-    | { delivered: true; response: Uint8Array; attempts: number; messageId: string }
-    | {
-        delivered: false;
-        queued: true;
-        attempts: number;
-        messageId: string;
-        error: string;
-      }
-  >;
+  /** Existing optionless calls retain this legacy transport contract. */
+  sendReliable(peerId: string, protocolId: string, payload: Uint8Array,
+    opts?: { messageId?: string; timeoutMs?: number }): Promise<AccessSendResult>;
+  /** Required for bounded/cancellable calls; never queues a read after failure. */
+  sendRequestOwned?(peerId: string, protocolId: string, payload: Uint8Array,
+    opts?: { messageId?: string; timeoutMs?: number; signal?: AbortSignal; maxReadBytes?: number;
+      recoverPeerAfterFailure?: boolean }): Promise<AccessSendResult>;
 }
 
 /**
@@ -85,6 +83,12 @@ export class AccessClient {
         throw new RangeError('Private access limits must be positive safe integers');
       }
     }
+    const requestOwned = Object.values(options).some(value => value !== undefined);
+    if (requestOwned && !this.messenger.sendRequestOwned) {
+      throw Object.assign(new Error('Bounded private access requires sendRequestOwned transport'), {
+        code: 'ACCESS_REQUEST_OWNED_REQUIRED',
+      });
+    }
     const message = new TextEncoder().encode(
       kaUal + toHex(paymentProof),
     );
@@ -99,15 +103,17 @@ export class AccessClient {
       requesterPublicKey: this.keypair.publicKey,
     });
 
-    const sendResult = await this.messenger.sendReliable(
-      publisherPeerId,
-      PROTOCOL_ACCESS,
-      requestData,
-      { timeoutMs: options.timeoutMs, signal: options.signal, maxReadBytes: options.maxResponseBytes },
-    );
+    const sendResult = await resolveWithinAbort(() => requestOwned
+      ? this.messenger.sendRequestOwned!(publisherPeerId, PROTOCOL_ACCESS, requestData, {
+        timeoutMs: options.timeoutMs, signal: options.signal, maxReadBytes: options.maxResponseBytes,
+        recoverPeerAfterFailure: false,
+      })
+      : this.messenger.sendReliable(publisherPeerId, PROTOCOL_ACCESS, requestData), options.signal);
     options.signal?.throwIfAborted();
+    if (!sendResult) throw new Error('Private access cancelled');
 
     if (!sendResult.delivered) {
+      if (requestOwned) throw Object.assign(new Error('Private access transport is busy'), { code: 'ACCESS_UNAVAILABLE' });
       // Access is synchronous-by-design — surface queued as a
       // rejection so the caller can retry with a fresh request rather
       // than waiting for a background outbox flush. The substrate

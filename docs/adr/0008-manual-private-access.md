@@ -45,6 +45,12 @@ a different but self-consistent payload. Applications needing anchored evidence
 must verify that commitment independently. A missing or mismatched root fails
 closed, without returning the unverified quads.
 
+Direct `AccessClient` calls with cancellation or response-limit options require
+an explicit `sendRequestOwned` transport method (the standard Messenger provides
+it). Legacy adapters exposing only `sendReliable` retain optionless behavior;
+bounded calls fail before sending instead of silently dropping ownership. The
+client also settles caller cancellation even if a transport ignores its signal.
+
 The operation returns content to its caller and does not insert it into any RDF
 partition. It promises neither automatic delivery nor EPCIS/local-query parity.
 Existing Messenger idempotency handling may retain response bytes under its

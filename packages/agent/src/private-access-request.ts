@@ -13,15 +13,12 @@ export interface PrivateAccessRequest {
   kaUal: string;
 }
 
-export interface PrivateAccessResponse {
-  granted: boolean;
-  quads: Quad[];
-  /** The request never inserts returned data into a local RDF graph. */
-  storedInGraph: false;
-  /** A peer's supplied root is not an independently authenticated chain commitment. */
-  verification: { kind: 'peer-root-self-check' | 'not-checked'; matches: boolean; chainAnchored: false };
-  privateMerkleRoot?: string;
-}
+/** Peer-root self-consistency never authenticates a chain commitment. */
+export type PrivateAccessResponse =
+  | { granted: true; quads: Quad[]; storedInGraph: false; privateMerkleRoot: string;
+      verification: { kind: 'peer-root-self-check'; matches: true; chainAnchored: false } }
+  | { granted: false; quads: []; storedInGraph: false;
+      verification: { kind: 'not-checked'; matches: false; chainAnchored: false } };
 
 type Owner = Pick<DKGAgent, 'messenger' | 'wallet' | 'peerId' | 'node'>;
 const running = new WeakSet<Owner>();
@@ -55,14 +52,7 @@ export async function requestOwnedPrivateAccess(
   const lifecycle = startRequestAbortLifecycle(TIMEOUT_MS, [options.signal, owner.node.stopSignal]);
   running.add(owner);
   try {
-    const client = new AccessClient({
-      sendReliable: async (peer, protocol, payload, sendOptions) => {
-        // Preserve reliable wire framing, but never enqueue a read after its caller ends.
-        const result = await owner.messenger.sendRequestOwned(peer, protocol, payload, { ...sendOptions, recoverPeerAfterFailure: false });
-        if (!result.delivered) throw failure('ACCESS_UNAVAILABLE', 'Private access transport is busy');
-        return result;
-      },
-    }, owner.wallet.keypair, owner.peerId);
+    const client = new AccessClient(owner.messenger, owner.wallet.keypair, owner.peerId);
     const result = await resolveWithinAbort(() => client.requestAccess(publisherPeerId, kaUal, undefined, {
       signal: lifecycle.signal, timeoutMs: TIMEOUT_MS,
       maxResponseBytes: MAX_RESPONSE_BYTES, maxQuads: MAX_QUADS,

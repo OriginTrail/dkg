@@ -5,8 +5,8 @@ import { AccessClient, type AccessSendSurface } from '../src/access-client.js';
 const UAL = 'did:dkg:evm:31337/0x1111111111111111111111111111111111111111/0';
 const result = (response: Uint8Array) => ({ delivered: true as const, response, attempts: 1, messageId: 'owned' });
 
-async function client(send: AccessSendSurface['sendReliable']) {
-  return new AccessClient({ sendReliable: send }, await generateEd25519Keypair(), 'local-peer');
+async function client(send: NonNullable<AccessSendSurface['sendRequestOwned']>) {
+  return new AccessClient({ sendReliable: send, sendRequestOwned: send }, await generateEd25519Keypair(), 'local-peer');
 }
 
 describe('caller-owned private access bounds', () => {
@@ -19,6 +19,14 @@ describe('caller-owned private access bounds', () => {
     expect(sends).toBe(0);
   });
 
+  it('rejects bounded calls on legacy-only adapters before any send', async () => {
+    let sends = 0;
+    const access = new AccessClient({ sendReliable: async () => { sends++; return result(new Uint8Array()); } },
+      await generateEd25519Keypair(), 'local-peer');
+    await expect(access.requestAccess('publisher-peer', UAL, undefined, { maxResponseBytes: 100 }))
+      .rejects.toMatchObject({ code: 'ACCESS_REQUEST_OWNED_REQUIRED' });
+    expect(sends).toBe(0);
+  });
   it('forwards deadline and cancellation, and never delivers a late response', async () => {
     const controller = new AbortController();
     let observed: unknown;

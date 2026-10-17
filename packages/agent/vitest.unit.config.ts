@@ -19,6 +19,7 @@ export default defineConfig({
     coverage: coverageForPackage("agent"),
     include: [
       'test/private-access-request-owner.test.ts',
+      'test/private-access-client-messenger.test.ts',
       'test/private-access-request.test.ts',
 
       "test/rfc64-manual-catalog-authority-scope-v1.test.ts",
