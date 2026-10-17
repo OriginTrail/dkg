@@ -58,5 +58,21 @@ export async function runSharedMemoryMetadataRegression({ base, token }) {
   assert.equal(new Set(result.result.bindings.map(row => row.agent)).size, 5);
   assert(result.result.bindings.every(row => !row.g.startsWith(`did:dkg:context-graph:${child}/`)));
   assert.equal(before.result.bindings.length, 1);
-  return { contextGraphId, contributors: 5, childExcluded: true, contentScopeUnchanged: true };
+  // Attribution rows alone cannot prove ordinary content partitions survived.
+  const contentSparql = `SELECT DISTINCT ?subject ?name WHERE { GRAPH ?g {
+    ?subject <http://schema.org/name> ?name
+  } FILTER(STRSTARTS(STR(?subject), "urn:${contextGraphId}:")) } ORDER BY ?subject LIMIT 20`;
+  const content = async includeSharedMemoryMeta => (await post('/api/query', {
+    sparql: contentSparql, contextGraphId, view: 'shared-working-memory',
+    includeContextGraphPartitions: true, includeSharedMemoryMeta,
+  }, owner)).result.bindings;
+  const expectedContent = contributors.map((_, index) => ({
+    subject: `urn:${contextGraphId}:${index}`, name: JSON.stringify(`Contributor ${index}`),
+  }));
+  const contentBefore = await content(false), contentExpanded = await content(true), contentAfter = await content(false);
+  for (const rows of [contentBefore, contentExpanded, contentAfter]) {
+    assert.deepEqual(rows, expectedContent, 'All five root/subgraph content rows, with no child-CG row, must remain visible');
+    assert(rows.every(row => row.subject !== `urn:${contextGraphId}:child`));
+  }
+  return { contextGraphId, contributors: 5, childExcluded: true, contentRows: expectedContent.length, contentScopeUnchanged: true };
 }

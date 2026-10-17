@@ -7,5 +7,5 @@ beforeAll(async () => { daemon = await startLiveDaemon(); }, 120_000);
 afterAll(async () => { await stopLiveDaemon(daemon); });
 it('reads five contributors across registered subgraphs without child-CG attribution', async () => {
   const proof = await runSharedMemoryMetadataRegression({ base: daemon.base, token: daemon.token });
-  expect(proof).toMatchObject({ contributors: 5, childExcluded: true, contentScopeUnchanged: true });
+  expect(proof).toMatchObject({ contributors: 5, childExcluded: true, contentRows: 5, contentScopeUnchanged: true });
 }, 240_000);
