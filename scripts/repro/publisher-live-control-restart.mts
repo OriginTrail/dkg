@@ -10,31 +10,25 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ownProcess, type OwnedProcess } from '../testing/owned-process.mjs';
 import { addPublisherWallet } from '../../packages/cli/src/publisher-wallets.js';
 
 const directory = await mkdtemp(join(tmpdir(), 'dkg-live-publisher-campaign-'));
 const token = randomUUID();
-const children: ReturnType<typeof spawn>[] = [];
+const children: OwnedProcess[] = [];
 async function start() {
   const child = spawn(process.execPath, ['--experimental-sqlite', '--import', 'tsx',
     fileURLToPath(new URL('./publisher-live-control-worker.mts', import.meta.url)), directory, token],
   { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  children.push(child);
-  let output = ''; let sequence = 0;
+  const owner = ownProcess(child, { label: 'Publisher control campaign worker' });
+  children.push(owner);
+  let sequence = 0;
   const messages: any[] = [];
-  child.stdout?.on('data', chunk => { output = (output + chunk).slice(-100_000); });
-  child.stderr?.on('data', chunk => { output = (output + chunk).slice(-100_000); });
   child.on('message', message => messages.push(message));
-  const wait = async (predicate: (message: any) => boolean) => {
-    const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline) {
-      const index = messages.findIndex(predicate);
-      if (index >= 0) return messages.splice(index, 1)[0];
-      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Worker exited: ${output}`);
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    throw new Error(`Worker response timed out: ${output}`);
-  };
+  const wait = (predicate: (message: any) => boolean) => owner.ready(() => {
+    const index = messages.findIndex(predicate);
+    return index >= 0 ? messages.splice(index, 1)[0] : undefined;
+  }, { timeoutMs: 20_000, intervalMs: 10 });
   const ready = await wait(m => m.type === 'ready');
   const command = async (action: string, jobId?: string) => {
     const id = ++sequence; child.send({ id, action, jobId });
@@ -48,14 +42,7 @@ async function start() {
     });
     assert.equal(response.status, 200); return response.json() as Promise<any>;
   };
-  return { child, ready, command, request, wait };
-}
-async function terminate(child: ReturnType<typeof spawn>, signal: NodeJS.Signals) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  const exit = new Promise<void>(resolve => child.once('exit', () => resolve()));
-  child.kill(signal);
-  const timer = setTimeout(() => child.kill('SIGKILL'), 5_000);
-  try { await exit; } finally { clearTimeout(timer); }
+  return { child, owner, ready, command, request, wait };
 }
 try {
   await addPublisherWallet(directory, `0x${'11'.repeat(32)}`);
@@ -69,8 +56,8 @@ try {
   assert.equal(accepted.job.status, 'accepted');
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.deepEqual(await first.command('status', accepted.jobId), accepted.job);
-  await terminate(first.child, 'SIGKILL');
-  assert.equal(first.child.signalCode, 'SIGKILL');
+  first.child.kill('SIGKILL');
+  assert.equal((await first.owner.closed).signal, 'SIGKILL');
   const second = await start();
   const restored = await second.request('control');
   assert.equal(restored.desiredState, 'paused'); assert.equal(restored.effectiveState, 'paused');
@@ -87,6 +74,6 @@ try {
     wallets: 2, pausedGeneration: 1, resumedGeneration: 2, acceptedEvidencePreserved: true,
     resumedExecution: true, backend: 'Oxigraph', chain: 'NoChainAdapter' }));
 } finally {
-  for (const child of children) await terminate(child, 'SIGTERM');
+  for (const owner of children) await owner.stop();
   await rm(directory, { recursive: true, force: true });
 }
