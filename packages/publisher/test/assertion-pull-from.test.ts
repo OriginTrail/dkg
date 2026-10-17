@@ -18,7 +18,7 @@ import {
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import { BlazegraphStore, GraphManager, OxigraphStore, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { BlazegraphNamespaceManager, BlazegraphStore, GraphManager, OxigraphStore, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, assertionScopedGraphUri } from '../src/index.js';
 import { resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
@@ -34,27 +34,20 @@ const ENTITY_1 = 'urn:e:alice';
 const ENTITY_2 = 'urn:e:bob';
 const ENTITY_3 = 'urn:e:carol';
 
-const namespaces: string[] = [];
+const namespaceCleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   vi.restoreAllMocks();
-  for (const url of namespaces.splice(0)) {
-    const response = await fetch(url, { method: 'DELETE' });
-    expect(response.ok).toBe(true);
-  }
+  for (const cleanup of namespaceCleanups.splice(0)) await cleanup();
 });
 
 async function makePublisher() {
   let store: OxigraphStore | BlazegraphStore = new OxigraphStore();
   const blazegraph = process.env.DKG_PULL_RECOVERY_BLAZEGRAPH_URL;
   if (blazegraph) {
-    const namespace = `pull-recovery-${randomUUID()}`;
-    const response = await fetch(`${blazegraph}/namespace`, {
-      method: 'POST', headers: { 'Content-Type': 'text/plain' },
-      body: `com.bigdata.rdf.sail.namespace=${namespace}\ncom.bigdata.rdf.store.AbstractTripleStore.quads=true\ncom.bigdata.rdf.sail.truthMaintenance=false\ncom.bigdata.rdf.store.AbstractTripleStore.axiomsClass=com.bigdata.rdf.axioms.NoAxioms\n`,
-    });
-    if (!response.ok) throw new Error(await response.text());
-    namespaces.push(`${blazegraph}/namespace/${namespace}`);
-    store = new BlazegraphStore(`${blazegraph}/namespace/${namespace}/sparql`);
+    const manager = new BlazegraphNamespaceManager({ namespaceApiUrl: `${blazegraph}/namespace`, requestTimeoutMs: 10_000 });
+    const handles = await manager.acquireMany([`pull-recovery-${randomUUID()}`]);
+    namespaceCleanups.push(() => manager.disposeAll(handles));
+    store = new BlazegraphStore(handles[0]!.sparqlUrl);
   }
   const publisher = new DKGPublisher({
     store,

@@ -20,21 +20,21 @@ interface PullRecoveryProof {
   agentAddress: string;
   subGraphName?: string;
   operationId: string | undefined;
-  archived: VerifiedPullRecovery['loadedSeal'] | undefined;
+  archived: ResolvedAssertionSource['loadedSeal'] | undefined;
   activeSubjects: string[];
   shareComplete: boolean;
   readPublicQuads: (graph: string) => Promise<Quad[]>;
   readPrivateQuads: (scope: GraphKnowledgeAssetScope) => Promise<Quad[]>;
 }
 
-export interface VerifiedPullRecovery {
+export interface ResolvedAssertionSource {
   loadedSeal: { seal: AssertionSeal; subject: string; quads: Quad[] };
   scope: GraphKnowledgeAssetScope;
   payload: Awaited<ReturnType<typeof validateGraphScopedPayloadAgainstSeal>>;
 }
 
 /** Prove an interrupted clear belongs to the exact completed SWM commitment. */
-export async function verifyPullRecoverySeal(input: PullRecoveryProof): Promise<VerifiedPullRecovery | undefined> {
+export async function verifyPullRecoverySeal(input: PullRecoveryProof): Promise<ResolvedAssertionSource | undefined> {
   const { store, graphManager, contextGraphId, name, agentAddress, subGraphName,
     operationId, archived, activeSubjects, shareComplete, readPublicQuads, readPrivateQuads } = input;
   if (!archived || archived.seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) return undefined;

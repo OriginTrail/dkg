@@ -76,3 +76,7 @@ A subsequent finalized-unpublished-edit -> discard -> pull failed with a source 
 - [Sanitized live report](../../run-reports/2026-10-18-issue-3332.md) records setup, reproducible harness, checks, baseline limitation and cleanup.
 - Both live share jobs succeeded; zero VM jobs or pending finalizations. Daemon/store stopped, ports closed, all nine signer nonces unchanged with pending=latest, batch-1 released. No monitoring automation created.
 - Remaining: confirm remote re-review and required CI gates on the final PR revision; inspect all threads including resolved ones for new feedback. Do not merge.
+
+### Remote review round 3
+
+The next remote review requested a neutral promote-state inspection instead of a mode flag on the ordinary mutation guard, and reuse of the canonical Blazegraph namespace lifecycle. `assertNoUnfinishedAssertionPromote` again returns void and rejects any non-mutable inspection. A dedicated `resolveAssertionPullSource` owns normal candidate selection and archive recovery, returning the same complete `ResolvedAssertionSource` in both cases. The test factory now uses `BlazegraphNamespaceManager` acquisition/disposal with a fresh namespace per test. The build, 142 focused tests, lint and file-size checks pass; the complete 71-case real-Blazegraph matrix, including process restarts at boundaries 4 and 34, passes. The full publisher suite passes all 2,211 tests across 120 files. No approval boundaries or data formats change.
