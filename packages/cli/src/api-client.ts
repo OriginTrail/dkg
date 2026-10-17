@@ -1,3 +1,4 @@
+import type { QueryOptions } from './query-options.js';
 import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -1718,26 +1719,7 @@ export class ApiClient {
   async query(
     sparql: string,
     contextGraphId?: string,
-    opts?: {
-      graphSuffix?: string;
-      includeSharedMemory?: boolean;
-      includeContextGraphPartitions?: boolean;
-      includeSharedMemoryMeta?: boolean;
-      view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
-      agentAddress?: string;
-      assertionName?: string;
-      subGraphName?: string;
-      verifiedGraph?: string;
-      minTrust?:
-        | 'SelfAttested'
-        | 'Endorsed'
-        | 'PartiallyVerified'
-        | 'ConsensusVerified'
-        | 0
-        | 1
-        | 2
-        | 3;
-    },
+    opts?: QueryOptions,
   ): Promise<{ result: QueryResult }> {
     return this.post('/api/query', {
       sparql,
