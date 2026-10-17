@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { defineCampaign } from './campaign-manifest.mjs';
 import { validatePublicationCohort } from './publication-evidence.mjs';
 const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
-const { Interface } = require('ethers');
+const { Interface, Wallet, Transaction } = require('ethers');
 const txHash = '0x' + '99'.repeat(32);
 const blockHash = '0x' + '77'.repeat(32);
 const repo = fileURLToPath(new URL('../../', import.meta.url));
@@ -62,7 +62,7 @@ test('publication identity binds manifest, admission job IDs and original coordi
   }
 });
 
-test('proof entry points reject a different published asset with unchanged counts and otherwise valid payloads', () => {
+test('proof entry points reject a different published asset with unchanged counts and otherwise valid payloads', async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'publication-cohort-'));
   try {
     const abiPath = 'packages/chain/abi/DKGKnowledgeAssets.json';
@@ -96,18 +96,33 @@ test('proof entry points reject a different published asset with unchanged count
     }
     const admission = structuredClone(f.admissions[0]);
     const expectedContract = '0x5555555555555555555555555555555555555555';
-    const install = (name, contract = expectedContract) => {
+    const publisher = Wallet.createRandom();
+    const lifecycleAbi = JSON.parse(fs.readFileSync(path.join(repo, 'packages/chain/abi/KnowledgeAssetsLifecycle.json')));
+    const lifecycle = new Interface(lifecycleAbi.abi ?? lifecycleAbi);
+    const destination = '0x' + '44'.repeat(20), zero = '0x' + '00'.repeat(32);
+    for (const { seal } of seals) Object.assign(seal, { assertedAtChainId: '84532', assertedAtKav10Address: destination });
+    const install = async (name, contract = expectedContract, graphId = 1n) => {
       const i = name === 'A' ? 0 : 1, job = structuredClone(f.jobs[i]);
       // Preserve A's admission/job ID even when the actual request, receipt and payload are B.
       job.jobId = admission.value.jobId;
+      const data = lifecycle.encodeFunctionData('publish', [{ publishOperationId: 'publish', contextGraphId: graphId,
+        merkleRoot: seals[i].seal.assertionMerkleRoot, knowledgeAssetsAmount: 1n, byteSize: 1n, epochs: 1n,
+        tokenAmount: 1n, isImmutable: false, merkleLeafCount: 1, catalogRoot: zero, catalogLeafCount: 0,
+        publisherNodeIdentityId: 1n, authorAddress: author, authorR: zero, authorVS: zero, authorSchemeVersion: 1,
+        reservedKaId: i + 1, identityIds: [], r: [], vs: [] }]);
+      const signedTransaction = await publisher.signTransaction({ type: 2, chainId: 84532, to: destination,
+        nonce: 0, data, gasLimit: 1000000, maxFeePerGas: 1, maxPriorityFeePerGas: 1 });
+      const transactionHash = Transaction.from(signedTransaction).hash;
+      Object.assign(job.broadcast, { txHash: transactionHash, walletId: publisher.address });
+      job.inclusion.txHash = transactionHash; job.finalization.txHash = transactionHash;
       for (const label of ['fixed-deadline', 'restart-readback']) {
         write(`${label}/rdf.json`, rdf(captures(name)));
         write(`${label}/-api-publisher-jobs.json`, { value: { jobs: [job] } });
       }
       const abi = JSON.parse(fs.readFileSync(path.join(repo, 'packages/chain/abi/DKGKnowledgeAssets.json'))), iface = new Interface(abi.abi ?? abi);
       const event = iface.encodeEventLog(iface.getEvent('KnowledgeAssetCreated'), [i + 1, author, 'publish', seals[i].seal.assertionMerkleRoot, 1, 1, 2, 1, false]);
-      write('reconciliation.json', { receipts: [{ jobId: job.jobId, hash: txHash, status: 1, blockHash, from: author, nonce: 0, blockNumber: 123,
-        logs: [{ address: contract, blockNumber: 123, blockHash, transactionHash: txHash, ...event }] }] });
+      write('reconciliation.json', { receipts: [{ jobId: job.jobId, hash: transactionHash, status: 1, blockHash, from: publisher.address, nonce: 0, blockNumber: 123, signedTransaction,
+        logs: [{ address: contract, blockNumber: 123, blockHash, transactionHash, ...event }] }] });
     };
     const hub = '0x6666666666666666666666666666666666666666';
     fs.mkdirSync(path.dirname(root), { recursive: true });
@@ -116,14 +131,14 @@ test('proof entry points reject a different published asset with unchanged count
       blocks: [{ blockNumber: 123, blockHash, knowledgeAssets: expectedContract }] });
     write('campaign-manifest.json', campaign); write('seal-proof.json', seals); write('pre-workload/rdf.json', rdf(before));
     write('publication-admissions.json', [admission]); write('synchronous-shares.json', []);
-    write('protocol.json', { startedAt: '1970-01-01T00:00:00Z' }); write('context-graph.json', { value: { onChainId: 1 } });
+    write('protocol.json', { startedAt: '1970-01-01T00:00:00Z' }); write('context-graph.json', { status: 200, value: { onChainId: '1', registered: true, uri: `did:dkg:context-graph:${cg}` } });
     const scopeFixture = inventoryScopeFixture(campaign, seals.map(s => ({ assertion_coordinate: s.name })), seals.map(s => ({ assertionCoordinate: s.name })));
     write('fixed-deadline/inventory.json', scopeFixture.capture); write('fixed-deadline/catalogs.json', scopeFixture.catalogs); write('fixed-deadline/-api-status.json', scopeFixture.status);
     write('restart-readback/manifest.json', { observedAt: '2026-10-17T00:00:00Z' });
     fs.mkdirSync(path.join(root, 'restart-regression'));
     const home = path.join(cwd, 'home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ contextGraphs: [cg], store: { options: { url: 'http://127.0.0.1:1' } } }));
     const run = (file, args = [arm]) => spawnSync(file.endsWith('.py') ? 'python3' : process.execPath, [script(file), ...args], { cwd, env: { ...process.env, DKG_HOME: home }, encoding: 'utf8' });
-    install('A');
+    await install('A');
     for (const file of ['verify.py', 'chain-proof.mjs', 'restart-content-proof.py']) {
       const result = run(file, file === 'restart-content-proof.py' ? [arm] : [arm, 'fixed-deadline']);
       assert.equal(result.status, 0, result.stderr);
@@ -161,7 +176,7 @@ test('proof entry points reject a different published asset with unchanged count
       assert.notEqual(run('chain-proof.mjs', [arm, 'fixed-deadline']).status, 0, 'accepted invalid receipt/log identity');
     }
     write('reconciliation.json', validReceipt);
-    install('A', '0x8888888888888888888888888888888888888888');
+    await install('A', '0x8888888888888888888888888888888888888888');
     const foreign = run('chain-proof.mjs', [arm, 'fixed-deadline']);
     assert.notEqual(foreign.status, 0, 'chain proof accepted an otherwise identical foreign-contract event');
     const foreignProof = JSON.parse(fs.readFileSync(path.join(root, 'chain-proof.json')));
@@ -169,7 +184,18 @@ test('proof entry points reject a different published asset with unchanged count
     assert.equal(foreignProof[0].carrierMatches, true);
     assert.equal(foreignProof[0].contractMatches, false);
     assert.equal(foreignProof[0].identityMatches, false);
-    install('B');
+    await install('A', expectedContract, 2n);
+    assert.notEqual(run('chain-proof.mjs', [arm, 'fixed-deadline']).status, 0, 'accepted a signed publication into another graph');
+    const wrongGraph = JSON.parse(fs.readFileSync(path.join(root, 'chain-proof.json')))[0];
+    assert.equal(wrongGraph.carrierMatches, true); assert.equal(wrongGraph.contractMatches, true);
+    assert.equal(wrongGraph.transaction.assetMatches, true); assert.equal(wrongGraph.transaction.contextGraphMatches, false);
+    assert.equal(wrongGraph.transaction.contextGraphId, '2'); assert.equal(wrongGraph.transaction.expectedContextGraphId, '1');
+    // Prior event/cohort proof certifies the same asset and carrier despite the wrong transaction graph.
+    assert.equal(wrongGraph.event.id, seals[0].seal.reservedKaId);
+    assert.equal(wrongGraph.event.root, seals[0].seal.assertionMerkleRoot);
+    assert.equal(wrongGraph.event.author.toLowerCase(), seals[0].seal.authorAddress);
+    assert.equal(wrongGraph.identityMatches, false);
+    await install('B');
     for (const file of ['verify.py', 'chain-proof.mjs', 'restart-content-proof.py']) {
       const result = run(file, file === 'restart-content-proof.py' ? [arm] : [arm, 'fixed-deadline']);
       if (file === 'verify.py' && result.status === 0) {

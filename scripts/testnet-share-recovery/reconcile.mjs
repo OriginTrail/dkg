@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 const require=createRequire(new URL('../../packages/cli/package.json',import.meta.url));
-const { JsonRpcProvider, Contract, formatEther }=require('ethers');
+const { JsonRpcProvider, Contract, Transaction, formatEther }=require('ethers');
 const arm=process.argv[2], label=process.argv[3];
 const dir=`.tmp/2963/evidence/${arm}`;
 const snap=JSON.parse(fs.readFileSync(`${dir}/${label}/-api-publisher-jobs.json`)).value.jobs;
@@ -13,8 +13,10 @@ for(const j of snap){
  if(j.status!=='finalized') throw Error(`Unsettled job ${j.jobId}: ${j.status}`);
  await new Promise(resolve=>setTimeout(resolve,400));
  const h=j.finalization.txHash; const r=await p.getTransactionReceipt(h); const t=await p.getTransaction(h);
- if(!r||r.status!==1||!t) throw Error('Unsettled receipt '+h);
- receipts.push({jobId:j.jobId,hash:h,status:r.status,blockNumber:r.blockNumber,blockHash:r.blockHash,from:t.from,nonce:t.nonce,logs:r.logs});
+ if(!r||r.status!==1||!t||t.hash!==r.hash||t.blockHash!==r.blockHash||t.blockNumber!==r.blockNumber) throw Error('Unsettled or mismatched receipt '+h);
+ const transaction=Transaction.from(t);
+ if(!transaction.isSigned()||transaction.hash!==h)throw Error('Signed transaction hash mismatch '+h);
+ receipts.push({jobId:j.jobId,hash:h,status:r.status,blockNumber:r.blockNumber,blockHash:r.blockHash,from:t.from,nonce:t.nonce,signedTransaction:transaction.serialized,logs:r.logs});
 }
 const wallets=[];
 for(const {address} of prior.wallets){
