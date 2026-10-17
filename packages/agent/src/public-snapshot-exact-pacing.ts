@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: Apache-2.0
+import type { ExactKnowledgeAssetSyncResult } from './durable-recovery-types.js';
+import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';
+
+/**
+ * The hold after a refused attempt, and how often a waiting job reads local
+ * sync capacity again: the interval the VM reconcile pass's wait uses.
+ */
+export const PUBLIC_SNAPSHOT_RETRY_MS = 2_500;
+/** Upper bound of the hold after repeated refusals. */
+export const PUBLIC_SNAPSHOT_MAX_HOLD_MS = 30_000;
+/** A wait must end this long before the job's limit: the final coverage read needs the time. */
+export const PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS = 120_000;
+/** The bound of one exact attempt. */
+export const PUBLIC_SNAPSHOT_ATTEMPT_TIMEOUT_MS = 120_000;
+
+/**
+ * What one exact attempt says about where the job goes next.
+ *  - `local-refusal`: this node's sync admission did not take the attempt, so
+ *    no peer was asked. Every peer would meet the same refusal.
+ *  - `retry-peer`: the peer said it is busy, or a stream it had served before
+ *    broke. It keeps its turn and is asked again after its hold-off.
+ *  - `answered`: the peer gave its answer for these assets.
+ */
+export type PublicSnapshotAttemptVerdict = 'local-refusal' | 'retry-peer' | 'answered';
+
+export interface PublicSnapshotPacingOptions {
+  readonly contextGraphId: string;
+  /** Epoch milliseconds at which the job ends. */
+  readonly deadline: number;
+  readonly signal: AbortSignal;
+  /** Whether this node's sync admission would take the graph's exact fetch now. */
+  readonly canAdmit?: () => boolean;
+}
+
+/**
+ * The waits of one snapshot job. A refusal that says nothing about the peer's
+ * data, because this node's sync capacity was in use or the peer said it was
+ * busy, is waited out inside the job's limit instead of failing the job.
+ *
+ * Local capacity is waited for as the VM reconcile pass waits for it: a
+ * jittered hold after each refusal, growing with repeated refusals, then a
+ * read of the admission every interval until it would take the attempt. A
+ * busy peer keeps its turn under the VM recovery stream setback policy and is
+ * asked again after the policy's hold-off, while the other configured peers
+ * may be asked meanwhile. The history is the job's own and ends with it.
+ */
+export class PublicSnapshotRecoveryPacing {
+  private readonly setbacks = new VmRecoveryStreamSetbackPolicy();
+  private refusals = 0;
+
+  constructor(private readonly options: PublicSnapshotPacingOptions) {}
+
+  /** Classify one attempt; `committed` counts the assets this attempt stored. */
+  settle(peerId: string, attempt: ExactKnowledgeAssetSyncResult, committed: number): PublicSnapshotAttemptVerdict {
+    if (committed === 0 && (attempt.admission === 'local-admission-deferred'
+      || (attempt.result?.deferredBackpressure ?? 0) > 0)) {
+      this.refusals += 1;
+      return 'local-refusal';
+    }
+    if (attempt.admission === 'work-started') this.refusals = 0;
+    const now = Date.now();
+    const outcome = attempt.streamOutcome;
+    if (outcome === 'complete') this.setbacks.recordServed(this.options.contextGraphId, peerId, now);
+    if (outcome !== 'responder-busy' && outcome !== 'stream-interrupted') return 'answered';
+    return this.setbacks.recordSetback(this.options.contextGraphId, peerId, outcome, now).keepsTurn
+      ? 'retry-peer'
+      : 'answered';
+  }
+
+  /** Whether the peer is still inside the hold-off of its last setback. */
+  heldOff(peerId: string): boolean {
+    return this.setbacks.heldOff(this.options.contextGraphId, peerId, Date.now());
+  }
+
+  /** The bound of the next attempt, which never runs past the job's limit. */
+  attemptTimeoutMs(): number {
+    return Math.max(0, Math.min(PUBLIC_SNAPSHOT_ATTEMPT_TIMEOUT_MS, this.options.deadline - Date.now()));
+  }
+
+  /** Wait until local sync admission would take the attempt. False when that cannot happen in time. */
+  async waitForAdmission(): Promise<boolean> {
+    const hold = Math.min(PUBLIC_SNAPSHOT_MAX_HOLD_MS, PUBLIC_SNAPSHOT_RETRY_MS * 2 ** (this.refusals - 1));
+    if (!(await this.sleep(jitter(hold)))) return false;
+    while (!this.options.signal.aborted && !this.admissionAvailable()) {
+      if (!(await this.sleep(jitter(PUBLIC_SNAPSHOT_RETRY_MS)))) return false;
+    }
+    return true;
+  }
+
+  /** Wait until one of these peers is past its hold-off. False when that cannot happen in time. */
+  async waitForPeer(peerIds: readonly string[]): Promise<boolean> {
+    while (!this.options.signal.aborted && peerIds.length > 0 && peerIds.every(peerId => this.heldOff(peerId))) {
+      if (!(await this.sleep(jitter(PUBLIC_SNAPSHOT_RETRY_MS)))) return false;
+    }
+    return true;
+  }
+
+  /** A capacity read that cannot answer falls back to the plain bounded retry. */
+  private admissionAvailable(): boolean {
+    try {
+      return this.options.canAdmit?.() ?? true;
+    } catch {
+      return true;
+    }
+  }
+
+  /** Sleep unless the wait would reach into the final read's reserve; cancellation ends it early. */
+  private async sleep(ms: number): Promise<boolean> {
+    const { deadline, signal } = this.options;
+    if (Date.now() + ms > deadline - PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS) return false;
+    if (signal.aborted) return true;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      signal.addEventListener('abort', done, { once: true });
+    });
+    return true;
+  }
+}
+
+/** Half the delay plus a random share of the other half, so waiting jobs do not retry in step. */
+function jitter(ms: number): number {
+  return Math.round(ms / 2 + Math.random() * (ms / 2));
+}
