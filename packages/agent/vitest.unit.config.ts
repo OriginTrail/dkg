@@ -18,6 +18,8 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      'test/durable-share-inventory.test.ts',
+      'test/promote-lifecycle-partial-commit.test.ts',
       "test/sync-exact-export-admission.test.ts",
       "test/prepared-content-cache.test.ts",
       "test/sync-prepared-content-export.test.ts",

@@ -1,3 +1,4 @@
+import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { resolvePreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
 import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
@@ -169,7 +170,6 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { constructConfiguredChainAdapter } from './configured-chain-adapter.js';
 import { signsThroughExternalSigner } from './external-author-signing.js';
 import {
-  prepareAssertionPromote,
   translateLegacySwmRetirementFence,
 } from './internal/promote/assertion-promote-precommit.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
@@ -541,7 +541,6 @@ import { WorkspaceCryptoMethods } from './dkg-agent-crypto.js';
 import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
 import {
   PublishMethods,
-  SEAL_CAPABILITY_GAP_CODE,
 } from './dkg-agent-publish.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
@@ -1038,9 +1037,8 @@ export class DKGAgent extends DKGAgentBase {
       this,
       new Rfc64SwmCatalogProjectionOwnerV1({
         resolvePartition: resolveCatalogPartition,
-        listLocalAuthorAddresses: () => this.listLocalAgents().map(
-          ({ agentAddress }) => agentAddress.toLowerCase() as EvmAddressV1,
-        ),
+        listDurableInventoryScopes: () => this.rfc64PersistenceV1?.swmAuthorInventory.listSwmAuthorInventoryScopesV1() ?? [],
+        listLocalAuthorAddresses: () => this.listLocalAgents().map(({ agentAddress }) => agentAddress.toLowerCase() as EvmAddressV1),
         acceptsPublicRootLane: (contextGraphId) => {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
           return lane !== null;
@@ -1555,6 +1553,8 @@ export class DKGAgent extends DKGAgentBase {
 
     const publisher = new DKGPublisher({
       store: agentStore,
+      promoteOwnershipReader: request => TripleStoreAsyncPromoteQueue.ownershipReader(
+        agentStore, agentRef?._promoteQueueConfig)(request),
       chain,
       eventBus,
       keypair,
@@ -3979,146 +3979,8 @@ export class DKGAgent extends DKGAgentBase {
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
-      async promote(contextGraphId: string, name: string, opts?: AssertionPromoteOptions): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
-        const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
-        if (opts?.skipSeal) {
-          throw Object.assign(
-            new Error(
-              'Graph-scoped Knowledge Assets must be finalized before sharing; unsealed SWM mutation is read-only legacy behavior.',
-            ),
-            { code: 'UNSEALED_SHARE_BLOCKED' },
-          );
-        }
-        if (opts?.entities && opts.entities !== 'all') {
-          throw Object.assign(
-            new Error(
-              'A graph-scoped Knowledge Asset is atomic. Create a new KA instead of sharing a subject subset.',
-            ),
-            { code: 'KA_ATOMIC_SHARE_REQUIRED' },
-          );
-        }
-        // Seal-before-share: the on-chain publish path
-        // (`publishFromFinalizedAssertion`) requires a FINALIZED assertion, and
-        // the seal must be computed over the Working-Memory content BEFORE
-        // promote moves it to SWM and empties WM (you cannot finalize afterwards
-        // — no quads left to hash). The canonical create→finalize→promote→publish
-        // flow already finalizes; this makes the UI/HTTP promote→publish flow —
-        // which has no explicit finalize step — work too.
-        //
-        // ALWAYS call `assertionFinalize`, never a "does a seal already exist?"
-        // short-circuit. assertionFinalize is itself idempotent: it returns the
-        // EXISTING seal untouched when its merkleRoot still matches the current
-        // WM (so an explicit finalize's author signature is preserved, never
-        // clobbered with the daemon signer), and it THROWS if the assertion was
-        // edited after finalize (stale seal) or the seal is corrupt. The old
-        // existence-only skip bypassed that check and would promote stale content
-        // that fails later at publish with a confusing merkleRoot mismatch.
-        // Thread the caller's author through (mirroring the explicit finalize
-        // route) so the seal attests the intended author rather than silently
-        // falling back to the daemon signer.
-        //
-        // Atomic-share options were normalized above. The helper owns draft
-        // readiness; assertionPromote owns exact SWM/VM replay validation.
-        try {
-          await agent.prepareAtomicAssertionShare(contextGraphId, name, promoteAgentAddress, {
-            subGraphName: opts?.subGraphName,
-            authorAgentAddress: opts?.authorAgentAddress,
-            preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
-          });
-        } catch (err: any) {
-          const msg = err?.message ?? String(err);
-          // Classify finalize failures so capability gaps retain a stable API
-          // code while validation/integrity errors keep their original detail.
-          //
-          // Capability gaps carry the stable SEAL_CAPABILITY_GAP code (tagged at the
-          // assertionFinalize throw sites). The message regex is a back-compat
-          // fallback ONLY for the same known capability messages, in case an error
-          // was re-wrapped and lost its code — it must NOT broaden the net to
-          // validation errors.
-          const isCapabilityGap =
-            err?.code === SEAL_CAPABILITY_GAP_CODE ||
-            /requires a V10-capable chain adapter|has no private key on file|no publisher signer is available|failed to reconcile KA-number floor|no\s+kaNumberAllocator is configured/i.test(msg);
-          if (!isCapabilityGap) {
-            // Validation/integrity (incl. the stale-seal / corrupt-seal cases that
-            // were previously special-cased) — fail fast with the real error. WM is
-            // preserved because we throw BEFORE assertionPromote.
-            throw err;
-          }
-          // Fail closed before assertionPromote so WM remains intact.
-          throw Object.assign(
-            new Error(
-              `Cannot seal "${name}" for sharing to Shared Memory — the asset would be left ` +
-                `unpublishable and Working Memory was NOT emptied. ${msg}`,
-            ),
-            {
-              code: 'UNSEALED_SHARE_BLOCKED',
-              recovery:
-                'Resolve the signing capability (a local agent key + a V10 chain adapter), then retry.',
-            },
-          );
-        }
-        const sealed = true;
-        const { gossipSigner, publisherOptions } = await prepareAssertionPromote(agent, {
-          contextGraphId,
-          publisherPeerId: agent.node.peerId.toString(),
-          options: opts,
-        });
-        const {
-          promotedCount,
-          gossipPayload,
-          promotedAllRoots,
-          shareOperationId,
-        } = await agent.publisher.assertionPromote(
-          contextGraphId,
-          name,
-          promoteAgentAddress,
-          publisherOptions,
-        );
-        if (gossipPayload) {
-          try {
-            // Preserve the immutable operation id through the fan-out seam.
-            // Direct share() already does this; assertion promotion previously
-            // dropped it, so receiver acknowledgements/watchdog retries could
-            // not be correlated for imported (including Markdown) KAs.
-            await agent.publishWorkspaceGossip(
-              contextGraphId,
-              gossipPayload,
-              createOperationContext('share'),
-              gossipSigner,
-              shareOperationId,
-              { subGraphName: opts?.subGraphName ?? null },
-            );
-          } catch (err: any) {
-            agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
-          }
-        }
-        // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
-        // lifecycle URN so the SWM pointer is observable (and can diverge from
-        // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
-        // The hook classifies its own pointer stamp (canonical durable-finalization
-        // boundary): a failure never reports success, and a replay of this same
-        // committed operation repairs it.
-        if (promotedAllRoots) {
-          await agent.afterDurableSwmPromotionV1({
-            contextGraphId,
-            subGraphName: opts?.subGraphName,
-            assertionCoordinate: name,
-            lifecycleAgentAddress: promoteAgentAddress,
-            shareOperationId: shareOperationId ?? null,
-            ctx: createOperationContext('share'),
-          });
-        }
-        // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
-        // assertionPromote (co-located with the member-row REPLACE, gated on the
-        // same isFullCompletePromote), so it stays in lockstep with the rows for
-        // EVERY caller of the public assertionPromote — not just this wrapper. The
-        // `promotedAllRoots` result is still used below for `publishReady`.
-        // A repaired/replayed share has promotedCount=0 but retains its durable
-        // shareOperationId. It is just as publish-ready as the first response;
-        // a VM no-op has no share operation id and remains false here.
-        const publishReady = sealed && promotedAllRoots && !!shareOperationId;
-        return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
-      },
+      ...durableAssertionShareMethods(agent, agentAddress,
+        message => agent.log.warn(createOperationContext('share'), message)),
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<void> {
         const discardAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionDiscard(contextGraphId, name, discardAgentAddress, opts?.subGraphName);
@@ -4564,7 +4426,7 @@ export class DKGAgent extends DKGAgentBase {
     if (this._promoteQueue) {
       throw new Error('configurePromoteQueue must be called before the queue is first accessed');
     }
-    this._promoteQueueConfig = config;
+    this._promoteQueueConfig = Object.freeze({ ...config });
   }
 
   /** Compatibility observation surface; lifecycle ownership lives in the runtime. */

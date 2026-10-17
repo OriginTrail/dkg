@@ -52,7 +52,6 @@ import type {
   UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
-  PublisherAssertionPromoteOptions,
   PublicationPricingPolicy,
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
@@ -99,18 +98,8 @@ import type { ContextGraphStorageDiscoveryStore } from './context-graph-storage-
 
 // ── File-local structural types ─────────────────────────────────────
 
-/** Public options for the agent assertion-promote facade. */
-export interface AssertionPromoteOptions extends Pick<
-  PublisherAssertionPromoteOptions,
-  'entities' | 'subGraphName' | 'accessPolicy' | 'allowedPeers'
-> {
-  agentAddress?: string;
-  authorAgentAddress?: string;
-  preSignedAuthorAttestation?: PreSignedAuthorAttestation;
-  awaitCuratorAck?: boolean;
-  curatorAckTimeoutMs?: number;
-  skipSeal?: boolean;
-}
+/** Public options distinguish ordinary promotion from immutable bound replay. */
+export type { AssertionPromoteOptions } from './internal/promote/assertion-promote-input.js';
 
 /**
  * Pre-signed AuthorAttestation payload supplied at finalize-time by
