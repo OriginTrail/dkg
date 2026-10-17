@@ -136,6 +136,44 @@ async function servedMeta(peer: PeerNode): Promise<Quad[]> {
   return result.bindings.map((row) => ({ subject: row['s']!, predicate: row['p']!, object: row['o']!, graph: metaGraph }));
 }
 
+/**
+ * Peers that answer a `_meta` fetch page by page and keep one metadata session
+ * per requester and graph, as a responder does (`prepareResponderSession`):
+ * each fresh fetch opens a new session, and a page of a session that another
+ * fetch replaced is refused. `most` is the most fetches that ran at once.
+ */
+function pagedMetaPeers(peers: ReadonlyMap<string, PeerNode>, pageSize = 2) {
+  const sessions = new Map<string, symbol>();
+  const stats = { running: 0, most: 0 };
+  const fetch = async (
+    _ctx: OperationContext,
+    peerId: string,
+    _contextGraphId: string,
+    _includeSharedMemory: boolean,
+    _phase: string,
+    _graphUri: string,
+    _deadline: number,
+    _options?: { forceFreshSession?: boolean; signal?: AbortSignal },
+  ) => {
+    const session = Symbol(peerId);
+    sessions.set(peerId, session);
+    stats.running += 1;
+    stats.most = Math.max(stats.most, stats.running);
+    try {
+      const quads = await servedMeta(peers.get(peerId)!);
+      for (let offset = 0; offset < quads.length; offset += pageSize) {
+        // A page is a round trip: long enough for any other fetch to start meanwhile.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (sessions.get(peerId) !== session) throw new Error('Durable meta sync session was superseded before page completion');
+      }
+      return { quads, checkpointKey: `meta-checkpoint-${peerId}`, resumedFromOffset: 0, completed: true };
+    } finally {
+      stats.running -= 1;
+    }
+  };
+  return { fetch, stats };
+}
+
 interface MemberOptions {
   /** The connected peers in the order the node's peer selection returns them. */
   readonly connected?: readonly string[];
@@ -433,39 +471,51 @@ describe('a member\'s first write into a sub-graph of a registered public graph 
     expect(member.fetchSyncPages).toHaveBeenCalledTimes(names.length + 1);
   });
 
-  it('finds the sub-graph a write names however many the owner registered, past the per-snapshot limit', async () => {
-    const names = Array.from({ length: PEER_SUB_GRAPH_REGISTRATION_LIMIT + 1 }, (_, i) => `s${String(i).padStart(4, '0')}`);
+  it('finds the sub-graph a write names past the first registrations the definition brought, however many the owner has', async () => {
+    // s0000 to s0257: the definition brings the first 256 in name order.
+    const names = Array.from({ length: PEER_SUB_GRAPH_REGISTRATION_LIMIT + 2 }, (_, i) => `s${String(i).padStart(4, '0')}`);
     const owner = await peerNode([...OWNER_DECLARATION, ...names.flatMap((name) => subGraphRegistration(name))]);
     const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
-    const publisher = await memberPublisher(member);
-    const last = names.at(-1)!;
+    await expect(bootstrap(member)).resolves.toBe('fetched');
+    const [beyond, last] = names.slice(PEER_SUB_GRAPH_REGISTRATION_LIMIT);
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, names[PEER_SUB_GRAPH_REGISTRATION_LIMIT - 1]!)).resolves.toBe(true);
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, last!)).resolves.toBe(false);
 
-    await expect(firstWrite(publisher, 'report-last', last)).resolves.toBeUndefined();
-    await expect(hasSubGraphRegistration(member.store, contextGraphId, last)).resolves.toBe(true);
-    // Bulk learning stays bounded: the requested name took one of the slots.
-    await expect(hasSubGraphRegistration(member.store, contextGraphId, names.at(-2)!)).resolves.toBe(false);
+    const publisher = await memberPublisher(member);
+    await expect(firstWrite(publisher, 'report-last', last!)).resolves.toBeUndefined();
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, last!)).resolves.toBe(true);
+    expect(member.fetchSyncPages).toHaveBeenCalledTimes(2);
+    // The lookup took what the write named; what the definition left out stays out.
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, beyond!)).resolves.toBe(false);
   });
 
-  it('never runs two fresh metadata fetches from one peer for one graph at once', async () => {
+  it('lets first writes into two sub-graphs at once through, without either lookup superseding the other\'s session at the owner', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(bootstrap(member)).resolves.toBe('fetched');
+    // Registered after the member got the definition: each write has to ask the owner.
+    await owner.store.insert([...subGraphRegistration(SUB_GRAPH), ...subGraphRegistration('drafts')]);
+    const peers = pagedMetaPeers(peersOf([[OWNER_PEER_ID, owner]]));
+    member.fetchSyncPages.mockImplementation(peers.fetch);
+    const publisher = await memberPublisher(member);
+
+    await expect(Promise.all([firstWrite(publisher, 'report-1', SUB_GRAPH), firstWrite(publisher, 'draft-1', 'drafts')]))
+      .resolves.toEqual([undefined, undefined]);
+
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, SUB_GRAPH)).resolves.toBe(true);
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, 'drafts')).resolves.toBe(true);
+    expect(peers.stats.most).toBe(1);
+    expect(member.log.warn).not.toHaveBeenCalled();
+  });
+
+  it('never runs two fresh metadata fetches from one peer for one graph at once: lookups and the definition pull take turns', async () => {
     const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH), ...subGraphRegistration('drafts')]);
     const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
-    const serve = member.fetchSyncPages.getMockImplementation()!;
-    let active = 0;
-    let most = 0;
-    member.fetchSyncPages.mockImplementation(async (...args) => {
-      active += 1;
-      most = Math.max(most, active);
-      try {
-        // Long enough for every other fetch to start if nothing kept them apart.
-        await new Promise((resolve) => setTimeout(resolve, 30));
-        return await serve(...args);
-      } finally {
-        active -= 1;
-      }
-    });
+    const peers = pagedMetaPeers(peersOf([[OWNER_PEER_ID, owner]]));
+    member.fetchSyncPages.mockImplementation(peers.fetch);
 
     // Two writes into two sub-graphs and the definition pull, all at once: each
-    // would open a fresh session at the owner, and a second one supersedes the first.
+    // opens a fresh session at the owner, and a second one supersedes the first.
     const [reports, drafts, definition] = await Promise.all([
       resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH),
       resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, 'drafts'),
@@ -475,10 +525,33 @@ describe('a member\'s first write into a sub-graph of a registered public graph 
     expect(reports).toEqual({ registered: true });
     expect(drafts).toEqual({ registered: true });
     expect(definition).toBe('fetched');
-    expect(most).toBe(1);
+    expect(peers.stats.most).toBe(1);
   });
 
-  it('settles within its budget while a registration of the sub-graph holds the lock', async () => {
+  it('registers the sub-graphs that writes queued behind a lookup wait for, so they do not ask again', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH), ...subGraphRegistration('drafts')]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    const serve = member.fetchSyncPages.getMockImplementation()!;
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => { answer = resolve; });
+    member.fetchSyncPages.mockImplementationOnce(async (...args) => {
+      await answered;
+      return serve(...args);
+    });
+
+    const reports = resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH);
+    await vi.waitFor(() => expect(member.fetchSyncPages).toHaveBeenCalledOnce());
+    // A write into another sub-graph comes while the owner is asked.
+    const drafts = resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, 'drafts');
+    await new Promise((resolve) => setImmediate(resolve));
+    answer();
+
+    await expect(reports).resolves.toEqual({ registered: true });
+    await expect(drafts).resolves.toEqual({ registered: true });
+    expect(member.fetchSyncPages).toHaveBeenCalledOnce();
+  });
+
+  it('ends a resolution within its budget while a registration of the sub-graph holds the lock, and lets the write through after', async () => {
     const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
     const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
     let release!: () => void;
@@ -487,18 +560,83 @@ describe('a member\'s first write into a sub-graph of a registered public graph 
       new Promise<void>((resolve) => { release = resolve; }),
     );
     try {
-      const started = Date.now();
-      await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 50 }))
+      // The owner answers at once; only the lock keeps the registration waiting.
+      await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 20 }))
         .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
-      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(member.fetchSyncPages).toHaveBeenCalledOnce();
+      await expect(hasSubGraphRegistration(member.store, contextGraphId, SUB_GRAPH)).resolves.toBe(false);
     } finally {
       release();
     }
-    // The registration it started finishes once the lock is free; the next write finds it.
+    // The registration it started completes once the lock is free, and the write tried again goes through.
     await vi.waitFor(async () => {
-      await expect(member.agent.resolveSubGraphRegistration(contextGraphId, SUB_GRAPH)).resolves.toEqual({ registered: true });
+      await expect(hasSubGraphRegistration(member.store, contextGraphId, SUB_GRAPH)).resolves.toBe(true);
     });
-  }, 10_000);
+    await expect(firstWrite(await memberPublisher(member), 'report-1', SUB_GRAPH)).resolves.toBeUndefined();
+    expect(member.fetchSyncPages).toHaveBeenCalledOnce();
+  });
+
+  it('ends a resolution within its budget when the check after the registration does not return', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    let registered = false;
+    member.log.info.mockImplementation((_ctx: unknown, message: unknown) => {
+      if (String(message).startsWith('Registered sub-graph(s)')) registered = true;
+    });
+    let answer!: () => void;
+    const stalled = new Promise<void>((resolve) => { answer = resolve; });
+    const query = member.store.query.bind(member.store);
+    // The store stops answering once the registration is in.
+    vi.spyOn(member.store, 'query').mockImplementation(async (...args: Parameters<OxigraphStore['query']>) => {
+      if (registered) await stalled;
+      return query(...args);
+    });
+    try {
+      await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 20 }))
+        .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
+      expect(registered).toBe(true);
+    } finally {
+      answer();
+    }
+    // The next resolution waits for that lookup to end and finds what it registered, without asking again.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + SUB_GRAPH_RESOLUTION_FAILURE_COOLDOWN_MS + 1);
+    await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH)).resolves.toEqual({ registered: true });
+    expect(member.fetchSyncPages).toHaveBeenCalledOnce();
+  });
+
+  it('ends a resolution that waits behind another lookup of the graph within its own budget, and its lookup never starts', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH), ...subGraphRegistration('drafts')]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    const serve = member.fetchSyncPages.getMockImplementation()!;
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => { answer = resolve; });
+    member.fetchSyncPages.mockImplementationOnce(async (...args) => {
+      await answered;
+      return serve(...args);
+    });
+    const reports = resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH);
+    await vi.waitFor(() => expect(member.fetchSyncPages).toHaveBeenCalledOnce());
+
+    try {
+      await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, 'drafts', { timeoutMs: 20 }))
+        .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
+    } finally {
+      answer();
+    }
+    await expect(reports).resolves.toEqual({ registered: true });
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, 'drafts')).resolves.toBe(false);
+    expect(member.fetchSyncPages).toHaveBeenCalledOnce();
+  });
+
+  it('passes a store failure during the lookup on to the write, and asks again on the next one', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
+    const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
+    vi.spyOn(member.store, 'insert').mockRejectedValueOnce(new Error('store unavailable'));
+
+    await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH)).rejects.toThrow('store unavailable');
+    await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH)).resolves.toEqual({ registered: true });
+    expect(member.fetchSyncPages).toHaveBeenCalledTimes(2);
+  });
 
   it('runs one resolution of a sub-graph at a time and lets concurrent writes share it', async () => {
     const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
@@ -513,37 +651,57 @@ describe('a member\'s first write into a sub-graph of a registered public graph 
     expect(member.fetchSyncPages).toHaveBeenCalledOnce();
   });
 
-  it('ends a resolution that runs out of time with a refusal that says so, and asks again on the next write', async () => {
+  it('ends a resolution that runs out of time within its budget, though the peer\'s fetch ignores the end, and asks again on the next write', async () => {
     const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
     const member = memberNode(peersOf([[OWNER_PEER_ID, owner]]));
-    // A peer that never answers: its fetch ends only when the resolution's budget aborts it.
-    member.fetchSyncPages.mockImplementationOnce((...args) => new Promise((_resolve, reject) => {
-      const signal = args[7]?.signal;
-      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-    }));
+    // A peer that answers only when the test lets it, over a fetch that does not stop when asked to.
+    const serve = member.fetchSyncPages.getMockImplementation()!;
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => { answer = resolve; });
+    member.fetchSyncPages.mockImplementationOnce(async (...args) => {
+      await answered;
+      return serve(...args);
+    });
 
-    await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 50 }))
-      .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
-    // The wait for sync capacity has the same budget.
-    expect(member.surface.runContextGraphSyncWithBackpressure.mock.calls[0]?.[5])
-      .toMatchObject({ operationSignal: expect.any(AbortSignal), source: 'control-plane' });
+    try {
+      await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 20 }))
+        .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
+      // The wait for sync capacity has the same budget, and it has ended.
+      const admission = member.surface.runContextGraphSyncWithBackpressure.mock.calls[0]?.[5] as
+        { operationSignal?: AbortSignal; source?: string } | undefined;
+      expect(admission).toMatchObject({ operationSignal: expect.any(AbortSignal), source: 'control-plane' });
+      expect(admission?.operationSignal?.aborted).toBe(true);
+    } finally {
+      answer();
+    }
+    // The answer that came too late registered nothing.
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, SUB_GRAPH)).resolves.toBe(false);
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + SUB_GRAPH_RESOLUTION_FAILURE_COOLDOWN_MS + 1);
     await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH)).resolves.toEqual({ registered: true });
+    expect(member.fetchSyncPages).toHaveBeenCalledTimes(2);
   });
 
-  it('asks no further peer once the time is up', async () => {
+  it('asks no further peer once the time is up, without waiting for the late answer', async () => {
     const owner = await peerNode([...OWNER_DECLARATION]);
     const core = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(SUB_GRAPH)]);
     const member = memberNode(peersOf([[OWNER_PEER_ID, owner], [CORE_PEER_ID, core]]), { connected: [OWNER_PEER_ID, CORE_PEER_ID] });
-    // The owner answers, but only after the budget has run out.
+    let answer!: () => void;
+    const late = new Promise<void>((resolve) => { answer = resolve; });
+    // The owner answers only when the test lets it, after the budget has run out.
     member.fetchSyncPages.mockImplementationOnce(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      await late;
       throw new Error('late');
     });
 
-    await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 20 }))
-      .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
+    try {
+      await expect(resolveUnregisteredSubGraphFromPeers(member.agent, contextGraphId, SUB_GRAPH, { timeoutMs: 20 }))
+        .resolves.toEqual({ registered: false, detail: 'no peer of the context graph could be asked: out of time' });
+    } finally {
+      answer();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(member.fetchSyncPages).toHaveBeenCalledOnce();
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, SUB_GRAPH)).resolves.toBe(false);
   });
 });
 

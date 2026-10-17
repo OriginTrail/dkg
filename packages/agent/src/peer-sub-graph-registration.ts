@@ -19,17 +19,19 @@
  *    (`curator-meta-refresh.ts`, which the RFC-64 metadata bootstrap uses)
  *    registers the sub-graphs it carries ({@link learnPeerSubGraphs});
  *  - a write that names a sub-graph this node has not registered asks the
- *    graph's owner and connected peers before it is refused
- *    ({@link resolveUnregisteredSubGraphFromPeers}, the publisher's
- *    `resolveUnregisteredSubGraph`).
+ *    graph's owner and connected peers before it is refused, and registers
+ *    that sub-graph, and any other one a write on this node is waiting for,
+ *    when a peer holds it ({@link resolveUnregisteredSubGraphFromPeers}, the
+ *    publisher's `resolveUnregisteredSubGraph`).
  *
  * A registration is bookkeeping, not authority: nothing reads `createdBy` or
  * `authorizedWriter` to admit a write, and the live paths register a
  * sub-graph for whoever shares into it. So any peer may serve one. What is
  * taken is still bounded: complete, well-formed registrations of the graph
- * only, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT} per snapshot, never
- * a writer list, never a name that is a context graph of its own on this node,
- * and an existing registration is left as it is.
+ * only, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT} from a definition
+ * and only the names writes wait for from a lookup, never a writer list,
+ * never a name that is a context graph of its own on this node, and an
+ * existing registration is left as it is.
  */
 
 import {
@@ -47,7 +49,10 @@ import {
   type UnregisteredSubGraphResolution,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { rememberBounded } from './bounded-map.js';
+import { isBoundedOperationTimeoutError, runBoundedOperation, throwIfOperationAborted } from './bounded-operation.js';
 import { stripLiteral } from './dkg-agent-utils.js';
+import { runSyncSingleFlight, syncSingleFlightKey } from './sync-single-flight.js';
 import { fetchFreshContextGraphMeta, type FreshMetaFetchAgent } from './sync/requester/fresh-meta-fetch.js';
 import { isKnownContextGraphUri } from './sync/requester/swm-target-executor.js';
 
@@ -59,8 +64,9 @@ const MAX_PEER_SUB_GRAPH_DESCRIPTION_LENGTH = 1024;
 /** `createdBy` when the peer's registration names no plain agent DID; informational only. */
 export const PEER_SUB_GRAPH_CREATED_BY_FALLBACK = 'meta-discovery';
 /**
- * How long one resolution may take, the wait for sync capacity included: it
- * runs inside the write that names the sub-graph.
+ * How long one resolution may take, the waits for an earlier lookup of the
+ * graph and for sync capacity included: it runs inside the write that names
+ * the sub-graph.
  */
 export const SUB_GRAPH_RESOLUTION_TIMEOUT_MS = 30_000;
 /** Peers one resolution asks: the graph's owner first, then connected peers. */
@@ -113,53 +119,75 @@ interface PeerSubGraphResolutionAgent extends PeerSubGraphRegistrationPorts, Fre
 /**
  * The sub-graph registrations of `contextGraphId` in `quads`, a peer's copy of
  * the graph's `_meta`: subject `<graph>/<name>` typed `dkg:SubGraph` and named
- * `<name>`, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT}. `options.first`
- * (the sub-graph a write names) is taken first when the snapshot holds it, so
- * the limit never leaves it out; the rest follow in name order.
+ * `<name>`, in name order, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT}.
  */
 export function readPeerSubGraphRegistrations(
   contextGraphId: string,
   quads: readonly Quad[],
-  options: { readonly first?: string } = {},
 ): PeerSubGraphRegistration[] {
+  const rowsByName = subGraphRowsByName(contextGraphId, quads);
+  const found: PeerSubGraphRegistration[] = [];
+  for (const name of [...rowsByName.keys()].sort()) {
+    if (found.length >= PEER_SUB_GRAPH_REGISTRATION_LIMIT) break;
+    const registration = parsePeerSubGraphRegistration(name, rowsByName.get(name)!);
+    if (registration !== undefined) found.push(registration);
+  }
+  return found;
+}
+
+/**
+ * The registrations of the sub-graphs `names` that `quads` hold, however many
+ * others they hold: what a write asks for is never left out by the limit of
+ * {@link readPeerSubGraphRegistrations}.
+ */
+function readRequestedPeerSubGraphRegistrations(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  names: ReadonlySet<string>,
+): PeerSubGraphRegistration[] {
+  return [...subGraphRowsByName(contextGraphId, quads, names)]
+    .flatMap(([name, rows]) => parsePeerSubGraphRegistration(name, rows) ?? []);
+}
+
+/** The rows of each `<graph>/<name>` subject of the graph's `_meta` in `quads`, by name; of `names` only, when given. */
+function subGraphRowsByName(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  names?: ReadonlySet<string>,
+): Map<string, Quad[]> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
   const rowsByName = new Map<string, Quad[]>();
   for (const quad of quads) {
     if (quad.graph !== metaGraph || !quad.subject.startsWith(prefix)) continue;
     const name = quad.subject.slice(prefix.length);
+    if (names !== undefined && !names.has(name)) continue;
     const rows = rowsByName.get(name) ?? [];
     rows.push(quad);
     rowsByName.set(name, rows);
   }
-  const found: PeerSubGraphRegistration[] = [];
-  const names = [...rowsByName.keys()].sort();
-  if (options.first !== undefined && rowsByName.has(options.first)) {
-    names.splice(names.indexOf(options.first), 1);
-    names.unshift(options.first);
-  }
-  for (const name of names) {
-    if (found.length >= PEER_SUB_GRAPH_REGISTRATION_LIMIT) break;
-    if (name.length > MAX_PEER_SUB_GRAPH_NAME_LENGTH || !validateSubGraphName(name).valid) continue;
-    const rows = rowsByName.get(name)!;
-    const objects = (predicate: string) => rows.filter((row) => row.predicate === predicate).map((row) => row.object);
-    if (!objects(RDF_TYPE).includes(SUB_GRAPH_TYPE)) continue;
-    if (!objects(SCHEMA_NAME).some((value) => value.startsWith('"') && stripLiteral(value) === name)) continue;
-    const createdAt = objects(CREATED_AT)
-      .map((value) => new Date(stripLiteral(value)))
-      .find((date) => Number.isFinite(date.getTime()));
-    const description = objects(SCHEMA_DESCRIPTION)
-      .filter((value) => value.startsWith('"'))
-      .map(stripLiteral)
-      .find((text) => text.length > 0 && text.length <= MAX_PEER_SUB_GRAPH_DESCRIPTION_LENGTH);
-    found.push({
-      name,
-      createdBy: objects(CREATED_BY).find((value) => PLAIN_AGENT_DID.test(value)) ?? PEER_SUB_GRAPH_CREATED_BY_FALLBACK,
-      ...(createdAt === undefined ? {} : { createdAt }),
-      ...(description === undefined ? {} : { description }),
-    });
-  }
-  return found;
+  return rowsByName;
+}
+
+/** The registration `rows` make for `name`, when they make a complete, well-formed one. */
+function parsePeerSubGraphRegistration(name: string, rows: readonly Quad[]): PeerSubGraphRegistration | undefined {
+  if (name.length > MAX_PEER_SUB_GRAPH_NAME_LENGTH || !validateSubGraphName(name).valid) return undefined;
+  const objects = (predicate: string) => rows.filter((row) => row.predicate === predicate).map((row) => row.object);
+  if (!objects(RDF_TYPE).includes(SUB_GRAPH_TYPE)) return undefined;
+  if (!objects(SCHEMA_NAME).some((value) => value.startsWith('"') && stripLiteral(value) === name)) return undefined;
+  const createdAt = objects(CREATED_AT)
+    .map((value) => new Date(stripLiteral(value)))
+    .find((date) => Number.isFinite(date.getTime()));
+  const description = objects(SCHEMA_DESCRIPTION)
+    .filter((value) => value.startsWith('"'))
+    .map(stripLiteral)
+    .find((text) => text.length > 0 && text.length <= MAX_PEER_SUB_GRAPH_DESCRIPTION_LENGTH);
+  return {
+    name,
+    createdBy: objects(CREATED_BY).find((value) => PLAIN_AGENT_DID.test(value)) ?? PEER_SUB_GRAPH_CREATED_BY_FALLBACK,
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(description === undefined ? {} : { description }),
+  };
 }
 
 /**
@@ -235,8 +263,19 @@ interface RememberedMiss {
 }
 
 interface PeerSubGraphResolutionState {
-  /** One resolution per sub-graph at a time; a write that comes meanwhile shares it. */
-  readonly inFlight: Map<string, Promise<UnregisteredSubGraphResolution>>;
+  /**
+   * One lookup of a graph at a time (`withKeyedLocks`, by graph). Each lookup
+   * opens a fresh session at the peer it asks, and the peer keeps one
+   * metadata session per requester and graph, so a second lookup would
+   * supersede the first one's remaining pages.
+   */
+  readonly lookupLocks: Map<string, Promise<void>>;
+  /**
+   * The names the resolutions of each graph are waiting for. A lookup
+   * registers every one of them that its peer holds, so the lookups queued
+   * behind it usually find their sub-graph without asking again.
+   */
+  readonly wanted: Map<string, Set<string>>;
   /** The last resolution of each `<graph>\0<name>` that did not find it. */
   readonly misses: Map<string, RememberedMiss>;
 }
@@ -246,7 +285,7 @@ const resolutionStates = new WeakMap<object, PeerSubGraphResolutionState>();
 function resolutionStateOf(agent: object): PeerSubGraphResolutionState {
   let state = resolutionStates.get(agent);
   if (state === undefined) {
-    state = { inFlight: new Map(), misses: new Map() };
+    state = { lookupLocks: new Map(), wanted: new Map(), misses: new Map() };
     resolutionStates.set(agent, state);
   }
   return state;
@@ -255,12 +294,15 @@ function resolutionStateOf(agent: object): PeerSubGraphResolutionState {
 /**
  * Resolve a sub-graph that a write names and this node has not registered:
  * ask the graph's owner, then connected peers, for the graph's `_meta`, and
- * register the sub-graphs their answers hold. Asks only for a graph this node
- * follows and did not create (the creator registers its own sub-graphs).
+ * register the sub-graph when one holds it. Asks only for a graph this node
+ * follows and did not create (the creator registers its own sub-graphs). One
+ * resolution of a sub-graph runs at a time, and a write that comes meanwhile
+ * shares it; one lookup of a graph runs at a time.
  * Never throws for a peer that cannot be asked, or for running out of its
- * `timeoutMs` (default {@link SUB_GRAPH_RESOLUTION_TIMEOUT_MS}); the outcome
- * says what was found. A sub-graph that no peer asked held is not asked for
- * again for {@link SUB_GRAPH_RESOLUTION_MISS_COOLDOWN_MS}, nor for
+ * `timeoutMs` (default {@link SUB_GRAPH_RESOLUTION_TIMEOUT_MS}), which bounds
+ * the whole resolution; the outcome says what was found. A sub-graph that no
+ * peer asked held is not asked for again for
+ * {@link SUB_GRAPH_RESOLUTION_MISS_COOLDOWN_MS}, nor for
  * {@link SUB_GRAPH_RESOLUTION_FAILURE_COOLDOWN_MS} after no peer could be asked.
  */
 export function resolveUnregisteredSubGraphFromPeers(
@@ -288,40 +330,20 @@ export function resolveUnregisteredSubGraphFromPeers(
       return Promise.resolve({ registered: false, detail: `asked ${Math.round(sinceMs / 1000)} s ago: ${missed.detail}` });
     }
   }
-  const running = state.inFlight.get(key);
-  if (running !== undefined) return running;
-  const resolution = resolveFromPeers(agent, state, key, contextGraphId, subGraphName, options.timeoutMs ?? SUB_GRAPH_RESOLUTION_TIMEOUT_MS)
-    .finally(() => {
-      if (state.inFlight.get(key) === resolution) state.inFlight.delete(key);
-    });
-  state.inFlight.set(key, resolution);
-  return resolution;
+  return runSyncSingleFlight(
+    agentObject,
+    syncSingleFlightKey('sub-graph-resolution', { contextGraphId, subGraphName }),
+    () => resolveWithinBudget(agent, state, key, contextGraphId, subGraphName, options.timeoutMs ?? SUB_GRAPH_RESOLUTION_TIMEOUT_MS),
+    { scope: 'durable' },
+  );
 }
 
-const OUT_OF_TIME = Symbol('out of time');
+/** What one lookup of the graph's peers found. */
+type PeerLookupOutcome =
+  | { readonly registered: true }
+  | { readonly registered: false; readonly asked: number; readonly answered: number; readonly lastFailure: string };
 
-/**
- * `work`'s outcome, or {@link OUT_OF_TIME} when `budget` ends first. `work`
- * goes on to its end either way (a rejection after that is still handled).
- */
-async function withinBudget<T>(work: Promise<T>, budget: AbortSignal): Promise<T | typeof OUT_OF_TIME> {
-  if (budget.aborted) {
-    work.catch(() => undefined);
-    return OUT_OF_TIME;
-  }
-  let onAbort!: () => void;
-  const ended = new Promise<typeof OUT_OF_TIME>((resolve) => {
-    onAbort = () => resolve(OUT_OF_TIME);
-    budget.addEventListener('abort', onAbort, { once: true });
-  });
-  try {
-    return await Promise.race([work, ended]);
-  } finally {
-    budget.removeEventListener('abort', onAbort);
-  }
-}
-
-async function resolveFromPeers(
+async function resolveWithinBudget(
   agent: PeerSubGraphResolutionAgent,
   state: PeerSubGraphResolutionState,
   key: string,
@@ -331,71 +353,102 @@ async function resolveFromPeers(
 ): Promise<UnregisteredSubGraphResolution> {
   const ctx = createOperationContext('sync');
   const deadline = Date.now() + timeoutMs;
-  // One budget for the whole resolution: the owner's lookup, the wait for sync
-  // capacity and for a peer's turn, every fetch and the registrations. Its end
-  // is an answer, not an error; what it cut short goes on without the caller.
-  const budget = AbortSignal.timeout(timeoutMs);
-  const peerIds = await withinBudget(resolutionPeers(agent, contextGraphId, budget), budget);
+  const stopWaiting = waitFor(state, contextGraphId, subGraphName);
+  let outcome: PeerLookupOutcome | undefined;
+  try {
+    // One budget for the whole resolution: the wait for an earlier lookup of
+    // the graph, the owner's lookup, the waits for sync capacity and for the
+    // peer, every fetch, the registrations and the check after them. Its end
+    // is an answer, not an error; what it cut short goes on without the
+    // caller, and a registration it started still completes.
+    outcome = await runBoundedOperation(
+      (signal) => withKeyedLocks(state.lookupLocks, [contextGraphId], () =>
+        lookUpPeers(agent, state, ctx, contextGraphId, subGraphName, deadline, signal)),
+      { timeoutMs, label: 'Sub-graph lookup' },
+    );
+  } catch (error) {
+    if (!isBoundedOperationTimeoutError(error)) throw error;
+  } finally {
+    stopWaiting();
+  }
+  if (outcome?.registered === true) {
+    state.misses.delete(key);
+    return { registered: true };
+  }
+  if (outcome !== undefined && outcome.answered > 0) {
+    const detail = `none of the ${outcome.answered} peer(s) of the context graph asked holds it`;
+    rememberMiss(state, key, { at: Date.now(), forMs: SUB_GRAPH_RESOLUTION_MISS_COOLDOWN_MS, detail });
+    return { registered: false, detail };
+  }
+  if (outcome !== undefined && outcome.asked === 0) {
+    return { registered: false, detail: 'no peer of the context graph was there to ask' };
+  }
+  const failure = outcome?.lastFailure ?? 'out of time';
+  const detail = `no peer of the context graph could be asked: ${failure}`;
+  rememberMiss(state, key, { at: Date.now(), forMs: SUB_GRAPH_RESOLUTION_FAILURE_COOLDOWN_MS, detail });
+  agent.log.warn(ctx, `Could not look up sub-graph "${subGraphName}" of context graph "${contextGraphId}": ${failure}`);
+  return { registered: false, detail };
+}
+
+/**
+ * Ask the graph's peers, the owner first, until one holds the sub-graph, and
+ * register each sub-graph of the graph that a resolution waits for and the
+ * answer holds. Runs as the graph's one lookup; stops once `signal` ends the
+ * resolution.
+ */
+async function lookUpPeers(
+  agent: PeerSubGraphResolutionAgent,
+  state: PeerSubGraphResolutionState,
+  ctx: OperationContext,
+  contextGraphId: string,
+  subGraphName: string,
+  deadline: number,
+  signal: AbortSignal,
+): Promise<PeerLookupOutcome> {
+  // The resolution may have ended while this lookup waited for the one before it.
+  throwIfOperationAborted(signal);
+  // The lookup before this one may have registered it.
+  if (await hasSubGraphRegistration(agent.store, contextGraphId, subGraphName)) return { registered: true };
+  const peerIds = await resolutionPeers(agent, contextGraphId, signal);
   let answered = 0;
-  let lastFailure = 'out of time';
-  let outOfTime = peerIds === OUT_OF_TIME;
-  for (const peerId of peerIds === OUT_OF_TIME ? [] : peerIds) {
-    if (budget.aborted) {
-      outOfTime = true;
-      break;
-    }
-    let quads: readonly Quad[] | undefined | typeof OUT_OF_TIME;
+  let lastFailure = '';
+  for (const peerId of peerIds) {
+    throwIfOperationAborted(signal);
+    let quads: readonly Quad[] | undefined;
     try {
-      quads = await withinBudget(fetchPeerMeta(agent, ctx, peerId, contextGraphId, deadline, budget), budget);
+      quads = await fetchPeerMeta(agent, ctx, peerId, contextGraphId, deadline, signal);
     } catch (error) {
-      if (budget.aborted) {
-        outOfTime = true;
-        break;
-      }
       lastFailure = error instanceof Error ? error.message : String(error);
       continue;
-    }
-    if (quads === OUT_OF_TIME) {
-      outOfTime = true;
-      break;
     }
     if (quads === undefined) {
       lastFailure = `peer ${peerId.slice(-8)} sent an incomplete answer`;
       continue;
     }
     answered += 1;
-    const found = readPeerSubGraphRegistrations(contextGraphId, quads, { first: subGraphName });
-    if (await withinBudget(registerPeerSubGraphs(agent, contextGraphId, found, peerId, ctx), budget) === OUT_OF_TIME) {
-      outOfTime = true;
-      break;
-    }
-    if (await hasSubGraphRegistration(agent.store, contextGraphId, subGraphName)) {
-      state.misses.delete(key);
+    const wanted = new Set(state.wanted.get(contextGraphId)).add(subGraphName);
+    const found = readRequestedPeerSubGraphRegistrations(contextGraphId, quads, wanted);
+    await registerPeerSubGraphs(agent, contextGraphId, found, peerId, ctx);
+    if (found.some((registration) => registration.name === subGraphName)
+      && await hasSubGraphRegistration(agent.store, contextGraphId, subGraphName)) {
       return { registered: true };
     }
   }
-  if (outOfTime) lastFailure = 'out of time';
-  else if (answered > 0) {
-    const detail = `none of the ${answered} peer(s) of the context graph asked holds it`;
-    rememberMiss(state, key, { at: Date.now(), forMs: SUB_GRAPH_RESOLUTION_MISS_COOLDOWN_MS, detail });
-    return { registered: false, detail };
-  } else if (peerIds !== OUT_OF_TIME && peerIds.length === 0) {
-    return { registered: false, detail: 'no peer of the context graph was there to ask' };
-  }
-  const detail = `no peer of the context graph could be asked: ${lastFailure}`;
-  rememberMiss(state, key, { at: Date.now(), forMs: SUB_GRAPH_RESOLUTION_FAILURE_COOLDOWN_MS, detail });
-  agent.log.warn(ctx, `Could not look up sub-graph "${subGraphName}" of context graph "${contextGraphId}": ${lastFailure}`);
-  return { registered: false, detail };
+  return { registered: false, asked: peerIds.length, answered, lastFailure };
+}
+
+/** Note that a resolution waits for `subGraphName`; the returned function ends that. */
+function waitFor(state: PeerSubGraphResolutionState, contextGraphId: string, subGraphName: string): () => void {
+  const names = state.wanted.get(contextGraphId) ?? new Set<string>();
+  state.wanted.set(contextGraphId, names.add(subGraphName));
+  return () => {
+    names.delete(subGraphName);
+    if (names.size === 0 && state.wanted.get(contextGraphId) === names) state.wanted.delete(contextGraphId);
+  };
 }
 
 function rememberMiss(state: PeerSubGraphResolutionState, key: string, miss: RememberedMiss): void {
-  state.misses.delete(key);
-  state.misses.set(key, miss);
-  while (state.misses.size > SUB_GRAPH_RESOLUTION_REMEMBERED_MISSES) {
-    const oldest = state.misses.keys().next().value;
-    if (oldest === undefined) break;
-    state.misses.delete(oldest);
-  }
+  rememberBounded(state.misses, key, miss, SUB_GRAPH_RESOLUTION_REMEMBERED_MISSES);
 }
 
 /** The graph's owner first, when this node can name its peer, then connected peers; never this node. */
