@@ -160,8 +160,10 @@ export function fetchFreshContextGraphMeta(
   //
   // A standalone fetch is real outbound sync work: it is admitted through the
   // node-wide scheduler, so partitioned mode can route it to fast capacity and
-  // the global cap still bounds it. A nested one stays inside its enclosing
-  // admission: acquiring twice could deadlock a saturated partition.
+  // the global cap still bounds it; in shared mode it may also take the one
+  // reserved control-plane slot beside that cap (#3280), so a transfer that
+  // holds every general slot does not refuse it. A nested one stays inside its
+  // enclosing admission: acquiring twice could deadlock a saturated partition.
   return hasSyncAdmissionSource()
     ? runFetch()
     : agent.runContextGraphSyncWithBackpressure(

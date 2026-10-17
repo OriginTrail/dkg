@@ -61,6 +61,7 @@ import {
   type SharedMemorySyncContext,
 } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { sharedMemoryRoundFoundNothingMissing } from '../src/sync/shared-memory-diagnostics.js';
 import type { RecoveryExecutionGuard } from
   '../src/sync/requester/recovery-execution-guard.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
@@ -1321,6 +1322,222 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
         contextGraphId: CG,
         metaQuads: poisonedMeta,
       })).toThrow(/ambiguous shareOperationId/);
+    });
+
+    describe('what a catch-up finds the node already holds (#3296)', () => {
+      // A member that received a graph's writes before its catch-up ran is
+      // served content it already has, and nothing is inserted. Readiness can
+      // still rest on that round: every asset found already held is counted,
+      // and an asset left to the catalog lane is counted apart, never as held.
+      const graphLocator = (fixture: typeof v1): Quad[] => fixture.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, fixture.operationId),
+            }
+          : quad
+      ));
+      const boundary = () => ({
+        graphUri: 'urn:test:rfc64-late-boundary',
+        subject: 'urn:test:rfc64-late-boundary:held',
+        quads: [{
+          subject: 'urn:test:rfc64-late-boundary:held',
+          predicate: 'urn:test:entry',
+          object: '"held"',
+          graph: 'urn:test:rfc64-late-boundary',
+        }],
+      });
+
+      it('counts a snapshot the node already holds; nothing is inserted and nothing is missing', async () => {
+        const store = new OxigraphStore();
+        await store.insert([...v1.meta]);
+        await store.insert(inGraph(v1.payload, v1.assertionGraph));
+        const h = realHarness(store, v1);
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0,
+          insertedDataTriples: 0,
+          alreadyHeldAssets: 1,
+          catalogDeferredAssets: 0,
+          swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 1, missingCount: 0, manifestComplete: true },
+        });
+        expect(summary.completedPhases).toBeGreaterThan(0);
+        expect(h.replaceCalls()).toBe(0);
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(true);
+      });
+
+      it('counts a snapshot that a newer stored version supersedes', async () => {
+        const store = new OxigraphStore();
+        await store.insert([...v2.meta]);
+        await store.insert(inGraph(v2.payload, v2.assertionGraph));
+        const h = realHarness(store, v1);
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0, insertedDataTriples: 0, alreadyHeldAssets: 1, supersededUnprovenAssets: 0,
+        });
+        expect(h.replaceCalls()).toBe(0);
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(true);
+      });
+
+      // A newer stored head is kept either way, but it proves the asset held
+      // only with its own content in the store. The first row is the review's
+      // case: v2's metadata alone in an empty store, then the peer's v1 snapshot.
+      it.each([
+        ['only its metadata', () => [...v2.meta]],
+        ['the older version\'s bytes under it', () => [...v2.meta, ...inGraph(v1.payload, v2.assertionGraph)]],
+      ])('reports a snapshot missing when the newer stored head it keeps has %s', async (_state, seed) => {
+        const store = new OxigraphStore();
+        await store.insert(seed());
+        const h = realHarness(store, v1);
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0,
+          insertedDataTriples: 0,
+          alreadyHeldAssets: 0,
+          supersededUnprovenAssets: 1,
+          swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 0, missingCount: 1, manifestComplete: true },
+        });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+        // Never overwritten with the older snapshot: the head stays v2.
+        expect(h.replaceCalls()).toBe(0);
+        const { materializer } = materializerFor(store);
+        expect(await materializer.readStoredHead(descriptorFor(v1)))
+          .toEqual({ version: '2', needsRepair: false, shareOperationId: 'op-v2' });
+      });
+
+      it('counts an asset the round writes as data, not as held', async () => {
+        const h = realHarness(new OxigraphStore(), v1);
+
+        const summary = await h.run();
+
+        expect(summary.insertedDataTriples).toBeGreaterThan(0);
+        expect(summary).toMatchObject({ failedPhases: 0, alreadyHeldAssets: 0 });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+      });
+
+      it('counts a root snapshot left to the catalog lane as deferred, never as held', async () => {
+        const store = new OxigraphStore();
+        await store.insert([...v1.meta]);
+        await store.insert(inGraph(v1.payload, v1.assertionGraph));
+        const h = realHarness(store, v1, v1.meta, { ordinaryRootSnapshotApplyAllowed: () => false });
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({ failedPhases: 0, alreadyHeldAssets: 0, catalogDeferredAssets: 1 });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+      });
+
+      it.each([false, true])(
+        'counts a graph-locator root the node already holds (durable boundary: %s)',
+        async (withBoundary) => {
+          const store = new OxigraphStore();
+          const meta = graphLocator(v1);
+          await store.insert(inGraph(v1.payload, v1.assertionGraph));
+          await store.insert(meta);
+          const h = realHarness(store, v1, meta, {
+            selectedRecovery: true,
+            preloadSnapshot: false,
+            ...(withBoundary ? { resolveRootSnapshotAtomicCompanion: boundary } : {}),
+          });
+
+          const summary = await h.run();
+
+          expect(summary).toMatchObject({
+            failedPhases: 0, insertedDataTriples: 0, alreadyHeldAssets: 1, catalogDeferredAssets: 0,
+          });
+          expect(h.atomicReplaceCalls()).toBe(withBoundary ? 1 : 0);
+          expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(true);
+        },
+      );
+
+      it('counts a graph-locator root that a newer stored head supersedes', async () => {
+        const store = new OxigraphStore();
+        await store.insert(inGraph(v2.payload, v2.assertionGraph));
+        await store.insert([...v2.meta]);
+        const h = realHarness(store, v1, graphLocator(v1), {
+          preloadSnapshot: false,
+          ordinaryRootSnapshotApplyAllowed: () => true,
+        });
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0, insertedDataTriples: 0, alreadyHeldAssets: 1, supersededUnprovenAssets: 0,
+        });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(true);
+      });
+
+      // No snapshot ref covers a graph-locator root, so only the count keeps a
+      // round from reading as complete when the newer head's content is absent.
+      it.each([
+        ['only its metadata', () => [...v2.meta]],
+        ['the older version\'s bytes under it', () => [...v2.meta, ...inGraph(v1.payload, v1.assertionGraph)]],
+      ])('leaves a graph-locator root missing when the newer stored head it keeps has %s', async (_state, seed) => {
+        const store = new OxigraphStore();
+        await store.insert(seed());
+        const h = realHarness(store, v1, graphLocator(v1), {
+          preloadSnapshot: false,
+          ordinaryRootSnapshotApplyAllowed: () => true,
+        });
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0, insertedDataTriples: 0, alreadyHeldAssets: 0, supersededUnprovenAssets: 1,
+        });
+        expect(summary.swmCoverage).toBeUndefined();
+        expect(h.replaceCalls()).toBe(0);
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+      });
+
+      it('a held asset beside one missing under a newer stored head does not prove the round', async () => {
+        const otherUal = 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/10';
+        const otherV1 = share(1, 'op-other-v1', 'other-one', otherUal);
+        const otherV2 = share(2, 'op-other-v2', 'other-two', otherUal);
+        const store = new OxigraphStore();
+        await store.insert([...graphLocator(v1), ...inGraph(v1.payload, v1.assertionGraph)]);
+        await store.insert([...otherV2.meta]);
+        const h = realHarness(store, v1, [...graphLocator(v1), ...graphLocator(otherV1)], {
+          preloadSnapshot: false,
+          ordinaryRootSnapshotApplyAllowed: () => true,
+        });
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({ failedPhases: 0, alreadyHeldAssets: 1, supersededUnprovenAssets: 1 });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+      });
+
+      it.each([1, 2])(
+        'counts a graph-locator root left to the catalog lane at authority check %i as deferred',
+        async (deniedAtCheck) => {
+          const store = new OxigraphStore();
+          const meta = graphLocator(v1);
+          await store.insert(inGraph(v1.payload, v1.assertionGraph));
+          await store.insert(meta);
+          let checks = 0;
+          const h = realHarness(store, v1, meta, {
+            preloadSnapshot: false,
+            ordinaryRootSnapshotApplyAllowed: () => {
+              checks += 1;
+              return checks < deniedAtCheck;
+            },
+          });
+
+          const summary = await h.run();
+
+          expect(checks).toBe(deniedAtCheck);
+          expect(summary).toMatchObject({ failedPhases: 0, alreadyHeldAssets: 0, catalogDeferredAssets: 1 });
+          expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+        },
+      );
     });
   });
 });
