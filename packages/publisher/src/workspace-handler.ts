@@ -1123,7 +1123,7 @@ export class SharedMemoryHandler {
         CG_AUTH_RPC_SITES.workspaceApply,
         () => this.getContextGraphAgentGateAddresses(contextGraphId, readProjectedMeta),
       );
-      const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
+      let allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
       const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(
         contextGraphId,
         readProjectedMeta,
@@ -1163,6 +1163,9 @@ export class SharedMemoryHandler {
             logWarn: (message) => this.log.warn(ctx, message), logInfo: (message) => this.log.info(ctx, message),
           });
           if (!retry.accepted) return { applied: false, reason: 'agent envelope verification failed', retryable: retry.retryable };
+          // The second look may have installed new metadata: the peer gate below
+          // must judge the sender from that metadata, not the earlier snapshot.
+          allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, this.createContextGraphMetaOracleRead(contextGraphId));
         }
       } else if (trustedReplay && !hasPrivateAccessPolicy && !decoded.senderKeyMessage && !decoded.encryptedPayload) {
         // GH #1124 (otReviewAgent #1239) — PUBLIC-CG host-catchup forgery gate.

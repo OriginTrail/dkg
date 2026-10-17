@@ -241,6 +241,37 @@ describe('SharedMemoryHandler: second look at the agent gate for a signer the pr
     expect(oracle).toHaveBeenCalledTimes(1);
   });
 
+  it('judges the sender from the peer gate of the refreshed metadata, not the snapshot taken before the refresh', async () => {
+    // Before the refresh the metadata admits the sending peer and excludes the
+    // writer; the refresh installs metadata that admits the writer but restricts
+    // peers to another one. Neither snapshot authorizes both, so nothing applies.
+    let allowedPeers = [PEER_ID];
+    const oracle = vi.fn<SwmAgentGateRefreshOracle>(async () => {
+      allowedPeers = [OTHER_PEER_ID];
+      return { kind: 'available', agentAddresses: FRESH_GATE };
+    });
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: new Map(),
+      localAgentAddresses: () => [localMember.address],
+      workspaceRecipientPrivateKeys: () => [recipientKey],
+      contextGraphMetaOracle: async () => ({
+        accessPolicy: 'private',
+        allowedAgents: PROJECTED_GATE,
+        participantAgents: [],
+        revokedAgents: [],
+        allowedPeers,
+      }),
+      agentGateRefreshOracle: oracle,
+    });
+
+    const outcome = await handler.handle(await writeBy(newMember, 'Peer Removed During Refresh'), PEER_ID);
+
+    expect(outcome).toMatchObject({ applied: false, retryable: false });
+    expect(outcome.reason).toContain(`peer "${PEER_ID}" not in allowlist`);
+    expect(oracle).toHaveBeenCalledTimes(1);
+    await expect(storedName()).resolves.toBeUndefined();
+  });
+
   it('keeps the local-membership check on the fresh gate', async () => {
     const oracle = freshGateOracle();
     const stranger = ethers.Wallet.createRandom();
