@@ -17,8 +17,7 @@ import {
   contextGraphIdsFromLocalRootMetaGraphs,
   contextGraphIdsFromMetricSubscriptionCandidates,
   countContextGraphsFromGraphUris,
-  GET_TOTAL_TRIPLES_SPARQL,
-  parseRdfInt,
+  createStoreCountMetrics,
   shadowContextGraphIdsFromMetricSubscriptionCandidates,
 } from "./metrics-queries.js";
 import { createMetricsPresence } from "./metrics-presence.js";
@@ -2648,56 +2647,9 @@ async function runDaemonInnerWithStartupOwnership(
     // then dedupes local layer graphs. It intentionally includes private CG graphs
     // that are backed by local subscription/declaration state.
     // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
-    getTotalTriples: async () => {
-      const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL, {
-        source: "daemon.metrics.totalTriples",
-      });
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    // RFC ka-metadata-trim (Phase 2 ⊕ / Phase 3 P3.1): the KC/KA counters are
-    // predicate-based, not rdf:type-based — `generateKCMetadata` no longer
-    // emits `rdf:type dkg:KnowledgeCollection` / `dkg:KnowledgeAsset` rows.
-    //   - KC ≙ a subject carrying `dkg:status` (every KC row, old shape or
-    //     new, has exactly one tentative/confirmed status quad).
-    //   - KA ≙ read-both: a legacy `<ual>/<n>` token row carrying
-    //     `dkg:partOf`, OR (collapsed shape, P3.1) a UAL subject carrying
-    //     `dkg:status` + the entity pair with NO token row pointing at it
-    //     (the NOT-EXISTS guard prevents double-counting old-shape rows,
-    //     whose aggregate UAL node also carries `dkg:rootEntity`).
-    getTotalKCs: async () => {
-      const r = await agent.query(
-        "SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?s } }",
-        { source: "daemon.metrics.totalKCs" },
-      );
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getTotalKAs: async () => {
-      const r = await agent.query(
-        `SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g {
-          { ?ka <http://dkg.io/ontology/partOf> ?kc }
-          UNION
-          { ?ka <http://dkg.io/ontology/status> ?st .
-            ?ka <http://dkg.io/ontology/rootEntity> ?re .
-            FILTER NOT EXISTS { ?tok <http://dkg.io/ontology/partOf> ?ka } }
-        } }`,
-        { source: "daemon.metrics.totalKAs" },
-      );
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getConfirmedKCs: async () => {
-      const r = await agent.query(
-        'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }',
-        { source: "daemon.metrics.confirmedKCs" },
-      );
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getTentativeKCs: async () => {
-      const r = await agent.query(
-        'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }',
-        { source: "daemon.metrics.tentativeKCs" },
-      );
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
+    // Unscoped reads: after a core-cache snapshot job they count the content
+    // outside the core-cache-marked graphs.
+    ...createStoreCountMetrics((sparql, options) => agent.query(sparql, options)),
     getStoreBytes: async () => {
       // External SPARQL backends own no local file; `null` is the
       // correct signal here (returning 0 misleads operators into

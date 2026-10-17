@@ -72,6 +72,7 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
+import { withholdGraphsFromUnscopedQuery } from './withheld-graph-scope.js';
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
 /** Upstream statuses that mean the SUBMITTED query was malformed. */
@@ -352,11 +353,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const plan = resolveQueryReadPlan(initialGraphScope, options,
       this.store.graphEnumerationVisibility ? admission : null);
     const reads = createQueryStoreReadContext(this.store, options);
+    if (options?.withheldGraphRoots?.length && plan.kind !== 'unscoped') {
+      throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
+    }
     switch (plan.kind) {
       case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
         plan.options.contextGraphId, plan.options, reads, reads.catalog);
-      case 'unscoped': return this.execWithExclusions(initialGraphScope, reads, options?.excludeGraphPrefixes);
+      case 'unscoped': return this.execWithExclusions(
+        withholdGraphsFromUnscopedQuery(initialGraphScope, options?.withheldGraphRoots ?? []),
+        reads, options?.excludeGraphPrefixes);
     }
   }
 

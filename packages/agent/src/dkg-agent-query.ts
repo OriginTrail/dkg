@@ -635,8 +635,9 @@ export class QueryMethods extends DKGAgentBase {
 
     const execute = () => {
       opts.signal?.throwIfAborted();
-      return withPublicSnapshotQueryTrust(this.store, opts.contextGraphId, opts.chainEvidenceMode, () => this.queryEngine.query(sparql, {
+      return withPublicSnapshotQueryTrust(this.store, opts.contextGraphId, opts.chainEvidenceMode, ({ withheldGraphRoots }) => this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,
+      withheldGraphRoots,
       requireCompleteGraphScope: opts.requireCompleteGraphScope,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,

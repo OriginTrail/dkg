@@ -22,6 +22,7 @@ export default defineConfig({
       "test/prepared-content-cache.test.ts",
       "test/sync-prepared-content-export.test.ts",
       "test/public-snapshot-evidence.test.ts",
+      "test/public-snapshot-unscoped-query.test.ts",
       "test/public-snapshot-discovery.test.ts",
       "test/public-snapshot-job-ownership.test.ts",
       "test/public-snapshot-partial-persistence.test.ts",

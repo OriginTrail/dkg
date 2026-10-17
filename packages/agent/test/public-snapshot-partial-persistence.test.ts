@@ -12,6 +12,7 @@ import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 import { withPublicSnapshotQueryTrust } from '../src/public-snapshot-evidence.js';
+import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import { materializeVerifiedGraphScopedAsset, type VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 
 afterEach(() => vi.restoreAllMocks());
@@ -56,11 +57,16 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only') {
   });
   return a;
 }
-const query=(store:OxigraphStore,scope?:string,mode?:'core-cache'|'rpc-only')=>withPublicSnapshotQueryTrust(store,scope,mode,()=>store.query('SELECT ?s WHERE {GRAPH ?g {?s <urn:value> "safe"}}'));
+const sparql='SELECT ?s WHERE {GRAPH ?g {?s <urn:value> "safe"}}';
+// Scoped reads use the raw store once the guard passes; unscoped reads go through
+// the engine with the marked graphs left out, as agent.query runs them.
+const query=(store:OxigraphStore,scope?:string,mode?:'core-cache'|'rpc-only')=>withPublicSnapshotQueryTrust(store,scope,mode,
+  async ({withheldGraphRoots})=>scope?store.query(sparql):{type:'bindings' as const,...await new DKGQueryEngine(store).query(sparql,{withheldGraphRoots})});
 const run=(a:any,mode:'core-cache'|'rpc-only')=>PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a,{contextGraphId:graph,onChainId:'1',trustedCorePeerIds:['core'],mode});
 async function checkGuard(store:OxigraphStore) {
   await expect(query(store,graph)).rejects.toThrow('core-trusted');
-  await expect(query(store)).rejects.toThrow('core-trusted');
+  // An unscoped read succeeds and leaves the marked graph out.
+  await expect(query(store)).resolves.toMatchObject({bindings:[]});
   await expect(query(store,graph,'rpc-only')).rejects.toThrow('core-trusted');
   const accepted=await query(store,graph,'core-cache');
   expect(accepted.type).toBe('bindings');

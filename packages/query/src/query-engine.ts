@@ -84,6 +84,13 @@ export interface QueryOptions {
    */
   excludeGraphPrefixes?: string[];
   /**
+   * Graph IRIs a query without `contextGraphId` must not read, each with every
+   * graph below it (`<iri>/...`). The query is answered over the dataset without
+   * them; one that names such a graph, or a graph that cannot be placed, is
+   * refused with `WithheldGraphQueryError`. Rejected on scoped queries.
+   */
+  withheldGraphRoots?: readonly string[];
+  /**
    * Per-subject trust floor for `verifiable-memory`. Values above
    * `SelfAttested` require every matched subject to carry an explicit
    * `http://dkg.io/ontology/trustLevel` literal at or above `minTrust`.

@@ -1,0 +1,51 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGAgent } from '../src/dkg-agent.js';
+import { markCoreTrustedGraph } from '../src/public-snapshot-evidence.js';
+
+const agents: DKGAgent[] = [];
+afterEach(async () => {
+  while (agents.length) await agents.pop()!.stop();
+});
+
+async function startAgent() {
+  const agent = await DKGAgent.create({ name: 'UnscopedQueryTrust', nodeRole: 'edge',
+    listenHost: '127.0.0.1', listenPort: 0, chainAdapter: new MockChainAdapter(),
+    syncReconcilerEnabled: false, vmReconcilerEnabled: false, randomSamplingUseWorkerThread: false });
+  agents.push(agent);
+  await agent.start();
+  return agent;
+}
+
+const values = (result: { bindings?: Array<Record<string, string>> }) => (result.bindings ?? []).map(row => row.value).sort();
+
+describe('agent.query after a core-cache snapshot job marked a graph', () => {
+  it('answers unscoped queries over every other graph and keeps reads of the marked graph guarded', async () => {
+    const agent = await startAgent();
+    const imported = 'did:dkg:context-graph:imported';
+    await agent.store.insert([
+      { subject: 'urn:entity:imported', predicate: 'urn:value', object: '"imported"', graph: imported },
+      { subject: 'urn:entity:imported-child', predicate: 'urn:value', object: '"imported-child"', graph: `${imported}/child/_meta` },
+      { subject: 'urn:entity:local', predicate: 'urn:value', object: '"local"', graph: 'did:dkg:context-graph:local-notes' },
+    ]);
+    const sparql = 'SELECT ?value WHERE { GRAPH ?g { ?s <urn:value> ?value } }';
+    const count = 'SELECT (COUNT(*) AS ?c) WHERE { { ?s <urn:value> ?o } UNION { GRAPH ?g { ?s <urn:value> ?o } } }';
+    expect(values(await agent.query(sparql))).toEqual(['"imported"', '"imported-child"', '"local"']);
+    expect((await agent.query(count)).bindings?.[0]?.c).toContain('"3"');
+
+    await markCoreTrustedGraph(agent.store, 'imported');
+    // Unscoped reads keep working, with the marked graph and its descendants left out.
+    expect(values(await agent.query(sparql))).toEqual(['"local"']);
+    expect((await agent.query(count)).bindings?.[0]?.c).toContain('"1"');
+    await expect(agent.query(`SELECT ?value WHERE { GRAPH <${imported}> { ?s <urn:value> ?value } }`))
+      .rejects.toMatchObject({ code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
+    await expect(agent.query(sparql, { chainEvidenceMode: 'core-cache' })).rejects.toThrow('explicit context graph');
+
+    // Scoped reads of the marked graph still need explicit acceptance; other graphs do not.
+    const scoped = 'SELECT ?value WHERE { ?s <urn:value> ?value }';
+    await expect(agent.query(scoped, { contextGraphId: 'imported' }))
+      .rejects.toMatchObject({ code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
+    expect(values(await agent.query(scoped, { contextGraphId: 'imported', chainEvidenceMode: 'core-cache' }))).toEqual(['"imported"']);
+    expect(values(await agent.query(scoped, { contextGraphId: 'local-notes' }))).toEqual(['"local"']);
+  });
+});
