@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { Wallet } from 'ethers';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { executePromoteRequest } from '../src/daemon/worker/execute-promote-request.js';
@@ -20,7 +21,8 @@ import { durableSynchronousShare } from '../src/daemon/routes/durable-synchronou
 import { daemonState } from '../src/daemon/state.js';
 import { createPromoteWorkerSupervisor, runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
 
-const CG = 'durable-sync-2963', NAME = 'asset', AUTHOR = `0x${'11'.repeat(20)}`;
+const signer = new Wallet(`0x${'11'.repeat(32)}`);
+const CG = 'durable-sync-2963', NAME = 'asset', AUTHOR = signer.address.toLowerCase();
 const lifecycle = assertionLifecycleUri(CG, AUTHOR, NAME);
 class FaultStore extends OxigraphStore {
   remaining = 0;
@@ -42,6 +44,7 @@ async function setup() {
     // This fixture isolates publisher/queue recovery. Live validation exercises
     // actual inventory and authority; separate tests cover that handoff.
     agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'legacy', killSwitchActive: false });
+    agent.createRfc64CatalogAuthorSignerV1 = () => ({ address: AUTHOR, signMessage: signer.signMessage.bind(signer) });
     agent.configurePromoteQueue({ backoff: () => 0, maxRetries: 1 });
     return { agent, publisher };
   };

@@ -19,7 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { buildAssertionSealQuads } from '../../packages/core/dist/index.js';
+import { ASSERTION_SEAL_PREDICATES, buildAssertionSealQuads } from '../../packages/core/dist/index.js';
 import { capturedTermIdentity } from './rdf-term-identity.mjs';
 import { defineCampaign } from './campaign-manifest.mjs';
 test('main reducer entry points retain a relocated asset as a failed proof', () => {
@@ -66,6 +66,29 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     };
     const original = run(); assert.equal(original.seals.length, 1); assert.equal(original.seals[0].unchanged, true);
     assert.deepEqual(original.proof.sealChanged, []); assert.deepEqual(original.proof.missingLifecycle, []); assert.deepEqual(original.proof.lifecycleErrors, [], JSON.stringify(original.proof.assets));
+    for (const [predicate, value] of [
+      [ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT, 'cd'.repeat(32)],
+      [ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION, '2'],
+      [ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS, '0x2222222222222222222222222222222222222222'],
+    ]) {
+      const field = before.find(row => row.p.value === predicate);
+      const conflict = { ...field, o: { ...field.o, value } };
+      for (const prepend of [true, false]) {
+        const ambiguous = rows => prepend ? [conflict, ...rows] : [...rows, conflict];
+        for (const phase of ['before', 'after', 'both']) {
+          write('pre-workload/rdf.json', rdf(phase === 'after' ? before : ambiguous(before)));
+          write('fixed-deadline/rdf.json', rdf(phase === 'before' ? [...metadata, ...payload] : ambiguous([...metadata, ...payload])));
+          const result = run();
+          assert.equal(result.seals[0].unchanged, false);
+          assert.match(result.seals[0].error, /Conflicting seal field/);
+          // The aggregate's raw-change field is distinct from seal validity.
+          // The strict seal proof must fail even when conflicting rows are unchanged.
+          assert.deepEqual(result.proof.sealChanged, phase === 'both' ? [] : [name]);
+        }
+      }
+    }
+    write('pre-workload/rdf.json', rdf(before));
+    write('fixed-deadline/rdf.json', rdf([...metadata, ...payload]));
     // Initial/non-injected operations must retain every immutable authority field.
     const intent = { version: 1, operationId: 'original', timestampMs: 1, confirmationRequired: true,
       accessPolicy: 'public', allowedPeers: [] };

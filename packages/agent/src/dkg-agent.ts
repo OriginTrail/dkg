@@ -1037,9 +1037,8 @@ export class DKGAgent extends DKGAgentBase {
       this,
       new Rfc64SwmCatalogProjectionOwnerV1({
         resolvePartition: resolveCatalogPartition,
-        listLocalAuthorAddresses: () => this.listLocalAgents().map(
-          ({ agentAddress }) => agentAddress.toLowerCase() as EvmAddressV1,
-        ),
+        listDurableInventoryScopes: () => this.rfc64PersistenceV1?.swmAuthorInventory.listSwmAuthorInventoryScopesV1() ?? [],
+        listLocalAuthorAddresses: () => this.listLocalAgents().map(({ agentAddress }) => agentAddress.toLowerCase() as EvmAddressV1),
         acceptsPublicRootLane: (contextGraphId) => {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
           return lane !== null;

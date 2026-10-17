@@ -1,3 +1,4 @@
+import { assertUnambiguousSealFields } from './seal-cardinality.mjs';
 import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
 import { indexAuthoritativeMetadata } from './authoritative-metadata.mjs';
 import { verifyIdentityTuples } from './identity-tuples.mjs';
@@ -15,6 +16,7 @@ const seals = new Map();
 for (const [subject, rows] of groups) {
   if (!subject.includes('/assertion/')) continue;
   if (!expectedSubjects.has(subject) || rows.some(r => r.s.type !== 'uri' || r.p.type !== 'uri')) throw Error('Unexpected prepared seal subject');
+  assertUnambiguousSealFields(rows);
   const parsed = parseAssertionSealQuads(rows.map(r => ({subject:r.s.value,predicate:r.p.value,object:term(r.o),graph:r.g.value})), subject);
   if (!parsed) throw Error(`Invalid prepared seal: ${subject}`);
   const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(parsed);

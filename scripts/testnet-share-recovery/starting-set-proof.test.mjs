@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { defineCampaign } from './campaign-manifest.mjs';
 import { faultEvidenceFixture } from './fault-evidence-fixture.mjs';
 import { capturedTermIdentity } from './rdf-term-identity.mjs';
-import { parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1 } from '../../packages/core/dist/index.js';
+import { ASSERTION_SEAL_PREDICATES, parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1 } from '../../packages/core/dist/index.js';
 
 test('starting gate requires the exact authoritative prepared seal subjects', () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'starting-evidence-'));
@@ -32,6 +32,19 @@ test('starting gate requires the exact authoritative prepared seal subjects', ()
     write('pre-workload/catalogs.json', [{ rows: [{ assertionCoordinate: name, kaId: seal.reservedKaId, assertionVersion: seal.assertionVersion, sealDigest: digest }] }]);
     const run = () => execFileSync(process.execPath, [fileURLToPath(new URL('./starting-set-proof.mjs', import.meta.url)), arm], { cwd, stdio: 'pipe' });
     write('pre-workload/rdf.json', { results: { bindings: rows } }); run();
+    for (const [predicate, value] of [
+      [ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT, 'cd'.repeat(32)],
+      [ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION, '2'],
+      [ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS, '0x2222222222222222222222222222222222222222'],
+    ]) {
+      const original = rows.find(row => row.p.value === predicate);
+      assert.ok(original);
+      const conflict = { ...original, o: { ...original.o, value } };
+      for (const ambiguous of [[conflict, ...rows], [...rows, conflict]]) {
+        write('pre-workload/rdf.json', { results: { bindings: ambiguous } });
+        assert.throws(run, 'Conflicting seal metadata must fail in either order');
+      }
+    }
     for (const transform of [
       r => ({ ...r, g: { type: 'uri', value: graph + '-relocated' } }),
       r => ({ ...r, s: { type: 'uri', value: subject.replace(campaign.author, 'wrong-author') } }),

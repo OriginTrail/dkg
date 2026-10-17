@@ -275,6 +275,7 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'catalog-projection-discovery-v1.js',
   'catalog-repair-diagnostics-v1.js',
   'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',

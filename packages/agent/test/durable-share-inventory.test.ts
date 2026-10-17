@@ -1,3 +1,5 @@
+import { RemoteSignerError } from '@origintrail-official/dkg-chain';
+import { Rfc64ControlEnvelopeSigningErrorV1 } from '../src/rfc64/control-envelope-signer-v1.js';
 import { AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, NETWORK_ID, seedDurableWorkspaceAssetV1, startRepairAgentV1 } from './support/rfc64-local-catalog-repair-fixture.js';
 import { Rfc64SwmAuthorInventoryProducerErrorV1 } from '../src/rfc64/swm-author-inventory-producer-v1.js';
 import { InventoryV1CandidateError } from '../src/rfc64/inventory-v1/index.js';
@@ -11,6 +13,18 @@ const params = { contextGraphId: 'cg', assertionCoordinate: 'asset', lifecycleAg
     intent: { version: 1 as const, operationId: 'original-operation', timestampMs: 1, confirmationRequired: false, accessPolicy: 'public' as const, allowedPeers: [] } }, ctx: createOperationContext('share') };
 
 describe('durable inventory handoff', () => {
+  it.each(['REMOTE_SIGNER_TIMEOUT', 'REMOTE_SIGNER_UNAVAILABLE', 'REMOTE_SIGNER_UNAUTHORIZED', 'REMOTE_SIGNER_INVALID_SIGNATURE'] as const)(
+    'distinguishes transport interruption from signer refusal: %s', async code => {
+      const cause = new Rfc64SwmAuthorInventoryProducerErrorV1('swm-inventory-producer-signer', 'signing failed', {
+        cause: new Rfc64ControlEnvelopeSigningErrorV1('callback', 'callback failed', { cause: new RemoteSignerError(code, 'fixture') }),
+      });
+      const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('inventory-maintenance', null, cause); }) };
+      const result = commitDurableShareInventory(agent as any, params);
+      if (code === 'REMOTE_SIGNER_TIMEOUT' || code === 'REMOTE_SIGNER_UNAVAILABLE') {
+        await expect(result).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE', cause });
+      } else await expect(result).rejects.toBe(cause);
+    });
+
   it.each(['swm-inventory-producer-input', 'swm-inventory-producer-history', 'swm-inventory-producer-signer'] as const)('preserves typed permanent %s from the inventory phase', async code => {
     const cause = new Rfc64SwmAuthorInventoryProducerErrorV1(code, 'invalid signed inventory');
     const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => { throw new SwmInventoryWriteFailure('inventory-maintenance', null, cause); }) };

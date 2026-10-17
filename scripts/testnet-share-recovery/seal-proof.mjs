@@ -1,3 +1,4 @@
+import { assertUnambiguousSealFields } from './seal-cardinality.mjs';
 import { loadCampaign } from './campaign-manifest.mjs';
 import { indexAuthoritativeMetadata } from './authoritative-metadata.mjs';
 import { bindingTermIdentity } from './rdf-term-identity.mjs';
@@ -11,7 +12,7 @@ const before=load(dir+'/pre-workload/rdf.json'),after=load(dir+'/'+label+'/rdf.j
 const term=t=>t.type==='uri'?t.value:JSON.stringify(t.value)+(t.datatype?`^^<${t.datatype}>`:t['xml:lang']?'@'+t['xml:lang']:'');
 const canonical=rows=>rows.map(r=>JSON.stringify([r.s,r.p,r.o,r.g].map(bindingTermIdentity))).sort();const proof=[];
 for(const [subject,old] of before){if(!subject.includes('/assertion/'))continue;const now=after.get(subject)??[];
- try {const seal=parseAssertionSealQuads(now.map(r=>({subject:r.s.value,predicate:r.p.value,object:term(r.o),graph:r.g.value})),subject);if(!seal)throw Error('Missing authoritative seal');
+ try {assertUnambiguousSealFields(old);assertUnambiguousSealFields(now);const seal=parseAssertionSealQuads(now.map(r=>({subject:r.s.value,predicate:r.p.value,object:term(r.o),graph:r.g.value})),subject);if(!seal)throw Error('Missing authoritative seal');
  const c=canonicalGraphScopedAuthorSealFromAssertionSealV1(seal);
  proof.push({name:subject.split('/').at(-1),subject,unchanged:JSON.stringify(canonical(old))===JSON.stringify(canonical(now)),sealDigest:computeCanonicalGraphScopedAuthorSealDigestV1(c),seal:c});
  }catch(e){proof.push({name:subject.split('/').at(-1),subject,unchanged:false,error:e.message});}

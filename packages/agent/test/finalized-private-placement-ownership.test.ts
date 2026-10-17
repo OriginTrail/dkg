@@ -101,6 +101,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
       resolvePartition: () => ({
         retryIntervalMs: options.retryIntervalMs ?? 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [],
       }),
+      listDurableInventoryScopes: () => [],
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
       acceptsFinalizedPrivateLane: () => {

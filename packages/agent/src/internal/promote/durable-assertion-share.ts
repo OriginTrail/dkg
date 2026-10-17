@@ -1,3 +1,4 @@
+import { assertShareInventorySigningCapability } from './share-inventory-signing-capability.js';
 import { normalizeAssertionPromoteExecution } from './assertion-promote-input.js';
 import { SwmCatalogAuthorityNotReady } from '../swm-inventory-write.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
@@ -74,7 +75,8 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
   try { inventoryRequired = agent.requiresRfc64ShareInventoryV1(contextGraphId, opts?.subGraphName); }
   catch (cause) { if (cause instanceof SwmCatalogAuthorityNotReady) throw createPromoteRetryableFailure(cause); throw cause; }
   const recoveryBinding = await agent.publisher.prepareAssertionPromoteRecovery(
-    contextGraphId, name, storageLane, publisherOptions, inventoryRequired);
+    contextGraphId, name, storageLane, publisherOptions, inventoryRequired,
+    inventoryRequired ? () => assertShareInventorySigningCapability(agent, storageLane) : undefined);
   if ('completedResult' in recoveryBinding) {
     return { agentAddress: storageLane, recoveryBinding: undefined,
       completedResult: { promotedCount: 0, sealed: true, publishReady: false,

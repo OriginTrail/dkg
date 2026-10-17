@@ -512,6 +512,11 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.compareAndSwapAppliedCatalogHeadV1(input);
   }
 
+  listSwmAuthorInventoryScopesV1(): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['listSwmAuthorInventoryScopesV1']> {
+    this.requireOpen();
+    return this.#candidate.listSwmAuthorInventoryScopesV1();
+  }
+
   readSwmAuthorInventoryHeadDigestV1(...input: Parameters<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']>): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']> {
     this.requireOpen();
     return this.#candidate.readSwmAuthorInventoryHeadDigestV1(...input);

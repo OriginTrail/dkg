@@ -76,6 +76,7 @@ export async function preparePromoteRecoveryBinding(
   opts: PublisherAssertionPromoteOptions | undefined, inventoryRequired: boolean, readOwner: PromoteOwnershipReader,
   retireCompletion: () => Promise<void>,
   verifyCompleted?: (seal: AssertionSeal, operationId?: string) => Promise<AssertionPromoteResult | null>,
+  beforeNewOperation?: () => Promise<void>,
 ): Promise<PromoteRecoveryAdmission> {
   const evidence = await readPromoteRecoveryEvidence(store, contextGraphId, name, agentAddress, opts);
   const { seal, sealDigest } = evidence;
@@ -101,6 +102,7 @@ export async function preparePromoteRecoveryBinding(
     await retireCompletion();
     throw recoveryBindingConflict('The existing share operation lacks a complete immutable intent');
   }
+  if (operation.kind === 'absent') await beforeNewOperation?.();
   const intent = operation.kind === 'complete' ? operation.intent
     : createPromoteOperationIntent({ operationId: createShareOperationId(), timestampMs: Date.now(),
       publisherPeerId: opts?.publisherPeerId, confirmationRequired: opts?.confirmBeforeCommit !== undefined,

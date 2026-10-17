@@ -25,6 +25,22 @@ async function setup() {
   return {store,publisher,reopen,queue,request,seal};
 }
 describe('bound ownership extends the publisher lifecycle mutation fence', () => {
+  it('checks new-operation capability before admission without imposing it on committed recovery', async () => {
+    const { publisher, store, queue, request, seal } = await setup();
+    const unavailable = new Error('inventory signer unavailable');
+    const preflight = vi.fn(async () => { throw unavailable; });
+    await expect(publisher.prepareAssertionPromoteRecovery(CG, NAME, AUTHOR, undefined, true, preflight)).rejects.toBe(unavailable);
+    expect(preflight).toHaveBeenCalledTimes(1);
+    expect(await queue.list()).toHaveLength(0);
+    expect(await store.countQuads(seal.graphUri)).toBe(1);
+    expect(await store.countQuads(seal.sharedGraphUri)).toBe(0);
+    const job = await queue.enqueueAndClaim(request, 'owner');
+    await publisher.assertionPromote(CG, NAME, AUTHOR, { recoveryBinding: request.recoveryBinding });
+    expect(await publisher.prepareAssertionPromoteRecovery(CG, NAME, AUTHOR, undefined, true, preflight)).toEqual(request.recoveryBinding);
+    expect(preflight).toHaveBeenCalledTimes(1);
+    expect((await queue.getStatus(job.jobId))?.request.recoveryBinding).toEqual(request.recoveryBinding);
+  });
+
   it.each(['running', 'failed_retrying', 'failed'])('refuses resealing behind an unfinished %s owner after publisher cleanup', async state => {
     const { publisher, store, queue, request, seal } = await setup();
     const job = await queue.enqueueAndClaim(request, 'owner');

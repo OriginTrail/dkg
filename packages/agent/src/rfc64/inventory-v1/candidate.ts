@@ -855,6 +855,11 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     }
   }
 
+  listSwmAuthorInventoryScopesV1(): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['listSwmAuthorInventoryScopesV1']> {
+    this.assertOpen();
+    return this.readTransaction(() => this.swmAuthorInventoryPersistenceV1().listScopes());
+  }
+
   readSwmAuthorInventoryHeadDigestV1(
     inventoryScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
