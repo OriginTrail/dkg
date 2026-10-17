@@ -130,20 +130,32 @@ async function main(): Promise<void> {
     const driver = join(directory, 'windows-client-launch.cjs');
     writeFileSync(driver, String.raw`const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const { spawnSync } = require('node:child_process');
+const { createRequire } = require('node:module');
 assert.equal(process.platform, 'win32');
 const entry = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).mcpServers.dkg;
-const request = JSON.stringify({jsonrpc:'2.0', id:1, method:'initialize', params:{protocolVersion:'2024-11-05', capabilities:{}, clientInfo:{name:'native-wsl-regression', version:'1'}}}) + '\n';
-const result = spawnSync(entry.command, entry.args, {env:{...process.env,...entry.env}, input:request, encoding:'utf8', timeout:30000, maxBuffer:1024*1024});
-assert.ifError(result.error);
-assert.equal(result.status, 0, result.stderr);
-const response = result.stdout.trim().split('\n').map(line => JSON.parse(line)).find(value => value.id === 1);
-assert.equal(response?.result?.serverInfo?.name, 'dkg', result.stdout + result.stderr);
-assert.match(result.stderr, /59231/, 'MCP must load the explicitly selected DKG_HOME with spaces and quotes');
-process.stdout.write('Windows client → pinned WSL → production MCP initialize passed\n');
+const cliRequire = createRequire(process.argv[3]);
+async function main() {
+  const { Client } = await import(cliRequire.resolve('@modelcontextprotocol/sdk/client/index.js'));
+  const { StdioClientTransport } = await import(cliRequire.resolve('@modelcontextprotocol/sdk/client/stdio.js'));
+  const transport = new StdioClientTransport({command:entry.command,args:entry.args,env:{...process.env,...entry.env},stderr:'pipe'});
+  let stderr = ''; transport.stderr.on('data', data => { stderr += data; });
+  const client = new Client({name:'native-wsl-regression',version:'1'});
+  let timer;
+  try {
+    await Promise.race([(async () => {
+      await client.connect(transport);
+      assert.equal(client.getServerVersion().name, 'dkg');
+      const result = await client.listTools();
+      assert(result.tools.length > 0, 'MCP must expose its DKG tools');
+      assert.match(stderr, /59231/, 'MCP must load the selected DKG_HOME with spaces and quotes');
+      process.stdout.write('Windows client → pinned WSL → production MCP initialize/tools-list passed\n');
+    })(),new Promise((_,reject) => {timer=setTimeout(() => reject(new Error('MCP launch timed out')),30000);})]);
+  } finally { clearTimeout(timer); await client.close(); await transport.close(); }
+}
+main().catch(error => { console.error(error); process.exitCode = 1; });
 `);
     const mountedWindowsNode = execFileSync('/usr/bin/wslpath', ['-u', windowsNode], { encoding: 'utf8' }).trim();
-    console.log(execFileSync(mountedWindowsNode, [windowsPath(driver), windowsPath(path)], {
+    console.log(execFileSync(mountedWindowsNode, [windowsPath(driver), windowsPath(path), windowsPath(fileURLToPath(new URL('../../package.json', import.meta.url)))], {
       encoding: 'utf8', timeout: 45_000, maxBuffer: 1024 * 1024,
     }).trim());
     await mcpUninstallAction({ yes: true, client: 'cursor:native' }, { detectClients: () => clients, log: () => {} });
