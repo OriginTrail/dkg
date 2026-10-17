@@ -2,10 +2,10 @@ import { throwInventoryRecoveryFailure } from '../../agent/src/internal/promote/
 import { inventoryPersistenceFailure } from '../../agent/src/rfc64/inventory-persistence-failure.js';
 import { Wallet, getBytes } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
-import { createOperationContext, canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-official/dkg-core';
+import { createOperationContext, type TimestampMsV1, canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-official/dkg-core';
 import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
 import { commitDurableShareInventory } from '../../agent/src/internal/promote/durable-share-inventory.js';
-import { AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, NETWORK_ID, seedDurableWorkspaceAssetV1, startRepairAgentV1 } from '../../agent/test/support/rfc64-local-catalog-repair-fixture.js';
+import { AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, NETWORK_ID, catalogScopeDigestV1, seedDurableWorkspaceAssetV1, startRepairAgentV1 } from '../../agent/test/support/rfc64-local-catalog-repair-fixture.js';
 import { rfc64SwmInventoryShadowRuntimeV1 } from '../../agent/src/rfc64/swm-inventory-shadow-runtime-v1.js';
 import { runPromoteJob, createPromoteWorkerSupervisor } from '../src/daemon/worker/async-promote-worker.js';
 
@@ -110,6 +110,65 @@ describe('bound worker owns the real inventory CAS', () => {
     const snapshot = agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR });
     expect(snapshot?.rows).toHaveLength(1);
     expect(snapshot?.rows[0]).toMatchObject({ kaUal: seeded.seal.kaUal, assertionCoordinate: seeded.assertionCoordinate });
+  });
+
+  it('retries projection authority loss after the real inventory CAS without changing its original row', async () => {
+    const agent = await startRepairAgentV1({ name: 'bound-projection-authority-loss',
+      autoPublish: { peers: [], catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1 } });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    agent.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+    await agent.whenRfc64CatalogResponsibilitiesIdleV1(); await agent.whenRfc64CatalogSupervisorsIdleV1();
+    const seeded = await seedDurableWorkspaceAssetV1(agent, 'projection-authority-loss', 97n);
+    const binding = { version: 1 as const, inventoryRequired: true,
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seeded.seal)),
+      intent: { version: 1 as const, operationId: seeded.shareOperationId, timestampMs: 1,
+        confirmationRequired: false, accessPolicy: 'public' as const, allowedPeers: [] } };
+    const queue = new TripleStoreAsyncPromoteQueue(agent.store, { backoff: () => 0, maxRetries: 1 });
+    const job = await queue.enqueueAndClaim({ contextGraphId: CONTEXT_GRAPH_ID, assertionName: seeded.assertionCoordinate,
+      entities: 'all', agentAddress: AUTHOR, recoveryBinding: binding }, 'original');
+    const params = { contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seeded.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR, recoveryBinding: binding, ctx: createOperationContext('share') };
+    const commit = agent.commitRfc64SwmAuthorInventoryV1.bind(agent);
+    let restorePolicy: (() => void) | undefined;
+    const acknowledgement = vi.spyOn(agent, 'commitRfc64SwmAuthorInventoryV1').mockImplementationOnce(async input => {
+      const result = await commit(input);
+      expect(result.status).toBe('applied');
+      // Lose actual accepted authority only after native inventory acknowledged its CAS.
+      const policy = vi.spyOn(agent.rfc64PublicCatalogServiceV1!, 'acceptedPolicySnapshot').mockReturnValue(null);
+      restorePolicy = () => policy.mockRestore(); return result;
+    });
+    try {
+      const result = await runPromoteJob({ job, queue, workerId: 'original', now: Date.now, log: () => undefined,
+        runPromote: async () => { await commitDurableShareInventory(agent, params); return { promotedCount: 0 }; } });
+      expect(result.outcome).toBe('failed_retrying');
+      expect((await queue.getStatus(job.jobId))?.attempt.lastError)
+        .toMatchObject({ diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE', retryable: true });
+    } finally { restorePolicy?.(); acknowledgement.mockRestore(); }
+    const before = agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR })!;
+    expect(before.rows).toHaveLength(1);
+    expect(before.rows[0]).toMatchObject({ kaUal: seeded.seal.kaUal, assertionCoordinate: seeded.assertionCoordinate,
+      shareOperationId: binding.intent.operationId });
+    vi.spyOn(agent, 'promoteQueue', 'get').mockReturnValue(queue);
+    const assertion = agent.assertion;
+    vi.spyOn(agent, 'assertion', 'get').mockReturnValue({ ...assertion, promote: async (_cg, _name, options) => {
+      expect(options?.recoveryBinding).toEqual(binding);
+      await commitDurableShareInventory(agent, params);
+      return { promotedCount: 0, sealed: true, publishReady: true, shareOperationId: seeded.shareOperationId };
+    } });
+    const supervisor = createPromoteWorkerSupervisor({ agent, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
+    try {
+      await supervisor.start();
+      await vi.waitFor(async () => expect((await queue.getStatus(job.jobId))?.state).toBe('succeeded'));
+      await vi.waitFor(() => expect(agent.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: catalogScopeDigestV1(), authorAddress: AUTHOR }))
+        .toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' }), { timeout: 10_000 });
+    } finally { await supervisor.stop(); }
+    expect((await queue.getStatus(job.jobId))?.request.recoveryBinding).toEqual(binding);
+    expect((await queue.getStatus(job.jobId))?.attempt.count).toBe(2);
+    const after = agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR })!;
+    expect(after).toEqual(before);
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs).toContainEqual(expect.objectContaining({
+      outcome: 'reconciled', inventoryHeadObjectDigest: before.head.objectDigest, inventoryRowCount: '1',
+    }));
   });
 
   it('holds a real invalid predecessor signature for inspection before any inventory CAS', async () => {

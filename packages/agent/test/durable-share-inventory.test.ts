@@ -61,6 +61,17 @@ describe('durable inventory handoff', () => {
     }));
     expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
   });
+  it.each(['service-unavailable', 'policy-not-accepted', 'authority-inactive'] as const)('keeps projection readiness %s retryable after acknowledged inventory', async reason => {
+    const cause = new SwmCatalogAuthorityNotReady(reason);
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'existing' })),
+      requestRfc64SwmCatalogProjectionV1: vi.fn(() => { throw cause; }) };
+    await expect(commitDurableShareInventory(agent as any, params)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE', cause });
+    expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledOnce();
+    expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
+    const refused = new Error('invalid projection authority');
+    agent.requestRfc64SwmCatalogProjectionV1.mockImplementation(() => { throw refused; });
+    await expect(commitDurableShareInventory(agent as any, params)).rejects.toBe(refused);
+  });
   it('retains pointer failure ownership and does not run the catalog mutation', async () => {
     const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn() };
     const detached = vi.fn();

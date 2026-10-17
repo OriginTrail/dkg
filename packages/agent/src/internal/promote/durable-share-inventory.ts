@@ -36,11 +36,14 @@ async function commitInventoryUnderAssetLock(agent: DKGAgent, params: BoundDurab
       default: { const unreachable: never = reason; throw new Error(`Unknown inventory outcome: ${unreachable}`); }
     }
   }
-  agent.requestRfc64SwmCatalogProjectionV1({
-    contextGraphId: params.contextGraphId as ContextGraphIdV1,
-    authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
-    ctx: params.ctx,
-  });
+  // A committed row still needs projection admission; retain its owner on typed readiness failure.
+  try {
+    agent.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: params.contextGraphId as ContextGraphIdV1,
+      authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
+      ctx: params.ctx,
+    });
+  } catch (error) { return throwInventoryRecoveryFailure(error); }
 }
 
 export async function finishDurableShare(
