@@ -121,10 +121,11 @@ export interface PeerSubGraphRegistrationPorts {
 /** What a resolution needs of the agent besides that. */
 interface PeerSubGraphResolutionAgent extends PeerSubGraphRegistrationPorts, FreshMetaFetchAgent {
   readonly peerId: string;
+  readonly node: { libp2p: { getConnections(): Array<{ remotePeer: { toString(): string } }> } };
   readonly localContextGraphProvenance: { hasLocalCreate(contextGraphId: string): boolean };
   readonly subscribedContextGraphs: ReadonlyMap<string, { readonly subscribed?: boolean }>;
   resolveCuratorPeerId(contextGraphId: string, options: { signal?: AbortSignal }): Promise<string | undefined>;
-  resolveRfc64UnregisteredAuthoritySeedPeersV1(options: { contextGraphId?: string }): readonly string[];
+  resolveRfc64UnregisteredAuthoritySeedPeersV1(options: { contextGraphId?: string; maxPeers?: number }): readonly string[];
 }
 
 /**
@@ -132,12 +133,14 @@ interface PeerSubGraphResolutionAgent extends PeerSubGraphRegistrationPorts, Fre
  * the graph's `_meta`: subject `<graph>/<name>` typed `dkg:SubGraph` and named
  * `<name>`, at most {@link PEER_SUB_GRAPH_REGISTRATION_LIMIT}. `options.first`
  * (the sub-graph a write names) is taken first when the snapshot holds it, so
- * the limit never leaves it out; the rest follow in name order.
+ * the limit never leaves it out; the rest follow in name order. Names in
+ * `options.exclude` (the registrations this node holds) are left out before
+ * the limit applies, so repeated reads of a large snapshot progress through it.
  */
 export function readPeerSubGraphRegistrations(
   contextGraphId: string,
   quads: readonly Quad[],
-  options: { readonly first?: string } = {},
+  options: { readonly first?: string; readonly exclude?: ReadonlySet<string> } = {},
 ): PeerSubGraphRegistration[] {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
@@ -145,6 +148,7 @@ export function readPeerSubGraphRegistrations(
   for (const quad of quads) {
     if (quad.graph !== metaGraph || !quad.subject.startsWith(prefix)) continue;
     const name = quad.subject.slice(prefix.length);
+    if (options.exclude?.has(name)) continue;
     const rows = rowsByName.get(name) ?? [];
     rows.push(quad);
     rowsByName.set(name, rows);
@@ -161,6 +165,29 @@ export function readPeerSubGraphRegistrations(
     if (registration !== undefined) found.push(registration);
   }
   return found;
+}
+
+/**
+ * The names of the sub-graphs this node holds a complete registration of in
+ * the graph's `_meta` (type, name and creator, what `hasSubGraphRegistration`
+ * requires). An incomplete row is not a registration: a peer's complete one
+ * is still taken and repairs it.
+ */
+export async function readLocalSubGraphNames(store: TripleStore, contextGraphId: string): Promise<Set<string>> {
+  const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
+  const result = await store.query(
+    `SELECT ?s WHERE { GRAPH <${contextGraphMetaGraphUri(contextGraphId)}> {
+      ?s <${RDF_TYPE}> <${SUB_GRAPH_TYPE}> ; <${SCHEMA_NAME}> ?name ; <${CREATED_BY}> ?createdBy .
+    } }`,
+    { source: 'agent.peerSubGraphRegistration.localNames' },
+  );
+  const names = new Set<string>();
+  if (result.type !== 'bindings') return names;
+  for (const row of result.bindings) {
+    const subject = row['s'];
+    if (typeof subject === 'string' && subject.startsWith(prefix)) names.add(subject.slice(prefix.length));
+  }
+  return names;
 }
 
 /**
@@ -511,7 +538,18 @@ function rememberMiss(state: PeerSubGraphResolutionState, key: string, miss: Rem
   rememberBounded(state.misses, key, miss, SUB_GRAPH_RESOLUTION_REMEMBERED_MISSES);
 }
 
-/** The graph's owner first, when this node can name its peer, then connected peers; never this node. */
+/**
+ * The peers to ask, never this node: the graph's owner first when this node
+ * can name its peer and is connected to it, then connected peers (the node's
+ * selection puts Cores, which keep and serve the owner's definition of the
+ * registered graphs they host, before other peers, keeps a slot for a peer
+ * that is not a Core, and rotates its window on each call, so repeated
+ * resolutions reach every connected peer). An owner this node is not
+ * connected to is asked last, so a member that reaches the graph only through
+ * Cores (an Edge behind NAT) does not spend its budget on a dial before it
+ * asks them; a dial to the owner is still tried when no connected peer holds
+ * the sub-graph.
+ */
 async function resolutionPeers(
   agent: PeerSubGraphResolutionAgent,
   contextGraphId: string,
@@ -519,13 +557,15 @@ async function resolutionPeers(
 ): Promise<string[]> {
   // An owner this node cannot name still leaves the connected peers to ask.
   const owner = await agent.resolveCuratorPeerId(contextGraphId, { signal }).catch(() => undefined);
-  const candidates = [
-    ...(owner === undefined ? [] : [owner]),
-    ...agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId }),
-  ];
-  return [...new Set(candidates)]
-    .filter((peerId) => peerId !== agent.peerId)
-    .slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS);
+  const connected = new Set(agent.node.libp2p.getConnections().map((connection) => connection.remotePeer.toString()));
+  const ownerNamed = owner !== undefined && owner !== agent.peerId;
+  const peers = [...new Set(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({
+    contextGraphId,
+    maxPeers: ownerNamed ? SUB_GRAPH_RESOLUTION_MAX_PEERS - 1 : SUB_GRAPH_RESOLUTION_MAX_PEERS,
+  }))].filter((peerId) => peerId !== agent.peerId && peerId !== owner);
+  if (!ownerNamed) return peers.slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS);
+  if (connected.has(owner)) return [owner, ...peers.slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS - 1)];
+  return [...peers.slice(0, SUB_GRAPH_RESOLUTION_MAX_PEERS - 1), owner];
 }
 
 /**
