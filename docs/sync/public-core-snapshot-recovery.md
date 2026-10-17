@@ -35,6 +35,17 @@ Content-Type: application/json
 
 Poll `GET /api/context-graph/snapshot-sync` for `running`, `complete` or `failed` and the final evidence. A duplicate running job returns 409. Change `mode` to `rpc-only` for independent evidence. There is no automatic mode downgrade or rerun after failure.
 
+A job runs inside a one-hour limit. Each exact batch takes this node's ordinary sync admission, so on a node with a single sync slot and no queue a batch can meet a slot that another admitted sync holds. Such a refusal says nothing about the source core's data, and neither does a core answering that it is busy, so the job waits instead of failing:
+
+- When local sync capacity refused the batch, the job holds back for a jittered delay (2.5 s, doubling after repeated refusals up to 30 s), then reads the admission every 2.5 s and retries the same batch once it would be taken. Trying another core would meet the same local refusal.
+- When a core answered busy, or a stream it had already served for this graph broke (at most twice in a row), that core keeps its turn and is asked again after a 15 s hold-off, the setback policy the VM reconcile pass uses. Other configured cores may be asked meanwhile. A core still answering busy after 30 minutes counts as having answered.
+
+Curator metadata refreshes have a reserved control-plane slot that no transfer can take. A refresh that finds the general slot free takes that slot first, and the job waits it out like any other admitted sync. A refresh that finds the general slot busy, for example held by the job, runs in the reserved slot: the job neither blocks it nor waits for it.
+
+A job fails when every configured core has answered without the assets, after the bounded singleton attempt, or when it cannot wait any longer: a wait must end two minutes before the limit, which leaves time for the final coverage read. The error keeps the committed count, for example `Snapshot recovery incomplete: 10/11 committed` or `Snapshot recovery incomplete: 0/12 committed (local sync capacity stayed in use)`.
+
+Before fetching a batch, and again after each wait, the job skips assets this node already holds: a confirmed copy at the pinned version and root whose stored content still verifies against that root, or a newer confirmed version whose own content verifies against the root it was confirmed at. That is the rule a catch-up uses to count content as held, and an older snapshot never replaces a newer stored version. A rerun after a failure or a restart therefore continues where the store stands, and `alreadyPresent` in the result counts the assets it did not transfer. Skipping never rewrites a stored copy; an `rpc-only` job still imports copies at the pinned version that carry core-cache labels, which relabels them with its own evidence. The job record itself is kept in memory, so after a restart `GET` reports `idle` until a new job is started.
+
 In-process callers use `agent.syncPublicGraphSnapshot(options)` and may supply an AbortSignal. Queries accept the mode separately:
 
 ```ts
@@ -48,7 +59,7 @@ await agent.query('SELECT ?s WHERE { ?s ?p ?o } LIMIT 20', {
 
 Local validation uses real DKG nodes, libp2p streaming, an isolated deployed Hardhat chain and separate Oxigraph stores. It checks core-cache transfers with receiver asset-RPC methods forbidden, independent RPC-only recovery, public/private behavior, evidence labeling and query refusal without acceptance. Contract tests reject stale/mis-scoped/malformed evidence; existing durable-materialization and private-query regression tests protect the reused boundaries.
 
-This implementation retains ten-asset streaming batches and sequential supplier fallback (up to four configured peers). It does not yet implement 100 MB chunks, concurrent suppliers, resumable graph sessions, background sampling audits or a large-graph five-minute performance guarantee. The storage benchmark is a separate lower-bound measurement. Cold snapshot generation still costs RPC work at the core; only a warm cache avoids that work for additional consumers.
+This implementation retains ten-asset streaming batches and sequential supplier fallback (up to four configured peers). A rerun resumes per asset from the local store, as described above. It does not yet implement 100 MB chunks, concurrent suppliers, resumable transfer sessions, background sampling audits or a large-graph five-minute performance guarantee. The storage benchmark is a separate lower-bound measurement. Cold snapshot generation still costs RPC work at the core; only a warm cache avoids that work for additional consumers.
 
 The bounded SELECT and entity-discovery endpoints accept the same `chainEvidenceMode`
 and echo it in successful responses. Omitting it retains the independent policy;
