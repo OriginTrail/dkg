@@ -123,6 +123,20 @@ describe('the route of a share to the graph\'s owner', () => {
     expect(followers).toEqual([]);
   });
 
+  it('gives up on an owner lookup that does not finish within the bound, before any connection', async () => {
+    const { route, followers, connects } = ports();
+    let lookupSignal: AbortSignal | undefined;
+    route.ownerPeerIds = (_contextGraphId, signal) => {
+      lookupSignal = signal;
+      return new Promise(() => {});
+    };
+
+    await expect(routeShareToGraphOwner(route, GRAPH, { timeoutMs: 5 })).resolves.toEqual([]);
+    expect(lookupSignal?.aborted).toBe(true);
+    expect(connects).toEqual([]);
+    expect(followers).toEqual([]);
+  });
+
   it('does nothing for a graph this node owns, or when the owner cannot be looked up', async () => {
     const owned = ports({ owners: [] });
     const failing = ports({ ownersFail: true });
@@ -152,6 +166,21 @@ describe('the owner peers of a graph', () => {
     now += GRAPH_OWNER_PEERS_TTL_MS;
     await owners.of(GRAPH);
     expect(resolve).toHaveBeenCalledTimes(3);
+  });
+
+  it('do not remember a lookup the caller gave up on', async () => {
+    let calls = 0;
+    const owners = new GraphOwnerPeers(async (_contextGraphId, signal) => {
+      calls += 1;
+      if (signal?.aborted) throw new Error('lookup aborted');
+      return [OWNER_1];
+    }, () => 0);
+    const gaveUp = new AbortController();
+    gaveUp.abort();
+
+    await expect(owners.of(GRAPH, gaveUp.signal)).rejects.toThrow('lookup aborted');
+    await expect(owners.of(GRAPH)).resolves.toEqual([OWNER_1]);
+    expect(calls).toBe(2);
   });
 
   it('let a peer a connection failed to be tried again after the pause', () => {

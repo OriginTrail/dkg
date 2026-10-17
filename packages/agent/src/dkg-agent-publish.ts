@@ -913,11 +913,11 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   graphOwnerRoutePortsV1(this: DKGAgent): GraphOwnerRoutePorts {
-    const owners = graphOwnerPeersOf(this, async (contextGraphId) => (
-      await this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16 })
+    const owners = graphOwnerPeersOf(this, async (contextGraphId, signal) => (
+      await this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16, signal })
     ).peerIds.filter((peerId) => peerId !== this.peerId));
     return {
-      ownerPeerIds: (contextGraphId) => owners.of(contextGraphId),
+      ownerPeerIds: (contextGraphId, signal) => owners.of(contextGraphId, signal),
       isConnected: (peerId) => this.node.libp2p.getPeers().some((peer) => peer.toString() === peerId),
       connect: async (peerId, signal) => {
         await this.ensurePeerConnected(peerId, { signal });

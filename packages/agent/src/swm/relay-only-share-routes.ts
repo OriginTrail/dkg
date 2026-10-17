@@ -36,8 +36,11 @@ export function coreHostsPublicGraph(
   return nodeRole === 'core' && subscription?.coreHosted === true;
 }
 
-/** Upper bound for connecting to one of the owner's peers before a share goes out without it. */
-export const GRAPH_OWNER_CONNECT_TIMEOUT_MS = 8_000;
+/**
+ * Upper bound for the whole route, the owner's lookup and the connection
+ * attempts together, before a share goes out without the owner.
+ */
+export const GRAPH_OWNER_ROUTE_TIMEOUT_MS = 10_000;
 /** Owner peers tried, in order, when none is connected. */
 export const GRAPH_OWNER_CONNECT_ATTEMPTS = 2;
 /** A peer this node could not connect to is not tried again for this long, so later shares do not wait for it. */
@@ -46,7 +49,7 @@ export const GRAPH_OWNER_RETRY_AFTER_MS = 60_000;
 /** What the owner route uses of the agent. */
 export interface GraphOwnerRoutePorts {
   /** The peers of the graph's owner; empty when this node owns the graph or none is known. */
-  ownerPeerIds(contextGraphId: string): Promise<readonly string[]>;
+  ownerPeerIds(contextGraphId: string, signal: AbortSignal): Promise<readonly string[]>;
   isConnected(peerId: string): boolean;
   /** Connect to the peer, through a relay when that is the only route; true once it takes shares. */
   connect(peerId: string, signal: AbortSignal): Promise<boolean>;
@@ -60,18 +63,21 @@ export interface GraphOwnerRoutePorts {
 /**
  * Make the graph's owner a follower of the graph before a share goes out:
  * the owner's connected peers when there are any, otherwise the first of its
- * peers this node can connect to within the bound. A peer a connection failed
- * to is left out for {@link GRAPH_OWNER_RETRY_AFTER_MS}. Returns the peers it
- * made followers; never throws.
+ * peers this node can connect to. One deadline bounds the owner's lookup and
+ * the connection attempts together; the share goes out without the owner when
+ * it passes. A peer a connection failed to is left out for
+ * {@link GRAPH_OWNER_RETRY_AFTER_MS}. Returns the peers it made followers;
+ * never throws.
  */
 export async function routeShareToGraphOwner(
   ports: GraphOwnerRoutePorts,
   contextGraphId: string,
   options: { readonly timeoutMs?: number; readonly attempts?: number } = {},
 ): Promise<readonly string[]> {
+  const deadline = AbortSignal.timeout(options.timeoutMs ?? GRAPH_OWNER_ROUTE_TIMEOUT_MS);
   let owners: readonly string[];
   try {
-    owners = await ports.ownerPeerIds(contextGraphId);
+    owners = await untilAborted(ports.ownerPeerIds(contextGraphId, deadline), deadline);
   } catch {
     return [];
   }
@@ -79,8 +85,8 @@ export async function routeShareToGraphOwner(
   if (routed.length === 0) {
     const candidates = owners.filter((peerId) => ports.mayConnect(peerId));
     for (const peerId of candidates.slice(0, options.attempts ?? GRAPH_OWNER_CONNECT_ATTEMPTS)) {
-      const reached = await ports.connect(peerId, AbortSignal.timeout(options.timeoutMs ?? GRAPH_OWNER_CONNECT_TIMEOUT_MS))
-        .catch(() => false);
+      if (deadline.aborted) break;
+      const reached = await untilAborted(ports.connect(peerId, deadline), deadline).catch(() => false);
       if (reached) {
         routed = [peerId];
         break;
@@ -92,27 +98,49 @@ export async function routeShareToGraphOwner(
   return routed;
 }
 
+/** `work`, or a rejection as soon as `signal` aborts, whichever comes first. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      (error: unknown) => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
+  });
+}
+
 /** Owner peers looked up at most once per graph in this window. */
 export const GRAPH_OWNER_PEERS_TTL_MS = 5 * 60_000;
 const MAX_CACHED_GRAPHS = 256;
 
 /** One agent's cache of graph owners' peers, and of the peers a connection recently failed to. */
 export class GraphOwnerPeers {
-  readonly #resolve: (contextGraphId: string) => Promise<readonly string[]>;
+  readonly #resolve: (contextGraphId: string, signal?: AbortSignal) => Promise<readonly string[]>;
   readonly #now: () => number;
   readonly #byGraph = new Map<string, { readonly at: number; readonly peerIds: readonly string[] }>();
   readonly #failedAt = new Map<string, number>();
 
-  constructor(resolve: (contextGraphId: string) => Promise<readonly string[]>, now: () => number = Date.now) {
+  constructor(
+    resolve: (contextGraphId: string, signal?: AbortSignal) => Promise<readonly string[]>,
+    now: () => number = Date.now,
+  ) {
     this.#resolve = resolve;
     this.#now = now;
   }
 
-  /** The owner's peers; a failed lookup counts as none until the window ends. */
-  async of(contextGraphId: string): Promise<readonly string[]> {
+  /**
+   * The owner's peers; a failed lookup counts as none until the window ends.
+   * A lookup the caller gave up on (`signal`) is not remembered.
+   */
+  async of(contextGraphId: string, signal?: AbortSignal): Promise<readonly string[]> {
     const cached = this.#byGraph.get(contextGraphId);
     if (cached !== undefined && this.#now() - cached.at < GRAPH_OWNER_PEERS_TTL_MS) return cached.peerIds;
-    const peerIds = await this.#resolve(contextGraphId).catch((): readonly string[] => []);
+    const peerIds = await this.#resolve(contextGraphId, signal).catch((error: unknown): readonly string[] => {
+      if (signal?.aborted) throw error;
+      return [];
+    });
     this.#byGraph.delete(contextGraphId);
     if (this.#byGraph.size >= MAX_CACHED_GRAPHS) this.#byGraph.delete(this.#byGraph.keys().next().value as string);
     this.#byGraph.set(contextGraphId, { at: this.#now(), peerIds });
@@ -136,7 +164,7 @@ const graphOwnerPeersByAgent = new WeakMap<object, GraphOwnerPeers>();
 /** The agent's cache of graph owners' peers, created with `resolve` on first use. */
 export function graphOwnerPeersOf(
   agent: object,
-  resolve: (contextGraphId: string) => Promise<readonly string[]>,
+  resolve: (contextGraphId: string, signal?: AbortSignal) => Promise<readonly string[]>,
 ): GraphOwnerPeers {
   let peers = graphOwnerPeersByAgent.get(agent);
   if (peers === undefined) {
