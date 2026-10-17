@@ -400,6 +400,8 @@ export default defineConfig({
       "test/approved-private-replica.test.ts",
       "test/approved-private-replica-proof-runs.test.ts",
       "test/swm-snapshot-materializer.test.ts",
+      // #3296 — a newer stored head proves an asset held only with its content.
+      "test/swm-stored-head-proof.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count
       // gate that keeps it self-healing, and the digest binding that makes an
