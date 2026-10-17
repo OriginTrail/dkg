@@ -55,8 +55,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw failure;
       },
       now: fixture.clock.now,
@@ -108,8 +108,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw failure;
       },
       now: fixture.clock.now,
@@ -136,8 +136,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
       now: fixture.clock.now,
@@ -174,8 +174,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
       now: fixture.clock.now,
@@ -221,8 +221,8 @@ describe('runPromoteJob diagnostics', () => {
         job,
         queue,
         workerId: 'worker-test',
-        runPromote: async (_request, markPromoteStarted) => {
-          await markPromoteStarted();
+        runPromote: async (_request) => {
+
           throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
         },
         now: fixture.clock.now,
@@ -251,8 +251,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 2 };
       },
       now: fixture.clock.now,
@@ -280,8 +280,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue: failingQueue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         // Hold the promote open until one heartbeat has failed.
         await heartbeatFailed.promise;
         return { promotedCount: 1 };

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sameCapturedTerm, capturedTermIdentity, bindingTermIdentity } from './rdf-term-identity.mjs';
+import { sameCapturedTerm, capturedTermIdentity, bindingTermIdentity, sameCapturedQuads } from './rdf-term-identity.mjs';
 const literal = { type: 'literal', value: 'intent' };
 for (const [name, before, after, expected] of [
   ['plain literal', '"intent"', literal, true],
@@ -18,4 +18,18 @@ for (const [name, before, after, expected] of [
 test('rejects malformed and inconsistent evidence', () => {
   assert.throws(() => capturedTermIdentity('"bad'));
   assert.throws(() => bindingTermIdentity({ ...literal, 'xml:lang': 'fr', datatype: 'urn:other' }));
+});
+test('exact quad comparison preserves graph, cardinality and complete RDF terms', () => {
+  const captured = [{ subject: 'urn:s', predicate: 'urn:p', object: '"value"@FR', graph: 'urn:g' }];
+  const row = { s: { type: 'uri', value: 'urn:s' }, p: { type: 'uri', value: 'urn:p' },
+    o: { type: 'literal', value: 'value', 'xml:lang': 'fr' }, g: { type: 'uri', value: 'urn:g' } };
+  assert.equal(sameCapturedQuads(captured, [row]), true);
+  assert.equal(sameCapturedQuads(captured, [row, row]), false);
+  assert.equal(sameCapturedQuads(captured, [{ ...row, g: { type: 'uri', value: 'urn:other' } }]), false);
+  assert.equal(sameCapturedQuads(captured, [{ ...row, o: { type: 'literal', value: 'value' } }]), false);
+  assert.equal(sameCapturedQuads(captured, [{ ...row, s: { type: 'bnode', value: 'urn:s' } }]), false);
+  const construct = [{ ...captured[0], graph: '' }];
+  assert.throws(() => sameCapturedQuads(construct, [row]));
+  assert.equal(sameCapturedQuads(construct, [row], 'urn:g'), true);
+  assert.equal(sameCapturedQuads(construct, [row], 'urn:other'), false);
 });

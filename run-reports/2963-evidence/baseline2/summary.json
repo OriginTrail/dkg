@@ -89,6 +89,10 @@
     "catalog-140",
     "catalog-141"
   ],
+  "lifecycleErrors": [
+    "catalog-140",
+    "catalog-141"
+  ],
   "manualRepairs": 0,
   "graphAudit": {
     "materializedGraphsExact": {

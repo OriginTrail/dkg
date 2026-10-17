@@ -37,8 +37,8 @@ describe('native inventory reopen failure retains the original durable worker ob
     });
     try {
       const result = await runPromoteJob({ job, queue, workerId: 'inline', now: Date.now, heartbeatIntervalMs: 60000, log: () => undefined,
-        runPromote: async (_request, markStarted) => {
-          await markStarted();
+        runPromote: async (_request) => {
+
           await commitDurableShareInventory(agent, { contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seeded.assertionCoordinate,
             lifecycleAgentAddress: AUTHOR, recoveryBinding: binding, ctx: createOperationContext('share') });
           return { promotedCount: 0 };
@@ -88,7 +88,7 @@ describe('native inventory reopen failure retains the original durable worker ob
     });
     try {
       const outcome=await runPromoteJob({job,queue,workerId:'inline',now:Date.now,heartbeatIntervalMs:60000,log:()=>undefined,
-        runPromote:async(_request,markStarted)=>{await markStarted();await commitDurableShareInventory(first,params);return {promotedCount:0};}});
+        runPromote:async(_request)=>{await commitDurableShareInventory(first,params);return {promotedCount:0};}});
       expect(reopening).toBe(true);
       expect(outcome.outcome).toBe('failed_retrying');
       expect((await queue.getStatus(job.jobId))?.attempt.lastError).toMatchObject({diagnosticCode:'PROMOTE_POST_COMMIT_FAILURE',retryable:true});

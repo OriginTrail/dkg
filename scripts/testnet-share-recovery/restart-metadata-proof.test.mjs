@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { verifyRestartMetadata } from './restart-metadata-proof.mjs';
 const dkg = 'http://dkg.io/ontology/', graph = 'urn:original-meta', subject = 'urn:asset';
 const q = (p, object) => ({ subject, predicate: dkg + p, object, graph });
-const fault = { metadataAtFault: { quads: [q('assertionMerkleRoot', '"root"'), q('shareOperationId', '"original"'), q('promoteOperationIntent', '"intent"')] },
+const fault = { metadataAtFault: { quads: [q('assertionMerkleRoot', '"root"^^<http://www.w3.org/2001/XMLSchema#hexBinary>'), q('shareOperationId', '"original"'), q('promoteOperationIntent', '"intent"')] },
   intendedMetadataInsert: [q('state', '"promoted"'), q('assertionGraph', 'urn:swm')] };
 const row = (p, value, type = 'literal') => ({ g: { type: 'uri', value: graph }, s: { type: 'uri', value: subject },
   p: { type: 'uri', value: dkg + p }, o: { type, value } });
-const rows = [row('assertionMerkleRoot', 'root'), row('shareOperationId', 'original'), row('promoteOperationIntent', 'intent'),
+const rows = [{ ...row('assertionMerkleRoot', 'root'), o: { type: 'literal', value: 'root', datatype: 'http://www.w3.org/2001/XMLSchema#hexBinary' } }, row('shareOperationId', 'original'), row('promoteOperationIntent', 'intent'),
   row('state', 'promoted'), row('memoryLayer', 'SWM'), row('swmShareComplete', 'true'), row('swmCurrentAssertion', 'root'), row('assertionGraph', 'urn:swm', 'uri')];
 test('accepts complete original metadata in its authoritative graph', () => {
   assert.deepEqual(verifyRestartMetadata(fault, rows), { metadataGraph: graph, originalSealAndIntent: true, lifecycleComplete: true });

@@ -101,5 +101,8 @@
       "unchanged": true
     }
   ],
-  "manualRepairs": 0
+  "manualRepairs": 0,
+  "metadataGraph": "did:dkg:context-graph:0x247b02c301b34e52e9021728f34c3457f81f2dfc/2963-candidate10-20261016/_meta",
+  "metadataComparison": "authoritative-full-rdf-term-v2",
+  "metadataRevalidatedAt": "2026-10-17T01:29:03.273Z"
 }

@@ -37,7 +37,7 @@ describe('bound worker owns the real inventory CAS', () => {
     const lock=runtime.runScopeExclusive.bind(runtime);
     const waitSpy=vi.spyOn(runtime,'runScopeExclusive').mockImplementation((scope,fn,signal)=>{if(scope===key)waiting();return lock(scope,fn,signal);});
     const first=runPromoteJob({job,queue,workerId:'original',now:Date.now,heartbeatIntervalMs:60_000,log:()=>undefined,
-      runPromote:async(_request,started)=>{await started();return complete();}});
+      runPromote:async(_request)=>{return complete();}});
     await queued;
     const resolve=agent.resolveRfc64CatalogReceiverAuthorityV1.bind(agent);
     const authority=vi.spyOn(agent,'resolveRfc64CatalogReceiverAuthorityV1').mockImplementation(cg=>({...resolve(cg),authoringAllowed:false}));
@@ -84,7 +84,7 @@ describe('bound worker owns the real inventory CAS', () => {
     } };
     const run = (claimed: typeof job, workerId: string) => runPromoteJob({ job: claimed, queue, workerId,
       now: Date.now, heartbeatIntervalMs: 60_000, log: () => undefined,
-      runPromote: async (_request, markStarted) => { await markStarted(); await commitDurableShareInventory(agent, { ...params, recoveryBinding: binding }); return { promotedCount: 0 }; },
+      runPromote: async (_request) => {  await commitDurableShareInventory(agent, { ...params, recoveryBinding: binding }); return { promotedCount: 0 }; },
     });
     expect((await run(job, 'first')).outcome).toBe('failed_retrying');
     expect((await queue.getStatus(job.jobId))?.attempt.lastError).toMatchObject({ diagnosticCode: policy ? 'PROMOTE_RETRYABLE_FAILURE' : 'PROMOTE_POST_COMMIT_FAILURE', retryable: true });
@@ -138,7 +138,7 @@ describe('bound worker owns the real inventory CAS', () => {
       entities: 'all', agentAddress: AUTHOR, recoveryBinding: binding }, 'original');
     try {
       const result = await runPromoteJob({ job, queue, workerId: 'original', now: Date.now, heartbeatIntervalMs: 60_000, log: () => undefined,
-        runPromote: async (_request, started) => { await started(); await commitDurableShareInventory(agent, {
+        runPromote: async (_request) => {  await commitDurableShareInventory(agent, {
           contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: next.assertionCoordinate,
           lifecycleAgentAddress: AUTHOR, recoveryBinding: binding, ctx: createOperationContext('share'),
         }); return { promotedCount: 0 }; } });

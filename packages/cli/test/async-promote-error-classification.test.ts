@@ -28,6 +28,7 @@ describe('diagnosticPromoteStage', () => {
   const EXPECTED_STAGES = [
     'ensureSubGraphRegistered',
     'assertGraphScopedLifecycleWritable',
+    'assertNoUnfinishedBoundShare',
     'knowledgeAssetPrivateQuads',
     'assertionScopedQuads',
     'assertTrustedCatalogTriplesAllowed',

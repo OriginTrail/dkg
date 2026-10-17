@@ -34,7 +34,7 @@ describe('bound VM share retains catalog ownership', () => {
     (first.agent as any).rfc64PersistenceV1 = { ...persistence, swmAuthorInventory: { ...persistence.swmAuthorInventory,
       compareAndSwapSwmAuthorInventoryV1: () => { throw inventoryPersistenceFailure(new Error('inventory CAS unavailable')); } } };
     expect((await runPromoteJob({ job, queue, workerId: 'first', now: Date.now, heartbeatIntervalMs: 60_000, log: () => undefined,
-      runPromote: async (_request, started) => { await started(); await commitDurableShareInventory(first.agent, params); return { promotedCount: 0 }; },
+      runPromote: async (_request) => {  await commitDurableShareInventory(first.agent, params); return { promotedCount: 0 }; },
     })).outcome).toBe('failed_retrying');
     (first.agent as any).rfc64PersistenceV1 = persistence;
     const seal = seeded.seal;
@@ -58,7 +58,7 @@ describe('bound VM share retains catalog ownership', () => {
     // Even the in-process VM fence cannot discharge the unowned placement.
     const secondClaim = await queue.claimNext('second');
     expect((await runPromoteJob({ job: secondClaim!, queue, workerId: 'second', now: Date.now, heartbeatIntervalMs: 60_000, log: () => undefined,
-      runPromote: async (_request, started) => { await started(); await commitDurableShareInventory(first.agent, params); return { promotedCount: 0 }; },
+      runPromote: async (_request) => {  await commitDurableShareInventory(first.agent, params); return { promotedCount: 0 }; },
     })).outcome).toBe('failed_retrying');
     expect(first.markers()).toHaveLength(0);
     await first.agent.stop();

@@ -110,8 +110,8 @@ describe('runPromoteJob', () => {
       new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'replaceSubject', outcome: 'not_started' }),
     );
     writes.mockImplementationOnce(marker);
-    const promote = vi.fn(async (_request: PromoteRequest, markStarted: () => Promise<void>) => {
-      await markStarted(); return { promotedCount: 1 };
+    const promote = vi.fn(async (_request: PromoteRequest) => {
+       return { promotedCount: 1 };
     });
     expect(await runPromoteJob({ job, queue, workerId: 'worker-test', runPromote: promote,
       now: fixture.clock.now, heartbeatIntervalMs: 0, bookkeepingRetryIntervalMs: 0,
@@ -128,8 +128,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 42 };
       },
       now: fixture.clock.now,
@@ -179,8 +179,8 @@ describe('runPromoteJob', () => {
       job,
       queue: failingQueue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 99 };
       },
       now: fixture.clock.now,
@@ -215,8 +215,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 7 };
       },
       now: fixture.clock.now,
@@ -242,8 +242,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 0 };
       },
       now: fixture.clock.now,
@@ -260,8 +260,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw new Error('fetch failed');
       },
       now: fixture.clock.now,
@@ -294,8 +294,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw { code: PROMOTE_RETRYABLE_FAILURE_CODE };
       },
       now: fixture.clock.now,
@@ -324,8 +324,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), {
           code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
           reason: 'finalized-name-absence-unaccepted',
@@ -356,8 +356,8 @@ describe('runPromoteJob', () => {
         job,
         queue,
         workerId: 'worker-test',
-        runPromote: async (_request, markPromoteStarted) => {
-          await markPromoteStarted();
+        runPromote: async (_request) => {
+
           throw thrown;
         },
         now: fixture.clock.now,
@@ -482,8 +482,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(
           new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
           { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' },
@@ -521,9 +521,9 @@ describe('runPromoteJob', () => {
           job: claimed,
           queue,
           workerId: 'worker-test',
-          runPromote: async (request, markPromoteStarted) => {
+          runPromote: async (request) => {
             seen.push(request);
-            await markPromoteStarted();
+
             if (refuse) throw fenceFailure();
             return { promotedCount: 1 };
           },
@@ -567,8 +567,8 @@ describe('runPromoteJob', () => {
           job: claimed!,
           queue,
           workerId: 'worker-test',
-          runPromote: async (_request, markPromoteStarted) => {
-            await markPromoteStarted();
+          runPromote: async (_request) => {
+
             throw fenceFailure();
           },
           now: fixture.clock.now,
@@ -617,8 +617,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), { code }));
       },
       now: fixture.clock.now,
@@ -638,8 +638,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(new Error('private graph id'), {
           code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
           reason: 'local-existence-unavailable',
@@ -672,8 +672,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw replaySafeFailure;
       },
       now: fixture.clock.now,
@@ -728,7 +728,7 @@ describe('runPromoteJob', () => {
     expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
     expect(promoteFailureDiagnostics(logs)).toEqual([
       expect.objectContaining({
-        promoteStartedMarkerPersisted: false,
+        promoteStartedMarkerPersisted: true,
         swmCommitObserved: false,
         classification: 'fatal',
         retryable: false,
@@ -783,8 +783,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromotePostCommitFailure(new Error('durable tail failed'));
       },
       now: fixture.clock.now,

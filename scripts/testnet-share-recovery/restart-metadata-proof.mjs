@@ -18,12 +18,14 @@ export function verifyRestartMetadata(fault, rows) {
   const originalSealAndIntent = before.length > 0 && canonical(before) === canonical(after);
   const lifecycle = fault.intendedMetadataInsert.find(q => q.predicate === DKG + 'state')?.subject;
   const root = original.find(q => q.predicate === DKG + 'assertionMerkleRoot')?.object;
+  // The seal uses xsd:hexBinary; the lifecycle pointer stores its lexical root as xsd:string.
+  const rootPointer = root === undefined ? undefined : JSON.stringify(capturedTermIdentity(root)[1]);
   const graph = fault.intendedMetadataInsert.find(q => q.predicate === DKG + 'assertionGraph')?.object;
   const one = (predicate, expected) => {
     const found = metadata.filter(r => r.s.value === lifecycle && r.p.value === DKG + predicate);
     return expected !== undefined && found.length === 1 && sameCapturedTerm(expected, found[0].o);
   };
   const lifecycleComplete = !!lifecycle && one('state', '"promoted"') && one('memoryLayer', '"SWM"')
-    && one('swmShareComplete', '"true"') && one('swmCurrentAssertion', root) && one('assertionGraph', graph);
+    && one('swmShareComplete', '"true"') && one('swmCurrentAssertion', rootPointer) && one('assertionGraph', graph);
   return { metadataGraph, originalSealAndIntent, lifecycleComplete };
 }

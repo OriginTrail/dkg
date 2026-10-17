@@ -32,7 +32,7 @@ export async function durableSynchronousShare(
   const outcome = await runPromoteJob({ job, queue, workerId, now: Date.now,
     heartbeatIntervalMs: Math.min(60_000, Math.floor(queue.effectiveLeaseMs / 4)),
     log: message => console.warn(message),
-    runPromote: (request, markStarted) => executePromoteRequest(agent, request, markStarted,
+    runPromote: (request) => executePromoteRequest(agent, request,
       { curatorAckTimeoutMs: options?.curatorAckTimeoutMs }),
   });
   if (outcome.outcome === 'succeeded') return outcome.result;

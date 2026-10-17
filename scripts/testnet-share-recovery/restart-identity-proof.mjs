@@ -1,3 +1,4 @@
+import { sameCapturedQuads } from './rdf-term-identity.mjs';
 import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
 import { verifyRestartMetadata } from './restart-metadata-proof.mjs';
 import {verifyIdentityTuples} from './identity-tuples.mjs';
@@ -32,18 +33,14 @@ if(mode==='before'){
  const before=JSON.parse(fs.readFileSync(`${dir}/before-raw-job.json`));
  const fault=JSON.parse(fs.readFileSync(home+`/2963-fault-${restartName}.json`));
  const rows=JSON.parse(fs.readFileSync(`${root}/restart-readback/rdf.json`)).results.bindings;
- const term = value => value.type === 'uri' ? value.value : JSON.stringify(value.value)
-   + (value.datatype ? `^^<${value.datatype}>` : value['xml:lang'] ? `@${value['xml:lang']}` : '');
  const identityPredicates=new Set([...Object.values(ASSERTION_SEAL_PREDICATES),'http://dkg.io/ontology/shareOperationId','http://dkg.io/ontology/promoteOperationIntent']);
  const originalFields=fault.metadataAtFault.quads.filter(q=>identityPredicates.has(q.predicate));
  const identitySubjects=new Set(originalFields.map(q=>q.subject));
- const canonical = values => JSON.stringify(values.sort());
  const {metadataGraph, originalSealAndIntent, lifecycleComplete}=verifyRestartMetadata(fault,rows);
  const graph=fault.intendedMetadataInsert.find(q=>q.predicate==='http://dkg.io/ontology/assertionGraph')?.object;
  if(!graph)throw Error('Missing exact crash graph');
  const publicRows=rows.filter(r=>r.g.value===graph);
- const exactContent=publicRows.length===campaign.triplesPerAsset && canonical(fault.contentAtFault.quads.map(q=>JSON.stringify([q.subject,q.predicate,q.object])))
-   === canonical(publicRows.map(r=>JSON.stringify([r.s.value,r.p.value,term(r.o)])));
+ const exactContent=publicRows.length===campaign.triplesPerAsset && sameCapturedQuads(fault.contentAtFault.quads, publicRows, graph);
  const dkg='http://dkg.io/ontology/';
  const sealValue=predicate=>rows.find(r=>r.g.value===metadataGraph&&identitySubjects.has(r.s.value)&&r.p.value===dkg+predicate)?.o.value;
  const scope=createGraphKnowledgeAssetScope(sealValue('kaUal'),sealValue('assertionVersion'));

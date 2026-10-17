@@ -27,3 +27,11 @@ export function bindingTermIdentity(term) {
 export function sameCapturedTerm(captured, binding) {
   return JSON.stringify(capturedTermIdentity(captured)) === JSON.stringify(bindingTermIdentity(binding));
 }
+
+/** Exact quad multiset equality. A scoped CONSTRUCT strips graph names; callers
+ * must supply that captured query's source graph for its default-graph results. */
+export function sameCapturedQuads(captured, bindings, capturedDefaultGraph) {
+  const before = captured.map(q => JSON.stringify([q.subject, q.predicate, q.object, q.graph || capturedDefaultGraph].map(capturedTermIdentity))).sort();
+  const after = bindings.map(r => JSON.stringify([r.s, r.p, r.o, r.g].map(bindingTermIdentity))).sort();
+  return before.length > 0 && JSON.stringify(before) === JSON.stringify(after);
+}

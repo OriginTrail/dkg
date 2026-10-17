@@ -260,7 +260,6 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
     workerId: string;
     runPromote: (
       request: PromoteRequest,
-      markPromoteStarted: () => Promise<void>,
     ) => Promise<T>;
     now: () => number;
     heartbeatIntervalMs: number;
@@ -369,66 +368,66 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
     }
   }
 
-  try {
-    let result: T;
-    let promoteStartedMarked = false;
-    let startMarkerFailure: { cause: unknown } | undefined;
-    const markPromoteStarted = async (): Promise<void> => {
-      if (promoteStartedMarked) return;
-      throwIfShutdownInterrupted();
-      try {
-        await persistWithRecovery('record promoteStarted', now() + Math.max(0, bookkeepingRetryBudgetMs),
-          () => queue.recordCommitMarker(job.jobId, claimToken, 'promoteStarted'));
-      } catch (cause) { startMarkerFailure = { cause }; throw cause; }
-      promoteStartedMarked = true;
+  async function recordPromotionFailure(err: unknown, promoteStarted: boolean): Promise<PromoteJobRunResult<T>> {
+    throwIfShutdownInterrupted();
+    const classified = classifyPromoteError(err, { boundRecovery: job.request.recoveryBinding !== undefined });
+    const message = err instanceof Error ? err.message : String(err);
+    logPromoteAttemptFailure({
+      job,
+      err,
+      message,
+      classified,
+      promoteStarted,
+      log,
+    });
+    // Persist the producer-owned diagnostic code (closed set) so the
+    // post-commit recovery sweep can key on it without parsing prose.
+    const attemptError: PromoteAttemptError = {
+      message,
+      retryable: classified.retryable,
+      classification: classified.classification,
+      recordedAt: now(),
+      ...(classified.diagnostic ? { diagnosticCode: classified.diagnostic.code } : {}),
+      ...('noEffectProof' in classified ? {noEffectProof: classified.noEffectProof} : {}),
     };
     try {
-      result = await runPromote(job.request, markPromoteStarted);
-    } catch (err: unknown) {
+      const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
+      const transition = await persistWithRecovery(
+        'record failure',
+        bookkeepingDeadlineAt,
+        () => queue.fail(job.jobId, claimToken, attemptError),
+      );
       throwIfShutdownInterrupted();
-      if (startMarkerFailure && job.request.recoveryBinding) {
-        // Promotion has not run. A marker acknowledgement cannot establish whether
-        // its fenced write committed; retain the owner for ordinary lease recovery.
-        const cause = startMarkerFailure.cause;
+      return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', cause: err, error: classified,
+        ...(transition.state === 'failed' && transition.retiredNoEffect ? {retiredNoEffect: true as const} : {}) };
+    } catch (failErr: unknown) {
+      if (failErr instanceof PromoteWorkerShutdownError) throw failErr;
+      // The write may have committed without an acknowledgement. A lost lease
+      // also forbids attributing another worker's outcome to this attempt.
+      return { outcome: 'failure_bookkeeping_uncertain', cause: err, bookkeepingCause: failErr, diagnostic: failureBookkeepingUncertainty(failErr) };
+    }
+  }
+
+  try {
+    // Queue ownership is established before the executor can mutate the asset.
+    // A failed marker write has its own boundary, separate from promotion failures.
+    try {
+      await persistWithRecovery('record promoteStarted', now() + Math.max(0, bookkeepingRetryBudgetMs),
+        () => queue.recordCommitMarker(job.jobId, claimToken, 'promoteStarted'));
+    } catch (cause) {
+      throwIfShutdownInterrupted();
+      if (job.request.recoveryBinding) {
+        // An uncertain fenced write retains its owner for ordinary lease recovery.
         return { outcome: 'failure_bookkeeping_uncertain', cause, bookkeepingCause: cause,
           diagnostic: failureBookkeepingUncertainty(cause) };
       }
-      const classified = classifyPromoteError(err, { boundRecovery: job.request.recoveryBinding !== undefined });
-      const message = err instanceof Error ? err.message : String(err);
-      logPromoteAttemptFailure({
-        job,
-        err,
-        message,
-        classified,
-        promoteStarted: promoteStartedMarked,
-        log,
-      });
-      // Persist the producer-owned diagnostic code (closed set) so the
-      // post-commit recovery sweep can key on it without parsing prose.
-      const attemptError: PromoteAttemptError = {
-        message,
-        retryable: classified.retryable,
-        classification: classified.classification,
-        recordedAt: now(),
-        ...(classified.diagnostic ? { diagnosticCode: classified.diagnostic.code } : {}),
-        ...('noEffectProof' in classified ? {noEffectProof: classified.noEffectProof} : {}),
-      };
-      try {
-        const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
-        const transition = await persistWithRecovery(
-          'record failure',
-          bookkeepingDeadlineAt,
-          () => queue.fail(job.jobId, claimToken, attemptError),
-        );
-        throwIfShutdownInterrupted();
-        return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', cause: err, error: classified,
-          ...(transition.state === 'failed' && transition.retiredNoEffect ? {retiredNoEffect: true as const} : {}) };
-      } catch (failErr: unknown) {
-        if (failErr instanceof PromoteWorkerShutdownError) throw failErr;
-        // The write may have committed without an acknowledgement. A lost lease
-        // also forbids attributing another worker's outcome to this attempt.
-        return { outcome: 'failure_bookkeeping_uncertain', cause: err, bookkeepingCause: failErr, diagnostic: failureBookkeepingUncertainty(failErr) };
-      }
+      return await recordPromotionFailure(cause, false);
+    }
+    let result: T;
+    try {
+      result = await runPromote(job.request);
+    } catch (err: unknown) {
+      return await recordPromotionFailure(err, true);
     }
 
     // Plan §7 recommendation (b): single OUTER commit-marker after
@@ -662,7 +661,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           job: claimed,
           queue: config.agent.promoteQueue,
           workerId: slot.workerId,
-          runPromote: (request, markStarted) => executePromoteRequest(config.agent, request, markStarted),
+          runPromote: (request) => executePromoteRequest(config.agent, request),
           now,
           heartbeatIntervalMs,
           bookkeepingRetryIntervalMs: config.bookkeepingRetryIntervalMs,

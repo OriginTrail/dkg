@@ -1,5 +1,6 @@
 import unittest
 from payload_evidence import audit_graphs
+from metadata_evidence import index_authoritative_metadata
 
 CG, ARM, NAME, UAL = 'cg', 'test', 'asset', 'did:dkg:base:84532/0xabc/1'
 GRAPH = 'did:dkg:context-graph:cg/_shared_memory/0xabc/1'
@@ -14,6 +15,22 @@ def payload():
 
 
 class ExactGraphEvidence(unittest.TestCase):
+    def test_non_injected_metadata_relocated_under_same_context_graph_is_missing(self):
+        graph = 'did:dkg:context-graph:cg/_meta'
+        seal, lifecycle = 'did:dkg:context-graph:cg/assertion/author/catalog-000', 'urn:dkg:assertion:cg:author:catalog-000'
+        rows = [row(seal, 'http://dkg.io/ontology/kaUal', UAL, graph),
+                row(lifecycle, 'http://dkg.io/ontology/state', 'promoted', graph)]
+        for item in rows:
+            item['g']['type'] = 'uri'
+        original = index_authoritative_metadata(rows, graph)
+        self.assertEqual(len(original[seal]), 1)
+        self.assertEqual(len(original[lifecycle]), 1)
+        for item in rows:
+            item['g']['value'] = graph + '-relocated'
+        moved = index_authoritative_metadata(rows, graph)
+        self.assertEqual(moved[seal], [])
+        self.assertEqual(moved[lifecycle], [])
+
     def audit(self, rows):
         return audit_graphs(rows, CG, ARM, {NAME: UAL}, set())
 

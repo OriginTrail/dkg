@@ -1,5 +1,6 @@
 {
-  "assets.json": "d48a061e604d8ff7fcb518d74cb0d6d313dce9f440caa0b14061fdeb245bc442",
+  "assets.json": "fb277847f8b5d14ad700e998a366eadf8c3e51f49a5e10eb914117630741217b",
+  "campaign-manifest.json": "8a9dc4a443c5191eda523c8b55e31b3c4957184a829fb74fc6d6785888dab52a",
   "catalog-identities.json": "4a4efcfe353d964e5ca6c523055685ca7ce9cf6be4a4465aa634258d5cb594da",
   "chain-events.json": "8f7302de9b8679ff259e3d7b0f4970388780636c22e7d7ca62a21ecf08196d88",
   "deadline-observations.json": "2c3bfba243a998adcd57ee2e8d28ac613a48e77783e549801f6508347d64a598",
@@ -24,7 +25,7 @@
   "restart-regression/catalogs.json": "8fd73831cc1f3137018707ffd302dbce3e9697021976663ee08fb44cbbca4c19",
   "restart-regression/export-manifest.json": "ac6e3cfcd1884a4960f7b2581bdceb1852b6a602fb2f5b45870f693d215a44bc",
   "restart-regression/fault.json": "95bb3c461e65581bc29cd8d1fbb957e9d0eb5e79bce1b30139f6c47be5d1c7ef",
-  "restart-regression/identity-proof.json": "a07bb44c090fa5112e766e5b42ba315709bdfbc07aad0ffebb6b4e0cd05d443a",
+  "restart-regression/identity-proof.json": "e6afcdc1c00c38416035e855e0bfde38829f778a99e47781ddf7f4679c2355b2",
   "restart-regression/inventory.json": "a68d8da9b978fc4398acd7ca68ed5e29d90dfd1a04872e98f45248fa241141b0",
   "restart-regression/observations.json": "8e3bdecfae724279212faa39d7008a76242dd9f5e6468e8f72e012dd907e7f80",
   "restart-regression/outcome.json": "33c92482377b3f9ad384d9b56c0b3da83e8bca422c263a1a0a7c7ac75441532d",
@@ -39,6 +40,6 @@
   "shutdown.json": "0727285dc702e4bdca66e4ad0011f540127f44526524ec50716f3c0ccf642286",
   "starting-set-proof.json": "9d6bf8c69e9dce8f2deb2038ebec07cb528378172b7af1c7c31107b926b510fe",
   "startup-recovery.json": "90fd1f0f9f1fa0d29338918ec638ace6bd54f5af79c06bed0fb64ef869205705",
-  "summary.json": "3423de5732200ee27fb8219c8552583430f0faedc1f610a8be75e90b7f77a7a9",
+  "summary.json": "5ac29af6cad177512892ac3b7bc384eaa5b5765187074b763555fbb9c4a5bca1",
   "traffic-end.json": "4dde6de82c20071a0462eb8bd5b7d77591a52741ec2bfaab011c6be51ad19ef3"
 }

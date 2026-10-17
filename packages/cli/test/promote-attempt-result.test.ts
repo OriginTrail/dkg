@@ -17,8 +17,8 @@ describe('attempt result preserves the domain outcome', () => {
         if (outcome === 'failure_bookkeeping_uncertain') vi.spyOn(queue, 'fail').mockRejectedValue(bookkeepingCause);
         const attempt = await runPromoteJob({ job, queue, workerId: 'worker-test', now: clock.now,
           heartbeatIntervalMs: 0, log: () => undefined,
-          runPromote: async (_request, started) => {
-            await started();
+          runPromote: async (_request) => {
+
             if (outcome === 'succeeded' || outcome === 'partial_promote_ambiguity') return domainResult;
             throw cause;
           },

@@ -86,6 +86,7 @@
   },
   "sealChanged": [],
   "missingLifecycle": [],
+  "lifecycleErrors": [],
   "manualRepairs": 0,
   "graphAudit": {
     "materializedGraphsExact": {

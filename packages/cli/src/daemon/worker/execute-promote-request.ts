@@ -3,9 +3,8 @@ import type { PromoteRequest } from '@origintrail-official/dkg-publisher';
 
 /** The admitted request is the sole source of durable execution fields. */
 export async function executePromoteRequest(agent: Pick<DKGAgent, 'assertion'>, request: PromoteRequest,
-  markStarted: () => Promise<void>, attempt?: Pick<AssertionPromoteOptions, 'curatorAckTimeoutMs'>,
+  attempt?: Pick<AssertionPromoteOptions, 'curatorAckTimeoutMs'>,
 ): ReturnType<DKGAgent['assertion']['promote']> {
-  await markStarted();
   const attemptOptions = {
     subGraphName: request.subGraphName,
     ...(request.agentAddress ? { agentAddress: request.agentAddress } : {}),

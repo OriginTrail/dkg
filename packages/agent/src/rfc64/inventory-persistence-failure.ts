@@ -34,8 +34,12 @@ function hasPermanentNativeSqliteFailure(error: unknown): boolean {
   for (let current = error; current instanceof Error && !visited.has(current); current = current.cause) {
     visited.add(current);
     const native = current as Error & { code?: unknown; errcode?: unknown };
-    if (native.code === 'ERR_SQLITE_ERROR' && typeof native.errcode === 'number'
-      && [1, 2, 11, 17, 18, 19, 20, 21, 25, 26].includes(native.errcode & 255)) return true;
+    if (native.code !== 'ERR_SQLITE_ERROR' || typeof native.errcode !== 'number') continue;
+    // https://www.sqlite.org/rescode.html: ERROR_RETRY (513) and ERROR_SNAPSHOT
+    // (769) share primary ERROR (1), so do not classify that entire family as permanent.
+    // Explicit ERROR/MISSING_COLLSEQ and IOERR_DATA/CORRUPTFS require inspection.
+    if ([1, 257, 8202, 8458].includes(native.errcode)
+      || [2, 11, 17, 18, 19, 20, 21, 25, 26].includes(native.errcode & 255)) return true;
   }
   return false;
 }
