@@ -3,6 +3,7 @@ import json,pathlib,sys,collections,datetime,hashlib,math
 from payload_evidence import audit_graphs
 from metadata_evidence import index_authoritative_metadata, preserves_original_operation, valid_operation_record
 from campaign_manifest import load_campaign, campaign_counts
+from publication_evidence import validate_publication_cohort
 arm,label=sys.argv[1:3]; root=pathlib.Path('.tmp/2963/evidence')/arm; end=root/label
 read=lambda p:json.load(open(p))
 rdf=read(end/'rdf.json')['results']['bindings']; pre=read(root/'pre-workload/rdf.json')['results']['bindings']
@@ -25,7 +26,8 @@ inv=read(end/'inventory.json')['swm']; catalogs=read(end/'catalogs.json'); cr=[r
 invnames=collections.Counter(r['assertion_coordinate'] for r in inv);catnames=collections.Counter(r['assertionCoordinate'] for r in cr)
 jobs=read(end/'-api-publisher-jobs.json')['value']['jobs']
 coordinates={name:property(before[f'did:dkg:context-graph:{cg}/assertion/{author}/{name}'],'kaUal')[0] for name in names}
-published={job['request']['knowledgeAssetVmPublish']['name'] for job in jobs if job['status']=='finalized'}
+publication_identity=validate_publication_cohort(campaign,read(root/'publication-admissions.json'),jobs,read(root/'seal-proof.json'))
+published=set(campaign['cohorts']['publications'])
 graph_audit=audit_graphs(rdf,cg,arm,coordinates,published,read(root/'context-graph.json')['value']['onChainId'],campaign['triplesPerAsset'])
 assets=[]
 for name in names:
@@ -43,7 +45,9 @@ shares=read(root/'synchronous-shares.json'); admissions=read(root/'publication-a
 ms=lambda s:datetime.datetime.fromisoformat(s.replace('Z','+00:00')).timestamp()*1000
 latencies=sorted(j['timestamps']['finalizedAt']-j['timestamps']['acceptedAt'] for j in jobs if j['status']=='finalized')
 percentile=lambda a,p:a[min(len(a)-1,math.ceil(len(a)*p)-1)] if a else None
-summary={'arm':arm,'snapshot':label,'requests':len(shares),'httpStatuses':dict(collections.Counter(str(s['status']) for s in shares)),'natural':{'denominator':counts['natural'],'http200':sum(r['status']==200 for r in shares if r['label'] not in injected_labels)},'injected':{'denominator':counts['injected'],'results':[r for r in shares if r['label'] in injected_labels]},'publications':{'admissions':len(admissions),'admitted':sum(r['status']==202 for r in admissions),'states':dict(collections.Counter(j['status'] for j in jobs)),'latencyP50Ms':percentile(latencies,.5),'latencyP90Ms':percentile(latencies,.9)},'inventory':{'actual':len(inv),'expected':counts['main'],'missing':sorted(set(names)-set(invnames)),'extra':sorted(set(invnames)-set(names)),'duplicates':[n for n,c in invnames.items() if c!=1]},'catalog':{'actual':len(cr),'expected':counts['main'],'missing':sorted(set(names)-set(catnames)),'extra':sorted(set(catnames)-set(names)),'duplicates':[n for n,c in catnames.items() if c!=1]},'sealChanged':[a['name'] for a in assets if not a['sealUnchanged']],'missingLifecycle':[a['name'] for a in assets if not a['state']],'lifecycleErrors':[a['name'] for a in assets if not a['lifecycleComplete']],'operationErrors':[a['name'] for a in assets if not a['originalOperationPreserved'] or (a['lifecycleComplete'] and not a['finalOperationValid'])],'manualRepairs':0,'assets':assets,'graphAudit':{k:v for k,v in graph_audit.items() if k!='assets'},'contentErrors':[a['name'] for a in assets if not a['requiredGraphPresent'] or not all(a['exactContentByGraph'].values()) or (a['lifecycleComplete'] and not a['wmEmpty'])]}
+summary={'arm':arm,'snapshot':label,'requests':len(shares),'httpStatuses':dict(collections.Counter(str(s['status']) for s in shares)),'natural':{'denominator':counts['natural'],'http200':sum(r['status']==200 for r in shares if r['label'] not in injected_labels)},'injected':{'denominator':counts['injected'],'results':[r for r in shares if r['label'] in injected_labels]},'publications':{'identity':publication_identity,'admissions':len(admissions),'admitted':sum(r['status']==202 for r in admissions),'states':dict(collections.Counter(j['status'] for j in jobs)),'latencyP50Ms':percentile(latencies,.5),'latencyP90Ms':percentile(latencies,.9)},'inventory':{'actual':len(inv),'expected':counts['main'],'missing':sorted(set(names)-set(invnames)),'extra':sorted(set(invnames)-set(names)),'duplicates':[n for n,c in invnames.items() if c!=1]},'catalog':{'actual':len(cr),'expected':counts['main'],'missing':sorted(set(names)-set(catnames)),'extra':sorted(set(catnames)-set(names)),'duplicates':[n for n,c in catnames.items() if c!=1]},'sealChanged':[a['name'] for a in assets if not a['sealUnchanged']],'missingLifecycle':[a['name'] for a in assets if not a['state']],'lifecycleErrors':[a['name'] for a in assets if not a['lifecycleComplete']],'operationErrors':[a['name'] for a in assets if not a['originalOperationPreserved'] or (a['lifecycleComplete'] and not a['finalOperationValid'])],'manualRepairs':0,'assets':assets,'graphAudit':{k:v for k,v in graph_audit.items() if k!='assets'},'contentErrors':[a['name'] for a in assets if not a['requiredGraphPresent'] or not all(a['exactContentByGraph'].values()) or (a['lifecycleComplete'] and not a['wmEmpty'])]}
 if latencies and len(latencies)==counts['publications']:
  finish=max(j['timestamps']['finalizedAt'] for j in jobs); duration=finish-ms(proto['startedAt']);summary['publications'].update(fullCohortMakespanMs=duration,fullCohortPerSecond=counts['publications']*1000/duration)
 (root/'verification.json').write_text(json.dumps(summary,indent=2));print(json.dumps({k:v for k,v in summary.items() if k not in ['assets','injected']},indent=2))
+
+if not publication_identity["valid"]:sys.exit(1)

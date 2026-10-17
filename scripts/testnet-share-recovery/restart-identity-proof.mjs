@@ -1,3 +1,4 @@
+import { requirePublicationCohort } from './publication-evidence.mjs';
 import { sameCapturedQuads } from './rdf-term-identity.mjs';
 import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
 import { verifyRestartMetadata, unchangedCohortMetadata, bindingMatchesCapturedOperation } from './restart-metadata-proof.mjs';
@@ -13,6 +14,11 @@ const root=`.tmp/2963/evidence/${arm}`,dir=`${root}/restart-regression`;
 const cfg=JSON.parse(fs.readFileSync(home+'/config.json')),campaign=loadCampaign(arm),counts=campaignCounts(campaign),cg=campaign.contextGraphId;
 const [restartName]=campaign.cohorts.restart;
 if(cfg.contextGraphs[0]!==cg)throw Error('Runtime graph differs from campaign');
+const publicationAdmissions=JSON.parse(fs.readFileSync(`${root}/publication-admissions.json`));
+const publicationSeals=JSON.parse(fs.readFileSync(`${root}/seal-proof.json`));
+const originalPublicationJobs=JSON.parse(fs.readFileSync(`${root}/fixed-deadline/-api-publisher-jobs.json`)).value.jobs;
+requirePublicationCohort(campaign,publicationAdmissions,originalPublicationJobs,publicationSeals);
+if(mode==='after') requirePublicationCohort(campaign,publicationAdmissions,JSON.parse(fs.readFileSync(`${root}/restart-readback/-api-publisher-jobs.json`)).value.jobs,publicationSeals);
 const query=`SELECT ?payload WHERE { GRAPH <urn:dkg:promote-queue:control-plane> {
  ?job <urn:dkg:promote-queue:contextGraphId> ${JSON.stringify(cg)} ;
  <urn:dkg:promote-queue:assertionName> ${JSON.stringify(restartName)} ; <urn:dkg:promote-queue:payload> ?payload

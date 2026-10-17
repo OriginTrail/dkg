@@ -1,6 +1,7 @@
 """Exact full-cohort payload proof after the separately observed daemon crash."""
 import json,pathlib,sys
 from campaign_manifest import load_campaign, campaign_counts
+from publication_evidence import validate_publication_cohort
 from payload_evidence import audit_graphs, same_payload_graphs
 arm=sys.argv[1]; root=pathlib.Path('.tmp/2963/evidence')/arm
 read=lambda p:json.loads(p.read_text())
@@ -20,12 +21,15 @@ original_graphs.add(prefix+'context/'+str(read(root/'context-graph.json')['value
 original_unchanged=same_payload_graphs(read(root/'fixed-deadline/rdf.json')['results']['bindings'],rows,original_graphs)
 
 jobs=read(root/'fixed-deadline/-api-publisher-jobs.json')['value']['jobs']
-published={j['request']['knowledgeAssetVmPublish']['name'] for j in jobs if j['status']=='finalized'}
+admissions=read(root/'publication-admissions.json')
+publication_identity=validate_publication_cohort(campaign,admissions,jobs,seals)
+restart_identity=validate_publication_cohort(campaign,admissions,read(root/'restart-readback/-api-publisher-jobs.json')['value']['jobs'],seals)
+published=set(campaign['cohorts']['publications'])
 proof=audit_graphs(rows,campaign['contextGraphId'],arm,coordinates,published,read(root/'context-graph.json')['value']['onChainId'],campaign['triplesPerAsset'])
 errors=[name for name,p in proof['assets'].items() if not p['requiredGraphPresent'] or not all(p['exactContentByGraph'].values()) or not p['wmEmpty']]
-all_exact=(original_unchanged and not errors and proof['materializedGraphPresent'] and all(proof['materializedGraphsExact'].values()) and not proof['unexpectedPayloadGraphs'])
+all_exact=(publication_identity['valid'] and restart_identity['valid'] and original_unchanged and not errors and proof['materializedGraphPresent'] and all(proof['materializedGraphsExact'].values()) and not proof['unexpectedPayloadGraphs'])
 result={'arm':arm,'snapshotObservedAt':read(root/'restart-readback/manifest.json')['observedAt'],'assets':len(coordinates),
- 'originalPayloadGraphsUnchanged':original_unchanged,'allExact':all_exact,'contentErrors':errors,'graphAudit':{k:v for k,v in proof.items() if k!='assets'}}
+ 'publicationIdentity':publication_identity,'restartPublicationIdentity':restart_identity,'originalPayloadGraphsUnchanged':original_unchanged,'allExact':all_exact,'contentErrors':errors,'graphAudit':{k:v for k,v in proof.items() if k!='assets'}}
 (root/'restart-regression/whole-cohort-content-proof.json').write_text(json.dumps(result,indent=2)+'\n')
 print(json.dumps(result))
 assert result['assets']==campaign_counts(campaign)['restart'] and all_exact

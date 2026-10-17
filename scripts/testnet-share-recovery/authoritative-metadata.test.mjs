@@ -140,6 +140,7 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...wmPayload]));
     assert.deepEqual(run().proof.contentErrors, [name]);
     write('restart-readback/rdf.json', rdf([...metadata, ...payload, ...wmPayload]));
+    write('restart-readback/-api-publisher-jobs.json', { value: { jobs: [] } });
     write('restart-readback/manifest.json', { observedAt: '2026-10-16T01:00:00.000Z' });
     fs.mkdirSync(path.join(root, 'restart-regression'));
     assert.throws(() => execFileSync('python3', [fileURLToPath(new URL('./restart-content-proof.py', import.meta.url)), arm], { cwd, stdio: 'pipe' }));
