@@ -75,6 +75,19 @@ query on the node was refused (#3319). A restarted owner's first write
 into its graph waits for the graph's catch-up, up to 30 s, where it was
 refused and went through on a retry 13 to 23 s later (#3320).
 
+Three fixes from end-to-end runs in which the members of a graph reach each
+other only through Cores. A Core that hosts a public graph keeps its
+members' shares into named sub-graphs and serves them to pulls, and a
+member's share goes to the graph's owner itself, through a relay when the
+two are not connected, so the owner holds the author's seal and can publish
+the member's asset (#3327). A member of a registered public graph that a
+first catch-up left unproven is caught up again, and a member that kept a
+Core's manifest naming a snapshot the Core no longer serves reads the
+manifest again, where it stayed unsynced for about ten minutes or longer
+(#3328). A node with a manual RFC-64 peer table uses it only for the
+private graphs it was configured for, where it denied the members of every
+other private graph, whose root writes then never reached it (#3333).
+
 **No smart-contract, ABI or deployment registry changes.** Three new
 protocols and one changed message. The owner of a public graph sends a
 change notice, `/dkg/10.0.1/swm-change-notice`, to the graph's followers
@@ -136,6 +149,9 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
 | A public snapshot job waits out a busy sync slot and resumes (#3318, #3140) | A batch of the job's exact-asset stream that the node's own sync admission refuses is tried again after a wait: a jittered hold of 2.5 s, doubling to 30 s, after each refusal, then a read of the general sync capacity every 2.5 s until a batch would be admitted; the other configured Cores are not asked meanwhile, since they would meet the same refusal. A Core that answers busy, or whose stream broke after it served the graph, keeps its turn and is asked again after 15 s, while other configured Cores may be asked; a Core still busy after 30 minutes counts as having answered. Waits end two minutes before the job's one-hour limit. Before each batch and after each wait the job skips the assets this node already holds, at the pinned version and root or in a newer confirmed version whose content verifies, so a rerun after a failure or a restart continues where the store stands; the result reports `alreadyPresent`. The job fails only when the configured Cores answered without the assets or the limit is reached, for example `Snapshot recovery incomplete: 0/12 committed (local sync capacity stayed in use)`. Its batches cannot take the reserved metadata slot of #3302, and a refresh in that slot never makes it wait. The job record still lives in memory | None |
 | A query without a Context Graph leaves out the graphs that a core-cache job marked (#3319, #3140) | Such a query is evaluated over the default graph and every named graph outside the marked graphs, their partitions and their descendants, so it answers without their content and without acceptance: the daemon's metrics counts and the node UI's cross-partition reads work again on such a node and count what lies outside the marked graphs. A query that names a marked graph still needs `chainEvidenceMode: "core-cache"` with that graph; acceptance stays per graph, and acceptance without a Context Graph is still refused. While graphs are withheld, `FROM` and `FROM NAMED` answer 409 `CORE_CACHE_QUERY_TRUST_REQUIRED`, as does an unscoped query while a marker names no graph or more than 256 graphs are marked; the SPARQL HTTP and Blazegraph adapters refuse the withholding, and unscoped queries are refused on them anyway. The markers are read again after the query, and a graph marked meanwhile withholds the result. The remote lookup of an asset by UAL still refuses while any graph is marked | None |
 | A restarted owner's first write waits for its graph's catch-up (#3320) | When the write preflight finds a graph the node knows but cannot write yet, and the node is catching that graph up (a catch-up job queued or running, a readiness repeat following one or armed, or an activation catch-up), the write waits until the subscription is proven synced, at most 30 s, and is then checked again in full. Past the bound it answers 503 with `code: CONTEXT_GRAPH_NOT_WRITABLE`, `retryable: true` and `Retry-After: 5`, where it answered 400 at once. A graph that nothing is catching up is still refused at once with 400, and a write the node may not make, for example from an agent a private graph does not admit, is refused before the wait. The readiness repeat (#3287) runs at once, instead of after its first delay of 15 s, when the attempt that settled found the graph's shared-memory lane not yet active and the lane is active now; a waiting write starts that repeat early, at most once per attempt | None. A client that retried a 400 on a restarted owner can wait for the answer; a 503 with `Retry-After` still asks for a retry |
+| A Core keeps its hosted graph's sub-graph shares, and a member's share goes to the graph's owner (#3327) | A Core that hosts a public graph, that is, signed a StorageACK for it, applies a member's share into a named sub-graph as a subscriber does and serves it to pulls; the root stays with the catalog, and every check of the share handler still runs. Before a graph's first Verified Memory publish no Core hosts it, and Cores still decline its sub-graph shares. Before a share into a public graph goes out, the author makes the graph's owner one of the share's followers: a connected owner peer as it is, otherwise the first of at most two of the owner's peers it can connect to, through a relay when that is the only route, within 10 s for the lookup and the connections together. An owner peer whose dial failed, and an owner that was not found, are not tried again for 60 s; owner peers that were found are reused for 5 minutes. An Edge that cannot map the owner's wallet to a peer fetches the owner's profile from a Core's `agents` phonebook on demand. A public graph with a peer allowlist is sent to the list, with the owner added when the list does not name it. The owner of a public graph in use also pulls it from one connected peer every 60 s, as a member does. An on-demand phonebook fetch that this node's own sync scheduler turns away asks the peer again after 1 s, at most 30 times within its budget, and takes no cooldown, where it took the 10-minute cooldown of an empty answer | None |
+| A registered public graph left unproven is caught up again, and a stale kept manifest is read again (#3328, #3287) | The readiness repeat (15 s, 30 s, 1, 2, 4, 8, 16 and 30 minutes, at most eight times) now follows a public graph whether or not it is registered on chain, where a registered graph was repeated only while its walk found the shared-memory lane not active; a subscription known only by its on-chain name hash is still not repeated. A member keeps a peer's complete shared-memory manifest between catch-up rounds while its snapshot walk is incomplete; a round that replays the kept manifest and resolves no further snapshot now ends it, so the next round reads the peer's current manifest, where the kept one was replayed until the walk expired, 10 minutes after its last progress. A round that does resolve a snapshot keeps the manifest, so a long walk still resumes where it stopped | None |
+| A manual RFC-64 peer table answers only for the private graphs it was configured for (#3333) | `rfc64Catalog.accessPolicyAuthority` with `peerAgentBindings` binds peers to agents for the selected private graphs of the activation config, and answered for every graph. For every other private graph, a graph joined at runtime for example, the node now resolves peers from the graph's own state (join delegations, the curator binding, the phonebook), as a node without the table does, and exchanges catalog heads and content with its members. A function authority supplied in code (`rfc64CatalogAccessPolicyAuthority`) still answers for every graph | None |
 
 ### Known issues
 
@@ -292,9 +308,10 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   A registered public graph whose id does not name its owner gets no
   definition from peers.
 - **A curator holds a member's seal only when the share reached it directly**
-  (#3294): a curator that was offline for the share and caught up by
-  shared-memory sync gets the share without the seal (#3307), and cannot
-  publish that asset. A second version of a member's asset still needs the
+  (#3294): a member's share goes to the curator itself, through a relay
+  when the two are not connected (#3327), but a curator that was offline
+  for the share and caught up by shared-memory sync gets the share without
+  the seal (#3307), and cannot publish that asset. A second version of a member's asset still needs the
   member's update attestation (`PUBLISH_AUTHOR_NOT_CUSTODIAL`), a member's
   asset in the root of a catalog-owned graph is not curator-publishable,
   and a seal by a smart-contract wallet, or by an agent other than the one
@@ -424,7 +441,9 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   shared pointer stamp of `publishAsync` between its share and its publish.
 - **A share from one member of a public graph reaches a member with no
   connection to it only through the graph's owner** (#1611, #3251): the
-  owner passes it on with its change notice (#3256), and no other node does.
+  owner passes it on with its change notice (#3256), a Core that hosts the
+  graph keeps a share into a named sub-graph and serves it to pulls
+  (#3327), and no other node does.
   While the owner is offline or not connected to a member, that member gets
   another member's write only through a sync with a peer that holds it. A
   notice is sent once, with no retry; a member that misses it gets the write
@@ -700,6 +719,49 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   through on a retry 13 to 23 s later. The repeat now runs at once when
   the lane has become active, and a write into a graph the node is
   catching up waits for the proof, up to 30 s; see the upgrade table.
+- **A member's share into a named sub-graph reaches the Cores that host
+  the graph and the graph's owner, with no direct link** (#3327): a member
+  that connects only to Cores sent a share to the graph's GossipSub
+  subscribers and its followers, which were the Cores it was connected to,
+  and those Cores declined it with `SWM write declined: legacy SWM apply is
+  not authoritative for subgraph`: only a subscriber applied a named
+  sub-graph of a catalog-owned graph, and a hosting Core does not subscribe.
+  Nothing brought the share to the owner, which needs the share itself,
+  with the author's seal, to publish the member's asset. A hosting Core now
+  applies such a share and serves it to pulls, and the author sends the
+  share to the graph's owner as a follower, connecting to it through a
+  relay when needed; see the upgrade table. On a devnet of four Cores, with
+  the owner and the members on Edges that connect only to Cores, the owner
+  held a member's asset about 4 s after the share and published it to
+  Verified Memory with the author's seal, and a member added later and a
+  restarted member read it.
+- **A member of a registered public graph no longer stays unsynced**
+  (#3328): from 4667f9f2b on, a member of a fresh registered public graph
+  could stay `synced: false`, its writes refused with
+  `CONTEXT_GRAPH_NOT_WRITABLE`. Since #3303 the first catch-up installs the
+  graph's definition from the chain, and with it the graph's RFC-64
+  authority, while it walks; the activation revoked the walk, and the
+  readiness repeat did not run again for a registered graph whose walk had
+  found its lane active. Separately, a member whose round reached a Core
+  while the Core kept the copy of a fresh publication for a StorageACK kept
+  that Core's manifest, which names a snapshot the Core never holds and
+  drops seconds later, and asked for it in every round for about 10
+  minutes. Both are fixed; see the upgrade table. On a public testnet a
+  member of a fresh registered public graph was synced after 27 s and every
+  member write was held by every node; on a devnet, members that subscribed
+  right after the graph's first publish were synced in 32 to 34 s, where
+  they were still unsynced after 240 s.
+- **A node with a manual RFC-64 peer table no longer shuts out the members
+  of the other private graphs it joins** (#3333): the table, which binds
+  peers to agents for the selected private graphs of the activation
+  config, answered for every graph. On such a node a member of any other
+  private graph resolved to no agent, so every catalog operation with it
+  was denied: the member's root writes never reached the node, while its
+  writes into named sub-graphs, which travel the legacy lane, arrived. In a
+  three-node test on a public testnet, with the table on two of the nodes,
+  the third node's root writes into a fresh registered private graph never
+  arrived; with the fix every member write was held by every node, in the
+  private graph as in the two public ones.
 - **A cold snapshot recovery is no longer cancelled when the graph's chain
   binding is discovered during its first batch** (#3176): the snapshot job
   installed the graph's numeric chain id without its name hash, so the
