@@ -66,6 +66,29 @@ test('main reducer entry points retain a relocated asset as a failed proof', () 
     };
     const original = run(); assert.equal(original.seals.length, 1); assert.equal(original.seals[0].unchanged, true);
     assert.deepEqual(original.proof.sealChanged, []); assert.deepEqual(original.proof.missingLifecycle, []); assert.deepEqual(original.proof.lifecycleErrors, [], JSON.stringify(original.proof.assets));
+    // Initial/non-injected operations must retain every immutable authority field.
+    const intent = { version: 1, operationId: 'original', timestampMs: 1, confirmationRequired: true,
+      accessPolicy: 'public', allowedPeers: [] };
+    const operation = [binding({ subject: life, predicate: 'http://dkg.io/ontology/shareOperationId', object: '"original"', graph }),
+      binding({ subject: life, predicate: 'http://dkg.io/ontology/promoteOperationIntent', object: JSON.stringify(JSON.stringify(intent)), graph })];
+    campaign.cohorts = { initial: [name], shares: [], publications: [], restart: [] };
+    write('campaign-manifest.json', campaign); write('pre-workload/rdf.json', rdf([...before, ...operation]));
+    write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...operation]));
+    assert.equal(run().proof.assets[0].originalOperationPreserved, true);
+    for (const changed of [
+      [operation[0], { ...operation[1], o: { type: 'literal', value: JSON.stringify({ ...intent, timestampMs: 2, confirmationRequired: false }) } }],
+      [operation[0]],
+      [...operation, { ...operation[1], o: { type: 'literal', value: JSON.stringify({ ...intent, timestampMs: 2 }) } }],
+      [{ ...operation[0], o: { type: 'literal', value: 'changed' } }, operation[1]],
+      [],
+    ]) {
+      write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...changed]));
+      const changedProof = run().proof;
+      assert.equal(changedProof.assets[0].originalOperationPreserved, false);
+      assert.deepEqual(changedProof.operationErrors, [name]);
+    }
+    write('pre-workload/rdf.json', rdf(before));
+    campaign.cohorts = { initial: [], shares: [name], publications: [], restart: [] }; write('campaign-manifest.json', campaign);
     const wmPayload = payload.map(r => ({ ...r, g: { type: 'uri', value: swmGraph.replace('_shared_memory', '_working_memory') } }));
     write('fixed-deadline/rdf.json', rdf([...metadata, ...payload, ...wmPayload]));
     assert.deepEqual(run().proof.contentErrors, [name]);

@@ -95,16 +95,23 @@ export async function preparePromoteRecoveryBinding(
 /** Recheck immutable stored evidence before entering any replay mutation. */
 export async function assertPromoteRecoveryBinding(
   store: TripleStore, contextGraphId: string, name: string, agentAddress: string,
-  opts: PublisherAssertionPromoteOptions,
+  opts: PublisherAssertionPromoteOptions, retireCompletion: () => Promise<void>,
 ) {
   const binding = validatePromoteRecoveryBinding(opts.recoveryBinding);
   const current = await readPromoteRecoveryEvidence(store, contextGraphId, name, agentAddress, opts);
   if (current.sealDigest !== binding.sealDigest) throw recoveryBindingConflict('The sealed asset changed after durable share admission');
-  const operation = current.readOperation();
-  if (operation.kind === 'legacy') throw recoveryBindingConflict('The original share operation lost its immutable intent');
-  if (operation.kind === 'complete'
-    && serializePromoteOperationIntent(operation.intent) !== serializePromoteOperationIntent(binding.intent)) {
-    throw recoveryBindingConflict('The immutable share operation changed after durable admission');
+  try {
+    const operation = current.readOperation();
+    if (operation.kind === 'legacy') throw recoveryBindingConflict('The original share operation lost its immutable intent');
+    if (operation.kind === 'complete'
+      && serializePromoteOperationIntent(operation.intent) !== serializePromoteOperationIntent(binding.intent)) {
+      throw recoveryBindingConflict('The immutable share operation changed after durable admission');
+    }
+  } catch (error) {
+    // Only deterministic persisted-operation validation is inside this catch.
+    // Reads and caller/seal validation above must not revoke a valid certificate.
+    await retireCompletion();
+    throw error;
   }
   return current;
 }

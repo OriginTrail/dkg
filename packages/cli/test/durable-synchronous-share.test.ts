@@ -13,7 +13,7 @@ import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocato
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
 import { durableSynchronousShare } from '../src/daemon/routes/durable-synchronous-share.js';
 import { daemonState } from '../src/daemon/state.js';
-import { createPromoteWorkerSupervisor } from '../src/daemon/worker/async-promote-worker.js';
+import { createPromoteWorkerSupervisor, runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
 
 const CG = 'durable-sync-2963', NAME = 'asset', AUTHOR = `0x${'11'.repeat(20)}`;
 const lifecycle = assertionLifecycleUri(CG, AUTHOR, NAME);
@@ -586,6 +586,67 @@ describe('durable synchronous share ownership', () => {
       expect((await restarted.promoteQueue.getStatus(original.jobId)).request.recoveryBinding).toEqual(original.request.recoveryBinding);
       expect(await restarted.assertion.pullFrom(CG, NAME, 'swm', { agentAddress: AUTHOR })).toMatchObject({ seeded: 1 });
     } finally { await worker.stop(); await store.close(); }
+  });
+
+  it.each(['corrupt', 'missing', 'changed'])('revokes a publication certificate on %s bound replay after inventory failure', async corruption => {
+    const {store,agent,publisher,finalized}=await setup();
+    daemonState.promoteWorkerAvailable=true;
+    agent.resolveRfc64CatalogReceiverAuthorityV1=()=>({mode:'catalog',killSwitchActive:false});
+    agent.commitRfc64SwmAuthorInventoryV1=async()=>{throw new SwmInventoryWriteFailure('inventory-maintenance',null,inventoryPersistenceFailure(new Error('inventory unavailable')));};
+    const failure=await durableSynchronousShare(agent,CG,NAME,{agentAddress:AUTHOR}).catch(e=>e);
+    const job=(await agent.promoteQueue.getStatus(failure.observation.jobId))!;
+    expect(job.state).toBe('failed_retrying');
+    expect(await publisher.hasSwmShareComplete(CG,NAME,AUTHOR)).toBe(true);
+    await store.deleteByPattern({graph:contextGraphMetaUri(CG),subject:lifecycle,predicate:'http://dkg.io/ontology/promoteOperationIntent'});
+    if(corruption!=='missing')await store.insert([{graph:contextGraphMetaUri(CG),subject:lifecycle,
+      predicate:'http://dkg.io/ontology/promoteOperationIntent',object:JSON.stringify(corruption==='corrupt'?'not-json':JSON.stringify({
+        ...job.request.recoveryBinding!.intent,timestampMs:job.request.recoveryBinding!.intent.timestampMs+1}))}]);
+    const worker=createPromoteWorkerSupervisor({agent,workerConcurrency:1,pollIntervalMs:10,log:()=>undefined});
+    try {
+      await worker.start();
+      await vi.waitFor(async()=>expect((await agent.promoteQueue.getStatus(job.jobId))?.state).toBe('failed'));
+      expect(await publisher.hasSwmShareComplete(CG,NAME,AUTHOR)).toBe(false);
+      await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG,NAME,{agentAddress:AUTHOR})).rejects.toMatchObject({code:'PUBLISH_NOT_FULL_SHARE'});
+      expect(await agent.promoteQueue.clearTerminalJob(job.jobId)).toMatchObject({outcome:'rejected'});
+      await expect(agent.assertion.discard(CG,NAME,{agentAddress:AUTHOR})).rejects.toMatchObject({code:'KA_PROMOTE_RECOVERY_REQUIRED'});
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    } finally {await worker.stop();await store.close();}
+  });
+
+  it('preserves the certificate when bound evidence cannot temporarily be read', async()=>{
+    const {store,agent,publisher}=await setup();
+    const bound=await agent.assertion.prepareDurableShare(CG,NAME,{agentAddress:AUTHOR});
+    await agent.assertion.promote(CG,NAME,bound);
+    const query=store.query.bind(store);
+    vi.spyOn(store,'query').mockImplementationOnce(async()=>{throw new StoreSchedulerBusyError('queue_wait_timeout','normal','test.read',{storeOperation:'query'});});
+    await expect(publisher.assertionPromote(CG,NAME,AUTHOR,bound)).rejects.toThrow();
+    vi.mocked(store.query).mockImplementation(query);
+    expect(await publisher.hasSwmShareComplete(CG,NAME,AUTHOR)).toBe(true);
+    await store.close();
+  });
+
+  it('reclaims a bound completed share after success bookkeeping fails with swmInserted=true', async()=>{
+    const {store,agent,finalized}=await setup();let now=Date.now();
+    const queue=new TripleStoreAsyncPromoteQueue(store,{now:()=>now,leaseMs:100,backoff:()=>0});
+    const bound=await agent.assertion.prepareDurableShare(CG,NAME,{agentAddress:AUTHOR});
+    const job=await queue.enqueueAndClaim({contextGraphId:CG,assertionName:NAME,entities:'all',...bound},'old');
+    vi.spyOn(queue,'succeed').mockRejectedValue(new Error('success bookkeeping unavailable'));
+    const outcome=await runPromoteJob({job,queue,workerId:'old',now:()=>now,heartbeatIntervalMs:25,bookkeepingRetryBudgetMs:0,
+      log:()=>undefined,runPromote:()=>agent.assertion.promote(CG,NAME,bound)});
+    expect(outcome.outcome).toBe('partial_promote_ambiguity');
+    expect(await queue.getStatus(job.jobId)).toMatchObject({state:'running',commitMarker:{promoteStarted:true,swmInserted:true}});
+    const content=await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`);
+    now+=101;
+    const reopened=new TripleStoreAsyncPromoteQueue(store,{now:()=>now,leaseMs:100,backoff:()=>0});
+    vi.spyOn(agent,'promoteQueue','get').mockReturnValue(reopened);
+    const worker=createPromoteWorkerSupervisor({agent,workerConcurrency:1,pollIntervalMs:10,heartbeatIntervalMs:25,bookkeepingRetryBudgetMs:0,log:()=>undefined});
+    try {
+      await worker.start();
+      await vi.waitFor(async()=>expect((await reopened.getStatus(job.jobId))?.state).toBe('succeeded'));
+      expect(await reopened.getStatus(job.jobId)).toMatchObject({attempt:{count:2},request:{recoveryBinding:bound.recoveryBinding}});
+      expect(await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`)).toEqual(content);
+      await expect(reopened.succeed(job.jobId,job.lease!.claimToken,{promotedCount:1,succeededAt:now})).rejects.toThrow();
+    } finally {await worker.stop();await store.close();}
   });
 
   it('refuses a stale prepared seal before persisting an owner if reopening won the lifecycle lock', async () => {

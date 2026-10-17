@@ -8374,7 +8374,8 @@ export class DKGPublisher implements Publisher {
     return this.withAssertionLifecycleWriteLock(request.contextGraphId, request.assertionName,
       request.agentAddress, request.subGraphName, async () => {
         await assertPromoteRecoveryBinding(this.store, request.contextGraphId, request.assertionName,
-          request.agentAddress, { subGraphName: request.subGraphName, recoveryBinding: request.recoveryBinding });
+          request.agentAddress, { subGraphName: request.subGraphName, recoveryBinding: request.recoveryBinding },
+          () => this.clearSwmShareCompleteUnlocked(request.contextGraphId, request.assertionName, request.agentAddress, request.subGraphName));
         return admit();
       });
   }
@@ -8431,7 +8432,8 @@ export class DKGPublisher implements Publisher {
   ): Promise<AssertionPromoteResult> {
     if (!opts?.recoveryBinding) await tagPromoteStep('assertNoUnfinishedBoundShare', () => assertNoUnfinishedBoundShare(this.promoteOwnershipReader, contextGraphId, name, agentAddress, opts?.subGraphName));
     const boundEvidence = opts?.recoveryBinding
-      ? await assertPromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts) : undefined;
+      ? await assertPromoteRecoveryBinding(this.store, contextGraphId, name, agentAddress, opts,
+        () => this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, opts?.subGraphName)) : undefined;
     // #1464 (PR1, diagnostic) — every awaited op below runs BEFORE the
     // `store.insert(swmQuads)` that actually lands the root in SWM. A masked
     // rejection here (typically a sparql-http read hitting the 30s

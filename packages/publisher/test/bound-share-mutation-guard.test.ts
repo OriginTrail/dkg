@@ -76,6 +76,18 @@ describe('bound ownership extends the publisher lifecycle mutation fence', () =>
     expect(await store.countQuads(seal.sharedGraphUri)).toBe(persisted.includes('swm')?80:0);
   });
 
+  it.each(['corrupt','missing','changed'])('revokes a completed publisher certificate for %s persisted bound authority', async fault=>{
+    const {publisher,store,request}=await setup();
+    await publisher.assertionPromote(CG,NAME,AUTHOR,{recoveryBinding:request.recoveryBinding});
+    expect(await publisher.hasSwmShareComplete(CG,NAME,AUTHOR)).toBe(true);
+    const pattern={graph:contextGraphMetaUri(CG),subject:assertionLifecycleUri(CG,AUTHOR,NAME),predicate:'http://dkg.io/ontology/promoteOperationIntent'};
+    await store.deleteByPattern(pattern);
+    if(fault!=='missing')await store.insert([{...pattern,object:JSON.stringify(fault==='corrupt'?'not-json':JSON.stringify({
+      ...request.recoveryBinding.intent,timestampMs:request.recoveryBinding.intent.timestampMs+1}))}]);
+    await expect(publisher.assertionPromote(CG,NAME,AUTHOR,{recoveryBinding:request.recoveryBinding})).rejects.toThrow();
+    expect(await publisher.hasSwmShareComplete(CG,NAME,AUTHOR)).toBe(false);
+  });
+
   it('does not acquire authority over a different graph when another queue is constructed', async () => {
     const {publisher,request,store}=await setup();
     const unrelated=new TripleStoreAsyncPromoteQueue(store,{graphUri:'urn:unrelated-control'});
