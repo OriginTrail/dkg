@@ -275,6 +275,7 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'catalog-projection-discovery-v1.js',
   'catalog-repair-diagnostics-v1.js',
   'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',
@@ -317,6 +318,8 @@ const blockedRfc64Modules = [
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
   'inventory-v1/exact-record.js',
+  'inventory-persistence-failure.js',
+  'inventory-v1/open-error.js',
   'inventory-v1/swm-author-inventory-auth-v1.js',
   'inventory-v1/swm-author-inventory-commit-plan.js',
   'inventory-v1/swm-author-inventory-contracts.js',
