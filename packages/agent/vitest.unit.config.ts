@@ -18,8 +18,6 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
-      'test/durable-share-inventory.test.ts',
-      'test/promote-lifecycle-partial-commit.test.ts',
       "test/sync-exact-export-admission.test.ts",
       "test/prepared-content-cache.test.ts",
       "test/sync-prepared-content-export.test.ts",
@@ -81,6 +79,8 @@ export default defineConfig({
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
+      'test/durable-share-inventory.test.ts',
+      'test/promote-lifecycle-partial-commit.test.ts',
       "test/promote-durable-root-companion.test.ts",
       "test/promote-swm-pointer-post-commit.test.ts",
       "test/clear-promote-async-facade.test.ts",
