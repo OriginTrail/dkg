@@ -11,7 +11,7 @@ const receiverDirectory = process.env.DKG_CATALOG_DURABILITY_RESTART || undefine
 const requestedBoundary = process.env.DKG_CATALOG_DURABILITY_CRASH;
 const boundaries: readonly string[] = ['before-flush', 'before-cas', 'after-cas'];
 if (!rootDirectory || (receiverDirectory ? !!requestedBoundary : !boundaries.includes(requestedBoundary ?? ''))) {
-  throw new Error('Run this worker through scripts/repro/rfc64-catalog-durable-head.mts');
+  throw new Error('Run this worker through its parent catalog durability campaign.');
 }
 
 it('runs the explicitly configured durability transition or restart', async () => {
