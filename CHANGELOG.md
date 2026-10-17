@@ -66,14 +66,14 @@ member's asset (#3307). A node that receives a shared-memory write from a
 member its local member list does not hold yet refreshes the list before
 it rejects the write, and an authority it cannot read makes the rejection
 retryable, where the write was dropped (#3312).
-<!-- PLACEHOLDER (PR in progress, number to come): a Core-snapshot recovery
-     job that waits and resumes under a busy sync slot, and queries without
-     a context graph that keep working after a core-cache job. One sentence
-     here; also an upgrade row, a Fixed entry, and narrow or remove the two
-     Known issues marked for it. -->
-<!-- PLACEHOLDER (PR in progress, number to come): a restarted owner's first
-     write waits for the graph to become writable instead of refusing. One
-     sentence here, an upgrade row and a Fixed entry. -->
+
+Three more fixes. A public snapshot job waits out a busy sync slot and
+resumes from what the node already holds, where it failed at the first
+refused batch (#3318). A query without a Context Graph leaves out the
+graphs that a core-cache job marked and keeps working, where every such
+query on the node was refused (#3319). A restarted owner's first write
+into its graph waits for the graph's catch-up, up to 30 s, where it was
+refused and went through on a retry 13 to 23 s later (#3320).
 
 **No smart-contract, ABI or deployment registry changes.** Three new
 protocols and one changed message. The owner of a public graph sends a
@@ -133,13 +133,9 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
 | A member writes into a sub-graph the graph's owner registered (#3306, #3293) | A node that installs a `_meta` snapshot as a graph's definition also registers the sub-graphs it holds: well-formed registrations of that graph only, at most 256, with no writer lists, and never a name that is a Context Graph of its own. A write into a sub-graph this node has not registered first asks the graph's owner and up to two connected peers for their `_meta`, one lookup per sub-graph at a time within 30 s, and does not ask again for 30 s about a sub-graph no peer held. A write into a sub-graph nobody holds is refused with HTTP 400 and `SUB_GRAPH_NOT_FOUND` on `POST /api/knowledge-assets`, `wm/write`, `wm/pull-from`, `swm/share`, `wm/import-file` and `POST /api/memory/turn`, where it was HTTP 500; the message keeps its wording and adds what the lookup found. An async share job that meets it fails with the same error, and the queue retries it | Clients that matched the 500 should expect 400 with `code: "SUB_GRAPH_NOT_FOUND"` |
 | A share carries its author's seal, so the curator can publish it (#3307, #3294) | The share message gains two optional fields, the assertion's name and the canonical graph-scoped author seal that RFC-64 defines, which the author's node fills on every graph-scoped share. The graph's curator keeps the seal only when the share's envelope is signed by the seal's author, the seal names this share's asset, version, counts and private root, commits to the Merkle root of exactly the content stored, and its attestation recovers the asset's author; other members and Cores keep nothing. The curator then publishes the member's asset with `POST /api/knowledge-assets/:name/vm/publish` and `selectedAuthorAgentAddress`, with the member's attestation and the curator's wallet, into the member's namespace. `vm/publish-async` for another node's asset answers 409 `ASYNC_PUBLISH_FOREIGN_AUTHOR`, where it answered 500. A node on an earlier version ignores the fields, and a share from such a node carries none | Upgrade the author's node and the curator's node to publish a member's shared asset |
 | A receiver refreshes its write gate before it rejects a shared-memory write by a signer its projected gate lacks (#3312) | A receiver judged an inbound shared-memory write by the member list in its local metadata, which for a member is the curator's metadata as of the receiver's last refresh. When an envelope's signature verifies but that list lacks the signer, the receiver now reads the canonical gate fresh and, when that still excludes the signer, refreshes the metadata from the curator under the existing cooldown and reads once more, all within 8 s. A signer the fresh gate holds is applied, logged at info; a signer it still excludes, or a graph with no member list, is rejected permanently as before; a gate that could not be read answers a retryable rejection, so the sender's fan-out retries on its watchdog where it dropped the share. A bad signature never reaches the refresh. Concurrent misses by one signer on one graph share one look, and a signer a fresh gate excluded is remembered for 10 s. The re-read is billed to the existing `cgAuth.workspaceApply` chain request site | None |
-
-<!-- PLACEHOLDER (PR in progress, number to come): upgrade row for the
-     Core-snapshot recovery job that waits and resumes under a busy sync
-     slot, and for queries without a context graph after a core-cache job. -->
-<!-- PLACEHOLDER (PR in progress, number to come): upgrade row for a
-     restarted owner's first write that waits for the graph to become
-     writable instead of refusing. -->
+| A public snapshot job waits out a busy sync slot and resumes (#3318, #3140) | A batch of the job's exact-asset stream that the node's own sync admission refuses is tried again after a wait: a jittered hold of 2.5 s, doubling to 30 s, after each refusal, then a read of the general sync capacity every 2.5 s until a batch would be admitted; the other configured Cores are not asked meanwhile, since they would meet the same refusal. A Core that answers busy, or whose stream broke after it served the graph, keeps its turn and is asked again after 15 s, while other configured Cores may be asked; a Core still busy after 30 minutes counts as having answered. Waits end two minutes before the job's one-hour limit. Before each batch and after each wait the job skips the assets this node already holds, at the pinned version and root or in a newer confirmed version whose content verifies, so a rerun after a failure or a restart continues where the store stands; the result reports `alreadyPresent`. The job fails only when the configured Cores answered without the assets or the limit is reached, for example `Snapshot recovery incomplete: 0/12 committed (local sync capacity stayed in use)`. Its batches cannot take the reserved metadata slot of #3302, and a refresh in that slot never makes it wait. The job record still lives in memory | None |
+| A query without a Context Graph leaves out the graphs that a core-cache job marked (#3319, #3140) | Such a query is evaluated over the default graph and every named graph outside the marked graphs, their partitions and their descendants, so it answers without their content and without acceptance: the daemon's metrics counts and the node UI's cross-partition reads work again on such a node and count what lies outside the marked graphs. A query that names a marked graph still needs `chainEvidenceMode: "core-cache"` with that graph; acceptance stays per graph, and acceptance without a Context Graph is still refused. While graphs are withheld, `FROM` and `FROM NAMED` answer 409 `CORE_CACHE_QUERY_TRUST_REQUIRED`, as does an unscoped query while a marker names no graph or more than 256 graphs are marked; the SPARQL HTTP and Blazegraph adapters refuse the withholding, and unscoped queries are refused on them anyway. The markers are read again after the query, and a graph marked meanwhile withholds the result. The remote lookup of an asset by UAL still refuses while any graph is marked | None |
+| A restarted owner's first write waits for its graph's catch-up (#3320) | When the write preflight finds a graph the node knows but cannot write yet, and the node is catching that graph up (a catch-up job queued or running, a readiness repeat following one or armed, or an activation catch-up), the write waits until the subscription is proven synced, at most 30 s, and is then checked again in full. Past the bound it answers 503 with `code: CONTEXT_GRAPH_NOT_WRITABLE`, `retryable: true` and `Retry-After: 5`, where it answered 400 at once. A graph that nothing is catching up is still refused at once with 400, and a write the node may not make, for example from an agent a private graph does not admit, is refused before the wait. The readiness repeat (#3287) runs at once, instead of after its first delay of 15 s, when the attempt that settled found the graph's shared-memory lane not yet active and the lane is active now; a waiting write starts that repeat early, at most once per attempt | None. A client that retried a 400 on a restarted owner can wait for the answer; a 503 with `Retry-After` still asks for a retry |
 
 ### Known issues
 
@@ -315,27 +311,18 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   stops persisting once its store file nears 512 MiB, about 150 assets of a
   6.4M-triple graph. Use `store.backend: oxigraph-server` or Blazegraph for
   large graphs.
-<!-- PLACEHOLDER (PR in progress, number to come): narrow or remove the next
-     two entries when the Core-snapshot recovery PR merges: queries without
-     a context graph keep working after a core-cache job, and the job waits
-     and resumes under a busy sync slot. -->
-- **Queries on a node that recovered a graph from a Core's chain snapshot
-  must accept that evidence** (#3140): the snapshot job in `core-cache`
-  mode marks the graph before it transfers anything, and the mark stays
-  across restarts, partial jobs and later syncs. A query over that graph,
-  its parent or a child without `chainEvidenceMode: "core-cache"`, and
-  every unscoped query on that node, answers 409
-  `CORE_CACHE_QUERY_TRUST_REQUIRED`; the node UI and the remote query and
-  lookup protocols send no mode, so they do not read such a graph. There is
-  no way to clear the mark. Run the job in `rpc-only` mode, or on a
-  separate profile and store.
-- **The snapshot job gives up when the node's own sync admission refuses a
-  batch** (#3140): the exact-asset stream of the job takes a general sync
-  slot, so on a node with one slot and no queue a batch that meets another
-  transfer is refused, and the job ends with `Snapshot recovery incomplete`
-  and no retry; a new job fetches every asset again. The bulk transport
-  takes no general slot. Use the default sync settings, or the bulk
-  transport, for such a recovery.
+- **A graph recovered from a Core's chain snapshot stays marked, and a
+  query that names it must accept that evidence** (#3140): the snapshot
+  job in `core-cache` mode marks the graph before it transfers anything,
+  and the mark stays across restarts, partial jobs and later syncs. A
+  query over that graph, its parent or a child without
+  `chainEvidenceMode: "core-cache"` answers 409
+  `CORE_CACHE_QUERY_TRUST_REQUIRED`. A query without a Context Graph leaves
+  the marked graphs out and answers (#3319), so the node UI's unscoped
+  reads show none of their content, and the remote lookup of an asset by
+  UAL refuses while any graph is marked. There is no way to clear the
+  mark. Run the job in `rpc-only` mode, or on a separate profile and
+  store, for a graph that every reader must see.
 - **Queued publications under sustained load** (#3252): the publisher
   changes of this release (#3253) were measured on a public testnet with 48
   queued publications and 256 shares into a private graph: every
@@ -672,13 +659,47 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   answer, so a receiver could not tell an outage from a non-member. The
   write path now takes the second look that sync authorization already
   took on the same miss; see the upgrade table.
-<!-- PLACEHOLDER (PR in progress, number to come): Fixed entry for the
-     Core-snapshot recovery job that waits and resumes under a busy sync
-     slot, and for queries without a context graph that keep working after
-     a core-cache job. -->
-<!-- PLACEHOLDER (PR in progress, number to come): Fixed entry for a
-     restarted owner's first write that waits for the graph to become
-     writable instead of refusing. -->
+- **A public snapshot job no longer fails at the first batch the node's own
+  sync admission refuses, and a rerun resumes** (#3318, #3140): on a node
+  with one general sync slot and no queue, any other admitted sync holding
+  the slot, a Verifiable Memory reconcile pass, an on-connect sync or a
+  shared-memory pull, made a batch's refusal come back as a silent
+  deferral; the job retried each asset once on the single-asset transport
+  with no pause and ended with `Snapshot recovery incomplete`, and a busy
+  answer from the source Core was taken the same way. The committed set
+  lived in memory, so a rerun started again from the first asset. The job
+  now tells a peer's answer from a refusal that says nothing about the
+  peer's data, waits out the local refusal as a reconcile pass does, holds
+  a busy Core off for 15 s, and skips what the node already holds before
+  each batch; see the upgrade table. In a test with the real job and sync
+  admission on one slot, a competing sync that held the slot for 20 s
+  delayed the job's first batch and the job completed with 12 of 12
+  stored, and a job interrupted after half of 20 assets requested only the
+  other ten when started again.
+- **A query without a Context Graph works again on a node that ran a
+  core-cache snapshot job** (#3319, #3140): the trust guard refused such a
+  query as soon as any graph on the node carried the core-cache mark, so
+  after one such job every unscoped query failed, the daemon's metrics
+  counts silently became null, the node UI's cross-partition reads failed,
+  and acceptance without a Context Graph was refused too. An unscoped
+  query is now evaluated over a dataset without the marked graphs, by the
+  store rather than by rewriting the query, so no core-cache evidence is
+  returned without acceptance; see the upgrade table. In tests of 24 query
+  shapes, each answer over a store with the marked graph withheld equalled
+  the answer over a store that lacked those graphs.
+- **A restarted owner's first write into its graph is no longer refused
+  while the graph catches up** (#3320): after a restart every saved
+  subscription is restored unsynced, and a write into a graph that holds
+  no content yet is accepted only once a catch-up has proven it synced.
+  For a graph registered on chain the first catch-up walks the graph's
+  shared-memory lane, which opens only once the node has accepted the
+  graph's authority; right after a restart that authority is still being
+  read, so the walk asked nobody, the readiness repeat waited its first
+  15 s, and the write preflight refused at once with
+  `CONTEXT_GRAPH_NOT_WRITABLE`. On a public testnet the owner's write went
+  through on a retry 13 to 23 s later. The repeat now runs at once when
+  the lane has become active, and a write into a graph the node is
+  catching up waits for the proof, up to 30 s; see the upgrade table.
 - **A cold snapshot recovery is no longer cancelled when the graph's chain
   binding is discovered during its first batch** (#3176): the snapshot job
   installed the graph's numeric chain id without its name hash, so the
