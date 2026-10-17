@@ -26,16 +26,18 @@ const { Client } = await import(require.resolve('@modelcontextprotocol/sdk/clien
 const { StdioClientTransport } = await import(require.resolve('@modelcontextprotocol/sdk/client/stdio.js'));
 const transport = new StdioClientTransport({ command: executable, args: entry.args, stderr: 'inherit' });
 const client = new Client({ name: 'dkg-wsl-launch-regression', version: '1.0.0' });
+// Match the mandatory native fixture: cold NTFS imports measured over three minutes.
+const timeoutMs = 240_000;
 let timer;
 try {
   await Promise.race([
     (async () => {
-      await client.connect(transport);
+      await client.connect(transport, { timeout: timeoutMs });
       const result = await client.listTools();
       if (!result.tools.length) throw new Error('MCP initialized without any DKG tools.');
       console.log(`WSL Windows-launch MCP handshake passed (${result.tools.length} tools).`);
     })(),
-    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Windows-to-WSL MCP handshake timed out')), 30_000); }),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Windows-to-WSL MCP handshake timed out after ${timeoutMs}ms`)), timeoutMs); }),
   ]);
 } finally {
   clearTimeout(timer);
