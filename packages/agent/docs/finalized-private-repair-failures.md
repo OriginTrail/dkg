@@ -26,8 +26,9 @@ failed persistence leaves a graph-owned reset pending even if the lane reactivat
 before storage recovers. The pass loads all queued siblings before awaiting any
 placement; no affected repair passes an uncommitted reset. An unavailable authority
 lookup also preserves that obligation. First and last failure timestamps remain
-intact. Public catalog reconciliation retains
-its existing retry policy.
+intact. A failed graph reset blocks that graph only; unrelated graph repairs keep
+running, and blocked sibling observers settle without an immediate retry loop.
+Public catalog reconciliation retains its existing retry policy.
 
 `GET /api/status` reports the additional `failures` aggregate inside
 `rfc64Catalog.finalizedPrivatePlacementQueue`: `failedMarkers`, `parkedMarkers`,

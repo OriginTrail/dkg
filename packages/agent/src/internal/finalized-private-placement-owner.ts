@@ -215,11 +215,27 @@ export class FinalizedPrivatePlacementOwnerV1 {
     for (const key of this.#retries.keys()) if (!currentKeys.has(key)) this.#forget(key);
     for (const key of this.#waiters.keys()) if (!currentKeys.has(key)) this.#waiters.release(key);
     this.#options.fullCatalogs.passStarted(currentKeys);
+    const blockedGraphs = new Set<ContextGraphIdV1>();
+    const observeLane = (contextGraphId: ContextGraphIdV1, inFlightKey?: string): boolean | undefined => {
+      if (blockedGraphs.has(contextGraphId)) return undefined;
+      try { return this.#observeLane(contextGraphId); }
+      catch (error) {
+        blockedGraphs.add(contextGraphId);
+        // Settle earlier cooldown waiters and later siblings too. Keeping a due
+        // waiter would reschedule a failing graph immediately without backoff.
+        for (const sibling of this.#lanes.get(contextGraphId)?.entries ?? []) {
+          const key = finalizedPrivateRepairKeyV1(sibling.repair);
+          if (key !== inFlightKey) this.#waiters.release(key);
+        }
+        this.#warn('catalog_private_repair_lane_reset_failed', error);
+        return undefined;
+      }
+    };
     await mapWithConcurrency(repairs, 1, async repair => {
       if (signal.aborted) return;
       const key = finalizedPrivateRepairKeyV1(repair);
       const entry = this.#entry(repair);
-      this.#observeLane(repair.contextGraphId);
+      if (observeLane(repair.contextGraphId) === undefined) return;
       // Capacity still owns admission and wakeups, even after a durable scheduling reset.
       if (this.#options.fullCatalogs.park(key, repair)) return this.#waiters.release(key);
       if (entry.retry.parked) { this.#waiters.release(key); return; }
@@ -237,7 +253,9 @@ export class FinalizedPrivatePlacementOwnerV1 {
       } catch (error) {
         placement.end('failed');
         if (!signal.aborted) {
-          if (this.#observeLane(repair.contextGraphId)) this.#runner.request();
+          const laneChanged = observeLane(repair.contextGraphId, key);
+          if (laneChanged === undefined) return;
+          if (laneChanged) this.#runner.request();
           if (attemptGeneration !== entry.retry.generation) return;
           const capacityOwned = this.#options.fullCatalogs.placementRefused(key, repair, error);
           const recorded = capacityOwned

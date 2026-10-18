@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FinalizedPrivateRepairRetryV1 } from '../src/internal/finalized-private-repair-retry.js';
-import { PRIVATE_REPAIR_MAX_BACKOFF_MS, parsePrivatePlacementFailureStateV1 } from '../src/rfc64/private-placement-failure-state-v1.js';
+import { PRIVATE_REPAIR_MAX_BACKOFF_MS, parsePrivatePlacementFailureStateV1, resetPrivatePlacementFailureStateV1 } from '../src/rfc64/private-placement-failure-state-v1.js';
 
 describe('exact private placement retry scheduling', () => {
   it('parks repeated deterministic failures and fences a stale failure after operator retry', () => {
@@ -10,7 +10,7 @@ describe('exact private placement retry scheduling', () => {
     const state = retry.snapshot(); expect(state).toMatchObject({ firstFailedAtMs: 1000, sameKindFailures: 3 });
     const reopened = new FinalizedPrivateRepairRetryV1(); reopened.restore(state, 1e6);
     expect(reopened.parked).toBe(true); expect(reopened.consecutiveFailures).toBe(3);
-    reopened.retryNow(); expect(reopened.eligible(1e6)).toBe(true);
+    reopened.retryNow(resetPrivatePlacementFailureStateV1(state!)); expect(reopened.eligible(1e6)).toBe(true);
     expect(reopened.fail(0, 1e6, 5000, 'signer_mismatch')).toBe(false);
     expect(reopened.parked).toBe(false);
   });

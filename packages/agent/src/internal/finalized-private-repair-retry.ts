@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resetPrivatePlacementFailureStateV1, type CatalogRepairFailureKindV1, PRIVATE_REPAIR_MAX_BACKOFF_MS, isDeterministicPrivateRepairFailureV1, parsePrivatePlacementFailureStateV1, type PrivatePlacementFailureStateV1 } from '../rfc64/private-placement-failure-state-v1.js';
+import { type CatalogRepairFailureKindV1, PRIVATE_REPAIR_MAX_BACKOFF_MS, isDeterministicPrivateRepairFailureV1, parsePrivatePlacementFailureStateV1, type PrivatePlacementFailureStateV1 } from '../rfc64/private-placement-failure-state-v1.js';
 
 /** Exact durable identity owns one failure record and its attempt-generation fence. */
 export class FinalizedPrivateRepairRetryV1 {
@@ -28,17 +28,11 @@ export class FinalizedPrivateRepairRetryV1 {
     return !this.parked && (this.nextAttemptAtMs === null || nowMs >= this.nextAttemptAtMs);
   }
 
-  reset(): void {
-    this.#restoredDeadline = null;
-    if (this.#failure) this.#failure = resetPrivatePlacementFailureStateV1(this.#failure);
-  }
-
-  /** Explicit operator retry invalidates any in-flight failure's scheduling generation. */
-  retryNow(persistedReset?: PrivatePlacementFailureStateV1 | null): void {
+  /** Apply the owner's committed reset and invalidate older in-flight failures. */
+  retryNow(persistedReset: PrivatePlacementFailureStateV1 | null): void {
     this.#generation += 1;
     this.#restoredDeadline = null;
-    if (persistedReset !== undefined) this.#failure = persistedReset;
-    else this.reset();
+    this.#failure = persistedReset;
   }
 
   fail(generation: number, nowMs: number, intervalMs?: number, kind: CatalogRepairFailureKindV1 = 'unknown'): boolean {
