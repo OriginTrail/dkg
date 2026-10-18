@@ -337,6 +337,35 @@ describe('a share that is sent again later', () => {
     expect(OWED_PUBLIC_SHARE_RESIGN_AFTER_MS).toBeLessThan(GOSSIP_ENVELOPE_FRESHNESS_MS);
   });
 
+  it('counts its age from the timestamp the new envelope carries, not from when a slow signer returned', async () => {
+    const stamps: number[] = [];
+    const h = harness({
+      owners: () => [OWNER],
+      answer: () => 'retryable',
+      resign: async () => {
+        const stampedAt = h.clock.now;
+        stamps.push(stampedAt);
+        h.clock.now += 120_000;
+        return encodeGossipEnvelope({
+          version: GOSSIP_ENVELOPE_VERSION,
+          type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+          contextGraphId: GRAPH,
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          timestamp: new Date(stampedAt).toISOString(),
+          signature: new Uint8Array([1]),
+          payload: new Uint8Array([2]),
+        });
+      },
+    });
+    h.owe('op-1', { owner: true, signedAt: h.clock.now - OWED_PUBLIC_SHARE_RESIGN_AFTER_MS });
+    await h.store.tick();
+    expect(h.store.snapshot()[0]?.signedAt).toBe(stamps[0]);
+    h.clock.now = stamps[0]! + OWED_PUBLIC_SHARE_RESIGN_AFTER_MS;
+    await h.store.tick();
+    expect(h.resigned).toHaveLength(2);
+    expect(h.store.snapshot()[0]?.signedAt).toBe(stamps[1]);
+  });
+
   it('is kept, and not sent, when signing it again fails; the next pass signs it', async () => {
     let failures = 1;
     const h = harness({

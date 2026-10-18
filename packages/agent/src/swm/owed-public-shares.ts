@@ -407,10 +407,12 @@ export class OwedPublicShares<S> {
   /** Sign the share again; false when that failed, the share then kept for a later pass or given up. */
   async #resign(share: OwedRecord<S>, generation: number): Promise<boolean> {
     try {
+      const startedAt = this.#now();
       const wire = await this.#ports.resign(share);
       if (!this.#open(generation)) return false;
       share.wire = wire;
-      share.signedAt = this.#now();
+      // Receivers judge freshness by the timestamp inside the envelope: a slow signer must not make it look newer.
+      share.signedAt = envelopeSignedAtMs(wire, startedAt);
       share.resignFailures = 0;
       return true;
     } catch (error) {
