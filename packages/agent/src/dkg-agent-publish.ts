@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
-import { incompleteNamedKaLifecycleAuthor } from './incomplete-named-ka-lifecycle.js';
+import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
 import { withKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
@@ -5002,7 +5002,7 @@ export class PublishMethods extends DKGAgentBase {
       ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     });
     if (!history) return {
-      author: await incompleteNamedKaLifecycleAuthor(this.store, request, agentAddress),
+      author: await incompleteNamedKaLifecycleOwner(this.store, request, agentAddress),
       incomplete: true,
     };
 

@@ -8,13 +8,13 @@ import { repairPublishedDescriptor } from '../src/published-descriptor-repair.js
 import { AUTHOR, PUBLISHER, TX_HASH } from './_helpers/named-ka-recovery-fixture.js';
 
 import { descriptorRepairFixture } from './_helpers/descriptor-repair-fixture.js';
-import { incompleteNamedKaLifecycleAuthor } from '../src/incomplete-named-ka-lifecycle.js';
+import { incompleteNamedKaLifecycleOwner } from '../src/incomplete-named-ka-lifecycle.js';
 
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const s of stores.splice(0)) await s.close(); });
 const DKG = 'http://dkg.io/ontology/';
-async function fixture(version = 1) {
-  const h = await descriptorRepairFixture(version); stores.push(h.store); return h;
+async function fixture(version = 1, lifecycleOwner?: string) {
+  const h = await descriptorRepairFixture(version, AUTHOR, lifecycleOwner); stores.push(h.store); return h;
 }
 
 describe('targeted published descriptor repair', () => {
@@ -36,7 +36,12 @@ describe('targeted published descriptor repair', () => {
         await h.store.insert([h.row(p, v)]);
       };
       if (failure === 'identity') await replace('kaId', '999');
-      if (failure === 'duplicate') await h.store.insert([{ ...h.row('kaId', '402'), subject: assertionLifecycleUri(h.input.contextGraphId, AUTHOR, h.input.name) }]);
+      if (failure === 'duplicate') {
+        const retained = await h.store.query(`SELECT ?p ?o WHERE { GRAPH <${h.graph}> { <${h.subject}> ?p ?o } }`);
+        if (retained.type !== 'bindings') throw new Error('bindings required');
+        await h.store.insert(retained.bindings.map(r => ({ graph: h.graph,
+          subject: assertionLifecycleUri(h.input.contextGraphId, AUTHOR, h.input.name), predicate: r.p!, object: r.o! })));
+      }
       if (failure === 'multivalue') await h.store.insert([h.row('wmCurrentAssertion', 'ff'.repeat(32))]);
       if (failure === 'draft') await replace('wmCurrentAssertion', 'ff'.repeat(32));
       if (failure === 'swm-draft') await replace('swmCurrentAssertion', 'ff'.repeat(32));
@@ -52,6 +57,8 @@ describe('targeted published descriptor repair', () => {
       if (failure === 'private-controls') h.chain.getContextGraphAccessPolicy.mockResolvedValue(1);
       const before = await h.all();
       await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false })).rejects.toMatchObject({ code: expect.stringMatching(/REPAIR_REFUSED|RECOVERY_INCONSISTENT/) });
+      if (failure === 'duplicate') await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false }))
+        .rejects.toThrow('missing or ambiguous lifecycle identity');
       if (['draft', 'swm-draft', 'identity', 'version', 'multivalue'].includes(failure)) {
         await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false })).rejects.toThrow(
           ['draft', 'swm-draft'].includes(failure) ? 'newer local draft' : failure === 'multivalue' ? 'conflicting' : 'does not match');
@@ -185,8 +192,46 @@ describe('incomplete lifecycle diagnostics', () => {
       await h.store.deleteByPattern({ graph: h.graph, subject: h.subject, predicate: DKG + 'kaId' });
       await h.store.insert([h.row('kaId', 'not-an-integer')]);
     }
-    const pending = incompleteNamedKaLifecycleAuthor(h.store, { ...h.input, kaNumber: '402', assertionVersion: '1', sealMerkleRoot: h.snapshot.latestRoot }, AUTHOR);
+    const pending = incompleteNamedKaLifecycleOwner(h.store, { ...h.input, kaNumber: '402', assertionVersion: '1', sealMerkleRoot: h.snapshot.latestRoot }, AUTHOR);
     if (kind === 'storage') await expect(pending).rejects.toBe(failure);
     else await expect(pending).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT', cause: { code: 'KA_WM_LIFECYCLE_CORRUPT' } });
   });
+});
+
+
+it('repairs a peer-owned lifecycle while proving the wallet-authored KA identity', async () => {
+  const lifecycleOwner = '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ';
+  const h = await fixture(2, lifecycleOwner); const before = await h.all();
+  // A UAL author alone cannot select a different local owner; require the explicit selector.
+  await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false }))
+    .rejects.toThrow('missing or ambiguous lifecycle identity');
+  await expect(repairPublishedDescriptor(h.host, { ...h.input, lifecycleOwner: 'wrong-owner', dryRun: false }))
+    .rejects.toThrow('missing or ambiguous lifecycle identity');
+  expect(await h.all()).toEqual(before);
+  const provenance = 'http://www.w3.org/ns/prov#wasAttributedTo';
+  await h.store.deleteByPattern({ graph: h.graph, subject: h.subject, predicate: provenance });
+  await h.store.insert([{ graph: h.graph, subject: h.subject, predicate: provenance, object: `did:dkg:agent:${lifecycleOwner.toLowerCase()}` }]);
+  const wrongOwnerCase = await h.all();
+  await expect(repairPublishedDescriptor(h.host, { ...h.input, lifecycleOwner, dryRun: false })).rejects.toThrow('does not match');
+  expect(await h.all()).toEqual(wrongOwnerCase);
+  await h.store.deleteByPattern({ graph: h.graph, subject: h.subject, predicate: provenance });
+  await h.store.insert([{ graph: h.graph, subject: h.subject, predicate: provenance, object: `did:dkg:agent:${lifecycleOwner}` }]);
+  expect(await h.all()).toEqual(before);
+  await expect(repairPublishedDescriptor(h.host, { ...h.input, lifecycleOwner }))
+    .resolves.toMatchObject({ status: 'verified', author: ethers.getAddress(AUTHOR), lifecycleOwner, assertionVersion: '2' });
+  expect(await h.all()).toEqual(before);
+  await expect(repairPublishedDescriptor(h.host, { ...h.input, lifecycleOwner, dryRun: false }))
+    .resolves.toMatchObject({ status: 'repaired', author: ethers.getAddress(AUTHOR), lifecycleOwner });
+  const repaired = await h.all(); expect(repaired).toHaveLength(before.length + 1);
+  expect(repaired).toContain(JSON.stringify({ g: h.graph, s: h.subject, p: DKG + 'state', o: '"published"' }));
+  await repairPublishedDescriptor(h.host, { ...h.input, lifecycleOwner, dryRun: false });
+  expect(await h.all()).toEqual(repaired);
+  // The peer identity cannot substitute for the KA wallet in a retained VM graph.
+  await h.store.deleteByPattern({ graph: h.graph, subject: h.subject, predicate: DKG + 'assertionGraph' });
+  await h.store.insert([{ graph: h.graph, subject: h.subject, predicate: DKG + 'assertionGraph',
+    object: contextGraphLayerUri(h.input.contextGraphId, MemoryLayer.VerifiableMemory, lifecycleOwner, 402n) }]);
+  const wrongGraph = await h.all();
+  await expect(repairPublishedDescriptor(h.host, { ...h.input, lifecycleOwner, dryRun: false }))
+    .rejects.toThrow('conflicting published identity or layer');
+  expect(await h.all()).toEqual(wrongGraph);
 });

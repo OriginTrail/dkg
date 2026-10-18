@@ -10,14 +10,14 @@ import { AUTHOR, TX_HASH, baseRequest, legacyEvidence, seededChain } from './_he
 
 const DKG = 'http://dkg.io/ontology/';
 describe('confirmed named KA descriptor recovery [#3362]', () => {
-  it('repairs an interrupted state replacement before finalizing the original job', async () => {
+  it.each([AUTHOR, '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ'])('repairs an interrupted state replacement for lifecycle owner %s before finalizing the original job', async lifecycleOwner => {
     const store = new OxigraphStore();
     const agent = await DKGAgent.create({ name: 'descriptor-recovery', store, chainAdapter: seededChain(),
       rfc64CatalogActivation: { enabled: false } });
     vi.spyOn(agent, 'peerId', 'get').mockReturnValue('12D3KooWRecoveryFixture');
-    const request = { ...baseRequest(), agentAddress: AUTHOR };
+    const request = { ...baseRequest(), agentAddress: lifecycleOwner };
     const graph = contextGraphMetaUri(request.contextGraphId);
-    const subject = assertionLifecycleUri(request.contextGraphId, AUTHOR, request.name);
+    const subject = assertionLifecycleUri(request.contextGraphId, lifecycleOwner, request.name);
     const vmGraph = contextGraphLayerUri(request.contextGraphId, MemoryLayer.VerifiableMemory, AUTHOR, 402n);
     const content = [{ graph: vmGraph, subject: 'urn:receipt:document', predicate: 'urn:content', object: '"accepted revision"' }];
     const executor = vi.fn(async () => { throw new Error('must never publish again'); });
@@ -30,13 +30,27 @@ describe('confirmed named KA descriptor recovery [#3362]', () => {
     try {
       await store.insert([
         ...content,
+        { graph, subject, predicate: DKG + 'assertionGraph', object: vmGraph },
         ...Object.entries({ state: 'promoted', assertionName: request.name, kaId: '402',
           reservedUal: request.kaUal!, shareOperationId: request.shareOperationId,
           assertionVersion: request.assertionVersion!, swmCurrentAssertion: request.sealMerkleRoot.slice(2),
           wmCurrentAssertion: request.sealMerkleRoot.slice(2) }).map(([p, value]) => ({ graph, subject,
           predicate: DKG + p, object: JSON.stringify(value) + (p === 'kaId' ? '^^<http://www.w3.org/2001/XMLSchema#integer>' : '') })),
-        { graph, subject, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `did:dkg:agent:${AUTHOR}` },
+        { graph, subject, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `did:dkg:agent:${lifecycleOwner}` },
       ]);
+      // Existing packed-ID lookup filters lifecycle owners to the wallet namespace.
+      // Establish its pre-fault behavior for a peer-owned lifecycle independently
+      // of recovery; the owner-scoped history API is the supported lookup here.
+      let peerLookupBefore: Awaited<ReturnType<typeof agent.assertion.resolveByKaId>>;
+      if (lifecycleOwner !== AUTHOR) {
+        await applyPublishedNamedKaVmLifecycle(store, { contextGraphId: request.contextGraphId,
+          agentAddress: lifecycleOwner, name: request.name, publishedUal: request.kaUal!,
+          merkleRoot: request.sealMerkleRoot, packedKaId: BigInt(request.seal.reservedKaId!) });
+        expect(await agent.assertion.history(request.contextGraphId, request.name, { agentAddress: lifecycleOwner }))
+          .toMatchObject({ state: 'published' });
+        peerLookupBefore = await agent.assertion.resolveByKaId(request.contextGraphId, BigInt(request.seal.reservedKaId!));
+        expect(peerLookupBefore).toBeNull();
+      }
       // Exercise the actual v10.0.24-compatible ordered writer, not a synthetic row deletion.
       const insert = store.insert.bind(store);
       const fault = vi.spyOn(store, 'insert').mockImplementation(async quads => {
@@ -44,10 +58,10 @@ describe('confirmed named KA descriptor recovery [#3362]', () => {
         await insert(quads);
       });
       await expect(applyPublishedNamedKaVmLifecycle(store, { contextGraphId: request.contextGraphId,
-        agentAddress: AUTHOR, name: request.name, publishedUal: request.kaUal!,
+        agentAddress: lifecycleOwner, name: request.name, publishedUal: request.kaUal!,
         merkleRoot: request.sealMerkleRoot, packedKaId: BigInt(request.seal.reservedKaId!) })).rejects.toThrow('injected store timeout');
       fault.mockRestore();
-      expect(await agent.assertion.history(request.contextGraphId, request.name, { agentAddress: AUTHOR })).toBeNull();
+      expect(await agent.assertion.history(request.contextGraphId, request.name, { agentAddress: lifecycleOwner })).toBeNull();
       expect(await agent.assertion.resolveByKaId(request.contextGraphId, BigInt(request.seal.reservedKaId!))).toBeNull();
       // VM is already materialized. Keep canonical evidence normalization and queue transitions real.
       vi.spyOn(agent as any, 'getOrCreateFinalizationHandler').mockReturnValue({ handleChainReconciledKC: async () => 'already-confirmed' });
@@ -80,12 +94,13 @@ describe('confirmed named KA descriptor recovery [#3362]', () => {
       expect(await queue.recover()).toBe(1);
       expect((await queue.getStatus(jobId))?.status).toBe('finalized');
       expect(proofDeletes).toBe(0);
-      const descriptor = await agent.assertion.history(request.contextGraphId, request.name, { agentAddress: AUTHOR });
+      const descriptor = await agent.assertion.history(request.contextGraphId, request.name, { agentAddress: lifecycleOwner });
       expect(descriptor).toMatchObject({ state: 'published', kaNumber: '402', publishedUal: request.kaUal,
         vmCurrentAssertion: request.sealMerkleRoot.slice(2) });
-      expect(await agent.assertion.resolveByKaId(request.contextGraphId, BigInt(request.seal.reservedKaId!))).toEqual(descriptor);
+      expect(await agent.assertion.resolveByKaId(request.contextGraphId, BigInt(request.seal.reservedKaId!)))
+        .toEqual(lifecycleOwner === AUTHOR ? descriptor : peerLookupBefore!);
       expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
-      expect(await agent.assertion.history(request.contextGraphId, request.name, { agentAddress: AUTHOR })).toEqual(descriptor);
+      expect(await agent.assertion.history(request.contextGraphId, request.name, { agentAddress: lifecycleOwner })).toEqual(descriptor);
       const vm = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`);
       expect(vm.type === 'quads' && vm.quads.map(q => ({ ...q, graph: vmGraph }))).toEqual(content);
       expect(executor).not.toHaveBeenCalled();

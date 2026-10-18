@@ -5,7 +5,7 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
-import { incompleteNamedKaLifecycleAuthor } from './incomplete-named-ka-lifecycle.js';
+import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
 import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
 import { recoverReceiptBackedGraphScopedEvidence } from './receipt-backed-graph-scoped-evidence.js';
 
@@ -14,6 +14,8 @@ export interface PublishedDescriptorRepairInput {
   name: string;
   kaUal: string;
   subGraphName?: string;
+  /** Retained local lifecycle owner, when different from the UAL author (for example a peer ID). */
+  lifecycleOwner?: string;
   /** Verification only unless explicitly false. */
   dryRun?: boolean;
 }
@@ -40,10 +42,11 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
   try {
     const scope = createGraphKnowledgeAssetScope(input.kaUal, '1');
     if (scope.chainId !== host.chain.chainId) return refuse('UAL belongs to another chain');
+    const lifecycleOwner = input.lifecycleOwner ?? scope.agentAddress;
     const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
     const signal = AbortSignal.timeout(30_000);
     const work = withKeyedLocks(host.writeLocks, [assertionLifecycleWriteLockKey(
-      input.contextGraphId, input.name, scope.agentAddress, input.subGraphName,
+      input.contextGraphId, input.name, lifecycleOwner, input.subGraphName,
     )], async () => {
       signal.throwIfAborted();
       const verified = await (async () => {
@@ -75,10 +78,10 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
         if (!await host.chain.isReceiptBlockFinalAndCanonical?.({
           txHash: e.transactionHash as `0x${string}`, blockNumber: e.blockNumber, blockHash: e.blockHash as `0x${string}`,
         }, { signal })) return refuse('receipt is not final and canonical');
-        const author = await incompleteNamedKaLifecycleAuthor(host.store, {
+        const retainedOwner = await incompleteNamedKaLifecycleOwner(host.store, {
           ...input, kaNumber: scope.kaNumber, assertionVersion: vm.scope.assertionVersion,
           sealMerkleRoot: snapshot.latestRoot,
-        }, scope.agentAddress, { allowPublishedState: true });
+        }, lifecycleOwner, { allowPublishedState: true });
         // A new confirmed block is normal during verification. Re-read the asset,
         // rather than requiring the earlier snapshot's header lease to remain current.
         const current = await host.chain.readKnowledgeAssetVersionSnapshot?.(kaId, { signal });
@@ -92,7 +95,7 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
           || current.knowledgeAssetStorageGeneration !== snapshot.knowledgeAssetStorageGeneration) {
           return refuse('chain version or storage binding changed during verification');
         }
-        return { author, root: snapshot.latestRoot, assertionVersion: vm.scope.assertionVersion,
+        return { author: ethers.getAddress(scope.agentAddress), lifecycleOwner: retainedOwner, root: snapshot.latestRoot, assertionVersion: vm.scope.assertionVersion,
           transactionHash: e.transactionHash };
       })();
       signal.throwIfAborted();
@@ -100,7 +103,7 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
         // Once the existing writer is entered, never abandon its mutation on timeout.
         writeEntered = true;
         await host.stampPublishedLifecycle({ contextGraphId: input.contextGraphId, name: input.name,
-          agentAddress: verified.author, subGraphName: input.subGraphName,
+          agentAddress: verified.lifecycleOwner, subGraphName: input.subGraphName,
           publishedUal: scope.ual, merkleRoot: verified.root, packedKaId: kaId, preserveVerifiedVmProof: true });
       }
       return { status: input.dryRun === false ? 'repaired' as const : 'verified' as const,

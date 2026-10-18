@@ -404,7 +404,7 @@ describe('authorized published descriptor repair contract', () => {
           listContextGraphs: vi.fn(async () => [{ id: input.contextGraphId, subscribed: true, synced: true }]) },
       });
     expect(result).toEqual({ status: 200, body: { status: dryRun === false ? 'repaired' : 'verified' } });
-    expect(repairPublishedKnowledgeAssetDescriptor).toHaveBeenCalledExactlyOnceWith({ ...input, name: 'asset', subGraphName: undefined, dryRun: dryRun !== false });
+    expect(repairPublishedKnowledgeAssetDescriptor).toHaveBeenCalledExactlyOnceWith({ ...input, name: 'asset', lifecycleOwner: undefined, subGraphName: undefined, dryRun: dryRun !== false });
   });
   it.each([null, 0, 1, 'false', {}, []])('rejects non-boolean dryRun=%j before SDK access', async dryRun => {
     const repairPublishedKnowledgeAssetDescriptor = vi.fn();
@@ -414,4 +414,21 @@ describe('authorized published descriptor repair contract', () => {
     expect(result.status).toBe(400);
     expect(repairPublishedKnowledgeAssetDescriptor).not.toHaveBeenCalled();
   });
+});
+
+
+it('passes an explicit lifecycle owner separately from the confirmed UAL', async () => {
+  const input = { contextGraphId: 'repair-cg', kaUal: 'did:dkg:evm:31337/0x00000000000000000000000000000000000000a1/402', lifecycleOwner: '12D3KooWLifecycleOwner' };
+  const repairPublishedKnowledgeAssetDescriptor = vi.fn(async () => ({ status: 'verified' }));
+  const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST', '/api/knowledge-assets/asset/vm/repair-descriptor', OPERATOR,
+    { body: JSON.stringify(input), agent: { repairPublishedKnowledgeAssetDescriptor,
+      listContextGraphs: vi.fn(async () => [{ id: input.contextGraphId, subscribed: true, synced: true }]) } });
+  expect(result.status).toBe(200);
+  expect(repairPublishedKnowledgeAssetDescriptor).toHaveBeenCalledExactlyOnceWith({ ...input, name: 'asset', subGraphName: undefined, dryRun: true });
+});
+it.each([null, 42, '', ' owner ', 'x'.repeat(257)])('rejects invalid lifecycleOwner=%j before SDK access', async lifecycleOwner => {
+  const repairPublishedKnowledgeAssetDescriptor = vi.fn();
+  const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST', '/api/knowledge-assets/asset/vm/repair-descriptor', OPERATOR,
+    { body: JSON.stringify({ contextGraphId: 'repair-cg', kaUal: 'ual', lifecycleOwner }), agent: { repairPublishedKnowledgeAssetDescriptor } });
+  expect(result.status).toBe(400); expect(repairPublishedKnowledgeAssetDescriptor).not.toHaveBeenCalled();
 });

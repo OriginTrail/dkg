@@ -14,8 +14,10 @@ function gate() {
 }
 
 describe('repair and the real agent draft writer share their lifecycle lock', () => {
-  it.each(['repair', 'writer'] as const)('preserves a new draft with %s entering first and mixed author casing', async first => {
-    const h = await descriptorRepairFixture();
+  it.each(['repair', 'writer'].flatMap(first => ['wallet', 'peer'].map(owner => ({ first, owner }))))(
+    'preserves a new draft with $first entering first and $owner lifecycle ownership', async ({ first, owner }) => {
+    const peerOwner = '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ';
+    const h = await descriptorRepairFixture(1, AUTHOR, owner === 'peer' ? peerOwner : undefined);
     await h.store.deleteByPattern({ graph: h.graph, subject: h.subject, predicate: DKG + 'kaId' });
     await h.store.insert([{ ...h.row('kaId', '402'), object: '"402"^^<http://www.w3.org/2001/XMLSchema#integer>' },
       h.row('contentScopeVersion', String(GRAPH_KA_CONTENT_SCOPE_VERSION))]);
@@ -25,7 +27,8 @@ describe('repair and the real agent draft writer share their lifecycle lock', ()
     vi.spyOn(agent, 'peerId', 'get').mockReturnValue('12D3KooWRepairSerialization');
     vi.spyOn(agent, 'getContextGraphOnChainId').mockResolvedValue('1');
     // UAL author is lowercase; the production writer uses the retained checksummed subject.
-    const author = ethers.getAddress(AUTHOR);
+    const author = owner === 'peer' ? peerOwner : ethers.getAddress(AUTHOR);
+    const input = { ...h.input, ...(owner === 'peer' ? { lifecycleOwner: author } : {}) };
     expect(author).not.toBe(AUTHOR);
     const entered = gate(); const release = gate();
     const before = await h.all();
@@ -45,7 +48,7 @@ describe('repair and the real agent draft writer share their lifecycle lock', ()
       }
       return insert(quads);
     });
-    const repair = () => agent.repairPublishedKnowledgeAssetDescriptor({ ...h.input, dryRun: false });
+    const repair = () => agent.repairPublishedKnowledgeAssetDescriptor({ ...input, dryRun: false });
     const create = () => agent.assertion.create(h.input.contextGraphId, h.input.name, { agentAddress: author });
     let pendingRepair: ReturnType<typeof repair> | undefined;
     let pendingCreate: ReturnType<typeof create> | undefined;
@@ -65,10 +68,10 @@ describe('repair and the real agent draft writer share their lifecycle lock', ()
       const wm = contextGraphLayerUri(h.input.contextGraphId, MemoryLayer.WorkingMemory, AUTHOR, 402n);
       const draft = [{ graph: wm, subject: 'urn:new:draft', predicate: 'urn:body', object: '"newer draft must survive"' }];
       await agent.assertion.write(h.input.contextGraphId, h.input.name, draft, { agentAddress: author });
-      const history = await agent.assertion.history(h.input.contextGraphId, h.input.name, { agentAddress: AUTHOR });
+      const history = await agent.assertion.history(h.input.contextGraphId, h.input.name, { agentAddress: owner === 'peer' ? author : AUTHOR });
       expect(history).toMatchObject({ state: 'created', kaNumber: '402', vmCurrentAssertion: h.snapshot.latestRoot.slice(2) });
       const rows = await h.all();
-      const refused = agent.repairPublishedKnowledgeAssetDescriptor({ ...h.input, dryRun: false });
+      const refused = agent.repairPublishedKnowledgeAssetDescriptor({ ...input, dryRun: false });
       await expect(refused).rejects.toThrow('state exists');
       expect(await h.all()).toEqual(rows);
       const content = await h.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${wm}> { ?s ?p ?o } }`);

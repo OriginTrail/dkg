@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { contextGraphLayerUri, createGraphKnowledgeAssetScope, MemoryLayer } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { readAssertionLifecycleCandidates, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
@@ -13,8 +13,8 @@ export type NamedKaLifecycleRecoveryFacts = Pick<KnowledgeAssetVmPublishRequest,
  * A descriptor's required state can be absent after an interrupted replacement;
  * the retained identity, version and VM root must independently prove its owner.
  */
-export async function incompleteNamedKaLifecycleAuthor(
-  store: TripleStore, request: NamedKaLifecycleRecoveryFacts, author: string,
+export async function incompleteNamedKaLifecycleOwner(
+  store: TripleStore, request: NamedKaLifecycleRecoveryFacts, lifecycleOwner: string,
   options: { allowPublishedState?: boolean } = {},
 ): Promise<string> {
   const refuse = (reason: string, cause?: unknown): never => {
@@ -25,7 +25,7 @@ export async function incompleteNamedKaLifecycleAuthor(
   if (!request.kaNumber || !request.kaUal || !request.assertionVersion
     || !/^(?:0x)?[0-9a-fA-F]{64}$/.test(request.sealMerkleRoot)) return refuse('incomplete recovery identity');
   let candidates;
-  try { candidates = await readAssertionLifecycleCandidates(store, request.contextGraphId, author, request.name, request.subGraphName); }
+  try { candidates = await readAssertionLifecycleCandidates(store, request.contextGraphId, lifecycleOwner, request.name, request.subGraphName); }
   catch (error) {
     if ((error as { code?: string } | null)?.code !== 'KA_WM_LIFECYCLE_CORRUPT') throw error;
     return refuse('invalid retained lifecycle reservation', error);
@@ -54,14 +54,20 @@ export async function incompleteNamedKaLifecycleAuthor(
   const published = literal('publishedUal');
   const layer = literal('memoryLayer');
   const graph = one(DKG + 'assertionGraph');
+  const scope = createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+  if (scope.kaNumber !== request.kaNumber) return refuse('KA graph identity does not match the reservation');
   const permittedGraphs = [MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory]
-    .map(layer => contextGraphLayerUri(request.contextGraphId, layer, author, BigInt(request.kaNumber!), request.subGraphName));
+    .map(layer => contextGraphLayerUri(request.contextGraphId, layer, scope.agentAddress, BigInt(scope.kaNumber), request.subGraphName));
   if ((published !== undefined && published !== request.kaUal)
     || layer !== 'VM' || (graph !== undefined && !permittedGraphs.includes(graph))) {
     return refuse('conflicting published identity or layer');
   }
+  const attributedOwner = one('http://www.w3.org/ns/prov#wasAttributedTo');
+  const expectedOwner = `did:dkg:agent:${lifecycleOwner}`;
+  const matchesOwner = /^0x[0-9a-fA-F]{40}$/.test(lifecycleOwner)
+    ? attributedOwner?.toLowerCase() === expectedOwner.toLowerCase() : attributedOwner === expectedOwner;
   if (literal('assertionName') !== request.name
-    || one('http://www.w3.org/ns/prov#wasAttributedTo')?.toLowerCase() !== `did:dkg:agent:${author}`.toLowerCase()
+    || !matchesOwner
     || candidate.record.number?.toString() !== request.kaNumber
     || literal('reservedUal') !== request.kaUal
     || literal('assertionVersion') !== request.assertionVersion) {

@@ -19,12 +19,16 @@ export async function handlePublishedDescriptorRepair(
   if (typeof parsed.kaUal !== 'string' || (parsed.dryRun !== undefined && typeof parsed.dryRun !== 'boolean')) {
     return jsonResponse(res, 400, { error: 'kaUal is required; dryRun must be boolean' });
   }
+  if (parsed.lifecycleOwner !== undefined && (typeof parsed.lifecycleOwner !== 'string'
+    || !parsed.lifecycleOwner.trim() || parsed.lifecycleOwner !== parsed.lifecycleOwner.trim() || parsed.lifecycleOwner.length > 256)) {
+    return jsonResponse(res, 400, { error: 'lifecycleOwner must be a nonempty owner identifier of at most 256 characters' });
+  }
   if (!validateOptionalSubGraphName(parsed.subGraphName, res)) return;
   const contextGraphId = await resolveRequiredWriteContextGraphId(agent, parsed.contextGraphId, res, preflight);
   if (!contextGraphId) return;
   try {
     return jsonResponse(res, 200, await agent.repairPublishedKnowledgeAssetDescriptor({
-      contextGraphId, name, kaUal: parsed.kaUal, subGraphName: parsed.subGraphName, dryRun: parsed.dryRun !== false,
+      contextGraphId, name, kaUal: parsed.kaUal, lifecycleOwner: parsed.lifecycleOwner, subGraphName: parsed.subGraphName, dryRun: parsed.dryRun !== false,
     }));
   } catch (error) {
     const code = (error as { code?: string }).code ?? 'KA_DESCRIPTOR_REPAIR_REFUSED';

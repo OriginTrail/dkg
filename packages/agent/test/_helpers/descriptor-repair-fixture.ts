@@ -9,9 +9,9 @@ import { applyPublishedNamedKaVmLifecycle } from '../../src/named-ka-vm-lifecycl
 import { AUTHOR, PUBLISHER, TX_HASH } from './named-ka-recovery-fixture.js';
 
 const DKG = 'http://dkg.io/ontology/';
-export async function descriptorRepairFixture(version = 1, sourceAuthor: string = AUTHOR) {
+export async function descriptorRepairFixture(version = 1, sourceAuthor: string = AUTHOR, lifecycleOwner?: string) {
   const store = new OxigraphStore();
-  const author = ethers.getAddress(sourceAuthor);
+  const author = lifecycleOwner ?? ethers.getAddress(sourceAuthor);
   const input = { contextGraphId: 'repair-cg', name: 'published', kaUal: `did:dkg:evm:31337/${sourceAuthor}/402` };
   const kaId = (BigInt(sourceAuthor) << 96n) | 402n;
   const subject = assertionLifecycleUri(input.contextGraphId, author, input.name);
@@ -52,7 +52,7 @@ export async function descriptorRepairFixture(version = 1, sourceAuthor: string 
     wmCurrentAssertion: snapshot.latestRoot.slice(2), swmCurrentAssertion: snapshot.latestRoot.slice(2),
     shareOperationId: 'original-share' }).map(([p, v]) => row(p, v)),
   { graph, subject, predicate: DKG + 'assertionGraph', object: vm },
-  { graph, subject, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `did:dkg:agent:${sourceAuthor}` },
+  { graph, subject, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `did:dkg:agent:${author}` },
   ]);
   await host.stampPublishedLifecycle({ ...input, agentAddress: author, publishedUal: input.kaUal,
     merkleRoot: snapshot.latestRoot, packedKaId: kaId });
