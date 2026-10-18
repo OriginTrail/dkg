@@ -148,6 +148,43 @@ describe('AsyncLiftRunner', () => {
     } finally { await runner.stop(); }
   });
 
+  it('closes admission synchronously before the publisher pause barrier settles', async () => {
+    let releasePause!: () => void;
+    const pauseHeld = new Promise<void>(resolve => { releasePause = resolve; });
+    const resume = vi.fn(async () => {});
+    const runner = new AsyncLiftRunner({ publisher: createPublisher({ pause: () => pauseHeld, resume }),
+      walletIds: ['wallet-1'] });
+    const closing = runner.closeClaims();
+    try {
+      expect(runner.claimGateStatus().held).toBe(true);
+      await expect(runner.releaseClaims()).rejects.toThrow('closed');
+      expect(resume).not.toHaveBeenCalled();
+    } finally { releasePause(); await closing; await runner.stop(); }
+  });
+
+  it('reinstalls publisher pause when terminal closure races an awaited resume', async () => {
+    let enterResume!: () => void; const entered = new Promise<void>(resolve => { enterResume = resolve; });
+    let releaseResume!: () => void; const held = new Promise<void>(resolve => { releaseResume = resolve; });
+    let paused = false;
+    const processNext = vi.fn(async () => null);
+    const runner = new AsyncLiftRunner({ publisher: createPublisher({
+      pause: async () => { paused = true; },
+      resume: async () => { enterResume(); await held; paused = false; },
+      processNext,
+    }), walletIds: ['wallet-1'], pollIntervalMs: 60_000 });
+    await runner.holdClaims(); await runner.start();
+    const resuming = runner.releaseClaims();
+    const rejected = expect(resuming).rejects.toThrow('closed');
+    try {
+      await entered; await runner.closeClaims();
+      releaseResume(); await rejected;
+      expect(runner.claimGateStatus().held).toBe(true);
+      expect(paused).toBe(true);
+      expect(processNext).not.toHaveBeenCalled();
+      await expect(runner.releaseClaims()).rejects.toThrow('closed');
+    } finally { releaseResume(); await resuming.catch(() => {}); await runner.stop(); }
+  });
+
   it('runs recovery before processing wallets', async () => {
     const order: string[] = [];
     const publisher = createPublisher({
