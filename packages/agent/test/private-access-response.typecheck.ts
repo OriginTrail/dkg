@@ -30,7 +30,7 @@ if (isAccessError(unknownFailure)) {
 const incompleteStatuses: Record<AccessErrorCode, number> = { ACCESS_UNAVAILABLE: 503 };
 void incompleteStatuses;
 
-import { AccessClient, RequestOwnedAccessClient } from '@origintrail-official/dkg-publisher';
+import { AccessClient, RequestOwnedAccessClient, type AccessResult, type RequestOwnedAccessResult } from '@origintrail-official/dkg-publisher';
 import type { Ed25519Keypair } from '@origintrail-official/dkg-core';
 declare const keypair: Ed25519Keypair;
 declare const legacyTransport: ConstructorParameters<typeof AccessClient>[0];
@@ -51,3 +51,27 @@ const durableTransport: RequestOwnedAccessSendSurface = {
   sendRequestOwned: messenger.sendReliable.bind(messenger),
 };
 void [ownedTransport, durableTransport];
+
+type OwnedAccessResult = Awaited<ReturnType<RequestOwnedAccessClient['requestAccess']>>;
+declare const ownedResult: OwnedAccessResult;
+if (ownedResult.granted) {
+  const root: Uint8Array = ownedResult.privateMerkleRoot;
+  const verified: boolean = ownedResult.verified;
+  void [root, verified];
+} else {
+  const verified: false = ownedResult.verified;
+  const noQuads: [] = ownedResult.quads;
+  // @ts-expect-error Denied decoded responses do not expose a root.
+  void ownedResult.privateMerkleRoot;
+  void [verified, noQuads];
+}
+// @ts-expect-error Every granted owned response carries the decoded root, including unverified payloads.
+const ownedMissingRoot: OwnedAccessResult = { granted: true, quads: [], verified: false };
+// @ts-expect-error A denied owned response cannot contain content root evidence.
+const ownedDeniedWithRoot: OwnedAccessResult = { granted: false, quads: [], verified: false, privateMerkleRoot: new Uint8Array() };
+const ownedUnverified: OwnedAccessResult = { granted: true, quads: [], verified: false, privateMerkleRoot: new Uint8Array() };
+// Existing SDK consumers keep the legacy, wider contract; owned results remain assignable to it.
+const legacyResult: AccessResult = { granted: true, quads: [], verified: false };
+const compatibleResult: AccessResult = ownedResult;
+const publicOwnedResult: RequestOwnedAccessResult = ownedResult;
+void [ownedMissingRoot, ownedDeniedWithRoot, ownedUnverified, legacyResult, compatibleResult, publicOwnedResult];

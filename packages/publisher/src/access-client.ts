@@ -23,6 +23,11 @@ export interface AccessResult {
   rejectionReason?: string;
 }
 
+/** Decoded peer response: granted content always carries its supplied root, even if unverified. */
+export type RequestOwnedAccessResult =
+  | { granted: true; quads: Quad[]; privateMerkleRoot: Uint8Array; verified: boolean }
+  | { granted: false; quads: []; verified: false; rejectionReason?: string };
+
 type AccessDeliveredResult = { delivered: true; response: Uint8Array; attempts: number; messageId: string };
 type AccessSendFailure = { delivered: false; queued: boolean; attempts: number; messageId: string; error: string };
 type AccessSendResult = AccessDeliveredResult | AccessSendFailure;
@@ -69,7 +74,7 @@ export class RequestOwnedAccessClient {
   }
 
   async requestAccess(publisherPeerId: string, kaUal: string,
-    paymentProof: Uint8Array = new Uint8Array(0), options: AccessClientRequestOptions = {}): Promise<AccessResult> {
+    paymentProof: Uint8Array = new Uint8Array(0), options: AccessClientRequestOptions = {}): Promise<RequestOwnedAccessResult> {
     const { signal, timeoutMs, maxResponseBytes, maxQuads } = options;
     signal?.throwIfAborted();
     for (const limit of [maxResponseBytes, maxQuads]) {
@@ -77,7 +82,7 @@ export class RequestOwnedAccessClient {
         throw new RangeError('Private access limits must be positive safe integers');
       }
     }
-    let result: AccessResult | null;
+    let result: RequestOwnedAccessResult | null;
     try {
       result = await resolveWithinAbort(async () => {
         const payload = await encodeRequest(this.keypair, this.peerId, kaUal, paymentProof);
@@ -108,7 +113,7 @@ async function encodeRequest(keypair: Ed25519Keypair, requesterPeerId: string,
 }
 
 function decodeResult(bytes: Uint8Array,
-  { maxResponseBytes, maxQuads }: Pick<AccessClientRequestOptions, 'maxResponseBytes' | 'maxQuads'> = {}): AccessResult {
+  { maxResponseBytes, maxQuads }: Pick<AccessClientRequestOptions, 'maxResponseBytes' | 'maxQuads'> = {}): RequestOwnedAccessResult {
   if (maxResponseBytes !== undefined && bytes.byteLength > maxResponseBytes) {
     throw accessError('ACCESS_RESPONSE_TOO_LARGE', 'Private access response exceeds byte limit');
   }

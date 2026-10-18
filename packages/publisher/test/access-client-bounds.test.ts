@@ -17,6 +17,33 @@ async function client(send: RequestOwnedAccessSendSurface['sendRequestOwned']) {
 }
 
 describe('caller-owned private access bounds', () => {
+  it.each(['owned', 'legacy'] as const)('%s decoder exposes a granted root even when the payload is unverified', async mode => {
+    const response = encodeAccessResponse({ granted: true,
+      nquads: new TextEncoder().encode('<urn:a> <urn:p> "a" <urn:g> .'),
+      privateMerkleRoot: new Uint8Array(), rejectionReason: '',
+    });
+    const send = async () => result(response);
+    const access = mode === 'owned' ? await client(send)
+      : new AccessClient({ sendReliable: send }, await generateEd25519Keypair(), 'local-peer');
+    const decoded = await access.requestAccess('publisher-peer', UAL);
+    expect(decoded).toMatchObject({ granted: true, verified: false });
+    expect(decoded.quads).toHaveLength(1);
+    expect(decoded.privateMerkleRoot).toBeInstanceOf(Uint8Array);
+    expect(decoded.privateMerkleRoot).toHaveLength(0);
+  });
+
+  it.each(['owned', 'legacy'] as const)('%s decoder drops content and root from a denied peer response', async mode => {
+    const response = encodeAccessResponse({ granted: false,
+      nquads: new TextEncoder().encode('<urn:a> <urn:p> "a" <urn:g> .'),
+      privateMerkleRoot: new Uint8Array(32).fill(1), rejectionReason: 'not allowed',
+    });
+    const send = async () => result(response);
+    const access = mode === 'owned' ? await client(send)
+      : new AccessClient({ sendReliable: send }, await generateEd25519Keypair(), 'local-peer');
+    expect(await access.requestAccess('publisher-peer', UAL))
+      .toEqual({ granted: false, quads: [], verified: false, rejectionReason: 'not allowed' });
+  });
+
   it('recognizes declared cross-package failures and rejects unknown codes', () => {
     for (const code of ACCESS_ERROR_CODES) {
       expect(isAccessError(accessError(code, 'local detail'))).toBe(true);

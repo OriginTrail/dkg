@@ -60,7 +60,7 @@ export async function requestOwnedPrivateAccess(
     if (!result.verified) throw accessError('ACCESS_INTEGRITY_FAILED', 'The peer payload does not match its supplied root');
     return {
       granted: true, quads: result.quads, storedInGraph: false,
-      privateMerkleRoot: `0x${Buffer.from(result.privateMerkleRoot!).toString('hex')}`,
+      privateMerkleRoot: `0x${Buffer.from(result.privateMerkleRoot).toString('hex')}`,
       verification: { kind: 'peer-root-self-check', matches: true, chainAnchored: false },
     };
   } catch (error) {
