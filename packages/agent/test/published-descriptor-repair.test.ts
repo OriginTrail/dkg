@@ -26,7 +26,6 @@ async function fixture() {
   const chain = {
     chainId: 'evm:31337',
     readKnowledgeAssetVersionSnapshot: vi.fn(async () => snapshot),
-    knowledgeAssetVersionSnapshotIsCurrent: vi.fn(async () => true),
     getKAContextGraphId: vi.fn(async () => 1n), getMerkleRootCount: vi.fn(async () => 1n),
     isContextGraphActiveOnChain: vi.fn(async () => true), getContextGraphAccessPolicy: vi.fn(async () => 0),
     isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
@@ -86,12 +85,21 @@ describe('targeted published descriptor repair', () => {
       if (failure === 'chain-cg') h.chain.getKAContextGraphId.mockResolvedValue(2n);
       if (failure === 'receipt') h.chain.resolveCanonicalFinalizationReceipt.mockRejectedValue(new Error('receipt unavailable'));
       if (failure === 'finality') h.chain.isReceiptBlockFinalAndCanonical.mockResolvedValue(false);
-      if (failure === 'chain-moved') h.chain.knowledgeAssetVersionSnapshotIsCurrent.mockResolvedValue(false);
+      if (failure === 'chain-moved') h.chain.readKnowledgeAssetVersionSnapshot.mockResolvedValueOnce(h.snapshot)
+        .mockResolvedValueOnce({ ...h.snapshot, rootCount: 2n });
       if (failure === 'private-controls') h.chain.getContextGraphAccessPolicy.mockResolvedValue(1);
       const before = await h.all();
       await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false })).rejects.toMatchObject({ code: expect.stringMatching(/REPAIR_REFUSED|RECOVERY_INCONSISTENT/) });
       expect(await h.all()).toEqual(before);
     });
+
+  it('accepts a new confirmed block when the coherent asset version is unchanged', async () => {
+    const h = await fixture();
+    h.chain.readKnowledgeAssetVersionSnapshot.mockResolvedValueOnce(h.snapshot)
+      .mockResolvedValueOnce({ ...h.snapshot, blockNumber: 101, blockHash: `0x${'22'.repeat(32)}` });
+    await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false }))
+      .resolves.toMatchObject({ status: 'repaired' });
+  });
 
   it('rejects concurrent repair instead of accumulating work', async () => {
     const h = await fixture(); let release!: () => void;

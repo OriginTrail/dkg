@@ -72,13 +72,23 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
         if (!await host.chain.isReceiptBlockFinalAndCanonical?.({
           txHash: e.transactionHash as `0x${string}`, blockNumber: e.blockNumber, blockHash: e.blockHash as `0x${string}`,
         }, { signal })) return refuse('receipt is not final and canonical');
-        if (!await host.chain.knowledgeAssetVersionSnapshotIsCurrent?.(kaId, snapshot, { signal })) {
-          return refuse('chain version changed during verification');
-        }
         const author = await incompleteNamedKaLifecycleAuthor(host.store, {
           ...input, kaNumber: scope.kaNumber, assertionVersion: vm.scope.assertionVersion,
           sealMerkleRoot: snapshot.latestRoot,
         }, scope.agentAddress, { allowPublishedState: true, requireCompleteVmProjection: true });
+        // A new confirmed block is normal during verification. Re-read the asset,
+        // rather than requiring the earlier snapshot's header lease to remain current.
+        const current = await host.chain.readKnowledgeAssetVersionSnapshot?.(kaId, { signal });
+        if (!current || current.blockNumber < snapshot.blockNumber
+          || (current.blockNumber === snapshot.blockNumber && current.blockHash !== snapshot.blockHash)
+          || current.rootCount !== snapshot.rootCount
+          || current.latestRoot.toLowerCase() !== snapshot.latestRoot.toLowerCase()
+          || current.latestAuthor.toLowerCase() !== snapshot.latestAuthor.toLowerCase()
+          || current.latestPublisher.toLowerCase() !== snapshot.latestPublisher.toLowerCase()
+          || current.knowledgeAssetStorageAddress !== snapshot.knowledgeAssetStorageAddress
+          || current.knowledgeAssetStorageGeneration !== snapshot.knowledgeAssetStorageGeneration) {
+          return refuse('chain version or storage binding changed during verification');
+        }
         return { author, root: snapshot.latestRoot, assertionVersion: vm.scope.assertionVersion,
           transactionHash: e.transactionHash };
       })();

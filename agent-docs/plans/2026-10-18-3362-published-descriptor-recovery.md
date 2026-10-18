@@ -42,3 +42,11 @@ Already-cleared jobs require a targeted operator repair endpoint. It defaults to
 - 138 agent tests (six suites) and 95 CLI tests (two suites) passed, including lifecycle, recovery, memory layers, operator proof/refusal and admin isolation. Chain evidence is controlled in the focused fault tests; live chain proof remains required.
 - Prepared Base Sepolia batch-1 claimed; balances and all pending/latest nonce baselines verified. Live plan saved under ignored `.scratch/3362/live-plan.md`.
 - Review rounds: 0/10; PR not yet opened.
+
+### Live validation correction
+
+PR #3365 opened at `71605cd6c`; otReviewAgent explicitly requested via REST (CLI reviewer editing required an unavailable organization-read scope). Initial checks have no failures; review pending.
+
+The first live operator dry-run correctly refused to mutate, but exposed an overly strict snapshot-header lease: normal Base Sepolia block advancement invalidated it even when the KA was unchanged. Replace the lease check with a fresh coherent asset snapshot, comparing root count/root/author/publisher/storage binding and refusing older or reorged same-height views. A new test accepts block advancement and retains the version-change refusal. Focused checks now pass 24 tests; typecheck and lint pass. Live ordinary publications continue on the initial binary until their queue drains; rebuild/restart on the correction before operator acceptance testing.
+
+Live fault evidence: a real confirmed publication's ordered state insertion failed twice; both descriptor reads became unavailable and the same transaction-bearing job remained included. First 20 ordinary heads passed name/UAL descriptor, exact-content and independent chain checks. Full campaign, restart and cleanup remain pending. Validation-response round 1; remote findings not yet received.
