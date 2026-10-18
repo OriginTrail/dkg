@@ -2747,8 +2747,9 @@ export class DKGAgent extends DKGAgentBase {
     const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
     void storageACKDrain.catch(() => {});
     this.peerSyncSession.close();
-    // No change notice, forwarded catalog head or notice pull starts after this.
+    // No change notice, forwarded catalog head, notice pull or owed share send starts after this.
     this.stopSwmChangeNoticesV1();
+    this.stopOwedPublicSharesV1();
     // Cancelling a waiter alone does not retire the shared physical scan.
     // Detached cold authority flights are aborted here too: after stop() no
     // request can consume their result, and the chain reader closes below.
