@@ -83,6 +83,7 @@ export default defineConfig({
       "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
       'test/durable-share-inventory.test.ts',
+      'test/committed-share-handoff.test.ts',
       'test/promote-lifecycle-partial-commit.test.ts',
       "test/promote-durable-root-companion.test.ts",
       "test/promote-swm-pointer-post-commit.test.ts",

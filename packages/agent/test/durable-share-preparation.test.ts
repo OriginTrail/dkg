@@ -9,6 +9,7 @@ import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
 import { commitConfirmedDurableShareInventory } from '../src/internal/promote/durable-vm-share-inventory.js';
 import { SwmCatalogAuthorityNotReady } from '../src/internal/swm-inventory-write.js';
+import { committedSharePendingCatalogHandoff, inventoryHandoffPendingFailure } from '../src/internal/promote/inventory-recovery-failure.js';
 import { resolveRfc64CatalogAuthoringPolicyV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import { Wallet } from 'ethers';
 
@@ -160,6 +161,37 @@ describe('agent durable share preparation and replay', () => {
     expect(() => agent.requiresRfc64ShareInventoryHandoffV1(CG, undefined)).toThrow(SwmCatalogAuthorityNotReady);
     await expect(agent.assertion.prepareDurableShare(CG, NAME)).rejects.toMatchObject({
       code: 'PROMOTE_RETRYABLE_FAILURE', cause: expect.any(SwmCatalogAuthorityNotReady) });
+  });
+
+  it('carries the committed share on a pending handoff failure while the bound obligation stays thrown', async () => {
+    const wallet = new Wallet(`0x${'22'.repeat(32)}`), author = wallet.address.toLowerCase();
+    const { agent, store, finalized } = await setup(author);
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, ...ACTIVE_LANE });
+    agent.createRfc64CatalogAuthorSignerV1 = () => ({ address: author, signMessage: wallet.signMessage.bind(wallet) });
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: author });
+    expect(prepared.recoveryBinding.inventoryRequired).toBe(true);
+    // The lane closed after admission and one responsibility pass finds it still closed.
+    agent.commitRfc64SwmAuthorInventoryV1 = vi.fn(async () => ({ status: 'dormant', dormantReason: 'inactive-lane' }));
+    agent.reconcileRfc64CatalogResponsibilityV1 = vi.fn(async () => ({ active: false, mode: 'catalog' }));
+    const failure = await agent.assertion.promote(CG, NAME, prepared).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE', cause: { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'inactive-lane' } });
+    expect(committedSharePendingCatalogHandoff(failure)).toEqual({ reason: 'inactive-lane', result: { promotedCount: 1,
+      sealed: true, publishReady: true, shareOperationId: prepared.recoveryBinding.intent.operationId } });
+    expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledOnce();
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    // A policy refusal after the commit is not a pending handoff and carries nothing.
+    agent.commitRfc64SwmAuthorInventoryV1 = vi.fn(async () => ({ status: 'dormant', dormantReason: 'policy-mismatch' }));
+    const refused = await agent.assertion.promote(CG, NAME, prepared).catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
+    expect(committedSharePendingCatalogHandoff(refused)).toBeUndefined();
+  });
+
+  it('carries nothing on an unbound promotion whose tail reports a pending handoff', async () => {
+    const { agent } = await setup();
+    const pending = inventoryHandoffPendingFailure('inactive-lane', 'Durable share inventory remains pending: inactive-lane');
+    vi.spyOn(agent, 'afterDurableSwmPromotionV1').mockRejectedValueOnce(pending);
+    await expect(agent.assertion.promote(CG, NAME)).rejects.toBe(pending);
+    expect(committedSharePendingCatalogHandoff(pending)).toBeUndefined();
   });
 
   it.each(['owned', 'inactive', 'pending', 'authority-refused', 'wrong-seal'])('requires exact confirmed handoff ownership: %s', async outcome => {

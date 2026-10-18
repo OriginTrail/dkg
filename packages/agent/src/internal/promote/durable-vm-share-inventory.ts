@@ -3,7 +3,7 @@ import { canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGrap
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { BoundDurableSwmPromotionParamsV1 } from '../../dkg-agent-rfc64-catalog-auto-publish.js';
 import { resolveDurableGraphScopedAuthorSealCandidateV1 } from '../../durable-author-seal-resolver-v1.js';
-import { inventoryHandoffPendingFailure, throwInventoryRecoveryFailure } from './inventory-recovery-failure.js';
+import { inventoryHandoffPendingFailure, throwConfirmedOwnershipFailure } from './inventory-recovery-failure.js';
 
 /** The publisher verified VM content, or inventory observed the exact confirmation fence. */
 export async function commitConfirmedDurableShareInventory(agent: DKGAgent, params: BoundDurableSwmPromotionParamsV1): Promise<void> {
@@ -25,6 +25,6 @@ export async function commitConfirmedDurableShareInventory(agent: DKGAgent, para
       ctx: params.ctx, publicationLabel: 'queued publish',
       expectedWorkspaceAccessPolicy: binding.intent.accessPolicy,
     });
-  } catch (error) { return throwInventoryRecoveryFailure(error); }
+  } catch (error) { return throwConfirmedOwnershipFailure(error); }
   if (ownership !== 'owned') throw inventoryHandoffPendingFailure('confirmed-ownership', 'Confirmed share catalog ownership remains pending');
 }

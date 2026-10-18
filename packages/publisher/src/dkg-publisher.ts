@@ -4,7 +4,7 @@ import { assertionLifecycleWriteLockKey, writeLocksForStore } from './store-writ
 import { assertNoUnfinishedBoundShare, unfinishedBoundShareError } from './bound-share-mutation-guard.js';
 import type { BoundPromoteRequest } from './async-promote-queue-types.js';
 import { readAssertionPromoteEvidence, parsePromoteLifecycleLiteral } from './assertion-promote-evidence.js';
-import { verifyCompletedLegacyPromote } from './completed-legacy-promote.js';
+import { confirmedVmSupersedesSeal, verifyCompletedLegacyPromote } from './completed-legacy-promote.js';
 import { snapshotPublisherPromoteOptions, type PublisherAssertionPromoteOptions, type AssertionPromoteResult } from './assertion-promote-types.js';
 export type { PublisherAssertionPromoteOptions } from './assertion-promote-types.js';
 import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
@@ -8431,7 +8431,19 @@ export class DKGPublisher implements Publisher {
       // left stale WM behind. Never re-promote that copy or regress VM lifecycle.
       // A sanctioned reopened draft has a new WM lifecycle/seal instead.
       // Validate the exact VM payload before accepting the stale retry as a no-op.
-      const completed = await this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName);
+      let completed: AssertionPromoteResult | null;
+      try { completed = await this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName); } catch (error) {
+        // A bound replay accepts only a proven, strictly newer confirmed version of the same VM graph. It writes no VM, WM,
+        // private content or gossip; a failed payload validation has already cleared the share-complete marker, as the VM no-op does.
+        if (!opts?.recoveryBinding || !await confirmedVmSupersedesSeal({ store: this.store, privateStore: this.privateStore,
+          scopedQuads: graph => this.assertionScopedQuads(graph) }, contextGraphId, seal, opts.subGraphName).catch(proofError => {
+          // Keep the mismatch visible when the proof itself fails; the proof's error decides the retry.
+          const mismatch = error instanceof Error ? error.message : String(error);
+          this.log.warn(createOperationContext('share'), `Completed VM check failed and its supersession proof could not complete: ${mismatch}`);
+          throw proofError;
+        })) throw error;
+        return { promotedCount: 0, promotedAllRoots: false };
+      }
       if (!completed) throw new Error('Cannot verify completed VM promotion');
       return { promotedCount: 0, promotedAllRoots: false };
     }
