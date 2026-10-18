@@ -6,11 +6,22 @@
  * pulls the graph from the sender. The protocol logic lives in
  * `swm/shared-memory-change-notice.ts`. `start()` (`dkg-agent-lifecycle.ts`)
  * registers the protocol, and `stop()` (`dkg-agent.ts`) stops both sides.
+ *
+ * Also a Core's forward of a member's signed share to the graph's owner, and
+ * the owner's receipt of it (`swm/owner-share-forward.ts`): both hang on the
+ * same apply hook, registration and shutdown.
  */
 
-import { createOperationContext, PROTOCOL_SWM_CHANGE_NOTICE } from '@origintrail-official/dkg-core';
+import {
+  createOperationContext,
+  DKG_GOSSIP_MAX_RPC_BYTES,
+  PROTOCOL_SWM_CHANGE_NOTICE,
+  PROTOCOL_SWM_UPDATE_RELAYED,
+} from '@origintrail-official/dkg-core';
+import { coreHostedOwnerPeerIds } from './core-hosted-definition.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { rfc64UnregisteredAuthorityOwnerV1 } from './rfc64/unregistered-authority-transport-v1.js';
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './rfc64/catalog-peers-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './rfc64/public-catalog-transport-v1.js';
 import {
@@ -24,14 +35,45 @@ import {
   type SwmChangeRecipientPorts,
 } from './swm/shared-memory-change-notice.js';
 import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
+import {
+  checkRelayedShare,
+  graphHasAllowlist,
+  OwnerShareForwarder,
+  RelayedShareApplies,
+  RelayedShareRateLimit,
+  relayedShareKey,
+  shouldForwardShareToOwner,
+  type OwnerShareToForward,
+} from './swm/owner-share-forward.js';
+import { coreHostsPublicGraph } from './swm/relay-only-share-routes.js';
+import { FANOUT_RESPONSE_REJECTED } from './swm/substrate-fanout.js';
 
-/** One agent's two sides of the notice, and its forwards of catalog heads that are still choosing their recipients. */
+/**
+ * One agent's two sides of the notice, its forwards of catalog heads that are
+ * still choosing their recipients (and of shares still deciding whether they
+ * go to the owner), its forwards of members' shares to graph owners, and the
+ * rate limit and the applies of the shares Cores relay to it.
+ */
 export interface SwmChangeNoticeOwnersV1 {
   readonly notifier: SwmChangeNotifier;
   readonly receiver: SwmChangeNoticeReceiver;
   readonly forwards: Set<Promise<void>>;
+  readonly ownerForwarder: OwnerShareForwarder;
+  readonly relayedShares: RelayedShareRateLimit;
+  readonly relayedApplies: RelayedShareApplies;
   stopped: boolean;
 }
+
+/** The fields of an applied share that the apply hook reads. */
+export interface SwmAppliedShareV1 {
+  readonly cgId?: string;
+  readonly subGraphName?: string;
+  readonly shareOperationId?: string;
+  readonly publisherPeerId?: string;
+}
+
+/** A relayed share the owner may apply, under its `relayedShareKey`, or why it is refused. */
+export type RelayedSwmShareAdmissionV1 = { readonly refusal: string } | { readonly key: string };
 
 /** Per agent. `start()` drops them, so that a restarted agent does not keep the stopped ones. */
 const ownersByAgentV1 = new WeakMap<object, SwmChangeNoticeOwnersV1>();
@@ -53,26 +95,29 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
       });
       return new Uint8Array();
     }, { maxReadBytes: SWM_CHANGE_NOTICE_MAX_BYTES });
+    // A member's share that a Core passes on to this node as the graph's owner.
+    this.router.register(PROTOCOL_SWM_UPDATE_RELAYED, async (data, peerIdObj) => (
+      this.handleRelayedSwmShareV1(data, peerIdObj.toString())
+    ), { maxReadBytes: DKG_GOSSIP_MAX_RPC_BYTES });
   }
 
-  /** Shutdown: the owner tells nobody of a change any more, and the follower starts no pull. */
+  /** Shutdown: the owner tells nobody of a change any more, the follower starts no pull, and no share goes to an owner. */
   stopSwmChangeNoticesV1(this: DKGAgent): void {
     const owners = this.swmChangeNoticeOwnersV1();
     owners.stopped = true;
     owners.notifier.stop();
     owners.receiver.stop();
+    owners.ownerForwarder.stop();
   }
 
   /**
    * A share from another peer was applied here. On the owner of a public
    * graph, tell the graph's followers so that they pull it now
-   * (`swm/shared-memory-change-notice.ts`). Never throws, never waits.
+   * (`swm/shared-memory-change-notice.ts`). With the share's bytes (`wire`),
+   * a Core also passes a member's share on to the graph's owner
+   * ({@link forwardShareToGraphOwnerV1}). Never throws, never waits.
    */
-  noticeSwmFollowersAfterApplyV1(this: DKGAgent, outcome: {
-    readonly cgId?: string;
-    readonly subGraphName?: string;
-    readonly shareOperationId?: string;
-  }, fromPeerId: string): void {
+  noticeSwmFollowersAfterApplyV1(this: DKGAgent, outcome: SwmAppliedShareV1, fromPeerId: string, wire?: Uint8Array): void {
     if (outcome.cgId === undefined) return;
     this.swmChangeNotifierV1().afterRemoteChange({
       contextGraphId: outcome.cgId,
@@ -80,6 +125,107 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
       hint: swmChangeNoticeHint(outcome.shareOperationId),
       sourcePeerId: fromPeerId,
     });
+    if (wire !== undefined) this.forwardShareToGraphOwnerV1(outcome, fromPeerId, wire);
+  }
+
+  /**
+   * On a Core: pass a member's share it has just applied, the bytes as they
+   * came, on to the graph's owner (`swm/owner-share-forward.ts`). Detached:
+   * the reply to the member does not wait for the checks or the send. Never
+   * throws.
+   */
+  forwardShareToGraphOwnerV1(this: DKGAgent, outcome: SwmAppliedShareV1, fromPeerId: string, wire: Uint8Array): void {
+    if (this.config.nodeRole !== 'core') return;
+    const owners = this.swmChangeNoticeOwnersV1();
+    if (owners.stopped) return;
+    const forward = this.ownerBoundShareV1(outcome, fromPeerId, wire)
+      .then((share) => {
+        if (share !== null && !owners.stopped) owners.ownerForwarder.forward(share);
+      })
+      .catch((error: unknown) => {
+        this.log.debug(createOperationContext('share'), `Share op=${outcome.shareOperationId ?? 'none'} not passed on to the graph's owner: ${errorText(error)}`);
+      });
+    owners.forwards.add(forward);
+    void forward.finally(() => owners.forwards.delete(forward));
+  }
+
+  /** The share to pass on to the owner of its graph, or null when it does not go there. */
+  async ownerBoundShareV1(this: DKGAgent, outcome: SwmAppliedShareV1, fromPeerId: string, wire: Uint8Array): Promise<OwnerShareToForward | null> {
+    if (outcome.cgId === undefined || outcome.shareOperationId === undefined) return null;
+    const contextGraphId = this.rfc64AuthorityContextGraphIdV1(outcome.cgId);
+    const owner = rfc64UnregisteredAuthorityOwnerV1(contextGraphId);
+    if (owner === null) return null;
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    const forward = await shouldForwardShareToOwner({
+      nodeRole: this.config.nodeRole,
+      hosted: coreHostsPublicGraph(this.config.nodeRole, subscription),
+      subscribed: subscription?.subscribed === true,
+      subGraphName: outcome.subGraphName,
+      shareOperationId: outcome.shareOperationId,
+      publisherPeerId: outcome.publisherPeerId,
+      fromPeerId,
+      wire,
+    }, {
+      ownerIsLocal: () => [...this.localAgents.keys()].some((address) => address.toLowerCase() === owner.toLowerCase()),
+      publicWithoutAllowlist: async () => (
+        !await this.isPrivateContextGraph(contextGraphId) && !graphHasAllowlist(await this.getCgMeta(contextGraphId))
+      ),
+    });
+    return forward ? { contextGraphId, shareOperationId: outcome.shareOperationId, fromPeerId, wire } : null;
+  }
+
+  /**
+   * A member's share that the Core `fromPeerId` passed on to this node as the
+   * graph's owner (`swm/owner-share-forward.ts`). Taken only from an admitted
+   * Core, by the curator of a public graph without an allowlist, when the
+   * envelope is the asset author's fresh signature over a plain share into a
+   * named sub-graph; then applied on the share handler's replay path, which
+   * keeps the author seal as for a direct send. The same bytes from other
+   * Cores run the handler once (`RelayedShareApplies`). Answers empty when
+   * applied and with the refusal byte otherwise; sends no share ack. Never
+   * throws.
+   */
+  async handleRelayedSwmShareV1(this: DKGAgent, data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
+    const ctx = createOperationContext('share');
+    const from = fromPeerId.slice(-8);
+    try {
+      const admission = await this.admitRelayedSwmShareV1(data, fromPeerId);
+      if ('refusal' in admission) {
+        this.log.debug(ctx, `Share relayed by ${from} refused: ${admission.refusal}`);
+        return FANOUT_RESPONSE_REJECTED;
+      }
+      const taken = await this.swmChangeNoticeOwnersV1().relayedApplies.once(admission.key, async () => {
+        const outcome = await this.getOrCreateSharedMemoryHandler().handle(data, fromPeerId, undefined, { trustedReplay: true });
+        if (!outcome.applied) {
+          this.log.debug(ctx, `Share relayed by ${from} not applied: ${outcome.reason}`);
+          return false;
+        }
+        this.log.info(ctx, `Applied share op=${outcome.shareOperationId ?? 'none'} of "${outcome.cgId ?? ''}" relayed by Core ${from}`);
+        return true;
+      });
+      if (taken === 'applied-before') this.log.debug(ctx, `Share relayed by ${from} already applied from another copy`);
+      return taken === 'refused' ? FANOUT_RESPONSE_REJECTED : new Uint8Array();
+    } catch (error) {
+      this.log.debug(ctx, `Share relayed by ${from} not handled: ${errorText(error)}`);
+      return FANOUT_RESPONSE_REJECTED;
+    }
+  }
+
+  /** Why a relayed share is refused, cheapest checks first, or the key it is applied under. */
+  async admitRelayedSwmShareV1(this: DKGAgent, data: Uint8Array, fromPeerId: string): Promise<RelayedSwmShareAdmissionV1> {
+    const owners = this.swmChangeNoticeOwnersV1();
+    if (owners.stopped) return { refusal: 'the node is stopping' };
+    if (!this.peerCapabilityRegistry.supportsCore(fromPeerId) || !this.networkAdmissionCoordinator.isAcceptedPeer(fromPeerId)) {
+      return { refusal: 'the sender is not an admitted Core' };
+    }
+    if (!owners.relayedShares.allow(fromPeerId)) return { refusal: 'the sender passed its rate limit' };
+    const check = checkRelayedShare(data, Date.now());
+    if (!check.ok) return { refusal: check.reason };
+    const contextGraphId = this.rfc64AuthorityContextGraphIdV1(check.contextGraphId);
+    if (!await this.isCuratorOf(contextGraphId)) return { refusal: `this node is not the curator of "${contextGraphId}"` };
+    if (await this.isPrivateContextGraph(contextGraphId)) return { refusal: `"${contextGraphId}" is private` };
+    if (graphHasAllowlist(await this.getCgMeta(contextGraphId))) return { refusal: `"${contextGraphId}" has an allowlist` };
+    return { key: relayedShareKey(contextGraphId, check.shareOperationId, data) };
   }
 
   /**
@@ -119,6 +265,7 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
     while (owners.forwards.size > 0) await Promise.allSettled(owners.forwards);
     await owners.notifier.settled();
     await owners.receiver.settled();
+    await owners.ownerForwarder.settled();
   }
 
   swmChangeNotifierV1(this: DKGAgent): SwmChangeNotifier {
@@ -191,7 +338,28 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
       },
       log: (message) => this.log.info(syncCtx, message),
     });
-    const owners: SwmChangeNoticeOwnersV1 = { notifier, receiver, forwards: new Set(), stopped: false };
+    const ownerForwarder = new OwnerShareForwarder({
+      ownerPeers: async (contextGraphId, signal) => {
+        const owner = rfc64UnregisteredAuthorityOwnerV1(contextGraphId);
+        return owner === null ? [] : coreHostedOwnerPeerIds(this, contextGraphId, owner, signal);
+      },
+      isConnected: (peerId) => this.node.libp2p.getPeers().some((peer) => peer.toString() === peerId),
+      selfPeerId: () => this.peerId,
+      send: async (peerId, wire, options) => {
+        const answer = await this.messenger.sendToPeer(peerId, PROTOCOL_SWM_UPDATE_RELAYED, wire, options);
+        return answer.length === 0 ? 'applied' : 'refused';
+      },
+      logDebug: (message) => this.log.debug(shareCtx, message),
+    });
+    const owners: SwmChangeNoticeOwnersV1 = {
+      notifier,
+      receiver,
+      forwards: new Set(),
+      ownerForwarder,
+      relayedShares: new RelayedShareRateLimit(),
+      relayedApplies: new RelayedShareApplies(),
+      stopped: false,
+    };
     ownersByAgentV1.set(this, owners);
     return owners;
   }
