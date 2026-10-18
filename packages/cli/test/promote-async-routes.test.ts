@@ -322,7 +322,8 @@ describe('async SWM-share queue daemon routes', () => {
     });
     expect(second.status).toBe(409);
     expect(second.body.existingJobId).toBe(first.body.jobId);
-    expect(second.body.error).toMatch(/already active/i);
+    expect(second.body.observedAdmission).toBe(true);
+    expect(second.body.error).toMatch(/previously observed share admission/i);
   });
 
   it('POST /:name/swm/share-async returns 503 when the worker is disabled', async () => {

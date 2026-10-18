@@ -1,6 +1,6 @@
 # Issue 3331: bounded async share admission and reconciliation
 
-Status: PR #3358 open; third remote review revision validated and ready for re-review. Owner: Codex. Base: `testnet-canary` at `b82918e8e8e40cdc30aa0e6d32ad4119e3d6c985`; branch `codex/3331-share-admission-pressure`.
+Status: PR #3358 open; remote reviewer converged; live validation passed; CI assertion alignment under verification. Owner: Codex. Base: `testnet-canary` at `b82918e8e8e40cdc30aa0e6d32ad4119e3d6c985`; branch `codex/3331-share-admission-pressure`.
 
 ## Outcome and evidence
 
@@ -80,3 +80,9 @@ The admission model now has private discriminated pre-persistence/persistence st
 ### Remote review round 3
 
 Added the missing primary-write regression: `replaceSubject` commits, then surfaces a nested query `not_started` error. The real queue retains indeterminate evidence and the persisted ID across immediate replay and authoritative read, with exactly one write and one durable job. The canonical primary `replaceSubject/not_started` rejection/retry test remains. All 30 admission tests passed; no production behavior changed.
+
+### Live validation and CI follow-up
+
+Remote review completed without findings on `b63a71d5b`. The subsequent isolated native macOS/Blazegraph/Base Sepolia run passed: delayed persistence plus caller disconnect retained one handle, competing pre-write timeout never wrote late, 32 concurrent 61-triple shares completed, and four VM publications finalized with matching chain roots/membership. Canonical payload, terminal clear/new admission, actual daemon/store restart and fresh post-restart sharing passed. All ten transactions were reconciled, owned resources stopped and batch released. Original Gnosis coverage and naturally reproducing the conflict scheduler timeout remain explicit limits.
+
+The full CI sweep found one existing CLI route assertion still requiring fresh-active wording for a positive owner observation. Update it to require `observedAdmission: true` and the intentionally qualified wording, while retaining the 409 and exact owner-ID assertions. Production code is unchanged from the live-tested commit. Current-head review and CI must be confirmed again.
