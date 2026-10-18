@@ -72,7 +72,10 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
     contextGraphId, publisherPeerId: agent.node.peerId.toString(), options: opts,
   });
   let inventoryRequired: boolean;
-  try { inventoryRequired = agent.requiresRfc64ShareInventoryV1(contextGraphId, opts?.subGraphName); }
+  // Owe the handoff only where the commit-time authoring lane can be active; otherwise the
+  // committed share would wait on a lane that only an authority refresh or a responsibility
+  // change can open.
+  try { inventoryRequired = agent.requiresRfc64ShareInventoryHandoffV1(contextGraphId, opts?.subGraphName); }
   catch (cause) { if (cause instanceof SwmCatalogAuthorityNotReady) throw createPromoteRetryableFailure(cause); throw cause; }
   const recoveryBinding = await agent.publisher.prepareAssertionPromoteRecovery(
     contextGraphId, name, storageLane, publisherOptions, inventoryRequired,

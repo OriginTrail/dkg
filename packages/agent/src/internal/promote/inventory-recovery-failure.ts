@@ -5,6 +5,18 @@ import { createPromoteRetryableFailure, createPromotePostCommitFailure } from '@
 import { isInventoryPersistenceFailure } from '../../rfc64/inventory-persistence-failure.js';
 import { SwmCatalogAuthorityNotReady, SwmInventoryWriteFailure } from '../swm-inventory-write.js';
 
+/** Cause code of a committed share whose inventory handoff has not completed yet. */
+export const SWM_INVENTORY_HANDOFF_PENDING_CODE = 'SWM_INVENTORY_HANDOFF_PENDING';
+
+/** Closed set, so the daemon can name the waiting step without quoting a raw dependency error. */
+type InventoryHandoffPendingReason =
+  | 'inactive-lane' | 'authority-transition' | 'projection-admission' | 'confirmed-ownership';
+
+/** The queue replays the same committed operation; the typed cause says which step it waits on. */
+export function inventoryHandoffPendingFailure(reason: InventoryHandoffPendingReason, message: string): Error {
+  return createPromoteRetryableFailure(Object.assign(new Error(message), { code: SWM_INVENTORY_HANDOFF_PENDING_CODE, reason }));
+}
+
 /** Replay policy consumes persistence provenance; integrity and producer refusals pass through. */
 export async function throwInventoryRecoveryFailure(error: unknown): Promise<never> {
   const cause = error instanceof SwmInventoryWriteFailure ? error.cause : error;
