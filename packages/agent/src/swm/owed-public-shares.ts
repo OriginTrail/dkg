@@ -67,6 +67,13 @@ export const OWED_PUBLIC_SHARE_OWNER_PEERS_MAX = 2;
  * `GOSSIP_ENVELOPE_FRESHNESS_MS`, and a send can take up to a minute.
  */
 export const OWED_PUBLIC_SHARE_RESIGN_AFTER_MS = GOSSIP_ENVELOPE_FRESHNESS_MS - 60_000;
+/**
+ * How long a Core that refused a kept share is left out of it. A Core that does
+ * not host the graph refuses like one that finds the share outdated, and it may
+ * start hosting the graph later: it is asked again after this, at most six
+ * times over a share's life.
+ */
+export const OWED_PUBLIC_SHARE_REFUSAL_HOLD_MS = 5 * 60_000;
 /** Failed signings after which a share is given up: an external signer may hold a pass for minutes. */
 export const OWED_PUBLIC_SHARE_RESIGN_FAILURES_MAX = 3;
 /** Dropped shares one warning names; the others are counted. */
@@ -125,8 +132,8 @@ interface OwedRecord<S> extends OwedPublicShare<S> {
   resignFailures: number;
   /** The store's count of shares tried, taken when this one was last tried; 0 while it never was. */
   lastTry: number;
-  /** Cores that refused this share; it is not sent to them again. */
-  readonly refusedBy: Set<string>;
+  /** Cores that refused this share, with when they did; it is not sent to them again for `OWED_PUBLIC_SHARE_REFUSAL_HOLD_MS`. */
+  readonly refusedBy: Map<string, number>;
 }
 
 /** What the store uses of the agent. */
@@ -271,7 +278,7 @@ export class OwedPublicShares<S> {
       this.#droppedForRoom.add(oldest);
     }
     this.#shares.set(input.shareOperationId, {
-      ...input, createdAt: this.#now(), attempts: 0, resignFailures: 0, lastTry: 0, refusedBy: new Set(),
+      ...input, createdAt: this.#now(), attempts: 0, resignFailures: 0, lastTry: 0, refusedBy: new Map(),
     });
     this.#arm();
   }
@@ -362,7 +369,7 @@ export class OwedPublicShares<S> {
       return false;
     }
     const holders = share.holder
-      ? await settled(() => this.#ports.holderPeers(share.contextGraphId, share.subGraphName, share.refusedBy), [])
+      ? await settled(() => this.#ports.holderPeers(share.contextGraphId, share.subGraphName, this.#refusedLately(share)), [])
       : [];
     const owners = share.owner
       ? (await lookUpOnce(lookups.owners, share.contextGraphId, () => this.#ports.ownerPeers(share.contextGraphId), []))
@@ -377,10 +384,10 @@ export class OwedPublicShares<S> {
       const outcomes = await Promise.all(holders.map((peerId) => this.#send(peerId, share)));
       if (!this.#open(generation)) return true;
       holders.forEach((peerId, index) => {
-        if (outcomes[index] === 'rejected') share.refusedBy.add(peerId);
+        if (outcomes[index] === 'rejected') share.refusedBy.set(peerId, this.#now());
       });
       // A Core that does not host the graph refuses as well, so refusals only leave those Cores out of this
-      // share (refusedBy): the share keeps looking for a holder until it is delivered or expires.
+      // share for a while (refusedBy): the share keeps looking for a holder until it is delivered or expires.
       if (outcomes.includes('delivered')) share.holder = false;
     }
     for (const peerId of owners) {
@@ -423,6 +430,13 @@ export class OwedPublicShares<S> {
       }
       return false;
     }
+  }
+
+  /** The Cores that refused `share` within `OWED_PUBLIC_SHARE_REFUSAL_HOLD_MS`; older refusals are forgotten. */
+  #refusedLately(share: OwedRecord<S>): Set<string> {
+    const since = this.#now() - OWED_PUBLIC_SHARE_REFUSAL_HOLD_MS;
+    for (const [peerId, refusedAt] of share.refusedBy) if (refusedAt <= since) share.refusedBy.delete(peerId);
+    return new Set(share.refusedBy.keys());
   }
 
   #send(peerId: string, share: OwedRecord<S>): Promise<OwedShareSendOutcome> {

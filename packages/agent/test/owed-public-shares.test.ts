@@ -14,6 +14,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   OWED_PUBLIC_SHARE_OWNER_PEERS_MAX,
+  OWED_PUBLIC_SHARE_REFUSAL_HOLD_MS,
   OWED_PUBLIC_SHARE_RESIGN_AFTER_MS,
   OWED_PUBLIC_SHARE_RESIGN_FAILURES_MAX,
   OWED_PUBLIC_SHARE_RETRY_MS,
@@ -278,6 +279,22 @@ describe('a share that reached nobody', () => {
     expect(h.sent.slice(4).map((sent) => `${sent.shareOperationId}:${sent.peerId}`).sort())
       .toEqual([`op-1:${CORE_3}`, `op-2:${CORE_3}`]);
     expect(h.store.snapshot()).toMatchObject([{ shareOperationId: 'op-2', holder: false, owner: true }]);
+  });
+
+  it('asks a Core that refused it again once the refusal hold has passed: the Core may host the graph by then', async () => {
+    let hosting = false;
+    const h = harness({ holders: () => [CORE_1], answer: () => (hosting ? 'delivered' : 'rejected') });
+    h.owe('op-1', { holder: true });
+    await h.store.tick();
+    expect(h.sent.map((sent) => sent.peerId)).toEqual([CORE_1]);
+    h.clock.now += OWED_PUBLIC_SHARE_REFUSAL_HOLD_MS - 1;
+    await h.store.tick();
+    expect(h.sent, 'not asked again within the hold').toHaveLength(1);
+    hosting = true;
+    h.clock.now += 1;
+    await h.store.tick();
+    expect(h.sent.map((sent) => sent.peerId)).toEqual([CORE_1, CORE_1]);
+    expect(h.store.size, 'delivered to the Core that hosts the graph now').toBe(0);
   });
 
   it('survives a lookup of the connected Cores that throws', async () => {
