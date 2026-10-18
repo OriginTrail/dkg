@@ -66,6 +66,17 @@ describe('targeted published descriptor repair', () => {
       expect(await h.all()).toEqual(before);
     });
 
+  it.each(['missing', 'mismatched'])('refuses a %s retained VM pointer despite valid independent proof', async kind => {
+    const h = await fixture();
+    await h.store.deleteByPattern({ graph: h.graph, subject: h.subject, predicate: DKG + 'vmCurrentAssertion' });
+    if (kind === 'mismatched') await h.store.insert([h.row('vmCurrentAssertion', 'ff'.repeat(32))]);
+    const before = await h.all(); const writer = vi.spyOn(h.host, 'stampPublishedLifecycle');
+    await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false }))
+      .rejects.toThrow('missing or different confirmed VM pointer');
+    expect(h.chain.isReceiptBlockFinalAndCanonical).toHaveBeenCalled();
+    expect(writer).not.toHaveBeenCalled(); expect(await h.all()).toEqual(before);
+  });
+
   it('completes the trailing fields after the actual first-publication writer loses state', async () => {
     const h = await fixture();
     await h.store.deleteByPattern({ graph: h.graph, subject: h.subject, predicate: DKG + 'publishedUal' });

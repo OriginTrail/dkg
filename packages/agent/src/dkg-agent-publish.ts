@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
-import { withKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
+import { tryWithKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
@@ -5275,13 +5275,8 @@ export class PublishMethods extends DKGAgentBase {
       );
       throwIfRecoveryDeadlineReached(signal);
       // This finalizer holds the queue's global claim lock. Never wait behind
-      // a lifecycle writer (which can itself need queue admission). No await
-      // separates this check from withKeyedLocks installing its gate.
-      if (this.writeLocks.has(lifecycleKey)) {
-        throw Object.assign(new Error('Named KA lifecycle writer is busy; recovery will retry'),
-          { code: 'KA_VM_RECOVERY_INCONSISTENT' });
-      }
-      await withKeyedLocks(this.writeLocks, [lifecycleKey], async () => {
+      // a lifecycle writer, which can itself need queue admission.
+      const lifecycleRepair = await tryWithKeyedLocks(this.writeLocks, [lifecycleKey], async () => {
         throwIfRecoveryDeadlineReached(signal);
         const lifecycleAuthor = await this._resolveRecoveredKnowledgeAssetVmLifecycleAuthor(request);
         throwIfRecoveryDeadlineReached(signal);
@@ -5295,6 +5290,10 @@ export class PublishMethods extends DKGAgentBase {
             + 'the current named assertion no longer matches the queued assertion');
         }
       });
+      if (!lifecycleRepair.acquired) {
+        throw Object.assign(new Error('Named KA lifecycle writer is busy; recovery will retry'),
+          { code: 'KA_VM_RECOVERY_INCONSISTENT' });
+      }
     }
 
     // A recovery-finalized transaction owns the same RFC-64 lifecycle tail as
