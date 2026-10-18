@@ -188,13 +188,29 @@ describe('a share owed to the graph\'s owner', () => {
     expect(OWED_PUBLIC_SHARE_OWNER_PEERS_MAX).toBe(2);
   });
 
-  it('is dropped with a warning when the owner refuses it', async () => {
-    const h = harness({ owners: () => [OWNER, OWNER_2], answer: () => 'rejected' });
+  it('leaves an owner peer that refuses it out for a while and tries the next owner peer', async () => {
+    const h = harness({ owners: () => [OWNER, OWNER_2], answer: (peerId) => (peerId === OWNER ? 'rejected' : 'delivered') });
     h.owe('op-1', { owner: true });
     await h.store.tick();
-    expect(h.sent.map((sent) => sent.peerId)).toEqual([OWNER]);
+    expect(h.sent.map((sent) => sent.peerId)).toEqual([OWNER, OWNER_2]);
+    expect(h.store.size, 'the second owner peer took it').toBe(0);
+    expect(h.infos.some((line) => line.includes('op-1') && line.includes('refused by the graph\'s owner peer'))).toBe(true);
+  });
+
+  it('keeps a share every owner peer refused, and asks them again once the refusal hold has passed', async () => {
+    let ready = false;
+    const h = harness({ owners: () => [OWNER, OWNER_2], answer: () => (ready ? 'delivered' : 'rejected') });
+    h.owe('op-1', { owner: true });
+    await h.store.tick();
+    expect(h.sent.map((sent) => sent.peerId)).toEqual([OWNER, OWNER_2]);
+    expect(h.store.size).toBe(1);
+    await h.store.tick();
+    expect(h.sent, 'not asked again within the hold').toHaveLength(2);
+    ready = true;
+    h.clock.now += OWED_PUBLIC_SHARE_REFUSAL_HOLD_MS;
+    await h.store.tick();
+    expect(h.sent.map((sent) => sent.peerId)).toEqual([OWNER, OWNER_2, OWNER]);
     expect(h.store.size).toBe(0);
-    expect(h.warnings.some((line) => line.includes('op-1') && line.includes('refused'))).toBe(true);
   });
 
   it('looks the owner of a graph up once a pass, whatever number of its shares are owed', async () => {
