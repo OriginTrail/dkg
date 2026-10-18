@@ -39,9 +39,9 @@ describe('async promote bookkeeping recovery', () => {
       job,
       queue: recoveringQueue,
       workerId: 'worker-test',
-      runPromote: async (_request) => {
+      runPromote: async (_request, markPromoteStarted) => {
         promoteCalls += 1;
-
+        await markPromoteStarted();
         throw retryableBookkeepingFailure();
       },
       now: fixture.clock.now,
@@ -91,9 +91,9 @@ describe('async promote bookkeeping recovery', () => {
       job,
       queue: recoveringQueue,
       workerId: 'worker-test',
-      runPromote: async (_request) => {
+      runPromote: async (_request, markPromoteStarted) => {
         promoteCalls += 1;
-
+        await markPromoteStarted();
         return { promotedCount: 99 };
       },
       now: fixture.clock.now,
@@ -140,9 +140,9 @@ describe('async promote bookkeeping recovery', () => {
       job,
       queue: recoveringQueue,
       workerId: 'worker-test',
-      runPromote: async (_request) => {
+      runPromote: async (_request, markPromoteStarted) => {
         promoteCalls += 1;
-
+        await markPromoteStarted();
         return { promotedCount: 99 };
       },
       now: fixture.clock.now,
@@ -188,9 +188,9 @@ describe('async promote bookkeeping recovery', () => {
       job,
       queue: recoveringQueue,
       workerId: 'worker-test',
-      runPromote: async (_request) => {
+      runPromote: async (_request, markPromoteStarted) => {
         promoteCalls += 1;
-
+        await markPromoteStarted();
         return { promotedCount: 99 };
       },
       now: fixture.clock.now,

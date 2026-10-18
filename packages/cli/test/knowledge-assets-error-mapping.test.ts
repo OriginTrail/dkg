@@ -6,15 +6,6 @@ import { respondAssertionCodeError, respondAssertionError } from '../src/daemon/
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
-import { withDurableShareOwner } from './_helpers/durable-share-owner.js';
-import { daemonState } from '../src/daemon/state.js';
-import type { OxigraphStore } from '@origintrail-official/dkg-storage';
-const shareStores: OxigraphStore[] = [];
-afterEach(async () => {
-  daemonState.promoteWorkerAvailable = false;
-  await Promise.all(shareStores.splice(0).map(store => store.close()));
-});
-
 function fakeResponse() {
   const record = { status: 0, body: '', ended: false, headers: {} as Record<string, string> };
   const res = {
@@ -141,7 +132,7 @@ describe('knowledge-assets mutation error mapping', () => {
 
       expect(record.status).toBe(503);
       expect(record.headers['Retry-After']).toBe('1');
-      expect(JSON.parse(record.body)).toMatchObject({
+      expect(JSON.parse(record.body)).toEqual({
         code: 'PROMOTE_RETRYABLE_FAILURE',
         error: '[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable',
         retryable: true,
@@ -304,7 +295,6 @@ describe('knowledge-assets mutation error mapping', () => {
         }),
         assertion: { promote },
       };
-      withDurableShareOwner(agent, shareStores);
       const { record, res } = fakeResponse();
       const rawPath = '/api/knowledge-assets/shared-right-after-registration/swm/share';
       const url = new URL(`http://127.0.0.1${rawPath}`);
@@ -326,7 +316,7 @@ describe('knowledge-assets mutation error mapping', () => {
       expect(promote).toHaveBeenCalledTimes(1);
       expect(record.status).toBe(503);
       expect(record.headers['Retry-After']).toBe('1');
-      expect(JSON.parse(record.body)).toMatchObject({
+      expect(JSON.parse(record.body)).toEqual({
         code: 'PROMOTE_RETRYABLE_FAILURE',
         error: '[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable',
         retryable: true,

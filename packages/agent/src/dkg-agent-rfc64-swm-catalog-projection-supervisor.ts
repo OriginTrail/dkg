@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import { SwmCatalogAuthorityNotReady } from './internal/swm-inventory-write.js';
-import { discoverDurableCatalogRepairsV1, newPendingRepairV1 } from './rfc64/catalog-projection-discovery-v1.js';
 
 /** Restart-safe local SWM-inventory to catalog projection supervisor. */
 
@@ -90,7 +88,7 @@ export interface Rfc64SwmCatalogProjectionSupervisorStatusV1 {
   readonly finalizedRowHeal?: Readonly<FinalizedRowHealCountsV1>;
 }
 
-export interface MutableAuthorRepairStatusV1 {
+interface MutableAuthorRepairStatusV1 {
   readonly contextGraphId: ContextGraphIdV1;
   readonly authorAddress: EvmAddressV1;
   outcome: Rfc64PublicCatalogAuthorRepairOutcomeV1;
@@ -136,7 +134,6 @@ export interface Rfc64FinalizedPrivatePlacementRepairRequestV1 {
 
 interface ProjectionOwnerDependenciesV1 {
   readonly resolvePartition: () => Rfc64CatalogBootstrapPartitionV1 | undefined;
-  readonly listDurableInventoryScopes: () => readonly Readonly<{ contextGraphId: ContextGraphIdV1; authorAddress: EvmAddressV1 }>[];
   readonly listLocalAuthorAddresses: () => readonly EvmAddressV1[];
   readonly acceptsPublicRootLane: (contextGraphId: ContextGraphIdV1) => boolean;
   readonly acceptsFinalizedPrivateLane: (contextGraphId: ContextGraphIdV1) => boolean;
@@ -172,7 +169,6 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
   readonly #fullCatalogs: FullCatalogParkingV1;
   #state: ProjectionSupervisorStateV1 | undefined;
   #admissionClosed = false;
-  #discoveryPending = false;
 
   constructor(dependencies: ProjectionOwnerDependenciesV1) {
     this.#dependencies = dependencies;
@@ -205,12 +201,19 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     this.#admissionClosed = false;
     const partition = this.#dependencies.resolvePartition();
     const localAuthors = this.#dependencies.listLocalAuthorAddresses();
-    const repairs: MutableAuthorRepairStatusV1[] = [];
-    const candidates = (partition?.track2Policies ?? [])
-      .filter(({ policyEnvelope }) => this.#dependencies.acceptsPublicRootLane(policyEnvelope.payload.contextGraphId as ContextGraphIdV1)).flatMap(({ policyEnvelope }) =>
-      localAuthors.map(authorAddress => ({ contextGraphId: policyEnvelope.payload.contextGraphId as ContextGraphIdV1, authorAddress })));
-    discoverDurableCatalogRepairsV1(() => candidates, repairs, newPendingRepairV1, error => { throw error; });
-    this.#discoverDurableRepairs(repairs, ctx);
+    const repairKeys = new Set<string>();
+    const repairs = (partition?.track2Policies ?? []).flatMap(
+      ({ policyEnvelope }): MutableAuthorRepairStatusV1[] => {
+        const contextGraphId = policyEnvelope.payload.contextGraphId as ContextGraphIdV1;
+        if (!this.#dependencies.acceptsPublicRootLane(contextGraphId)) return [];
+        return localAuthors.flatMap((authorAddress) => {
+          const key = `${contextGraphId}\n${authorAddress}`;
+          if (repairKeys.has(key)) return [];
+          repairKeys.add(key);
+          return [newPendingRepairV1(contextGraphId, authorAddress)];
+        });
+      },
+    );
     const hasFinalizedPrivateRepairs = this.#dependencies.listFinalizedPrivateRepairs().length > 0;
     const existing = this.#state;
     if (existing !== undefined) {
@@ -242,7 +245,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       if (hasFinalizedPrivateRepairs) existing.finalizedPrivateRunner.request();
       return;
     }
-    if (repairs.length === 0 && !hasFinalizedPrivateRepairs && !this.#discoveryPending) return;
+    if (repairs.length === 0 && !hasFinalizedPrivateRepairs) return;
     const retryIntervalMs = partition?.retryIntervalMs
       ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
     this.#state = this.#createState(
@@ -251,7 +254,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       repairs,
       ctx,
     );
-    if (repairs.length > 0 || this.#discoveryPending) this.#state.runner.request();
+    if (repairs.length > 0) this.#state.runner.request();
     if (hasFinalizedPrivateRepairs) this.#state.finalizedPrivateRunner.request();
   }
 
@@ -379,13 +382,6 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     this.#state = undefined;
   }
 
-  #discoverDurableRepairs(repairs: MutableAuthorRepairStatusV1[], ctx: OperationContext): void {
-    this.#discoveryPending = !discoverDurableCatalogRepairsV1(
-      this.#dependencies.listDurableInventoryScopes, repairs, newPendingRepairV1,
-      error => this.#dependencies.warn(ctx, JSON.stringify({ event: 'catalog_inventory_discovery_failed', diagnostic: catalogRepairDiagnosticV1(error) })),
-    );
-  }
-
   #createState(
     retryIntervalMs: number | undefined,
     finalizedPrivateRetryIntervalMs: number,
@@ -409,7 +405,6 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         );
       },
       beforePeriodicPass: () => {
-        if (this.#discoveryPending) this.#discoverDurableRepairs(state.repairs, ctx);
         // Live inventory mutations already dirty their exact scope. The timer
         // is the bounded liveness path for failures, not a reason to rebuild
         // every healthy catalog from its complete inventory every five seconds.
@@ -599,9 +594,8 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       const active = this.#dependencies.acceptsPublicRootLane(contextGraphId);
       return retry.observe(active
         ? this.#dependencies.readRepairRevision(contextGraphId, authorAddress) : null);
-    } catch (error) {
-      if (error instanceof SwmCatalogAuthorityNotReady) return retry.observe(null);
-      // Unknown hint failures cannot reset cooldown; only typed lane absence can.
+    } catch {
+      // A hint failure must not reject the mutation caller or reset its cooldown.
       return undefined;
     }
   }
@@ -705,6 +699,27 @@ function projectionOwnerV1(agent: DKGAgent): Rfc64SwmCatalogProjectionOwnerV1 {
   return owner;
 }
 
+function newPendingRepairV1(
+  contextGraphId: ContextGraphIdV1,
+  authorAddress: EvmAddressV1,
+): MutableAuthorRepairStatusV1 {
+  return {
+    contextGraphId,
+    authorAddress,
+    outcome: 'pending',
+    attempts: 0,
+    inventoryHeadObjectDigest: null,
+    catalogVersion: null,
+    inventoryRowCount: null,
+    lastError: null,
+    updatedAtMs: null,
+    dirty: true,
+    pendingMutationRequest: false,
+    diagnostic: null,
+    retry: new CatalogRepairRetryV1(),
+  };
+}
+
 export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   observeRfc64SwmCatalogProjectionLaneAvailabilityV1(
     this: DKGAgent,
@@ -714,7 +729,7 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     projectionOwnersV1.get(this)?.observeLaneAvailability(contextGraphId);
   }
 
-  /** Rediscover signed inventory ownership and selected local-author scopes. */
+  /** Seed bounded local-author projection work from selected catalog scopes. */
   startRfc64SwmCatalogProjectionSupervisorV1(
     this: DKGAgent,
     ctx: OperationContext,

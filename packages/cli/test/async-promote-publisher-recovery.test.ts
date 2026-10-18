@@ -67,8 +67,8 @@ describe('async promote repairs the publisher durable tail', () => {
         return runPromoteJob({
           job, queue, workerId: 'recovery-worker', now: clock.now, heartbeatIntervalMs: 0,
           log: () => {},
-          runPromote: async (_request) => {
-
+          runPromote: async (_request, markPromoteStarted) => {
+            await markPromoteStarted();
             return agent.assertion.promote(contextGraphId, name);
           },
         });

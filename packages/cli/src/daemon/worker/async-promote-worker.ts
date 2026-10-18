@@ -1,10 +1,9 @@
-import { createPromoteExecutionAuthority } from './promote-execution-authority.js';
-import { executePromoteRequest } from './execute-promote-request.js';
 /**
  * Async-promote queue worker supervisor.
  *
  * PR #3 of the async-promote-queue series. PR #1 shipped the queue
- * library and HTTP routes. This module drains the queue: an in-process queue signal wakes N worker slots,
+ * library; PR #2 exposed it to the agent + HTTP routes. This module
+ * drains the queue: an in-process queue signal wakes N worker slots,
  * with periodic polling retained for durable cross-process writes and
  * retry deadlines. A claimed slot calls `agent.assertion.promote(...)`,
  * then records success or classified failure back into the queue.
@@ -32,7 +31,7 @@ import { executePromoteRequest } from './execute-promote-request.js';
  * Shutdown semantics: RFC §6.2 says do NOT mark `running → queued`
  * on shutdown. We stop polling, let in-flight jobs complete (or
  * timeout), and rely on `recoverOnStartup()` at the next boot to
- * reclaim immutable bound shares; ambiguous legacy attempts remain parked.
+ * decide what to do with any leases the old worker held.
  */
 
 import type {
@@ -47,7 +46,7 @@ import {
   type AsyncPromoteQueue,
   type PromoteAttemptError,
   type PromoteJob,
-  type PromoteRequest, type PromoteExecutionAuthority,
+  type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
 import { logPromoteAttemptFailure } from './async-promote-attempt-diagnostics.js';
@@ -205,12 +204,13 @@ function failureBookkeepingUncertainty(error: unknown): { errorName: string; err
   return { errorName, errorCode };
 }
 
-export type PromoteJobRunResult<T extends { promotedCount: number }> =
-  | { outcome: 'succeeded'; result: T }
-  | { outcome: 'failed_retrying' | 'failed_terminal'; cause: unknown; error: ClassifiedPromoteError; retiredNoEffect?: true }
-  | { outcome: 'partial_promote_ambiguity'; result: T; cause: unknown; error: ClassifiedPromoteError }
-  | { outcome: 'failure_bookkeeping_uncertain'; cause: unknown; bookkeepingCause: unknown;
-      diagnostic: { errorName: string; errorCode: string } };
+type PromoteJobRunResult = {
+  outcome: 'succeeded' | 'failed_retrying' | 'failed_terminal' | 'partial_promote_ambiguity';
+  error?: ClassifiedPromoteError;
+} | {
+  outcome: 'failure_bookkeeping_uncertain';
+  diagnostic: { errorName: string; errorCode: string };
+};
 
 export interface PromoteWorkerCounters {
   succeeded: number;
@@ -254,12 +254,15 @@ function isRetryableQueueBookkeepingError(error: unknown): boolean {
  * in-flight heartbeat after that point throws a `PromoteJobLeaseError`,
  * which the heartbeat catcher logs and ignores.
  */
-export async function runPromoteJob<T extends { promotedCount: number }>(
+export async function runPromoteJob(
   args: {
     job: PromoteJob;
     queue: AsyncPromoteQueue;
     workerId: string;
-    runPromote: (request: PromoteRequest, authority?: PromoteExecutionAuthority) => Promise<T>;
+    runPromote: (
+      request: PromoteRequest,
+      markPromoteStarted: () => Promise<void>,
+    ) => Promise<{ promotedCount: number }>;
     now: () => number;
     heartbeatIntervalMs: number;
     bookkeepingRetryIntervalMs?: number;
@@ -269,7 +272,7 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
     log: PromoteWorkerLogger;
     emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   },
-): Promise<PromoteJobRunResult<T>> {
+): Promise<PromoteJobRunResult> {
   const {
     job,
     queue,
@@ -367,67 +370,53 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
     }
   }
 
-  async function recordPromotionFailure(err: unknown, promoteStarted: boolean): Promise<PromoteJobRunResult<T>> {
-    throwIfShutdownInterrupted();
-    const classified = classifyPromoteError(err, { boundRecovery: job.request.recoveryBinding !== undefined });
-    const message = err instanceof Error ? err.message : String(err);
-    logPromoteAttemptFailure({
-      job,
-      err,
-      message,
-      classified,
-      promoteStarted,
-      log,
-    });
-    // Persist the producer-owned diagnostic code (closed set) so the
-    // post-commit recovery sweep can key on it without parsing prose.
-    const attemptError: PromoteAttemptError = {
-      message,
-      retryable: classified.retryable,
-      classification: classified.classification,
-      recordedAt: now(),
-      ...(classified.diagnostic ? { diagnosticCode: classified.diagnostic.code } : {}),
-      ...('noEffectProof' in classified ? {noEffectProof: classified.noEffectProof} : {}),
+  try {
+    let result: { promotedCount: number };
+    let promoteStartedMarked = false;
+    const markPromoteStarted = async (): Promise<void> => {
+      if (promoteStartedMarked) return;
+      throwIfShutdownInterrupted();
+      await queue.recordCommitMarker(job.jobId, claimToken, 'promoteStarted');
+      promoteStartedMarked = true;
     };
     try {
-      const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
-      const transition = await persistWithRecovery(
-        'record failure',
-        bookkeepingDeadlineAt,
-        () => queue.fail(job.jobId, claimToken, attemptError),
-      );
-      throwIfShutdownInterrupted();
-      return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', cause: err, error: classified,
-        ...(transition.state === 'failed' && transition.retiredNoEffect ? {retiredNoEffect: true as const} : {}) };
-    } catch (failErr: unknown) {
-      if (failErr instanceof PromoteWorkerShutdownError) throw failErr;
-      // The write may have committed without an acknowledgement. A lost lease
-      // also forbids attributing another worker's outcome to this attempt.
-      return { outcome: 'failure_bookkeeping_uncertain', cause: err, bookkeepingCause: failErr, diagnostic: failureBookkeepingUncertainty(failErr) };
-    }
-  }
-
-  try {
-    // Queue ownership is established before the executor can mutate the asset.
-    // A failed marker write has its own boundary, separate from promotion failures.
-    try {
-      await persistWithRecovery('record promoteStarted', now() + Math.max(0, bookkeepingRetryBudgetMs),
-        () => queue.recordCommitMarker(job.jobId, claimToken, 'promoteStarted'));
-    } catch (cause) {
-      throwIfShutdownInterrupted();
-      if (job.request.recoveryBinding) {
-        // An uncertain fenced write retains its owner for ordinary lease recovery.
-        return { outcome: 'failure_bookkeeping_uncertain', cause, bookkeepingCause: cause,
-          diagnostic: failureBookkeepingUncertainty(cause) };
-      }
-      return await recordPromotionFailure(cause, false);
-    }
-    let result: T;
-    try {
-      result = await runPromote(job.request, job.request.recoveryBinding
-        ? createPromoteExecutionAuthority(queue, job.jobId, claimToken, now, throwIfShutdownInterrupted) : undefined);
+      result = await runPromote(job.request, markPromoteStarted);
     } catch (err: unknown) {
-      return await recordPromotionFailure(err, true);
+      throwIfShutdownInterrupted();
+      const classified = classifyPromoteError(err);
+      const message = err instanceof Error ? err.message : String(err);
+      logPromoteAttemptFailure({
+        job,
+        err,
+        message,
+        classified,
+        promoteStarted: promoteStartedMarked,
+        log,
+      });
+      // Persist the producer-owned diagnostic code (closed set) so the
+      // post-commit recovery sweep can key on it without parsing prose.
+      const attemptError: PromoteAttemptError = {
+        message,
+        retryable: classified.retryable,
+        classification: classified.classification,
+        recordedAt: now(),
+        ...(classified.diagnostic ? { diagnosticCode: classified.diagnostic.code } : {}),
+      };
+      try {
+        const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
+        const transition = await persistWithRecovery(
+          'record failure',
+          bookkeepingDeadlineAt,
+          () => queue.fail(job.jobId, claimToken, attemptError),
+        );
+        throwIfShutdownInterrupted();
+        return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', error: classified };
+      } catch (failErr: unknown) {
+        if (failErr instanceof PromoteWorkerShutdownError) throw failErr;
+        // The write may have committed without an acknowledgement. A lost lease
+        // also forbids attributing another worker's outcome to this attempt.
+        return { outcome: 'failure_bookkeeping_uncertain', diagnostic: failureBookkeepingUncertainty(failErr) };
+      }
     }
 
     // Plan §7 recommendation (b): single OUTER commit-marker after
@@ -476,7 +465,7 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
           `Operator action: inspect SWM/VM for the assertion before any /recover.`,
       );
       return {
-        outcome: 'partial_promote_ambiguity', result, cause: bookkeepingErr,
+        outcome: 'partial_promote_ambiguity',
         error: {
           retryable: false,
           classification: 'fatal',
@@ -502,7 +491,7 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
       }
     }
 
-    return { outcome: 'succeeded', result };
+    return { outcome: 'succeeded' };
   } finally {
     shutdownSignal?.removeEventListener('abort', stopHeartbeats);
     stopHeartbeats();
@@ -661,7 +650,21 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           job: claimed,
           queue: config.agent.promoteQueue,
           workerId: slot.workerId,
-          runPromote: (request, executionAuthority) => executePromoteRequest(config.agent, request, { executionAuthority }),
+          runPromote: async (request, markPromoteStarted) => {
+            const entities: 'all' | string[] | undefined =
+              request.entities === undefined
+                ? undefined
+                : request.entities === 'all'
+                ? 'all'
+                : [...request.entities];
+            await markPromoteStarted();
+            return config.agent.assertion.promote(request.contextGraphId, request.assertionName, {
+              entities,
+              subGraphName: request.subGraphName,
+              ...(request.agentAddress ? { agentAddress: request.agentAddress } : {}),
+              ...(request.authorAgentAddress ? { authorAgentAddress: request.authorAgentAddress } : {}),
+            });
+          },
           now,
           heartbeatIntervalMs,
           bookkeepingRetryIntervalMs: config.bookkeepingRetryIntervalMs,

@@ -146,7 +146,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         publicQuads: [],
       };
     };
-    agent.commitRfc64ConfirmedInventoryRemovalV1 = async (input: any) => {
+    agent.removeRfc64SwmAuthorInventoryShadowV1 = async (input: any) => {
       rfc64SwmInventoryRemovalCalls.push(input);
       throw new Error('simulated escaped RFC-64 SWM inventory removal failure');
     };

@@ -107,18 +107,17 @@ describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () =
 });
 
 describe('#1464 promote step tagging — assertionPromote integration', () => {
-  it.each(['assertNoUnfinishedBoundShare', 'assertGraphScopedLifecycleWritable'] as const)('tags a rejected %s pre-insert read', async stage => {
+  it('surfaces a [promote:<step>] tag when a pre-insert store read rejects', async () => {
     const store = new OxigraphStore();
     const boom = new Error('SPARQL HTTP query failed (500): oxigraph worker unavailable');
     (boom as { code?: unknown }).code = 'OXIGRAPH_DOWN';
-    // Ownership is checked first; bypass its read only to test the next lifecycle boundary.
+    // The graph-scoped lifecycle write gate is the first pre-insert store read.
     store.query = async () => {
       throw boom;
     };
 
     const publisher = new DKGPublisher({
       store,
-      ...(stage === 'assertGraphScopedLifecycleWritable' ? { promoteOwnershipReader: async () => null } : {}),
       chain: {} as unknown as ChainAdapter, // unused before the reject point
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
@@ -130,10 +129,10 @@ describe('#1464 promote step tagging — assertionPromote integration', () => {
         'my-assertion',
         '0x1234567890abcdef1234567890abcdef12345678',
       ),
-    ).rejects.toThrow(`[promote:${stage}] SPARQL HTTP query failed (500)`);
+    ).rejects.toThrow(/^\[promote:assertGraphScopedLifecycleWritable\] SPARQL HTTP query failed \(500\)/);
 
     // Original error identity + classification code preserved for PR2.
-    expect(boom.message).toContain(`[promote:${stage}]`);
+    expect(boom.message).toContain('[promote:assertGraphScopedLifecycleWritable]');
     expect((boom as { code?: unknown }).code).toBe('OXIGRAPH_DOWN');
   });
 });

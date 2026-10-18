@@ -73,15 +73,7 @@ describe('RFC-64 durable local SWM catalog projection repair', () => {
     await edge.whenRfc64PublicCatalogBootstrapIdleV1();
     await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(repair).not.toHaveBeenCalled();
-    // Durable obligations survive inactivity, but cannot bypass subscription.
-    expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
-      .toEqual([expect.objectContaining({
-        contextGraphId: CONTEXT_GRAPH_ID,
-        authorAddress: AUTHOR,
-        outcome: 'failed',
-        attempts: 1,
-        diagnostic: expect.objectContaining({ kind: 'lane_inactive' }),
-      })]);
+    expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()).toBeNull();
 
     edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
@@ -91,7 +83,7 @@ describe('RFC-64 durable local SWM catalog projection repair', () => {
         contextGraphId: CONTEXT_GRAPH_ID,
         authorAddress: AUTHOR,
         outcome: 'failed',
-        attempts: 2,
+        attempts: 1,
       })]);
 
     // Repeated active notifications must not turn a failure into a retry storm.
@@ -104,7 +96,7 @@ describe('RFC-64 durable local SWM catalog projection repair', () => {
     await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(repair).toHaveBeenCalledTimes(2);
     expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
-      .toEqual([expect.objectContaining({ outcome: 'failed', attempts: 3 })]);
+      .toEqual([expect.objectContaining({ outcome: 'failed', attempts: 2 })]);
     edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(repair).toHaveBeenCalledTimes(2);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  createPromoteOperationIntent, validatePromoteOperationIntent,
+  createPromoteOperationIntent,
   parsePromoteOperationIntent,
   serializePromoteOperationIntent,
   type PromoteOperationIntent,
@@ -49,15 +49,6 @@ describe('durable promote operation intent v1 codec', () => {
     expect(Object.isFrozen(intent.allowedPeers)).toBe(true);
     expect(() => { (intent as any).timestampMs += 1; }).toThrow(TypeError);
     expect(() => { (intent.allowedPeers as any).push('peer-c'); }).toThrow(TypeError);
-  });
-
-  it('validates an object without invoking serialization and owns its peer snapshot', () => {
-    const input = { ...PUBLIC_INTENT, accessPolicy: 'allowList', allowedPeers: ['peer-a'],
-      toJSON() { throw new Error('serialization must not be part of object validation'); } };
-    const intent = validatePromoteOperationIntent(input, 'operation-1');
-    input.allowedPeers.push('peer-b');
-    expect(intent.allowedPeers).toEqual(['peer-a']);
-    expect(Object.isFrozen(intent.allowedPeers)).toBe(true);
   });
 
   it('returns the same deeply immutable model when parsing durable storage', () => {

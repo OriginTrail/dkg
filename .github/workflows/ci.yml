@@ -318,10 +318,6 @@ jobs:
         run: node scripts/ci/fetch-trusted-controller.mjs
       - name: Test repository scripts
         run: pnpm run test:scripts
-      - name: Test share recovery evidence reducers
-        run: |
-          node --test scripts/testnet-share-recovery/*.test.mjs
-          python3 -m unittest discover -s scripts/testnet-share-recovery -p test_payload_evidence.py
       - name: Verify every test has an execution route
         run: pnpm test:inventory
       - name: Upload test execution inventory

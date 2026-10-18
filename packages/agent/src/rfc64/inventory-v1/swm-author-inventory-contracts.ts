@@ -3,7 +3,6 @@ import type {
   EvmAddressV1,
   SwmAuthorInventoryRowV1,
   SwmAuthorInventorySnapshotV1,
-  SwmAuthorInventoryScopeV1,
 } from '@origintrail-official/dkg-core';
 import type { VerifiedControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
@@ -85,8 +84,6 @@ export interface DeleteSwmAuthorInventoryInputV1 {
 }
 
 export interface Rfc64SwmAuthorInventoryOperationsV1 {
-  /** Durable discovery includes empty heads and authors not registered locally. */
-  listSwmAuthorInventoryScopesV1(): readonly SwmAuthorInventoryScopeV1[];
   readSwmAuthorInventoryHeadDigestV1(
     inventoryScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
@@ -117,10 +114,6 @@ export function createRfc64SwmAuthorInventoryOperationsViewV1(
   requireOwnerOpen: () => void,
 ): Rfc64SwmAuthorInventoryOperationsV1 {
   return Object.freeze({
-    listSwmAuthorInventoryScopesV1: () => {
-      requireOwnerOpen();
-      return inventory.listSwmAuthorInventoryScopesV1();
-    },
     readSwmAuthorInventoryHeadDigestV1: (
       inventoryScopeDigest: Digest32V1,
       authorAddress: EvmAddressV1,

@@ -1,5 +1,3 @@
-import { isReadOnlyStoreOperation } from '../store-operation-outcome.js';
-import { classifyStoreReadTransport } from '../store-read-transport-failure.js';
 import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
 import { refuseWithheldGraphQuery } from '../withheld-graph-query.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
@@ -51,7 +49,9 @@ import {
   type GraphWriteScope,
 } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
-import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
+import {
+  isAtomicGraphReplaceStagingGraph,
+} from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
   type Rfc64AuthorCommitCasInputV1,
@@ -1075,7 +1075,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     const isConstruct = operation.kind === 'read'
       && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
     const canonicalOperation = storeOperation ?? (isConstruct ? 'construct' : 'query');
-    const result = this.runStoreWork(canonicalOperation, options, async (lifecycleSignal, work) => {
+    return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal, work) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
         ...options,
         signal: lifecycleSignal,
@@ -1132,7 +1132,6 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         });
       }
     });
-    return operation.kind === 'read' && (storeOperation === undefined || isReadOnlyStoreOperation(storeOperation)) ? classifyStoreReadTransport(result) : result;
   }
 
   private async queryConstruct(

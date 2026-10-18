@@ -442,9 +442,7 @@ export {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   PROMOTE_COMMIT_MARKER_STEPS,
   PROMOTE_JOB_STATES,
-  PromoteAdmissionUncertainError,
   PromoteJobConflictError,
-  PromoteJobCancellationConflictError,
   PromoteJobLeaseError,
   type AsyncPromoteQueue,
   type AsyncPromoteQueueConfig,
@@ -461,8 +459,6 @@ export {
   type PromotePostCommitRecoveryEvent,
   type PromoteRecoverySummary,
   type PromoteRequest,
-  type BoundPromoteRequest,
-  type BoundPromoteJob,
   type PromoteResult,
   type PromoteStats,
   type PromoteTerminalJobClearer,
@@ -548,11 +544,7 @@ export {
 
 export { DEFAULT_PROMOTE_RETRY_TUNING, createDefaultPromoteBackoff, resolvePromoteRetryTuning, type PromoteRetryTuning } from './promote-retry-policy.js';
 
-export { PromoteStaleAdmissionError, validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';
-export { UnfinishedBoundShareError } from './bound-share-mutation-guard.js';
 export { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from './graph-knowledge-asset-metadata.js';
 
 export { withMaterializationLocks } from './materialization-lock-group.js';
 export { readCurrentAssertionVersion } from './materialization-assertion-version.js';
-
-export type { PromoteExecutionAuthority } from './assertion-promote-types.js';

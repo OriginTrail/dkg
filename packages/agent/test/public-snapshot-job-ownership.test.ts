@@ -212,12 +212,11 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
     a.started = true;
     a.subscribedContextGraphs.set(CG, { subscribed: true, onChainId: '14', onChainHash: ethers.id(CG) });
     a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;
-    const observedAt = Date.now();
     const pinned = sealPublicGraphSnapshot({ version: 1, chainId: a.chain.chainId,
       deploymentId: a.chain.deploymentId, contextGraphId: CG, onChainId: '14', nameHash: ethers.id(CG),
       contextGraphStorage: `0x${'1'.repeat(40)}`, assetStorage: `0x${'2'.repeat(40)}`,
       blockNumber: '123', blockHash: `0x${'a'.repeat(64)}`, finalityConfirmations: 1,
-      observedAt, expiresAt: observedAt + 120000, accessPolicy: 0,
+      observedAt: Date.now(), expiresAt: Date.now() + 120000, accessPolicy: 0,
       assets: f.items.map(item => ({ id: item.kaId.toString(), root: ethers.hexlify(item.root), version: '1' })) });
     a.chain.readPublicGraphSnapshot = vi.fn(async () => pinned);
     let authority!: import('../src/durable-recovery-authority.js').DurableRecoveryAuthority;

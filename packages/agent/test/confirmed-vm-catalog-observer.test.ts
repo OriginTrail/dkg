@@ -1,11 +1,7 @@
-import { Rfc64CatalogAutoPublishMethods } from '../src/dkg-agent-rfc64-catalog-auto-publish.js';
-import { throwInventoryRecoveryFailure } from '../src/internal/promote/inventory-recovery-failure.js';
-import { requireInventoryRemovalLane, SwmCatalogAuthorityNotReady } from '../src/internal/swm-inventory-write.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import { Logger, createOperationContext, type SwmAuthorInventoryScopeV1 } from '@origintrail-official/dkg-core';
-import { SwmInventoryWriteFailure } from '../src/internal/swm-inventory-write.js';
-import { observeConfirmedVmTransfer, observeConfirmedVmCatalogV1, transferConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
+import { observeConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
 import { CatalogPlacementTimingV1, installCatalogPlacementTimingV1 } from '../src/internal/catalog-placement-timing.js';
 import { AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, NETWORK_ID, assertionSealV1, authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
 import { rfc64SwmInventoryAssetKeyV1, rfc64SwmInventoryShadowRuntimeV1 } from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
@@ -19,8 +15,8 @@ async function fixture() {
     finalizedPrivateScopeBase: null,
     storeRepair: vi.fn(async () => {}),
     requestPlacement: vi.fn(() => ({ accepted: false })),
-    removeInventory: vi.fn(async () => ({ status: 'absent', attempts: 0, snapshot: null })),
-    requestProjection: vi.fn(() => true),
+    removeShadow: vi.fn(async () => ({ status: 'absent', action: 'remove', attempts: 0, headObjectDigest: null, error: null })),
+    requestProjection: vi.fn(() => false),
   };
   const params = {
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -40,62 +36,7 @@ async function fixture() {
 }
 
 describe('confirmed VM catalog completion certificate', () => {
-  it.each([true,false])('retains retry only for required but inactive removal authority (required=%s)', async required => {
-    const {deps,params}=await fixture();
-    deps.removeInventory=async()=>{
-      try {return requireInventoryRemovalLane(null,()=>required);}
-      catch(cause){throw new SwmInventoryWriteFailure('inventory-maintenance',params.seal.kaUal??null,cause);}
-    };
-    const failure=await transferConfirmedVmCatalogV1(deps,params).catch(error=>error);
-    if(required){
-      expect(failure.cause).toBeInstanceOf(SwmCatalogAuthorityNotReady);
-      await expect(throwInventoryRecoveryFailure(failure)).rejects.toMatchObject({code:'PROMOTE_RETRYABLE_FAILURE'});
-    }else{
-      await expect(throwInventoryRecoveryFailure(failure)).rejects.toThrow('policy excluded removal');
-      expect(failure.cause).not.toBeInstanceOf(SwmCatalogAuthorityNotReady);
-    }
-  });
-
-  it.each(['applied', 'absent', 'inactive'] as const)('strict recovery accepts only durable public removal: %s', async status => {
-    const { deps, params } = await fixture();
-    deps.removeInventory = vi.fn(async () => (status === 'inactive' ? { status } : { status, attempts: 0, snapshot: null }));
-    expect(await transferConfirmedVmCatalogV1(deps, params))
-      .toBe(status === 'applied' || status === 'absent' ? 'owned' : 'inactive');
-  });
-
-  it.each(['applied', 'absent'] as const)('strict recovery retains public %s ownership until projection is admitted', async status => {
-    const { deps, params } = await fixture();
-    deps.removeInventory = vi.fn(async () => ({ status, attempts: 0, snapshot: null }));
-    deps.requestProjection = vi.fn(() => false);
-    expect(await transferConfirmedVmCatalogV1(deps, params)).toBe('projection-pending');
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true); // Legacy committed-removal result.
-    const readiness = new SwmCatalogAuthorityNotReady('policy-not-accepted');
-    deps.requestProjection = vi.fn(() => { throw readiness; });
-    const failure = await transferConfirmedVmCatalogV1(deps, params).catch(error => error);
-    expect(failure).toMatchObject({ boundary: 'projection', cause: readiness });
-    await expect(throwInventoryRecoveryFailure(failure)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE', cause: readiness });
-    const invalid = new Error('invalid projection authority');
-    deps.requestProjection = vi.fn(() => { throw invalid; });
-    await expect(throwInventoryRecoveryFailure(await transferConfirmedVmCatalogV1(deps, params).catch(error => error))).rejects.toBe(invalid);
-  });
-
-  it('strict recovery preserves authority refusal and classifies only marker persistence as a write boundary', async () => {
-    const { deps, params, scopeBase } = await fixture();
-    const refusal = new Error('authority denied');
-    const transfer = () => Rfc64CatalogAutoPublishMethods.prototype.transferRfc64ConfirmedVmV1.call(
-      { resolveRfc64CatalogAuthoringLaneV1: () => { throw refusal; } } as any, params);
-    await expect(transfer()).rejects.toMatchObject({ phase: 'authority', cause: refusal });
-    expect(await observeConfirmedVmTransfer(deps.log, params, transfer)).toBe(false);
-    deps.finalizedPrivateScopeBase = scopeBase;
-    const disk = new Error('disk unavailable');
-    deps.storeRepair = vi.fn(async () => { throw disk; });
-    const failure = await transferConfirmedVmCatalogV1(deps, params).catch(e => e);
-    expect(failure).toBeInstanceOf(SwmInventoryWriteFailure);
-    expect(failure).toMatchObject({ phase: 'inventory-maintenance', cause: disk });
-    expect(deps.requestPlacement).not.toHaveBeenCalled();
-  });
-
-  it.each(['applied', 'throws'] as const)('fences author retirement behind queued public confirmation (%s)', async (outcome) => {
+  it.each(['applied', 'failed', 'throws'] as const)('fences author retirement behind queued public confirmation (%s)', async (outcome) => {
     const { deps, params } = await fixture();
     const runtime = rfc64SwmInventoryShadowRuntimeV1(deps.owner);
     const lane = { contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR };
@@ -109,13 +50,13 @@ describe('confirmed VM catalog completion certificate', () => {
     const removalGate = new Promise<void>((resolve) => { releaseRemoval = resolve; });
     const entered = new Promise<void>((resolve) => { removalEntered = resolve; });
     const predecessor = runtime.runExclusive(assetKey, () => assetGate);
-    deps.removeInventory = vi.fn(async () => {
+    deps.removeShadow = vi.fn(async () => {
       events.push(`remove:${context.getStore()}`);
       removalEntered();
       await removalGate;
       events.push('removal-settled');
       if (outcome === 'throws') throw new Error('removal unavailable');
-      return { status: outcome, attempts: 1, snapshot: null };
+      return { status: outcome, action: 'remove', attempts: 1, headObjectDigest: null, error: null };
     });
     const pending = context.run('confirmation', () => observeConfirmedVmCatalogV1(deps, params));
     try {
@@ -145,10 +86,10 @@ describe('confirmed VM catalog completion certificate', () => {
     }
   });
 
-  it.each(['applied', 'absent', 'inactive'] as const)('reports public removal %s honestly', async (status) => {
+  it.each(['applied', 'absent', 'dormant', 'failed'] as const)('reports public removal %s honestly', async (status) => {
     const { deps, params } = await fixture();
-    deps.removeInventory = vi.fn(async () => (status === 'inactive' ? { status } : { status, attempts: 0, snapshot: null }));
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true);
+    deps.removeShadow = vi.fn(async () => ({ status, action: 'remove', attempts: 0, headObjectDigest: null, error: null }));
+    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(status !== 'failed');
     expect(deps.storeRepair).not.toHaveBeenCalled();
     expect(deps.requestProjection).toHaveBeenCalledTimes(status === 'applied' || status === 'absent' ? 1 : 0);
   });
@@ -166,7 +107,7 @@ describe('confirmed VM catalog completion certificate', () => {
     expect(deps.storeRepair).toHaveBeenCalledWith(expect.objectContaining({
       inventoryScope: { ...scopeBase, authorAddress: AUTHOR },
     }));
-    expect(deps.removeInventory).not.toHaveBeenCalled();
+    expect(deps.removeShadow).not.toHaveBeenCalled();
     expect(deps.requestPlacement).not.toHaveBeenCalled();
     release();
     expect(await pending).toBe(true); // Supervisor refusal leaves a durable independent owner.
@@ -184,14 +125,14 @@ describe('confirmed VM catalog completion certificate', () => {
 
   it('does not certify an escaped public removal failure', async () => {
     const { deps, params } = await fixture();
-    deps.removeInventory = vi.fn(async () => { throw new Error('store unavailable'); });
+    deps.removeShadow = vi.fn(async () => { throw new Error('store unavailable'); });
     expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(false);
   });
 
   it.each([
     ['storeRepair', false, 'placement was not recorded, so nothing owes it'],
     ['requestPlacement', true, 'placement could not be requested; its durable marker stays'],
-    ['removeInventory', false, 'SWM inventory shadow removal escaped its failure boundary'],
+    ['removeShadow', false, 'SWM inventory shadow removal escaped its failure boundary'],
     ['requestProjection', true, 'SWM inventory shadow removal escaped its failure boundary'],
   ] as const)('keeps the durable verdict and ends timing when the %s getter throws', async (capability, expected, warning) => {
     const { deps, params, scopeBase } = await fixture();
@@ -199,7 +140,7 @@ describe('confirmed VM catalog completion certificate', () => {
     deps.finalizedPrivateScopeBase = privateLane ? scopeBase : null;
     const stored = deps.storeRepair;
     const requested = deps.requestPlacement;
-    const removed = deps.removeInventory;
+    const removed = deps.removeShadow;
     Object.defineProperty(deps, capability, { get: () => { throw new Error('capability unavailable'); } });
     installCatalogPlacementTimingV1(deps.owner, new CatalogPlacementTimingV1({
       clock: () => 0, logThresholdMs: 0,
@@ -222,7 +163,7 @@ describe('confirmed VM catalog completion certificate', () => {
 
   it.each(['applied', 'absent'] as const)('retains a committed public %s when projection notification throws', async (status) => {
     const { deps, params } = await fixture();
-    deps.removeInventory = vi.fn(async () => ({ status, attempts: 0, snapshot: null }));
+    deps.removeShadow = vi.fn(async () => ({ status, action: 'remove', attempts: 0, headObjectDigest: null, error: null }));
     deps.requestProjection = vi.fn(() => { throw new Error('projection unavailable'); });
     const warn = vi.spyOn(deps.log, 'warn').mockImplementation(() => {});
     expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true);

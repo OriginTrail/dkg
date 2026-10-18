@@ -1,7 +1,0 @@
-import { loadCampaign } from './campaign-manifest.mjs';
-import fs from 'node:fs';import{loadApiClientToken}from'../../packages/cli/dist/auth.js';import{DkgHomeFiles}from'../../packages/cli/dist/config.js';
-const arm=process.argv[2],home=process.env.DKG_HOME,cfg=JSON.parse(fs.readFileSync(home+'/config.json')),token=await loadApiClientToken(new DkgHomeFiles(home));
-const campaign = loadCampaign(arm), cg = campaign.contextGraphId;
-const names=[...campaign.cohorts.initial,...campaign.cohorts.shares];
-let next=0;const results=[];await Promise.all(Array.from({length:campaign.shareConcurrency},async()=>{for(;;){const name=names[next++];if(name===undefined)return;const startedAt=new Date().toISOString();try{const params=new URLSearchParams({contextGraphId:cg,agentAddress:campaign.author});const r=await fetch(`http://127.0.0.1:${cfg.apiPort}/api/knowledge-assets/${name}?${params}`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(campaign.readTimeoutMs)});results.push({name,startedAt,status:r.status,value:await r.json()});}catch(e){results.push({name,startedAt,status:null,error:e.message});}}}));
-fs.writeFileSync(`.tmp/2963/evidence/${arm}/descriptor-proof.json`,JSON.stringify(results.sort((a,b)=>a.name.localeCompare(b.name)),null,2));console.log({denominator:results.length,http200:results.filter(x=>x.status===200).length,failures:results.filter(x=>x.status!==200).map(x=>({name:x.name,status:x.status,error:x.error}))});

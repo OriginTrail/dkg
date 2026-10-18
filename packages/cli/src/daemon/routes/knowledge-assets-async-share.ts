@@ -1,4 +1,3 @@
-import { PromoteJobCancellationConflictError } from '@origintrail-official/dkg-publisher';
 import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/knowledge-assets-async-share.ts
 //
@@ -216,7 +215,7 @@ export async function handleKaShareJobCancel(ctx: RequestContext, jobId: string)
       return jsonResponse(res, 404, { error: err.message });
     }
     // "Cannot cancel job in state 'running'" etc.
-    if (err instanceof PromoteJobCancellationConflictError || err.message?.includes("Cannot cancel")) {
+    if (err.message?.includes("Cannot cancel")) {
       return jsonResponse(res, 409, { error: err.message });
     }
     throw err;

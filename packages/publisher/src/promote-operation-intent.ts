@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/** Preserve the public share operation identifier format for both admission paths. */
-export function createShareOperationId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 /** Durable v1 envelope, shared by creation, replay validation and finalization. */
 export type PromoteOperationIntent = Readonly<{
   version: 1;
@@ -66,10 +61,10 @@ function canonicalizeAllowedPeers(peers: readonly string[]): readonly string[] {
   return [...new Set(peers.map((peer) => peer.trim()).filter(Boolean))].sort();
 }
 
-export function assertPromoteOperationIntent(
+function validatePromoteOperationIntent(
   parsed: unknown,
   expectedOperationId: string,
-): asserts parsed is PromoteOperationIntent {
+): PromoteOperationIntent {
   const candidate = parsed as Partial<PromoteOperationIntent> | undefined;
   const publisherPeerId = candidate?.publisherPeerId;
   const allowedPeers = candidate?.allowedPeers;
@@ -89,8 +84,7 @@ export function assertPromoteOperationIntent(
     && (accessPolicy === 'public' || accessPolicy === 'ownerOnly' || accessPolicy === 'allowList')
     && Array.isArray(allowedPeers)
     && allowedPeers.every((peer) => typeof peer === 'string')
-    && allowedPeers.length === canonicalAllowedPeers.length
-    && allowedPeers.every((peer, index) => peer === canonicalAllowedPeers[index])
+    && JSON.stringify(allowedPeers) === JSON.stringify(canonicalAllowedPeers)
     && ((accessPolicy === 'allowList') === (canonicalAllowedPeers.length > 0));
   if (!valid) {
     throw Object.assign(
@@ -98,15 +92,14 @@ export function assertPromoteOperationIntent(
       { code: 'KA_PROMOTE_OPERATION_INTENT_CORRUPT' },
     );
   }
-}
-
-/** Validate a caller-owned object, then return an immutable independent snapshot. */
-export function validatePromoteOperationIntent(parsed: unknown, expectedOperationId: string): PromoteOperationIntent {
-  assertPromoteOperationIntent(parsed, expectedOperationId);
+  const immutableAllowedPeers = Object.freeze([...canonicalAllowedPeers]);
   return Object.freeze({
-    version: 1, operationId: parsed.operationId, timestampMs: parsed.timestampMs,
-    ...(parsed.publisherPeerId ? { publisherPeerId: parsed.publisherPeerId } : {}),
-    confirmationRequired: parsed.confirmationRequired, accessPolicy: parsed.accessPolicy,
-    allowedPeers: Object.freeze([...parsed.allowedPeers]),
+    version: 1,
+    operationId: expectedOperationId,
+    timestampMs: candidate.timestampMs!,
+    ...(publisherPeerId ? { publisherPeerId } : {}),
+    confirmationRequired: candidate.confirmationRequired!,
+    accessPolicy,
+    allowedPeers: immutableAllowedPeers,
   });
 }

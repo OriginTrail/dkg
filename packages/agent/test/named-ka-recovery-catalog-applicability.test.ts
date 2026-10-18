@@ -103,7 +103,7 @@ describe('named KA recovery catalog applicability', () => {
         resolveRfc64CatalogAuthoringLaneV1: DKGAgent['resolveRfc64CatalogAuthoringLaneV1'];
       };
       const resolveLane = vi.spyOn(h.agent as unknown as CatalogLaneHost, 'resolveRfc64CatalogAuthoringLaneV1');
-      const remove = vi.spyOn(h.agent, 'commitRfc64ConfirmedInventoryRemovalV1');
+      const remove = vi.spyOn(h.agent, 'removeRfc64SwmAuthorInventoryShadowV1');
       const warn = vi.spyOn(h.agent.log, 'warn');
       try {
         if (failure === 'authority-unavailable') {
@@ -119,7 +119,7 @@ describe('named KA recovery catalog applicability', () => {
           } as ReturnType<CatalogLaneHost['resolveRfc64CatalogAuthoringLaneV1']>);
         }
         if (failure === 'public-removal-failure') {
-          remove.mockRejectedValue(new Error('inventory removal unavailable'));
+          remove.mockResolvedValue({ status: 'failed', action: 'remove', attempts: 1, headObjectDigest: null, error: null });
         }
         if (failure === 'private-marker-failure') {
           expect(Reflect.set(h.agent, 'rfc64PersistenceV1', { finalizedPrivatePlacementRepairs: { put } })).toBe(true);

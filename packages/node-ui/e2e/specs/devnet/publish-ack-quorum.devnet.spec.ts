@@ -51,7 +51,7 @@ async function publishFreshEntity(cgId: string, tag: string) {
     });
     expect(wm.ok, `WM create failed: ${wm.status} ${wm.body}`).toBe(true);
     const promoted = await promoteAssertion({ contextGraphId: cgId, assertionName: name });
-    expect(promoted.ok, `SWM promote failed: ${promoted.status} ${await promoted.clone().text()}`).toBe(true);
+    expect(promoted.ok, `SWM promote failed: ${promoted.status}`).toBe(true);
     return publishToVm({ contextGraphId: cgId, assertionName: name });
   });
 }

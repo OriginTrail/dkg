@@ -141,7 +141,6 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
   const reconcile = vi.fn(async (): Promise<null> => null);
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 5_000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }) as never,
-    listDurableInventoryScopes: () => [],
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
     acceptsFinalizedPrivateLane: () => laneActive,

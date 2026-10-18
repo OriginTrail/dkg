@@ -1,4 +1,3 @@
-import { inventoryPersistenceFailure } from './inventory-persistence-failure.js';
 import {
   MAX_DECIMAL_U64,
   SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
@@ -239,19 +238,19 @@ export async function mergeRfc64SwmAuthorInventoryRowsV1(
         cause instanceof InventoryV1CandidateError
         && cause.code === 'swm-inventory-cas-conflict'
       ) {
-        throw inventoryPersistenceFailure(new Rfc64SwmAuthorInventoryProducerErrorV1(
+        throw new Rfc64SwmAuthorInventoryProducerErrorV1(
           'swm-inventory-producer-conflict',
           `SWM inventory exact merge did not converge after ${attempt} CAS attempts`,
           { cause },
-        ));
+        );
       }
       throw cause;
     }
   }
-  throw inventoryPersistenceFailure(new Rfc64SwmAuthorInventoryProducerErrorV1(
+  throw new Rfc64SwmAuthorInventoryProducerErrorV1(
     'swm-inventory-producer-conflict',
     'SWM inventory exact-merge CAS attempt bound was exhausted',
-  ));
+  );
 }
 
 /** Remove one KA after it leaves the active SWM-only set (normally VM confirmation). */
@@ -389,19 +388,19 @@ async function mutateRfc64SwmAuthorInventoryV1<TResult>(
       ) continue;
       if (cause instanceof InventoryV1CandidateError
         && cause.code === 'swm-inventory-cas-conflict') {
-        throw inventoryPersistenceFailure(new Rfc64SwmAuthorInventoryProducerErrorV1(
+        throw new Rfc64SwmAuthorInventoryProducerErrorV1(
           'swm-inventory-producer-conflict',
           `SWM inventory ${policy.operation} did not converge after ${attempt} CAS attempts`,
           { cause },
-        ));
+        );
       }
       throw cause;
     }
   }
-  throw inventoryPersistenceFailure(new Rfc64SwmAuthorInventoryProducerErrorV1(
+  throw new Rfc64SwmAuthorInventoryProducerErrorV1(
     'swm-inventory-producer-conflict',
     `SWM inventory ${policy.operation} CAS attempt bound was exhausted`,
-  ));
+  );
 }
 
 function clampSuccessorIssuedAtV1(

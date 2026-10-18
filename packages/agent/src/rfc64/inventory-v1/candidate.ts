@@ -1,4 +1,3 @@
-import { inventoryPersistenceFailure, inheritInventoryPersistenceFailure } from '../inventory-persistence-failure.js';
 import { type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 export { createRfc64SwmAuthorInventoryOperationsViewV1, type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 import { randomBytes } from 'node:crypto';
@@ -652,7 +651,6 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   #startupPurgeDone = false;
   #committedOverruns = 0;
   #available = true;
-  #unavailableCause: unknown;
   #closed = false;
   #activeWriteDeadline: number | null = null;
   /** Cleared by every applied-head write attempt and every reopen. */
@@ -662,7 +660,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     private database: DatabaseSync,
     private readonly onRequireReopen: (database: DatabaseSync) => DatabaseSync,
     private readonly monotonicNow: () => number = () => performance.now(),
-    private readonly onRejectReopened: (database: DatabaseSync, cause?: unknown) => void = closeRejectedDatabase,
+    private readonly onRejectReopened: (database: DatabaseSync) => void = closeRejectedDatabase,
   ) {}
 
   /** Number of committed write operations whose successful COMMIT crossed a hard budget. */
@@ -853,11 +851,6 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     } finally {
       this.#appliedCatalogHeadsSnapshot = null;
     }
-  }
-
-  listSwmAuthorInventoryScopesV1(): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['listSwmAuthorInventoryScopesV1']> {
-    this.assertOpen();
-    return this.readTransaction(() => this.swmAuthorInventoryPersistenceV1().listScopes());
   }
 
   readSwmAuthorInventoryHeadDigestV1(
@@ -2570,9 +2563,10 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
 
   private requireReopen(): void {
     if (this.#closed || !this.#available) {
-      throw inheritInventoryPersistenceFailure(new InventoryV1CandidateError(
-        'candidate-database-error', 'candidate inventory is unavailable and cannot reopen',
-        { cause: this.#unavailableCause }), this.#closed ? undefined : this.#unavailableCause);
+      throw new InventoryV1CandidateError(
+        'candidate-database-error',
+        'candidate inventory is unavailable and cannot reopen',
+      );
     }
     this.invalidateTraversals();
     // A new low-level handle: nothing listed through the old one is reused.
@@ -2598,14 +2592,12 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       assertUsableReopenedDatabase(reopened, this.monotonicNow, repairDeadline);
       this.database = reopened;
       this.#available = true;
-      this.#unavailableCause = undefined;
     } catch (cause) {
-      this.#unavailableCause = cause instanceof LatencyBudgetSignal ? latencyBudgetError(cause) : cause;
       // A lifecycle owner may attach the replacement before returning it.
       // Detach first and close second so a rejected identity/probe/deadline
       // result can never leave the foundation pointing at a stale handle.
       if (reopened !== null) {
-        try { this.onRejectReopened(reopened, this.#unavailableCause); } catch { /* remain unavailable */ }
+        try { this.onRejectReopened(reopened); } catch { /* remain unavailable */ }
       }
       // Direct/internal providers are required to abandon the prior handle,
       // but a malformed provider might return before doing so.
@@ -2617,9 +2609,11 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       ) {
         throw cause;
       }
-      throw inheritInventoryPersistenceFailure(new InventoryV1CandidateError(
-        'candidate-database-error', 'verified low-level inventory reopen failed; the foundation remains unavailable',
-        { cause }), this.#unavailableCause);
+      throw new InventoryV1CandidateError(
+        'candidate-database-error',
+        'verified low-level inventory reopen failed; the foundation remains unavailable',
+        { cause },
+      );
     }
   }
 
@@ -2701,10 +2695,12 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
 
   private assertOpen(): void {
     if (this.#closed || !this.#available) {
-      throw inheritInventoryPersistenceFailure(new InventoryV1CandidateError(
-        'candidate-database-error', this.#closed ? 'candidate inventory adapter is closed'
+      throw new InventoryV1CandidateError(
+        'candidate-database-error',
+        this.#closed
+          ? 'candidate inventory adapter is closed'
           : 'candidate inventory adapter is unavailable after failed verified reopen',
-        { cause: this.#unavailableCause }), this.#closed ? undefined : this.#unavailableCause);
+      );
     }
   }
 
@@ -3372,15 +3368,15 @@ function normalizeCandidateError(message: string, cause: unknown): InventoryV1Ca
 }
 
 function databaseError(message: string, cause: unknown): InventoryV1CandidateError {
-  return inventoryPersistenceFailure(new InventoryV1CandidateError('candidate-database-error', message, { cause }));
+  return new InventoryV1CandidateError('candidate-database-error', message, { cause });
 }
 
 function latencyBudgetError(cause: unknown): InventoryV1CandidateError {
-  return inventoryPersistenceFailure(new InventoryV1CandidateError(
+  return new InventoryV1CandidateError(
     'latency-budget-exceeded',
     'SQL-1 latency budget was exceeded; the result was discarded and verified reopen is required',
     { cause },
-  ));
+  );
 }
 
 function invalidLoad(message: string): never {

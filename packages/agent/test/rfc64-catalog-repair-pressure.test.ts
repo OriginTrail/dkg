@@ -49,7 +49,6 @@ function fixture(reconcile: (signal: AbortSignal) => Promise<void>, queueLimit =
   // compatible with both sides of the regression without fabricating repair policy.
   const dependencies = {
     resolvePartition: () => undefined,
-    listDurableInventoryScopes: () => [],
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
     acceptsFinalizedPrivateLane: () => true,

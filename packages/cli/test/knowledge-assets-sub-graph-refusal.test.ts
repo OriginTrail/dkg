@@ -13,7 +13,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { SubGraphNotFoundError, SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
-import { daemonState } from '../src/daemon/state.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CG_ID = 'issue-3293-cg';
@@ -30,7 +29,6 @@ describe('write into a sub-graph nobody holds (#3293)', () => {
   let baseUrl: string;
 
   afterEach(async () => {
-    daemonState.promoteWorkerAvailable = false;
     if (server) {
       await new Promise<void>((resolve, reject) => server!.close((err) => (err ? reject(err) : resolve())));
       server = undefined;
@@ -151,15 +149,11 @@ describe('write into a sub-graph nobody holds (#3293)', () => {
   });
 
   it('wm/write and swm/share answer the same 400', async () => {
-    daemonState.promoteWorkerAvailable = true;
-    const enqueueAndClaim = vi.fn();
-    const prepareDurableShare = vi.fn(async () => { throw refusal(); });
     await startWith({
-      promoteQueue: { enqueueAndClaim },
       assertion: {
         history: async () => null,
         create: async () => { throw refusal(); },
-        prepareDurableShare,
+        promote: async () => { throw refusal(); },
       },
     });
 
@@ -169,8 +163,6 @@ describe('write into a sub-graph nobody holds (#3293)', () => {
       quads: [{ subject: 'urn:test:3293', predicate: 'http://schema.org/name', object: '"report"', graph: '' }],
     }));
     expectRefusal(await post(`/${ASSERTION_NAME}/swm/share`, { contextGraphId: CG_ID, subGraphName: SUB_GRAPH }));
-    expect(prepareDurableShare).toHaveBeenCalledOnce();
-    expect(enqueueAndClaim).not.toHaveBeenCalled();
   });
 
   it('wm/import-file asks the agent to resolve the sub-graph and answers its refusal with 400 SUB_GRAPH_NOT_FOUND', async () => {

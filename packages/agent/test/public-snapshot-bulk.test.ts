@@ -36,12 +36,11 @@ describe('public bulk snapshot recovery', () => {
       controls.push(frame.index);
       expect(completed.has(f.uals[frame.index]!)).toBe(true);
     } });
-    const observedAt = Date.now();
     const snapshot = sealPublicGraphSnapshot({ version: 1, chainId: 'base:84532', deploymentId: 'fixture',
       contextGraphId: cg, onChainId: '14', nameHash: `0x${'1'.repeat(64)}`,
       contextGraphStorage: `0x${'2'.repeat(40)}`, assetStorage: `0x${'0'.repeat(39)}1`,
       blockNumber: '10', blockHash: `0x${'3'.repeat(64)}`, finalityConfirmations: 1,
-      observedAt, expiresAt: observedAt + 120_000, accessPolicy: 0,
+      observedAt: Date.now(), expiresAt: Date.now() + 120_000, accessPolicy: 0,
       assets: [...f.byId].map(([id, root]) => ({ id: String(id), root: `0x${Buffer.from(root).toString('hex')}`, version: '1' })),
     });
     const connect = vi.fn(async (peer: string) => { if (peer === 'offline') throw new Error('offline dial failed'); });

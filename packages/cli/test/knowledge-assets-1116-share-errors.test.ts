@@ -17,9 +17,6 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { randomUUID } from 'node:crypto';
-import { TripleStoreAsyncPromoteQueue, CuratorRejectedError } from '@origintrail-official/dkg-publisher';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -34,7 +31,6 @@ import {
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import {
-  createPromotePostCommitFailure,
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
   PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
@@ -116,12 +112,9 @@ function rootlessIntent(snapshot: {
 describe('#1116 share/seal route error mapping (fake agent)', () => {
   let server: Server | undefined;
   let baseUrl: string;
-  let shareStore: OxigraphStore | undefined;
 
   afterEach(async () => {
     daemonState.promoteWorkerAvailable = false;
-    await shareStore?.close();
-    shareStore = undefined;
     if (server) {
       await new Promise<void>((resolve, reject) => {
         server!.close((err) => (err ? reject(err) : resolve()));
@@ -154,19 +147,6 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
             ? { error: new Error('test publisher startup failure') }
             : {}),
         };
-    // Keep the route fixture's promote callback, with a real durable owner.
-    const shareQueue = typeof assertion.promote === 'function'
-      ? new TripleStoreAsyncPromoteQueue(shareStore = new OxigraphStore()) : undefined;
-    if (shareQueue) {
-      daemonState.promoteWorkerAvailable = true;
-      assertion.admitDurableShare = (request: any, workerId: string) => shareQueue.enqueueAndClaim(request, workerId);
-      assertion.prepareDurableShare = async (_cg: string, _name: string, opts: any) => ({
-        agentAddress: opts?.agentAddress ?? ROOTLESS_AUTHOR,
-        recoveryBinding: { version: 1, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: false,
-          intent: { version: 1, operationId: randomUUID(), timestampMs: Date.now(),
-            confirmationRequired: false, accessPolicy: 'public', allowedPeers: [] } },
-      });
-    }
     const agent = {
       async listContextGraphs() {
         return [{
@@ -180,7 +160,6 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       async contextGraphExists(cgId: string) {
         return cgId === CG_ID;
       },
-      promoteQueue: shareQueue,
       resolveAgentByToken: () => undefined,
       assertion,
       // Agent-level methods (e.g. publishFromFinalizedAssertion /
@@ -306,40 +285,6 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
   });
 
-  it('preserves a stronger acknowledgement conflict as 409 with recovery ownership', async () => {
-    await startWith({ promote: async () => {
-      throw Object.assign(new Error('Existing operation cannot satisfy stronger acknowledgement'),
-        { code: 'KA_PROMOTE_ACK_REQUIREMENT_CONFLICT' });
-    } });
-    const res = await post('swm/share', { contextGraphId: CG_ID, awaitCuratorAck: true });
-    expect(res.status).toBe(409);
-    expect(res.body).toMatchObject({ code: 'KA_PROMOTE_ACK_REQUIREMENT_CONFLICT',
-      recoveryState: 'inspection-required', retryable: false });
-    expect(res.body.recoveryJobId).toEqual(expect.any(String));
-  });
-
-  it.each([[false, 'network-cg'], [false, 'timeout'], [true, 'ordinary']])('exposes permanent share recovery ownership (one-shot=%s, graph=%s)', async (oneShot, rejectedGraph) => {
-    await startWith({
-      history: async () => null, create: async () => {}, write: async () => {},
-      finalize: async () => ({ merkleRoot: new Uint8Array(32), authorAddress: ROOTLESS_AUTHOR }),
-      promote: async () => { throw new CuratorRejectedError(rejectedGraph as string); },
-    });
-    const res = oneShot
-      ? await postRoot({ contextGraphId: CG_ID, name: 'rejected', quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"' }], finalize: true, alsoShareSwm: true })
-      : await post('swm/share', { contextGraphId: CG_ID });
-    expect(res.status).toBe(oneShot ? 207 : 409);
-    expect(res.body).toMatchObject({ recoveryState: 'inspection-required', retryable: false });
-    expect(res.body.recoveryJobId).toEqual(expect.any(String));
-    expect(res.body.recoveryStatusUrl).toBe(`/api/knowledge-assets/swm/share-jobs/${res.body.recoveryJobId}`);
-    if (!oneShot) expect(res.body).toMatchObject({ code: 'CURATOR_REJECTED', curatorDelivery: 'rejected' });
-    if (!oneShot) {
-      const repeat = await post('swm/share', { contextGraphId: CG_ID });
-      expect(repeat.status).toBe(409);
-      expect(repeat.body).toMatchObject({ code: 'SHARE_OWNER_CONFLICT', recoveryState: 'inspection-required',
-        retryable: false, recoveryJobId: res.body.recoveryJobId, recoveryStatusUrl: res.body.recoveryStatusUrl });
-    }
-  });
-
   it('swm/share: KA_NAMED_GRAPH_SHARE_UNSUPPORTED → 409 { code, error, namedGraphs }', async () => {
     await startWith({
       promote: async () => {
@@ -358,79 +303,6 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('KA_NAMED_GRAPH_SHARE_UNSUPPORTED');
     expect(String(res.body.error)).toContain('named-graph');
     expect(res.body.namedGraphs).toEqual(['urn:test:graph:one']);
-  });
-
-  it('returns 409 for protected durable cancellation and still cancels an ordinary queued job', async () => {
-    await startWith({
-      promote: async () => { throw createPromotePostCommitFailure(new Error('interrupted')); },
-      cancelPromoteAsync: async (id: string) => new TripleStoreAsyncPromoteQueue(shareStore!).cancel(id),
-      getPromoteAsyncStatus: async (id: string) => new TripleStoreAsyncPromoteQueue(shareStore!).getStatus(id),
-    });
-    const share = await post('swm/share', { contextGraphId: CG_ID });
-    const queue = new TripleStoreAsyncPromoteQueue(shareStore!);
-    const before = await queue.getStatus(share.body.recoveryJobId);
-    const cancel = await fetch(`${baseUrl}/api/knowledge-assets/swm/share-jobs/${share.body.recoveryJobId}`, { method: 'DELETE' });
-    expect(cancel.status).toBe(409);
-    expect(await queue.getStatus(share.body.recoveryJobId)).toEqual(before);
-    const ordinary = await queue.enqueue({ contextGraphId: CG_ID, assertionName: 'ordinary', entities: 'all' });
-    const ordinaryCancel = await fetch(`${baseUrl}/api/knowledge-assets/swm/share-jobs/${ordinary}`, { method: 'DELETE' });
-    expect(ordinaryCancel.status).toBe(200);
-    expect(await queue.getStatus(ordinary)).toMatchObject({ state: 'failed', reason: 'cancelled' });
-  });
-
-  it.each(['pending', 'inspection-store', 'before-admission', 'terminal'])('one-shot %s keeps its partial contract and VM continuation', async kind => {
-    let vmCalls = 0;
-    const storeFailure = () => new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'insert', outcome: 'indeterminate', storeOperation: 'insert' });
-    const assertion: Record<string, unknown> = {
-      create: async () => 'did:dkg:assertion:partial', write: async () => {},
-      finalize: async () => ({ merkleRoot: new Uint8Array(32), authorAddress: ROOTLESS_AUTHOR }),
-      promote: async () => {
-        if (kind === 'pending') throw createPromotePostCommitFailure(new Error('interrupted'));
-        if (kind === 'inspection-store') throw storeFailure();
-        throw new CuratorRejectedError(CG_ID);
-      },
-    };
-    await startWith(assertion, { publishFromFinalizedAssertion: async () => {
-      vmCalls++;
-      return { onChainResult: { status: 'confirmed' } };
-    } });
-    if (kind === 'before-admission') assertion.prepareDurableShare = async () => { throw storeFailure(); };
-    const response = await fetch(`${baseUrl}/api/knowledge-assets`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contextGraphId: CG_ID, name: 'partial', finalize: true, alsoShareSwm: true, alsoPublishVm: true,
-        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"' }] }) });
-    const body = await response.json();
-    expect(response.status).toBe(kind === 'terminal' ? 207 : 503);
-    expect(vmCalls).toBe(kind === 'terminal' ? 1 : 0);
-    if (kind !== 'terminal') expect(response.headers.get('retry-after')).toBe('1');
-    if (kind === 'before-admission') expect(body.recoveryJobId).toBeUndefined();
-    else expect(body).toMatchObject({ recoveryJobId: expect.any(String),
-      recoveryState: kind === 'pending' ? 'pending' : 'inspection-required', retryable: kind === 'pending' });
-    if (kind !== 'terminal') expect(body).toMatchObject({ created: true, partial: true, failedPhase: 'swm-share' });
-  });
-
-  it.each(['standalone', 'one-shot'])('%s post-commit failure returns a durable recovery handle and protects the queue row', async mode => {
-    await startWith({
-      create: async () => 'did:dkg:assertion:owned-share',
-      write: async () => undefined,
-      finalize: async () => ({ assertionUri: 'did:dkg:assertion:owned-share', merkleRoot: new Uint8Array(32),
-        authorAddress: ROOTLESS_AUTHOR, schemeVersion: 1, chainId: 1n,
-        kav10Address: `0x${'ef'.repeat(20)}`, eip712Digest: `0x${'12'.repeat(32)}` }),
-      promote: async () => { throw createPromotePostCommitFailure(new Error('lifecycle insert interrupted')); },
-    });
-    const res = mode === 'standalone'
-      ? await post('swm/share', { contextGraphId: CG_ID })
-      : await postRoot({ contextGraphId: CG_ID, name: ASSERTION_NAME, quads: [{
-        subject: 'urn:owned-share', predicate: 'https://schema.org/name', object: '"owned"', graph: '',
-      }], finalize: true, alsoShareSwm: true });
-    expect(res.status).toBe(503);
-    expect(res.body).toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE', retryable: true,
-      recoveryState: 'pending', retryAction: 'resume_existing_knowledge_asset' });
-    expect(res.body.recoveryStatusUrl).toBe(`/api/knowledge-assets/swm/share-jobs/${res.body.recoveryJobId}`);
-    if (mode === 'one-shot') expect(res.body).toMatchObject({ partial: true, failedPhase: 'swm-share', name: ASSERTION_NAME });
-    const queue = new TripleStoreAsyncPromoteQueue(shareStore!);
-    expect(await queue.getStatus(res.body.recoveryJobId)).toMatchObject({ state: 'failed_retrying',
-      attempt: { lastError: { diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE', retryable: true } } });
-    expect(await queue.clearTerminalJob(res.body.recoveryJobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
   });
 
   it('wm/finalize (layer:swm): rejects read-only before invoking the engine', async () => {
