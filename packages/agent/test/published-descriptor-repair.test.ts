@@ -1,72 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { assertionLifecycleUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import { assertionLifecycleUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
-import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { repairPublishedDescriptor } from '../src/published-descriptor-repair.js';
 import { AUTHOR, PUBLISHER, TX_HASH } from './_helpers/named-ka-recovery-fixture.js';
+
+import { descriptorRepairFixture } from './_helpers/descriptor-repair-fixture.js';
+import { incompleteNamedKaLifecycleAuthor } from '../src/incomplete-named-ka-lifecycle.js';
 
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const s of stores.splice(0)) await s.close(); });
 const DKG = 'http://dkg.io/ontology/';
 async function fixture(version = 1) {
-  const store = new OxigraphStore(); stores.push(store);
-  const author = ethers.getAddress(AUTHOR);
-  const input = { contextGraphId: 'repair-cg', name: 'published', kaUal: `did:dkg:evm:31337/${AUTHOR}/402` };
-  const kaId = (BigInt(AUTHOR) << 96n) | 402n;
-  const subject = assertionLifecycleUri(input.contextGraphId, author, input.name);
-  const graph = contextGraphMetaUri(input.contextGraphId);
-  const vm = contextGraphLayerUri(input.contextGraphId, MemoryLayer.VerifiableMemory, AUTHOR, 402n);
-  const content: Quad[] = [{ graph: vm, subject: 'urn:asset:body', predicate: 'urn:text', object: '"exact accepted revision"' }];
-  const root = computeFlatKCRootV10(content, []);
-  const snapshot = { latestRoot: ethers.hexlify(root), rootCount: BigInt(version), latestAuthor: AUTHOR,
-    latestPublisher: PUBLISHER, blockNumber: 100, blockHash: `0x${'11'.repeat(32)}` };
-  const chain = {
-    chainId: 'evm:31337',
-    readKnowledgeAssetVersionSnapshot: vi.fn(async () => snapshot),
-    getKAContextGraphId: vi.fn(async () => 1n), getMerkleRootCount: vi.fn(async () => BigInt(version)),
-    isContextGraphActiveOnChain: vi.fn(async () => true), getContextGraphAccessPolicy: vi.fn(async () => 0),
-    isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
-    verifyKAUpdate: vi.fn(async () => ({ verified: true, onChainMerkleRoot: root,
-      merkleRootCount: BigInt(version), blockNumber: 90, blockHash: snapshot.blockHash, txIndex: 1 })),
-    resolveCanonicalFinalizationReceipt: vi.fn(async () => ({ status: 'confirmed', receipt: {
-      txHash: TX_HASH, blockNumber: 90, blockHash: snapshot.blockHash, txIndex: 1,
-      merkleRoot: root, publisherAddress: PUBLISHER, authorAddress: AUTHOR,
-      kaId, batchId: kaId, startKAId: kaId, endKAId: kaId,
-    } })),
-  };
-  const host = { store, chain: chain as unknown as ChainAdapter, writeLocks: new Map<string, Promise<void>>(),
-    getContextGraphOnChainId: async () => '1',
-    stampPublishedLifecycle: (input: Parameters<typeof applyPublishedNamedKaVmLifecycle>[1]) => applyPublishedNamedKaVmLifecycle(store, input) };
-  const row = (p: string, value: string): Quad => ({ graph, subject, predicate: DKG + p, object: JSON.stringify(value) });
-  await store.insert([...content, ...generateGraphKnowledgeAssetMetadata({
-    ual: input.kaUal, contextGraphId: input.contextGraphId, merkleRoot: root, publisherPeerId: 'fixture',
-    accessPolicy: 'public', allowedPeers: [], timestamp: new Date(), authorAddress: AUTHOR,
-    assertionVersion: version, publicTripleCount: 1, privateTripleCount: 0, assertionGraph: vm,
-  }, { status: 'confirmed', confirmation: { kind: 'transaction', provenance: {
-    txHash: TX_HASH, blockNumber: 90, blockTimestamp: 0, publisherAddress: PUBLISHER,
-    batchId: kaId, chainId: 'evm:31337',
-  } } }),
-  ...Object.entries({ assertionName: input.name, kaId: '402', reservedUal: input.kaUal, publishedUal: input.kaUal,
-    assertionVersion: String(version), memoryLayer: 'VM', vmCurrentAssertion: snapshot.latestRoot.slice(2),
-    wmCurrentAssertion: snapshot.latestRoot.slice(2), swmCurrentAssertion: snapshot.latestRoot.slice(2),
-    shareOperationId: 'original-share' }).map(([p, v]) => row(p, v)),
-  { graph, subject, predicate: DKG + 'assertionGraph', object: vm },
-  { graph, subject, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `did:dkg:agent:${AUTHOR}` },
-  ]);
-  await host.stampPublishedLifecycle({ ...input, agentAddress: author, publishedUal: input.kaUal,
-    merkleRoot: snapshot.latestRoot, packedKaId: kaId });
-  await store.deleteByPattern({ graph, subject, predicate: DKG + 'state' });
-  const all = async () => {
-    const r = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }');
-    if (r.type !== 'bindings') throw new Error('bindings required');
-    return r.bindings.map(r => JSON.stringify(r)).sort();
-  };
-  return { host, chain, store, input, subject, graph, vm, content, snapshot, row, all };
+  const h = await descriptorRepairFixture(version); stores.push(h.store); return h;
 }
 
 describe('targeted published descriptor repair', () => {
@@ -219,5 +167,26 @@ describe('targeted published descriptor repair', () => {
     const first = repairPublishedDescriptor(h.host, h.input);
     await expect(repairPublishedDescriptor(h.host, h.input)).rejects.toMatchObject({ code: 'KA_DESCRIPTOR_REPAIR_BUSY' });
     release(); await expect(first).resolves.toMatchObject({ status: 'verified' });
+  });
+});
+
+
+describe('incomplete lifecycle diagnostics', () => {
+  it.each(['storage', 'corrupt'] as const)('preserves the %s failure evidence', async kind => {
+    const h = await fixture();
+    const failure = Object.assign(new Error('Store scheduler queue wait timeout', { cause: new Error('store unavailable') }), { code: 'STORE_QUEUE_TIMEOUT' });
+    if (kind === 'storage') {
+      const query = h.store.query.bind(h.store);
+      vi.spyOn(h.store, 'query').mockImplementation((sparql, options) => {
+        if (options?.source === 'publisher.lifecycle.candidates') return Promise.reject(failure);
+        return query(sparql, options);
+      });
+    } else {
+      await h.store.deleteByPattern({ graph: h.graph, subject: h.subject, predicate: DKG + 'kaId' });
+      await h.store.insert([h.row('kaId', 'not-an-integer')]);
+    }
+    const pending = incompleteNamedKaLifecycleAuthor(h.store, { ...h.input, kaNumber: '402', assertionVersion: '1', sealMerkleRoot: h.snapshot.latestRoot }, AUTHOR);
+    if (kind === 'storage') await expect(pending).rejects.toBe(failure);
+    else await expect(pending).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT', cause: { code: 'KA_WM_LIFECYCLE_CORRUPT' } });
   });
 });

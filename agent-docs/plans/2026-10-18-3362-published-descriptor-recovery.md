@@ -70,3 +70,9 @@ CI's SPARQL scanner could not infer the bounded subject VALUES list. Added its d
 Live progress: 15/15 updates completed, and all 46 current heads plus all 61 publication receipts passed independent verification. Both cleared-job operator scenarios passed on `727a55b8a`. The daemon is stopped for the final proof-preserving revision; a fresh automatic fault fixture, version-2 operator repair and all-head cold-restart verification will run on it. Review response budget: 3/10 including the initial live-validation correction.
 
 Round 3 validation: all 150 agent tests across six suites passed, including both writer modes and canonical UPDATE receipt proof/refusal. Typecheck, lint and file-size checks passed. Final live replay remains pending.
+
+### Remote review response round 4 (in progress)
+
+Preserve storage failures (including their cause/code) while translating only canonical lifecycle corruption. Add real-agent/publisher serialization coverage in both execution orders and authorized HTTP dry-run contract coverage. Final round-3 live replay passed all 47 heads and 62 publication versions after a daemon/database cold restart; all 125 wallet transactions have successful receipts. Owned services are stopped while this review batch is addressed.
+
+Round 4 verification: 29 focused agent tests and 35 CLI authority/route tests pass. Real DKGAgent creation/write serialization passes in both orders with checksummed writer/lowercase repair identity; an additional real finalize/signature test installs version 2 and a newer WM root before the waiting repair refuses, preserving both roots and all resulting metadata. Agent build/type fixtures, lint, file-size and whitespace checks pass. Production delta from the accepted live runtime is limited to preserving storage-error diagnostics.

@@ -392,3 +392,26 @@ describe('published descriptor repair authority', () => {
     expect(repairPublishedKnowledgeAssetDescriptor).not.toHaveBeenCalled();
   });
 });
+
+
+describe('authorized published descriptor repair contract', () => {
+  const input = { contextGraphId: 'repair-cg', kaUal: 'did:dkg:evm:31337/0x00000000000000000000000000000000000000a1/402' };
+  it.each([undefined, true, false])('passes dryRun=%s explicitly to the SDK', async dryRun => {
+    const repairPublishedKnowledgeAssetDescriptor = vi.fn(async () => ({ status: dryRun === false ? 'repaired' : 'verified' }));
+    const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST',
+      '/api/knowledge-assets/asset/vm/repair-descriptor', OPERATOR, {
+        body: JSON.stringify({ ...input, dryRun }), agent: { repairPublishedKnowledgeAssetDescriptor,
+          listContextGraphs: vi.fn(async () => [{ id: input.contextGraphId, subscribed: true, synced: true }]) },
+      });
+    expect(result).toEqual({ status: 200, body: { status: dryRun === false ? 'repaired' : 'verified' } });
+    expect(repairPublishedKnowledgeAssetDescriptor).toHaveBeenCalledExactlyOnceWith({ ...input, name: 'asset', subGraphName: undefined, dryRun: dryRun !== false });
+  });
+  it.each([null, 0, 1, 'false', {}, []])('rejects non-boolean dryRun=%j before SDK access', async dryRun => {
+    const repairPublishedKnowledgeAssetDescriptor = vi.fn();
+    const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST',
+      '/api/knowledge-assets/asset/vm/repair-descriptor', OPERATOR,
+      { body: JSON.stringify({ ...input, dryRun }), agent: { repairPublishedKnowledgeAssetDescriptor } });
+    expect(result.status).toBe(400);
+    expect(repairPublishedKnowledgeAssetDescriptor).not.toHaveBeenCalled();
+  });
+});

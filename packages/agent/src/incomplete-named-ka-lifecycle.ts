@@ -17,8 +17,8 @@ export async function incompleteNamedKaLifecycleAuthor(
   store: TripleStore, request: NamedKaLifecycleRecoveryFacts, author: string,
   options: { allowPublishedState?: boolean; requireCompatibleVmProjection?: boolean } = {},
 ): Promise<string> {
-  const refuse = (reason: string): never => {
-    throw Object.assign(new Error(`Cannot repair published descriptor for "${request.name}": ${reason}`), {
+  const refuse = (reason: string, cause?: unknown): never => {
+    throw Object.assign(new Error(`Cannot repair published descriptor for "${request.name}": ${reason}`, { cause }), {
       code: 'KA_VM_RECOVERY_INCONSISTENT',
     });
   };
@@ -26,7 +26,10 @@ export async function incompleteNamedKaLifecycleAuthor(
     || !/^(?:0x)?[0-9a-fA-F]{64}$/.test(request.sealMerkleRoot)) return refuse('incomplete recovery identity');
   let candidates;
   try { candidates = await readAssertionLifecycleCandidates(store, request.contextGraphId, author, request.name, request.subGraphName); }
-  catch { return refuse('invalid retained lifecycle reservation'); }
+  catch (error) {
+    if ((error as { code?: string } | null)?.code !== 'KA_WM_LIFECYCLE_CORRUPT') throw error;
+    return refuse('invalid retained lifecycle reservation', error);
+  }
   if (candidates.length !== 1) return refuse('missing or ambiguous lifecycle identity; retain the original job evidence');
   const candidate = candidates[0]!;
   const bindings = candidate.record.bindings;
