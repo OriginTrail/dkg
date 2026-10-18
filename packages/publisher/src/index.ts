@@ -557,4 +557,4 @@ export { readCurrentAssertionVersion } from './materialization-assertion-version
 
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
 
-export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome } from './promote-admission.js';
+export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';

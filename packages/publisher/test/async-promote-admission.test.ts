@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, StoreSchedulerBusyError, StorePriorityScheduler, type TripleStore } from '@origintrail-official/dkg-storage';
+import { jobSubject, literal, PROMOTE_PAYLOAD } from '../src/async-promote-queue-utils.js';
 import { isAutomaticallyRecoverablePostCommitFailure } from '../src/async-promote-recovery-policy.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import { PromoteAdmissionAttempt, PromoteAdmissionCoordinator, type PromoteAdmissionEvent } from '../src/promote-admission.js';
@@ -175,6 +176,7 @@ it('retains unresolved uncertainty even when a read sees no job; never manufactu
   });
   const first = await bounded(queue.enqueue(request)) as { error: { jobId: string } };
   expect(await queue.getStatus(first.error.jobId)).toBeNull();
+  expect(await queue.clearTerminalJob(first.error.jobId)).toEqual({ outcome: 'already_absent' });
   await expect(queue.enqueue(request)).rejects.toMatchObject({ jobId: first.error.jobId, admissionOutcome: 'indeterminate' });
   expect(writes).toBe(1);
 });
@@ -284,7 +286,7 @@ it('evicts excess positive observations without ever caching permission to admit
 it('keeps deadline and eventual phase observations distinct and payload-free', () => {
   const events: PromoteAdmissionEvent[] = [];
   const attempt = new PromoteAdmissionAttempt(1000, event => events.push(event));
-  attempt.enter('graph'); attempt.enter('conflict'); attempt.enter('persist', 'sensitive-job-id');
+  attempt.enter('graph'); attempt.enter('conflict'); attempt.beginPersistence('sensitive-job-id');
   attempt.report(attempt.expire().admissionOutcome, 'deadline');
   attempt.report('completed'); // eventual persistence acknowledgement after timeout
   expect(events.slice(-2)).toEqual([
@@ -362,4 +364,46 @@ it.each(['replaceSubject', 'flush'] as const)('retains the mutex after timeout u
   expect((await status)?.jobId).toBe(outcome.error.jobId);
   expect((await claim)?.jobId).toBe(outcome.error.jobId);
   expect(await queue.list()).toHaveLength(1);
+});
+
+it('settles retained uncertainty before clearing an externally completed job', async () => {
+  let armed = true;
+  const { queue, inner, config } = fixture(async (method, _args, run) => {
+    const result = await run();
+    if (armed && method === 'flush') { armed = false; throw new Error('lost admission acknowledgement'); }
+    return result;
+  });
+  const admission = await bounded(queue.enqueue(request)) as { error: { jobId: string } };
+  const id = admission.error.jobId;
+  const external = new TripleStoreAsyncPromoteQueue(inner, config);
+  const job = (await external.claimNext('external-worker'))!;
+  await external.recordCommitMarker(id, job.lease!.claimToken, 'swmInserted');
+  await external.succeed(id, job.lease!.claimToken, { promotedCount: 1, succeededAt: Date.now() });
+  // Deliberately no status/list call on the original queue before clear.
+  expect(await queue.clearTerminalJob(id)).toEqual({ outcome: 'cleared' });
+  const next = await queue.enqueue(request);
+  expect(next).not.toBe(id);
+  expect((await queue.list()).map(job => job.jobId)).toEqual([next]);
+});
+
+it.each(['malformed', 'mismatched-id', 'unknown-state'] as const)('does not erase uncertainty when terminal clear sees %s evidence', async kind => {
+  let armed = true;
+  const { queue, inner, config } = fixture(async (method, _args, run) => {
+    const result = await run();
+    if (armed && method === 'flush') { armed = false; throw new Error('lost admission acknowledgement'); }
+    return result;
+  });
+  const admission = await bounded(queue.enqueue(request)) as { error: { jobId: string } };
+  const id = admission.error.jobId;
+  const external = new TripleStoreAsyncPromoteQueue(inner, config);
+  await external.cancel(id);
+  const job = (await external.getStatus(id))!;
+  const payload = kind === 'malformed' ? '{invalid' : JSON.stringify({ ...job,
+    ...(kind === 'mismatched-id' ? { jobId: 'different-job' } : { state: 'unknown' }),
+  });
+  const pattern = { subject: jobSubject(id), predicate: PROMOTE_PAYLOAD, graph: config.graphUri! };
+  await inner.deleteByPattern(pattern);
+  await inner.insert([{ ...pattern, object: literal(payload) }]);
+  expect(await queue.clearTerminalJob(id)).toEqual({ outcome: 'rejected', reason: kind === 'unknown-state' ? 'unknown' : 'malformed' });
+  await expect(queue.enqueue(request)).rejects.toMatchObject({ admissionOutcome: 'indeterminate', jobId: id });
 });

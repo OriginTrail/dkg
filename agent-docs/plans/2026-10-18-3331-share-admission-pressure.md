@@ -1,6 +1,6 @@
 # Issue 3331: bounded async share admission and reconciliation
 
-Status: PR #3358 open; first remote review revision validated and ready for re-review. Owner: Codex. Base: `testnet-canary` at `b82918e8e8e40cdc30aa0e6d32ad4119e3d6c985`; branch `codex/3331-share-admission-pressure`.
+Status: PR #3358 open; second remote review revision validated and ready for re-review. Owner: Codex. Base: `testnet-canary` at `b82918e8e8e40cdc30aa0e6d32ad4119e3d6c985`; branch `codex/3331-share-admission-pressure`.
 
 ## Outcome and evidence
 
@@ -70,3 +70,9 @@ No durable schema migration is needed. Rollback removes the admission wrapper/ob
 All four reviewer threads were actionable. Admission errors now carry `partialDisposition: unavailable`, so one-shot create/share returns the original scoped 503 and never continues to optional publication. Pending and durable ownership share one activation-conflict lookup (including lane/exclusion handling). Primary persistence and flush return explicit evidence through `persistPromoteJobWithEvidence`; ordinary worker writes still throw their original causes. Tentative job identity is no longer cleared to encode outcome.
 
 New real-queue tests cover inline admission, explicit recovery and automatic recovery against retained uncertainty with no visible new row, plus competing status/claim operations after both write and flush deadlines. HTTP tests cover one-shot creation with and without optional VM publication. Validation: 147 queue tests, 128 HTTP/worker/durable tests and 23 bound-owner tests passed; publisher and CLI compilation, lint and file-size checks passed. Remote re-review and live validation remain outstanding.
+
+### Remote review round 2
+
+A validated terminal clear now reconciles retained admission uncertainty before deleting the supporting durable record. Absent, malformed, mismatched-ID and unknown-state rows do not settle uncertainty. The new regression commits a job, loses its flush acknowledgement, completes it through an independent store handle, then clears directly through the original queue and successfully admits the selector again.
+
+The admission model now has private discriminated pre-persistence/persistence state, a `beginPersistence(jobId)` transition, and immutable discriminated error evidence. Indeterminate evidence always requires its original handle; HTTP rendering narrows that same evidence. Compile-time negative fixtures reject missing IDs, inappropriate phases, non-admission with a handle, and public mutation. Validation: 151 queue tests, 128 HTTP/worker/durable tests, 23 bound-owner tests, publisher/CLI compilation, negative type fixtures, lint and file-size checks passed. The expanded diff remains one admission/reconciliation contract; type, terminal-clear and HTTP integration tests belong with the implementation rather than a separately mergeable partial fix.

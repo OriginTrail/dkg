@@ -32,7 +32,7 @@ function context(promoteAsync: (...args: any[]) => Promise<unknown>) {
 describe('async share admission HTTP evidence', () => {
   it.each(['live', 'standalone'])('keeps a nested not_started out of the %s response after persistence starts', async route => {
     const cause = new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'private.operation.name');
-    const { ctx, record } = context(async () => { throw new PromoteAdmissionError('persist', 'indeterminate', 'original-job', cause); });
+    const { ctx, record } = context(async () => { throw new PromoteAdmissionError({ phase: 'persist', admissionOutcome: 'indeterminate', jobId: 'original-job' }, cause); });
     if (route === 'live') await handleKnowledgeAssetsRoutes(ctx);
     else await handleKaShareAsyncEnqueue(ctx, 'asset');
     expect(record.status).toBe(503);
@@ -46,7 +46,7 @@ describe('async share admission HTTP evidence', () => {
 
   it('reports proven non-admission without inventing an ID or claiming the whole HTTP operation never started', () => {
     const { ctx, record } = context(async () => undefined);
-    respondAssertionError(ctx.res, new PromoteAdmissionError('conflict', 'not_admitted'));
+    respondAssertionError(ctx.res, new PromoteAdmissionError({ phase: 'conflict', admissionOutcome: 'not_admitted' }));
     expect(JSON.parse(record.body)).toMatchObject({ admissionScope: 'async_promote_job', admissionOutcome: 'not_admitted' });
     expect(JSON.parse(record.body)).not.toHaveProperty('jobId');
     expect(JSON.parse(record.body)).not.toHaveProperty('outcome');
@@ -82,7 +82,7 @@ it.each([false, true])('one-shot sharing preserves uncertainty and stops before 
   });
   withDurableShareOwner(ctx.agent, stores);
   vi.spyOn(ctx.agent.assertion, 'admitDurableShare').mockRejectedValue(
-    new PromoteAdmissionError('persist', 'indeterminate', 'original-uncertain-job'));
+    new PromoteAdmissionError({ phase: 'persist', admissionOutcome: 'indeterminate', jobId: 'original-uncertain-job' }));
   const publishFromFinalizedAssertion = vi.fn();
   Object.assign(ctx.agent, { publishFromFinalizedAssertion });
   Object.assign(ctx, { path: '/api/knowledge-assets', url: new URL('http://localhost/api/knowledge-assets') });

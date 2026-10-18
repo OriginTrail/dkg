@@ -154,10 +154,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         attempt: { count: 0, maxRetries: this.maxRetries },
         formatVersion: ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
       };
-      admission.enter('persist', jobId);
+      admission.beginPersistence(jobId);
       const persistence = await this.writeJobWithEvidence(job);
-      if (!persistence.ok) throw new PromoteAdmissionError('persist', persistence.admissionOutcome,
-        persistence.admissionOutcome === 'indeterminate' ? jobId : undefined, persistence.cause);
+      if (!persistence.ok) throw new PromoteAdmissionError(persistence.admissionOutcome === 'indeterminate'
+        ? { phase: 'persist', admissionOutcome: 'indeterminate', jobId }
+        : { phase: 'persist', admissionOutcome: 'not_admitted' }, persistence.cause);
       this.notifyWorkAvailable();
       return jobId;
     }), this.admissionTimeoutMs);
@@ -750,6 +751,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (parsed.kind === 'absent') return { outcome: 'already_absent' };
       if (parsed.kind === 'malformed') return { outcome: 'rejected', reason: 'malformed' };
       const { job } = parsed;
+      if (job.jobId !== jobId) return { outcome: 'rejected', reason: 'malformed' };
       // Structurally-valid job whose state is a well-formed string but not a recognized enum
       // value → unknown (a missing/non-string state was already classified `malformed`). Narrow
       // to PromoteJobState only AFTER the membership check confirms it.
@@ -764,6 +766,9 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         && Math.max(1, job.attempt.count) < job.attempt.maxRetries) {
         return { outcome: 'rejected', reason: 'nonterminal' };
       }
+      // Settle a retained lost-ack admission while its authoritative terminal
+      // evidence still exists. Absence/corruption above must never do this.
+      this.admissions.observe({ ...job, state: job.state as PromoteJobState });
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };
     });

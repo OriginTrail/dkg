@@ -13,15 +13,34 @@ export interface PromoteAdmissionEvent {
   outcome: 'completed' | PromoteAdmissionOutcome;
 }
 
+export type PromoteAdmissionEvidence =
+  | { readonly phase: PromoteAdmissionPhase; readonly admissionOutcome: 'not_admitted'; readonly jobId?: never }
+  | { readonly phase: 'persist'; readonly admissionOutcome: 'indeterminate'; readonly jobId: string };
+
 /** This verdict describes job admission, never every mutation in the HTTP request. */
 export class PromoteAdmissionError extends Error {
   readonly code = 'PROMOTE_ADMISSION_UNAVAILABLE';
   readonly retryable = true;
-  constructor(readonly phase: PromoteAdmissionPhase, readonly admissionOutcome: PromoteAdmissionOutcome,
-    readonly jobId?: string, cause?: unknown) {
+  readonly evidence: PromoteAdmissionEvidence;
+  constructor(evidence: PromoteAdmissionEvidence, cause?: unknown) {
     super('Async share admission could not be confirmed', { cause });
+    if (evidence.admissionOutcome === 'indeterminate') {
+      if (evidence.phase !== 'persist' || typeof evidence.jobId !== 'string' || !evidence.jobId) {
+        throw new TypeError('Indeterminate admission requires a persistence job ID');
+      }
+      this.evidence = Object.freeze({ phase: 'persist', admissionOutcome: 'indeterminate', jobId: evidence.jobId });
+    } else {
+      if (evidence.admissionOutcome !== 'not_admitted' || evidence.jobId !== undefined
+        || !['lock', 'graph', 'conflict', 'persist'].includes(evidence.phase)) {
+        throw new TypeError('Invalid non-admission evidence');
+      }
+      this.evidence = Object.freeze({ phase: evidence.phase, admissionOutcome: 'not_admitted' });
+    }
     this.name = 'PromoteAdmissionError';
   }
+  get phase(): PromoteAdmissionPhase { return this.evidence.phase; }
+  get admissionOutcome(): PromoteAdmissionOutcome { return this.evidence.admissionOutcome; }
+  get jobId(): string | undefined { return this.evidence.jobId; }
 }
 
 const logger = new Logger('AsyncPromoteAdmission');
@@ -31,26 +50,36 @@ function trace(event: PromoteAdmissionEvent): void {
   }
 }
 
+type PrePersistencePhase = Exclude<PromoteAdmissionPhase, 'persist'>;
+type AdmissionState = { phase: PrePersistencePhase; jobId?: never } | { phase: 'persist'; jobId: string };
+
 /** One bounded operation. Expiry before persist forbids a later admission write. */
 export class PromoteAdmissionAttempt {
-  phase: PromoteAdmissionPhase = 'lock';
-  jobId?: string;
+  private state: AdmissionState = { phase: 'lock' };
+  get phase(): PromoteAdmissionPhase { return this.state.phase; }
+  get jobId(): string | undefined { return this.state.jobId; }
   private expired = false;
   private phaseStarted = performance.now();
   private readonly deadlineAt: number;
   constructor(timeoutMs: number, private readonly emit: (event: PromoteAdmissionEvent) => void) {
     this.deadlineAt = performance.now() + timeoutMs;
   }
-  enter(phase: PromoteAdmissionPhase, jobId?: string): void {
+  enter(phase: PrePersistencePhase): void { this.transition({ phase }); }
+  beginPersistence(jobId: string): void {
+    if (typeof jobId !== 'string' || !jobId) throw new TypeError('Persistence requires a job ID');
+    this.transition({ phase: 'persist', jobId });
+  }
+  private transition(state: AdmissionState): void {
+    if (this.state.phase === 'persist') throw new Error('Cannot leave or restart persistence');
     if (this.expired || performance.now() >= this.deadlineAt) throw this.expire();
     this.report('completed');
-    this.phase = phase;
-    this.jobId = jobId;
+    this.state = state;
     this.phaseStarted = performance.now();
   }
   error(cause?: unknown): PromoteAdmissionError {
-    const outcome = this.phase === 'persist' ? 'indeterminate' : 'not_admitted';
-    return new PromoteAdmissionError(this.phase, outcome, this.jobId, cause);
+    return new PromoteAdmissionError(this.state.phase === 'persist'
+      ? { ...this.state, admissionOutcome: 'indeterminate' }
+      : { ...this.state, admissionOutcome: 'not_admitted' }, cause);
   }
   expire(): PromoteAdmissionError { this.expired = true; return this.error(); }
   report(outcome: PromoteAdmissionEvent['outcome'], event: PromoteAdmissionEvent['event'] = 'phase_settled'): void {
@@ -116,7 +145,7 @@ export class PromoteAdmissionCoordinator {
       if (performance.now() - owner.observedAt >= OBSERVATION_TTL_MS) { this.owners.delete(id); continue; }
       if (promoteLaneScopesConflict(owner.scope, scope)) throw new PromoteJobConflictError(id, request, true);
     }
-    if (this.pending.size >= MAX_PENDING) throw new PromoteAdmissionError('lock', 'not_admitted');
+    if (this.pending.size >= MAX_PENDING) throw new PromoteAdmissionError({ phase: 'lock', admissionOutcome: 'not_admitted' });
     const attempt = new PromoteAdmissionAttempt(timeoutMs, emit);
     let timer: ReturnType<typeof setTimeout>;
     const deadline = new Promise<never>((_resolve, reject) => {
