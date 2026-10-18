@@ -177,6 +177,21 @@ describe('the owner takes a member\'s share that a Core relays', () => {
     expect(owner.logLines.filter((line) => line.includes('already applied from another copy'))).toHaveLength(2);
   });
 
+  it('tells the owner\'s followers once after it applies a relayed share, as a direct or gossip apply does, and passes nothing on', async () => {
+    const owner = ownerHost();
+    const notice = vi.spyOn(owner.agent, 'noticeSwmFollowersAfterApplyV1');
+    const wire = await relayedShare();
+
+    await owner.agent.handleRelayedSwmShareV1(wire, CORE_A);
+    await owner.agent.handleRelayedSwmShareV1(Uint8Array.from(wire), CORE_B);
+    await owner.agent.handleRelayedSwmShareV1(await relayedShare({ request: { contentScopeVersion: 1 } }), CORE_C);
+
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice.mock.calls[0]![0]).toMatchObject({ cgId: RELAYED_CG });
+    expect(notice.mock.calls[0]![1]).toBe(CORE_A);
+    expect(notice.mock.calls[0]![2], 'no bytes: the owner does not pass the share on').toBeUndefined();
+  });
+
   it('applies the copies of one share that three Cores relay at once once', async () => {
     const owner = ownerHost();
     const spies = handlerSpies(owner);

@@ -201,6 +201,8 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
           return false;
         }
         this.log.info(ctx, `Applied share op=${outcome.shareOperationId ?? 'none'} of "${outcome.cgId ?? ''}" relayed by Core ${from}`);
+        // As after a direct or gossip apply: the owner tells the graph's followers. No bytes, so it is not passed on again.
+        this.noticeSwmFollowersAfterApplyV1(outcome, fromPeerId);
         return true;
       });
       if (taken === 'applied-before') this.log.debug(ctx, `Share relayed by ${from} already applied from another copy`);
