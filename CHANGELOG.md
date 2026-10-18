@@ -88,6 +88,20 @@ manifest again, where it stayed unsynced for about ten minutes or longer
 private graphs it was configured for, where it denied the members of every
 other private graph, whose root writes then never reached it (#3333).
 
+Three changes to the recovery of shares. A synchronous share that has
+committed to shared memory and then meets a transient failure is no longer
+left without an owner: the node persists a recovery job before it promotes,
+the job resumes the original operation after the failure or a restart, and
+the error answer names the job (#3300). Where the node can author the
+graph's catalog, the share succeeds only after its signed inventory entry
+is written; where the graph's catalog authority is not accepted on the node
+yet, for example just after the graph is created or registered or just
+after a restart, the share completes and its inventory entry is written in
+the background, as in 10.0.24 (#3360). A pull of a shared asset back into
+working memory that was interrupted while it cleared the shared seal
+recovers from the seal's archive, where every later pull of that asset was
+refused (#3341).
+
 **No smart-contract, ABI or deployment registry changes.** Three new
 protocols and one changed message. The owner of a public graph sends a
 change notice, `/dkg/10.0.1/swm-change-notice`, to the graph's followers
@@ -152,6 +166,7 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
 | A Core keeps its hosted graph's sub-graph shares, and a member's share goes to the graph's owner (#3327) | A Core that hosts a public graph, that is, signed a StorageACK for it, applies a member's share into a named sub-graph as a subscriber does and serves it to pulls; the root stays with the catalog, and every check of the share handler still runs. Before a graph's first Verified Memory publish no Core hosts it, and Cores still decline its sub-graph shares. Before a share into a public graph goes out, the author makes the graph's owner one of the share's followers: a connected owner peer as it is, otherwise the first of at most two of the owner's peers it can connect to, through a relay when that is the only route, within 10 s for the lookup and the connections together. An owner peer whose dial failed, and an owner that was not found, are not tried again for 60 s; owner peers that were found are reused for 5 minutes. An Edge that cannot map the owner's wallet to a peer fetches the owner's profile from a Core's `agents` phonebook on demand. A public graph with a peer allowlist is sent to the list, with the owner added when the list does not name it. The owner of a public graph in use also pulls it from one connected peer every 60 s, as a member does. An on-demand phonebook fetch that this node's own sync scheduler turns away asks the peer again after 1 s, at most 30 times within its budget, and takes no cooldown, where it took the 10-minute cooldown of an empty answer | None |
 | A registered public graph left unproven is caught up again, and a stale kept manifest is read again (#3328, #3287) | The readiness repeat (15 s, 30 s, 1, 2, 4, 8, 16 and 30 minutes, at most eight times) now follows a public graph whether or not it is registered on chain, where a registered graph was repeated only while its walk found the shared-memory lane not active; a subscription known only by its on-chain name hash is still not repeated. A member keeps a peer's complete shared-memory manifest between catch-up rounds while its snapshot walk is incomplete; a round that replays the kept manifest and resolves no further snapshot now ends it, so the next round reads the peer's current manifest, where the kept one was replayed until the walk expired, 10 minutes after its last progress. A round that does resolve a snapshot keeps the manifest, so a long walk still resumes where it stopped | None |
 | A manual RFC-64 peer table answers only for the private graphs it was configured for (#3333) | `rfc64Catalog.accessPolicyAuthority` with `peerAgentBindings` binds peers to agents for the selected private graphs of the activation config, and answered for every graph. For every other private graph, a graph joined at runtime for example, the node now resolves peers from the graph's own state (join delegations, the curator binding, the phonebook), as a node without the table does, and exchanges catalog heads and content with its members. A function authority supplied in code (`rfc64CatalogAccessPolicyAuthority`) still answers for every graph | None |
+| Synchronous shares persist a recovery job before they promote (#3300) | Their promote queue records use format version 4. An earlier version does not know that format: it would take such a record over without its recovery binding and could finish the share as a different operation | Before downgrading a node to an earlier version, wait until `GET /api/knowledge-assets/swm/share-jobs` lists no unfinished job |
 
 ### Known issues
 
