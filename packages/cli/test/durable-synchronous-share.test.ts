@@ -5,7 +5,9 @@ import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-asse
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { executePromoteRequest } from '../src/daemon/worker/execute-promote-request.js';
 import { inventoryPersistenceFailure } from '../../agent/src/rfc64/inventory-persistence-failure.js';
-import { SwmInventoryWriteFailure } from '../../agent/src/internal/swm-inventory-write.js';
+import { SwmCatalogAuthorityNotReady, SwmInventoryWriteFailure } from '../../agent/src/internal/swm-inventory-write.js';
+import { ConfirmedVmOwnershipFailure } from '../../agent/src/internal/confirmed-vm-catalog-observer.js';
+import { rfc64SwmInventoryShadowRuntimeV1 } from '../../agent/src/rfc64/swm-inventory-shadow-runtime-v1.js';
 import { resolveRfc64CatalogAuthoringPolicyV1 } from '../../agent/src/rfc64/public-catalog-activation-config-v1.js';
 import { classifySynchronousShareFailure } from '../src/daemon/routes/durable-share-response.js';
 import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/durable-share-failure.js';
@@ -14,7 +16,8 @@ vi.mock('@origintrail-official/dkg-agent', () => import('../../agent/src/index.j
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, StoreOperationTimeoutError, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, CuratorUnconfirmedError, PromoteAdmissionUncertainError } from '@origintrail-official/dkg-publisher';
+import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, CuratorUnconfirmedError, PromoteAdmissionUncertainError,
+  computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, skolemizeKnowledgeAssetParts } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
@@ -95,6 +98,63 @@ function useInactiveCatalogAuthority(agent: Awaited<ReturnType<typeof setup>>['a
   expect(agent.resolveRfc64CatalogReceiverAuthorityV1(CG)).toMatchObject({
     mode: 'catalog', killSwitchActive: false, authoringAllowed: false, reconciliationLane: 'disabled',
   });
+}
+const OPEN_LANE = { mode: 'catalog', killSwitchActive: false, active: true, authoringAllowed: true, reconciliationLane: 'catalog-apply' };
+const CLOSED_LANE = { mode: 'catalog', killSwitchActive: false, active: false, authoringAllowed: false, reconciliationLane: 'disabled' };
+/** Admit with an open authoring lane, then close it before the commit, as a transition after admission does. */
+function closeLaneAfterAdmission(agent: Awaited<ReturnType<typeof setup>>['agent']) {
+  let authority: object = OPEN_LANE;
+  agent.resolveRfc64CatalogReceiverAuthorityV1 = () => authority;
+  const assertion = agent.assertion;
+  vi.spyOn(agent, 'assertion', 'get').mockReturnValue({ ...assertion, prepareDurableShare: async (...args: any[]) => {
+    const prepared = await (assertion.prepareDurableShare as any)(...args);
+    // The handoff is frozen as owed; the authority is then fenced, as after a restart.
+    authority = CLOSED_LANE;
+    return prepared;
+  } });
+  return { reopen: () => { authority = OPEN_LANE; } };
+}
+/** A responsibility pass that finds the graph's lane still closed. */
+function keepLaneClosed(agent: Awaited<ReturnType<typeof setup>>['agent']) {
+  return vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1').mockResolvedValue({ active: false, mode: 'catalog' } as any);
+}
+const MEMORY_LAYER = 'http://dkg.io/ontology/memoryLayer';
+async function graphContent(store: FaultStore, graph: string) {
+  return store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+}
+/** A bound share answered with a pending handoff, then a confirmed VM publish of its admitted version. */
+async function publishWhileHandoffPending() {
+  const fixture = await setup();
+  const { store, agent, publisher, finalized } = fixture;
+  daemonState.promoteWorkerAvailable = true;
+  closeLaneAfterAdmission(agent);
+  keepLaneClosed(agent);
+  const answer = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR });
+  expect(answer.catalogHandoff).toMatchObject({ state: 'pending', reason: 'inactive-lane' });
+  const [job] = await agent.promoteQueue.list({});
+  const vm = finalized.sharedGraphUri.replace('/_shared_memory/', '/_verifiable_memory/');
+  await store.insert(finalized.publicQuads.map(q => ({ ...q, graph: vm })));
+  await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: MEMORY_LAYER });
+  await store.insert([{ graph: contextGraphMetaUri(CG), subject: lifecycle, predicate: MEMORY_LAYER, object: '"VM"' }]);
+  await publisher.clearSwmShareComplete(CG, NAME, AUTHOR);
+  return { ...fixture, job, vm, binding: job.request.recoveryBinding! };
+}
+type VmUpdate = 'superseding' | 'equal-version' | 'different-root' | 'missing-vm' | 'unconfirmed-envelope';
+/** A later update replaces the per-asset VM graph and confirms its newer version. */
+async function confirmVmUpdate(fixture: Awaited<ReturnType<typeof publishWhileHandoffPending>>, kind: VmUpdate) {
+  const { store, finalized, vm } = fixture;
+  const updated = [{ subject: 'urn:asset', predicate: 'https://schema.org/name', object: '"updated"', graph: '' }];
+  await store.deleteByPattern({ graph: vm });
+  if (kind !== 'missing-vm') await store.insert(updated.map(q => ({ ...q, graph: vm })));
+  const rootQuads = kind === 'different-root' ? finalized.publicQuads : updated;
+  const normalized = await skolemizeKnowledgeAssetParts(rootQuads.map(q => ({ ...q, graph: '' })), [], { allowCanonicalSkolemTerms: true });
+  const version = kind === 'equal-version' ? BigInt(finalized.assertionVersion) : BigInt(finalized.assertionVersion) + 1n;
+  await store.insert(generateGraphKnowledgeAssetMetadata({ ual: finalized.kaUal, contextGraphId: CG,
+    merkleRoot: computeFlatKCRootV10(normalized.publicQuads, []), publisherPeerId: '12D3KooWRecovery', accessPolicy: 'public',
+    timestamp: new Date(0), assertionVersion: version, publicTripleCount: 1, assertionGraph: vm,
+  }, kind === 'unconfirmed-envelope' ? { status: 'tentative' } : { status: 'confirmed', confirmation: { kind: 'transaction',
+    provenance: { txHash: `0x${'ab'.repeat(32)}`, blockNumber: 1, blockTimestamp: 1, publisherAddress: AUTHOR, batchId: 7n, chainId: '31337' } } }));
+  return graphContent(store, vm);
 }
 
 describe('durable synchronous share ownership', () => {
@@ -629,29 +689,189 @@ describe('durable synchronous share ownership', () => {
     } finally { await close(); await store.close(); }
   });
 
-  it('keeps a handoff owed at admission pending when the authoring lane closes before commit', async () => {
+  it('answers a committed share with a pending catalog handoff when the authoring lane closes before commit, then writes the inventory once the lane reopens', async () => {
+    const { store, agent, publisher, freshAgent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    closeLaneAfterAdmission(agent);
+    const reconcile = keepLaneClosed(agent);
+    const writer = vi.spyOn(agent, 'commitRfc64SwmAuthorInventoryV1');
+    const result = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR });
+    const [job] = await agent.promoteQueue.list({});
+    const operationId = job.request.recoveryBinding!.intent.operationId;
+    expect(result).toEqual({ promotedCount: 1, sealed: true, publishReady: true, shareOperationId: operationId,
+      catalogHandoff: { state: 'pending', reason: 'inactive-lane', recoveryJobId: job.jobId } });
+    expect(reconcile).toHaveBeenCalledOnce();
+    // The real inventory writer reports the closed lane once; the pass does not reopen it.
+    expect(writer).toHaveBeenCalledOnce();
+    await expect(writer.mock.results[0]!.value).resolves.toMatchObject({ status: 'dormant', dormantReason: 'inactive-lane' });
+    expect(job).toMatchObject({ state: 'failed_retrying', request: { recoveryBinding: { inventoryRequired: true } },
+      attempt: { lastError: { diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE', retryable: true } } });
+    expect(agent.scheduleRfc64SwmInventoryObserverV1).not.toHaveBeenCalled();
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    expect(await publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    await expect(agent.assertion.discard(CG, NAME, { agentAddress: AUTHOR })).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    await expect(agent.assertion.pullFrom(CG, NAME, 'swm', { agentAddress: AUTHOR }))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: job.jobId });
+    await expect(agent.promoteQueue.cancel(job.jobId)).rejects.toThrow('obligation');
+    expect(await agent.promoteQueue.clearTerminalJob(job.jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    // A restarted node whose lane is still closed writes nothing: the real writer refuses and the job keeps its obligation.
+    const { agent: closed } = await freshAgent();
+    closed.resolveRfc64CatalogReceiverAuthorityV1 = () => CLOSED_LANE;
+    keepLaneClosed(closed);
+    const closedWriter = vi.spyOn(closed, 'commitRfc64SwmAuthorInventoryV1');
+    const claim = (await closed.promoteQueue.claimNext('closed-lane'))!;
+    expect(claim.jobId).toBe(job.jobId);
+    expect((await runPromoteJob({ job: claim, queue: closed.promoteQueue, workerId: 'closed-lane', now: Date.now,
+      heartbeatIntervalMs: 60_000, log: () => undefined,
+      runPromote: (request, executionAuthority) => executePromoteRequest(closed, request, { executionAuthority }) })).outcome).toBe('failed_retrying');
+    expect(closedWriter).toHaveBeenCalledOnce();
+    await expect(closedWriter.mock.results[0]!.value).resolves.toMatchObject({ status: 'dormant', dormantReason: 'inactive-lane' });
+    expect(await closed.promoteQueue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying',
+      request: { recoveryBinding: job.request.recoveryBinding } });
+    await expect(closed.assertion.pullFrom(CG, NAME, 'swm', { agentAddress: AUTHOR }))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: job.jobId });
+    // A restarted node whose lane is open again writes the owed inventory through the same job.
+    const { agent: restarted } = await freshAgent();
+    restarted.resolveRfc64CatalogReceiverAuthorityV1 = () => OPEN_LANE;
+    const reopened = vi.fn(async () => ({ status: 'applied', attempts: 1, headObjectDigest: 'reopened-head', kaUal: finalized.kaUal }));
+    restarted.commitRfc64SwmAuthorInventoryV1 = reopened;
+    restarted.requestRfc64SwmCatalogProjectionV1 = () => true;
+    const worker = createPromoteWorkerSupervisor({ agent: restarted, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
+    try {
+      await worker.start();
+      await vi.waitFor(async () => expect((await restarted.promoteQueue.getStatus(job.jobId))?.state).toBe('succeeded'));
+      expect(reopened).toHaveBeenCalledOnce();
+      expect(reopened.mock.calls[0]![0]).toMatchObject({ shareOperationId: operationId });
+      expect((await restarted.promoteQueue.getStatus(job.jobId))?.request.recoveryBinding).toEqual(job.request.recoveryBinding);
+      expect(await restarted.assertion.pullFrom(CG, NAME, 'swm', { agentAddress: AUTHOR })).toMatchObject({ seeded: 1 });
+    } finally { await worker.stop(); await store.close(); }
+  });
+
+  it('completes the one-shot share inline when one responsibility pass reopens the authoring lane', async () => {
     const { store, agent, finalized } = await setup();
     daemonState.promoteWorkerAvailable = true;
-    let authority: object = { mode: 'catalog', killSwitchActive: false, active: true, authoringAllowed: true, reconciliationLane: 'catalog-apply' };
-    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => authority;
-    const assertion = agent.assertion;
-    vi.spyOn(agent, 'assertion', 'get').mockReturnValue({ ...assertion, prepareDurableShare: async (...args) => {
-      const prepared = await assertion.prepareDurableShare(...args);
-      // The handoff is frozen as owed; the authority is then fenced, as after a restart.
-      authority = { mode: 'catalog', killSwitchActive: false, active: false, authoringAllowed: false, reconciliationLane: 'disabled' };
-      return prepared;
-    } });
+    const lane = closeLaneAfterAdmission(agent);
+    const reconcile = vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1').mockImplementation(async () => {
+      lane.reopen();
+      return { active: true, mode: 'catalog' } as any;
+    });
+    const realWriter = agent.commitRfc64SwmAuthorInventoryV1.bind(agent);
+    const writer = vi.spyOn(agent, 'commitRfc64SwmAuthorInventoryV1')
+      .mockImplementationOnce(realWriter)
+      .mockResolvedValueOnce({ status: 'applied', attempts: 1, headObjectDigest: 'reopened-head', kaUal: finalized.kaUal } as any);
+    const projection = vi.fn(() => true);
+    agent.requestRfc64SwmCatalogProjectionV1 = projection;
+    const result = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR });
+    const [job] = await agent.promoteQueue.list({});
+    expect(result).toEqual({ promotedCount: 1, sealed: true, publishReady: true,
+      shareOperationId: job.request.recoveryBinding!.intent.operationId });
+    expect(job).toMatchObject({ state: 'succeeded', request: { recoveryBinding: { inventoryRequired: true } } });
+    await expect(writer.mock.results[0]!.value).resolves.toMatchObject({ status: 'dormant', dormantReason: 'inactive-lane' });
+    expect(writer).toHaveBeenCalledTimes(2);
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(projection).toHaveBeenCalledOnce();
+    await store.close();
+  });
+
+  it.each(['authority-transition', 'projection-admission', 'authority-not-ready'] as const)(
+    'answers a committed share with a pending %s catalog handoff', async reason => {
+      const { store, agent, finalized } = await setup();
+      daemonState.promoteWorkerAvailable = true;
+      agent.resolveRfc64CatalogReceiverAuthorityV1 = () => OPEN_LANE;
+      keepLaneClosed(agent);
+      agent.commitRfc64SwmAuthorInventoryV1 = vi.fn(async () => {
+        if (reason === 'authority-not-ready') {
+          throw new SwmInventoryWriteFailure('authority', null, new SwmCatalogAuthorityNotReady('service-unavailable'));
+        }
+        return reason === 'authority-transition' ? { status: 'dormant', dormantReason: reason }
+          : { status: 'applied', attempts: 1, headObjectDigest: 'head', kaUal: finalized.kaUal };
+      }) as any;
+      agent.requestRfc64SwmCatalogProjectionV1 = () => false;
+      const result = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR });
+      const [job] = await agent.promoteQueue.list({});
+      expect(result).toMatchObject({ promotedCount: 1, sealed: true, publishReady: true,
+        shareOperationId: job.request.recoveryBinding!.intent.operationId,
+        catalogHandoff: { state: 'pending', reason, recoveryJobId: job.jobId } });
+      expect(job).toMatchObject({ state: 'failed_retrying', request: { recoveryBinding: { inventoryRequired: true } } });
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+      await store.close();
+    });
+
+  it.each(['pending', 'authority-not-ready'] as const)('keeps confirmed-ownership (%s) on the 503 recovery contract', async outcome => {
+    const { store, agent } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => OPEN_LANE;
+    agent.commitRfc64SwmAuthorInventoryV1 = vi.fn(async () => ({ status: 'dormant', dormantReason: 'vm-confirmed' })) as any;
+    const notReady = new SwmCatalogAuthorityNotReady('service-unavailable');
+    const transfer = outcome === 'pending' ? vi.spyOn(agent, 'transferRfc64ConfirmedVmV1').mockResolvedValue('pending')
+      : vi.spyOn(agent, 'transferRfc64ConfirmedVmV1').mockRejectedValue(new ConfirmedVmOwnershipFailure('authority', notReady));
     const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
     expect(failure).toBeInstanceOf(DurableShareFailure);
     expect(failure.observation.state).toBe('pending');
-    // The real inventory writer reports the closed lane through the typed handoff cause.
-    expect(failure.cause).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE',
-      cause: { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'inactive-lane' } });
-    expect(await agent.promoteQueue.getStatus(failure.observation.jobId)).toMatchObject({
-      state: 'failed_retrying', request: { recoveryBinding: { inventoryRequired: true } } });
-    expect(agent.scheduleRfc64SwmInventoryObserverV1).not.toHaveBeenCalled();
-    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    if (outcome === 'pending') {
+      expect(failure.cause).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE',
+        cause: { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'confirmed-ownership' } });
+    } else {
+      // The same readiness cause from the shared-memory inventory step is answered as shared.
+      expect(failure.cause).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+      expect(failure.cause.cause).toBe(notReady);
+    }
+    expect(transfer).toHaveBeenCalledOnce();
+    expect(classifySynchronousShareFailure(failure, { contextGraphId: CG, name: NAME, phase: 'swm-share' }))
+      .toMatchObject({ status: 503, body: { recoveryState: 'pending', recoveryJobId: failure.observation.jobId } });
     await store.close();
+  });
+
+  it('keeps the 503 unobserved contract when a pending-handoff failure cannot be recorded', async () => {
+    const { store, agent } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    closeLaneAfterAdmission(agent);
+    keepLaneClosed(agent);
+    const queue = agent.promoteQueue;
+    vi.spyOn(queue, 'fail').mockImplementation(async () => {
+      vi.spyOn(queue, 'getStatus').mockRejectedValue(new Error('queue observation unavailable'));
+      throw new Error('failure write refused');
+    });
+    const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
+    expect(failure).toBeInstanceOf(DurableShareFailure);
+    expect(failure.observation).toEqual({ state: 'unobserved', jobId: expect.any(String) });
+    expect(failure).not.toHaveProperty('catalogHandoff');
+    expect(failure.cause).toMatchObject({ cause: { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'inactive-lane' } });
+    await store.close();
+  });
+
+  it('answers the share route with a shared, publish-ready body and a pending catalog handoff when the authoring lane closes before commit', async () => {
+    const { store, agent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    closeLaneAfterAdmission(agent);
+    // The responsibility pass runs in the request, outside the asset's inventory lock (a started agent runs the real pass
+    // in the agent suite; this fixture has no background dispatcher).
+    const lockedDuringPass: boolean[] = [];
+    const reconcile = vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1').mockImplementation(async () => {
+      // An exclusive section starts its callback synchronously, before it is tracked; one macrotask later a pass
+      // running inside the lane lock would see the write.
+      await new Promise(resolve => setImmediate(resolve));
+      lockedDuringPass.push(rfc64SwmInventoryShadowRuntimeV1(agent).hasInventoryWrites({ contextGraphId: CG, authorAddress: AUTHOR }));
+      return { active: false, mode: 'catalog' } as any;
+    });
+    const { post, close } = await serveShares(agent);
+    try {
+      const response = await post();
+      expect(response.status).toBe(200);
+      expect(response.headers.get('retry-after')).toBeNull();
+      const body = await response.json();
+      const [job] = await agent.promoteQueue.list({});
+      expect(body).toMatchObject({ swmShared: true, sealed: true, publishReady: true, promotedCount: 1,
+        shareOperationId: job.request.recoveryBinding!.intent.operationId,
+        catalogHandoff: { state: 'pending', reason: 'inactive-lane', recoveryJobId: job.jobId,
+          recoveryStatusUrl: `/api/knowledge-assets/swm/share-jobs/${job.jobId}` } });
+      for (const field of ['code', 'error', 'partial', 'recoveryState']) expect(body).not.toHaveProperty(field);
+      expect(job.state).toBe('failed_retrying');
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+      expect(reconcile).toHaveBeenCalledOnce();
+      expect(reconcile).toHaveBeenCalledWith(CG);
+      expect(lockedDuringPass).toEqual([false]);
+    } finally { await close(); await store.close(); }
   });
 
   it.each([false, true])('finishes a pre-intent VM no-op with leftover WM=%s', async leftover => {
@@ -717,6 +937,59 @@ describe('durable synchronous share ownership', () => {
     expect(await agent.assertion.history(CG, NAME, { agentAddress: AUTHOR })).toMatchObject({ memoryLayer: 'VM' });
     await store.close();
   });
+
+  it('converges a bound replay through confirmed ownership after a VM publish and a later confirmed update', async () => {
+    const fixture = await publishWhileHandoffPending();
+    const { store, agent, finalized, binding, vm } = fixture;
+    const updated = await confirmVmUpdate(fixture, 'superseding');
+    const transfer = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1').mockResolvedValueOnce('inactive').mockResolvedValueOnce('owned');
+    const replay = { agentAddress: AUTHOR, recoveryBinding: binding };
+    await expect(agent.assertion.promote(CG, NAME, replay)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE',
+      cause: { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'confirmed-ownership' } });
+    expect(await agent.assertion.promote(CG, NAME, replay)).toEqual({ promotedCount: 0, sealed: true, publishReady: false });
+    expect(transfer).toHaveBeenCalledTimes(2);
+    for (const [call] of transfer.mock.calls) {
+      expect(call).toMatchObject({ shareOperationId: binding.intent.operationId,
+        expectedWorkspaceAccessPolicy: binding.intent.accessPolicy, seal: { assertionVersion: finalized.assertionVersion } });
+    }
+    expect(await graphContent(store, vm)).toEqual(updated);
+    expect(await agent.assertion.history(CG, NAME, { agentAddress: AUTHOR })).toMatchObject({ memoryLayer: 'VM' });
+    await store.close();
+  });
+
+  it('ends the bound job succeeded and releases the lifecycle fence after a VM publish and a later confirmed update', async () => {
+    const fixture = await publishWhileHandoffPending();
+    const { store, agent, publisher, job, vm } = fixture;
+    const updated = await confirmVmUpdate(fixture, 'superseding');
+    const owner = { contextGraphId: CG, assertionName: NAME, agentAddress: AUTHOR };
+    expect(await (publisher as any).promoteOwnershipReader(owner)).toMatchObject({ jobId: job.jobId });
+    const transfer = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1').mockResolvedValue('owned');
+    const worker = createPromoteWorkerSupervisor({ agent, workerConcurrency: 1, pollIntervalMs: 10, log: () => undefined });
+    try {
+      await worker.start();
+      await vi.waitFor(async () => expect((await agent.promoteQueue.getStatus(job.jobId))?.state).toBe('succeeded'));
+      expect(transfer).toHaveBeenCalledOnce();
+      expect(await (publisher as any).promoteOwnershipReader(owner)).toBeFalsy();
+      expect(await graphContent(store, vm)).toEqual(updated);
+    } finally { await worker.stop(); await store.close(); }
+  });
+
+  it.each(['equal-version', 'different-root', 'missing-vm', 'unconfirmed-envelope'] as const)(
+    'keeps an unproven VM replacement fatal for a bound replay (%s)', async kind => {
+      const fixture = await publishWhileHandoffPending();
+      const { store, agent, binding, vm } = fixture;
+      const replaced = await confirmVmUpdate(fixture, kind);
+      const meta = await graphContent(store, contextGraphMetaUri(CG));
+      const transfer = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1');
+      const failure = await agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR, recoveryBinding: binding }).catch(e => e);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure.code).toBeUndefined();
+      expect(failure.message).toMatch(kind === 'missing-vm' ? /triple-count mismatch/ : /Merkle mismatch/);
+      expect(transfer).not.toHaveBeenCalled();
+      expect(await graphContent(store, vm)).toEqual(replaced);
+      expect(await graphContent(store, contextGraphMetaUri(CG))).toEqual(meta);
+      await store.close();
+    });
 
   it('reclaims an expired started bound lease after process loss and fences the old token', async () => {
     const { store, agent, freshAgent } = await setup();

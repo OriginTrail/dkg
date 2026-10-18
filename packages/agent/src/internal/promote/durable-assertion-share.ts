@@ -2,6 +2,7 @@ import { assertShareInventorySigningCapability } from './share-inventory-signing
 import { normalizeAssertionPromoteExecution } from './assertion-promote-input.js';
 import { SwmCatalogAuthorityNotReady } from '../swm-inventory-write.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
+import { attachCommittedShare } from './inventory-recovery-failure.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { createPromoteRetryableFailure, UnfinishedBoundShareError } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
@@ -161,8 +162,17 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
       });
     }
   };
-  if (execution.kind === 'bound' && execution.authority) await execution.authority.run(finish);
-  else await finish();
+  try {
+    if (execution.kind === 'bound' && execution.authority) await execution.authority.run(finish);
+    else await finish();
+  } catch (error) {
+    // The bound job keeps the obligation, so the failure is still thrown; it carries the
+    // committed share only for the one-shot answer of a pending catalog handoff.
+    if (execution.kind === 'bound' && promotedAllRoots && shareOperationId) {
+      attachCommittedShare(error, { promotedCount, sealed: true, publishReady: true, shareOperationId });
+    }
+    throw error;
+  }
   // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
   // assertionPromote (co-located with the member-row REPLACE, gated on the
   // same isFullCompletePromote), so it stays in lockstep with the rows for

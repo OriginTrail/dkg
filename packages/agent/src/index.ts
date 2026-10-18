@@ -279,6 +279,7 @@ export type {
 export type {
   FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
+export { committedSharePendingCatalogHandoff, type CommittedSharePendingCatalogHandoff } from './internal/promote/inventory-recovery-failure.js';
 export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';

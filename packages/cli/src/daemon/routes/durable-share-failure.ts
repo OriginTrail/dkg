@@ -11,6 +11,11 @@ export class DurableShareFailure extends Error {
   }
 }
 
+/** One status URL for a share job, so success and failure answers name it the same way. */
+export function shareJobStatusUrl(jobId: string): string {
+  return `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`;
+}
+
 /** A conflict is not evidence that a worker will retry it. */
 export async function observeShareRecovery(queue: AsyncPromoteQueue, jobId: string): Promise<ShareRecoveryObservation> {
   try {

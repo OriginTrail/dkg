@@ -1,7 +1,7 @@
 import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
 import { promoteConflictResponse } from './promote-admission-response.js';
 import { partialDurableShareFailure, classifySynchronousShareFailure, synchronousShareFailureDecision } from './durable-share-response.js';
-import { durableSynchronousShare, synchronousShareSuccessBody } from './durable-synchronous-share.js';
+import { durableSynchronousShare, shareOperationFields, synchronousShareSuccessBody } from './durable-synchronous-share.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { classifyKaIdentifier, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
@@ -1034,7 +1034,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.promotedCount = share.promotedCount;
           result.sealed = share.sealed;
           result.publishReady = share.publishReady;
-          if (share.shareOperationId) result.shareOperationId = share.shareOperationId;
+          Object.assign(result, shareOperationFields(share));
           // #1116: the one-shot finalizes BEFORE sharing, so a shared asset is
           // normally sealed ("swm-shared"). The unsealed status is only reachable
           // if a future path shares without sealing.

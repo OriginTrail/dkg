@@ -51,6 +51,8 @@ import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+import { classifyPromoteError } from '../src/daemon/worker/async-promote-worker.js';
+import { attachCommittedShare, inventoryHandoffPendingFailure } from '../../agent/src/internal/promote/inventory-recovery-failure.js';
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
@@ -406,6 +408,50 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     else expect(body).toMatchObject({ recoveryJobId: expect.any(String),
       recoveryState: kind === 'pending' ? 'pending' : 'inspection-required', retryable: kind === 'pending' });
     if (kind !== 'terminal') expect(body).toMatchObject({ created: true, partial: true, failedPhase: 'swm-share' });
+  });
+
+  it.each(['standalone', 'one-shot', 'one-shot-with-vm'])('answers a committed share with a pending catalog handoff during an authoring-lane transition (%s)', async mode => {
+    let vmCalls = 0;
+    const pendingHandoff = () => attachCommittedShare(
+      inventoryHandoffPendingFailure('inactive-lane', 'Durable share inventory remains pending: inactive-lane'),
+      { promotedCount: 1, sealed: true, publishReady: true, shareOperationId: 'committed-operation' });
+    await startWith({
+      create: async () => 'did:dkg:assertion:transition', write: async () => {},
+      finalize: async () => ({ merkleRoot: new Uint8Array(32), authorAddress: ROOTLESS_AUTHOR }),
+      promote: async () => { throw pendingHandoff(); },
+    }, { publishFromFinalizedAssertion: async () => {
+      vmCalls++;
+      return { status: 'confirmed', onChainResult: { status: 'confirmed' } };
+    } });
+    const response = mode === 'standalone'
+      ? await fetch(`${baseUrl}/api/knowledge-assets/${ASSERTION_NAME}/swm/share`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contextGraphId: CG_ID }) })
+      : await fetch(`${baseUrl}/api/knowledge-assets`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId: CG_ID, name: ASSERTION_NAME, finalize: true, alsoShareSwm: true,
+          ...(mode === 'one-shot-with-vm' ? { alsoPublishVm: true } : {}),
+          quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"' }] }) });
+    const body = await response.json();
+    expect(response.status).toBe(mode === 'standalone' ? 200 : 201);
+    expect(response.headers.get('retry-after')).toBeNull();
+    expect(body).toMatchObject({ swmShared: true, promotedCount: 1, sealed: true, publishReady: true,
+      shareOperationId: 'committed-operation', catalogHandoff: { state: 'pending', reason: 'inactive-lane', recoveryJobId: expect.any(String) } });
+    const jobId = body.catalogHandoff.recoveryJobId;
+    expect(body.catalogHandoff.recoveryStatusUrl).toBe(`/api/knowledge-assets/swm/share-jobs/${jobId}`);
+    if (mode !== 'standalone') expect(body.status).toBe(mode === 'one-shot' ? 'swm-shared' : 'vm-confirmed');
+    expect(vmCalls).toBe(mode === 'one-shot-with-vm' ? 1 : 0);
+    for (const field of ['partial', 'phase', 'failedPhase', 'retryAction', 'recoveryState', 'code', 'error', 'errors']) {
+      expect(body).not.toHaveProperty(field);
+    }
+    expect(classifyPromoteError(pendingHandoff(), { boundRecovery: true })).toMatchObject({ classification: 'transient',
+      retryable: true, diagnostic: { code: 'PROMOTE_RETRYABLE_FAILURE' } });
+    const queue = new TripleStoreAsyncPromoteQueue(shareStore!);
+    expect(await queue.getStatus(jobId)).toMatchObject({ state: 'failed_retrying',
+      attempt: { lastError: { diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE', retryable: true } } });
+    expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    const repeat = await post('swm/share', { contextGraphId: CG_ID });
+    expect(repeat.status).toBe(503);
+    expect(repeat.body).toMatchObject({ code: 'SHARE_OWNER_CONFLICT', recoveryState: 'pending', recoveryJobId: jobId });
+    expect(repeat.body).not.toHaveProperty('catalogHandoff');
   });
 
   it.each(['standalone', 'one-shot'])('%s post-commit failure returns a durable recovery handle and protects the queue row', async mode => {
