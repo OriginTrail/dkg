@@ -9,6 +9,14 @@ import { KA_VM_VALIDATION } from '../../../scripts/testing/ka-vm-publish.js';
 import { AUTHOR, TX_HASH, baseRequest, legacyEvidence, seededChain } from './_helpers/named-ka-recovery-fixture.js';
 
 const DKG = 'http://dkg.io/ontology/';
+async function promptly<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('queue blocked behind lifecycle writer')), 1_000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
 describe('confirmed named KA descriptor recovery [#3362]', () => {
   it.each([AUTHOR, '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ'])('repairs an interrupted state replacement for lifecycle owner %s before finalizing the original job', async lifecycleOwner => {
     const store = new OxigraphStore();
@@ -70,6 +78,30 @@ describe('confirmed named KA descriptor recovery [#3362]', () => {
       await queue.claimNext('wallet');
       await queue.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
       await queue.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: 'wallet', operationKind: 'create' } });
+      // The real seal-preparation entry holds the same lock as user finalization.
+      // Recovery must release the global queue lock without queuing a late stamp.
+      let entered!: () => void; let release!: () => void;
+      const writerEntered = new Promise<void>(resolve => { entered = resolve; });
+      const writerHeld = new Promise<void>(resolve => { release = resolve; });
+      const writer = (agent as any).publisher.prepareAssertionShareSeal(
+        request.contextGraphId, request.name, lifecycleOwner, undefined,
+        async () => { entered(); await writerHeld; },
+      ) as Promise<void>;
+      let recovery: Promise<number> | undefined;
+      try {
+        await writerEntered;
+        recovery = queue.recover();
+        expect(await promptly(recovery)).toBe(0);
+        expect((await queue.getStatus(jobId))?.status).toBe('broadcast');
+        const otherId = await promptly(queue.enqueueKnowledgeAssetVmPublish({ ...request,
+          name: 'unrelated', shareOperationId: 'unrelated', intentKey: `sha256:${'cd'.repeat(32)}` }));
+        expect((await promptly(queue.claimNext('other-wallet')))?.jobId).toBe(otherId);
+      } finally {
+        release(); await writer; await recovery;
+      }
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(await agent.assertion.history(request.contextGraphId, request.name, { agentAddress: lifecycleOwner })).toBeNull();
+      expect((await queue.getStatus(jobId))?.status).toBe('broadcast');
       // A second transient failure must retain the same tx-bearing owner.
       // Force the supported ordered fallback. Arm the original destructive-proof fault;
       // an incomplete repair must never reach either deletion, even on repeated attempts.

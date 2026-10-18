@@ -5,6 +5,7 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
+import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
 import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
 import { recoverReceiptBackedGraphScopedEvidence } from './receipt-backed-graph-scoped-evidence.js';
@@ -43,7 +44,7 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
     const scope = createGraphKnowledgeAssetScope(input.kaUal, '1');
     if (scope.chainId !== host.chain.chainId) return refuse('UAL belongs to another chain');
     const lifecycleOwner = input.lifecycleOwner ?? scope.agentAddress;
-    const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+    const kaId = packKnowledgeAssetIdFromIdentity(scope);
     const signal = AbortSignal.timeout(30_000);
     const work = withKeyedLocks(host.writeLocks, [assertionLifecycleWriteLockKey(
       input.contextGraphId, input.name, lifecycleOwner, input.subGraphName,

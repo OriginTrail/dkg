@@ -5270,10 +5270,21 @@ export class PublishMethods extends DKGAgentBase {
     // regress its pointer; the exact publish receipt is nevertheless repaired.
     if (materialization !== 'stale-target') {
       const author = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-      await withKeyedLocks(this.writeLocks, [assertionLifecycleWriteLockKey(
+      const lifecycleKey = assertionLifecycleWriteLockKey(
         request.contextGraphId, request.name, author, request.subGraphName,
-      )], async () => {
+      );
+      throwIfRecoveryDeadlineReached(signal);
+      // This finalizer holds the queue's global claim lock. Never wait behind
+      // a lifecycle writer (which can itself need queue admission). No await
+      // separates this check from withKeyedLocks installing its gate.
+      if (this.writeLocks.has(lifecycleKey)) {
+        throw Object.assign(new Error('Named KA lifecycle writer is busy; recovery will retry'),
+          { code: 'KA_VM_RECOVERY_INCONSISTENT' });
+      }
+      await withKeyedLocks(this.writeLocks, [lifecycleKey], async () => {
+        throwIfRecoveryDeadlineReached(signal);
         const lifecycleAuthor = await this._resolveRecoveredKnowledgeAssetVmLifecycleAuthor(request);
+        throwIfRecoveryDeadlineReached(signal);
         if (lifecycleAuthor) {
           await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
             { ...request, agentAddress: lifecycleAuthor.author }, recovered.localUal,
