@@ -130,8 +130,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
       if (previous) resets.push({ repair, state: resetPrivatePlacementFailureStateV1(previous) });
     }
     if (!resets.length) return 0;
-    this.#dependencies.writePrivateFailures(resets);
-    for (const { repair, state } of resets) this.#retries.get(finalizedPrivateRepairKeyV1(repair))?.retry.retryNow(state);
+    this.#commitResets(resets);
     this.#runner.requestNextTurn();
     return resets.length;
   }
@@ -182,14 +181,20 @@ export class FinalizedPrivatePlacementOwnerV1 {
     if (!lane.resetPending) return false;
     const resets = [...lane.entries].map(entry => {
       const previous = entry.retry.snapshot();
-      return { entry, state: previous ? resetPrivatePlacementFailureStateV1(previous) : null };
+      return { repair: entry.repair, state: previous ? resetPrivatePlacementFailureStateV1(previous) : null };
     });
-    const writes = resets.flatMap(({ entry, state }) => state ? [{ repair: entry.repair, state }] : []);
-    if (writes.length) this.#dependencies.writePrivateFailures(writes);
-    for (const { entry, state } of resets) entry.retry.retryNow(state);
+    this.#commitResets(resets);
     lane.active = active;
     lane.resetPending = false;
     return true;
+  }
+
+  /** Persist the prepared evidence before fencing any loaded scheduling generation. */
+  #commitResets(resets: readonly Rfc64PrivatePlacementFailureWriteV1[]): void {
+    const writes = resets.filter(({ state }) => state !== null);
+    if (writes.length) this.#dependencies.writePrivateFailures(writes);
+    // Lane resets also fence loaded entries that have not recorded a failure yet.
+    for (const { repair, state } of resets) this.#retries.get(finalizedPrivateRepairKeyV1(repair))?.retry.retryNow(state);
   }
 
   #observeLane(contextGraphId: ContextGraphIdV1): boolean {

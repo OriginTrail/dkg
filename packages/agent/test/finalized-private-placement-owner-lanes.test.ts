@@ -66,6 +66,27 @@ it('loads queued siblings before awaiting an attempt so a concurrent lane edge r
   } finally { held.resolve(); }
 });
 
+it.each(['unknown', 'catalog_full'] as const)('fences a first in-flight %s failure on a lane reset without manufacturing persisted evidence', async kind => {
+  const row = repair('first-attempt'); const f = fixture([row]);
+  const held = deferred();
+  f.attempt.mockImplementationOnce(async () => {
+    await held.promise;
+    if (kind === 'catalog_full') throw new AuthorCatalogFullErrorV1(Array.from({ length: 1024 }, (_, i) => ({ seal: { kaUal: `held-${i}` } })), 1);
+    throw new Error('obsolete first failure');
+  });
+  f.owner.start(ctx); await vi.advanceTimersByTimeAsync(0);
+  try {
+    expect(f.attempt).toHaveBeenCalledTimes(1);
+    expect(f.records.size).toBe(0);
+    f.setActive(false); f.owner.observeLaneAvailability(graph);
+    f.setActive(true); held.resolve(); await f.owner.whenIdle();
+    expect(f.attempt).toHaveBeenCalledTimes(2);
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.records.size).toBe(0);
+    expect(f.owner.status()?.authorCatalogCapacity.parkedPlacements).toBe(0);
+  } finally { held.resolve(); }
+});
+
 it.each([false, true])('keeps the pending graph reset when siblings change (replace all: %s)', async replaceAll => {
   const a = repair('a'); const b = repair('b'); const c = repair('c'); const f = fixture([a, b]);
   for (const row of [a, b, c]) f.records.set(row.assertionCoordinate, parked);
