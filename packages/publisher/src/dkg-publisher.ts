@@ -8442,6 +8442,10 @@ export class DKGPublisher implements Publisher {
           this.log.warn(createOperationContext('share'), `Completed VM check failed and its supersession proof could not complete: ${mismatch}`);
           throw proofError;
         })) throw error;
+        // The caught error may be the marker clear itself: accept the newer version only once the marker is gone, so a
+        // failed deletion keeps the replay failing and its bound owner in place.
+        if (await this.hasSwmShareComplete(contextGraphId, name, agentAddress, opts.subGraphName))
+          await this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, opts.subGraphName);
         return { promotedCount: 0, promotedAllRoots: false };
       }
       if (!completed) throw new Error('Cannot verify completed VM promotion');

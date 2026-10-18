@@ -14,6 +14,7 @@ import {
 import { GraphManager, OxigraphStore, PrivateContentStore, StoreSchedulerBusyError, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, computeFlatKCRootV10, computePrivateRootV10, generateGraphKnowledgeAssetMetadata, skolemizeKnowledgeAssetParts } from '../src/index.js';
 import { confirmedVmSupersedesSeal } from '../src/completed-legacy-promote.js';
+import { SWM_SHARE_COMPLETE_PRED } from '../src/shared-memory-author-seal.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
 const CG = 'vm-supersession-cg';
@@ -105,6 +106,29 @@ describe('bound replay after a confirmed VM update', () => {
     expect(await graphContent(store, vm)).toEqual(updated);
     expect(await graphContent(store, contextGraphMetaUri(CG))).toEqual(meta);
     expect(await publisher.hasSwmShareComplete(CG, NAME, AGENT)).toBe(false);
+    await store.close();
+  });
+
+  it('keeps the bound replay failing while a stale share-complete marker cannot be cleared, then completes', async () => {
+    const fixture = await publishedBoundShare();
+    const { store, publisher, binding, opts, vm, seal, host } = fixture;
+    const updated = await confirmUpdate(fixture, 'superseding');
+    expect(await confirmedVmSupersedesSeal(host, CG, seal)).toBe(true);
+    await publisher.markSwmShareComplete(CG, NAME, AGENT);
+    const busy = new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'test.markerDelete', { storeOperation: 'deleteByPattern' });
+    const remove = store.deleteByPatternWithoutCount.bind(store);
+    const markerDelete = vi.spyOn(store, 'deleteByPatternWithoutCount').mockImplementation(async pattern => {
+      if (pattern.predicate === SWM_SHARE_COMPLETE_PRED) throw busy;
+      return remove(pattern);
+    });
+    // The proven newer version must not turn a failed marker deletion into a successful no-op.
+    await expect(publisher.assertionPromote(CG, NAME, AGENT, { ...opts, recoveryBinding: binding })).rejects.toBe(busy);
+    expect(await publisher.hasSwmShareComplete(CG, NAME, AGENT)).toBe(true);
+    markerDelete.mockRestore();
+    expect(await publisher.assertionPromote(CG, NAME, AGENT, { ...opts, recoveryBinding: binding }))
+      .toEqual({ promotedCount: 0, promotedAllRoots: false });
+    expect(await publisher.hasSwmShareComplete(CG, NAME, AGENT)).toBe(false);
+    expect(await graphContent(store, vm)).toEqual(updated);
     await store.close();
   });
 
