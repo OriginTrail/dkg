@@ -7,6 +7,7 @@ on:
       - 'packages/cli/test/fixtures/mcp-config-wsl.fixture.ts'
       - 'packages/cli/test/fixtures/mcp-windows-client.fixture.cjs'
       - 'packages/cli/scripts/run-mcp-config-wsl.sh'
+      - 'scripts/test-mcp-wsl-launch.mjs'
       - 'packages/cli/.gitattributes'
       - 'packages/cli/package.json'
       - 'packages/cli/test/mcp-config-metadata.test.ts'

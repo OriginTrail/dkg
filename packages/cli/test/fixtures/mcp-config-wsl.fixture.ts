@@ -146,10 +146,9 @@ async function main(): Promise<void> {
     // Cold module imports across the CI checkout's NTFS/WSL boundary took 146s
     // before setup even began. Bound this correctness smoke independently of
     // interactive client startup performance; retain real initialize/tools-list.
-    const driver = fileURLToPath(new URL('../../test/fixtures/mcp-windows-client.fixture.cjs', import.meta.url));
-    const mountedWindowsNode = execFileSync('/usr/bin/wslpath', ['-u', windowsNode], { encoding: 'utf8' }).trim();
-    console.log(execFileSync('/usr/bin/env', ['--', mountedWindowsNode, windowsPath(driver), windowsPath(path), projectMarker], {
-      encoding: 'utf8', timeout: 300_000, maxBuffer: 1024 * 1024,
+    const smoke = fileURLToPath(new URL('../../../../scripts/test-mcp-wsl-launch.mjs', import.meta.url));
+    console.log(execFileSync(process.execPath, [smoke, path, windowsNode, projectMarker, '59231'], {
+      encoding: 'utf8', timeout: 310_000, maxBuffer: 1024 * 1024,
     }).trim());
     await mcpUninstallAction({ yes: true, client: 'cursor:native' }, { detectClients: () => clients, log: () => {} });
     assert.equal(JSON.parse(readFileSync(path, 'utf8')).mcpServers.dkg.command, registered.command,
