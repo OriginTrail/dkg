@@ -1,6 +1,7 @@
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { resolvePreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
+import { CatalogRepairConditionErrorV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 
 import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
@@ -1020,12 +1021,8 @@ export class DKGAgent extends DKGAgentBase {
           );
         },
         connectToPeerId: (peerId, options) => this.connectToPeerId(peerId, options),
-        queueRecoveryPlan: (plan, onError, delayMs) => {
-          return this.queueRfc64CatalogRecoveryPlanV1(plan, onError, delayMs);
-        },
-        synchronizeTarget: (params) => (
-          this.synchronizeRfc64CatalogRolloutFromProvidersV1(params)
-        ),
+        queueRecoveryPlan: (plan, onError, delayMs) => this.queueRfc64CatalogRecoveryPlanV1(plan, onError, delayMs),
+        synchronizeTarget: (params) => this.synchronizeRfc64CatalogRolloutFromProvidersV1(params),
         warn: (ctx, message) => this.log.warn(ctx, message),
       }),
     );
@@ -1059,7 +1056,10 @@ export class DKGAgent extends DKGAgentBase {
         },
         listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
         readPrivateFailure: (repair) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.readFailure(repair) ?? null,
-        writePrivateFailures: entries => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.writeFailures(entries),
+        writePrivateFailures: entries => {
+          if (this.rfc64PersistenceV1 === undefined) throw new CatalogRepairConditionErrorV1('persistence_unavailable', 'Private placement failure persistence is unavailable');
+          this.rfc64PersistenceV1.finalizedPrivatePlacementRepairs.writeFailures(entries);
+        },
         repairFinalizedPrivatePlacement: async (repair, placement) => {
           await this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement); },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),

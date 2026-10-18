@@ -52,6 +52,25 @@ it('restores actual node repair failure evidence and keeps inactive owed work af
   expect(after).toMatchObject({ failedMarkers: 1, kinds: [{ kind: 'lane_inactive', count: 1 }] });
   expect(after!.maxConsecutiveFailures).toBeGreaterThanOrEqual(before!.maxConsecutiveFailures);
   expect(after!.oldestFailureAgeMs).toBeGreaterThanOrEqual(before!.oldestFailureAgeMs!);
+  // Exercise the production owner binding: the queue can be read, then the
+  // persistence owner becomes unavailable before the required reset commit.
+  const persistence = Object.getOwnPropertyDescriptor(second, 'rfc64PersistenceV1')!;
+  expect(persistence.value).toBeDefined();
+  const queueBefore = second.readRfc64SwmCatalogProjectionSupervisorStatusV1()!.finalizedPrivatePlacement;
+  let persistenceReads = 0;
+  Object.defineProperty(second, 'rfc64PersistenceV1', { configurable: true,
+    get: () => persistenceReads++ === 0 ? persistence.value : undefined });
+  try {
+    expect(() => second.retryRfc64FailedPrivatePlacementsV1()).toThrow(expect.objectContaining({ kind: 'persistence_unavailable', message: 'Private placement failure persistence is unavailable' }));
+    expect(persistenceReads).toBeGreaterThanOrEqual(2);
+  } finally { Object.defineProperty(second, 'rfc64PersistenceV1', persistence); }
+  await new Promise(resolve => setTimeout(resolve, 10));
+  await second.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+  const queueAfter = second.readRfc64SwmCatalogProjectionSupervisorStatusV1()!.finalizedPrivatePlacement;
+  expect(queueAfter).toMatchObject({ waiters: queueBefore.waiters, passRunning: false,
+    lastPassDurationMs: queueBefore.lastPassDurationMs, cooldownSkips: queueBefore.cooldownSkips,
+    failures: { failedMarkers: after!.failedMarkers, parkedMarkers: after!.parkedMarkers,
+      maxConsecutiveFailures: after!.maxConsecutiveFailures, kinds: after!.kinds } });
   expect(second.retryRfc64FailedPrivatePlacementsV1()).toBe(1);
   await new Promise(resolve => setTimeout(resolve, 10));
   await second.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
