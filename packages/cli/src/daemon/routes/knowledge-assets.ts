@@ -1,3 +1,4 @@
+import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
 import { promoteConflictResponse } from './promote-admission-response.js';
 import { partialDurableShareFailure, classifySynchronousShareFailure, synchronousShareFailureDecision } from './durable-share-response.js';
 import { durableSynchronousShare, synchronousShareSuccessBody } from './durable-synchronous-share.js';
@@ -1120,6 +1121,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   const layer = segs[1]; // wm | swm | vm | undefined
   const verb = segs[2];
 
+  if (method === 'POST' && layer === 'vm' && verb === 'repair-descriptor') return handlePublishedDescriptorRepair(ctx, name, writePreflightContextGraphOpts);
   // Shared GET preflight: decode/validate the :identifier, require + normalize
   // contextGraphId, validate subGraphName, extract optional agentAddress. For
   // agent-scoped bearer tokens, omitted agentAddress defaults to the token's

@@ -1,3 +1,4 @@
+import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -377,5 +378,17 @@ describe('shared memory TTL setting', () => {
   it('leaves other methods and paths to later handlers', async () => {
     expect((await ttl('POST', '/api/settings/shared-memory-ttl', OPERATOR)).handled).toBe(false);
     expect((await ttl('PUT', '/api/settings/retention', OPERATOR)).handled).toBe(false);
+  });
+});
+
+
+describe('published descriptor repair authority', () => {
+  it('rejects agent scope before parsing the body or accessing the asset', async () => {
+    const repairPublishedKnowledgeAssetDescriptor = vi.fn();
+    const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST',
+      '/api/knowledge-assets/asset/vm/repair-descriptor', AGENT,
+      { body: '{invalid', agent: { repairPublishedKnowledgeAssetDescriptor } });
+    expect(result.status).toBe(403);
+    expect(repairPublishedKnowledgeAssetDescriptor).not.toHaveBeenCalled();
   });
 });

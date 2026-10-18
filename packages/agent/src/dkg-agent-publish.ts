@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
+import { incompleteNamedKaLifecycleAuthor } from './incomplete-named-ka-lifecycle.js';
+import { withKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
@@ -4933,6 +4936,11 @@ export class PublishMethods extends DKGAgentBase {
     return { action: 'execute' };
   }
 
+  async repairPublishedKnowledgeAssetDescriptor(this: DKGAgent, input: PublishedDescriptorRepairInput) {
+    return repairPublishedDescriptor({ store: this.store, chain: this.chain, writeLocks: this.writeLocks,
+      getContextGraphOnChainId: this.getContextGraphOnChainId.bind(this) }, input);
+  }
+
   async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
@@ -4976,10 +4984,10 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /** Re-check the named lifecycle independently of the mutable workspace head. */
-  async _canStampRecoveredKnowledgeAssetVmLifecycle(
+  async _resolveRecoveredKnowledgeAssetVmLifecycleAuthor(
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
-  ): Promise<boolean> {
+  ): Promise<string | false> {
     const bareRoot = (value?: string | null): string | undefined => {
       const trimmed = value?.trim().toLowerCase();
       if (!trimmed) return undefined;
@@ -4990,7 +4998,7 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress,
       ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     });
-    if (!history) return false;
+    if (!history) return incompleteNamedKaLifecycleAuthor(this.store, request, agentAddress);
 
     const queuedSeal = bareRoot(request.sealMerkleRoot);
     const queuedWm = bareRoot(request.wmCurrentAssertion) ?? queuedSeal;
@@ -5023,7 +5031,7 @@ export class PublishMethods extends DKGAgentBase {
     if (history.reservedUal && request.reservedUal && history.reservedUal !== request.reservedUal) {
       return false;
     }
-    return true;
+    return history.agentAddress;
   }
 
   async finalizeRecoveredQueuedKnowledgeAssetVmPublish(
@@ -5254,21 +5262,22 @@ export class PublishMethods extends DKGAgentBase {
     );
     // `stale-target` means a still-newer local version won the race. Do not
     // regress its pointer; the exact publish receipt is nevertheless repaired.
-    const canStampLifecycle = materialization !== 'stale-target'
-      && await this._canStampRecoveredKnowledgeAssetVmLifecycle(request);
-    if (canStampLifecycle) {
-      await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
-        request,
-        recovered.localUal,
-        recovered.reservedKaId,
-        recovered.materialization.merkleRoot,
-      );
-    } else if (materialization !== 'stale-target') {
-      this.log.info(
-        ctx,
-        `Recovered receipt for "${request.name}" without lifecycle stamping because `
-          + 'the current named assertion no longer matches the queued assertion',
-      );
+    if (materialization !== 'stale-target') {
+      const author = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+      await withKeyedLocks(this.writeLocks, [assertionLifecycleWriteLockKey(
+        request.contextGraphId, request.name, author, request.subGraphName,
+      )], async () => {
+        const lifecycleAuthor = await this._resolveRecoveredKnowledgeAssetVmLifecycleAuthor(request);
+        if (lifecycleAuthor) {
+          await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
+            { ...request, agentAddress: lifecycleAuthor }, recovered.localUal,
+            recovered.reservedKaId, recovered.materialization.merkleRoot,
+          );
+        } else {
+          this.log.info(ctx, `Recovered receipt for "${request.name}" without lifecycle stamping because `
+            + 'the current named assertion no longer matches the queued assertion');
+        }
+      });
     }
 
     // A recovery-finalized transaction owns the same RFC-64 lifecycle tail as

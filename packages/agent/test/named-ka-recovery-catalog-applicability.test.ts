@@ -11,7 +11,7 @@ import { AUTHOR, TX_HASH, baseRequest, legacyEvidence, seededChain } from './_he
 
 type RecoveryInternals = {
   getOrCreateFinalizationHandler(): Pick<FinalizationHandler, 'handleChainReconciledKC'>;
-  _canStampRecoveredKnowledgeAssetVmLifecycle(): Promise<boolean>;
+  _resolveRecoveredKnowledgeAssetVmLifecycleAuthor(): Promise<string | false>;
 };
 
 async function fixture(legacy: boolean, evidence: AsyncKnowledgeAssetVmPublishRecoveryEvidence = legacyEvidence()) {
@@ -31,7 +31,7 @@ async function fixture(legacy: boolean, evidence: AsyncKnowledgeAssetVmPublishRe
   const materialize = vi.fn<FinalizationHandler['handleChainReconciledKC']>(async () => 'already-confirmed');
   vi.spyOn(agent as unknown as RecoveryInternals, 'getOrCreateFinalizationHandler')
     .mockReturnValue({ handleChainReconciledKC: materialize });
-  vi.spyOn(agent as unknown as RecoveryInternals, '_canStampRecoveredKnowledgeAssetVmLifecycle')
+  vi.spyOn(agent as unknown as RecoveryInternals, '_resolveRecoveredKnowledgeAssetVmLifecycleAuthor')
     .mockResolvedValue(false);
   vi.spyOn(agent, 'getContextGraphOnChainId').mockResolvedValue('1');
   const observer = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1'); // call through; never mock true
