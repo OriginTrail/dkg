@@ -7,6 +7,7 @@ import {
   type KnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+import { parallelProof, proofOperation, type AwaitProofOperation, type ProofOperation } from './proof-operation.js';
 import {
   VerifiedGraphScopedFinalizationEvidenceCodec,
   type VerifiedGraphScopedFinalizationEvidence,
@@ -30,8 +31,6 @@ export type ReceiptBackedGraphScopedAssertion = Pick<
 
 export interface RecoverReceiptBackedGraphScopedEvidenceInput {
   store: TripleStore;
-  /** Observe concurrent proof reads so a caller can retain backpressure after fail-fast rejection. */
-  onReadStarted?: (read: Promise<unknown>) => void;
   chain?: ChainAdapter;
   contextGraphId: string;
   scope: { ual: string; assertionVersion: string };
@@ -71,6 +70,20 @@ function anchorQuads(input: RecoverReceiptBackedGraphScopedEvidenceInput): Quad[
  */
 export async function recoverReceiptBackedGraphScopedEvidence(
   input: RecoverReceiptBackedGraphScopedEvidenceInput,
+): Promise<ReceiptBackedGraphScopedEvidenceRecovery> {
+  return startReceiptBackedGraphScopedEvidence(input).result;
+}
+
+/** Own receipt verification through completion, even after its result fails fast. */
+export function startReceiptBackedGraphScopedEvidence(
+  input: RecoverReceiptBackedGraphScopedEvidenceInput,
+): ProofOperation<ReceiptBackedGraphScopedEvidenceRecovery> {
+  return proofOperation(own => recoverReceiptEvidence(input, own));
+}
+
+async function recoverReceiptEvidence(
+  input: RecoverReceiptBackedGraphScopedEvidenceInput,
+  own: AwaitProofOperation,
 ): Promise<ReceiptBackedGraphScopedEvidenceRecovery> {
   let assertionVersion: bigint;
   try {
@@ -127,29 +140,25 @@ export async function recoverReceiptBackedGraphScopedEvidence(
   }
   const { transactionHash } = receiptProvenance;
 
-  const trackRead = <T>(read: Promise<T>): Promise<T> => {
-    input.onReadStarted?.(read);
-    return read;
-  };
   try {
-    const [receiptAuthority, rootCount, trustedControls] = await Promise.all([
-      assertionVersion === 1n
-        ? trackRead(publishResolver!.call(input.chain, transactionHash))
-        : trackRead(updateVerifier!.call(
+    const [receiptAuthority, rootCount, trustedControls] = await own(parallelProof([
+      () => assertionVersion === 1n
+        ? publishResolver!.call(input.chain, transactionHash)
+        : updateVerifier!.call(
             input.chain,
             transactionHash,
             input.kaId,
             input.publisherAddress,
-          )),
-      trackRead(rootCountReader.call(input.chain, input.kaId)),
-      trackRead(readLocallyTrustedKnowledgeAssetControlEnvelope(
+          ),
+      () => rootCountReader.call(input.chain, input.kaId),
+      () => readLocallyTrustedKnowledgeAssetControlEnvelope(
         input.store,
         metaGraph,
         input.scope.ual,
         anchorQuads(input),
         { source: 'agent.finalization.recoverReceiptBackedEvidence.controls' },
-      )),
-    ]);
+      ),
+    ]));
     if (rootCount !== assertionVersion) {
       return { status: 'unavailable', reason: 'canonical receipt or target assertion root is unavailable' };
     }

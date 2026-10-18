@@ -120,19 +120,22 @@ describe('targeted published descriptor repair', () => {
     expect(await h.all()).toEqual(before);
   });
 
-  it.each(['binding', 'receipt-root', 'receipt-controls'].flatMap(phase => [false, true].map(rejectSibling => ({ phase, rejectSibling }))))(
+  it.each(['binding', 'binding-sync', 'receipt-root', 'receipt-sync', 'receipt-controls'].flatMap(phase => [false, true].map(rejectSibling => ({ phase, rejectSibling }))))(
     'retains backpressure after $phase fails until its sibling settles (reject=$rejectSibling)', async ({ phase, rejectSibling }) => {
     const h = await fixture(); const before = await h.all();
     const deadline = new AbortController(); vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
     let release!: () => void;
     const held = new Promise<void>((resolve, reject) => { release = () => rejectSibling ? reject(new Error('sibling failed')) : resolve(); });
     const failure = new Error('parallel proof unavailable');
-    if (phase === 'binding') {
-      vi.spyOn(h.host, 'getContextGraphOnChainId').mockRejectedValueOnce(failure);
+    if (phase === 'binding' || phase === 'binding-sync') {
+      const read = vi.spyOn(h.host, 'getContextGraphOnChainId');
+      if (phase === 'binding-sync') read.mockImplementationOnce(() => { throw failure; });
+      else read.mockRejectedValueOnce(failure);
       h.chain.getKAContextGraphId.mockImplementationOnce(async () => { await held; return 1n; });
     } else {
-      h.chain.resolveCanonicalFinalizationReceipt.mockRejectedValueOnce(failure);
-      if (phase === 'receipt-root') {
+      if (phase === 'receipt-sync') h.chain.resolveCanonicalFinalizationReceipt.mockImplementationOnce(() => { throw failure; });
+      else h.chain.resolveCanonicalFinalizationReceipt.mockRejectedValueOnce(failure);
+      if (phase === 'receipt-root' || phase === 'receipt-sync') {
         h.chain.getMerkleRootCount.mockImplementationOnce(async () => { await held; return 1n; });
       } else {
         const query = h.store.query.bind(h.store); let stalled = false;
