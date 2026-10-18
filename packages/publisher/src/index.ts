@@ -560,3 +560,5 @@ export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
 export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';
 
 export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
+
+export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } from './assertion-lifecycle-record.js';

@@ -1,3 +1,4 @@
+import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { resolvePreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
@@ -4076,14 +4077,7 @@ export class DKGAgent extends DKGAgentBase {
         // then its EIP-55 and lowercase equivalents. The resolved subject must
         // be carried into the event/root queries below; rebuilding it from the
         // caller spelling would silently split one lifecycle into two.
-        const lifecycleAddresses = [addr];
-        if (/^0x[0-9a-fA-F]{40}$/.test(addr)) {
-          const lowercase = addr.toLowerCase();
-          const checksummed = ethers.getAddress(lowercase);
-          for (const candidate of [checksummed, lowercase]) {
-            if (!lifecycleAddresses.includes(candidate)) lifecycleAddresses.push(candidate);
-          }
-        }
+        const lifecycleAddresses = assertionLifecycleAuthorCandidates(addr);
 
         let lifecycleUri: string | undefined;
         let row: Record<string, string> | undefined;

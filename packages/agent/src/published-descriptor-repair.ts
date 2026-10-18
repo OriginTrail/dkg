@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
-import { assertionLifecycleUri, contextGraphMetaUri, createGraphKnowledgeAssetScope, resolveWithinAbort } from '@origintrail-official/dkg-core';
+import { createGraphKnowledgeAssetScope, resolveWithinAbort } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 import { incompleteNamedKaLifecycleAuthor } from './incomplete-named-ka-lifecycle.js';
 import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
 import { recoverReceiptBackedGraphScopedEvidence } from './receipt-backed-graph-scoped-evidence.js';
@@ -20,6 +21,7 @@ interface RepairHost {
   store: TripleStore;
   chain: ChainAdapter;
   writeLocks: Map<string, Promise<void>>;
+  stampPublishedLifecycle: PublishedNamedKaVmLifecycleWriter;
   getContextGraphOnChainId(cg: string, options?: { signal?: AbortSignal }): Promise<string | null | undefined>;
 }
 const active = new WeakSet<object>();
@@ -28,22 +30,23 @@ const refuse = (message: string): never => {
 };
 
 /** Explicit one-asset recovery after terminal jobs have been cleared. Never sends a transaction.
- * Only the absent state is restored; all surviving identity/content/provenance must verify.
+ * Completes the interrupted VM projection; surviving identity/content/provenance must verify.
  */
 export async function repairPublishedDescriptor(host: RepairHost, input: PublishedDescriptorRepairInput) {
   if (active.has(host.store)) throw Object.assign(new Error('Another descriptor repair is active'), { code: 'KA_DESCRIPTOR_REPAIR_BUSY' });
   active.add(host.store);
   let abandonedRead: Promise<unknown> | undefined;
+  let writeEntered = false;
   try {
     const scope = createGraphKnowledgeAssetScope(input.kaUal, '1');
     if (scope.chainId !== host.chain.chainId) return refuse('UAL belongs to another chain');
     const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
     const signal = AbortSignal.timeout(30_000);
-    return await withKeyedLocks(host.writeLocks, [assertionLifecycleWriteLockKey(
+    const work = withKeyedLocks(host.writeLocks, [assertionLifecycleWriteLockKey(
       input.contextGraphId, input.name, scope.agentAddress, input.subGraphName,
     )], async () => {
       signal.throwIfAborted();
-      const proof = (async () => {
+      const verified = await (async () => {
         const snapshot = await host.chain.readKnowledgeAssetVersionSnapshot?.(kaId, { signal });
         if (!snapshot || snapshot.rootCount <= 0n || snapshot.latestAuthor.toLowerCase() !== scope.agentAddress.toLowerCase()) {
           return refuse('current chain version or author is unavailable');
@@ -75,7 +78,7 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
         const author = await incompleteNamedKaLifecycleAuthor(host.store, {
           ...input, kaNumber: scope.kaNumber, assertionVersion: vm.scope.assertionVersion,
           sealMerkleRoot: snapshot.latestRoot,
-        }, scope.agentAddress, { allowPublishedState: true, requireCompleteVmProjection: true });
+        }, scope.agentAddress, { allowPublishedState: true, requireCompatibleVmProjection: true });
         // A new confirmed block is normal during verification. Re-read the asset,
         // rather than requiring the earlier snapshot's header lease to remain current.
         const current = await host.chain.readKnowledgeAssetVersionSnapshot?.(kaId, { signal });
@@ -92,23 +95,24 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
         return { author, root: snapshot.latestRoot, assertionVersion: vm.scope.assertionVersion,
           transactionHash: e.transactionHash };
       })();
-      const verified = await resolveWithinAbort(() => proof, signal);
-      if (!verified) {
-        abandonedRead = proof;
-        return refuse('verification deadline exceeded');
-      }
       signal.throwIfAborted();
       if (input.dryRun === false) {
-        // All prerequisites are read-only. Once entered, await this idempotent insert completely.
-        await host.store.insert([{
-          graph: contextGraphMetaUri(input.contextGraphId),
-          subject: assertionLifecycleUri(input.contextGraphId, verified.author, input.name, input.subGraphName),
-          predicate: 'http://dkg.io/ontology/state', object: '"published"',
-        }]);
+        // Once the existing writer is entered, never abandon its mutation on timeout.
+        writeEntered = true;
+        await host.stampPublishedLifecycle({ contextGraphId: input.contextGraphId, name: input.name,
+          agentAddress: verified.author, subGraphName: input.subGraphName,
+          publishedUal: scope.ual, merkleRoot: verified.root, packedKaId: kaId });
       }
       return { status: input.dryRun === false ? 'repaired' as const : 'verified' as const,
         ...verified, kaUal: scope.ual };
     });
+    const result = await resolveWithinAbort(() => work, signal);
+    if (result) return result;
+    if (writeEntered) return await work;
+    // The queued callback checks cancellation before reading or writing. Keep its gate
+    // and store-wide backpressure until a stalled predecessor/read actually settles.
+    abandonedRead = work;
+    return refuse('verification deadline exceeded');
   } finally {
     // A timed-out read cannot mutate. Keep backpressure until even its underlying reads settle.
     if (abandonedRead) void abandonedRead.then(() => active.delete(host.store), () => active.delete(host.store));

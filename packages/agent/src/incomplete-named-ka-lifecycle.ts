@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-import { ethers } from 'ethers';
-import { assertionLifecycleUri, contextGraphMetaUri, formatSparqlTerm, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import type { KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
+import { readAssertionLifecycleCandidates, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 
 const DKG = 'http://dkg.io/ontology/';
 export type NamedKaLifecycleRecoveryFacts = Pick<KnowledgeAssetVmPublishRequest,
@@ -16,7 +15,7 @@ export type NamedKaLifecycleRecoveryFacts = Pick<KnowledgeAssetVmPublishRequest,
  */
 export async function incompleteNamedKaLifecycleAuthor(
   store: TripleStore, request: NamedKaLifecycleRecoveryFacts, author: string,
-  options: { allowPublishedState?: boolean; requireCompleteVmProjection?: boolean } = {},
+  options: { allowPublishedState?: boolean; requireCompatibleVmProjection?: boolean } = {},
 ): Promise<string> {
   const refuse = (reason: string): never => {
     throw Object.assign(new Error(`Cannot repair published descriptor for "${request.name}": ${reason}`), {
@@ -25,23 +24,14 @@ export async function incompleteNamedKaLifecycleAuthor(
   };
   if (!request.kaNumber || !request.kaUal || !request.assertionVersion
     || !/^(?:0x)?[0-9a-fA-F]{64}$/.test(request.sealMerkleRoot)) return refuse('incomplete recovery identity');
-  const authors = /^0x[0-9a-fA-F]{40}$/.test(author)
-    ? [...new Set([author, ethers.getAddress(author.toLowerCase()), author.toLowerCase()])]
-    : [author];
-  const graph = formatSparqlTerm(contextGraphMetaUri(request.contextGraphId), { position: 'graph' });
-  const candidates = authors.map(address => ({ address,
-    subject: assertionLifecycleUri(request.contextGraphId, address, request.name, request.subGraphName) }));
-  const result = await store.query(`SELECT ?subject ?p ?o WHERE {
-    VALUES ?subject { ${candidates.map(c => formatSparqlTerm(c.subject, { position: 'subject' })).join(' ')} }
-    GRAPH ${graph} { ?subject ?p ?o }
-  }`, { source: 'agent.recovery.incompleteNamedLifecycle' });
-  if (result.type !== 'bindings') return refuse('lifecycle facts unavailable');
-  const subjects = new Set(result.bindings.map(row => row.subject));
-  if (subjects.size !== 1) return refuse('missing or ambiguous lifecycle identity; retain the original job evidence');
-  const candidate = candidates.find(c => subjects.has(c.subject));
-  if (!candidate) return refuse('unknown lifecycle subject');
+  let candidates;
+  try { candidates = await readAssertionLifecycleCandidates(store, request.contextGraphId, author, request.name, request.subGraphName); }
+  catch { return refuse('invalid retained lifecycle reservation'); }
+  if (candidates.length !== 1) return refuse('missing or ambiguous lifecycle identity; retain the original job evidence');
+  const candidate = candidates[0]!;
+  const bindings = candidate.record.bindings;
   const one = (predicate: string): string | undefined => {
-    const values = result.bindings.filter(row => row.p === predicate).map(row => row.o);
+    const values = bindings.filter(row => row.p === predicate).map(row => row.o);
     if (values.length > 1) return refuse(`conflicting ${predicate} values`);
     return values[0];
   };
@@ -58,13 +48,20 @@ export async function incompleteNamedKaLifecycleAuthor(
   if (state !== undefined && !(options.allowPublishedState && state === 'published')) {
     return refuse('state exists but the descriptor could not be resolved');
   }
-  if (options.requireCompleteVmProjection && (literal('publishedUal') !== request.kaUal
-    || literal('memoryLayer') !== 'VM'
-    || one(DKG + 'assertionGraph') !== contextGraphLayerUri(request.contextGraphId, MemoryLayer.VerifiableMemory,
-      author, BigInt(request.kaNumber), request.subGraphName))) return refuse('incomplete published identity or layer');
+  if (options.requireCompatibleVmProjection) {
+    const published = literal('publishedUal');
+    const layer = literal('memoryLayer');
+    const graph = one(DKG + 'assertionGraph');
+    const permittedGraphs = [MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory]
+      .map(layer => contextGraphLayerUri(request.contextGraphId, layer, author, BigInt(request.kaNumber!), request.subGraphName));
+    if ((published !== undefined && published !== request.kaUal)
+      || layer !== 'VM' || (graph !== undefined && !permittedGraphs.includes(graph))) {
+      return refuse('conflicting published identity or layer');
+    }
+  }
   if (literal('assertionName') !== request.name
     || one('http://www.w3.org/ns/prov#wasAttributedTo')?.toLowerCase() !== `did:dkg:agent:${author}`.toLowerCase()
-    || literal('kaId') !== request.kaNumber
+    || candidate.record.number?.toString() !== request.kaNumber
     || literal('reservedUal') !== request.kaUal
     || literal('assertionVersion') !== request.assertionVersion) {
     return refuse('retained name, author, reservation or version does not match the confirmed request');
@@ -78,5 +75,5 @@ export async function incompleteNamedKaLifecycleAuthor(
   }
   const operation = literal('shareOperationId');
   if (request.shareOperationId !== undefined && operation !== undefined && operation !== request.shareOperationId) return refuse('a different share owns this lifecycle');
-  return candidate.address;
+  return candidate.author;
 }

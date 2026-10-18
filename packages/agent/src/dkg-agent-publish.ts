@@ -4938,7 +4938,8 @@ export class PublishMethods extends DKGAgentBase {
 
   async repairPublishedKnowledgeAssetDescriptor(this: DKGAgent, input: PublishedDescriptorRepairInput) {
     return repairPublishedDescriptor({ store: this.store, chain: this.chain, writeLocks: this.writeLocks,
-      getContextGraphOnChainId: this.getContextGraphOnChainId.bind(this) }, input);
+      getContextGraphOnChainId: this.getContextGraphOnChainId.bind(this),
+      stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter }, input);
   }
 
   async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
