@@ -15,7 +15,7 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import type { ContextGraph } from '../stores/projects.js';
-import { useContextGraphInventory } from '../hooks/useContextGraphInventory.js';
+import { refreshContextGraphInventory, useContextGraphInventory } from '../hooks/useContextGraphInventory.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryCounts } from './project/helpers.js';
@@ -46,7 +46,7 @@ const TS_PREDS = [
 ];
 
 export function MemoryStackView() {
-  const { contextGraphs } = useContextGraphInventory();
+  const { contextGraphs, error: listError, identity, inventoryLoading, inventoryError } = useContextGraphInventory();
   // Shared hidden-CG preference (same set as PanelLeft + Dashboard).
   const { hidden } = useHiddenContextGraphIds();
   const visible = useMemo(
@@ -59,16 +59,22 @@ export function MemoryStackView() {
       <div className="v10-memstack-head">
         <h1 className="v10-memstack-title">Memory Stack</h1>
         <p className="v10-memstack-sub">
-          Every layer across every context graph, at a glance. {visible.length} visible context graph{visible.length === 1 ? '' : 's'} ·
-          hidden context graphs are skipped.
+          Every layer across every context graph, at a glance.
+          {(!inventoryLoading && !inventoryError || contextGraphs.length > 0) && <> {visible.length} visible context graph{visible.length === 1 ? '' : 's'} · hidden context graphs are skipped.</>}
         </p>
       </div>
 
-      {visible.length === 0 ? (
+      {inventoryError && <div className="v10-stale-banner" role="alert">
+        <span>{listError ? 'Context graphs unavailable. ' : ''}{identity.error ? 'Agent identity unavailable. ' : ''}
+          {contextGraphs.length > 0 ? 'Showing the last available context graphs.' : 'Context graph inventory is unknown.'}</span>
+        <button type="button" className="v10-retry-btn" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry context graphs</button>
+      </div>}
+      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}
+      {visible.length === 0 ? (!inventoryError && !inventoryLoading && (
         <div className="v10-memstack-empty">
           No visible context graphs. Create one from the sidebar or un-hide dismissed ones.
         </div>
-      ) : (
+      )) : (
         <div className="v10-memstack-table">
           <div className="v10-memstack-colheads">
             <div className="v10-memstack-colhead project" />
