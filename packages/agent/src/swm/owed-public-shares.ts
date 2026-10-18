@@ -23,8 +23,12 @@
  *    its author's seal. The owner's route is asked again on each pass, until
  *    it finds the owner.
  * Every {@link OWED_PUBLIC_SHARE_RETRY_MS} one pass sends at most
- * {@link OWED_PUBLIC_SHARES_PER_PASS} records, those owed to any peer first,
- * oldest first; a record with no peer to go to now does not count. A share is
+ * {@link OWED_PUBLIC_SHARES_PER_PASS} records, those owed to any peer first;
+ * within each kind the record tried longest ago goes first, a record never
+ * tried before any other, oldest first among equals. So records that keep
+ * failing take turns with the others instead of holding every place of every
+ * pass while a newer record waits until it expires. A record with no peer to
+ * go to now does not count, and keeps its place. A share is
  * signed again before it is sent once its envelope is older than
  * {@link OWED_PUBLIC_SHARE_RESIGN_AFTER_MS}. A record ends when what it owes
  * is settled, when the owner refuses the share, when every Core it was sent to
@@ -119,6 +123,8 @@ interface OwedRecord<S> extends OwedPublicShare<S> {
   holder: boolean;
   owner: boolean;
   resignFailures: number;
+  /** The store's count of shares tried, taken when this one was last tried; 0 while it never was. */
+  lastTry: number;
   /** Cores that refused this share; it is not sent to them again. */
   readonly refusedBy: Set<string>;
 }
@@ -215,6 +221,8 @@ export class OwedPublicShares<S> {
   readonly #shares = new Map<string, OwedRecord<S>>();
   /** Shares that made room for newer ones since the last pass. */
   readonly #droppedForRoom = new DroppedShares();
+  /** Shares tried so far, over all passes: a share's {@link OwedRecord.lastTry} orders the next pass. */
+  #tries = 0;
   #timer: { cancel(): void } | undefined;
   #running: Promise<void> | undefined;
   #closed = false;
@@ -263,7 +271,7 @@ export class OwedPublicShares<S> {
       this.#droppedForRoom.add(oldest);
     }
     this.#shares.set(input.shareOperationId, {
-      ...input, createdAt: this.#now(), attempts: 0, resignFailures: 0, refusedBy: new Set(),
+      ...input, createdAt: this.#now(), attempts: 0, resignFailures: 0, lastTry: 0, refusedBy: new Set(),
     });
     this.#arm();
   }
@@ -329,8 +337,13 @@ export class OwedPublicShares<S> {
     expired.flush(warn, `given up after ${OWED_PUBLIC_SHARE_TTL_MS / 60_000} min`);
     this.#droppedForRoom.flush(warn, 'dropped to make room for newer owed shares');
     const lookups: PassLookups = { publicGraphs: new Map(), owners: new Map() };
-    // A share that reached nobody goes first; the sort keeps each kind oldest first.
-    const shares = [...this.#shares.values()].sort((left, right) => Number(right.holder) - Number(left.holder));
+    // A share that reached nobody goes first. Within each kind the share tried
+    // longest ago goes first; the sort keeps equals oldest first. A share tried
+    // in this pass goes behind every share of its kind this pass did not get
+    // to, so the shares of one kind take turns, and none waits behind shares
+    // that keep failing until it expires.
+    const shares = [...this.#shares.values()]
+      .sort((left, right) => Number(right.holder) - Number(left.holder) || left.lastTry - right.lastTry);
     let sent = 0;
     for (const share of shares) {
       if (sent >= OWED_PUBLIC_SHARES_PER_PASS || !this.#open(generation)) return;
@@ -357,6 +370,8 @@ export class OwedPublicShares<S> {
       : [];
     if (!this.#open(generation) || (holders.length === 0 && owners.length === 0)) return false;
     share.attempts += 1;
+    this.#tries += 1;
+    share.lastTry = this.#tries;
     if (this.#now() - share.signedAt >= OWED_PUBLIC_SHARE_RESIGN_AFTER_MS && !(await this.#resign(share, generation))) return true;
     if (holders.length > 0) {
       const outcomes = await Promise.all(holders.map((peerId) => this.#send(peerId, share)));

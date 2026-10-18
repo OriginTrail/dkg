@@ -1467,7 +1467,15 @@ export class PublishMethods extends DKGAgentBase {
                     trackedQuorum.dropPeer(shareOperationId, record.peerId);
                   }
                 }
-                // A Core that refused holds none of the graph's shares of this scope.
+                // A Core that applied the share hosts the graph's shares of this
+                // scope. A Core that refused it is dropped from this share, and
+                // left out of the graph's next shares of this scope only when it
+                // applied none of them lately: a refusal does not say whether the
+                // Core does not host the graph or refused only this share, an
+                // outdated version for one (`ShareHolderRefusals`).
+                if (record.outcome === 'delivered' && holderCores.has(record.peerId)) {
+                  shareHolderRefusalsOf(this).noteAccepted(contextGraphId, subGraphName, record.peerId);
+                }
                 if (record.outcome === 'rejected' && holderCores.has(record.peerId)) {
                   if (trackedQuorum && shareOperationId) trackedQuorum.dropPeer(shareOperationId, record.peerId);
                   shareHolderRefusalsOf(this).noteRefused(contextGraphId, subGraphName, record.peerId);

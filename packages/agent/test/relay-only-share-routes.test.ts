@@ -3,16 +3,18 @@
 /**
  * The routes by which a share into a public graph reaches the nodes that
  * need it when its author connects only to Cores (`swm/relay-only-share-routes.ts`):
- * a Core that hosts the graph applies a share into a named sub-graph, and the
- * author makes the graph's owner one of the share's followers. The agent's
- * wiring is in `swm-shares-through-relay.test.ts` and
- * `core-hosted-sub-graph-share.test.ts`.
+ * a Core that hosts the graph applies a share into a named sub-graph, the
+ * author makes the graph's owner one of the share's followers, and a share no
+ * recipient holds for others goes to the connected Cores. The agent's wiring
+ * is in `swm-shares-through-relay.test.ts`, `swm-share-holder-cores.test.ts`
+ * and `core-hosted-sub-graph-share.test.ts`.
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_OWNER_PEERS_TTL_MS,
   GRAPH_OWNER_RETRY_AFTER_MS,
   GraphOwnerPeers,
+  SHARE_HOLDER_ACCEPT_TTL_MS,
   SHARE_HOLDER_CORES_MAX,
   SHARE_HOLDER_REFUSAL_TTL_MS,
   ShareHolderRefusals,
@@ -299,6 +301,49 @@ describe('the Cores a share goes to when no recipient holds the graph for others
       expect(refusals.refused(GRAPH, 'reports', 'core-0')).toBe(false);
       expect(refusals.refused(GRAPH, 'reports', 'core-1')).toBe(true);
       expect(refusals.refused(GRAPH, 'reports', 'core-1024')).toBe(true);
+    });
+
+    // A receiver refuses an outdated version of an asset as it refuses a graph
+    // it does not host. A Core that applied a share of the graph lately hosts
+    // it, so one refusal from it must not leave it out of the graph's shares.
+    it('is not left out for a refusal when it applied a share of that graph and scope lately', () => {
+      let now = 0;
+      const refusals = new ShareHolderRefusals(() => now);
+      refusals.noteAccepted(GRAPH, 'reports', CORE_1);
+      now += SHARE_HOLDER_ACCEPT_TTL_MS - 1;
+      refusals.noteRefused(GRAPH, 'drafts', CORE_1);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(false);
+      expect(refusals.size).toBe(0);
+      // The accept is for named sub-graphs: a refusal of a root share still counts.
+      refusals.noteRefused(GRAPH, null, CORE_1);
+      expect(refusals.refused(GRAPH, null, CORE_1)).toBe(true);
+      // Once the accept is that old, a refusal leaves the Core out again.
+      now += 1;
+      refusals.noteRefused(GRAPH, 'reports', CORE_1);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(true);
+      expect(refusals.acceptsHeld, 'an expired accept is forgotten').toBe(0);
+    });
+
+    it('is taken back once the Core applies a share of that graph and scope, as when two answers arrive out of order', () => {
+      const refusals = new ShareHolderRefusals(() => 0);
+      refusals.noteRefused(GRAPH, 'reports', CORE_1);
+      refusals.noteRefused(GRAPH, 'reports', CORE_2);
+      refusals.noteAccepted(GRAPH, 'reports', CORE_1);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(false);
+      expect(refusals.refused(GRAPH, 'reports', CORE_2)).toBe(true);
+      refusals.noteRefused(GRAPH, 'reports', CORE_1);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(false);
+      expect(SHARE_HOLDER_ACCEPT_TTL_MS).toBe(10 * 60_000);
+    });
+
+    it('keeps at most 1,024 accepts, the oldest making room', () => {
+      const refusals = new ShareHolderRefusals(() => 0);
+      for (let index = 0; index <= 1_024; index += 1) refusals.noteAccepted(GRAPH, 'reports', `core-${index}`);
+      expect(refusals.acceptsHeld).toBe(1_024);
+      refusals.noteRefused(GRAPH, 'reports', 'core-0');
+      refusals.noteRefused(GRAPH, 'reports', 'core-1');
+      expect(refusals.refused(GRAPH, 'reports', 'core-0')).toBe(true);
+      expect(refusals.refused(GRAPH, 'reports', 'core-1')).toBe(false);
     });
 
     it('is kept per agent, the same memory every time', () => {

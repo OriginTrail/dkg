@@ -27,7 +27,8 @@
  *    it is connected to as well ({@link needsHoldingCores}), as it sends
  *    followers. A Core that hosts the graph keeps the share for the others,
  *    who pull it from there; one that does not refuses it, and is left out of
- *    that graph's shares for a while ({@link ShareHolderRefusals}).
+ *    that graph's shares for a while, unless it applied one of them lately
+ *    ({@link ShareHolderRefusals}).
  */
 
 import { createHash } from 'node:crypto';
@@ -181,7 +182,10 @@ export function graphOwnerPeersOf(
 export const SHARE_HOLDER_CORES_MAX = 4;
 /** A Core that refused a share of a graph is not sent that graph's shares of the same scope for this long. */
 export const SHARE_HOLDER_REFUSAL_TTL_MS = 10 * 60_000;
-const SHARE_HOLDER_REFUSALS_MAX = 1024;
+/** A Core that applied a share of a graph less than this long ago hosts the graph's shares of that scope. */
+export const SHARE_HOLDER_ACCEPT_TTL_MS = 10 * 60_000;
+/** Refusals, and apart from them accepts, remembered at most. */
+const SHARE_HOLDER_MEMORY_MAX = 1024;
 
 /**
  * Whether a share also goes to the connected Cores: shares by an Edge into a
@@ -230,33 +234,70 @@ function refusalKey(contextGraphId: string, subGraphName: string | null, peerId:
 /**
  * Cores that refused a share of a graph, by the scope it went to: a Core that
  * does not host the graph refuses all of its sub-graph shares, and a Core whose
- * catalog owns the root refuses root shares only. Bounded; the oldest refusal
- * makes room.
+ * catalog owns the root refuses root shares only.
+ *
+ * A refusal alone does not show which. A receiver answers every share it
+ * will never apply with the same one-byte refusal: one for a graph or scope it
+ * does not host, and one it rejects on its own merits, such as an outdated or
+ * conflicting version of an asset or another publisher's asset. Its reason
+ * stays in the receiver's log, so the sender cannot tell the two apart without
+ * a change to the protocol. So a Core that applied a share of the graph and
+ * scope within {@link SHARE_HOLDER_ACCEPT_TTL_MS} hosts them: a refusal from it
+ * is about that share alone, and the sender keeps it to that share (the share's
+ * delivery tracking drops the Core). Only a refusal from a Core with no recent
+ * accept leaves the Core out of the graph's shares of that scope, and an accept
+ * ends a refusal noted before it, as when the answers to two shares arrive out
+ * of order. What remains: the first share a Core ever gets of a graph may be
+ * refused on its merits and leave the Core out for a while, and a Core that
+ * stops hosting the graph is still sent its shares until its last accept is
+ * that old, each refusal then kept to its share.
+ *
+ * Bounded; the oldest refusal, or accept, makes room.
  */
 export class ShareHolderRefusals {
   readonly #now: () => number;
-  readonly #at = new Map<string, number>();
+  readonly #refusedAt = new Map<string, number>();
+  readonly #acceptedAt = new Map<string, number>();
 
   constructor(now: () => number = Date.now) {
     this.#now = now;
   }
 
+  /** The Core applied a share of the graph into this scope: it hosts them. */
+  noteAccepted(contextGraphId: string, subGraphName: string | null, peerId: string): void {
+    const key = refusalKey(contextGraphId, subGraphName, peerId);
+    this.#refusedAt.delete(key);
+    rememberBounded(this.#acceptedAt, key, this.#now(), SHARE_HOLDER_MEMORY_MAX);
+  }
+
+  /** The Core refused a share of the graph into this scope; left out only when it applied none of them lately. */
   noteRefused(contextGraphId: string, subGraphName: string | null, peerId: string): void {
-    rememberBounded(this.#at, refusalKey(contextGraphId, subGraphName, peerId), this.#now(), SHARE_HOLDER_REFUSALS_MAX);
+    const key = refusalKey(contextGraphId, subGraphName, peerId);
+    if (this.#recent(this.#acceptedAt, key, SHARE_HOLDER_ACCEPT_TTL_MS)) return;
+    rememberBounded(this.#refusedAt, key, this.#now(), SHARE_HOLDER_MEMORY_MAX);
   }
 
   refused(contextGraphId: string, subGraphName: string | null, peerId: string): boolean {
-    const key = refusalKey(contextGraphId, subGraphName, peerId);
-    const at = this.#at.get(key);
-    if (at === undefined) return false;
-    if (this.#now() - at < SHARE_HOLDER_REFUSAL_TTL_MS) return true;
-    this.#at.delete(key);
-    return false;
+    return this.#recent(this.#refusedAt, refusalKey(contextGraphId, subGraphName, peerId), SHARE_HOLDER_REFUSAL_TTL_MS);
   }
 
   /** Refusals held; for tests. */
   get size(): number {
-    return this.#at.size;
+    return this.#refusedAt.size;
+  }
+
+  /** Accepts held; for tests. */
+  get acceptsHeld(): number {
+    return this.#acceptedAt.size;
+  }
+
+  /** Whether `key` was noted in `memory` less than `ttlMs` ago; an older note is forgotten. */
+  #recent(memory: Map<string, number>, key: string, ttlMs: number): boolean {
+    const at = memory.get(key);
+    if (at === undefined) return false;
+    if (this.#now() - at < ttlMs) return true;
+    memory.delete(key);
+    return false;
   }
 }
 

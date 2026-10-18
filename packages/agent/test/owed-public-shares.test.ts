@@ -3,7 +3,7 @@
 /**
  * Shares into a public graph that reached nobody, or not the graph's owner,
  * kept and sent again for a bounded time (`swm/owed-public-shares.ts`). The
- * agent's wiring is in `swm-shares-through-relay.test.ts`.
+ * agent's wiring is in `swm-owed-public-share-wiring.test.ts`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -461,6 +461,43 @@ describe('the store of owed shares', () => {
     expect(h.sent.map((sent) => sent.shareOperationId)).toEqual(
       Array.from({ length: OWED_PUBLIC_SHARES_PER_PASS }, (_unused, index) => `op-${index}`),
     );
+  });
+
+  // Eight shares whose owners keep answering "not now" held every place of
+  // every pass: a ninth, whose owner would take it at once, expired unsent.
+  it('gives every share its turn: shares that keep failing do not keep a newer one from being sent', async () => {
+    const h = harness({
+      owners: () => [OWNER],
+      answer: (_peerId, share) => (share.shareOperationId === 'op-8' ? 'delivered' : 'retryable'),
+    });
+    for (let index = 0; index < 9; index += 1) h.owe(`op-${index}`, { owner: true });
+    const sentInPass = async (): Promise<string[]> => {
+      const before = h.sent.length;
+      h.clock.now += OWED_PUBLIC_SHARE_RETRY_MS;
+      await h.fire();
+      return h.sent.slice(before).map((sent) => sent.shareOperationId);
+    };
+    const ids = (from: number, to: number): string[] => Array.from({ length: to - from + 1 }, (_unused, index) => `op-${from + index}`);
+    expect(await sentInPass()).toEqual(ids(0, 7));
+    expect(await sentInPass(), 'the share not tried yet goes first').toEqual(['op-8', ...ids(0, 6)]);
+    expect(h.store.snapshot().map((share) => share.shareOperationId)).toEqual(ids(0, 7));
+    expect(await sentInPass(), 'the share left out of the last pass goes first').toEqual(['op-7', ...ids(0, 6)]);
+    expect((await sentInPass()).sort(), 'with no more shares than a pass sends, each is sent every pass').toEqual(ids(0, 7));
+    expect(h.store.snapshot().every((share) => share.attempts >= 3)).toBe(true);
+  });
+
+  it('takes turns within each kind, those that reached nobody still before those owed only to the owner', async () => {
+    const h = harness({ owners: () => [OWNER], holders: () => [CORE_1], answer: () => 'retryable' });
+    for (let index = 0; index < 10; index += 1) h.owe(`op-owner-${index}`, { owner: true });
+    for (let index = 0; index < 3; index += 1) h.owe(`op-nobody-${index}`, { holder: true });
+    const nobody = ['op-nobody-0', 'op-nobody-1', 'op-nobody-2'];
+    const owner = (indexes: number[]): string[] => indexes.map((index) => `op-owner-${index}`);
+    await h.store.tick();
+    expect(h.sent.map((sent) => sent.shareOperationId)).toEqual([...nobody, ...owner([0, 1, 2, 3, 4])]);
+    await h.store.tick();
+    expect(h.sent.slice(8).map((sent) => sent.shareOperationId)).toEqual([...nobody, ...owner([5, 6, 7, 8, 9])]);
+    await h.store.tick();
+    expect(h.sent.slice(16).map((sent) => sent.shareOperationId)).toEqual([...nobody, ...owner([0, 1, 2, 3, 4])]);
   });
 
   it('sends a share that reached nobody before older shares owed only to the owner', async () => {
