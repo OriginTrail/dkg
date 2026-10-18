@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/assertion-lifecycle-candidates.test.ts',
       'test/wm-lifecycle-integrity.test.ts',
       'test/assertion-write-provenance.test.ts',
       'test/sub-graph-registration-resolver.test.ts',
