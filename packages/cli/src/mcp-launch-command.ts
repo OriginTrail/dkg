@@ -5,6 +5,7 @@ import { userInfo } from 'node:os';
 import type { McpConfigSelection } from './mcp-client-registry.js';
 import type { DesiredRegistration } from './mcp-client-config.js';
 import type { McpRuntime } from './mcp-runtime.js';
+import { windowsSystemRoot } from './mcp-windows-system-root.js';
 
 /**
  * The canonical MCP-server entry written into client config files.
@@ -133,16 +134,13 @@ export function clientMcpEntry(
   if (!distro || /\p{Cc}/u.test(distro)) {
     throw new Error('WSL_DISTRO_NAME is required to pin Windows MCP clients to this WSL distribution. Run setup inside the intended distribution.');
   }
-  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows';
-  if (!/^[A-Za-z]:[\\/]/.test(systemRoot) || /[\\/]\.\.?([\\/]|$)/.test(systemRoot)) {
-    throw new Error('Windows MCP launch requires an absolute Windows SystemRoot (for example C:\\Windows).');
-  }
   return {
-    command: win32.join(systemRoot, 'System32', 'wsl.exe'),
+    command: win32.join(windowsSystemRoot(), 'System32', 'wsl.exe'),
     args: ['--distribution', distro, '--user', userInfo().username, '--exec', '/usr/bin/env', '--',
       `DKG_HOME=${canonical.env.DKG_HOME}`, canonical.command, ...canonical.args],
     // Keep the standard client environment field for classification and tooling;
     // the explicit env assignment above also crosses the Windows/WSL boundary.
     env: { ...canonical.env },
+    environmentTransfer: { kind: 'windows-wsl', inherited: process.env.WSLENV ?? '' },
   };
 }

@@ -147,10 +147,8 @@ export type SetupContext = 'installed' | 'monorepo';
  * mirrors the local enum the planning loop produces.
  */
 export type PlannedAction = 'register' | 'refresh' | 'skip';
-export interface PlannedItem {
-  s: ClientState;
-  action: PlannedAction;
-}
+type WritablePlannedItem = { s: ResolvedClientState; action: 'register' | 'refresh' };
+export type PlannedItem = WritablePlannedItem | { s: ClientState; action: 'skip' };
 
 /**
  * Dependency surface for `mcpSetupAction`. All bundled-flow primitives
@@ -386,17 +384,22 @@ function detectContext(
 
 type RegistrationState = 'registered' | 'stale' | 'not-registered';
 
-interface ClientState {
+interface ResolvedClientState {
+  kind: 'classified';
   target: McpConfigSelection;
   state: RegistrationState;
+  entry: DesiredRegistration;
 }
+type ClientState = ResolvedClientState | {
+  kind: 'failed'; target: McpConfigSelection; state: 'not-registered';
+};
 
 function classify(
   target: McpConfigSelection,
   expected: DesiredRegistration,
-): ClientState {
+): ResolvedClientState {
   const current = readRegistration(target.file);
-  return { target, state: classifyRegistration(current, expected) };
+  return { kind: 'classified', target, state: classifyRegistration(current, expected), entry: expected };
 }
 
 /**
@@ -889,24 +892,20 @@ export async function mcpSetupAction(
   // emit a stderr warning, mark the target as failed, and force
   // the planner below to `skip` it so no write is attempted on a
   // client we couldn't read. Other clients continue unaffected.
-  const classifyFailed = new Set<McpConfigSelection>();
-  const entries = new Map<McpConfigSelection, DesiredRegistration>();
   const runtime = (deps.detectMcpRuntime ?? detectMcpRuntime)();
   const states: ClientState[] = clients.map((c) => {
     try {
       const entry = clientMcpEntry(expectedEntry, c, runtime);
-      entries.set(c, entry);
       return classify(c, entry);
     } catch (err: any) {
       process.stderr.write(
         `[setup] WARNING: ${mcpConfigClientNames(c)} classify failed (${err?.message ?? err}); skipping this client.\n`,
       );
-      classifyFailed.add(c);
-      return { target: c, state: 'not-registered' };
+      return { kind: 'failed', target: c, state: 'not-registered' };
     }
   });
   const planned: PlannedItem[] = states.map((s) => {
-    if (classifyFailed.has(s.target)) return { s, action: 'skip' };
+    if (s.kind === 'failed') return { s, action: 'skip' };
     if (force) return { s, action: 'refresh' };
     if (s.state === 'not-registered') return { s, action: 'register' };
     if (s.state === 'stale') return { s, action: 'refresh' };
@@ -939,7 +938,7 @@ export async function mcpSetupAction(
     ? planned
     : await confirm(planned, { yes: opts.yes === true });
 
-  const writes = confirmed.filter((p) => p.action !== 'skip');
+  const writes = confirmed.filter((p): p is WritablePlannedItem => p.action !== 'skip');
   if (writes.length === 0) {
     if (planned.some((p) => p.action !== 'skip')) {
       // Codex Round-5 Fix 7: clarify the flag guidance. `--force`
@@ -973,7 +972,7 @@ export async function mcpSetupAction(
     console.log('');
     for (const { s, action } of writes) {
       try {
-        writeRegistration(s.target.file, entries.get(s.target)!);
+        writeRegistration(s.target.file, s.entry);
         console.log(`  ${action === 'register' ? 'Registered' : 'Refreshed'} ${mcpConfigClientNames(s.target)} → ${s.target.file.displayPath}`);
         // RFC-41 §4.5: explicit SKILL.md delivery for Cursor + Claude Code,
         // which don't walk node_modules for skill discovery. Returns null
@@ -1025,7 +1024,7 @@ export async function mcpSetupAction(
   // failure).
   if (!dryRun) {
     const allFailures: { name: string; error: string }[] = [
-      ...Array.from(classifyFailed).map((target) => ({ name: mcpConfigClientNames(target), error: 'classify failed' })),
+      ...states.filter((s) => s.kind === 'failed').map((s) => ({ name: mcpConfigClientNames(s.target), error: 'classify failed' })),
       ...writeFailures,
     ];
     if (allFailures.length > 0) {

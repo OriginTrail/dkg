@@ -16,6 +16,7 @@ const windowsRoot = process.argv[2];
 const windowsNode = process.argv[3];
 assert(windowsNode, 'Windows Node executable is required for the actual client launch');
 assert(windowsRoot, 'Windows-side temporary root is required');
+const projectMarker = "native-wsl-project 'literal' $HOME";
 const directory = mkdtempSync(join(windowsRoot, "dkg-wsl-acl 'quoted'-"));
 const cursorDirectory = join(directory, '.cursor');
 mkdirSync(cursorDirectory);
@@ -33,8 +34,10 @@ async function main(): Promise<void> {
   const priorPath = process.env.PATH;
   const priorCwd = process.cwd();
   const priorEntrypoint = process.argv[1];
+  const priorWslEnvironment = process.env.WSLENV;
   const linuxHome = mkdtempSync('/tmp/dkg-wsl-native-home-');
   try {
+    delete process.env.WSLENV;
     // The isolated Linux home and the Windows USERPROFILE resolver name the
     // same Windows directory, exactly as in the reported aliasing case.
     process.env.HOME = directory;
@@ -43,7 +46,7 @@ async function main(): Promise<void> {
     process.env.DKG_HOME = nodeHome;
     mkdirSync(nodeHome);
     writeFileSync(join(nodeHome, 'config.json'), JSON.stringify({ name: 'Metadata fixture', networkConfig: 'testnet', apiPort: 59231 }));
-    writeFileSync(path, JSON.stringify({ mcpServers: { dkg: { command: 'old', env: { EXTRA: 'keep' } }, sibling: { command: 'other' } } }));
+    writeFileSync(path, JSON.stringify({ mcpServers: { dkg: { command: 'old', env: { EXTRA: 'keep', DKG_PROJECT: projectMarker } }, sibling: { command: 'other' } } }));
     protect(path);
     const descriptor = () => powershell('(Get-Acl -LiteralPath $env:DKG_NATIVE_FIXTURE_PATH).Sddl');
     const before = descriptor();
@@ -104,20 +107,33 @@ async function main(): Promise<void> {
       .filter(target => target.id === 'cursor');
     assert.deepEqual(clients.map(target => target.configPath), [linuxCursorPath, path]);
     const separateDeps = { ...setupDeps, detectClients: () => clients };
+    const resolvedEntries = new Map<string, { command: string; args: string[] }>();
     await mcpSetupAction({ ...setupOptions, force: false }, { ...separateDeps, confirmPlan: async planned => {
       assert.deepEqual(planned.map(item => item.action), ['register', 'refresh']);
+      for (const item of planned) {
+        assert(item.action !== 'skip');
+        assert.equal(item.s.kind, 'classified');
+        resolvedEntries.set(item.s.target.file.destination, item.s.entry);
+      }
       return [...planned];
     } });
     assert.equal(existsSync(marker), false, 'setup must not execute the PATH/cwd shadow PowerShell');
     assert.equal(descriptor(), before, 'setup must preserve the complete protected security descriptor');
     const registered = JSON.parse(readFileSync(path, 'utf8')).mcpServers.dkg;
     const native = JSON.parse(readFileSync(linuxCursorPath, 'utf8')).mcpServers.dkg;
+    for (const [configPath, entry] of resolvedEntries) {
+      const persisted = JSON.parse(readFileSync(configPath, 'utf8')).mcpServers.dkg;
+      assert.equal(persisted.command, entry.command);
+      assert.deepEqual(persisted.args, entry.args);
+    }
     assert.equal(native.command, process.execPath);
     assert.deepEqual(native.args, [process.argv[1], 'mcp', 'serve']);
     assert.deepEqual(native.env, { DKG_HOME: nodeHome });
     assert.match(registered.command, /\\System32\\wsl\.exe$/);
     assert.deepEqual(registered.args.slice(0, 2), ['--distribution', process.env.WSL_DISTRO_NAME]);
-    assert.deepEqual(registered.env, { EXTRA: 'keep', DKG_HOME: nodeHome });
+    assert.deepEqual(registered.env, { EXTRA: 'keep', DKG_PROJECT: projectMarker, DKG_HOME: nodeHome,
+      WSLENV: 'DKG_HOME/u:DKG_PROJECT/u:EXTRA/u' });
+    assert.equal('environmentTransfer' in registered, false);
     assert(registered.args.includes(`DKG_HOME=${nodeHome}`));
     await mcpSetupAction({ ...setupOptions, force: false }, { ...separateDeps, confirmPlan: async planned => {
       assert.deepEqual(planned.map(item => [item.s.state, item.action]), [['registered', 'skip'], ['registered', 'skip']]);
@@ -130,46 +146,9 @@ async function main(): Promise<void> {
     // Cold module imports across the CI checkout's NTFS/WSL boundary took 146s
     // before setup even began. Bound this correctness smoke independently of
     // interactive client startup performance; retain real initialize/tools-list.
-    const driver = join(directory, 'windows-client-launch.cjs');
-    writeFileSync(driver, String.raw`const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const { createRequire } = require('node:module');
-const { pathToFileURL } = require('node:url');
-assert.equal(process.platform, 'win32');
-const entry = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).mcpServers.dkg;
-const cliRequire = createRequire(process.argv[3]);
-async function main() {
-  const started = Date.now();
-  const stage = label => process.stderr.write('[native-wsl] ' + label + ' after ' + (Date.now() - started) + 'ms\n');
-  stage('Windows client loading SDK');
-  const { Client } = await import(pathToFileURL(cliRequire.resolve('@modelcontextprotocol/sdk/client/index.js')).href);
-  const { StdioClientTransport } = await import(pathToFileURL(cliRequire.resolve('@modelcontextprotocol/sdk/client/stdio.js')).href);
-  stage('launching exact registered WSL command');
-  const transport = new StdioClientTransport({command:entry.command,args:entry.args,env:{...process.env,...entry.env},stderr:'pipe'});
-  let stderr = ''; transport.stderr.on('data', data => { stderr = (stderr + data).slice(-64 * 1024); });
-  const client = new Client({name:'native-wsl-regression',version:'1'});
-  let timer;
-  try {
-    await Promise.race([(async () => {
-      await client.connect(transport, { timeout: 240000 });
-      stage('production MCP initialized');
-      assert.equal(client.getServerVersion().name, 'dkg');
-      const result = await client.listTools();
-      stage('production MCP tools listed');
-      assert(result.tools.length > 0, 'MCP must expose its DKG tools');
-      assert.match(stderr, /59231/, 'MCP must load the selected DKG_HOME with spaces and quotes');
-      process.stdout.write('Windows client → pinned WSL → production MCP initialize/tools-list passed\n');
-    })(),new Promise((_,reject) => {timer=setTimeout(() => reject(new Error('MCP launch timed out after 240000ms')),240000);})]);
-  } catch (error) {
-    stage('registered MCP launch failed');
-    process.stderr.write('[native-wsl] child stderr tail:\n' + (stderr || '<empty>') + '\n');
-    throw error;
-  } finally { clearTimeout(timer); await client.close(); await transport.close(); }
-}
-main().catch(error => { console.error(error); process.exitCode = 1; });
-`);
+    const driver = fileURLToPath(new URL('../../test/fixtures/mcp-windows-client.fixture.cjs', import.meta.url));
     const mountedWindowsNode = execFileSync('/usr/bin/wslpath', ['-u', windowsNode], { encoding: 'utf8' }).trim();
-    console.log(execFileSync('/usr/bin/env', ['--', mountedWindowsNode, windowsPath(driver), windowsPath(path), windowsPath(fileURLToPath(new URL('../../package.json', import.meta.url)))], {
+    console.log(execFileSync('/usr/bin/env', ['--', mountedWindowsNode, windowsPath(driver), windowsPath(path), projectMarker], {
       encoding: 'utf8', timeout: 300_000, maxBuffer: 1024 * 1024,
     }).trim());
     await mcpUninstallAction({ yes: true, client: 'cursor:native' }, { detectClients: () => clients, log: () => {} });
@@ -238,6 +217,8 @@ main().catch(error => { console.error(error); process.exitCode = 1; });
   } finally {
     process.chdir(priorCwd);
     process.argv[1] = priorEntrypoint;
+    if (priorWslEnvironment === undefined) delete process.env.WSLENV;
+    else process.env.WSLENV = priorWslEnvironment;
     if (priorPath === undefined) delete process.env.PATH;
     else process.env.PATH = priorPath;
     if (priorHome === undefined) delete process.env.HOME;

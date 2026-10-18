@@ -4,10 +4,12 @@ import { execFileSync } from 'node:child_process';
 import { platform, userInfo } from 'node:os';
 import type { McpConfigSelection } from '../src/mcp-client-registry.js';
 import { clientMcpEntry } from '../src/mcp-launch-command.js';
+import { windowsSystemRoot } from '../src/mcp-windows-system-root.js';
+import { forwardedWslEnvironment } from '../src/mcp-wsl-environment.js';
 
-const saved = { distro: process.env.WSL_DISTRO_NAME, root: process.env.SystemRoot, upper: process.env.SYSTEMROOT };
+const saved = { distro: process.env.WSL_DISTRO_NAME, root: process.env.SystemRoot, upper: process.env.SYSTEMROOT, wslenv: process.env.WSLENV };
 afterEach(() => {
-  for (const [key, value] of Object.entries({ WSL_DISTRO_NAME: saved.distro, SystemRoot: saved.root, SYSTEMROOT: saved.upper })) {
+  for (const [key, value] of Object.entries({ WSL_DISTRO_NAME: saved.distro, SystemRoot: saved.root, SYSTEMROOT: saved.upper, WSLENV: saved.wslenv })) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
 });
@@ -38,11 +40,13 @@ describe('MCP client launch boundary', () => {
   it('pins the distro, OS user and absolute runtime without shell interpolation', () => {
     process.env.WSL_DISTRO_NAME = 'Ubuntu DKG';
     process.env.SystemRoot = 'D:\\Windows';
+    process.env.WSLENV = 'USER_SETTING/pl';
     expect(clientMcpEntry(canonical, selection('windows-wsl'), 'wsl')).toEqual({
       command: 'D:\\Windows\\System32\\wsl.exe',
       args: ['--distribution', 'Ubuntu DKG', '--user', userInfo().username, '--exec', '/usr/bin/env', '--',
         `DKG_HOME=${canonical.env.DKG_HOME}`, canonical.command, ...canonical.args],
       env: canonical.env,
+      environmentTransfer: { kind: 'windows-wsl', inherited: 'USER_SETTING/pl' },
     });
   });
   it('refuses a missing distro rather than relying on a changeable Windows default', () => {
@@ -55,6 +59,26 @@ describe('MCP client launch boundary', () => {
   it('refuses a relative Windows executable root', () => {
     process.env.WSL_DISTRO_NAME = 'Ubuntu'; process.env.SystemRoot = 'Windows';
     expect(() => clientMcpEntry(canonical, selection('windows-wsl'), 'wsl')).toThrow('absolute Windows SystemRoot');
+  });
+
+  it('shares root precedence and default between Windows executables', () => {
+    delete process.env.SystemRoot; delete process.env.SYSTEMROOT;
+    expect(windowsSystemRoot()).toBe('C:\\Windows');
+    process.env.SYSTEMROOT = 'D:\\Windows';
+    expect(windowsSystemRoot()).toBe('D:\\Windows');
+    process.env.SystemRoot = 'E:/Windows';
+    expect(windowsSystemRoot()).toBe('E:/Windows');
+  });
+  it.each(['.', 'Windows', 'C:Windows', '\\Windows', 'C:\\Windows\\..\\untrusted'])('rejects invalid shared SystemRoot %s', root => {
+    process.env.SystemRoot = root;
+    expect(windowsSystemRoot).toThrow('absolute Windows SystemRoot');
+  });
+  it('keeps WSLENV names case-sensitive and compatible combined flags', () => {
+    expect(forwardedWslEnvironment({ DKG_PROJECT: 'literal', CUSTOM: 'literal', WSLENV: 'dkg_project/w:DKG_PROJECT/ulw:CUSTOM/plw:OTHER/w' }, ''))
+      .toBe('dkg_project/w:DKG_PROJECT/ul:CUSTOM/pl:OTHER/w');
+  });
+  it.each(['BAD:NAME', 'BAD/NAME', 'BAD=NAME', 'BAD\nNAME'])('rejects unrepresentable WSLENV names without including values (%s)', name => {
+    expect(() => forwardedWslEnvironment({ [name]: 'private-fixture-value' }, '')).toThrow('MCP environment variable names');
   });
 
 });
