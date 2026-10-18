@@ -60,6 +60,7 @@ export default defineConfig({
       'test/async-lift-receipt-hint-failures.test.ts',
       'test/async-lift-post-finality-timing.test.ts',
       'test/async-lift-runner.test.ts',
+      'test/async-lift-runner-claim-control.test.ts',
       'test/async-lift-runner-wallet-wake.test.ts',
       'test/pre-broadcast-signal-await.test.ts',
       'test/async-lift-admission-clear-2270.test.ts',
