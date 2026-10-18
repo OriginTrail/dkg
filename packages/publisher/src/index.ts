@@ -536,7 +536,7 @@ export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, 
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
-export { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
+export { withKeyedLocks, tryWithKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 
 export { withSnapshotScope, snapshotOperation, WorkspaceSnapshotScope, snapshotReferenceCheck, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
 
@@ -558,3 +558,7 @@ export { readCurrentAssertionVersion } from './materialization-assertion-version
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
 
 export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';
+
+export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
+
+export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } from './assertion-lifecycle-record.js';
