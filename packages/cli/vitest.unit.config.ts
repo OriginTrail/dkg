@@ -17,6 +17,7 @@ export default defineConfig({
           'test/durable-gossip-signer-lookup.test.ts',
           'test/durable-share-preparation-race.test.ts',
           'test/durable-inventory-worker.test.ts',
+          'test/durable-superseded-vm-ownership.test.ts',
           'test/durable-unregistered-author-process.test.ts',
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',
