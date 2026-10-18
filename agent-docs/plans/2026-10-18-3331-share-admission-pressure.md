@@ -1,6 +1,6 @@
 # Issue 3331: bounded async share admission and reconciliation
 
-Status: implementation and local verification complete; final runtime rebuild and PR review next. Owner: Codex. Base: `testnet-canary` at `b82918e8e8e40cdc30aa0e6d32ad4119e3d6c985`; branch `codex/3331-share-admission-pressure`.
+Status: PR #3358 open; first remote review revision validated and ready for re-review. Owner: Codex. Base: `testnet-canary` at `b82918e8e8e40cdc30aa0e6d32ad4119e3d6c985`; branch `codex/3331-share-admission-pressure`.
 
 ## Outcome and evidence
 
@@ -64,3 +64,9 @@ No durable schema migration is needed. Rollback removes the admission wrapper/ob
 - Runtime packages build, lint, and file-size guard passed; a final runtime rebuild follows the last small coordinator/diagnostic edits. No scheduler priority/concurrency change or durable format change.
 - Self-review added three material protections: canonical atomic `replaceSubject/not_started` is usable only at the primary persistence boundary before flush; uncertain admissions also fence synchronous/explicit/automatic reactivation paths; deadline telemetry distinguishes response expiry from eventual store completion. Fresh external status reads invalidate stale observations, while absent rows do not erase unresolved write uncertainty.
 - One cohesive PR: approximately 700 authored lines including tests, documentation and this plan. Splitting the coordinator, HTTP evidence and tests would separate the safety contract from its validation; keep them together. Remote independent review and live testnet evidence remain outstanding.
+
+### Remote review round 1
+
+All four reviewer threads were actionable. Admission errors now carry `partialDisposition: unavailable`, so one-shot create/share returns the original scoped 503 and never continues to optional publication. Pending and durable ownership share one activation-conflict lookup (including lane/exclusion handling). Primary persistence and flush return explicit evidence through `persistPromoteJobWithEvidence`; ordinary worker writes still throw their original causes. Tentative job identity is no longer cleared to encode outcome.
+
+New real-queue tests cover inline admission, explicit recovery and automatic recovery against retained uncertainty with no visible new row, plus competing status/claim operations after both write and flush deadlines. HTTP tests cover one-shot creation with and without optional VM publication. Validation: 147 queue tests, 128 HTTP/worker/durable tests and 23 bound-owner tests passed; publisher and CLI compilation, lint and file-size checks passed. Remote re-review and live validation remain outstanding.

@@ -5,6 +5,7 @@ import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-asse
 import { handleKaShareAsyncEnqueue } from '../src/daemon/routes/knowledge-assets-async-share.js';
 import { respondAssertionError } from '../src/daemon/routes/knowledge-assets-error-mapping.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { withDurableShareOwner } from './_helpers/durable-share-owner.js';
 import { daemonState } from '../src/daemon/state.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
@@ -70,4 +71,30 @@ describe('async share admission HTTP evidence', () => {
     expect(query).not.toHaveBeenCalled();
     expect(await queue.list()).toHaveLength(1);
   });
+});
+
+it.each([false, true])('one-shot sharing preserves uncertainty and stops before optional publishing (%s)', async publish => {
+  const { ctx, record } = context(async () => undefined);
+  const promote = vi.fn(async () => ({ promotedCount: 1 }));
+  Object.assign(ctx.agent.assertion, {
+    history: async () => null, create: async () => 'urn:test:asset', write: async () => undefined,
+    finalize: async () => ({ merkleRoot: new Uint8Array(32), authorAddress: 'test-author' }), promote,
+  });
+  withDurableShareOwner(ctx.agent, stores);
+  vi.spyOn(ctx.agent.assertion, 'admitDurableShare').mockRejectedValue(
+    new PromoteAdmissionError('persist', 'indeterminate', 'original-uncertain-job'));
+  const publishFromFinalizedAssertion = vi.fn();
+  Object.assign(ctx.agent, { publishFromFinalizedAssertion });
+  Object.assign(ctx, { path: '/api/knowledge-assets', url: new URL('http://localhost/api/knowledge-assets') });
+  Object.assign(ctx.req, { __dkgPrebufferedBody: Buffer.from(JSON.stringify({
+    contextGraphId: 'admission-cg', name: 'asset', alsoShareSwm: true, alsoPublishVm: publish,
+    quads: [{ subject: 'urn:asset', predicate: 'urn:label', object: '"payload"' }],
+  })) });
+  await handleKnowledgeAssetsRoutes(ctx);
+  expect(record.status).toBe(503);
+  expect(JSON.parse(record.body)).toMatchObject({ created: true, partial: true, admissionOutcome: 'indeterminate',
+    jobId: 'original-uncertain-job', statusPath: '/api/knowledge-assets/swm/share-jobs/original-uncertain-job',
+    recovery: expect.stringContaining('Observe this job ID') });
+  expect(publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  expect(promote).not.toHaveBeenCalled();
 });

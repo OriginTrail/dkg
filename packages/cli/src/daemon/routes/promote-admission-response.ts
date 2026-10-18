@@ -6,6 +6,7 @@ export function classifyPromoteAdmissionError(error: unknown): AssertionFailureR
   if (!(error instanceof PromoteAdmissionError)) return undefined;
   return {
     status: 503,
+    partialDisposition: 'unavailable',
     headers: { 'Retry-After': '1' },
     body: {
       code: error.code,

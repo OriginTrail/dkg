@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, StoreSchedulerBusyError, StorePriorityScheduler, type TripleStore } from '@origintrail-official/dkg-storage';
+import { isAutomaticallyRecoverablePostCommitFailure } from '../src/async-promote-recovery-policy.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import { PromoteAdmissionAttempt, PromoteAdmissionCoordinator, type PromoteAdmissionEvent } from '../src/promote-admission.js';
 import type { AsyncPromoteQueueConfig, PromoteRequest, PromoteJob } from '../src/async-promote-queue-types.js';
@@ -293,4 +294,72 @@ it('keeps deadline and eventual phase observations distinct and payload-free', (
   expect(JSON.stringify(events)).not.toContain('sensitive-job-id');
   const brokenObserver = new PromoteAdmissionAttempt(1000, () => { throw new Error('logger failed'); });
   expect(() => brokenObserver.enter('graph')).not.toThrow();
+});
+
+it.each(['inline', 'explicit-recovery', 'automatic-recovery'] as const)(
+  'fences %s behind retained uncertainty even when no new row is visible', async mode => {
+    let rejectWrite = false, writes = 0;
+    const { queue } = fixture(async (method, _args, run) => {
+      if (method === 'replaceSubject') {
+        writes++;
+        if (rejectWrite) throw new Error('lost persistence acknowledgement');
+      }
+      return run();
+    });
+    const selected = { ...request, agentAddress: `0x${'11'.repeat(20)}` };
+    const oldId = await queue.enqueue(selected);
+    const claimed = (await queue.claimNext('worker'))!;
+    await queue.fail(oldId, claimed.lease!.claimToken, {
+      message: 'Promote commit may have completed; retry the same sealed operation',
+      diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE', retryable: false, classification: 'fatal', recordedAt: Date.now(),
+    });
+    const old = await queue.getStatus(oldId);
+    expect(isAutomaticallyRecoverablePostCommitFailure(old!)).toBe(true);
+    rejectWrite = true;
+    const admission = await bounded(queue.enqueue(selected)) as { error: { jobId: string } };
+    const id = admission.error.jobId;
+    expect(id).toBeTypeOf('string');
+    expect(await queue.getStatus(id)).toBeNull();
+    const writesBefore = writes;
+    if (mode === 'inline') {
+      await expect(queue.enqueueAndClaim({ ...selected, entities: 'all', recoveryBinding: {
+        version: 1, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: false,
+        intent: { version: 1, operationId: 'different-share', timestampMs: Date.now(),
+          confirmationRequired: false, accessPolicy: 'public', allowedPeers: [] },
+      } }, 'inline')).rejects.toMatchObject({ admissionOutcome: 'indeterminate', jobId: id });
+    } else if (mode === 'explicit-recovery') {
+      await expect(queue.recover(oldId)).rejects.toMatchObject({ admissionOutcome: 'indeterminate', jobId: id });
+    } else {
+      expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    }
+    expect(writes).toBe(writesBefore);
+    expect(await queue.getStatus(oldId)).toEqual(old);
+    await expect(queue.enqueue(selected)).rejects.toMatchObject({ admissionOutcome: 'indeterminate', jobId: id });
+    expect(await queue.list()).toHaveLength(1);
+  },
+);
+
+it.each(['replaceSubject', 'flush'] as const)('retains the mutex after timeout until %s settles', async methodToHold => {
+  let armed = true; const delay = gate();
+  const { queue, store, config } = fixture(async (method, _args, run) => {
+    if (armed && method === methodToHold) { armed = false; delay.enter(); await delay.held; }
+    return run();
+  });
+  const admission = bounded(queue.enqueue(request));
+  await delay.entered;
+  const outcome = await admission as { error: { jobId: string } };
+  expect(outcome).toMatchObject({ error: { admissionOutcome: 'indeterminate', jobId: expect.any(String) } });
+  const other = new TripleStoreAsyncPromoteQueue(store, config);
+  const query = vi.spyOn(store, 'query');
+  let observed = false, claimed = false;
+  const status = other.getStatus(outcome.error.jobId).then(job => { observed = true; return job; });
+  const claim = other.claimNext('other-worker').then(job => { claimed = true; return job; });
+  try {
+    await tick();
+    expect(query).not.toHaveBeenCalled();
+    expect(observed).toBe(false); expect(claimed).toBe(false);
+  } finally { delay.release(); }
+  expect((await status)?.jobId).toBe(outcome.error.jobId);
+  expect((await claim)?.jobId).toBe(outcome.error.jobId);
+  expect(await queue.list()).toHaveLength(1);
 });

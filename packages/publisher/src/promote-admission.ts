@@ -1,5 +1,5 @@
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
-import { isStoreOperationTimeoutError, isStoreSchedulerBusyError, isStoreOperationNotStarted, type TripleStore } from '@origintrail-official/dkg-storage';
+import { isStoreOperationTimeoutError, isStoreSchedulerBusyError, type TripleStore } from '@origintrail-official/dkg-storage';
 import { hasUnfinishedBoundObligation, storedPromoteLaneScope } from './async-promote-ownership.js';
 import { PromoteJobConflictError, type PromoteJob, type PromoteRequest } from './async-promote-queue-types.js';
 import { ACTIVE_PROMOTE_STATES, promoteLaneConflictScope, promoteLaneScopesConflict, uniquenessKey } from './async-promote-queue-utils.js';
@@ -49,13 +49,8 @@ export class PromoteAdmissionAttempt {
     this.phaseStarted = performance.now();
   }
   error(cause?: unknown): PromoteAdmissionError {
-    return new PromoteAdmissionError(this.phase, this.jobId ? 'indeterminate' : 'not_admitted', this.jobId, cause);
-  }
-  persistFailed(cause: unknown): void {
-    // Only at the primary persistence boundary, before flush: the canonical
-    // atomic operation can prove it never dispatched. Nested query/flush
-    // rejections cannot prove that no job was written.
-    if (isStoreOperationNotStarted(cause, 'replaceSubject')) this.jobId = undefined;
+    const outcome = this.phase === 'persist' ? 'indeterminate' : 'not_admitted';
+    return new PromoteAdmissionError(this.phase, outcome, this.jobId, cause);
   }
   expire(): PromoteAdmissionError { this.expired = true; return this.error(); }
   report(outcome: PromoteAdmissionEvent['outcome'], event: PromoteAdmissionEvent['event'] = 'phase_settled'): void {
@@ -64,7 +59,7 @@ export class PromoteAdmissionAttempt {
   }
 }
 
-interface Flight { attempt: PromoteAdmissionAttempt; result: Promise<string>; }
+interface Flight { attempt: PromoteAdmissionAttempt; result: Promise<string>; scope: ReturnType<typeof promoteLaneConflictScope>; }
 interface Observation { jobId: string; scope: ReturnType<typeof storedPromoteLaneScope>; observedAt: number; }
 const coordinators = new WeakMap<TripleStore, Map<string, PromoteAdmissionCoordinator>>();
 const MAX_PENDING = 64;
@@ -85,17 +80,14 @@ export class PromoteAdmissionCoordinator {
   }
 
   invalidate(jobId: string): void { this.owners.delete(jobId); }
-  /** Other activation paths cannot escape a pending async admission. */
-  assertNoPending(request: PromoteRequest, excludeJobId?: string): void {
-    const flight = this.pendingConflict(request, excludeJobId);
-    if (flight) throw flight.attempt.error();
-  }
-  hasPending(request: PromoteRequest, excludeJobId?: string): boolean {
-    return this.pendingConflict(request, excludeJobId) !== undefined;
-  }
-  private pendingConflict(request: PromoteRequest, excludeJobId?: string): Flight | undefined {
-    const flight = this.pending.get(uniquenessKey(request));
-    return flight && (!excludeJobId || flight.attempt.jobId !== excludeJobId) ? flight : undefined;
+  /** One pending-owner lookup, including legacy wildcard lanes and caller exclusions. */
+  findPendingConflict(scope: ReturnType<typeof promoteLaneConflictScope>, excludeJobId?: string,
+    excludeAttempt?: PromoteAdmissionAttempt): PromoteAdmissionError | undefined {
+    for (const flight of this.pending.values()) {
+      if (flight.attempt === excludeAttempt || (excludeJobId && flight.attempt.jobId === excludeJobId)) continue;
+      if (promoteLaneScopesConflict(flight.scope, scope)) return flight.attempt.error();
+    }
+    return undefined;
   }
   observe(job: PromoteJob): void {
     this.invalidate(job.jobId);
@@ -114,7 +106,7 @@ export class PromoteAdmissionCoordinator {
     const key = uniquenessKey(request);
     const existing = this.pending.get(key);
     if (existing) {
-      if (existing.attempt.jobId) throw existing.attempt.error();
+      if (existing.attempt.phase === 'persist') throw existing.attempt.error();
       // Share the original bounded attempt; never start a second admission to
       // escape uncertainty. Preserve the established conflict response on success.
       throw new PromoteJobConflictError(await existing.result, request);
@@ -137,11 +129,11 @@ export class PromoteAdmissionCoordinator {
     // Start in a microtask so the entry exists before any observation can settle it.
     const operation = Promise.resolve().then(() => work(attempt)).catch(cause => {
       if (cause instanceof PromoteJobConflictError || cause instanceof PromoteAdmissionError) throw cause;
-      if (attempt.jobId || isStoreSchedulerBusyError(cause) || isStoreOperationTimeoutError(cause)) throw attempt.error(cause);
+      if (attempt.phase === 'persist' || isStoreSchedulerBusyError(cause) || isStoreOperationTimeoutError(cause)) throw attempt.error(cause);
       throw cause;
     });
     const result = Promise.race([operation, deadline]).finally(() => clearTimeout(timer));
-    const flight = { attempt, result };
+    const flight = { attempt, result, scope };
     this.pending.set(key, flight);
     void operation.then(() => {
       attempt.report('completed');

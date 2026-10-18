@@ -1,7 +1,8 @@
-import { PromoteAdmissionCoordinator } from './promote-admission.js';
+import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
+import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionAttempt } from './promote-admission.js';
 import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
-import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob, persistPromoteJob } from './bound-promote-job.js';
+import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob } from './bound-promote-job.js';
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
 /**
@@ -75,6 +76,9 @@ import {
   type PromoteUniquenessInput,
 } from './async-promote-queue-utils.js';
 
+type ActivationConflict = { kind: 'pending'; error: PromoteAdmissionError }
+  | { kind: 'durable'; job: PromoteJob; error: PromoteJobConflictError };
+
 export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteTerminalJobClearer {
   /**
    * Per-graph-URI mutex map. Serialises uniqueness-affecting mutations
@@ -136,7 +140,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       admission.enter('graph');
       await this.ensureGraph();
       admission.enter('conflict');
-      await this.assertNoActiveConflict(this.conflictLookupForRequest(requestSnapshot));
+      await this.assertNoActiveConflict(this.conflictLookupForRequest(requestSnapshot), undefined, admission);
 
       const now = this.now();
       const jobId = this.idGenerator();
@@ -151,7 +155,9 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         formatVersion: ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
       };
       admission.enter('persist', jobId);
-      await this.writeJob(job, cause => admission.persistFailed(cause));
+      const persistence = await this.writeJobWithEvidence(job);
+      if (!persistence.ok) throw new PromoteAdmissionError('persist', persistence.admissionOutcome,
+        persistence.admissionOutcome === 'indeterminate' ? jobId : undefined, persistence.cause);
       this.notifyWorkAvailable();
       return jobId;
     }), this.admissionTimeoutMs);
@@ -162,7 +168,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     if (!workerId) throw new Error('workerId is required');
     const requestSnapshot = this.snapshotRequest(request);
     return this.withMutationLock(async () => {
-      this.admissions.assertNoPending(requestSnapshot);
       await this.ensureGraph();
       await this.assertNoActiveConflict(this.conflictLookupForRequest(requestSnapshot));
       const now = this.now(), jobId = this.idGenerator();
@@ -260,7 +265,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
           `Cannot recover job ${jobId}: ${job.reason ?? job.attempt.lastError?.message ?? 'manual inspection required'}`,
         );
       }
-      this.admissions.assertNoPending(job.request, job.jobId);
       await this.assertNoActiveConflict(this.conflictLookupForStoredJob(job), job.jobId);
       const recovered: PromoteJob = {
         jobId: job.jobId,
@@ -438,12 +442,13 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       }
 
       const conflicting = await this.findActiveConflict(this.conflictLookupForStoredJob(job), job.jobId);
+      if (conflicting?.kind === 'pending') continue;
       if (conflicting) {
         await this.abandonForManualInspection(
           job,
           now,
-          `recovery conflict: active promote job ${conflicting.jobId} already owns this assertion`,
-          `Startup recovery found active promote job ${conflicting.jobId} for the same assertion`,
+          `recovery conflict: active promote job ${conflicting.job.jobId} already owns this assertion`,
+          `Startup recovery found active promote job ${conflicting.job.jobId} for the same assertion`,
         );
         abandoned += 1;
         continue;
@@ -551,7 +556,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         events.push({ jobId: job.jobId, action: 'exhausted', attempt: attemptCount, maxAttempts });
         continue;
       }
-      if (this.admissions.hasPending(job.request, job.jobId)) continue;
       // Another active job already owns this assertion; leave the row for a
       // later sweep rather than breaking the per-assertion uniqueness key.
       const conflicting = await this.findActiveConflict(this.conflictLookupForStoredJob(job), job.jobId);
@@ -698,17 +702,17 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return job;
   }
 
-  private async writeJob(job: PromoteJob, onPersistFailure?: (cause: unknown) => void): Promise<void> {
-    this.nextIdleClaimAt = 0;
-    this.admissions.invalidate(job.jobId);
-    try { await this.persistJobRecord(job); }
-    catch (cause) { onPersistFailure?.(cause); throw cause; }
-    await this.store.flush?.();
-    this.admissions.observe(job);
+  private async writeJob(job: PromoteJob): Promise<void> {
+    const result = await this.writeJobWithEvidence(job);
+    if (!result.ok) throw result.cause;
   }
 
-  private async persistJobRecord(job: PromoteJob): Promise<void> {
-    await persistPromoteJob(this.store, this.graphUri, job);
+  private async writeJobWithEvidence(job: PromoteJob): Promise<PromotePersistenceResult> {
+    this.nextIdleClaimAt = 0;
+    this.admissions.invalidate(job.jobId);
+    const result = await persistPromoteJobWithEvidence(this.store, this.graphUri, job);
+    if (result.ok) this.admissions.observe(job);
+    return result;
   }
 
   // #1837 — subject-scoped record removal (the delete half of writeJob, no re-insert).
@@ -783,26 +787,25 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private async assertNoActiveConflict(
     lookup: PromoteConflictLookup,
     excludeJobId?: string,
+    excludeAttempt?: PromoteAdmissionAttempt,
   ): Promise<void> {
-    const existing = await this.findActiveConflict(lookup, excludeJobId);
-    if (existing) {
-      throw new PromoteJobConflictError(existing.jobId, {
-        contextGraphId: lookup.request.contextGraphId,
-        subGraphName: lookup.request.subGraphName,
-        assertionName: lookup.request.assertionName,
-        agentAddress: lookup.request.agentAddress,
-      });
-    }
+    const conflict = await this.findActiveConflict(lookup, excludeJobId, excludeAttempt);
+    if (conflict) throw conflict.error;
   }
 
+  /** All activation paths compose pending uncertainty and durable ownership here. */
   private async findActiveConflict(
     lookup: PromoteConflictLookup,
     excludeJobId?: string,
-  ): Promise<PromoteJob | null> {
+    excludeAttempt?: PromoteAdmissionAttempt,
+  ): Promise<ActivationConflict | null> {
+    const pending = this.admissions.findPendingConflict(lookup.laneScope, excludeJobId, excludeAttempt);
+    if (pending) return { kind: 'pending', error: pending };
     const jobs = await readPromoteOwnershipCandidates(this.store, this.graphUri, lookup);
     for (const job of jobs) this.admissions.observe(job);
-    return jobs.find(job => job.jobId !== excludeJobId
-      && (ACTIVE_PROMOTE_STATES.includes(job.state) || hasUnfinishedBoundObligation(job))) ?? null;
+    const job = jobs.find(job => job.jobId !== excludeJobId
+      && (ACTIVE_PROMOTE_STATES.includes(job.state) || hasUnfinishedBoundObligation(job)));
+    return job ? { kind: 'durable', job, error: new PromoteJobConflictError(job.jobId, lookup.request) } : null;
   }
 
   private jobsShareClaimLane(active: PromoteJob, candidate: PromoteJob): boolean {
