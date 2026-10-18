@@ -270,6 +270,28 @@ it('releases a persistence attempt only when the primary atomic operation proves
   expect(await queue.list()).toHaveLength(1);
 });
 
+it('retains the committed handle when primary persistence surfaces nested query non-start evidence', async () => {
+  let armed = true, writes = 0;
+  const { queue } = fixture(async (method, _args, run) => {
+    if (method === 'replaceSubject') writes++;
+    const result = await run();
+    if (armed && method === 'replaceSubject') {
+      armed = false;
+      throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'nested.query', { storeOperation: 'query' });
+    }
+    return result;
+  });
+  const admission = await bounded(queue.enqueue(request)) as { error: { jobId: string } };
+  expect(admission).toMatchObject({ error: { phase: 'persist', admissionOutcome: 'indeterminate', jobId: expect.any(String),
+    cause: { storeOperation: 'query', outcome: 'not_started' } } });
+  await expect(queue.enqueue(request)).rejects.toMatchObject({ admissionOutcome: 'indeterminate', jobId: admission.error.jobId });
+  expect(writes).toBe(1);
+  expect((await queue.getStatus(admission.error.jobId))?.state).toBe('queued');
+  await expect(queue.enqueue(request)).rejects.toMatchObject({ existingJobId: admission.error.jobId });
+  expect((await queue.list()).map(job => job.jobId)).toEqual([admission.error.jobId]);
+  expect(writes).toBe(1);
+});
+
 it('evicts excess positive observations without ever caching permission to admit', async () => {
   const coordinator = new PromoteAdmissionCoordinator();
   for (let i = 0; i < 1025; i++) coordinator.observe({

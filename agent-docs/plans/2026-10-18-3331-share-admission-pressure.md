@@ -1,6 +1,6 @@
 # Issue 3331: bounded async share admission and reconciliation
 
-Status: PR #3358 open; second remote review revision validated and ready for re-review. Owner: Codex. Base: `testnet-canary` at `b82918e8e8e40cdc30aa0e6d32ad4119e3d6c985`; branch `codex/3331-share-admission-pressure`.
+Status: PR #3358 open; third remote review revision validated and ready for re-review. Owner: Codex. Base: `testnet-canary` at `b82918e8e8e40cdc30aa0e6d32ad4119e3d6c985`; branch `codex/3331-share-admission-pressure`.
 
 ## Outcome and evidence
 
@@ -76,3 +76,7 @@ New real-queue tests cover inline admission, explicit recovery and automatic rec
 A validated terminal clear now reconciles retained admission uncertainty before deleting the supporting durable record. Absent, malformed, mismatched-ID and unknown-state rows do not settle uncertainty. The new regression commits a job, loses its flush acknowledgement, completes it through an independent store handle, then clears directly through the original queue and successfully admits the selector again.
 
 The admission model now has private discriminated pre-persistence/persistence state, a `beginPersistence(jobId)` transition, and immutable discriminated error evidence. Indeterminate evidence always requires its original handle; HTTP rendering narrows that same evidence. Compile-time negative fixtures reject missing IDs, inappropriate phases, non-admission with a handle, and public mutation. Validation: 151 queue tests, 128 HTTP/worker/durable tests, 23 bound-owner tests, publisher/CLI compilation, negative type fixtures, lint and file-size checks passed. The expanded diff remains one admission/reconciliation contract; type, terminal-clear and HTTP integration tests belong with the implementation rather than a separately mergeable partial fix.
+
+### Remote review round 3
+
+Added the missing primary-write regression: `replaceSubject` commits, then surfaces a nested query `not_started` error. The real queue retains indeterminate evidence and the persisted ID across immediate replay and authoritative read, with exactly one write and one durable job. The canonical primary `replaceSubject/not_started` rejection/retry test remains. All 30 admission tests passed; no production behavior changed.
