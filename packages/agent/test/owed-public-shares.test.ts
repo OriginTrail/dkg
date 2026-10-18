@@ -259,20 +259,25 @@ describe('a share that reached nobody', () => {
     expect(h.store.size).toBe(1);
   });
 
-  // Receivers answer an outdated version of an asset as they answer a graph
-  // they do not host. Cores that refuse a kept share as outdated are asked
-  // once; they are not asked again, and the record no longer waits for them.
-  it('owes the Cores nothing more once every Core it went to refuses it, and still owes the owner', async () => {
-    const h = harness({ holders: () => [CORE_1, CORE_2], answer: () => 'rejected' });
+  // A Core that does not host the graph refuses a share as it refuses an outdated version. Refusals only leave
+  // those Cores out of the share: it keeps looking for a holder until it is delivered or expires.
+  it('keeps looking for a holder after every Core it went to refuses it, and reaches a Core that connects later', async () => {
+    let cores = [CORE_1, CORE_2];
+    const h = harness({ holders: () => cores, answer: (peerId) => (peerId === CORE_3 ? 'delivered' : 'rejected') });
     h.owe('op-1', { holder: true });
     h.owe('op-2', { holder: true, owner: true });
     await h.store.tick();
     expect(h.sent.map((sent) => `${sent.shareOperationId}:${sent.peerId}`).sort())
       .toEqual([`op-1:${CORE_1}`, `op-1:${CORE_2}`, `op-2:${CORE_1}`, `op-2:${CORE_2}`]);
-    expect(h.store.snapshot()).toMatchObject([{ shareOperationId: 'op-2', holder: false, owner: true }]);
-    expect(h.infos.filter((line) => line.includes('refused by every Core'))).toHaveLength(2);
+    const holderOf = (id: string) => h.store.snapshot().find((share) => share.shareOperationId === id)?.holder;
+    expect([holderOf('op-1'), holderOf('op-2')]).toEqual([true, true]);
     await h.store.tick();
-    expect(h.sent, 'no Core is sent a refused share again').toHaveLength(4);
+    expect(h.sent, 'no Core is sent a share it refused again').toHaveLength(4);
+    cores = [CORE_1, CORE_2, CORE_3];
+    await h.store.tick();
+    expect(h.sent.slice(4).map((sent) => `${sent.shareOperationId}:${sent.peerId}`).sort())
+      .toEqual([`op-1:${CORE_3}`, `op-2:${CORE_3}`]);
+    expect(h.store.snapshot()).toMatchObject([{ shareOperationId: 'op-2', holder: false, owner: true }]);
   });
 
   it('survives a lookup of the connected Cores that throws', async () => {

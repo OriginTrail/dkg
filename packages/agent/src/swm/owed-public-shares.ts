@@ -379,13 +379,9 @@ export class OwedPublicShares<S> {
       holders.forEach((peerId, index) => {
         if (outcomes[index] === 'rejected') share.refusedBy.add(peerId);
       });
-      if (outcomes.includes('delivered')) {
-        share.holder = false;
-      } else if (outcomes.every((outcome) => outcome === 'rejected')) {
-        // A refused share is not applied later: no Core is asked again.
-        share.holder = false;
-        this.#ports.logInfo(`${describeShare(share)} refused by every Core it was sent to again; not sent to a Core any more`);
-      }
+      // A Core that does not host the graph refuses as well, so refusals only leave those Cores out of this
+      // share (refusedBy): the share keeps looking for a holder until it is delivered or expires.
+      if (outcomes.includes('delivered')) share.holder = false;
     }
     for (const peerId of owners) {
       const outcome = await this.#send(peerId, share);

@@ -25,7 +25,8 @@
  *     owner through the relay, and the owner holds it with member 1's author
  *     seal (a copy pulled from the Core carries none, and the owner needs the
  *     seal to publish the member's asset).
- * Without the fix none of it happens: see `SHARES_REACH_A_HOSTING_CORE`.
+ * Before the fix none of it happened: the share went to no peer, member 2 never
+ * got it, and nothing sent it to the owner again.
  *
  * White-box steps, each named where it is made: the Core is made host-only with
  * `unsubscribeFromContextGraph` and is kept out of member 1's followers (as a
@@ -56,15 +57,6 @@ import {
 } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
-/**
- * THE SWITCH for the fix: the one line of this file the fix changes.
- *
- * `false` describes the code before the fix: member 1's share reaches neither
- * the Core nor, later, the owner, and the assertions pin exactly that over
- * their watch. With `true` they require the deliveries within their bounds.
- */
-const SHARES_REACH_A_HOSTING_CORE = true;
-
 /** The share goes to the Core when it is made. */
 const CORE_BOUND_MS = 30_000;
 /** Member 2 pulls a graph in use from its peers every minute. */
@@ -74,8 +66,6 @@ const MEMBER_PULL_BOUND_MS = 150_000;
  * for the owner again a minute after it last found none.
  */
 const OWNER_BOUND_MS = 150_000;
-/** How long a delivery that must not happen is watched for. */
-const ABSENCE_WATCH_MS = 20_000;
 /** The background sync rounds that follow a connection or a subscribe end well within this. */
 const BACKGROUND_SYNC_BOUND_MS = 90_000;
 
@@ -293,26 +283,21 @@ describe('E2E: a relay-only member\'s sub-graph share while no Core subscribes a
     const atCore = await pollUntil(
       () => holdsShare(core, subject, literal),
       (holds) => holds,
-      SHARES_REACH_A_HOSTING_CORE ? CORE_BOUND_MS : ABSENCE_WATCH_MS,
+      CORE_BOUND_MS,
       500,
     );
     await member1.awaitInFlightSubstrateFanOuts();
-    if (SHARES_REACH_A_HOSTING_CORE) {
-      expect(atCore, 'the hosting Core holds member 1\'s share').toBe(true);
-      expect(deliveredDirectly(member1, contextGraphId) - deliveredBefore, 'receivers that applied member 1\'s direct send').toBe(1);
-    } else {
-      expect(atCore, 'before the fix the share reaches no Core; if it does, set SHARES_REACH_A_HOSTING_CORE to true').toBe(false);
-      expect(deliveredDirectly(member1, contextGraphId)).toBe(deliveredBefore);
-    }
+    expect(atCore, 'the hosting Core holds member 1\'s share').toBe(true);
+    expect(deliveredDirectly(member1, contextGraphId) - deliveredBefore, 'receivers that applied member 1\'s direct send').toBe(1);
 
     // 2. Member 2, connected to the Core only, gets it from there.
     const atMember2 = await pollUntil(
       () => holdsShare(member2, subject, literal),
       (holds) => holds,
-      SHARES_REACH_A_HOSTING_CORE ? MEMBER_PULL_BOUND_MS : ABSENCE_WATCH_MS,
+      MEMBER_PULL_BOUND_MS,
       1_000,
     );
-    expect(atMember2, 'member 2 holds member 1\'s share').toBe(SHARES_REACH_A_HOSTING_CORE);
+    expect(atMember2, 'member 2 holds member 1\'s share').toBe(true);
     expect(linkConnections(network, member1, member2), 'the members were never connected').toEqual([]);
 
     // 3. Member 1 finds the owner now (white-box: the lookup, and the owner's
@@ -333,17 +318,13 @@ describe('E2E: a relay-only member\'s sub-graph share while no Core subscribes a
     const seal = await pollUntil(
       sealAtOwner,
       (candidate) => candidate !== undefined,
-      SHARES_REACH_A_HOSTING_CORE ? OWNER_BOUND_MS : ABSENCE_WATCH_MS,
+      OWNER_BOUND_MS,
       1_000,
     );
-    if (SHARES_REACH_A_HOSTING_CORE) {
-      expect(seal, 'the owner holds member 1\'s author seal').toBeDefined();
-      expect(await holdsShare(owner, subject, literal), 'the owner holds member 1\'s share').toBe(true);
-      await member1.awaitInFlightSubstrateFanOuts();
-      expect(deliveredDirectly(member1, contextGraphId), 'member 1 delivered the share to the owner').toBeGreaterThan(deliveredBeforeOwner);
-      expectRelayOnlyLink(network, member1, owner, 'after the share reached the owner');
-    } else {
-      expect(seal, 'before the fix nothing sends the share to the owner again').toBeUndefined();
-    }
+    expect(seal, 'the owner holds member 1\'s author seal').toBeDefined();
+    expect(await holdsShare(owner, subject, literal), 'the owner holds member 1\'s share').toBe(true);
+    await member1.awaitInFlightSubstrateFanOuts();
+    expect(deliveredDirectly(member1, contextGraphId), 'member 1 delivered the share to the owner').toBeGreaterThan(deliveredBeforeOwner);
+    expectRelayOnlyLink(network, member1, owner, 'after the share reached the owner');
   }, 600_000);
 });

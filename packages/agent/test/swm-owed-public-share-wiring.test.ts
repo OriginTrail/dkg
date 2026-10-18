@@ -116,7 +116,8 @@ describe('a share into a public graph kept because it reached nobody or not the 
       await owed.tick();
       expect(received.map((sent) => sent.peerId)).toEqual([CORE]);
       expect(shareHolderRefusalsOf(agent).refused(OWNED_ELSEWHERE, 'reports', CORE)).toBe(false);
-      expect(owed.snapshot()).toMatchObject([{ shareOperationId: 'share-1', holder: false, owner: true }]);
+      // The refusal leaves that Core out of share-1 only; share-1 keeps looking for a holder.
+      expect(owed.snapshot()).toMatchObject([{ shareOperationId: 'share-1', holder: true, owner: true }]);
       const warn = vi.spyOn(wired.log, 'warn');
       expect(await share('reports')).toEqual([CORE]);
       // The fresh share's own refusal is remembered.
