@@ -78,7 +78,7 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
         const author = await incompleteNamedKaLifecycleAuthor(host.store, {
           ...input, kaNumber: scope.kaNumber, assertionVersion: vm.scope.assertionVersion,
           sealMerkleRoot: snapshot.latestRoot,
-        }, scope.agentAddress, { allowPublishedState: true, requireCompatibleVmProjection: true });
+        }, scope.agentAddress, { allowPublishedState: true });
         // A new confirmed block is normal during verification. Re-read the asset,
         // rather than requiring the earlier snapshot's header lease to remain current.
         const current = await host.chain.readKnowledgeAssetVersionSnapshot?.(kaId, { signal });

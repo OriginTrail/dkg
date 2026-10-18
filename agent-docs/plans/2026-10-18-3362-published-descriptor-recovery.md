@@ -76,3 +76,9 @@ Round 3 validation: all 150 agent tests across six suites passed, including both
 Preserve storage failures (including their cause/code) while translating only canonical lifecycle corruption. Add real-agent/publisher serialization coverage in both execution orders and authorized HTTP dry-run contract coverage. Final round-3 live replay passed all 47 heads and 62 publication versions after a daemon/database cold restart; all 125 wallet transactions have successful receipts. Owned services are stopped while this review batch is addressed.
 
 Round 4 verification: 29 focused agent tests and 35 CLI authority/route tests pass. Real DKGAgent creation/write serialization passes in both orders with checksummed writer/lowercase repair identity; an additional real finalize/signature test installs version 2 and a newer WM root before the waiting repair refuses, preserving both roots and all resulting metadata. Agent build/type fixtures, lint, file-size and whitespace checks pass. Production delta from the accepted live runtime is limited to preserving storage-error diagnostics.
+
+### Remote review response round 5 (in progress)
+
+Remove the unused projection-compatibility opt-out from the shared recovery helper. Both production callers always enabled it; the checks now form an unconditional invariant, retaining only the intentional operator/queue state-policy distinction. The prior clean `f36db5aaa` runtime passed all 47 heads, 62 receipts and three operator dry-run/idempotence scenarios. All 125 transactions were reconciled, owned services stopped, nine wallet nonces settled and batch-1 released at 18:07:10Z.
+
+Round 5 validation: all 30 automatic/operator/concurrency recovery tests pass; agent build/type/package checks and lint pass. Inspection confirms both production callers previously passed `requireCompatibleVmProjection: true`, so removing the opt-out preserves their live-tested behavior.

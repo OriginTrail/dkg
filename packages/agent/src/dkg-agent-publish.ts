@@ -5002,7 +5002,7 @@ export class PublishMethods extends DKGAgentBase {
       ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     });
     if (!history) return {
-      author: await incompleteNamedKaLifecycleAuthor(this.store, request, agentAddress, { requireCompatibleVmProjection: true }),
+      author: await incompleteNamedKaLifecycleAuthor(this.store, request, agentAddress),
       incomplete: true,
     };
 

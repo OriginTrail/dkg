@@ -15,7 +15,7 @@ export type NamedKaLifecycleRecoveryFacts = Pick<KnowledgeAssetVmPublishRequest,
  */
 export async function incompleteNamedKaLifecycleAuthor(
   store: TripleStore, request: NamedKaLifecycleRecoveryFacts, author: string,
-  options: { allowPublishedState?: boolean; requireCompatibleVmProjection?: boolean } = {},
+  options: { allowPublishedState?: boolean } = {},
 ): Promise<string> {
   const refuse = (reason: string, cause?: unknown): never => {
     throw Object.assign(new Error(`Cannot repair published descriptor for "${request.name}": ${reason}`, { cause }), {
@@ -51,16 +51,14 @@ export async function incompleteNamedKaLifecycleAuthor(
   if (state !== undefined && !(options.allowPublishedState && state === 'published')) {
     return refuse('state exists but the descriptor could not be resolved');
   }
-  if (options.requireCompatibleVmProjection) {
-    const published = literal('publishedUal');
-    const layer = literal('memoryLayer');
-    const graph = one(DKG + 'assertionGraph');
-    const permittedGraphs = [MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory]
-      .map(layer => contextGraphLayerUri(request.contextGraphId, layer, author, BigInt(request.kaNumber!), request.subGraphName));
-    if ((published !== undefined && published !== request.kaUal)
-      || layer !== 'VM' || (graph !== undefined && !permittedGraphs.includes(graph))) {
-      return refuse('conflicting published identity or layer');
-    }
+  const published = literal('publishedUal');
+  const layer = literal('memoryLayer');
+  const graph = one(DKG + 'assertionGraph');
+  const permittedGraphs = [MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory]
+    .map(layer => contextGraphLayerUri(request.contextGraphId, layer, author, BigInt(request.kaNumber!), request.subGraphName));
+  if ((published !== undefined && published !== request.kaUal)
+    || layer !== 'VM' || (graph !== undefined && !permittedGraphs.includes(graph))) {
+    return refuse('conflicting published identity or layer');
   }
   if (literal('assertionName') !== request.name
     || one('http://www.w3.org/ns/prov#wasAttributedTo')?.toLowerCase() !== `did:dkg:agent:${author}`.toLowerCase()
