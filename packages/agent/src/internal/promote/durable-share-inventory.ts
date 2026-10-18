@@ -1,9 +1,9 @@
-import { throwInventoryRecoveryFailure } from './inventory-recovery-failure.js';
+import { inventoryHandoffPendingFailure, throwInventoryRecoveryFailure } from './inventory-recovery-failure.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
 import { rfc64SwmInventoryShadowRuntimeV1 } from '../../rfc64/swm-inventory-shadow-runtime-v1.js';
 import { type SwmInventoryWriteOutcome } from '../swm-inventory-write.js';
 import type { ContextGraphIdV1, EvmAddressV1 } from '@origintrail-official/dkg-core';
-import { createPromoteRetryableFailure, runPromoteCommittedFinalization } from '@origintrail-official/dkg-publisher';
+import { runPromoteCommittedFinalization } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AfterDurableSwmPromotionParamsV1, BoundDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1 } from '../../dkg-agent-rfc64-catalog-auto-publish.js';
 
@@ -32,7 +32,7 @@ async function commitInventoryUnderAssetLock(agent: DKGAgent, params: BoundDurab
       case 'vm-confirmed': return 'vm-confirmed';
       case 'inactive-lane':
       case 'authority-transition':
-        throw createPromoteRetryableFailure(new Error(`Durable share inventory remains pending: ${reason}`));
+        throw inventoryHandoffPendingFailure(reason, `Durable share inventory remains pending: ${reason}`);
       default: { const unreachable: never = reason; throw new Error(`Unknown inventory outcome: ${unreachable}`); }
     }
   }
@@ -43,7 +43,7 @@ async function commitInventoryUnderAssetLock(agent: DKGAgent, params: BoundDurab
       authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
       ctx: params.ctx,
     });
-    if (!accepted) throw createPromoteRetryableFailure(new Error('Durable share catalog projection admission remains pending'));
+    if (!accepted) throw inventoryHandoffPendingFailure('projection-admission', 'Durable share catalog projection admission remains pending');
   } catch (error) { return throwInventoryRecoveryFailure(error); }
 }
 

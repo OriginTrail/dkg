@@ -78,6 +78,24 @@ async function serveShares(agent: Awaited<ReturnType<typeof setup>>['agent']) {
   } };
 }
 afterEach(() => { daemonState.promoteWorkerAvailable = false; });
+/** The real authority resolver and responsibility registry, refresh-fenced or not responsible. */
+function useInactiveCatalogAuthority(agent: Awaited<ReturnType<typeof setup>>['agent'], authority: 'not-responsible' | 'refresh-fenced') {
+  // Drop the fixture's legacy override.
+  delete (agent as any).resolveRfc64CatalogReceiverAuthorityV1;
+  agent.config = { nodeRole: 'edge', rfc64CatalogExecutionPlan: {
+    killSwitchActive: false, responsibilityDefaultMode: 'catalog', selectedAuthority: {}, contextGraphModes: {},
+  } } as any;
+  if (authority === 'refresh-fenced') {
+    // Responsible, but its authority has not been accepted yet (a new graph, a pending roster read
+    // or a restart). The receiver-lane start-up work is outside this share path.
+    (agent as any).handleRfc64CatalogReceiverSelectionTransitionV1 = vi.fn();
+    agent.commitRfc64CatalogResponsibilityV1(CG, 'edge-subscription');
+    expect(agent.readRfc64CatalogResponsibilityV1(CG)).toMatchObject({ responsible: true, active: true, mode: 'catalog' });
+  }
+  expect(agent.resolveRfc64CatalogReceiverAuthorityV1(CG)).toMatchObject({
+    mode: 'catalog', killSwitchActive: false, authoringAllowed: false, reconciliationLane: 'disabled',
+  });
+}
 
 describe('durable synchronous share ownership', () => {
   it.each(['unowned-precommit', 'bound-precommit', 'committed-missing-layer'])('preflights only new uncommitted admission (%s)', async state => {
@@ -503,10 +521,13 @@ describe('durable synchronous share ownership', () => {
   });
 
   it.each([
-    ['legacy', false, false], ['catalog', true, false], ['catalog', false, true], ['shadow', false, true],
-  ])('captures effective %s admission with kill switch %s as inventoryRequired=%s', async (mode, killSwitchActive, required) => {
+    ['legacy', false, false, false], ['catalog', true, false, false],
+    ['catalog', false, true, true], ['shadow', false, true, true],
+    // A fenced or non-responsible authority cannot open the lane the handoff would wait on.
+    ['catalog', false, false, false], ['shadow', false, false, false],
+  ])('captures effective %s admission with kill switch %s and authoring allowed %s as inventoryRequired=%s', async (mode, killSwitchActive, authoringAllowed, required) => {
     const { store, agent } = await setup();
-    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode, killSwitchActive, active: false });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode, killSwitchActive, active: authoringAllowed, authoringAllowed });
     const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
     expect(prepared.recoveryBinding.inventoryRequired).toBe(required);
     await store.close();
@@ -533,16 +554,19 @@ describe('durable synchronous share ownership', () => {
     await store.close();
   });
 
-  it.each([null, 0])('requires accepted policy before exempting a public-only share (accepted=%s)', async accepted => {
+  it.each([[null, false], [null, true], [0, false], [0, true]] as const)(
+    'requires accepted policy before exempting a public-only share (accepted=%s, authoring allowed=%s)', async (accepted, authoringAllowed) => {
     const { store, agent, finalized } = await setup();
     agent.config = { rfc64CatalogDeploymentProfile: { networkId: 'otp:20430' },
       rfc64CatalogAuthoringPolicy: resolveRfc64CatalogAuthoringPolicyV1({ selectedCatalogAuthoringControls: [], acceptedPolicies: [],
         legacyPublicFallback: { mode: 'all-accepted-public', config: { peers: [], catalogIssuerDelegationExpiresAt: '253402300799000' } } }) };
-    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, active: false, authoringAllowed: false });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, active: authoringAllowed, authoringAllowed });
     vi.spyOn(agent, 'rfc64PublicCatalogServiceV1', 'get').mockReturnValue({ acceptedPolicySnapshot: () => accepted === null ? null : { policy: { accessPolicy: accepted } } });
     const request = agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR, accessPolicy: 'ownerOnly' });
+    // Missing policy stays a retryable readiness gap; an accepted private policy owes the
+    // bound handoff only while the authoring lane can be active.
     if (accepted === null) await expect(request).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
-    else expect((await request).recoveryBinding.inventoryRequired).toBe(true);
+    else expect((await request).recoveryBinding.inventoryRequired).toBe(authoringAllowed);
     expect(await agent.promoteQueue.list({})).toHaveLength(0);
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
     expect(await store.countQuads(finalized.graphUri)).toBe(1);
@@ -565,6 +589,68 @@ describe('durable synchronous share ownership', () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ state: 'succeeded', request: { recoveryBinding: { inventoryRequired: false } } });
     expect(inventory).not.toHaveBeenCalled();
+    await store.close();
+  });
+
+  it.each(['not-responsible', 'refresh-fenced'] as const)(
+    'completes a share whose catalog authority is %s and hands inventory to the detached observer', async authority => {
+      const { store, agent, finalized } = await setup();
+      useInactiveCatalogAuthority(agent, authority);
+      const inventory = vi.spyOn(agent, 'commitRfc64SwmAuthorInventoryV1');
+      daemonState.promoteWorkerAvailable = true;
+      const result = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR });
+      expect(result).toMatchObject({ promotedCount: 1, sealed: true, publishReady: true, shareOperationId: expect.any(String) });
+      const jobs = await agent.promoteQueue.list({});
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ state: 'succeeded', request: { recoveryBinding: {
+        inventoryRequired: false, intent: { operationId: result.shareOperationId } } } });
+      expect(agent.scheduleRfc64SwmInventoryObserverV1).toHaveBeenCalledWith(expect.objectContaining({
+        contextGraphId: CG, assertionCoordinate: NAME, shareOperationId: result.shareOperationId,
+      }));
+      expect(inventory).not.toHaveBeenCalled();
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+      await store.close();
+    });
+
+  it('answers a shared, publish-ready HTTP share while the catalog authority is refresh-fenced', async () => {
+    const { store, agent, finalized } = await setup();
+    useInactiveCatalogAuthority(agent, 'refresh-fenced');
+    daemonState.promoteWorkerAvailable = true;
+    const { post, close } = await serveShares(agent);
+    try {
+      const response = await post();
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({ swmShared: true, sealed: true, publishReady: true, promotedCount: 1, shareOperationId: expect.any(String) });
+      expect(agent.scheduleRfc64SwmInventoryObserverV1).toHaveBeenCalledWith(expect.objectContaining({
+        contextGraphId: CG, assertionCoordinate: NAME, shareOperationId: body.shareOperationId,
+      }));
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    } finally { await close(); await store.close(); }
+  });
+
+  it('keeps a handoff owed at admission pending when the authoring lane closes before commit', async () => {
+    const { store, agent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    let authority: object = { mode: 'catalog', killSwitchActive: false, active: true, authoringAllowed: true, reconciliationLane: 'catalog-apply' };
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => authority;
+    const assertion = agent.assertion;
+    vi.spyOn(agent, 'assertion', 'get').mockReturnValue({ ...assertion, prepareDurableShare: async (...args) => {
+      const prepared = await assertion.prepareDurableShare(...args);
+      // The handoff is frozen as owed; the authority is then fenced, as after a restart.
+      authority = { mode: 'catalog', killSwitchActive: false, active: false, authoringAllowed: false, reconciliationLane: 'disabled' };
+      return prepared;
+    } });
+    const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR }).catch(e => e);
+    expect(failure).toBeInstanceOf(DurableShareFailure);
+    expect(failure.observation.state).toBe('pending');
+    // The real inventory writer reports the closed lane through the typed handoff cause.
+    expect(failure.cause).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE',
+      cause: { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'inactive-lane' } });
+    expect(await agent.promoteQueue.getStatus(failure.observation.jobId)).toMatchObject({
+      state: 'failed_retrying', request: { recoveryBinding: { inventoryRequired: true } } });
+    expect(agent.scheduleRfc64SwmInventoryObserverV1).not.toHaveBeenCalled();
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
     await store.close();
   });
 
@@ -612,7 +698,7 @@ describe('durable synchronous share ownership', () => {
 
   it('requires durable catalog ownership after the real publisher verifies a VM no-op', async () => {
     const { store, agent, finalized } = await setup();
-    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, active: true, authoringAllowed: true });
     const bound = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
     const swmTail = vi.spyOn(agent, 'afterDurableSwmPromotionV1').mockRejectedValueOnce(new Error('inventory CAS unavailable'));
     await expect(agent.assertion.promote(CG, NAME, bound)).rejects.toThrow('inventory CAS unavailable');
@@ -682,7 +768,7 @@ describe('durable synchronous share ownership', () => {
   it('fences reopening through pending inventory recovery, including a fresh agent, then releases it after worker success', async () => {
     const { store, agent, freshAgent, finalized } = await setup();
     daemonState.promoteWorkerAvailable = true;
-    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, active: true, authoringAllowed: true });
     agent.commitRfc64SwmAuthorInventoryV1 = async () => {
       throw new SwmInventoryWriteFailure('inventory-maintenance', null, inventoryPersistenceFailure(new Error('inventory CAS unavailable')));
     };
@@ -749,7 +835,7 @@ describe('durable synchronous share ownership', () => {
   it('refuses the legacy shortcut over HTTP when a bound inventory obligation lost its intent', async () => {
     const { store, agent, publisher, finalized } = await setup();
     daemonState.promoteWorkerAvailable = true;
-    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, active: true, authoringAllowed: true });
     agent.commitRfc64SwmAuthorInventoryV1 = async () => {
       throw new SwmInventoryWriteFailure('inventory-maintenance', null, inventoryPersistenceFailure(new Error('inventory CAS unavailable')));
     };
@@ -792,7 +878,7 @@ describe('durable synchronous share ownership', () => {
   it.each(['corrupt', 'missing', 'changed'])('revokes a publication certificate on %s bound replay after inventory failure', async corruption => {
     const {store,agent,publisher,finalized}=await setup();
     daemonState.promoteWorkerAvailable=true;
-    agent.resolveRfc64CatalogReceiverAuthorityV1=()=>({mode:'catalog',killSwitchActive:false});
+    agent.resolveRfc64CatalogReceiverAuthorityV1=()=>({mode:'catalog',killSwitchActive:false,active:true,authoringAllowed:true});
     agent.commitRfc64SwmAuthorInventoryV1=async()=>{throw new SwmInventoryWriteFailure('inventory-maintenance',null,inventoryPersistenceFailure(new Error('inventory unavailable')));};
     const failure=await durableSynchronousShare(agent,CG,NAME,{agentAddress:AUTHOR}).catch(e=>e);
     const job=(await agent.promoteQueue.getStatus(failure.observation.jobId))!;
@@ -916,7 +1002,7 @@ describe('durable synchronous share ownership', () => {
     const { store, agent, publisher, finalized } = await setup();
     let now = Date.now(), entered = false, release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, active: true, authoringAllowed: true });
     const inventory = vi.fn(async () => {
       if (pause === 'inside-tail' && !entered) { entered = true; await gate; }
       return { status: 'applied', attempts: 1, headObjectDigest: 'same-head', kaUal: 'did:dkg:confirmed-asset' };

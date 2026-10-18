@@ -7,6 +7,7 @@ import { SwmCatalogAuthorityNotReady, SwmInventoryWriteFailure } from '../src/in
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { commitDurableShareInventory, finishDurableShare } from '../src/internal/promote/durable-share-inventory.js';
+import { SWM_INVENTORY_HANDOFF_PENDING_CODE } from '../src/internal/promote/inventory-recovery-failure.js';
 
 const params = { contextGraphId: 'cg', assertionCoordinate: 'asset', lifecycleAgentAddress: `0x${'11'.repeat(20)}`,
   recoveryBinding: { version: 1 as const, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: true,
@@ -44,7 +45,11 @@ describe('durable inventory handoff', () => {
   it.each(['inactive-lane', 'authority-transition'])('retains the obligation while %s', async dormantReason => {
     const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'dormant', dormantReason })),
       requestRfc64SwmCatalogProjectionV1: vi.fn() };
-    await expect(commitDurableShareInventory(agent as any, params)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    const failure = await commitDurableShareInventory(agent as any, params).catch(error => error);
+    expect(failure).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    // A typed, closed-set cause lets the daemon name the waiting step.
+    expect(failure.cause).toMatchObject({ code: SWM_INVENTORY_HANDOFF_PENDING_CODE, reason: dormantReason,
+      message: `Durable share inventory remains pending: ${dormantReason}` });
     expect(agent.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
   });
   it.each(['service-unavailable', 'policy-not-accepted'] as const)('retries typed readiness %s only', async reason => {
@@ -78,7 +83,9 @@ describe('durable inventory handoff', () => {
   it('retains the original obligation when projection admission returns false', async () => {
     const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'existing' })),
       requestRfc64SwmCatalogProjectionV1: vi.fn(() => false) };
-    await expect(commitDurableShareInventory(agent as any, params)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    const failure = await commitDurableShareInventory(agent as any, params).catch(error => error);
+    expect(failure).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    expect(failure.cause).toMatchObject({ code: SWM_INVENTORY_HANDOFF_PENDING_CODE, reason: 'projection-admission' });
     expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledWith(expect.objectContaining({ shareOperationId: 'original-operation' }));
     expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
   });

@@ -9,21 +9,25 @@ import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
 import { commitConfirmedDurableShareInventory } from '../src/internal/promote/durable-vm-share-inventory.js';
 import { SwmCatalogAuthorityNotReady } from '../src/internal/swm-inventory-write.js';
+import { resolveRfc64CatalogAuthoringPolicyV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { Wallet } from 'ethers';
 
 const CG = 'agent-bound-share', NAME = 'asset', AUTHOR = `0x${'11'.repeat(20)}`;
 const stores: OxigraphStore[] = [];
 afterEach(async () => { await Promise.all(stores.splice(0).map(store => store.close())); });
-async function setup() {
+async function setup(author = AUTHOR) {
   const store = new OxigraphStore(); stores.push(store);
   const { agent, publisher } = await createPromotionAgentForTest(store, {
-    agentAddress: AUTHOR, peerId: '12D3KooWRecovery', kaAllocator: makeTestKaNumberAllocator(),
+    agentAddress: author, peerId: '12D3KooWRecovery', kaAllocator: makeTestKaNumberAllocator(),
   });
   agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'legacy', killSwitchActive: false });
-  await publisher.assertionCreate(CG, NAME, AUTHOR);
-  await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:asset', predicate: 'urn:value', object: '"original"' }]);
-  const finalized = await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR });
+  await publisher.assertionCreate(CG, NAME, author);
+  await publisher.assertionWrite(CG, NAME, author, [{ subject: 'urn:asset', predicate: 'urn:value', object: '"original"' }]);
+  const finalized = await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: author });
   return { agent, store, finalized };
 }
+const ACTIVE_LANE = { active: true, authoringAllowed: true, reconciliationLane: 'catalog-apply' } as const;
+const FENCED_LANE = { active: false, authoringAllowed: false, reconciliationLane: 'disabled' } as const;
 
 describe('agent durable share preparation and replay', () => {
   it('configures custom ownership before lazy queue construction across store wrappers', async () => {
@@ -105,9 +109,57 @@ describe('agent durable share preparation and replay', () => {
 
   it.each(['service-unavailable', 'policy-not-accepted'] as const)('retains typed readiness before admission: %s', async reason => {
     const { agent, store, finalized } = await setup();
-    agent.requiresRfc64ShareInventoryV1 = () => { throw new SwmCatalogAuthorityNotReady(reason); };
+    agent.requiresRfc64ShareInventoryHandoffV1 = () => { throw new SwmCatalogAuthorityNotReady(reason); };
     await expect(agent.assertion.prepareDurableShare(CG, NAME)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+  });
+
+  it.each([
+    ['fenced', FENCED_LANE, false],
+    ['active and accepted', ACTIVE_LANE, true],
+  ] as const)('owes the signed inventory handoff at admission only from an authoring lane: %s', async (_label, lane, handoff) => {
+    const wallet = new Wallet(`0x${'22'.repeat(32)}`), author = wallet.address.toLowerCase();
+    const { agent, store, finalized } = await setup(author);
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, ...lane });
+    const signer = vi.fn(() => ({ address: author, signMessage: wallet.signMessage.bind(wallet) }));
+    agent.createRfc64CatalogAuthorSignerV1 = signer;
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: author });
+    expect(prepared.recoveryBinding.inventoryRequired).toBe(handoff);
+    // The catalog obligation itself is unchanged; only the bound handoff follows the lane.
+    expect(agent.requiresRfc64ShareInventoryV1(CG, undefined)).toBe(true);
+    if (handoff) expect(signer).toHaveBeenCalledWith(author);
+    else expect(signer).not.toHaveBeenCalled();
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+  });
+
+  it.each([
+    ['legacy', { mode: 'legacy', killSwitchActive: false }, undefined, false, false],
+    ['kill switch', { mode: 'catalog', killSwitchActive: true, ...FENCED_LANE }, undefined, false, false],
+    ['named sub-graph', { mode: 'catalog', killSwitchActive: false, ...ACTIVE_LANE }, 'notes', false, false],
+    ['active catalog', { mode: 'catalog', killSwitchActive: false, ...ACTIVE_LANE }, undefined, true, true],
+    ['active shadow', { mode: 'shadow', killSwitchActive: false, ...ACTIVE_LANE, reconciliationLane: 'shadow-stage' }, undefined, true, true],
+    ['fenced catalog', { mode: 'catalog', killSwitchActive: false, ...FENCED_LANE }, undefined, true, false],
+    ['fenced shadow', { mode: 'shadow', killSwitchActive: false, ...FENCED_LANE }, undefined, true, false],
+  ] as const)('separates the catalog obligation from the bound handoff: %s', async (_label, authority, subGraphName, obligation, handoff) => {
+    const { agent } = await setup();
+    const resolve = vi.fn(() => authority);
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = resolve;
+    expect(agent.requiresRfc64ShareInventoryV1(CG, subGraphName)).toBe(obligation);
+    expect(agent.requiresRfc64ShareInventoryHandoffV1(CG, subGraphName)).toBe(handoff);
+    // Each decision reads the receiver authority once.
+    expect(resolve).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an unavailable catalog policy a typed readiness gap for both decisions', async () => {
+    const { agent } = await setup();
+    agent.config = { rfc64CatalogDeploymentProfile: { networkId: 'otp:20430' },
+      rfc64CatalogAuthoringPolicy: resolveRfc64CatalogAuthoringPolicyV1({ selectedCatalogAuthoringControls: [], acceptedPolicies: [],
+        legacyPublicFallback: { mode: 'all-accepted-public', config: { peers: [], catalogIssuerDelegationExpiresAt: '253402300799000' } } }) };
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, ...ACTIVE_LANE });
+    expect(() => agent.requiresRfc64ShareInventoryV1(CG, undefined)).toThrow(SwmCatalogAuthorityNotReady);
+    expect(() => agent.requiresRfc64ShareInventoryHandoffV1(CG, undefined)).toThrow(SwmCatalogAuthorityNotReady);
+    await expect(agent.assertion.prepareDurableShare(CG, NAME)).rejects.toMatchObject({
+      code: 'PROMOTE_RETRYABLE_FAILURE', cause: expect.any(SwmCatalogAuthorityNotReady) });
   });
 
   it.each(['owned', 'inactive', 'pending', 'authority-refused', 'wrong-seal'])('requires exact confirmed handoff ownership: %s', async outcome => {
@@ -131,6 +183,7 @@ describe('agent durable share preparation and replay', () => {
       await expect(transfer).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
       expect(agent.transferRfc64ConfirmedVmV1).not.toHaveBeenCalled();
     } else if (outcome === 'authority-refused') await expect(transfer).rejects.toBe(refusal);
-    else await expect(transfer).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    else await expect(transfer).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE',
+      cause: { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'confirmed-ownership' } });
   });
 });
