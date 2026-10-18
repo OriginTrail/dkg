@@ -1,20 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The two routes by which a share into a public graph reaches the nodes that
+ * The routes by which a share into a public graph reaches the nodes that
  * need it when its author connects only to Cores (`swm/relay-only-share-routes.ts`):
- * a Core that hosts the graph applies a share into a named sub-graph, and the
- * author makes the graph's owner one of the share's followers. The agent's
- * wiring is in `swm-shares-through-relay.test.ts` and
- * `core-hosted-sub-graph-share.test.ts`.
+ * a Core that hosts the graph applies a share into a named sub-graph, the
+ * author makes the graph's owner one of the share's followers, and a share no
+ * recipient holds for others goes to the connected Cores. The agent's wiring
+ * is in `swm-shares-through-relay.test.ts`, `swm-share-holder-cores.test.ts`
+ * and `core-hosted-sub-graph-share.test.ts`.
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_OWNER_PEERS_TTL_MS,
   GRAPH_OWNER_RETRY_AFTER_MS,
   GraphOwnerPeers,
+  SHARE_HOLDER_ACCEPT_TTL_MS,
+  SHARE_HOLDER_CORES_MAX,
+  SHARE_HOLDER_REFUSAL_TTL_MS,
+  ShareHolderRefusals,
+  chooseHoldingCores,
   coreHostsPublicGraph,
+  needsHoldingCores,
   routeShareToGraphOwner,
+  shareHolderRefusalsOf,
   type GraphOwnerRoutePorts,
 } from '../src/swm/relay-only-share-routes.js';
 
@@ -215,5 +223,135 @@ describe('the owner peers of a graph', () => {
     expect(resolve).toHaveBeenCalledTimes(257);
     await owners.of('graph-0');
     expect(resolve).toHaveBeenCalledTimes(258);
+  });
+});
+
+describe('the Cores a share goes to when no recipient holds the graph for others', () => {
+  const CORE_1 = '12D3KooWCoreOne';
+  const CORE_2 = '12D3KooWCoreTwo';
+  const EDGE = '12D3KooWEdgeNode';
+  const isCore = (peerId: string): boolean => peerId.startsWith('12D3KooWCore');
+
+  it('are needed by an Edge whose public share has no Core among its recipients', () => {
+    expect(needsHoldingCores({ authorRole: 'edge', publicShare: true, recipients: [], isCore })).toBe(true);
+    expect(needsHoldingCores({ authorRole: undefined, publicShare: true, recipients: [EDGE], isCore })).toBe(true);
+  });
+
+  it('are not needed when a recipient is a Core, for a share that is not public, or on a Core', () => {
+    expect(needsHoldingCores({ authorRole: 'edge', publicShare: true, recipients: [EDGE, CORE_1], isCore })).toBe(false);
+    expect(needsHoldingCores({ authorRole: 'edge', publicShare: false, recipients: [], isCore })).toBe(false);
+    expect(needsHoldingCores({ authorRole: 'core', publicShare: true, recipients: [], isCore })).toBe(false);
+  });
+
+  it('are the connected Cores that are not recipients already and did not refuse, at most four', () => {
+    const candidates = ['12D3KooWCoreF', '12D3KooWCoreB', '12D3KooWCoreE', CORE_1, '12D3KooWCoreA', '12D3KooWCoreB', CORE_2];
+    const chosen = chooseHoldingCores({
+      contextGraphId: GRAPH,
+      candidates,
+      exclude: new Set([CORE_1]),
+      refused: (peerId) => peerId === '12D3KooWCoreE',
+    });
+    expect([...chosen].sort()).toEqual(['12D3KooWCoreA', '12D3KooWCoreB', '12D3KooWCoreF', CORE_2].sort());
+    expect(SHARE_HOLDER_CORES_MAX).toBe(4);
+    const all = chooseHoldingCores({ contextGraphId: GRAPH, candidates, exclude: new Set(), refused: () => false });
+    expect(all).toHaveLength(4);
+    expect(chooseHoldingCores({ contextGraphId: GRAPH, candidates, exclude: new Set(), refused: () => false, max: 1 })).toEqual([all[0]]);
+    expect(chooseHoldingCores({ contextGraphId: GRAPH, candidates: [], exclude: new Set(), refused: () => false })).toEqual([]);
+  });
+
+  // Ordered by peer id, the lowest-id Cores of the network took every graph's shares.
+  it('are taken in an order fixed per graph, which differs between graphs', () => {
+    const cores = Array.from({ length: 12 }, (_unused, index) => `12D3KooWCore${String(index).padStart(2, '0')}`);
+    const choose = (contextGraphId: string, candidates: readonly string[]) =>
+      chooseHoldingCores({ contextGraphId, candidates, exclude: new Set(), refused: () => false });
+    const chosen = choose(GRAPH, cores);
+    expect(choose(GRAPH, [...cores].reverse()), 'the order the Cores connected in does not matter').toEqual(chosen);
+    const firstChoices = new Set(Array.from({ length: 16 }, (_unused, index) => choose(`${GRAPH}-${index}`, cores)[0]));
+    expect(firstChoices.size).toBeGreaterThan(1);
+  });
+
+  describe('a Core that refused a share', () => {
+    it('is left out for that graph and scope until the pause has passed', () => {
+      let now = 0;
+      const refusals = new ShareHolderRefusals(() => now);
+      refusals.noteRefused(GRAPH, 'reports', CORE_1);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(true);
+      expect(refusals.refused(GRAPH, 'drafts', CORE_1), 'another named sub-graph has the same scope kind').toBe(true);
+      expect(refusals.refused(GRAPH, null, CORE_1), 'the root is another scope').toBe(false);
+      expect(refusals.refused('another-graph', 'reports', CORE_1)).toBe(false);
+      expect(refusals.refused(GRAPH, 'reports', CORE_2)).toBe(false);
+      now += SHARE_HOLDER_REFUSAL_TTL_MS - 1;
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(true);
+      now += 1;
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(false);
+      expect(refusals.size, 'an expired refusal is forgotten').toBe(0);
+    });
+
+    it('is remembered for the root apart from the sub-graphs', () => {
+      const refusals = new ShareHolderRefusals(() => 0);
+      refusals.noteRefused(GRAPH, null, CORE_1);
+      expect(refusals.refused(GRAPH, null, CORE_1)).toBe(true);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(false);
+    });
+
+    it('is one of at most 1,024 refusals, the oldest making room', () => {
+      const refusals = new ShareHolderRefusals(() => 0);
+      for (let index = 0; index <= 1_024; index += 1) refusals.noteRefused(GRAPH, 'reports', `core-${index}`);
+      expect(refusals.size).toBe(1_024);
+      expect(refusals.refused(GRAPH, 'reports', 'core-0')).toBe(false);
+      expect(refusals.refused(GRAPH, 'reports', 'core-1')).toBe(true);
+      expect(refusals.refused(GRAPH, 'reports', 'core-1024')).toBe(true);
+    });
+
+    // A receiver refuses an outdated version of an asset as it refuses a graph
+    // it does not host. A Core that applied a share of the graph lately hosts
+    // it, so one refusal from it must not leave it out of the graph's shares.
+    it('is not left out for a refusal when it applied a share of that graph and scope lately', () => {
+      let now = 0;
+      const refusals = new ShareHolderRefusals(() => now);
+      refusals.noteAccepted(GRAPH, 'reports', CORE_1);
+      now += SHARE_HOLDER_ACCEPT_TTL_MS - 1;
+      refusals.noteRefused(GRAPH, 'drafts', CORE_1);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(false);
+      expect(refusals.size).toBe(0);
+      // The accept is for named sub-graphs: a refusal of a root share still counts.
+      refusals.noteRefused(GRAPH, null, CORE_1);
+      expect(refusals.refused(GRAPH, null, CORE_1)).toBe(true);
+      // Once the accept is that old, a refusal leaves the Core out again.
+      now += 1;
+      refusals.noteRefused(GRAPH, 'reports', CORE_1);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(true);
+      expect(refusals.acceptsHeld, 'an expired accept is forgotten').toBe(0);
+    });
+
+    it('is taken back once the Core applies a share of that graph and scope, as when two answers arrive out of order', () => {
+      const refusals = new ShareHolderRefusals(() => 0);
+      refusals.noteRefused(GRAPH, 'reports', CORE_1);
+      refusals.noteRefused(GRAPH, 'reports', CORE_2);
+      refusals.noteAccepted(GRAPH, 'reports', CORE_1);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(false);
+      expect(refusals.refused(GRAPH, 'reports', CORE_2)).toBe(true);
+      refusals.noteRefused(GRAPH, 'reports', CORE_1);
+      expect(refusals.refused(GRAPH, 'reports', CORE_1)).toBe(false);
+      expect(SHARE_HOLDER_ACCEPT_TTL_MS).toBe(10 * 60_000);
+    });
+
+    it('keeps at most 1,024 accepts, the oldest making room', () => {
+      const refusals = new ShareHolderRefusals(() => 0);
+      for (let index = 0; index <= 1_024; index += 1) refusals.noteAccepted(GRAPH, 'reports', `core-${index}`);
+      expect(refusals.acceptsHeld).toBe(1_024);
+      refusals.noteRefused(GRAPH, 'reports', 'core-0');
+      refusals.noteRefused(GRAPH, 'reports', 'core-1');
+      expect(refusals.refused(GRAPH, 'reports', 'core-0')).toBe(true);
+      expect(refusals.refused(GRAPH, 'reports', 'core-1')).toBe(false);
+    });
+
+    it('is kept per agent, the same memory every time', () => {
+      const agentOne = {};
+      const agentTwo = {};
+      shareHolderRefusalsOf(agentOne).noteRefused(GRAPH, 'reports', CORE_1);
+      expect(shareHolderRefusalsOf(agentOne).refused(GRAPH, 'reports', CORE_1)).toBe(true);
+      expect(shareHolderRefusalsOf(agentTwo).refused(GRAPH, 'reports', CORE_1)).toBe(false);
+    });
   });
 });

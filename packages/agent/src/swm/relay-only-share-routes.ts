@@ -7,7 +7,7 @@
  * A member sends a share to the graph's GossipSub subscribers and to its
  * followers (#3208). For a relay-only author those are the Cores it is
  * connected to: GossipSub does not run over a relayed connection, and another
- * Edge is a follower only after it asked this one for the graph. Two routes
+ * Edge is a follower only after it asked this one for the graph. Three routes
  * close the gap:
  *
  * 1. A Core that hosts the public graph applies a share into a named
@@ -22,9 +22,18 @@
  *    Memory, so the owner must get the share itself. An Edge keeps no
  *    `agents` phonebook, so it looks the owner's wallet up in a Core's
  *    phonebook on demand when it cannot map the owner to a peer.
+ * 3. When none of a share's recipients is a Core, which is the case while no
+ *    Core subscribes to the graph yet, the author sends the share to the Cores
+ *    it is connected to as well ({@link needsHoldingCores}), as it sends
+ *    followers. A Core that hosts the graph keeps the share for the others,
+ *    who pull it from there; one that does not refuses it, and is left out of
+ *    that graph's shares for a while, unless it applied one of them lately
+ *    ({@link ShareHolderRefusals}).
  */
 
+import { createHash } from 'node:crypto';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
+import { rememberBounded } from '../bounded-map.js';
 import type { ContextGraphSub } from '../dkg-agent-types.js';
 
 /**
@@ -167,4 +176,139 @@ export function graphOwnerPeersOf(
     graphOwnerPeersByAgent.set(agent, peers);
   }
   return peers;
+}
+
+/** Connected Cores one share goes to when none of its recipients is a Core. */
+export const SHARE_HOLDER_CORES_MAX = 4;
+/** A Core that refused a share of a graph is not sent that graph's shares of the same scope for this long. */
+export const SHARE_HOLDER_REFUSAL_TTL_MS = 10 * 60_000;
+/** A Core that applied a share of a graph less than this long ago hosts the graph's shares of that scope. */
+export const SHARE_HOLDER_ACCEPT_TTL_MS = 10 * 60_000;
+/** Refusals, and apart from them accepts, remembered at most. */
+const SHARE_HOLDER_MEMORY_MAX = 1024;
+
+/**
+ * Whether a share also goes to the connected Cores: shares by an Edge into a
+ * public graph, when none of the share's recipients is a Core. Asked on "no
+ * Core", not on "no recipient": a routed owner or a follower must not keep
+ * the share from the Cores, which hold it for the members connected only to
+ * Cores.
+ */
+export function needsHoldingCores(input: {
+  readonly authorRole: 'core' | 'edge' | undefined;
+  readonly publicShare: boolean;
+  readonly recipients: readonly string[];
+  readonly isCore: (peerId: string) => boolean;
+}): boolean {
+  return (input.authorRole ?? 'edge') === 'edge'
+    && input.publicShare
+    && !input.recipients.some((peerId) => input.isCore(peerId));
+}
+
+/**
+ * The connected Cores a share goes to: not a recipient already, not one that
+ * refused the graph's share lately, at most {@link SHARE_HOLDER_CORES_MAX}.
+ * They are taken in an order fixed per graph, so that a graph's shares go to
+ * the same Cores each time while different graphs spread over the Cores.
+ */
+export function chooseHoldingCores(input: {
+  readonly contextGraphId: string;
+  readonly candidates: readonly string[];
+  readonly exclude: ReadonlySet<string>;
+  readonly refused: (peerId: string) => boolean;
+  readonly max?: number;
+}): string[] {
+  const rank = (peerId: string): string => createHash('sha256').update(`${input.contextGraphId}\0${peerId}`).digest('hex');
+  return [...new Set(input.candidates)]
+    .filter((peerId) => !input.exclude.has(peerId) && !input.refused(peerId))
+    .map((peerId) => ({ peerId, rank: rank(peerId) }))
+    .sort((left, right) => (left.rank < right.rank ? -1 : left.rank > right.rank ? 1 : 0))
+    .slice(0, input.max ?? SHARE_HOLDER_CORES_MAX)
+    .map(({ peerId }) => peerId);
+}
+
+function refusalKey(contextGraphId: string, subGraphName: string | null, peerId: string): string {
+  return `${contextGraphId}\0${subGraphName === null ? 'root' : 'named'}\0${peerId}`;
+}
+
+/**
+ * Cores that refused a share of a graph, by the scope it went to: a Core that
+ * does not host the graph refuses all of its sub-graph shares, and a Core whose
+ * catalog owns the root refuses root shares only.
+ *
+ * A refusal alone does not show which. A receiver answers every share it
+ * will never apply with the same one-byte refusal: one for a graph or scope it
+ * does not host, and one it rejects on its own merits, such as an outdated or
+ * conflicting version of an asset or another publisher's asset. Its reason
+ * stays in the receiver's log, so the sender cannot tell the two apart without
+ * a change to the protocol. So a Core that applied a share of the graph and
+ * scope within {@link SHARE_HOLDER_ACCEPT_TTL_MS} hosts them: a refusal from it
+ * is about that share alone, and the sender keeps it to that share (the share's
+ * delivery tracking drops the Core). Only a refusal from a Core with no recent
+ * accept leaves the Core out of the graph's shares of that scope, and an accept
+ * ends a refusal noted before it, as when the answers to two shares arrive out
+ * of order. What remains: the first share a Core ever gets of a graph may be
+ * refused on its merits and leave the Core out for a while, and a Core that
+ * stops hosting the graph is still sent its shares until its last accept is
+ * that old, each refusal then kept to its share.
+ *
+ * Bounded; the oldest refusal, or accept, makes room.
+ */
+export class ShareHolderRefusals {
+  readonly #now: () => number;
+  readonly #refusedAt = new Map<string, number>();
+  readonly #acceptedAt = new Map<string, number>();
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  /** The Core applied a share of the graph into this scope: it hosts them. */
+  noteAccepted(contextGraphId: string, subGraphName: string | null, peerId: string): void {
+    const key = refusalKey(contextGraphId, subGraphName, peerId);
+    this.#refusedAt.delete(key);
+    rememberBounded(this.#acceptedAt, key, this.#now(), SHARE_HOLDER_MEMORY_MAX);
+  }
+
+  /** The Core refused a share of the graph into this scope; left out only when it applied none of them lately. */
+  noteRefused(contextGraphId: string, subGraphName: string | null, peerId: string): void {
+    const key = refusalKey(contextGraphId, subGraphName, peerId);
+    if (this.#recent(this.#acceptedAt, key, SHARE_HOLDER_ACCEPT_TTL_MS)) return;
+    rememberBounded(this.#refusedAt, key, this.#now(), SHARE_HOLDER_MEMORY_MAX);
+  }
+
+  refused(contextGraphId: string, subGraphName: string | null, peerId: string): boolean {
+    return this.#recent(this.#refusedAt, refusalKey(contextGraphId, subGraphName, peerId), SHARE_HOLDER_REFUSAL_TTL_MS);
+  }
+
+  /** Refusals held; for tests. */
+  get size(): number {
+    return this.#refusedAt.size;
+  }
+
+  /** Accepts held; for tests. */
+  get acceptsHeld(): number {
+    return this.#acceptedAt.size;
+  }
+
+  /** Whether `key` was noted in `memory` less than `ttlMs` ago; an older note is forgotten. */
+  #recent(memory: Map<string, number>, key: string, ttlMs: number): boolean {
+    const at = memory.get(key);
+    if (at === undefined) return false;
+    if (this.#now() - at < ttlMs) return true;
+    memory.delete(key);
+    return false;
+  }
+}
+
+const shareHolderRefusalsByAgent = new WeakMap<object, ShareHolderRefusals>();
+
+/** The agent's memory of Cores that refused a share, created on first use (with `now`, for tests). */
+export function shareHolderRefusalsOf(agent: object, now?: () => number): ShareHolderRefusals {
+  let refusals = shareHolderRefusalsByAgent.get(agent);
+  if (refusals === undefined) {
+    refusals = new ShareHolderRefusals(now);
+    shareHolderRefusalsByAgent.set(agent, refusals);
+  }
+  return refusals;
 }

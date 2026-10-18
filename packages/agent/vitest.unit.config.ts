@@ -56,6 +56,7 @@ export default defineConfig({
       "test/swm-change-notice-wiring.test.ts",
       "test/core-hosted-sub-graph-share.test.ts",
       "test/relay-only-share-routes.test.ts",
+      "test/owed-public-shares.test.ts",
       "test/shared-memory-sync-fresh-round.test.ts",
       "test/dkg-agent-swm-target-executor-composition.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",
@@ -410,6 +411,8 @@ export default defineConfig({
       "test/swm-sender-key-peer-routes.test.ts",
       "test/swm-sender-key-overlapping-shares.test.ts",
       "test/swm-shares-through-relay.test.ts",
+      "test/swm-share-holder-cores.test.ts",
+      "test/swm-owed-public-share-wiring.test.ts",
       // #2827 — SWM authority and plaintext decisions for a joined member of a
       // public, unregistered context graph.
       "test/public-unregistered-member-swm.test.ts",

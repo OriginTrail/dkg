@@ -1505,6 +1505,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // new ones (the runtime is created lazily on first use otherwise).
     peekFinalizedAuthorityColdResolution(this)?.reopen();
     peekOnDemandAgentsPhonebook(this)?.reopen();
+    this.reopenOwedPublicSharesV1();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
     this.coreHostRecordingGeneration += 1;
