@@ -39,6 +39,8 @@ describe('exact private placement retry scheduling', () => {
     const reopened = new FinalizedPrivateRepairRetryV1(); reopened.restore(state, 0);
     expect(state.nextAttemptAtMs).toBe(3_605_000);
     expect(reopened.nextAttemptAtMs).toBe(PRIVATE_REPAIR_MAX_BACKOFF_MS);
+    expect(reopened.snapshot()).toEqual(state);
+    expect(parsePrivatePlacementFailureStateV1(reopened.snapshot())).toEqual(state);
     expect(reopened.eligible(PRIVATE_REPAIR_MAX_BACKOFF_MS - 1)).toBe(false);
     expect(reopened.eligible(PRIVATE_REPAIR_MAX_BACKOFF_MS)).toBe(true);
   });

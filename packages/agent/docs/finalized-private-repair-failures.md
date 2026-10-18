@@ -19,7 +19,12 @@ marker. These conditions require investigation or a configuration/authority
 correction; repeated signing or storage operations do not repair them. Unknown,
 store-pressure, transport, inactive-lane and unavailable-persistence conditions
 remain retryable. A real observed inactive/active lane transition can also reset
-scheduling. Public catalog reconciliation retains its existing retry policy.
+scheduling. The private-placement owner commits every affected loaded marker’s
+reset in one transaction before advancing its lane observation or generation.
+Stopping immediately afterward cannot resurrect superseded parking on restart;
+failed persistence leaves the transition pending for a later observation. First
+and last failure timestamps remain intact. Public catalog reconciliation retains
+its existing retry policy.
 
 `GET /api/status` reports the additional `failures` aggregate inside
 `rfc64Catalog.finalizedPrivatePlacementQueue`: `failedMarkers`, `parkedMarkers`,
@@ -27,7 +32,8 @@ scheduling. Public catalog reconciliation retains its existing retry policy.
 is loaded failure evidence for the supervisor's owed queue, including parked
 entries. Failure age survives restart; the existing pending-queue age remains a
 process-local observation. Wall-clock changes can affect age; a restored transient
-retry delay is capped at thirty minutes. No graph, author, KA, marker digest or
+retry delay is capped at thirty minutes in runtime scheduling; the persisted
+record and historical timestamps are preserved. No graph, author, KA, marker digest or
 raw error is exposed by the aggregate.
 
 After correcting a parked condition, a node operator can send:
@@ -45,7 +51,8 @@ rescheduled, not that placement succeeded. Retry resets its failure streak and
 cooldown, retains its first/last failure evidence, and fences older in-flight
 failures from restoring the prior schedule. An actual successful in-flight repair
 may still complete its marker. A `503` reports that scheduling was unavailable;
-markers remain owed, and a partial retry should be checked through status.
+markers remain owed. A failed reset transaction changes no marker’s scheduling
+state or in-memory generation.
 
 The migration from inventory schema 5 to 6 adds a foreign-key-cascaded diagnostic
 table only. Canonical marker bytes and digests, existing signatures, and placement
@@ -57,7 +64,8 @@ markers to start an old binary.
 
 Regression coverage includes baseline failures for excessive retries and inactive
 lane classification; exact SQLite persistence, schema migration, corrupt hints,
-restart/parking/operator retry; stale-attempt fencing; and HTTP admin scope and
+restart/parking/operator retry; lane reset followed immediately by close/reopen;
+transaction rollback when a later marker rejects a reset; stale-attempt fencing; and HTTP admin scope and
 aggregate redaction. A native node restart test exercises the real agent startup,
 owned inventory and Oxigraph paths against an inactive marker without a mocked
 repair implementation. These tests do not establish the cause of every historical

@@ -226,3 +226,87 @@ it('round-trips every declared failure kind through real SQLite and restart', as
   store.writeFailures(entries); inventories.pop()!.close(); store = await openStore(dataDir);
   for (const entry of entries) expect(store.readFailure(entry.repair)).toEqual(entry.state);
 });
+
+
+it.each(['availability', 'refused request'] as const)('persists a %s lane reset before stopping and reopening a parked marker', async transition => {
+  vi.useFakeTimers(); vi.setSystemTime(20000);
+  const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-lane-reset-')); roots.push(dataDir);
+  let store = await openStore(dataDir); await store.put(repair); store.writeFailure(repair, failure);
+  const other = { ...repair, assertionCoordinate: 'asset-2' };
+  await store.put(other); store.writeFailure(other, { ...failure, firstFailedAtMs: 2000 });
+  const ctx = createOperationContext('system');
+  let laneActive = true;
+  const attempt = vi.fn(async (row: Parameters<typeof store.delete>[0]) => { await store.delete(row); });
+  const makeOwner = () => {
+    const owner = new Rfc64SwmCatalogProjectionOwnerV1({
+      resolvePartition: () => ({ retryIntervalMs: 5000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
+      listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
+      acceptsFinalizedPrivateLane: () => laneActive, readRepairRevision: () => null,
+      listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
+      writePrivateFailures: entries => store.writeFailures(entries),
+      repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
+    });
+    owners.push(owner); return owner;
+  };
+  let owner = makeOwner(); owner.start(ctx); await owner.whenIdle();
+  expect(attempt).not.toHaveBeenCalled();
+  expect(owner.status()?.finalizedPrivatePlacement.failures?.parkedMarkers).toBe(2);
+  laneActive = false;
+  if (transition === 'availability') owner.observeLaneAvailability(repair.contextGraphId);
+  else expect(owner.requestFinalizedPrivate({ repair, ctx }).accepted).toBe(false);
+  // Stop before an attempt can replace the durable failure record.
+  await owner.close(); inventories.pop()!.close();
+  store = await openStore(dataDir);
+  expect(store.list()).toHaveLength(2);
+  expect(store.readFailure(repair)).toEqual({ ...failure, consecutiveFailures: 0,
+    sameKindFailures: 0, nextAttemptAtMs: null, parked: false });
+  expect(store.readFailure(other)).toEqual({ ...failure, firstFailedAtMs: 2000, consecutiveFailures: 0,
+    sameKindFailures: 0, nextAttemptAtMs: null, parked: false });
+  expect(attempt).not.toHaveBeenCalled();
+  laneActive = true;
+  owner = makeOwner(); owner.start(ctx); await owner.whenIdle();
+  expect(attempt).toHaveBeenCalledTimes(2);
+  expect(store.list()).toEqual([]);
+});
+
+
+it('keeps all lane observations unchanged when SQLite rejects the reset batch, then retries the same edge', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  vi.useFakeTimers(); vi.setSystemTime(20000);
+  const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-lane-rollback-')); roots.push(dataDir);
+  const store = await openStore(dataDir);
+  const other = { ...repair, assertionCoordinate: 'asset-2' };
+  await store.put(repair); await store.put(other);
+  store.writeFailure(repair, failure); store.writeFailure(other, { ...failure, firstFailedAtMs: 2000 });
+  let laneActive = true;
+  const attempt = vi.fn(async () => {});
+  const owner = new Rfc64SwmCatalogProjectionOwnerV1({
+    resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
+    listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
+    acceptsFinalizedPrivateLane: () => laneActive, readRepairRevision: () => null,
+    listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
+    writePrivateFailures: entries => store.writeFailures(entries),
+    repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
+  });
+  owners.push(owner); owner.start(createOperationContext('system')); await owner.whenIdle();
+  const db = new DatabaseSync(join(dataDir, 'rfc64-sync', 'inventory-v1.sqlite3'));
+  try {
+    const canonical = db.prepare('SELECT repair_digest, repair_json FROM rfc64_finalized_private_placement_repairs_v1 ORDER BY repair_digest').all();
+    db.exec(`CREATE TRIGGER reject_lane_reset BEFORE UPDATE ON rfc64_private_placement_failures_v1
+      WHEN OLD.repair_digest = (SELECT repair_digest FROM rfc64_finalized_private_placement_repairs_v1
+        ORDER BY repair_digest LIMIT 1 OFFSET 1)
+      BEGIN SELECT RAISE(ABORT, 'lane reset rejected'); END;`);
+    laneActive = false; owner.observeLaneAvailability(repair.contextGraphId);
+    expect(store.readFailure(repair)).toEqual(failure);
+    expect(store.readFailure(other)).toEqual({ ...failure, firstFailedAtMs: 2000 });
+    expect(owner.status()?.finalizedPrivatePlacement.failures).toMatchObject({ parkedMarkers: 2, maxConsecutiveFailures: 3 });
+    db.exec('DROP TRIGGER reject_lane_reset');
+    // No intervening activation: persistence failure must not consume the edge.
+    owner.observeLaneAvailability(repair.contextGraphId);
+    expect(owner.status()?.finalizedPrivatePlacement.failures).toMatchObject({ parkedMarkers: 0, maxConsecutiveFailures: 0 });
+    expect(store.readFailure(repair)).toMatchObject({ parked: false, firstFailedAtMs: 1000, lastFailedAtMs: 16000 });
+    expect(store.readFailure(other)).toMatchObject({ parked: false, firstFailedAtMs: 2000, lastFailedAtMs: 16000 });
+    expect(db.prepare('SELECT repair_digest, repair_json FROM rfc64_finalized_private_placement_repairs_v1 ORDER BY repair_digest').all()).toEqual(canonical);
+    expect(attempt).not.toHaveBeenCalled();
+  } finally { db.close(); }
+});
