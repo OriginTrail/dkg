@@ -18,6 +18,12 @@ interface RetryEntry {
   readonly retry: FinalizedPrivateRepairRetryV1;
   attempts: number;
 }
+interface GraphLane {
+  readonly id: ContextGraphIdV1;
+  readonly entries: Set<RetryEntry>;
+  active: boolean | undefined;
+  resetPending: boolean;
+}
 interface Dependencies {
   listFinalizedPrivateRepairs(): readonly Rfc64FinalizedPrivatePlacementRepairV1[];
   acceptsFinalizedPrivateLane(graph: ContextGraphIdV1): boolean;
@@ -43,6 +49,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
   readonly #dependencies: Dependencies;
   readonly #options: Options;
   readonly #retries = new Map<string, RetryEntry>();
+  readonly #lanes = new Map<string, GraphLane>();
   readonly #waiters = new FinalizedPrivatePlacementWaitersV1();
   readonly #runner: NextTurnRecurringTaskV1;
   #waiterTimer: ReturnType<typeof setTimeout> | undefined;
@@ -76,12 +83,10 @@ export class FinalizedPrivatePlacementOwnerV1 {
   /** Observe an inactive edge without admitting a placement. */
   observeLaneAvailability(contextGraphId: string): void {
     if (this.closed) return;
-    const entries = [...this.#retries.values()].filter(entry => entry.repair.contextGraphId === contextGraphId);
-    if (!entries.length) return;
+    const lane = this.#lanes.get(contextGraphId);
+    if (!lane) return;
     try {
-      if (!this.#dependencies.acceptsFinalizedPrivateLane(entries[0].repair.contextGraphId)) {
-        this.#transitionLane(entries, false);
-      }
+      if (!this.#dependencies.acceptsFinalizedPrivateLane(lane.id)) this.#transitionLane(lane.id, false);
     } catch (error) { this.#warn('catalog_private_repair_lane_reset_failed', error); }
   }
 
@@ -100,8 +105,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
       if (!laneAccepts && this.#options.retryIntervalMs > 0) this.#runner.schedule(this.#options.retryIntervalMs);
     }
     if (!laneAccepts) {
-      try { this.#transitionLane([...this.#retries.values()].filter(entry =>
-        entry.repair.contextGraphId === repair.contextGraphId), false); }
+      try { this.#transitionLane(repair.contextGraphId, false); }
       catch (error) { this.#warn('catalog_private_repair_lane_reset_failed', error); }
       return rejected();
     }
@@ -138,6 +142,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
     await this.#runner.close();
     this.#waiters.releaseAll();
     this.#retries.clear();
+    this.#lanes.clear();
   }
 
   #entry(repair: Rfc64FinalizedPrivatePlacementRepairV1): RetryEntry {
@@ -148,32 +153,55 @@ export class FinalizedPrivatePlacementOwnerV1 {
       try { entry.retry.restore(this.#dependencies.readPrivateFailure(repair), Date.now()); }
       catch { /* Unavailable hints cannot park owed work. */ }
       this.#retries.set(key, entry);
+      let lane = this.#lanes.get(repair.contextGraphId);
+      if (!lane) {
+        lane = { id: repair.contextGraphId, entries: new Set(), active: undefined, resetPending: false };
+        this.#lanes.set(repair.contextGraphId, lane);
+      }
+      lane.entries.add(entry);
     }
     return entry;
   }
 
-  #transitionLane(entries: readonly RetryEntry[], active: boolean): boolean {
-    const changed = entries.filter(entry => entry.retry.laneChanged(active));
-    const resets = changed.flatMap(entry => {
-      const previous = entry.retry.snapshot();
-      return previous ? [{ repair: entry.repair, state: resetPrivatePlacementFailureStateV1(previous) }] : [];
-    });
-    if (resets.length) this.#dependencies.writePrivateFailures(resets);
-    // Failed persistence leaves the old lane observation intact for the next pass.
-    const byKey = new Map(resets.map(({ repair, state }) => [finalizedPrivateRepairKeyV1(repair), state]));
-    for (const entry of entries) entry.retry.observeLane(active, byKey.get(finalizedPrivateRepairKeyV1(entry.repair)) ?? null);
-    return changed.length > 0;
+  #forget(key: string): void {
+    const entry = this.#retries.get(key);
+    if (!entry) return;
+    this.#retries.delete(key);
+    const lane = this.#lanes.get(entry.repair.contextGraphId)!;
+    lane.entries.delete(entry);
+    if (!lane.entries.size) this.#lanes.delete(lane.id);
   }
 
-  #observeLane(entry: RetryEntry): boolean {
+  #transitionLane(contextGraphId: ContextGraphIdV1, active: boolean): boolean {
+    const lane = this.#lanes.get(contextGraphId);
+    if (!lane) return false;
+    if (lane.active === undefined) { lane.active = active; return false; }
+    // A failed write cannot consume the observed edge, even if the lane returns
+    // to its committed state before storage recovers.
+    lane.resetPending ||= lane.active !== active;
+    if (!lane.resetPending) return false;
+    const resets = [...lane.entries].map(entry => {
+      const previous = entry.retry.snapshot();
+      return { entry, state: previous ? resetPrivatePlacementFailureStateV1(previous) : null };
+    });
+    const writes = resets.flatMap(({ entry, state }) => state ? [{ repair: entry.repair, state }] : []);
+    if (writes.length) this.#dependencies.writePrivateFailures(writes);
+    for (const { entry, state } of resets) entry.retry.retryNow(state);
+    lane.active = active;
+    lane.resetPending = false;
+    return true;
+  }
+
+  #observeLane(contextGraphId: ContextGraphIdV1): boolean {
     let active: boolean;
-    try { active = this.#dependencies.acceptsFinalizedPrivateLane(entry.repair.contextGraphId); }
-    catch { return false; }
-    if (!entry.retry.laneChanged(active)) return entry.retry.observeLane(active);
-    // Only an actual edge scans siblings; ordinary admission stays linear in the queue.
-    // The lane belongs to the graph, so all loaded markers cross the same durable boundary.
-    return this.#transitionLane([...this.#retries.values()].filter(candidate =>
-      candidate.repair.contextGraphId === entry.repair.contextGraphId), active);
+    try { active = this.#dependencies.acceptsFinalizedPrivateLane(contextGraphId); }
+    catch (error) {
+      // An uncertain lane cannot authorize admission or let an old completion
+      // overwrite the still-uncommitted reset obligation.
+      if (this.#lanes.get(contextGraphId)?.resetPending) throw error;
+      return false;
+    }
+    return this.#transitionLane(contextGraphId, active);
   }
 
   async #runPass(signal: AbortSignal): Promise<void> {
@@ -181,14 +209,17 @@ export class FinalizedPrivatePlacementOwnerV1 {
     const currentKeys = new Set(repairs.map(finalizedPrivateRepairKeyV1));
     const timing = this.#options.timing();
     timing.passStarted(currentKeys);
-    for (const key of this.#retries.keys()) if (!currentKeys.has(key)) this.#retries.delete(key);
+    // Establish every queued sibling before the first awaited placement. A lane
+    // notification during that attempt must also reset later parked siblings.
+    for (const repair of repairs) this.#entry(repair);
+    for (const key of this.#retries.keys()) if (!currentKeys.has(key)) this.#forget(key);
     for (const key of this.#waiters.keys()) if (!currentKeys.has(key)) this.#waiters.release(key);
     this.#options.fullCatalogs.passStarted(currentKeys);
     await mapWithConcurrency(repairs, 1, async repair => {
       if (signal.aborted) return;
       const key = finalizedPrivateRepairKeyV1(repair);
       const entry = this.#entry(repair);
-      this.#observeLane(entry);
+      this.#observeLane(repair.contextGraphId);
       // Capacity still owns admission and wakeups, even after a durable scheduling reset.
       if (this.#options.fullCatalogs.park(key, repair)) return this.#waiters.release(key);
       if (entry.retry.parked) { this.#waiters.release(key); return; }
@@ -202,11 +233,11 @@ export class FinalizedPrivatePlacementOwnerV1 {
         if (!this.#dependencies.acceptsFinalizedPrivateLane(repair.contextGraphId)) throw new CatalogRepairLaneInactiveErrorV1();
         await withDefaultStoreWorkPriority('background', () => this.#dependencies.repairFinalizedPrivatePlacement(repair, placement.attempt));
         placement.end('completed');
-        this.#retries.delete(key);
+        this.#forget(key);
       } catch (error) {
         placement.end('failed');
         if (!signal.aborted) {
-          if (this.#observeLane(entry)) this.#runner.request();
+          if (this.#observeLane(repair.contextGraphId)) this.#runner.request();
           if (attemptGeneration !== entry.retry.generation) return;
           const capacityOwned = this.#options.fullCatalogs.placementRefused(key, repair, error);
           const recorded = capacityOwned

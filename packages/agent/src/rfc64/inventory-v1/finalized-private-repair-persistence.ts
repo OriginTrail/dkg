@@ -160,13 +160,11 @@ export class FinalizedPrivateRepairPersistenceV1 {
     const write = () => {
       for (const { digest, json } of rows) {
         if (json === null) {
-          const remove = this.host.prepare('DELETE FROM rfc64_private_placement_failures_v1 WHERE repair_digest = :digest');
+          const remove = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.deleteFinalizedPrivatePlacementFailure);
           this.host.statement(() => remove.run({ digest }));
         } else {
           // INSERT-SELECT cannot resurrect a completed marker. The FK cleans up successful deletion.
-          const save = this.host.prepare(`INSERT INTO rfc64_private_placement_failures_v1 (repair_digest, state_json)
-            SELECT repair_digest, :json FROM rfc64_finalized_private_placement_repairs_v1 WHERE repair_digest = :digest
-            ON CONFLICT(repair_digest) DO UPDATE SET state_json = excluded.state_json`);
+          const save = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.upsertFinalizedPrivatePlacementFailure);
           this.host.statement(() => save.run({ digest, json }));
         }
       }
@@ -179,7 +177,7 @@ export class FinalizedPrivateRepairPersistenceV1 {
   }
 
   private readFailure(digest: Uint8Array): PrivatePlacementFailureStateV1 | null {
-    const query = this.host.prepare('SELECT state_json FROM rfc64_private_placement_failures_v1 WHERE repair_digest = :digest');
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getFinalizedPrivatePlacementFailure);
     const row = this.host.statement(() => query.get({ digest })) as SqlRowV1 | undefined;
     if (!row) return null;
     // A damaged diagnostic never authorizes a transition or parks an owed repair.

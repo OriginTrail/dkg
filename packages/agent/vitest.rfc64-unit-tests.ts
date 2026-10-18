@@ -2,6 +2,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-private-placement-restart.integration.test.ts",
   "test/rfc64-catalog-repair-backoff.test.ts",
   "test/finalized-private-repair-retry.test.ts",
+  "test/finalized-private-placement-owner-lanes.test.ts",
   "test/rfc64-catalog-repair-pressure.test.ts",
   "test/rfc64-catalog-repair-diagnostics.test.ts",
   // #3134 — a full author catalog refuses a new asset once, visibly, and is not retried on a timer.

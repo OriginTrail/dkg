@@ -22,8 +22,11 @@ remain retryable. A real observed inactive/active lane transition can also reset
 scheduling. The private-placement owner commits every affected loaded marker’s
 reset in one transaction before advancing its lane observation or generation.
 Stopping immediately afterward cannot resurrect superseded parking on restart;
-failed persistence leaves the transition pending for a later observation. First
-and last failure timestamps remain intact. Public catalog reconciliation retains
+failed persistence leaves a graph-owned reset pending even if the lane reactivates
+before storage recovers. The pass loads all queued siblings before awaiting any
+placement; no affected repair passes an uncommitted reset. An unavailable authority
+lookup also preserves that obligation. First and last failure timestamps remain
+intact. Public catalog reconciliation retains
 its existing retry policy.
 
 `GET /api/status` reports the additional `failures` aggregate inside
@@ -65,7 +68,8 @@ markers to start an old binary.
 Regression coverage includes baseline failures for excessive retries and inactive
 lane classification; exact SQLite persistence, schema migration, corrupt hints,
 restart/parking/operator retry; lane reset followed immediately by close/reopen;
-transaction rollback when a later marker rejects a reset; stale-attempt fencing; and HTTP admin scope and
+transaction rollback when a later marker rejects a reset; failed reset followed by
+reactivation, changing sibling membership, stale-attempt fencing; and HTTP admin scope and
 aggregate redaction. A native node restart test exercises the real agent startup,
 owned inventory and Oxigraph paths against an inactive marker without a mocked
 repair implementation. These tests do not establish the cause of every historical

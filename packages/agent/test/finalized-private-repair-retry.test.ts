@@ -5,7 +5,6 @@ import { PRIVATE_REPAIR_MAX_BACKOFF_MS, parsePrivatePlacementFailureStateV1 } fr
 describe('exact private placement retry scheduling', () => {
   it('parks repeated deterministic failures and fences a stale failure after operator retry', () => {
     const retry = new FinalizedPrivateRepairRetryV1();
-    retry.observeLane(true);
     for (const now of [1000, 6000, 16000]) expect(retry.fail(0, now, 5000, 'signer_mismatch')).toBe(true);
     expect(retry.parked).toBe(true); expect(retry.eligible(1e9)).toBe(false);
     const state = retry.snapshot(); expect(state).toMatchObject({ firstFailedAtMs: 1000, sameKindFailures: 3 });

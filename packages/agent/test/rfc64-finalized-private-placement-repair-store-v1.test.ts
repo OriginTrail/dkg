@@ -310,3 +310,62 @@ it('keeps all lane observations unchanged when SQLite rejects the reset batch, t
     expect(attempt).not.toHaveBeenCalled();
   } finally { db.close(); }
 });
+
+it.each(['availability', 'refused request'] as const)(
+  'retains a failed %s reset across reactivation and commits every sibling reset before repair admission', async transition => {
+    const { DatabaseSync } = await import('node:sqlite');
+    vi.useFakeTimers(); vi.setSystemTime(20000);
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-lane-reactivation-')); roots.push(dataDir);
+    const store = await openStore(dataDir);
+    const other = { ...repair, assertionCoordinate: 'asset-2' };
+    await store.put(repair); await store.put(other);
+    store.writeFailure(repair, failure); store.writeFailure(other, { ...failure, firstFailedAtMs: 2000 });
+    let laneActive = true;
+    const snapshots: Array<ReturnType<typeof store.readFailure>[]> = [];
+    const markerBytes: unknown[] = [];
+    const db = new DatabaseSync(join(dataDir, 'rfc64-sync', 'inventory-v1.sqlite3'));
+    const canonical = () => db.prepare('SELECT repair_digest, repair_json FROM rfc64_finalized_private_placement_repairs_v1 ORDER BY repair_digest').all();
+    const attempt = vi.fn(async (row: typeof repair) => {
+      snapshots.push(store.list().map(item => store.readFailure(item)));
+      markerBytes.push(canonical());
+      await store.delete(row);
+    });
+    const owner = new Rfc64SwmCatalogProjectionOwnerV1({
+      resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
+      listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
+      acceptsFinalizedPrivateLane: () => laneActive, readRepairRevision: () => null,
+      listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
+      writePrivateFailures: entries => store.writeFailures(entries),
+      repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
+    });
+    owners.push(owner);
+    const ctx = createOperationContext('system');
+    try {
+      owner.start(ctx); await owner.whenIdle();
+      expect(attempt).not.toHaveBeenCalled(); // Initial active observation preserves parked evidence.
+      const originalBytes = canonical();
+      db.exec(`CREATE TRIGGER reject_reactivation_reset BEFORE UPDATE ON rfc64_private_placement_failures_v1
+        WHEN OLD.repair_digest = (SELECT repair_digest FROM rfc64_finalized_private_placement_repairs_v1
+          ORDER BY repair_digest LIMIT 1 OFFSET 1)
+        BEGIN SELECT RAISE(ABORT, 'reactivation reset rejected'); END;`);
+      laneActive = false;
+      if (transition === 'availability') owner.observeLaneAvailability(repair.contextGraphId);
+      else expect(owner.requestFinalizedPrivate({ repair, ctx }).accepted).toBe(false);
+      laneActive = true;
+      owner.start(ctx); await owner.whenIdle();
+      expect(attempt).not.toHaveBeenCalled(); // Persistence still fails: no new generation is admitted.
+      expect(store.readFailure(repair)).toEqual(failure);
+      expect(store.readFailure(other)).toEqual({ ...failure, firstFailedAtMs: 2000 });
+      expect(canonical()).toEqual(originalBytes);
+      db.exec('DROP TRIGGER reject_reactivation_reset');
+      owner.start(ctx); await owner.whenIdle(); // The same active lane must still retry the pending reset.
+      expect(attempt).toHaveBeenCalledTimes(2);
+      expect(markerBytes[0]).toEqual(originalBytes);
+      expect(snapshots[0]).toHaveLength(2);
+      expect(snapshots[0]).toEqual(expect.arrayContaining([1000, 2000].map(firstFailedAtMs => ({
+        ...failure, firstFailedAtMs, consecutiveFailures: 0, sameKindFailures: 0, parked: false,
+      }))));
+      expect(store.list()).toEqual([]);
+    } finally { db.close(); }
+  },
+);
