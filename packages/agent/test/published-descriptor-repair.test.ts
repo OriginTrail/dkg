@@ -109,6 +109,45 @@ describe('targeted published descriptor repair', () => {
     expect(await h.all()).toEqual(before);
   });
 
+  it.each(['binding', 'receipt-root', 'receipt-controls'].flatMap(phase => [false, true].map(rejectSibling => ({ phase, rejectSibling }))))(
+    'retains backpressure after $phase fails until its sibling settles (reject=$rejectSibling)', async ({ phase, rejectSibling }) => {
+    const h = await fixture(); const before = await h.all();
+    const deadline = new AbortController(); vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    let release!: () => void;
+    const held = new Promise<void>((resolve, reject) => { release = () => rejectSibling ? reject(new Error('sibling failed')) : resolve(); });
+    const failure = new Error('parallel proof unavailable');
+    if (phase === 'binding') {
+      vi.spyOn(h.host, 'getContextGraphOnChainId').mockRejectedValueOnce(failure);
+      h.chain.getKAContextGraphId.mockImplementationOnce(async () => { await held; return 1n; });
+    } else {
+      h.chain.resolveCanonicalFinalizationReceipt.mockRejectedValueOnce(failure);
+      if (phase === 'receipt-root') {
+        h.chain.getMerkleRootCount.mockImplementationOnce(async () => { await held; return 1n; });
+      } else {
+        const query = h.store.query.bind(h.store); let stalled = false;
+        vi.spyOn(h.store, 'query').mockImplementation(async (sparql, options) => {
+          if (!stalled && options?.source === 'agent.finalization.recoverReceiptBackedEvidence.controls') {
+            stalled = true; await held;
+          }
+          return query(sparql, options);
+        });
+      }
+    }
+    const writer = vi.spyOn(h.host, 'stampPublishedLifecycle');
+    try {
+      await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false })).rejects.toThrow(failure.message);
+      await expect(repairPublishedDescriptor(h.host, h.input)).rejects.toMatchObject({ code: 'KA_DESCRIPTOR_REPAIR_BUSY' });
+      deadline.abort();
+      await expect(repairPublishedDescriptor(h.host, h.input)).rejects.toMatchObject({ code: 'KA_DESCRIPTOR_REPAIR_BUSY' });
+      expect(writer).not.toHaveBeenCalled(); expect(await h.all()).toEqual(before);
+    } finally { release(); }
+    vi.mocked(AbortSignal.timeout).mockReturnValue(new AbortController().signal);
+    await vi.waitFor(async () => {
+      await expect(repairPublishedDescriptor(h.host, h.input)).resolves.toMatchObject({ status: 'verified' });
+    });
+    expect(writer).not.toHaveBeenCalled(); expect(await h.all()).toEqual(before);
+  });
+
   it('awaits an entered mutation even if the read deadline expires', async () => {
     const h = await fixture(); const deadline = new AbortController();
     vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);

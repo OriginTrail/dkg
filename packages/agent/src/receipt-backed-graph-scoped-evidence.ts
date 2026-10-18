@@ -30,6 +30,8 @@ export type ReceiptBackedGraphScopedAssertion = Pick<
 
 export interface RecoverReceiptBackedGraphScopedEvidenceInput {
   store: TripleStore;
+  /** Observe concurrent proof reads so a caller can retain backpressure after fail-fast rejection. */
+  onReadStarted?: (read: Promise<unknown>) => void;
   chain?: ChainAdapter;
   contextGraphId: string;
   scope: { ual: string; assertionVersion: string };
@@ -125,24 +127,28 @@ export async function recoverReceiptBackedGraphScopedEvidence(
   }
   const { transactionHash } = receiptProvenance;
 
+  const trackRead = <T>(read: Promise<T>): Promise<T> => {
+    input.onReadStarted?.(read);
+    return read;
+  };
   try {
     const [receiptAuthority, rootCount, trustedControls] = await Promise.all([
       assertionVersion === 1n
-        ? publishResolver!.call(input.chain, transactionHash)
-        : updateVerifier!.call(
+        ? trackRead(publishResolver!.call(input.chain, transactionHash))
+        : trackRead(updateVerifier!.call(
             input.chain,
             transactionHash,
             input.kaId,
             input.publisherAddress,
-          ),
-      rootCountReader.call(input.chain, input.kaId),
-      readLocallyTrustedKnowledgeAssetControlEnvelope(
+          )),
+      trackRead(rootCountReader.call(input.chain, input.kaId)),
+      trackRead(readLocallyTrustedKnowledgeAssetControlEnvelope(
         input.store,
         metaGraph,
         input.scope.ual,
         anchorQuads(input),
         { source: 'agent.finalization.recoverReceiptBackedEvidence.controls' },
-      ),
+      )),
     ]);
     if (rootCount !== assertionVersion) {
       return { status: 'unavailable', reason: 'canonical receipt or target assertion root is unavailable' };

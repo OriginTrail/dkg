@@ -40,6 +40,16 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
   active.add(host.store);
   let abandonedRead: Promise<unknown> | undefined;
   let writeEntered = false;
+  const reads = new Set<Promise<unknown>>();
+  const trackRead = <T>(read: Promise<T>): Promise<T> => {
+    reads.add(read);
+    void read.then(() => reads.delete(read), () => reads.delete(read));
+    return read;
+  };
+  const releaseAfterReads = () => {
+    if (reads.size) void Promise.allSettled(reads).then(() => active.delete(host.store));
+    else active.delete(host.store);
+  };
   try {
     const scope = createGraphKnowledgeAssetScope(input.kaUal, '1');
     if (scope.chainId !== host.chain.chainId) return refuse('UAL belongs to another chain');
@@ -56,8 +66,8 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
           return refuse('current chain version or author is unavailable');
         }
         const [cg, boundCg] = await Promise.all([
-          host.getContextGraphOnChainId(input.contextGraphId, { signal }),
-          host.chain.getKAContextGraphId?.(kaId, { signal }),
+          trackRead(host.getContextGraphOnChainId(input.contextGraphId, { signal })),
+          trackRead(Promise.resolve(host.chain.getKAContextGraphId?.(kaId, { signal }))),
         ]);
         if (!cg || boundCg === undefined || BigInt(cg) !== boundCg) return refuse('context graph binding does not match');
         const vm = await resolveConfirmedGraphScopedVm(host.store, {
@@ -66,7 +76,7 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
         });
         if (vm.status !== 'verified') return refuse('exact confirmed VM content or metadata does not match');
         const receipt = await recoverReceiptBackedGraphScopedEvidence({
-          store: host.store, chain: host.chain, contextGraphId: input.contextGraphId, scope: vm.scope,
+          store: host.store, chain: host.chain, onReadStarted: trackRead, contextGraphId: input.contextGraphId, scope: vm.scope,
           head: { kaUal: scope.ual, assertionVersion: vm.scope.assertionVersion,
             publicQuadsDigest: vm.publicQuadsDigest, publicTripleCount: vm.envelope.publicTripleCount,
             privateTripleCount: vm.envelope.privateTripleCount,
@@ -118,8 +128,9 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
     abandonedRead = work;
     return refuse('verification deadline exceeded');
   } finally {
-    // A timed-out read cannot mutate. Keep backpressure until even its underlying reads settle.
-    if (abandonedRead) void abandonedRead.then(() => active.delete(host.store), () => active.delete(host.store));
-    else active.delete(host.store);
+    // Fail-fast parallel reads can outlive work even without a timeout. If work
+    // timed out, wait for it first so reads it starts later are included too.
+    if (abandonedRead) void abandonedRead.then(releaseAfterReads, releaseAfterReads);
+    else releaseAfterReads();
   }
 }
