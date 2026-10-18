@@ -78,7 +78,13 @@ describe('caller-owned private access bounds', () => {
       controller.abort(reason);
       await vi.waitFor(() => expect(outcome).toBe(reason), { timeout: 150 });
       expect(send).not.toHaveBeenCalled();
-    } finally { release(new Uint8Array(64)); await request; }
+    } finally {
+      release(new Uint8Array(64));
+      await request;
+      // The caller already settled on cancellation. Let the abandoned signing
+      // continuation finish before checking that it did not invoke transport.
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
     expect(send).not.toHaveBeenCalled();
   });
 

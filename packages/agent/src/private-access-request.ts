@@ -2,8 +2,9 @@ import { peerIdFromString } from '@libp2p/peer-id';
 import {
   parseDeterministicKnowledgeAssetUal,
   startRequestAbortLifecycle,
+  type Ed25519Keypair,
 } from '@origintrail-official/dkg-core';
-import { RequestOwnedAccessClient, accessError } from '@origintrail-official/dkg-publisher';
+import { RequestOwnedAccessClient, accessError, type RequestOwnedAccessSendSurface } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from './dkg-agent.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -20,7 +21,12 @@ export type PrivateAccessResponse =
   | { granted: false; quads: []; storedInGraph: false;
       verification: { kind: 'not-checked'; matches: false; chainAnchored: false } };
 
-type Owner = Pick<DKGAgent, 'messenger' | 'wallet' | 'peerId' | 'node'>;
+type Owner = {
+  messenger: RequestOwnedAccessSendSurface;
+  wallet: { keypair: Ed25519Keypair };
+  peerId: string;
+  node: { readonly stopSignal: AbortSignal | undefined };
+};
 const running = new WeakSet<Owner>();
 const TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;

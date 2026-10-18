@@ -1,4 +1,5 @@
 import type { PrivateAccessResponse } from '../src/private-access-request.js';
+import type { requestOwnedPrivateAccess } from '../src/private-access-request.js';
 
 declare const response: PrivateAccessResponse;
 if (response.granted) {
@@ -51,6 +52,10 @@ const durableTransport: RequestOwnedAccessSendSurface = {
   sendRequestOwned: messenger.sendReliable.bind(messenger),
 };
 void [ownedTransport, durableTransport];
+const minimalOwner: Parameters<typeof requestOwnedPrivateAccess>[0] = {
+  messenger: ownedTransport, wallet: { keypair }, peerId: 'peer', node: { stopSignal: new AbortController().signal },
+};
+void minimalOwner;
 
 type OwnedAccessResult = Awaited<ReturnType<RequestOwnedAccessClient['requestAccess']>>;
 declare const ownedResult: OwnedAccessResult;

@@ -62,7 +62,9 @@ describe('manual private access over real local peers', () => {
       verification: { kind: 'peer-root-self-check', matches: true, chainAnchored: false },
       quads: payload,
     });
-    const rows = await allowed.store.query('SELECT ?s WHERE { GRAPH ?g { ?s <urn:value> "private" } }');
+    const rows = await allowed.store.query(`SELECT ?s WHERE {
+      { ?s <urn:value> "private" } UNION { GRAPH ?g { ?s <urn:value> "private" } }
+    }`);
     expect(rows).toMatchObject({ type: 'bindings', bindings: [] });
     expect(allowed.getMessengerOutboxStats()).toMatchObject({ queuedEntries: 0 });
   });

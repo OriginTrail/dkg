@@ -14,8 +14,8 @@ async function fixture(response = good) {
   const stop = new AbortController();
   const sendRequestOwned = vi.fn(async () => ({ delivered: true as const, response, attempts: 1, messageId: 'owned' }));
   const owner = { peerId: PEER, wallet: { keypair: await generateEd25519Keypair() },
-    node: { stopSignal: stop.signal }, messenger: { sendRequestOwned } };
-  return { owner: owner as unknown as Parameters<typeof requestOwnedPrivateAccess>[0], stop, sendRequestOwned };
+    node: { stopSignal: stop.signal }, messenger: { sendRequestOwned } } satisfies Parameters<typeof requestOwnedPrivateAccess>[0];
+  return { owner, stop, sendRequestOwned };
 }
 afterEach(() => vi.useRealTimers());
 
