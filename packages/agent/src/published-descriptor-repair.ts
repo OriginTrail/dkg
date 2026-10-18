@@ -101,7 +101,7 @@ export async function repairPublishedDescriptor(host: RepairHost, input: Publish
         writeEntered = true;
         await host.stampPublishedLifecycle({ contextGraphId: input.contextGraphId, name: input.name,
           agentAddress: verified.author, subGraphName: input.subGraphName,
-          publishedUal: scope.ual, merkleRoot: verified.root, packedKaId: kaId });
+          publishedUal: scope.ual, merkleRoot: verified.root, packedKaId: kaId, preserveVerifiedVmProof: true });
       }
       return { status: input.dryRun === false ? 'repaired' as const : 'verified' as const,
         ...verified, kaUal: scope.ual };

@@ -4948,6 +4948,7 @@ export class PublishMethods extends DKGAgentBase {
     publishedUal: string,
     packedKaId?: bigint,
     merkleRoot: string = request.sealMerkleRoot,
+    preserveVerifiedVmProof = false,
   ): Promise<void> {
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     await this.publishedNamedKaVmLifecycleWriter({
@@ -4958,6 +4959,7 @@ export class PublishMethods extends DKGAgentBase {
       publishedUal,
       merkleRoot,
       packedKaId,
+      ...(preserveVerifiedVmProof ? { preserveVerifiedVmProof: true } : {}),
     });
   }
 
@@ -4988,7 +4990,7 @@ export class PublishMethods extends DKGAgentBase {
   async _resolveRecoveredKnowledgeAssetVmLifecycleAuthor(
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
-  ): Promise<string | false> {
+  ): Promise<{ author: string; incomplete: boolean } | false> {
     const bareRoot = (value?: string | null): string | undefined => {
       const trimmed = value?.trim().toLowerCase();
       if (!trimmed) return undefined;
@@ -4999,7 +5001,10 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress,
       ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     });
-    if (!history) return incompleteNamedKaLifecycleAuthor(this.store, request, agentAddress);
+    if (!history) return {
+      author: await incompleteNamedKaLifecycleAuthor(this.store, request, agentAddress, { requireCompatibleVmProjection: true }),
+      incomplete: true,
+    };
 
     const queuedSeal = bareRoot(request.sealMerkleRoot);
     const queuedWm = bareRoot(request.wmCurrentAssertion) ?? queuedSeal;
@@ -5032,7 +5037,7 @@ export class PublishMethods extends DKGAgentBase {
     if (history.reservedUal && request.reservedUal && history.reservedUal !== request.reservedUal) {
       return false;
     }
-    return history.agentAddress;
+    return { author: history.agentAddress, incomplete: false };
   }
 
   async finalizeRecoveredQueuedKnowledgeAssetVmPublish(
@@ -5271,8 +5276,8 @@ export class PublishMethods extends DKGAgentBase {
         const lifecycleAuthor = await this._resolveRecoveredKnowledgeAssetVmLifecycleAuthor(request);
         if (lifecycleAuthor) {
           await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
-            { ...request, agentAddress: lifecycleAuthor }, recovered.localUal,
-            recovered.reservedKaId, recovered.materialization.merkleRoot,
+            { ...request, agentAddress: lifecycleAuthor.author }, recovered.localUal,
+            recovered.reservedKaId, recovered.materialization.merkleRoot, lifecycleAuthor.incomplete,
           );
         } else {
           this.log.info(ctx, `Recovered receipt for "${request.name}" without lifecycle stamping because `

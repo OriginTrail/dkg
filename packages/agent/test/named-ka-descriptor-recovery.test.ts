@@ -57,16 +57,29 @@ describe('confirmed named KA descriptor recovery [#3362]', () => {
       await queue.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
       await queue.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: 'wallet', operationKind: 'create' } });
       // A second transient failure must retain the same tx-bearing owner.
-      const update = store.update.bind(store);
-      const repairFault = vi.spyOn(store, 'update').mockImplementation(async (query, options) => {
-        if (options?.source === 'agent.publish.namedKaVmLifecycle') throw new Error('repair temporarily unavailable');
-        return update(query, options);
+      // Force the supported ordered fallback. Arm the original destructive-proof fault;
+      // an incomplete repair must never reach either deletion, even on repeated attempts.
+      (agent as any).publishedNamedKaVmLifecycleWriter = (input: Parameters<typeof applyPublishedNamedKaVmLifecycle>[1]) =>
+        applyPublishedNamedKaVmLifecycle(store, input);
+      const remove = store.deleteByPatternWithoutCount.bind(store);
+      let proofDeletes = 0;
+      vi.spyOn(store, 'deleteByPatternWithoutCount').mockImplementation(async pattern => {
+        await remove(pattern);
+        if (pattern.subject === subject && ['vmCurrentAssertion', 'memoryLayer'].some(p => pattern.predicate === DKG + p)) {
+          proofDeletes++; throw new Error('failure after required recovery proof deletion');
+        }
+      });
+      const repairFault = vi.spyOn(store, 'insert').mockImplementation(async quads => {
+        if (quads.some(q => q.predicate === DKG + 'state')) throw new Error('repair temporarily unavailable');
+        return insert(quads);
       });
       expect(await queue.recover()).toBe(0);
       expect((await queue.getStatus(jobId))?.status).toBe('broadcast');
+      expect(proofDeletes).toBe(0);
       repairFault.mockRestore();
       expect(await queue.recover()).toBe(1);
       expect((await queue.getStatus(jobId))?.status).toBe('finalized');
+      expect(proofDeletes).toBe(0);
       const descriptor = await agent.assertion.history(request.contextGraphId, request.name, { agentAddress: AUTHOR });
       expect(descriptor).toMatchObject({ state: 'published', kaNumber: '402', publishedUal: request.kaUal,
         vmCurrentAssertion: request.sealMerkleRoot.slice(2) });

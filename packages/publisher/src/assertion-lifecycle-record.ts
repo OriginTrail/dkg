@@ -63,6 +63,7 @@ export async function readAssertionLifecycleCandidates(
 ): Promise<Array<{ author: string; subject: string; record: AssertionLifecycleRecord }>> {
   const candidates = assertionLifecycleAuthorCandidates(author).map(address => ({ author: address,
     subject: assertSafeIri(assertionLifecycleUri(contextGraphId, address, name, subGraphName)) }));
+  // sparql-scan-allow: R4 -- VALUES binds at most three exact lifecycle subjects (address case aliases); never a graph-wide scan.
   const result = await store.query(`SELECT ?subject ?p ?o WHERE {
     VALUES ?subject { ${candidates.map(c => `<${c.subject}>`).join(' ')} }
     GRAPH <${assertSafeIri(contextGraphMetaUri(contextGraphId))}> { ?subject ?p ?o }

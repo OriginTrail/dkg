@@ -11,7 +11,7 @@ import { AUTHOR, TX_HASH, baseRequest, legacyEvidence, seededChain } from './_he
 
 type RecoveryInternals = {
   getOrCreateFinalizationHandler(): Pick<FinalizationHandler, 'handleChainReconciledKC'>;
-  _resolveRecoveredKnowledgeAssetVmLifecycleAuthor(): Promise<string | false>;
+  _resolveRecoveredKnowledgeAssetVmLifecycleAuthor(): Promise<{ author: string; incomplete: boolean } | false>;
 };
 
 async function fixture(legacy: boolean, evidence: AsyncKnowledgeAssetVmPublishRecoveryEvidence = legacyEvidence()) {

@@ -60,3 +60,13 @@ The publisher-owned lifecycle reader now exposes case-equivalent candidates and 
 All 45 initial live publications completed on `71605cd6c`. The daemon was stopped after ordinary work drained, retaining the fault fixture's included job and original transaction. Restart, operator verification and the 15 updates will execute on the reviewed correction. No SCAN host writes or wallet release occurred.
 
 Round 2 local verification: 145 agent tests across six suites and 80 publisher tests (pull-from plus provenance) passed. Agent/publisher builds and type fixtures, lint and file-size checks passed. Live acceptance remains pending on this revision; the existing daemon is stopped and its store retained.
+
+### Remote review response round 3 (in progress)
+
+Two actionable findings: a compatibility repair could delete its own required VM-root evidence, and successful UPDATE receipt repair needed explicit coverage. Incomplete-descriptor repair now passes a verified-proof mode to the shared mutation builder, preserving the already-proven lifecycle VM pointer and layer on both atomic and ordered paths. Automatic recovery selects that mode only after strict raw proof, including compatible layer/projection; ordinary publication behavior is unchanged. Fault tests arm an exception after deleting required proof and show neither repair path reaches that deletion; a separate transient state-insertion failure preserves proof and permits retry. Version-2 tests drive the real receipt resolver's `verifyKAUpdate` branch, retaining root/version and refusing a receipt for another version.
+
+CI's SPARQL scanner could not infer the bounded subject VALUES list. Added its documented R4 acknowledgement explaining the at-most-three exact address-case lifecycle subjects. The scanner self-tests and targeted scan pass; this does not exempt any graph-wide query.
+
+Live progress: 15/15 updates completed, and all 46 current heads plus all 61 publication receipts passed independent verification. Both cleared-job operator scenarios passed on `727a55b8a`. The daemon is stopped for the final proof-preserving revision; a fresh automatic fault fixture, version-2 operator repair and all-head cold-restart verification will run on it. Review response budget: 3/10 including the initial live-validation correction.
+
+Round 3 validation: all 150 agent tests across six suites passed, including both writer modes and canonical UPDATE receipt proof/refusal. Typecheck, lint and file-size checks passed. Final live replay remains pending.

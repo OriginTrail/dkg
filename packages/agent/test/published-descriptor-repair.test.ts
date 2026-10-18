@@ -13,7 +13,7 @@ import { AUTHOR, PUBLISHER, TX_HASH } from './_helpers/named-ka-recovery-fixture
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const s of stores.splice(0)) await s.close(); });
 const DKG = 'http://dkg.io/ontology/';
-async function fixture() {
+async function fixture(version = 1) {
   const store = new OxigraphStore(); stores.push(store);
   const author = ethers.getAddress(AUTHOR);
   const input = { contextGraphId: 'repair-cg', name: 'published', kaUal: `did:dkg:evm:31337/${AUTHOR}/402` };
@@ -23,14 +23,16 @@ async function fixture() {
   const vm = contextGraphLayerUri(input.contextGraphId, MemoryLayer.VerifiableMemory, AUTHOR, 402n);
   const content: Quad[] = [{ graph: vm, subject: 'urn:asset:body', predicate: 'urn:text', object: '"exact accepted revision"' }];
   const root = computeFlatKCRootV10(content, []);
-  const snapshot = { latestRoot: ethers.hexlify(root), rootCount: 1n, latestAuthor: AUTHOR,
+  const snapshot = { latestRoot: ethers.hexlify(root), rootCount: BigInt(version), latestAuthor: AUTHOR,
     latestPublisher: PUBLISHER, blockNumber: 100, blockHash: `0x${'11'.repeat(32)}` };
   const chain = {
     chainId: 'evm:31337',
     readKnowledgeAssetVersionSnapshot: vi.fn(async () => snapshot),
-    getKAContextGraphId: vi.fn(async () => 1n), getMerkleRootCount: vi.fn(async () => 1n),
+    getKAContextGraphId: vi.fn(async () => 1n), getMerkleRootCount: vi.fn(async () => BigInt(version)),
     isContextGraphActiveOnChain: vi.fn(async () => true), getContextGraphAccessPolicy: vi.fn(async () => 0),
     isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
+    verifyKAUpdate: vi.fn(async () => ({ verified: true, onChainMerkleRoot: root,
+      merkleRootCount: BigInt(version), blockNumber: 90, blockHash: snapshot.blockHash, txIndex: 1 })),
     resolveCanonicalFinalizationReceipt: vi.fn(async () => ({ status: 'confirmed', receipt: {
       txHash: TX_HASH, blockNumber: 90, blockHash: snapshot.blockHash, txIndex: 1,
       merkleRoot: root, publisherAddress: PUBLISHER, authorAddress: AUTHOR,
@@ -44,13 +46,13 @@ async function fixture() {
   await store.insert([...content, ...generateGraphKnowledgeAssetMetadata({
     ual: input.kaUal, contextGraphId: input.contextGraphId, merkleRoot: root, publisherPeerId: 'fixture',
     accessPolicy: 'public', allowedPeers: [], timestamp: new Date(), authorAddress: AUTHOR,
-    assertionVersion: 1, publicTripleCount: 1, privateTripleCount: 0, assertionGraph: vm,
+    assertionVersion: version, publicTripleCount: 1, privateTripleCount: 0, assertionGraph: vm,
   }, { status: 'confirmed', confirmation: { kind: 'transaction', provenance: {
     txHash: TX_HASH, blockNumber: 90, blockTimestamp: 0, publisherAddress: PUBLISHER,
     batchId: kaId, chainId: 'evm:31337',
   } } }),
   ...Object.entries({ assertionName: input.name, kaId: '402', reservedUal: input.kaUal, publishedUal: input.kaUal,
-    assertionVersion: '1', memoryLayer: 'VM', vmCurrentAssertion: snapshot.latestRoot.slice(2),
+    assertionVersion: String(version), memoryLayer: 'VM', vmCurrentAssertion: snapshot.latestRoot.slice(2),
     wmCurrentAssertion: snapshot.latestRoot.slice(2), swmCurrentAssertion: snapshot.latestRoot.slice(2),
     shareOperationId: 'original-share' }).map(([p, v]) => row(p, v)),
   { graph, subject, predicate: DKG + 'assertionGraph', object: vm },
@@ -163,6 +165,43 @@ describe('targeted published descriptor repair', () => {
     await started; deadline.abort(); await Promise.resolve(); expect(settled).toBe(false);
     await expect(repairPublishedDescriptor(h.host, h.input)).rejects.toMatchObject({ code: 'KA_DESCRIPTOR_REPAIR_BUSY' });
     release(); await expect(pending).resolves.toMatchObject({ status: 'repaired' });
+  });
+
+  it('preserves proof fields through compatibility repair faults and retries', async () => {
+    const h = await fixture(); const before = await h.all();
+    const remove = h.store.deleteByPatternWithoutCount.bind(h.store);
+    let destructiveProofDeletes = 0;
+    vi.spyOn(h.store, 'deleteByPatternWithoutCount').mockImplementation(async pattern => {
+      await remove(pattern);
+      if (pattern.subject === h.subject && ['vmCurrentAssertion', 'memoryLayer'].some(p => pattern.predicate === DKG + p)) {
+        destructiveProofDeletes++; throw new Error('failure after deleting required retry proof');
+      }
+    });
+    const insert = h.store.insert.bind(h.store);
+    const stateFailure = vi.spyOn(h.store, 'insert').mockImplementation(async quads => {
+      if (quads.some(q => q.predicate === DKG + 'state')) throw new Error('transient state insertion');
+      return insert(quads);
+    });
+    await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false })).rejects.toThrow('transient state insertion');
+    expect(destructiveProofDeletes).toBe(0); expect(await h.all()).toEqual(before);
+    stateFailure.mockRestore();
+    await expect(repairPublishedDescriptor(h.host, { ...h.input, dryRun: false })).resolves.toMatchObject({ status: 'repaired' });
+    expect(destructiveProofDeletes).toBe(0);
+  });
+
+  it.each([true, false])('verifies an UPDATE receipt (matching version: %s)', async matches => {
+    const h = await fixture(2); const before = await h.all();
+    if (!matches) h.chain.verifyKAUpdate.mockResolvedValue({ verified: true, onChainMerkleRoot: ethers.getBytes(h.snapshot.latestRoot), merkleRootCount: 1n,
+      blockNumber: 90, blockHash: h.snapshot.blockHash, txIndex: 1 });
+    const repair = repairPublishedDescriptor(h.host, { ...h.input, dryRun: false });
+    if (matches) {
+      await expect(repair).resolves.toMatchObject({ status: 'repaired', assertionVersion: '2', root: h.snapshot.latestRoot });
+      expect(await h.all()).toHaveLength(before.length + 1);
+    } else {
+      await expect(repair).rejects.toThrow('update receipt does not match'); expect(await h.all()).toEqual(before);
+    }
+    expect(h.chain.verifyKAUpdate).toHaveBeenCalledWith(TX_HASH, (BigInt(AUTHOR) << 96n) | 402n, PUBLISHER);
+    expect(h.chain.resolveCanonicalFinalizationReceipt).not.toHaveBeenCalled();
   });
 
   it('accepts a new confirmed block when the coherent asset version is unchanged', async () => {
