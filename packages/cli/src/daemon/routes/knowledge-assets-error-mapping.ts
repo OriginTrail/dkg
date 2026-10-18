@@ -1,3 +1,4 @@
+import { classifyPromoteAdmissionError } from './promote-admission-response.js';
 import type { AssertionFailureResponse } from './assertion-failure-response.js';
 import { classifyPromoteRecoveryError, type PromoteRecoveryContext } from './promote-recovery-response.js';
 export { respondPromoteRecoveryError } from './promote-recovery-response.js';
@@ -101,6 +102,8 @@ export function respondAssertionCodeError(res: RequestContext["res"], e: any): b
  * VM publishing keeps its own mapping so chain failures remain server errors.
  */
 export function classifyAssertionError(e: any, context?: PromoteRecoveryContext): AssertionFailureResponse {
+  const admission = classifyPromoteAdmissionError(e);
+  if (admission) return admission;
   const promote = classifyPromoteRecoveryError(e, context);
   if (promote) return promote;
   if (e?.code === "OVERSIZED_RDF_LITERAL") return { status: 400, body: oversizedRdfLiteralResponseBody(e) };

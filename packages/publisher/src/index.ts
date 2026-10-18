@@ -556,3 +556,5 @@ export { withMaterializationLocks } from './materialization-lock-group.js';
 export { readCurrentAssertionVersion } from './materialization-assertion-version.js';
 
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
+
+export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';
