@@ -14,7 +14,7 @@ import {
 import {
   GraphManager,
   PrivateContentStore,
-  type TripleStore,
+  type OxigraphStore,
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import {
@@ -61,7 +61,7 @@ function isProtocolMetadata(quad: Quad): boolean {
  */
 export async function finalizeRootlessAssertionForTest(params: {
   publisher: DKGPublisher;
-  store: TripleStore;
+  store: OxigraphStore;
   contextGraphId: string;
   name: string;
   agentAddress: string;
