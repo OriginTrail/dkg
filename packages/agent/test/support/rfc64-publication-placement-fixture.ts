@@ -14,8 +14,9 @@
  * chain normalization answers as it does for a publish that is the asset's current version (the
  * test file mocks the normalizer module for that; see {@link recoveredNamedKaPublishV1}), and the
  * agent's own finalization handler gives a staged answer about the VM content and writes none.
- * Each asset retains the normal created/promoted lifecycle metadata. Recovery must prove and
- * stamp that descriptor before finalizing its job, independently of deferred catalog placement.
+ * Queued publications retain normal created/promoted lifecycle metadata. Recovery must prove
+ * and stamp their descriptors before finalizing, independently of deferred catalog placement.
+ * Observer-only fixtures exercise catalog obligations without enqueueing a named publication.
  *
  * Time: one clock the row moves by hand drives the publisher's job timestamps and the placement
  * timing, so a wait is exactly what the row parked.
@@ -467,14 +468,28 @@ export async function seedPlacementAssetV1(
   kaNumber: bigint,
 ): Promise<PlacementAssetV1> {
   const { seal } = await seedInventoryAssetV1(agent, suffix, kaNumber);
+  await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+  return Object.freeze({
+    suffix,
+    kaNumber,
+    seal,
+    assertionCoordinate: `repair-${suffix}`,
+    shareOperationId: `repair-operation-${suffix}`,
+    txHash: `0x${kaNumber.toString(16).padStart(64, '0')}` as Hex,
+  });
+}
+
+/** Queue recovery owns a named descriptor; catalog-observer-only fixtures do not. */
+async function seedNamedPublicationLifecycleV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+  const { seal } = asset;
   const lifecycle = {
     contextGraphId: CONTEXT_GRAPH_ID, agentAddress: AUTHOR,
-    assertionName: `repair-${suffix}`, kaNumber,
+    assertionName: asset.assertionCoordinate, kaNumber: asset.kaNumber,
     timestamp: new Date(seal.finalizedAtIso),
   };
   await agent.store.insert(generateAssertionCreatedMetadata({ ...lifecycle, reservedUal: seal.kaUal }));
   const promoted = generateAssertionPromotedMetadata({ ...lifecycle,
-    shareOperationId: `repair-operation-${suffix}`, rootEntities: [],
+    shareOperationId: asset.shareOperationId, rootEntities: [],
     merkleHex: Buffer.from(seal.merkleRoot).toString('hex'),
   });
   await agent.store.delete(promoted.delete);
@@ -485,15 +500,6 @@ export async function seedPlacementAssetV1(
     predicate: `http://dkg.io/ontology/${predicate}`,
     object: JSON.stringify(String(predicate === 'contentScopeVersion' ? seal.contentScopeVersion : seal.assertionVersion)),
   })));
-  await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
-  return Object.freeze({
-    suffix,
-    kaNumber,
-    seal,
-    assertionCoordinate: `repair-${suffix}`,
-    shareOperationId: `repair-operation-${suffix}`,
-    txHash: `0x${kaNumber.toString(16).padStart(64, '0')}` as Hex,
-  });
 }
 
 /** One call of the real post-confirmation observer for `asset`, as a completion path makes it. */
@@ -769,6 +775,7 @@ export function createPublicationPathV1(
   });
 
   const enqueue = async (asset: PlacementAssetV1): Promise<string> => {
+    await seedNamedPublicationLifecycleV1(agent, asset);
     const request = queuedPublishRequestV1(asset);
     queued.set(asset.txHash.toLowerCase(), { request, asset });
     return publisher.enqueueKnowledgeAssetVmPublish(request);
