@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import { reconcileRetainedShare, validateShareReconciliationInput } from '../src/share-reconciliation.js';
-import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_PAYLOAD, jobSubject, literal } from '../src/async-promote-queue-utils.js';
+import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_PAYLOAD, jobSubject, literal, serializeJobRecord } from '../src/async-promote-queue-utils.js';
 import { SHARE_AUTHOR, shareEvidence } from './_helpers/share-completion-evidence.js';
 
 const proof = shareEvidence();
@@ -72,15 +72,40 @@ describe('retained share reconciliation', () => {
     expect(await queue.reconcileShare(input)).toMatchObject({ outcome: 'unproven', reason: 'absent_or_pruned', mutationRetryAllowed: false });
     expect(write).not.toHaveBeenCalled();
   });
-  it('refuses incomplete inventory rather than using a match before the cap', async () => {
-    await complete();
-    const query = store.query.bind(store);
-    vi.spyOn(store, 'query').mockImplementationOnce(async (...args) => {
-      const result = await query(...args);
-      if (result.type !== 'bindings') throw new Error('expected bindings');
-      return { ...result, bindings: Array.from({ length: 1001 }, () => result.bindings[0]) };
-    });
+  it('fetches an overflow record from a real 1001-record context inventory', async () => {
+    const id = await complete(), job = (await queue.getStatus(id))!;
+    await store.insert(Array.from({ length: 1000 }, (_, i) => serializeJobRecord({ ...job,
+      jobId: `retained-${i}`, request: { ...request, assertionName: `other-${i}` }, result: undefined,
+    }, DEFAULT_PROMOTE_CONTROL_GRAPH_URI).jobQuads).flat());
     expect(await queue.reconcileShare(input)).toMatchObject({ outcome: 'unproven', reason: 'incomplete_inventory', inventory: { complete: false } });
+  });
+  it('waits for a competing fallback replacement instead of proving a temporarily incomplete inventory', async () => {
+    await complete();
+    let pause!: () => void, release!: () => void;
+    const paused = new Promise<void>(resolve => { pause = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let armed = false;
+    const fallback = new Proxy(store, { get(target, prop) {
+      if (prop === 'replaceSubject') return undefined;
+      if (prop === 'insert') return async (...args: Parameters<OxigraphStore['insert']>) => {
+        if (armed) { pause(); await gate; }
+        return target.insert(...args);
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const writer = new TripleStoreAsyncPromoteQueue(fallback);
+    await writer.enqueue(request);
+    armed = true;
+    const claim = writer.claimNext('fallback-worker');
+    await paused;
+    let settled = false;
+    const observation = queue.reconcileShare(input).then(value => { settled = true; return value; });
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+    } finally { release(); await claim; }
+    expect(await observation).toMatchObject({ outcome: 'unproven', reason: 'unfinished' });
   });
   it('does not hide an unavailable read behind an empty candidate set', async () => {
     vi.spyOn(store, 'query').mockRejectedValueOnce(new Error('store unavailable'));
@@ -96,22 +121,21 @@ describe('retained share reconciliation', () => {
   it.each(['missing-payload', 'wrong-subject', 'unknown-version', 'bad-request-binding'] as const)(
     'does not silently omit a %s row', async corruption => {
       await complete();
-      const query = store.query.bind(store);
-      vi.spyOn(store, 'query').mockImplementationOnce(async (...args) => {
-        const result = await query(...args);
-        if (result.type !== 'bindings') throw new Error('expected bindings');
-        const row = { ...result.bindings[0] };
-        if (corruption === 'missing-payload') delete row.payload;
-        else if (corruption === 'wrong-subject') row.job = 'urn:wrong:subject';
-        else {
-          const payload = JSON.parse(row.payload);
-          if (corruption === 'unknown-version') payload.result.shareEvidence.version = 999;
-          else payload.result.shareEvidence.agentAddress = 'different-lane';
-          row.payload = JSON.stringify(payload);
-        }
-        return { ...result, bindings: [row] };
-      });
-      expect(await queue.reconcileShare(input)).toMatchObject({ outcome: 'unproven', mutationRetryAllowed: false });
+      const id = await complete(), job = (await queue.getStatus(id))!;
+      const originalSubject = jobSubject(id);
+      let quads = serializeJobRecord(job, DEFAULT_PROMOTE_CONTROL_GRAPH_URI).jobQuads;
+      if (corruption === 'missing-payload') quads = quads.filter(q => q.predicate !== PROMOTE_PAYLOAD);
+      else if (corruption === 'wrong-subject') quads = quads.map(q => ({ ...q, subject: 'urn:wrong:subject' }));
+      else {
+        const payload = JSON.parse(JSON.stringify(job));
+        if (corruption === 'unknown-version') payload.result.shareEvidence.version = 999;
+        else payload.result.shareEvidence.agentAddress = 'different-lane';
+        quads = serializeJobRecord(payload, DEFAULT_PROMOTE_CONTROL_GRAPH_URI).jobQuads;
+      }
+      await store.deleteByPattern({ graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI, subject: originalSubject });
+      await store.insert(quads);
+      expect(await queue.reconcileShare(input)).toMatchObject({ outcome: 'unproven', mutationRetryAllowed: false,
+        reason: ['missing-payload', 'wrong-subject'].includes(corruption) ? 'incomplete_inventory' : 'conflicting_evidence' });
     });
   it('requires bound completion to match both the admitted seal digest and operation', () => {
     const recoveryBinding = { version: 1 as const, sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(proof.seal),

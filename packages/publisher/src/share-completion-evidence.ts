@@ -2,7 +2,7 @@ import {
   computeCanonicalGraphScopedAuthorSealDigestV1, assertCanonicalGraphScopedAuthorSealV1, canonicalGraphScopedAuthorSealFromAssertionSealV1,
   type AssertionSeal, type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
-import type { PromoteRequest, PromoteResult, PromoteJob } from './async-promote-queue-types.js';
+import type { PromoteRequest } from './async-promote-queue-types.js';
 import { normalizePromoteAgentLane } from './async-promote-queue-utils.js';
 
 /** Produced under the publisher lifecycle lock, never accepted from a share request. */
@@ -37,12 +37,13 @@ export function readShareCompletionEvidence(value: unknown): ShareCompletionEvid
   });
 }
 
-export function createShareCompletionEvidence(
+export function tryCreateShareCompletionEvidence(
   contextGraphId: string, assertionName: string, agentAddress: string,
   subGraphName: string | undefined, seal: AssertionSeal, shareOperationId: string,
-): ShareCompletionEvidence {
-  return readShareCompletionEvidence({ version: 1, contextGraphId, assertionName, agentAddress,
-    subGraphName, entities: 'all', shareOperationId, seal: canonicalGraphScopedAuthorSealFromAssertionSealV1(seal) });
+): ShareCompletionEvidence | undefined {
+  try { return readShareCompletionEvidence({ version: 1, contextGraphId, assertionName, agentAddress,
+    subGraphName, entities: 'all', shareOperationId, seal: canonicalGraphScopedAuthorSealFromAssertionSealV1(seal) }); }
+  catch { return undefined; } // Previously accepted older seals remain shareable without proof.
 }
 
 export function shareEvidenceMatchesRequest(evidence: ShareCompletionEvidence, request: PromoteRequest): boolean {
@@ -52,14 +53,4 @@ export function shareEvidenceMatchesRequest(evidence: ShareCompletionEvidence, r
     && (!request.authorAgentAddress || evidence.seal.authorAddress === request.authorAgentAddress.toLowerCase())
     && (!request.recoveryBinding || (evidence.shareOperationId === request.recoveryBinding.intent.operationId
       && computeCanonicalGraphScopedAuthorSealDigestV1(evidence.seal) === request.recoveryBinding.sealDigest));
-}
-
-/** Pure success transition; callers must hold and validate the current lease. */
-export function promoteSuccessTransition(job: PromoteJob, result: PromoteResult, now: number): PromoteJob {
-  if (!job.commitMarker?.swmInserted) {
-    throw new Error(`Cannot succeed job ${job.jobId}: commitMarker.swmInserted is false. Worker must record SWM commit before declaring success.`);
-  }
-  if (result.shareEvidence && !shareEvidenceMatchesRequest(result.shareEvidence, job.request))
-    throw new Error('Share completion evidence does not match the leased request');
-  return { ...job, state: 'succeeded', updatedAt: now, lease: undefined, result };
 }

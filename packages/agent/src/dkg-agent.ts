@@ -139,7 +139,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteTerminalJobClearer, type TerminalJobClearOutcome,
+  type PromoteTerminalJobClearer, type PromoteShareReconciler, type TerminalJobClearOutcome,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
@@ -4375,9 +4375,7 @@ export class DKGAgent extends DKGAgentBase {
         return agent.promoteQueue.getStatus(jobId);
       },
       async reconcileShare(input: import('@origintrail-official/dkg-publisher').ShareReconciliationInput) {
-        const queue = agent.promoteQueue;
-        if (!queue.reconcileShare) throw new Error('Share reconciliation is unavailable');
-        return queue.reconcileShare(input);
+        return agent.promoteQueue.reconcileShare(input);
       },
       async listPromoteAsyncJobs(filter?: PromoteListFilter): Promise<PromoteJob[]> {
         return agent.promoteQueue.list(filter);
@@ -4408,7 +4406,7 @@ export class DKGAgent extends DKGAgentBase {
    * `recordCommitMarker` / `recoverOnStartup`) without the assertion
    * subsurface having to leak those methods to user-facing callers.
    */
-  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer {
+  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler {
     if (!this._promoteQueue) {
       this._promoteQueue = new TripleStoreAsyncPromoteQueue(this.store, this._promoteQueueConfig ?? {});
     }

@@ -11,7 +11,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { ASSERTION_SEAL_PREDICATES, contextGraphAssertionUri, contextGraphMetaUri, TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
@@ -166,6 +166,18 @@ async function createFixture(settle: (committed: boolean | undefined) => void) {
 }
 
 describe('promote post-commit recovery', () => {
+  it('preserves ordinary legacy seal sharing without fabricating unsupported evidence', async () => {
+    const fixture = await createFixture(() => {});
+    await fixture.store.deleteByPattern({ graph: contextGraphMetaUri(CG_ID),
+      subject: contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME), predicate: ASSERTION_SEAL_PREDICATES.RESERVED_KA_ID });
+    expect(await fixture.attempt()).toEqual({});
+    const completed = (await fixture.queue.getStatus(fixture.jobId))!;
+    expect(completed.state).toBe('succeeded');
+    expect(completed.result).not.toHaveProperty('shareEvidence');
+    await fixture.expectExactSwmGraph();
+    expect(await fixture.workingMemoryCount()).toBe(0);
+    expect(await fixture.hasCompletionMarker()).toBe(true);
+  });
   it('persists producer evidence for the exact committed graph and retains it after queue reconstruction', async () => {
     const fixture = await createFixture(() => {});
     expect(await fixture.attempt()).toEqual({});

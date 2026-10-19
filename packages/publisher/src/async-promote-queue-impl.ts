@@ -1,5 +1,6 @@
-import { reconcileRetainedShare, type ShareReconciliationInput } from './share-reconciliation.js';
-import { readShareCompletionEvidence, promoteSuccessTransition } from './share-completion-evidence.js';
+import { reconcileRetainedShare, validateShareReconciliationInput, type ShareReconciliationInput } from './share-reconciliation.js';
+import { readShareCompletionEvidence } from './share-completion-evidence.js';
+import { promoteSuccessTransition } from './async-promote-success.js';
 import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
 import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionAttempt } from './promote-admission.js';
 import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
@@ -204,7 +205,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   reconcileShare(input: ShareReconciliationInput) {
-    return reconcileRetainedShare(this.store, input, this.graphUri);
+    const expected = validateShareReconciliationInput(input);
+    return this.withMutationLock(() => reconcileRetainedShare(this.store, expected, this.graphUri));
   }
 
   private async listUnlocked(
@@ -883,12 +885,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
 
-  /**
-   * In-process mutex so concurrent queue mutations don't race the
-   * uniqueness/read-then-write SPARQL flow. Mirrors
-   * `AsyncLiftPublisher.withClaimLock`, widened from worker claims to
-   * all operations that can activate a uniqueness key.
-   */
+  /** Serializes control-graph mutations and consistent reads, including fallback replacements. */
   private async withMutationLock<T>(fn: () => Promise<T>): Promise<T> {
     const previous = TripleStoreAsyncPromoteQueue.mutationQueues.get(this.graphUri) ?? Promise.resolve();
     let release!: () => void;

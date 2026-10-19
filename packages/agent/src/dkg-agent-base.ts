@@ -223,7 +223,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteTerminalJobClearer,
+  type PromoteTerminalJobClearer, type PromoteShareReconciler,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
@@ -697,7 +697,7 @@ export class DKGAgentBase {
   // Typed with the terminal-clear capability at the ownership boundary (not cast at the
   // getter): the only assigned value is `TripleStoreAsyncPromoteQueue`, which implements it,
   // and any test/subclass substituting a queue must now satisfy the clearer at compile time.
-  protected _promoteQueue?: AsyncPromoteQueue & PromoteTerminalJobClearer;
+  protected _promoteQueue?: AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler;
   /**
    * Override for tests / future operator config. When set before
    * `promoteQueue` is first accessed, the queue is constructed with

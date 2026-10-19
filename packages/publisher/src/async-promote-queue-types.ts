@@ -302,6 +302,11 @@ export interface AsyncPromoteQueue {
   };
 }
 
+/** Required on agent-owned queues that expose the reconciliation read API. */
+export interface PromoteShareReconciler {
+  reconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
+}
+
 /**
  * #1837 — atomic by-exact-jobId terminal cleanup for the SWM share (promote) queue.
  * Segregated off the base contract (mirrors the publisher-side VmPublishTerminalJobClearer);
