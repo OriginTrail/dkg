@@ -93,6 +93,7 @@ export default defineConfig({
       "test/promote-durable-root-companion.test.ts",
       "test/promote-swm-pointer-post-commit.test.ts",
       "test/clear-promote-async-facade.test.ts",
+      "test/share-reconciliation-facade.test.ts",
       "test/query-min-trust-alias.test.ts",
       "test/query-working-memory-identity.test.ts",
       "test/query-refused-aggregate.test.ts",
