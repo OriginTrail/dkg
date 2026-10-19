@@ -883,7 +883,7 @@ export async function withGlobalSyncBackpressure<T>(
         + `${reservedSlotState(reserve)})`,
     );
     return await traceSyncAdmission(options.label, work, {
-      reserved: admission.entry.payload.reserved === true,
+      slot: admission.entry.payload.reserved ? reserve?.pool : 'general',
       limit,
       queueLimit,
       partitioned: options.policy.partitions !== undefined,
