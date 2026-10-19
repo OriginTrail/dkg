@@ -189,7 +189,7 @@ Never guess — `GET /api/agent/identity` is free and definitive. Call it first.
 
 On an **OpenClaw runtime** or **Hermes provider runtime**, prefer the `dkg_*` tools below over raw HTTP — the adapter handles token discovery, parameter aliasing, and error shaping. Other runtimes may expose different tool surfaces — Cursor / Claude Code / MCP clients should install [`@origintrail-official/dkg-mcp`](../../../mcp-dkg/README.md) for its own (different) tool set. When no tool layer applies (raw CLI, custom HTTP client, or an operation not covered by the tools below), use the HTTP API — the rest of this doc is the reference.
 
-Drop to HTTP when the operation isn't in the table — participant self-service join/sign routes (§6), conditional writes (§5), publisher jobs (§8), file retrieval (§7), endorse / verify / update (§5), SSE events (§8). Each tool's full schema lives in `DkgNodePlugin.ts`; this table exists to help you find the right name, not re-document it.
+Drop to HTTP when the operation isn't in the table — participant self-service join/sign routes (§6), publisher jobs (§8), file retrieval (§7), endorse / verify / update (§5), SSE events (§8). Each tool's full schema lives in `DkgNodePlugin.ts`; this table exists to help you find the right name, not re-document it.
 
 > **Parameter spelling differs by runtime.** The `dkg_*` examples in this doc use the MCP/HTTP **camelCase** spelling (`alsoShareSwm`, `subGraphName`, `contextGraphId`). The **OpenClaw** and **Hermes** tools expose the *same fields* in **snake_case** (`also_share_swm`, `sub_graph_name`, `context_graph_id`). Match the spelling to your runtime's own tool schema — e.g. on OpenClaw/Hermes the one-shot is `dkg_knowledge_asset_create({ quads, also_share_swm: true })`. A wrong-case key is silently ignored (the asset would seal but not share).
 
@@ -210,7 +210,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_knowledge_asset_create` | `POST /api/knowledge-assets` | Start a WM assertion (knowledge asset). **One-shot:** pass non-empty `quads` to write+seal in one call (**stops at a sealed WM draft**); add **`alsoShareSwm:true`** to also share to SWM in the same call — `dkg_knowledge_asset_create({ quads, alsoShareSwm:true })` is the recommended create→write→seal→share shortcut that lands a publish-ready KA in SWM (then `dkg_knowledge_asset_publish` to mint). `alsoShareSwm` defaults **false** (sharing — private→networked — is an explicit step); it never mints to VM. Sealing needs no on-chain registration |
 | `dkg_knowledge_asset_write` | `POST /api/knowledge-assets/{name}/wm/write` | Append triples (`{subject,predicate,object}` — no per-quad `graph`) to a WM assertion |
 | `dkg_knowledge_asset_finalize` | `POST /api/knowledge-assets/{name}/wm/finalize` | **Seal** the WM draft (the "git commit" — EIP-712 AuthorAttestation over the whole assertion). Returns `assertionUri`, `merkleRoot`, `authorAddress`, `schemeVersion`, `chainId`, `kav10Address`, `eip712Digest`, plus `kaUal` and `assertionVersion` — the number this draft will be published as (one above the KA's latest confirmed version; `1` for a new KA) |
-| `dkg_knowledge_asset_share` | `POST /api/knowledge-assets/{name}/swm/share` | Share a WM assertion's triples to SWM (formerly "promote"). A full share (`entities: "all"` / omitted) **seals by default** (publish-ready); `skipSeal:true` opts out; a subset share is SWM-only — see §5 |
+| `dkg_knowledge_asset_share` | `POST /api/knowledge-assets/{name}/swm/share` | Share a WM assertion's triples to SWM (formerly "promote"). A full share (`entities: "all"` / omitted) **seals by default** (publish-ready); `skipSeal:true` opts out; shares are atomic, so an `entities` subset is refused with `KA_ATOMIC_SHARE_REQUIRED` — see §5 |
 | `dkg_knowledge_asset_publish` | `POST /api/knowledge-assets/{name}/vm/publish` | **Mint / update on chain** (the sealed assertion → VM). Returns the **UAL** + `kaId` + `txHash` — see §5 VM for the full response body |
 | `dkg_knowledge_asset_pull_from` | `POST /api/knowledge-assets/{name}/wm/pull-from` | Seed a fresh WM draft from the current SWM or VM state (the "git checkout" — edit loop). Body `{ contextGraphId, layer: "swm"\|"vm", onConflict?: "reject"\|"replace" }` |
 | `dkg_knowledge_asset_discard` | `POST /api/knowledge-assets/{name}/wm/discard` | Drop a WM assertion |
@@ -270,8 +270,8 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
 - `GET /api/knowledge-assets/{name}/wm/quads?contextGraphId=...&subGraphName=...` — read assertion contents as quads
 - `POST /api/knowledge-assets/{name}/wm/pull-from` — seed a fresh WM draft from the current SWM or VM state (the "git checkout" — start an edit loop on already-shared/published content).
   Body: `{ "contextGraphId": "...", "layer": "swm" | "vm", "onConflict"?: "reject" | "replace", "subGraphName"?: "..." }`. Returns `{ wmDraft: "open", seededFrom: { layer }, ... }`; an existing dirty draft → `409 WM_DRAFT_CONFLICT` unless `onConflict: "replace"`.
-- `POST /api/knowledge-assets/{name}/swm/share` — share assertion triples to SWM (synchronous; returns once SWM insert + gossip complete). Formerly "promote". A **full** share (`entities` omitted or `"all"`) **seals by default** and is then publish-ready; pass `"skipSeal": true` to share WITHOUT sealing (an unsealed SWM share — you can seal it later in place with `wm/finalize` `layer:"swm"`). A **subset** share (`entities` = a proper subset) is SWM-only, never sealed, and **not** publishable to VM as a subset. If a default (sealing) full share cannot seal — a rare residual capability gap (no local key / non-V10 adapter; an unregistered CG is no longer a gap) — it **fails closed**: `409 { code: "UNSEALED_SHARE_BLOCKED", error, recovery }` with **Working Memory preserved** (no silent unsealed share); resolve the gap or pass `skipSeal:true`.
-  Body: `{ "contextGraphId": "...", "entities"?: [...] | "all", "skipSeal"?: boolean, "subGraphName"?: "..." }`. Returns `{ swmShared: true, promotedCount, sealed, publishReady }` — `sealed`/`publishReady` describe THIS share (a subset or `skipSeal` share is `sealed:false` **by design**, not a failure).
+- `POST /api/knowledge-assets/{name}/swm/share` — share assertion triples to SWM (synchronous; returns once SWM insert + gossip complete). Formerly "promote". A **full** share (`entities` omitted or `"all"`) **seals by default** and is then publish-ready; pass `"skipSeal": true` to share WITHOUT sealing (an unsealed SWM share — you can seal it later in place with `wm/finalize` `layer:"swm"`). Shares are **atomic**: any `entities` array (a subset of root entities) is refused with `400 { code: "KA_ATOMIC_SHARE_REQUIRED" }` — to share some entities on their own, put them in a separate Knowledge Asset. If a default (sealing) full share cannot seal — a rare residual capability gap (no local key / non-V10 adapter; an unregistered CG is no longer a gap) — it **fails closed**: `409 { code: "UNSEALED_SHARE_BLOCKED", error, recovery }` with **Working Memory preserved** (no silent unsealed share); resolve the gap or pass `skipSeal:true`.
+  Body: `{ "contextGraphId": "...", "skipSeal"?: boolean, "subGraphName"?: "..." }` (`"entities": "all"` is still accepted and changes nothing). Returns `{ swmShared: true, promotedCount, sealed, publishReady }` — `sealed`/`publishReady` describe THIS share (a `skipSeal` share is `sealed:false` **by design**, not a failure).
 - `POST /api/knowledge-assets/{name}/swm/share-async` — enqueue the same promote for an in-daemon worker to handle in the background. Returns `202 { jobId, state: "queued" }` immediately. Use this for bulk importers where waiting for the synchronous round-trip is the bottleneck (the Graphify import RFC `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` explains the motivation). See §8 "Async promote queue" for the inspection routes.
 - `POST /api/knowledge-assets/{name}/wm/discard` — drop the assertion graph
   Body: `{ "contextGraphId": "...", "subGraphName"?: "..." }`
@@ -401,8 +401,8 @@ need to register it yourself first. Three things to know:
 4. **stale / corrupt seal** — the assertion was edited after a prior finalize: the share
    **throws**; re-finalize (or discard) before sharing.
 
-Subset shares are SWM-only and never sealed (`publishReady: false` by design). To recover an
-asset that is unsealed-in-SWM, `wm/finalize` `layer:"swm"` seals it in place — then publish.
+Subset shares are refused (`400 KA_ATOMIC_SHARE_REQUIRED`): a Knowledge Asset is always shared
+whole. To recover an asset that is unsealed-in-SWM, `wm/finalize` `layer:"swm"` seals it in place — then publish.
 
 - `POST /api/knowledge-assets/{name}/vm/publish` — per-KA sealed publish → VM (costs TRAC; returns the UAL). Canonical.
 - `POST /api/update` — update an existing Knowledge Asset on-chain. Body: `{ kaId, contextGraphId, quads, privateQuads?, precomputedUpdateAttestation? }` — the new data is passed **inline as `quads`** (it is NOT read from SWM). For the name-based edit loop, prefer `wm/pull-from` → edit → `wm/finalize` → `swm/share` → `vm/publish` instead.
@@ -551,7 +551,7 @@ Respect these when producing writes — they're enforced at the node and produce
 
 - **Reorganizing assertions.** There is no rename-assertion or move-between-sub-graphs endpoint. To reorganize, create a new assertion (with `subGraphName?` for a different partition), copy the triples over via `/wm/write`, then `/wm/discard` the original. A new assertion starts a fresh lifecycle record in `_meta`.
 - **Reserved subject IRIs.** Subjects matching `urn:dkg:file:*` or `urn:dkg:extraction:*` are reserved for internal file/extraction metadata and are rejected at write time. Use a different subject IRI.
-- **SWM gossip size cap (4 MiB).** A single share (`/swm/share`) must fit in one 4 MiB gossip message. Split larger assertions by root entity before sharing — use the `entities` parameter on `/swm/share` to share subsets.
+- **SWM gossip size cap (4 MiB).** A single share (`/swm/share`) must fit in one 4 MiB gossip message. Shares are atomic (an `entities` subset is refused with `KA_ATOMIC_SHARE_REQUIRED`), so split a larger assertion into several smaller Knowledge Assets — for example by root entity — and share each one.
 - **SWM entity ownership (first-writer-wins).** The first peer to write a root entity in SWM becomes its owner; other peers' promotes or writes against that same root entity are rejected with an ownership error. Partition work by agent-owned root entities to avoid conflicts.
 - **Blank nodes are auto-skolemized.** Any `_:b0`-style blank nodes you submit are deterministically rewritten to UUID-backed URIs before storage, so IDs stay stable across sync and on-chain anchoring. Prefer explicit IRIs in production data.
 
@@ -764,7 +764,7 @@ and does not promote, finalize, or publish.
 - `GET /api/chain/rpc-health` (PUBLIC) — RPC health
 - `GET /api/identity` — node identity (DID, identity ID)
 - `GET /api/host/info` — OS-level host details for UI flows that need real absolute paths (no `~`). Returns `{ homedir, hostname, username, platform, defaultWorkspaceParent }`. `defaultWorkspaceParent` probes `~/code`, `~/dev`, `~/projects` in order and falls back to `homedir`. Auth-required because `hostname` and `username` can be identifying; does not expose anything sensitive beyond that.
-- `GET /api/events` — SSE stream for real-time notifications (`text/event-stream`). Emits `join_request`, `join_approved`, `project_synced` events with a `: heartbeat` comment every 30 s. Use it to watch for inbound invitations and project sync completions without polling.
+- `GET /api/events` — SSE stream for real-time notifications (`text/event-stream`). Sends `connected` on open, then `memory_graph_changed` (`{ contextGraphId, layers, operation, source?, subGraphName?, counts?, timestamp }` whenever a context graph's WM/SWM/VM content changes: writes, finalize, share, publish, gossip applies, sync), `join_request`, `join_approved`, `join_rejected`, `project_synced`, and `notification` (`{ contextGraphId, type }`, a generic refresh signal sent with each scoped notification), with a `: heartbeat` comment every 30 s. Use it to watch memory changes, inbound invitations and project sync completions without polling.
 - 🚧 `GET /api/agent/profile` — your agent profile *(planned)*
 
 ### Agent encryption-key management
@@ -856,11 +856,11 @@ The worker runs in-daemon and is **on by default**. Disable per node with `confi
 
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/api/knowledge-assets/{name}/swm/share-async` | Enqueue a promote. Body: `{ contextGraphId, entities?: [...] \| "all", subGraphName? }`. Returns `200 { jobId, state: "queued" }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
+| `POST` | `/api/knowledge-assets/{name}/swm/share-async` | Enqueue a promote. Body: `{ contextGraphId, subGraphName? }`; an `entities` array is refused with `400 KA_ATOMIC_SHARE_REQUIRED` (shares are atomic). Returns `200 { jobId, state: "queued" }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs/{jobId}` | Read one job (`state`, `attempt.count`, `commitMarker`, `result`, `attempt.lastError` with `classification: transient\|cap_exceeded\|fatal`). |
 | `DELETE` | `/api/knowledge-assets/swm/share-jobs/{jobId}` | Cancel a `queued` / `failed_retrying` job. `409` if the job is `running` (let the lease expire). |
-| `POST` | `/api/knowledge-assets/swm/share-jobs/{jobId}/recover` | Re-queue a `failed` job after the operator has fixed whatever was wrong (subdivided an over-large entity set, restarted an upstream, etc.). |
+| `POST` | `/api/knowledge-assets/swm/share-jobs/{jobId}/recover` | Re-queue a `failed` job after the operator has fixed whatever was wrong (restarted an upstream, etc.). |
 
 CLI equivalents:
 
@@ -877,7 +877,7 @@ Failure classifications you'll see in `attempt.lastError.classification`:
 | Classification | Retry? | Typical cause | Operator action |
 |---|---|---|---|
 | `transient` | yes (until `maxRetries=5` reached) | `fetch failed` / `ECONNRESET` / `timeout` | Wait — the worker will pick it up after backoff. |
-| `cap_exceeded` | no | `Promoted assertion too large for gossip` (4 MiB) or `Request body too large` (256 KB) | Re-enqueue with a smaller `entities` slice — the queue can't subdivide on its own. |
+| `cap_exceeded` | no | `Promoted assertion too large for gossip` (4 MiB) or `Request body too large` (256 KB) | Split the content into smaller Knowledge Assets and enqueue each one — shares are atomic, and the queue can't subdivide on its own. |
 | `fatal` | no | Bad request, missing assertion, etc. | Inspect the error message, fix the cause, then `POST /api/knowledge-assets/swm/share-jobs/{jobId}/recover`. |
 
 ### TRAC auto-approve policy (V10 publish + update)
