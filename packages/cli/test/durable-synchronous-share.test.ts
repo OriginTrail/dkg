@@ -14,7 +14,7 @@ import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-agent', () => import('../../agent/src/index.js'));
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeCanonicalGraphScopedAuthorSealDigestV1, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, StoreOperationTimeoutError, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, CuratorUnconfirmedError, PromoteAdmissionUncertainError,
   computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, skolemizeKnowledgeAssetParts } from '@origintrail-official/dkg-publisher';
@@ -764,7 +764,10 @@ describe('durable synchronous share ownership', () => {
     const result = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR });
     const [job] = await agent.promoteQueue.list({});
     expect(result).toEqual({ promotedCount: 1, sealed: true, publishReady: true,
-      shareOperationId: job.request.recoveryBinding!.intent.operationId });
+      shareOperationId: job.request.recoveryBinding!.intent.operationId, shareEvidence: job.result!.shareEvidence });
+    expect(job.result!.shareEvidence).toMatchObject({ version: 1, contextGraphId: CG, assertionName: NAME,
+      shareOperationId: job.request.recoveryBinding!.intent.operationId, seal: { kaUal: finalized.kaUal } });
+    expect(computeCanonicalGraphScopedAuthorSealDigestV1(job.result!.shareEvidence!.seal)).toBe(job.request.recoveryBinding!.sealDigest);
     expect(job).toMatchObject({ state: 'succeeded', request: { recoveryBinding: { inventoryRequired: true } } });
     await expect(writer.mock.results[0]!.value).resolves.toMatchObject({ status: 'dormant', dormantReason: 'inactive-lane' });
     expect(writer).toHaveBeenCalledTimes(2);

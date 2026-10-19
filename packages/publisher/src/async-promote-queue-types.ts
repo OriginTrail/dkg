@@ -1,3 +1,5 @@
+import type { ShareReconciliationInput, ShareReconciliationResult } from './share-reconciliation.js';
+import type { ShareCompletionEvidence } from './share-completion-evidence.js';
 import type { PromoteNoEffectProof } from './promote-no-effect-rejection.js';
 import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 /**
@@ -136,6 +138,8 @@ export interface PromoteAttemptState {
 }
 
 export interface PromoteResult {
+  /** Additive versioned observation; not queue replay authority. */
+  shareEvidence?: ShareCompletionEvidence;
   promotedCount: number;
   succeededAt: number;
   /** Informational only — populated when the worker observed the gossip payload size. */
@@ -261,6 +265,7 @@ export interface AsyncPromoteQueue {
   getStatus(jobId: string): Promise<PromoteJob | null>;
   // RFC §3.3
   list(filter?: PromoteListFilter): Promise<PromoteJob[]>;
+  reconcileShare?(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
   // RFC §3.4
   cancel(jobId: string): Promise<void>;
   recover(jobId: string): Promise<void>;

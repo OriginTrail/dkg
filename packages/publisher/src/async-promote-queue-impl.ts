@@ -1,3 +1,5 @@
+import { reconcileRetainedShare, type ShareReconciliationInput } from './share-reconciliation.js';
+import { readShareCompletionEvidence, promoteSuccessTransition } from './share-completion-evidence.js';
 import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
 import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionAttempt } from './promote-admission.js';
 import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
@@ -201,6 +203,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     });
   }
 
+  reconcileShare(input: ShareReconciliationInput) {
+    return reconcileRetainedShare(this.store, input, this.graphUri);
+  }
+
   private async listUnlocked(
     filter: PromoteListFilter = {},
     source = 'publisher.asyncPromote.list',
@@ -382,22 +388,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   async succeed(jobId: string, claimToken: string, result: PromoteResult): Promise<void> {
+    const snapshot = { ...result, ...(result.shareEvidence ? { shareEvidence: readShareCompletionEvidence(result.shareEvidence) } : {}) };
     await this.withMutationLock(async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       this.assertLeaseHeld(job, claimToken);
-      if (!job.commitMarker?.swmInserted) {
-        throw new Error(
-          `Cannot succeed job ${jobId}: commitMarker.swmInserted is false. Worker must record SWM commit before declaring success.`,
-        );
-      }
-      const succeeded: PromoteJob = {
-        ...job,
-        state: 'succeeded',
-        updatedAt: this.now(),
-        lease: undefined,
-        result,
-      };
+      const succeeded = promoteSuccessTransition(job, snapshot, this.now());
       await this.writeJob(succeeded);
     });
   }

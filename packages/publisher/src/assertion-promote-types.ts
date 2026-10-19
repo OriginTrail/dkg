@@ -1,3 +1,4 @@
+import type { ShareCompletionEvidence } from './share-completion-evidence.js';
 import type { PublishOptions } from './publisher.js';
 import { validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';
 import type { WorkspaceAgentRecipientResolver } from './workspace-agent-recipients.js';
@@ -42,6 +43,7 @@ export type AssertionPromoteResult = {
   gossipMessage?: Uint8Array;
   promotedAllRoots: boolean;
   shareOperationId?: string;
+  shareEvidence?: ShareCompletionEvidence;
 };
 
 /** Snapshot caller-owned collections before waiting on the lifecycle lock. */

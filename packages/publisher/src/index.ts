@@ -562,3 +562,6 @@ export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissio
 export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
 
 export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } from './assertion-lifecycle-record.js';
+
+export { readShareCompletionEvidence, createShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
+export { reconcileRetainedShare, validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';

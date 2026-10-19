@@ -111,6 +111,7 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
     gossipPayload,
     promotedAllRoots,
     shareOperationId,
+    shareEvidence,
   } = await agent.publisher.assertionPromote(
     contextGraphId,
     name,
@@ -182,7 +183,8 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
   // shareOperationId. It is just as publish-ready as the first response;
   // a VM no-op has no share operation id and remains false here.
   const publishReady = sealed && promotedAllRoots && !!shareOperationId;
-  return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
+  return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}),
+    ...(shareEvidence ? { shareEvidence } : {}) };
 }
 
 /** Agent bindings keep admission and mutation fencing in the publisher's lifecycle domain. */

@@ -109,7 +109,7 @@ async function createFixture(settle: (committed: boolean | undefined) => void) {
         publisherPeerId: PEER,
       });
       await queue.recordCommitMarker(jobId, token, 'swmInserted');
-      await queue.succeed(jobId, token, { promotedCount: result.promotedCount, succeededAt: now });
+      await queue.succeed(jobId, token, { promotedCount: result.promotedCount, succeededAt: now, shareEvidence: result.shareEvidence });
       return {};
     } catch (failure: unknown) {
       const recorded = recordFailure(failure, now);
@@ -166,6 +166,28 @@ async function createFixture(settle: (committed: boolean | undefined) => void) {
 }
 
 describe('promote post-commit recovery', () => {
+  it('persists producer evidence for the exact committed graph and retains it after queue reconstruction', async () => {
+    const fixture = await createFixture(() => {});
+    expect(await fixture.attempt()).toEqual({});
+    const reopened = new TripleStoreAsyncPromoteQueue(fixture.store);
+    const completed = (await reopened.getStatus(fixture.jobId))!;
+    const evidence = completed.result?.shareEvidence;
+    expect(evidence).toMatchObject({ version: 1, contextGraphId: CG_ID,
+      assertionName: ASSERTION_NAME, agentAddress: AGENT, entities: 'all',
+      seal: { kaUal: fixture.finalized.kaUal, assertionVersion: fixture.finalized.assertionVersion,
+        publicTripleCount: String(TRIPLES.length), authorAddress: AGENT } });
+    expect(evidence?.shareOperationId).toBeTruthy();
+    await fixture.expectExactSwmGraph();
+    const reconciled = await reopened.reconcileShare({ contextGraphId: CG_ID,
+      assertionName: ASSERTION_NAME, agentAddress: AGENT, authorAddress: AGENT, entities: 'all',
+      kaUal: fixture.finalized.kaUal, assertionVersion: fixture.finalized.assertionVersion,
+      merkleRoot: evidence!.seal.assertionMerkleRoot, shareOperationId: evidence!.shareOperationId });
+    expect(reconciled).toMatchObject({ outcome: 'proven', jobId: fixture.jobId, evidence });
+    // Replaying the same committed operation must retain its original identity.
+    const replay = await fixture.publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
+    expect(replay.shareEvidence).toEqual(evidence);
+  });
+
   it.each([
     ['a not-started store timeout', notStartedTimeout],
     ['a scheduler admission rejection', schedulerBusy],
