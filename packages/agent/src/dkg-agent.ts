@@ -3402,6 +3402,8 @@ export class DKGAgent extends DKGAgentBase {
     // `packages/cli/src/publisher-runner.ts:createV10ACKProviderForPublisher`.
     if (typeof this.chain.getEvmChainId !== 'function') return undefined;
     if (typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
+    // The Cores asked for StorageACKs learn which node is the graph owner's (`swm/owner-tie-offer.ts`).
+    this.offerOwnerTieV1(contextGraphId);
 
     const collector = new ACKCollector({
       gossipPublish: async (topic: string, data: Uint8Array) => {

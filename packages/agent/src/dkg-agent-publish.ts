@@ -95,7 +95,7 @@ import {
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
-  type WorkspaceRecipientEncryptionKey,
+  type WorkspaceRecipientEncryptionKey, type EvmAddressV1,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
   type MessageIdempotencyStore,
@@ -126,7 +126,7 @@ import {
   type Quad,
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, operationalSigningOf, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import { signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { externalAuthorSignerFor, heldAuthorSigner, registeredAgentAuthorSigner } from './author-signer.js';
 import  {
@@ -274,6 +274,7 @@ import {
   type OwedPublicShare, type OwedPublicShares, type OwedShareSendOutcome,
 } from './swm/owed-public-shares.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
+import { ownerTieOffersOf } from './swm/owner-tie-offer.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
   BEACON_REANNOUNCE_INTERVAL_MS,
@@ -1092,6 +1093,40 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /**
+   * On a running Edge, offer a registered graph's owner-peer tie to the connected
+   * Cores (`swm/owner-tie-offer.ts`), signed with this node's key of the wallet
+   * the graph id names. Never throws, and does not wait for the offer.
+   */
+  offerOwnerTieV1(this: DKGAgent, contextGraphId: string): void {
+    if ((this.config.nodeRole ?? 'edge') !== 'edge' || !this.started) return;
+    void ownerTieOffersOf(this, () => ({
+      holdsKeyOf: (wallet) => [...this.localAgents.keys(), ...(operationalSigningOf(this.chain)?.payerAddresses ?? [])]
+        .some((address) => address.toLowerCase() === wallet),
+      localOnChainId: (graphId) => this.subscribedContextGraphs.get(graphId)?.onChainId,
+      isPublic: async (graphId) => !(await this.isPrivateContextGraph(graphId).catch(() => true)),
+      cores: () => this.connectedSharedMemoryCoresV1(),
+      sign: (graphId, wallet, request) => {
+        const author = this.createRfc64CatalogAuthorSignerV1(wallet as EvmAddressV1);
+        return this.encodeWorkspaceGossipMessage(graphId, request, { agentAddress: wallet, signMessage: (message) => author.signMessage(message) });
+      },
+      send: (peerId, wire) => this.sendOwnerTieOfferV1(peerId, wire),
+      selfPeerId: () => this.peerId,
+      logDebug: (message) => this.log.debug(createOperationContext('share'), message),
+    })).offer(contextGraphId);
+  }
+
+  /** One send of an owner tie offer, drained by `stop()` like a fan-out; never queued in the outbox. */
+  async sendOwnerTieOfferV1(this: DKGAgent, peerId: string, wire: Uint8Array): Promise<void> {
+    const sending = this.messenger.sendRequestOwned(peerId, PROTOCOL_SWM_UPDATE, wire, {
+      timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
+    });
+    const tracked: Promise<void> = sending.then(() => undefined, () => undefined)
+      .finally(() => { this.inFlightSubstrateFanOuts.delete(tracked); });
+    this.inFlightSubstrateFanOuts.add(tracked);
+    await sending;
+  }
+
+  /**
    * Shutdown: owed shares are not sent again, and a share made while the agent
    * stops is not kept. Made here if need be, so that such a share finds it closed.
    */
@@ -1157,6 +1192,8 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<void> {
     // A graph written here is in use: keep it pulled from its owner (#3251).
     this.recentSharedMemoryPulls?.noteActivity(contextGraphId);
+    // On the owner's node, the Cores learn which node is the owner's (`swm/owner-tie-offer.ts`).
+    this.offerOwnerTieV1(contextGraphId);
     const payload = normalizeWorkspaceGossipPublishInput(payloadOrMessage);
     const message = payload.message;
     // OT-RFC-38 / LU-6 Phase B — derive the wire-form id ONCE at the
