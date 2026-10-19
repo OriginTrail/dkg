@@ -139,6 +139,7 @@
     "./dist/rfc64/public-catalog-reconciliation-outcome-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-task-lifecycle-v1.js": null,
+    "./dist/rfc64/announced-current-head-retry-v1.js": null,
     "./dist/rfc64/public-catalog-service-v1.js": null,
     "./dist/rfc64/public-catalog-head-delivery-v1.js": null,
     "./dist/rfc64/public-catalog-head-fanout-v1.js": null,

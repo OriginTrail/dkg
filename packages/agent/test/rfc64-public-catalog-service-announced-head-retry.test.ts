@@ -779,6 +779,15 @@ const ANNOUNCED_SCOPE_CAP = 1_024;
 const HELD_PASS_RETRY_INTERVAL_MS = 60_000;
 const FRESH_AUTHOR_BASE = 0x10_0000;
 
+/**
+ * Move the wall clock past the first re-pull delay of a retained target, so the
+ * next pass takes it too. Timers stay real.
+ */
+function passFirstRePullDelay(): void {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.now() + HELD_PASS_RETRY_INTERVAL_MS);
+}
+
 /** Distinct lowercase author for one announced scope inside the shared open CG. */
 function authorAt(index: number): EvmAddressV1 {
   return `0x${'ab'.repeat(16)}${index.toString(16).padStart(8, '0')}` as EvmAddressV1;
@@ -947,7 +956,9 @@ describe('RFC-64 announced-head acceleration pass integrity (T4/T5)', () => {
       announcedCurrentHeadRetryArmed: true,
     });
 
-    // Pass 2 starts on B's hint with [A, B]; both discoveries are held open.
+    // Pass 2 starts on B's hint with [A, B], A being due for its re-pull;
+    // both discoveries are held open.
+    passFirstRePullDelay();
     router.hold('peer-a', 'peer-b');
     await deliverHint(router, headB, 'peer-b');
     expect(service.stats().announcedCurrentHeadPendingScopes).toBe(0);
@@ -996,7 +1007,9 @@ describe('RFC-64 announced-head acceleration pass integrity (T4/T5)', () => {
     await service.whenReceiverIdle();
     expect(onAccelerationFailed).toHaveBeenCalledTimes(1);
 
-    // Pass 2 starts on B's hint with [A, B] and is held open on both.
+    // Pass 2 starts on B's hint with [A, B], A being due for its re-pull, and
+    // is held open on both.
+    passFirstRePullDelay();
     router.hold('peer-a', 'peer-b');
     await deliverHint(router, headFor(B), 'peer-b');
     expect(service.stats().announcedCurrentHeadPendingScopes).toBe(0);
@@ -1012,7 +1025,8 @@ describe('RFC-64 announced-head acceleration pass integrity (T4/T5)', () => {
     expect(service.stats().announcedCurrentHeadPendingScopes).toBe(ANNOUNCED_SCOPE_CAP);
     // B (one attempt) finds the map full: A, the most-attempted retained
     // entry, yields observably; no fresh hint does. The coalesced follow-up
-    // pass then pulls every fresh hint and B once (all fail fast, retained).
+    // pass then pulls every fresh hint once (all fail fast, retained); B waits
+    // for its re-pull delay.
     router.release('peer-b');
     await service.whenReceiverIdle();
 
@@ -1031,11 +1045,11 @@ describe('RFC-64 announced-head acceleration pass integrity (T4/T5)', () => {
     expect((events[2]!.error as Error).message).toMatch(/capacity exhausted/);
     expect(events[3]!.error).toBeInstanceOf(AggregateError);
     const followUp = events.slice(4);
-    expect(followUp).toHaveLength(ANNOUNCED_SCOPE_CAP);
+    expect(followUp).toHaveLength(ANNOUNCED_SCOPE_CAP - 1);
     const followUpAuthors = new Set(followUp.map((event) => event.scope.authorAddress));
-    expect(followUpAuthors.size).toBe(ANNOUNCED_SCOPE_CAP);
+    expect(followUpAuthors.size).toBe(ANNOUNCED_SCOPE_CAP - 1);
     expect(followUpAuthors.has(A)).toBe(false);
-    expect(followUpAuthors.has(B)).toBe(true);
+    expect(followUpAuthors.has(B)).toBe(false);
     expect(followUp.every((event) => !event.abandoned)).toBe(true);
     // Never above the cap at any re-insert, and at rest exactly at it.
     expect(Math.max(...pendingAtEvent)).toBe(ANNOUNCED_SCOPE_CAP);
@@ -1093,6 +1107,317 @@ describe('RFC-64 announced-head acceleration pass integrity (T4/T5)', () => {
     expect(service.stats()).toMatchObject({
       announcedCurrentHeadPendingScopes: ANNOUNCED_SCOPE_CAP,
       announcedCurrentHeadRetryArmed: true,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T6: an announced head that no provider serves. Every pass finds the older
+// head the providers hold, and the receiver replays that head (under a receiver
+// lease, on a graph with a late legacy SWM marker). The lane must space those
+// passes out, and a head whose budget ran out must not start again on the next
+// repeat of its hint.
+// ---------------------------------------------------------------------------
+
+/** Short real cadence for T6: libp2p nodes and fake timers do not mix. */
+const UNSERVED_INTERVAL_MS = 100;
+const UNSERVED_MAX_ATTEMPTS = 4;
+
+interface UnservedHeadFixtureV1 {
+  readonly provider: Rfc64PublicCatalogServiceV1;
+  readonly replica: Rfc64PublicCatalogServiceV1;
+  readonly requesterPeerId: string;
+  readonly policyDigest: Digest32V1;
+  readonly head: Awaited<ReturnType<typeof stageHead>>;
+  /** Discovery reads served by the provider. */
+  readonly providerReads: ReturnType<typeof vi.fn>;
+  /** Reconciles of the provider-served head: one receiver lease each. */
+  readonly replays: number[];
+  readonly failures: Array<Readonly<{ at: number; event: Rfc64AnnouncedCurrentHeadAccelerationFailureV1 }>>;
+}
+
+async function unservedHeadFixture(): Promise<UnservedHeadFixtureV1> {
+  const [providerNode, requesterNode, providerPersistence, requesterPersistence] =
+    await Promise.all([
+      startNode(),
+      startNode(),
+      openPersistence('unserved-provider'),
+      openPersistence('unserved-requester'),
+    ]);
+  await connect(requesterNode, providerNode);
+  const head = await stageHead(providerPersistence);
+  // The provider serves the older head it holds, never the announced one.
+  const providerReads = vi.fn(async () => head.objectDigest as Digest32V1);
+  const provider = new Rfc64PublicCatalogServiceV1({
+    router: new ProtocolRouter(providerNode),
+    controlObjects: providerPersistence.controlObjects,
+    currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: providerReads },
+    transportTimeoutMs: 4_000,
+  });
+  services.push(provider);
+  const replays: number[] = [];
+  const failures: Array<Readonly<{
+    at: number;
+    event: Rfc64AnnouncedCurrentHeadAccelerationFailureV1;
+  }>> = [];
+  const replica = new Rfc64PublicCatalogServiceV1({
+    router: new ProtocolRouter(requesterNode),
+    controlObjects: requesterPersistence.controlObjects,
+    native: {
+      readCatalogObjectByDigest: async () => null,
+      readKaBundleByDigest: async () => null,
+      createReconciler: () => ({
+        // The older head always needs a replay; the announced one is never there.
+        isHeadSatisfied: async () => false,
+        reconcileHead: async (_peerId, announced) => {
+          if (announced.catalogHeadObjectDigest !== head.objectDigest) return 'not-found';
+          replays.push(Date.now());
+          return 'applied';
+        },
+      }),
+    },
+    currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+    announcedCurrentHeadRetry: {
+      intervalMs: UNSERVED_INTERVAL_MS,
+      maxAttempts: UNSERVED_MAX_ATTEMPTS,
+    },
+    onAccelerationFailed: (event) => { failures.push(Object.freeze({ at: Date.now(), event })); },
+    receiver: { retryBackoffMs: 0 },
+    transportTimeoutMs: 4_000,
+  });
+  services.push(replica);
+  const policy = acceptPolicy(provider);
+  acceptPolicy(replica);
+  provider.start();
+  replica.start();
+  return {
+    provider,
+    replica,
+    requesterPeerId: requesterNode.peerId,
+    policyDigest: policy.policyDigest,
+    head,
+    providerReads,
+    replays,
+    failures,
+  };
+}
+
+/** An announcement of a version above the served head, which no provider holds. */
+function unservedAnnouncement(
+  f: UnservedHeadFixtureV1,
+  version: string,
+): Rfc64PublicCatalogHeadAnnouncementV1 {
+  return Object.freeze({
+    ...announcementFor(f.head, f.policyDigest),
+    catalogVersion: version,
+    catalogHeadObjectDigest: `0x${version.padStart(2, '0').repeat(32)}` as Digest32V1,
+  }) as Rfc64PublicCatalogHeadAnnouncementV1;
+}
+
+async function announceTo(f: UnservedHeadFixtureV1, version: string): Promise<void> {
+  const delivery = await f.provider.announceCatalogHead({
+    announcement: unservedAnnouncement(f, version),
+    peers: [f.requesterPeerId],
+  });
+  expect(delivery.failedPeers).toEqual([]);
+}
+
+describe('RFC-64 announced head that no provider serves (T6)', () => {
+  it('replays the served head once per pass, doubles the delay between passes, then goes quiet', async () => {
+    const f = await unservedHeadFixture();
+    await announceTo(f, '1');
+
+    await vi.waitFor(() => {
+      expect(f.failures).toHaveLength(UNSERVED_MAX_ATTEMPTS);
+    }, { timeout: 20_000, interval: 10 });
+    await f.replica.whenReceiverIdle();
+
+    expect(f.failures.map(({ event }) => [event.attempt, event.abandoned, event.error])).toEqual([
+      [1, false, null],
+      [2, false, null],
+      [3, false, null],
+      [4, true, null],
+    ]);
+    // Each pass replayed the older head the provider serves: one lease turn each.
+    expect(f.replays).toHaveLength(UNSERVED_MAX_ATTEMPTS);
+    // The delay before each re-pull doubles: 1, 2 and 4 intervals.
+    const gaps = f.failures.slice(1).map(({ at }, index) => at - f.failures[index]!.at);
+    gaps.forEach((gap, index) => {
+      expect(gap).toBeGreaterThanOrEqual(UNSERVED_INTERVAL_MS * 2 ** index - 5);
+    });
+
+    // The provider repeats the hint, as it does on every connect: nothing is pulled.
+    const readsAtQuiet = f.providerReads.mock.calls.length;
+    await announceTo(f, '1');
+    await new Promise<void>((resolve) => setTimeout(resolve, 4 * UNSERVED_INTERVAL_MS));
+    await f.replica.whenReceiverIdle();
+    expect(f.failures).toHaveLength(UNSERVED_MAX_ATTEMPTS);
+    expect(f.replays).toHaveLength(UNSERVED_MAX_ATTEMPTS);
+    expect(f.providerReads.mock.calls.length).toBe(readsAtQuiet);
+    expect(f.replica.stats()).toMatchObject({
+      announcedCurrentHeadPendingScopes: 0,
+      announcedCurrentHeadRetryArmed: false,
+    });
+
+    // A newer head is new work: it is pulled at once, with a fresh budget.
+    await announceTo(f, '2');
+    await vi.waitFor(() => {
+      expect(f.failures).toHaveLength(UNSERVED_MAX_ATTEMPTS + 1);
+    }, { timeout: 20_000, interval: 10 });
+    expect(f.failures.at(-1)!.event).toMatchObject({
+      announcedCatalogVersion: '2',
+      attempt: 1,
+      abandoned: false,
+    });
+  }, 60_000);
+
+  it('does not pull a retained head again before its delay when the same hint repeats', async () => {
+    const f = await unservedHeadFixture();
+    await announceTo(f, '1');
+    await vi.waitFor(() => { expect(f.failures).toHaveLength(1); }, { timeout: 20_000, interval: 10 });
+    const [first] = f.failures;
+
+    // Repeats arrive well inside the 100 ms delay; the re-pull still waits for it.
+    await announceTo(f, '1');
+    await announceTo(f, '1');
+    await vi.waitFor(() => { expect(f.failures).toHaveLength(2); }, { timeout: 20_000, interval: 5 });
+    expect(f.failures[1]!.at - first!.at).toBeGreaterThanOrEqual(UNSERVED_INTERVAL_MS - 5);
+    expect(f.replays).toHaveLength(2);
+  }, 60_000);
+});
+
+describe('RFC-64 announced-head acceleration: a hint repeated during the pass (T7)', () => {
+  it('leaves the retained head to its delay instead of pulling it again in the follow-up pass', async () => {
+    const { router, service, onAccelerationFailed } = heldPassService({
+      maxAttempts: MAX_PULL_ATTEMPTS,
+    });
+    const policy = acceptPolicy(service);
+    service.start();
+    const head = announcement({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      catalogVersion: '0',
+      policyDigest: policy.policyDigest,
+    });
+
+    // Pass 1 is held open on the provider; the same hint arrives again meanwhile.
+    router.hold('peer-a');
+    await deliverHint(router, head, 'peer-a');
+    await deliverHint(router, head, 'peer-a');
+    expect(service.stats().announcedCurrentHeadPendingScopes).toBe(1);
+
+    router.release('peer-a');
+    await service.whenReceiverIdle();
+
+    // One pull and one report: the follow-up pass found the head not yet due.
+    expect(onAccelerationFailed).toHaveBeenCalledTimes(1);
+    expect(router.sends.filter(
+      ({ protocolId }) => protocolId === RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
+    )).toHaveLength(1);
+    expect(service.stats()).toMatchObject({
+      announcedCurrentHeadPendingScopes: 1,
+      announcedCurrentHeadRetryArmed: true,
+    });
+    // A caller waiting on the graph does not wait out that delay.
+    await expect(service.whenReceiverIdleForContextGraph(CONTEXT_GRAPH_ID)).resolves.toBeUndefined();
+  });
+
+  it('pulls again in the follow-up pass when the hint came from another provider', async () => {
+    const { router, service, onAccelerationFailed } = heldPassService({
+      maxAttempts: MAX_PULL_ATTEMPTS,
+    });
+    const policy = acceptPolicy(service);
+    service.start();
+    const head = announcement({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      catalogVersion: '0',
+      policyDigest: policy.policyDigest,
+    });
+
+    router.hold('peer-a');
+    await deliverHint(router, head, 'peer-a');
+    await deliverHint(router, head, 'peer-b');
+    router.release('peer-a');
+    await service.whenReceiverIdle();
+
+    // The follow-up pass pulled the head from both providers at once.
+    expect(onAccelerationFailed).toHaveBeenCalledTimes(2);
+    expect(onAccelerationFailed.mock.calls[1]![0]).toMatchObject({
+      attempt: 2,
+      remotePeerIds: ['peer-b', 'peer-a'],
+    });
+  });
+});
+
+describe('RFC-64 announced-head acceleration: a retained head another lane applied (T8)', () => {
+  function satisfiedLaneService() {
+    const router = new GatedDiscoveryRouter();
+    const applied = new Set<string>();
+    const onAccelerationFailed =
+      vi.fn<(event: Rfc64AnnouncedCurrentHeadAccelerationFailureV1) => void>();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: inertControlObjects(),
+      native: {
+        readCatalogObjectByDigest: async () => null,
+        readKaBundleByDigest: async () => null,
+        createReconciler: () => ({
+          isHeadSatisfied: async (head) => applied.has(head.catalogHeadObjectDigest),
+          isHeadKnownSatisfied: (head) => applied.has(head.catalogHeadObjectDigest),
+          reconcileHead: async () => 'not-found',
+        }),
+      },
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+      announcedCurrentHeadRetry: { intervalMs: HELD_PASS_RETRY_INTERVAL_MS, maxAttempts: MAX_PULL_ATTEMPTS },
+      onAccelerationFailed,
+      receiver: { retryBackoffMs: 0 },
+    });
+    services.push(service);
+    const policy = acceptPolicy(service);
+    service.start();
+    const headAtVersion = (catalogVersion: string, digestByte: string) => announcement({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      catalogVersion,
+      policyDigest: policy.policyDigest,
+      catalogHeadObjectDigest: `0x${digestByte.repeat(32)}` as Digest32V1,
+    });
+    return { router, service, applied, onAccelerationFailed, headAtVersion };
+  }
+
+  it('drops the retained target when a hint for a head that supersedes it is known satisfied', async () => {
+    const { router, service, applied, onAccelerationFailed, headAtVersion } = satisfiedLaneService();
+    const first = headAtVersion('1', 'c1');
+    await deliverHint(router, first, 'peer-a');
+    await service.whenReceiverIdle();
+    expect(onAccelerationFailed).toHaveBeenCalledTimes(1);
+    expect(service.stats().announcedCurrentHeadPendingScopes).toBe(1);
+
+    // The receiver applied a newer head meanwhile; its hint settles the retained target.
+    const newer = headAtVersion('2', 'c2');
+    applied.add(newer.catalogHeadObjectDigest);
+    const scheduledBefore = service.stats().receiver.scheduled;
+    await deliverHint(router, newer, 'peer-a');
+    expect(service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 1,
+      announcedCurrentHeadPendingScopes: 0,
+    });
+    expect(service.stats().receiver.scheduled).toBe(scheduledBefore);
+  });
+
+  it('keeps the retained target for a satisfied hint of the same version with another head', async () => {
+    const { router, service, applied, headAtVersion } = satisfiedLaneService();
+    await deliverHint(router, headAtVersion('1', 'c1'), 'peer-a');
+    await service.whenReceiverIdle();
+
+    const conflicting = headAtVersion('1', 'd1');
+    applied.add(conflicting.catalogHeadObjectDigest);
+    await deliverHint(router, conflicting, 'peer-a');
+    await service.whenReceiverIdle();
+    expect(service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 0,
+      announcedCurrentHeadPendingScopes: 1,
     });
   });
 });
