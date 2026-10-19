@@ -325,6 +325,7 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
+import { AuthorityAcceptedCatchupBatch } from './sync/on-connect/graph-scope.js';
 
 export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
   /** Exact durable predecessor returned by genesis or a prior successor. */
@@ -499,8 +500,8 @@ const rfc64CatalogAuthorityProgressV1 =
   new WeakMap<DKGAgent, Map<string, Rfc64CatalogAuthorityProgressV1>>();
 const rfc64CatalogAuthorityRevisionsV1 =
   new WeakMap<DKGAgent, Map<string, number>>();
-const rfc64AuthorityAcceptedCatchupTimersV1 =
-  new WeakMap<DKGAgent, ReturnType<typeof setTimeout>>();
+const rfc64AuthorityAcceptedCatchupBatchesV1 =
+  new WeakMap<DKGAgent, AuthorityAcceptedCatchupBatch>();
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
 /**
  * Context graphs whose accepted policy was composed from a private join
@@ -3473,7 +3474,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // rather than on every periodic unchanged refresh.
       if (previousAuthorityProgress?.state !== 'accepted' || authorityGenerationChanged) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
-        this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
+        this.scheduleRfc64AuthorityAcceptedPeerCatchupV1(contextGraphId);
       }
       this.scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
         contextGraphId,
@@ -3607,37 +3608,36 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    * Coalesce a batch of accepted authority transitions into one connected-peer
    * catch-up. A peer may have completed an ordinary sync while those graphs
    * were correctly denied as pending; the resulting freshness stamp must not
-   * suppress the first pass with the newly accepted scope.
+   * suppress the first pass with the newly accepted scope. The pass covers
+   * only the batched graphs: the peer's other graphs did not change.
    */
-  private scheduleRfc64AuthorityAcceptedPeerCatchupV1(this: DKGAgent): void {
-    const existing = rfc64AuthorityAcceptedCatchupTimersV1.get(this);
-    if (existing !== undefined) clearTimeout(existing);
-    const timer = setTimeout(() => {
-      if (rfc64AuthorityAcceptedCatchupTimersV1.get(this) !== timer) return;
-      rfc64AuthorityAcceptedCatchupTimersV1.delete(this);
-      // The node can be stopped or restarting while the agent still reports
-      // started, and reading libp2p then throws from this timer, outside any
-      // caller that could catch it.
-      if (!this.started || !this.node.isStarted) return;
-      for (const peer of this.node.libp2p.getPeers()) {
-        const peerId = peer.toString();
-        this.queueSyncFromPeerOnConnect(
-          peerId,
-          (failedPeerId, error) => {
-            this.log.warn(
-              createOperationContext('sync'),
-              `RFC-64 authority catch-up from ${failedPeerId.slice(-8)} failed: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          },
-          0,
-          { authorityScopeChanged: true },
-        );
-      }
-    }, 3_000);
-    (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
-    rfc64AuthorityAcceptedCatchupTimersV1.set(this, timer);
+  private scheduleRfc64AuthorityAcceptedPeerCatchupV1(this: DKGAgent, contextGraphId: string): void {
+    let batch = rfc64AuthorityAcceptedCatchupBatchesV1.get(this);
+    if (batch === undefined) {
+      batch = new AuthorityAcceptedCatchupBatch(3_000, (authorityScopeContextGraphIds) => {
+        // The node can be stopped or restarting while the agent still reports
+        // started, and reading libp2p then throws from this timer, outside any
+        // caller that could catch it.
+        if (!this.started || !this.node.isStarted) return;
+        for (const peer of this.node.libp2p.getPeers()) {
+          this.queueSyncFromPeerOnConnect(
+            peer.toString(),
+            (failedPeerId, error) => {
+              this.log.warn(
+                createOperationContext('sync'),
+                `RFC-64 authority catch-up from ${failedPeerId.slice(-8)} failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            },
+            0,
+            { authorityScopeChanged: true, authorityScopeContextGraphIds },
+          );
+        }
+      });
+      rfc64AuthorityAcceptedCatchupBatchesV1.set(this, batch);
+    }
+    batch.add(contextGraphId);
   }
 
   /**

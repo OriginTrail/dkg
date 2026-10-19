@@ -7,6 +7,7 @@ import {
   type SyncOnConnectPeerAccountingEntry,
   type SyncReconcilerAttemptOutcome,
 } from './attempt-accounting.js';
+import type { SyncOnConnectGraphScope } from './graph-scope.js';
 import type { SyncOnConnectPeerJobRunner } from './peer-scheduler.js';
 import type { SyncOnConnectPeerOutcome } from './sync-on-connect.js';
 
@@ -18,7 +19,9 @@ export interface ReconciledSyncOnConnectPeerJobDependencies<SelectedPlan, Probe>
     recoveryPlan: SelectedPlan | undefined,
   ) => Promise<SyncOnConnectAttemptResult>;
   readonly runAutomaticSelected?: () => Promise<SyncOnConnectAttemptResult>;
-  readonly runOrdinary: () => Promise<SyncOnConnectAttemptResult>;
+  readonly runOrdinary: (
+    contextGraphIds: SyncOnConnectGraphScope,
+  ) => Promise<SyncOnConnectAttemptResult>;
   readonly selectedRetryStillRequired: () => boolean;
   readonly resetBackoffBeforeRetry: () => void;
   readonly commitAccounting: (
@@ -69,7 +72,9 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     return this.runSelectedPhase(() => this.dependencies.runSelected(recoveryPlan));
   }
 
-  async runAutomaticSelectedThenOrdinary(): Promise<SyncReconcilerAttemptOutcome> {
+  async runAutomaticSelectedThenOrdinary(
+    contextGraphIds: SyncOnConnectGraphScope = null,
+  ): Promise<SyncReconcilerAttemptOutcome> {
     this.assertActive();
     const automaticSelectedPhase = this.automaticSelectedPhase;
     this.automaticSelectedPhase = null;
@@ -88,7 +93,10 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     }
     let ordinaryOutcome: SyncReconcilerAttemptOutcome;
     try {
-      ordinaryOutcome = await this.attemptPhase('ordinary', this.dependencies.runOrdinary);
+      ordinaryOutcome = await this.attemptPhase(
+        'ordinary',
+        () => this.dependencies.runOrdinary(contextGraphIds),
+      );
     } catch (ordinaryError: unknown) {
       if (selectedPhaseFailed) {
         throw new AggregateError(

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { SyncOnConnectAttemptResult } from
   '../src/sync/on-connect/attempt-accounting.js';
+import type { SyncOnConnectGraphScope } from
+  '../src/sync/on-connect/graph-scope.js';
 import { ReconciledSyncOnConnectPeerJobRunner } from
   '../src/sync/on-connect/peer-job-runner.js';
 import {
@@ -19,7 +21,7 @@ function completed(accounting: SyncOnConnectPeerOutcome): SyncOnConnectAttemptRe
 function createRunner(input: Readonly<{
   runSelected?: () => Promise<SyncOnConnectAttemptResult>;
   runAutomaticSelected?: () => Promise<SyncOnConnectAttemptResult>;
-  runOrdinary: () => Promise<SyncOnConnectAttemptResult>;
+  runOrdinary: (contextGraphIds: SyncOnConnectGraphScope) => Promise<SyncOnConnectAttemptResult>;
 }>) {
   const commitAccounting = vi.fn();
   const resetBackoffBeforeRetry = vi.fn();
@@ -191,5 +193,23 @@ describe('sync-on-connect peer-job phase accounting', () => {
       progress: false,
     }, PROBE);
     expect(resetBackoffBeforeRetry).not.toHaveBeenCalled();
+  });
+
+  it('hands each ordinary pass its graph scope, the whole scope by default', async () => {
+    const scopes: SyncOnConnectGraphScope[] = [];
+    const { runner, commitAccounting } = createRunner({
+      runOrdinary: async (contextGraphIds) => {
+        scopes.push(contextGraphIds);
+        return completed({ reconcilerDisposition: 'clear', fresh: false, progress: false });
+      },
+    });
+    const scope = new Set(['cg-changed']);
+
+    await runner.runAutomaticSelectedThenOrdinary(scope);
+    await runner.runAutomaticSelectedThenOrdinary();
+    runner.finish();
+
+    expect(scopes).toEqual([scope, null]);
+    expect(commitAccounting).toHaveBeenCalledOnce();
   });
 });
