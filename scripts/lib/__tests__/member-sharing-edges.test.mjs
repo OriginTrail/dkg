@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { openDevnet } from '../member-sharing/devnet.mjs';
 import { TemporaryEdges } from '../member-sharing/temporary-edges.mjs';
 
 const MARK = '.issue-3251-member-sharing';
@@ -126,4 +127,34 @@ test('a node whose start failed after addnode created it is removed; a later run
   next.reclaimLeftovers();
   assert.ok(!existsSync(devnet.nodeDir(9)));
   assert.ok(untouched(devnet, 10));
+});
+
+test('cancelling the real devnet.sh call stops the script while the node comes up: its later steps never run', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'dkg-devnet-sh-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, '.devnet');
+  mkdirSync(join(root, 'scripts'));
+  mkdirSync(join(dir, 'node8'), { recursive: true });
+  writeFileSync(join(dir, 'node8', 'config.json'), '{"theirs":true}');
+  // A stand-in for addnode: it claims and marks the folder, waits while the node comes up, then records the start.
+  writeFileSync(join(root, 'scripts', 'devnet.sh'), [
+    'set -e',
+    'mkdir "$DEVNET_DIR/node$2"',
+    `echo "$DEVNET_ADDNODE_MARK_TEXT" > "$DEVNET_DIR/node$2/${MARK}"`,
+    'sleep 3 > /dev/null 2>&1',
+    'echo up > "$DEVNET_DIR/node$2/started"',
+  ].join('\n'));
+  const devnet = openDevnet({ repoRoot: root, dir, apiPortBase: 9201, libp2pPortBase: 10001, adminToken: 'token' });
+  const cancel = new AbortController();
+  const began = Date.now();
+  const adding = devnet.devnetSh(['addnode', '7', 'edge'], { DEVNET_ADDNODE_MARK_TEXT: 'S member2 starting' }, 30_000, { signal: cancel.signal });
+  for (let i = 0; i < 200 && !existsSync(join(dir, 'node7', MARK)); i++) await new Promise(resolve => { setTimeout(resolve, 10); });
+  assert.equal(readFileSync(join(dir, 'node7', MARK), 'utf8'), 'S member2 starting\n');
+  cancel.abort();
+  const added = await adding;
+  assert.notEqual(added.status, 0);
+  assert.ok(Date.now() - began < 2_000, `the call ended ${Date.now() - began} ms after it began: it was waited for, not stopped`);
+  await new Promise(resolve => { setTimeout(resolve, 3_500 - (Date.now() - began)); });
+  assert.equal(existsSync(join(dir, 'node7', 'started')), false, 'the step after the wait ran: the script was not stopped');
+  assert.equal(readFileSync(join(dir, 'node8', 'config.json'), 'utf8'), '{"theirs":true}');
 });
