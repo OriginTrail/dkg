@@ -50,6 +50,8 @@ export default defineConfig({
       "test/swm-sync-sub-graph-registration.test.ts",
       "test/registered-public-sub-graph-first-write.test.ts",
       "test/core-hosted-definition.test.ts",
+      "test/core-hosted-owner-peer-tie.test.ts",
+      "test/owner-tie-offer.test.ts",
       "test/fresh-meta-fetch.test.ts",
       "test/swm-pull-knowledge-asset-share.test.ts",
       "test/swm-change-notice.test.ts",

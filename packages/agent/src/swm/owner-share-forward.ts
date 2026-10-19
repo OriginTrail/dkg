@@ -98,15 +98,18 @@ function decodeShareEnvelope(bytes: Uint8Array): DecodedShareEnvelope {
   } catch {
     return { kind: 'other' };
   }
+  return { kind: decodedShareEnvelopeKind(envelope), envelope };
+}
+
+/** The kind of a decoded share envelope: `other` for another version or type, or an empty payload. */
+export function decodedShareEnvelopeKind(envelope: GossipEnvelopeMsg): ShareEnvelopeKind {
   if (envelope.version !== GOSSIP_ENVELOPE_VERSION || envelope.type !== GOSSIP_TYPE_WORKSPACE_PUBLISH || !envelope.payload?.length) {
-    return { kind: 'other' };
+    return 'other';
   }
-  if (isEncryptedPayload(envelope.payload)) return { kind: 'encrypted', envelope };
-  if (isSenderKeyPayload(envelope.payload)) return { kind: 'sender-key', envelope };
-  if (!envelope.signature?.length || !envelope.agentAddress || !ethers.isAddress(envelope.agentAddress)) {
-    return { kind: 'unsigned', envelope };
-  }
-  return { kind: 'signed-plain', envelope };
+  if (isEncryptedPayload(envelope.payload)) return 'encrypted';
+  if (isSenderKeyPayload(envelope.payload)) return 'sender-key';
+  if (!envelope.signature?.length || !envelope.agentAddress || !ethers.isAddress(envelope.agentAddress)) return 'unsigned';
+  return 'signed-plain';
 }
 
 function isEncryptedPayload(payload: Uint8Array): boolean {
