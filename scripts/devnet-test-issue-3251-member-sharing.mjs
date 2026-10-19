@@ -58,19 +58,29 @@
 //      after it) and after an owner restart (live, both directions)
 //   5  members MEMBER_SHARING_LATER_SECS (default 300) after they subscribed
 //      still receive new writes, both directions
-//   6  member 2 while its only sync slot is busy with a large transfer of
-//      another graph (MEMBER_SHARING_BIG_ASSETS x MEMBER_SHARING_BIG_TRIPLES).
+//   6  member 2 while its only general sync slot is busy with a large transfer
+//      of another graph (MEMBER_SHARING_BIG_ASSETS x MEMBER_SHARING_BIG_TRIPLES).
 //      Member 2's own evidence must show the transfer in the slot: its
 //      admission trace (DKG_SYNC_ADMISSION_TRACE, written by the agent) names
 //      the admission of the large graph that took its general slot, under the
-//      effective policy of one general slot and no queue, and when it gave the
-//      slot up. A write counts only when it was received before then. A
-//      reserved shared-memory slot beside the general one is the fix under
-//      test (the diagnostics report it as part of one pool, so they are not
-//      read for this). Its daemon starts with the sync environment variables
-//      pinned to that policy (they override config). A write received after
-//      the transfer gave up the slot, or a transfer never admitted, fails the
-//      case as not exercised; a running catch-up job alone proves nothing
+//      effective policy of one general slot and no queue, and lists it once a
+//      second while it holds the slot. A write counts only when it was received
+//      before the last trace line that shows the transfer holding the slot (its
+//      release, or a lost release's last listing). The reserved slots beside
+//      the general one, for shared-memory pulls (#3258) and control-plane
+//      fetches (#3302), are the fixes under test: the writes must reach member
+//      2 although the general slot is busy (the diagnostics report the reserved
+//      slots as part of one pool, so they are not read for this). Its daemon
+//      starts with the sync environment variables pinned to that policy (they
+//      override config), and its catch-up asks one peer at a time, the owner
+//      first (DKG_CATCHUP_MAX_CONCURRENT_PEERS=1), and member 2 subscribes to
+//      the large graph once its general slot is free: so the owner's transfer
+//      is the pull that takes the general slot. The transfer is meant to hold
+//      it through the bound of every write: a write member 2 does not hold by
+//      then fails the case. A write received after the transfer gave up the
+//      slot, a transfer that took a reserved slot, or a transfer never
+//      admitted, fails the case as not exercised; a running catch-up job alone
+//      proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
 //      and 3 on a private graph whose members joined through the signed
 //      request flow. A member's write into a private graph sets up its sender
@@ -118,7 +128,7 @@
 //   MEMBER_SHARING_NODES         temporary nodes owner,member1,member2 (default: the
 //                                first three of 7, 8, 9, 10 with no folder and no
 //                                listener on their API or libp2p port)
-//   MEMBER_SHARING_BIG_ASSETS    assets of the large graph of case 6 (32)
+//   MEMBER_SHARING_BIG_ASSETS    assets of the large graph of case 6 (64)
 //   MEMBER_SHARING_BIG_TRIPLES   triples per asset of that graph (2000)
 //   MEMBER_SHARING_KEEP_NODES=1  leave the temporary nodes running (debugging)
 //
@@ -155,7 +165,13 @@ const SYNCED_MS = positive('MEMBER_SHARING_SYNCED_SECS', 90) * 1000;
 // without it the member's own writes into the graph are refused.
 const DEFINITION_MS = 90_000;
 const LATER_MS = positive('MEMBER_SHARING_LATER_SECS', 300) * 1000;
-const BIG_ASSETS = Math.round(positive('MEMBER_SHARING_BIG_ASSETS', 32));
+// Case 6's transfer must hold member 2's general slot through the bound of
+// every write it makes, about 75 s, or a write that member 2 does not hold
+// while the slot is busy can only be reported as not exercised. Its length
+// follows the number of assets (about 1.2 to 1.7 s each from the owner over
+// the relay), not their size: 64 assets took 109 s, 16 assets of 8000 triples
+// 39 s.
+const BIG_ASSETS = Math.round(positive('MEMBER_SHARING_BIG_ASSETS', 64));
 const BIG_TRIPLES = Math.round(positive('MEMBER_SHARING_BIG_TRIPLES', 2000));
 const SUB = 's';
 const STAMP = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${process.pid}`;
@@ -170,7 +186,7 @@ const CASES = {
   3: 'history: writes made before the members subscribed',
   4: 'after a member restart and after an owner restart',
   5: `members ${seconds(LATER_MS)} s after they subscribed`,
-  6: 'member 2 while its only sync slot is busy with another graph',
+  6: 'member 2 while its general sync slot is busy with another graph',
   7: 'cases 1, 2, 3 on a registered graph; 1, 3 on a private graph',
   8: 'the synced flag of every member',
 };
@@ -278,7 +294,7 @@ async function run() {
   for (const scenario of active) live.push(...await scenario.memberWrites(scenarioIo, owner, members));
   await settle(live);
 
-  // Case 6: member 2's only sync slot busy with a large transfer of another graph.
+  // Case 6: member 2's only general sync slot busy with a large transfer of another graph.
   if (big) await busyMember({ devnet, edges, graphs, io, report, precondition, boundMs: BOUND_MS, sub: SUB }, pub.graph, big);
 
   // Case 5: members that subscribed LATER_MS ago.

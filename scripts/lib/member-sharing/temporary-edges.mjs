@@ -122,12 +122,17 @@ export class TemporaryEdges {
     // the caller (DKG_SYNC_GLOBAL_MAX_INFLIGHT=8, say) would give it spare
     // slots. So they are pinned to its policy.
     // Case 6 needs to know which admission holds its slot, and when: the node
-    // writes its admission trace into its folder.
+    // writes its admission trace into its folder. Its catch-up asks one peer at
+    // a time (the owner first), so that the large graph's transfer from the
+    // owner is the pull that takes its general slot (busy-member.mjs).
     const trace = join(this.devnet.nodeDir(member2), 'sync-admissions.jsonl');
     this.member2 = {
       ...record(member2, 'member2', 'member2', relay2,
         { relay: relay2, announceAddresses: [DEAD_DIRECT_ADDRESS, `${relay2}/p2p-circuit`], syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
-        { DKG_SYNC_GLOBAL_MAX_INFLIGHT: '1', DKG_SYNC_GLOBAL_LIMIT: '1', DKG_SYNC_GLOBAL_QUEUE_LIMIT: '0', DKG_SYNC_ADMISSION_TRACE: trace }),
+        {
+          DKG_SYNC_GLOBAL_MAX_INFLIGHT: '1', DKG_SYNC_GLOBAL_LIMIT: '1', DKG_SYNC_GLOBAL_QUEUE_LIMIT: '0', DKG_SYNC_ADMISSION_TRACE: trace,
+          DKG_CATCHUP_MAX_CONCURRENT_PEERS: '1',
+        }),
       trace,
     };
     return { taken };
