@@ -5,6 +5,10 @@ import type {
 } from './public-catalog-reconciliation-outcome-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from
   './public-catalog-transport-v1.js';
+import { RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 } from './catalog-head-lineage-v1.js';
+
+/** How far past the first queued head of a scope the next run may jump. */
+const RFC64_RECEIVER_MAX_HEAD_JUMP_V1 = BigInt(RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1);
 
 export type Rfc64ReceiverSchedulingClassV1 =
   | 'ambient'
@@ -62,6 +66,8 @@ export interface Rfc64ReceiverLifecycleTaskV1 {
   completionWaiters?: Array<(result: Rfc64PublicCatalogReceiverCompletionV1) => void>;
   running?: boolean;
   settled?: boolean;
+  /** A newer head of its scope ran in its place once; it now runs in queue order. */
+  passedOver?: boolean;
 }
 
 /**
@@ -183,11 +189,65 @@ export class Rfc64ReceiverTaskLifecycleV1<
     return this.#deferred.delete(task);
   }
 
+  /**
+   * The first queued task whose scope has no writer, or the newest queued head
+   * of that scope in its place.
+   *
+   * Each head a receiver applies costs one receiver lease of its graph, and
+   * the leases of all graphs take one node-wide turn at a time. A scope whose
+   * writer waited for its turn has often had several newer heads delivered in
+   * the meantime. Run in queue order, each would wait for a turn of its own
+   * and apply a transition the next one replaces. The newest one applies the
+   * same end state in one turn: a head is a complete signed set, and the
+   * receiver proves its signed lineage back to the durable head. The heads it
+   * replaced stay queued and then settle as already applied, without a lease.
+   *
+   * Only ambient heads, delivered hints, take part. A caller-awaited head
+   * keeps its place, and a verified current head has its own placement and
+   * retirement rules. A delivered head is not verified yet, so the jump is
+   * bounded twice:
+   * - it reaches at most one signed lineage window past the first head, the
+   *   furthest the receiver can apply in one step;
+   * - a head passed over once is never passed over again. When the newest
+   *   head cannot be applied, the older ones run in queue order, so later
+   *   hints for newer heads delay them by one attempt at most. The scope
+   *   lock already made every head of a scope wait for each one before it.
+   */
   takeNextRunnable(): TTask | undefined {
     const index = this.#queue.findIndex((task) => !this.#activeByScopeKey.has(task.scopeKey));
     if (index < 0) return undefined;
-    const [task] = this.#queue.splice(index, 1);
+    const [task] = this.#queue.splice(this.#newestAmbientHeadOfScopeAt(index), 1);
     return task;
+  }
+
+  /** The queue index of the task to run in place of the one at `index`. */
+  #newestAmbientHeadOfScopeAt(index: number): number {
+    const first = this.#queue[index]!;
+    if (!isCoalescibleAmbientHeadV1(first) || first.passedOver === true) return index;
+    let newest = index;
+    for (let candidate = index + 1; candidate < this.#queue.length; candidate += 1) {
+      const task = this.#queue[candidate]!;
+      if (
+        task.scopeKey === first.scopeKey
+        && isCoalescibleAmbientHeadV1(task)
+        && task.catalogVersion > this.#queue[newest]!.catalogVersion
+        && task.catalogVersion - first.catalogVersion <= RFC64_RECEIVER_MAX_HEAD_JUMP_V1
+      ) {
+        newest = candidate;
+      }
+    }
+    if (newest === index) return index;
+    const newestVersion = this.#queue[newest]!.catalogVersion;
+    for (const task of this.#queue) {
+      if (
+        task.scopeKey === first.scopeKey
+        && isCoalescibleAmbientHeadV1(task)
+        && task.catalogVersion < newestVersion
+      ) {
+        task.passedOver = true;
+      }
+    }
+    return newest;
   }
 
   begin(task: TTask): void {
@@ -303,6 +363,10 @@ export class Rfc64ReceiverTaskLifecycleV1<
     for (const resolve of waiters) notify(() => resolve(result));
     return true;
   }
+}
+
+function isCoalescibleAmbientHeadV1(task: Rfc64ReceiverLifecycleTaskV1): boolean {
+  return task.schedulingPolicy.schedulingClass === 'ambient' && !task.cancellation.signal.aborted;
 }
 
 /** Exact-head deduplication key owned by the receiver scheduler. */
