@@ -2,7 +2,7 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10.0.25] - 2026-10-16
+## [10.0.25] - 2026-10-19
 
 A patch for shared memory between the members of a public Context Graph,
 after a community report on 10.0.24 (#3251) and to finish #3198. A
@@ -75,7 +75,7 @@ query on the node was refused (#3319). A restarted owner's first write
 into its graph waits for the graph's catch-up, up to 30 s, where it was
 refused and went through on a retry 13 to 23 s later (#3320).
 
-Three fixes from end-to-end runs in which the members of a graph reach each
+Five fixes from end-to-end runs in which the members of a graph reach each
 other only through Cores. A Core that hosts a public graph keeps its
 members' shares into named sub-graphs and serves them to pulls, and a
 member's share goes to the graph's owner itself, through a relay when the
@@ -86,30 +86,55 @@ Core's manifest naming a snapshot the Core no longer serves reads the
 manifest again, where it stayed unsynced for about ten minutes or longer
 (#3328). A node with a manual RFC-64 peer table uses it only for the
 private graphs it was configured for, where it denied the members of every
-other private graph, whose root writes then never reached it (#3333).
+other private graph, whose root writes then never reached it (#3333). On
+an Edge, a member's share into a public graph that has no Core among its
+recipients, for example right after the graph is created, also goes to up
+to four connected Cores, where it could go to nobody with nothing logged. A
+share that reached no peer is logged, and a share that reached no peer or
+not the graph's owner is sent again for up to 30 minutes (#3368). A Core
+that applies a member's share into a named sub-graph of a public graph
+passes the member's signed share, unchanged, to the owner's node it is
+connected to, so the owner holds the author's seal also when the member
+cannot find the owner (#3371).
 
-Three changes to the recovery of shares. A synchronous share that has
-committed to shared memory and then meets a transient failure is no longer
-left without an owner: the node persists a recovery job before it promotes,
-the job resumes the original operation after the failure or a restart, and
-the error answer names the job (#3300). Where the node can author the
-graph's catalog, the share succeeds only after its signed inventory entry
-is written; where the graph's catalog authority is not accepted on the node
-yet, for example just after the graph is created or registered or just
-after a restart, the share completes and its inventory entry is written in
-the background, as in 10.0.24 (#3360). A pull of a shared asset back into
-working memory that was interrupted while it cleared the shared seal
-recovers from the seal's archive, where every later pull of that asset was
-refused (#3341).
+Five changes to the recovery of shares, and one to the recovery of
+publications. A synchronous share that has committed to shared memory and
+then meets a transient failure is no longer left without an owner: the node
+persists a recovery job before it promotes, the job resumes the original
+operation after the failure or a restart, and the error answer names the
+job (#3300). Where the node can author the graph's catalog, the share
+succeeds only after its signed inventory entry is written; where the
+graph's catalog authority is not accepted on the node yet, for example just
+after the graph is created or registered or just after a restart, the share
+completes and its inventory entry is written in the background, as in
+10.0.24 (#3360). A share admitted while the node could author the graph's
+catalog, whose authoring lane has closed by the time it hands its inventory
+entry over, is answered as shared, with the pending catalog handoff named
+in the answer, and its recovery job writes the entry (#3363). A pull of a
+shared asset back into working memory that was interrupted while it
+cleared the shared seal recovers from the seal's archive, where every later
+pull of that asset was refused (#3341). An asynchronous share waits at most
+10 s for its admission to the queue and says whether a job was admitted,
+was not, or may have been, where under store pressure a caller could give
+up while its job was still being admitted (#3358). The queue's recovery
+repairs a confirmed publication whose descriptor an interrupted lifecycle
+write removed, where it finalized the job without the descriptor and the
+asset's lookups answered 404. For such an asset whose job was already
+cleared, a node administrator can verify and repair the descriptor through
+a route that defaults to a dry run and sends no transaction (#3365).
 
-**No smart-contract, ABI or deployment registry changes.** Three new
+**No smart-contract, ABI or deployment registry changes.** Four new
 protocols and one changed message. The owner of a public graph sends a
 change notice, `/dkg/10.0.1/swm-change-notice`, to the graph's followers
 when it applies a share from another peer (#3256). A node on an earlier
 version does not take that stream, and the owner goes on. For the root of a
 public graph that is not registered on chain the owner forwards the
 member's catalog head over the existing announcement protocol instead,
-which a node on 10.0.24 already accepts. A Core registers
+which a node on 10.0.24 already accepts. A Core passes a member's signed
+share into a named sub-graph of a public graph to the graph's owner over
+`/dkg/10.0.1/swm-update-relayed` (#3371). A Core on an earlier version does
+not forward, and an owner on an earlier version refuses the stream, which
+the Core does not retry. A Core registers
 `/dkg/10.0.0/public-graph-snapshot/1` and answers it, for the public graphs
 it hosts or follows, with a bounded snapshot of the graph's chain state;
 only the snapshot job of this release asks for one (#3140). The bulk
@@ -166,7 +191,14 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
 | A Core keeps its hosted graph's sub-graph shares, and a member's share goes to the graph's owner (#3327) | A Core that hosts a public graph, that is, signed a StorageACK for it, applies a member's share into a named sub-graph as a subscriber does and serves it to pulls; the root stays with the catalog, and every check of the share handler still runs. Before a graph's first Verified Memory publish no Core hosts it, and Cores still decline its sub-graph shares. Before a share into a public graph goes out, the author makes the graph's owner one of the share's followers: a connected owner peer as it is, otherwise the first of at most two of the owner's peers it can connect to, through a relay when that is the only route, within 10 s for the lookup and the connections together. An owner peer whose dial failed, and an owner that was not found, are not tried again for 60 s; owner peers that were found are reused for 5 minutes. An Edge that cannot map the owner's wallet to a peer fetches the owner's profile from a Core's `agents` phonebook on demand. A public graph with a peer allowlist is sent to the list, with the owner added when the list does not name it. The owner of a public graph in use also pulls it from one connected peer every 60 s, as a member does. An on-demand phonebook fetch that this node's own sync scheduler turns away asks the peer again after 1 s, at most 30 times within its budget, and takes no cooldown, where it took the 10-minute cooldown of an empty answer | None |
 | A registered public graph left unproven is caught up again, and a stale kept manifest is read again (#3328, #3287) | The readiness repeat (15 s, 30 s, 1, 2, 4, 8, 16 and 30 minutes, at most eight times) now follows a public graph whether or not it is registered on chain, where a registered graph was repeated only while its walk found the shared-memory lane not active; a subscription known only by its on-chain name hash is still not repeated. A member keeps a peer's complete shared-memory manifest between catch-up rounds while its snapshot walk is incomplete; a round that replays the kept manifest and resolves no further snapshot now ends it, so the next round reads the peer's current manifest, where the kept one was replayed until the walk expired, 10 minutes after its last progress. A round that does resolve a snapshot keeps the manifest, so a long walk still resumes where it stopped | None |
 | A manual RFC-64 peer table answers only for the private graphs it was configured for (#3333) | `rfc64Catalog.accessPolicyAuthority` with `peerAgentBindings` binds peers to agents for the selected private graphs of the activation config, and answered for every graph. For every other private graph, a graph joined at runtime for example, the node now resolves peers from the graph's own state (join delegations, the curator binding, the phonebook), as a node without the table does, and exchanges catalog heads and content with its members. A function authority supplied in code (`rfc64CatalogAccessPolicyAuthority`) still answers for every graph | None |
+| A member's share into a public graph also goes to connected Cores when none of its recipients is a Core (#3368) | On an Edge, a share into a public graph without a roster or a peer allowlist, whose subscribers, followers and routed owner include no Core, also goes to up to four connected Cores that take shared-memory updates, in an order fixed per graph so that different graphs spread over the Cores. They are sent to as followers are, outside the subscriber narrowing and the tier cap, and the delivery watchdog retries them as it retries direct members. A Core that hosts the graph applies a member's sub-graph share (#3327), and the other members pull it from there. A Core that refuses the share is left out of that graph and scope for ten minutes, unless it applied a share of that graph and scope in the last ten minutes: a Core answers a share it will not apply, an outdated version for example, as it answers one for a graph it does not host, so such a Core is left out of the refused share only. Private graphs, shares by a Core and the root of a catalog-owned graph are unchanged | None |
+| A public share that reached no peer, or not the graph's owner, is kept and sent again (#3368, #3371) | A share that reached no peer writes `SWM share into "<graph>" sub-graph "<name>" op=<id> reached no peer (no subscriber, follower, owner or connected Core); kept for 30 min` at warn, and one whose only recipients were Cores that all refused it writes `... refused by every connected Core it went to, its only recipients; kept for 30 min`. For the root the `sub-graph` part is left out, and `; kept for 30 min` is written only when the share is kept. Such a share, and one that did not reach the graph's owner on another node, is kept in memory by its operation id and sent again every 30 s, to the connected Cores and to at most two owner peers once the owner route finds them. It is signed again before its envelope grows too old for receivers, its age counted from the timestamp in the envelope. A Core or an owner peer that refuses a kept share is not sent it again for five minutes, and the share goes on to the other Cores and owner peers until what it owes is delivered or it is given up. A pass sends at most eight shares, those that reached no peer first and, within each kind, the one tried longest ago first; at most 64 shares and 32 MiB are kept in all, each for at most 30 minutes and three failed signings. These sends never queue in the durable outbox, a share whose graph is no longer public is dropped, and nothing is kept across a restart. A share given up is named in one warn line a pass, for example `1 SWM share given up after 30 min, not having reached what it owed: ...` | None |
+| A first partial phonebook fetch that leaves a wanted owner unresolved is followed by the shorter cooldown (#3368) | The on-demand fetch of a Core's `agents` phonebook waits 10 minutes, where it waited 30, before it fetches again after the first partial fetch in a row that left an owner or a wallet it was asked for unresolved, so the owner lookup of a share is not held off for half an hour. A second partial fetch in a row, and a fetch that resolved everything it was asked for, keep the 30 minutes | None |
+| A Core passes a member's signed share to the graph's owner (#3371) | New protocol `/dkg/10.0.1/swm-update-relayed`. Right after a Core applies a member's share into a named sub-graph of a public graph without a peer allowlist, which it hosts or subscribes to, it sends the share's envelope bytes, unchanged, to at most two of the owner's peers it is connected to. It finds them in its own store within 5 s: the curator node of the definition it holds, the agent registry, and the peer the definition came from. It forwards only a signed plain share that came from its publisher, each graph, operation and peer once in 30 minutes, with one attempt and no outbox, at most eight sends at a time, and the reply to the member does not wait. The owner accepts such a share only from a peer it admits as a Core, at most 120 a minute per Core, only while it is the curator of a public graph without an allowlist, and only when the envelope is the asset author's own signature over a plain share into a named sub-graph, signed at most five minutes before and at most 30 s ahead. It applies the share as it applies a direct one, with the author's seal and the share-complete record, once for the same bytes whichever Cores pass it on, and then sends its change notice to the graph's followers (#3256); it refuses every other case and sends no share acknowledgement. A Core on an earlier version does not forward, and the member's own route to the owner (#3327) stays the fallback; an owner on an earlier version refuses the protocol, which the Core logs at debug and does not retry | Upgrade the Cores and the owners' nodes together for an owner to receive its members' signed shares through the Cores. Members need no change, and older nodes keep working |
 | Synchronous shares persist a recovery job before they promote (#3300) | Their promote queue records use format version 4. An earlier version does not know that format: it would take such a record over without its recovery binding and could finish the share as a different operation | Before downgrading a node to an earlier version, wait until `GET /api/knowledge-assets/swm/share-jobs` lists no unfinished job |
+| A committed synchronous share whose catalog handoff has to wait is answered as shared (#3363, #3360) | A share admitted while the node could author the graph's catalog can find the authoring lane closed when it hands its inventory entry over, because responsibility or authority changed after admission, for example while a new graph settles or during a registration, a revocation or a binding change. The request then runs one responsibility pass for the graph and, when that reopens the lane, writes the entry once more. When the handoff still waits, `POST /api/knowledge-assets/<name>/swm/share` answers 200 and a one-shot create with a share answers 201 with `status: swm-shared`, and a one-shot create goes on to the Verified Memory publish it was asked for. Both bodies carry `catalogHandoff: { state: "pending", reason, recoveryJobId, recoveryStatusUrl }`, with the reason `inactive-lane`, `authority-transition`, `projection-admission` or `authority-not-ready`; the field is absent when nothing is pending. The share job stays `failed_retrying` with its obligation until it has written the entry, and other nodes see the asset in the catalog only after that: meanwhile a repeated share answers 503 `SHARE_OWNER_CONFLICT`, a write, discard, reopen or `wm/pull-from` of the asset answers 409 `KA_PROMOTE_RECOVERY_REQUIRED`, the job cannot be cancelled or cleared, and a publish is accepted. The daemon logs `knowledge_asset_share_catalog_handoff_pending`, and `dkg ka share` and `dkg ka create --share` print the reason, the job and `dkg ka share-job <job-id>`. The other recovery answers are unchanged. A replay after a confirmed update of the published asset completes when a strictly newer confirmed version proves the same Verified Memory graph, that version's private triples included, and writes nothing to Verified Memory, private content or gossip; anything it cannot prove stays held for inspection. Described in `docs/use-dkg/knowledge-asset-lifecycle.md` | None. Treat a success that carries a pending `catalogHandoff` as shared, and follow `recoveryStatusUrl` for the catalog part instead of sharing the asset again |
+| An asynchronous share is admitted to the queue within 10 s, and its answer says what became of the job (#3358, #3331) | `POST /api/knowledge-assets/<name>/swm/share-async` (`dkg ka share-async`) admits its job within a budget of 10 s that covers the queue lock, the conflict lookup and the job's write and flush. Authentication, readiness and author resolution come before it, so this is no bound on the whole request. An admission that runs out before the job is written answers 503 with `Retry-After: 1`, `code: "PROMOTE_ADMISSION_UNAVAILABLE"`, `retryable: true`, `admissionOutcome: "not_admitted"` and the `phase` (`lock`, `graph`, `conflict` or `persist`), and writes no job later. Once the write has started, a deadline or a failure answers the same code with `admissionOutcome: "indeterminate"`, the `jobId` and its `statusPath`. A repeat of the same share (graph, sub-graph, name and author lane) while its admission is pending gets the same job id, and one for a job this node acknowledged or read in the last five minutes answers 409 with `existingJobId` and `observedAdmission: true` without another store lookup; that is an earlier observation, not the job's current state, and the 409 then says so in its message. At most 64 unresolved admissions are kept per queue, and a further new admission is refused without a write; at most 1,024 known jobs are remembered. A one-shot create that meets such an admission answers the same 503 and does not go on to a Verified Memory publish. With `DKG_ASYNC_PROMOTE_ADMISSION_TRACE=1` the node logs `async_promote_admission` events with the phase, the elapsed time and the outcome only; off by default. Store capacity and priorities are unchanged. Described in `docs/api/async-share-admission.md` | Retry a `not_admitted` answer with the same share. After an `indeterminate` answer, follow the returned job or repeat the same share; do not create a different asset or operation to get past it. A missing status answer does not prove that no job was admitted. Tooling that matched the text of the 409 should read `existingJobId` |
+| A confirmed publication whose descriptor an interrupted write removed is repaired (#3365, #3362) | When a write of a confirmed publication's lifecycle record was interrupted after it had removed the record's state, the queue's recovery took the descriptor for a different assertion, skipped the repair and finalized the job, and the asset's name and UAL lookups answered 404. Recovery now proves the asset from the identity, version and root fields that survived, repairs the descriptor under the asset's lifecycle lock, and keeps the original job when the repair fails; it refuses conflicting or duplicate identities and keeps newer drafts. For an asset whose job was already cleared, the node-administrator route `POST /api/knowledge-assets/<name>/vm/repair-descriptor` verifies the exact Verified Memory content, the transaction evidence, the current chain author and version and the graph binding, and completes the descriptor. It verifies only unless `dryRun: false` is sent, answers `status: "verified"` and then `status: "repaired"`, is idempotent and sends no transaction; 409 means that the proof does not hold, and 503 `KA_DESCRIPTOR_REPAIR_BUSY` that another repair is running. Agent-scoped credentials cannot call it. Described in `docs/operations/published-descriptor-repair.md` | None. Use the route only for an asset whose descriptor is missing; do not clear an unresolved job or publish the asset again |
 
 ### Known issues
 
@@ -310,6 +342,14 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   shared memory of a private graph arrives only with the next connection or
   reconciler round, or once that slot is free. Use the default setting, 10
   slots and a queue of 20.
+- **Delivery to a member whose only sync slot is busy with another graph is
+  not verified end to end** (#3279): the case of the member-sharing devnet
+  suite in which a large transfer of another graph holds a member's only
+  general sync slot is reported as not exercised. The case expects one sync
+  slot in all, and such a node now also runs a reserved shared-memory slot
+  and a reserved metadata slot (#3258, #3302), so the busy slot is never
+  exercised. Reading the node's admission trace in that case is
+  tracked in #3279.
 - **A registered public graph that has never been published is hosted by no
   Core, so a member with no path to the graph's owner cannot make its first
   write into an owner-registered sub-graph until the graph's first
@@ -322,15 +362,51 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   keeps that copy, and its listing shows no curator; its writes go through.
   A registered public graph whose id does not name its owner gets no
   definition from peers.
+- **Right after a graph and a sub-graph are created, a relay-only member's
+  first write into the owner's sub-graph can be refused for minutes**
+  (#3376): a Core starts hosting the graph when it signs a StorageACK for
+  the graph's first publication, but nothing it holds names the owner's
+  node yet, so it finds the node to fetch the owner's definition from only
+  by trying its connected peers in turn, with retries over minutes. In
+  three runs on a public testnet the first Core reached the owner 7 to 14
+  minutes after the graph was created. Until a Core holds the owner's
+  definition, the member's lookup finds no registration and the write is
+  refused with `SUB_GRAPH_NOT_FOUND`. The write lands later through the
+  client's retry; nothing is lost.
+- **The agents phonebook can keep stale peers for a wallet** (#3370): a
+  Core's phonebook keeps every peer and key that an agent's profile ever
+  named, and many of a relay-only Edge's profile updates do not reach the
+  Core, so a wallet can map only to peers that no longer run. A lookup of
+  the graph's owner then dials those peers and does not reach the owner. A
+  member's share reaches the owner through the Cores without the phonebook
+  (#3368, #3371); other routes that map a wallet to a peer still depend on
+  it.
 - **A curator holds a member's seal only when the share reached it directly**
   (#3294): a member's share goes to the curator itself, through a relay
-  when the two are not connected (#3327), but a curator that was offline
-  for the share and caught up by shared-memory sync gets the share without
-  the seal (#3307), and cannot publish that asset. A second version of a member's asset still needs the
+  when the two are not connected (#3327), a Core that applies a share into
+  a named sub-graph passes it on once to the curator's node it is connected
+  to (#3371), and the member's node sends it again for up to 30 minutes
+  while it has not reached the curator (#3368).
+  A curator that none of these reached, for example one that was offline
+  for longer, or one the member's node restarted before reaching, gets the
+  share by shared-memory sync without the seal (#3307), and cannot publish
+  that asset. A second version of a member's asset still needs the
   member's update attestation (`PUBLISH_AUTHOR_NOT_CUSTODIAL`), a member's
   asset in the root of a catalog-owned graph is not curator-publishable,
   and a seal by a smart-contract wallet, or by an agent other than the one
   that signs the node's shares, is not kept.
+- **A share made while the graph's catalog authority is not accepted on the
+  node can stay out of the author's catalog** (#3361): such a share
+  completes, and its signed inventory entry is written in the background
+  (#3360) by an observer in the node's process. The observer waits for the
+  authority for about 16 s, and stops at once when a refresh of the graph's
+  chain registration fails. When the authority is accepted later than that,
+  or the node restarts first, the asset stays in the author's shared memory
+  but never gets an inventory entry, so the author's catalog does not list
+  it, and a later acceptance of the authority does not add it. This happens
+  just after a graph is created or registered, or just after a restart, and
+  is as in 10.0.24. A share admitted while the node could author the catalog
+  keeps the entry owed in its recovery job (#3300, #3363).
 - **A member that subscribes to a registered graph without shared memory
   lists it `synced: false` after a complete recovery** (#3296): a catch-up
   now proves a plane on which it finds nothing missing (#3304), but the
@@ -378,6 +454,16 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   until the member subscribes again or content arrives. Members that reached
   this state on an earlier version are in the same position after the
   upgrade. Subscribe again.
+- **A member of an empty private graph registered on chain can stay
+  unsynced after it subscribes** (#3367): for such a graph only the proof
+  that its Verified Memory is empty and finalized marks it synced, and that
+  proof runs only within 8 s of a subscribe, when a catch-up job ends, and
+  for 30 s after the join metadata is confirmed. When the curator's metadata
+  reaches the member a few seconds later than that, for example from a slow
+  curator or over relayed links, the member stays `synced: false` although
+  its join was approved, and nothing runs the proof again: the readiness
+  repeat follows public graphs only (#3328). A further subscribe call runs
+  the proof again.
 - **A read by a newly approved member of an unregistered private graph can
   answer a retryable 503** (#3064): before it reads such a graph, the
   member's node has to accept a proof that the graph's name is not
@@ -428,6 +514,14 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   the graph's metadata, which the curator sends on an approved join request.
   Have the member send a signed join request; a pre-authorized member is
   approved automatically.
+- **An automatic join approval can leave a request pending after the
+  node's store was briefly busy** (#3366): with open enrollment, the node
+  reads the requester's encryption key before it reserves an automatic
+  approval and again just before it commits it. When the store turns such a
+  read away because it is busy, the key is taken as invalid: the request
+  stays `pending` with no retryable signal, a reservation already made is
+  used up, and nothing is logged. The agent is not admitted, and its
+  subscribe answers 403.
 - **A restarted member Edge may not reconnect to its private graph's curator
   Edge if the curator is unreachable** (#2865): approval now carries a
   validated listener hint and recovery retries the curator connection
@@ -777,6 +871,54 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   the third node's root writes into a fresh registered private graph never
   arrived; with the fix every member write was held by every node, in the
   private graph as in the two public ones.
+- **A member's share made right after a public graph was created no longer
+  goes to nobody** (#3368): an Edge that reaches the other members only
+  through Cores sent a share to the graph's subscribers, its followers and
+  the graph's owner. Right after the graph was created no Core had
+  subscribed to the graph's topic yet, and the owner could not be found,
+  because the member's first phonebook fetch came back partial and a
+  partial fetch started a 30-minute cooldown. The share then went to no
+  peer, nothing was logged and nothing sent it again, so the owner and the
+  other members never got it. Such a share now also goes to connected
+  Cores, a share that reached no peer is logged, a share that reached no
+  peer or not the graph's owner is sent again for up to 30 minutes, and the
+  first partial phonebook fetch that leaves an owner unresolved is followed
+  by the 10-minute cooldown; see the upgrade table. In an end-to-end test
+  with two members that never connect to each other, a Core that hosts the
+  graph without subscribing to its topic and no owner in the sharing
+  member's phonebook, the Core held the share, the other member got it, and
+  the owner got it with its author seal once it could be found.
+- **The owner of a public graph gets a relay-only member's signed share
+  through a Core** (#3371): such a member's share into a named sub-graph
+  reached the Cores that host the graph (#3368), and the other members
+  pulled it from there, but the owner needs the member's own signed share,
+  with the author's seal, to publish the member's asset, and a copy pulled
+  from a Core carries no seal. The member's own route to the owner (#3327)
+  needs the owner's wallet mapped to a live peer, and on a public testnet
+  the phonebook listed only stale peers for the owner's wallet (#3370), so
+  the owner never got the share and could not publish the asset. A Core
+  that applies such a share now passes it on, unchanged, to the owner's
+  node it is connected to, and the owner applies it once, with the author's
+  seal, and tells the graph's followers; see the upgrade table. In an
+  end-to-end test with two relay-only members and a relay-only owner, a
+  Core that hosts the graph without subscribing to its topic, and member
+  phonebooks that cannot find the owner, the owner held the member's share
+  with its author seal, delivered through the Core, and no member ever
+  connected to the owner.
+- **An asynchronous share under store pressure answers what became of its
+  job** (#3358, #3331): a `swm/share-async` request waited without a bound
+  for the queue lock and the store, behind other queue work, so a caller
+  could give up while its job was still being admitted, and the job was then
+  created and ran all the same; a repeated request waited behind the same
+  congested lookup. A store error inside the admission could be answered as
+  if nothing had started, although the job could already have been written.
+  The admission now has a budget of 10 s, says whether it admitted a job,
+  did not, or may have, with the job's id, and a repeated request for the
+  same asset is answered from what the node already knows; see the upgrade
+  table. In a test on a public testnet with a store write held for 12 s and
+  the caller gone, the repeated request got the original job id in 75 ms and
+  exactly one job completed, and a competing request was refused after 10 s
+  and wrote nothing later.
 - **A cold snapshot recovery is no longer cancelled when the graph's chain
   binding is discovered during its first batch** (#3176): the snapshot job
   installed the graph's numeric chain id without its name hash, so the
@@ -911,6 +1053,24 @@ other's pages during ordinary sync; nothing is wrong when they do (#3298).
   publish of another node's asset** (#3306, #3307): HTTP 400
   `SUB_GRAPH_NOT_FOUND` and 409 `ASYNC_PUBLISH_FOREIGN_AUTHOR`, where both
   answered 500.
+- **Admission evidence for asynchronous shares** (#3358): the error code
+  `PROMOTE_ADMISSION_UNAVAILABLE` with `admissionOutcome`, `phase` and, when
+  a job may exist, `jobId` and `statusPath`; `observedAdmission` on the 409
+  for a known job; and the opt-in `async_promote_admission` log under
+  `DKG_ASYNC_PROMOTE_ADMISSION_TRACE=1`. See the upgrade table and
+  `docs/api/async-share-admission.md`.
+- **A pending catalog handoff on share answers** (#3363): `catalogHandoff`
+  on the answers of the synchronous share and of a one-shot create with a
+  share, the log event `knowledge_asset_share_catalog_handoff_pending`, and
+  the handoff lines in the output of `dkg ka share` and
+  `dkg ka create --share`; see the upgrade table.
+- **A relayed share protocol** (#3371): `/dkg/10.0.1/swm-update-relayed`,
+  on which a Core passes a member's signed share to the owner of a public
+  graph; see the upgrade table.
+- **A descriptor repair route for node administrators** (#3365):
+  `POST /api/knowledge-assets/<name>/vm/repair-descriptor`, which verifies
+  only unless `dryRun: false` is sent; see the upgrade table and
+  `docs/operations/published-descriptor-repair.md`.
 
 ## [10.0.24] - 2026-10-14
 
