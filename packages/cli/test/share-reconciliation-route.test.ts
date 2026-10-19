@@ -10,7 +10,7 @@ const input = { contextGraphId: 'private-cg', assertionName: 'asset', agentAddre
   authorAddress: caller, entities: 'all' as const, kaUal: `did:dkg:evm:31337/${caller}/7`,
   assertionVersion: '2', merkleRoot: `0x${'aa'.repeat(32)}` };
 const result = { outcome: 'unproven', reason: 'absent_or_pruned', mutationRetryAllowed: false,
-  inventory: { scope: 'retained_context_jobs', complete: true, limit: 1000 } };
+  inventory: { scope: 'retained_queue_jobs', complete: true, limit: 1000 } };
 const allowed = { outcome: 'allowed', grantScope: 'caller', source: 'registered-chain',
   reason: 'chain-participant', metadataBootstrap: 'eligible' };
 function fixture() {

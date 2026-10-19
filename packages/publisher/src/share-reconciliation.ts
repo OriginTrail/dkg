@@ -1,7 +1,7 @@
 import { parseDeterministicKnowledgeAssetUal, validateAssertionName } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_CONTEXT_GRAPH_ID, PROMOTE_PAYLOAD,
-  jobSubject, literal, normalizePromoteAgentLane, parseJobPayload } from './async-promote-queue-utils.js';
+  jobSubject, parseLiteral, normalizePromoteAgentLane, parseJobPayload } from './async-promote-queue-utils.js';
 import { readShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
 
 export interface ShareReconciliationInput {
@@ -22,7 +22,7 @@ export type ShareReconciliationReason = 'absent_or_pruned' | 'identity_mismatch'
 export type ShareReconciliationResult = {
   /** This read never establishes that another mutation is safe. */
   mutationRetryAllowed: false;
-  inventory: { scope: 'retained_context_jobs'; complete: boolean; limit: number };
+  inventory: { scope: 'retained_queue_jobs'; complete: boolean; limit: number };
 } & ({ outcome: 'proven'; jobId: string; state: 'succeeded'; evidence: ShareCompletionEvidence }
   | { outcome: 'unproven'; reason: ShareReconciliationReason });
 
@@ -64,20 +64,21 @@ function sameEntities(a: readonly string[] | 'all', b: readonly string[] | 'all'
   return JSON.stringify([...new Set(a)].sort()) === JSON.stringify([...new Set(b)].sort());
 }
 
-/** One canonical-payload snapshot; never silently filters malformed rows or paginates mutations. */
-export async function reconcileRetainedShare(
+/** Internal reader: caller must hold the queue mutation lock. Discover all subjects before filtering canonical payloads. */
+export async function reconcileRetainedShareUnlocked(
   store: TripleStore, input: ShareReconciliationInput, graphUri = DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
 ): Promise<ShareReconciliationResult> {
   const expected = validateShareReconciliationInput(input), limit = 1000;
-  const inventory = { scope: 'retained_context_jobs' as const, complete: true, limit };
+  const inventory = { scope: 'retained_queue_jobs' as const, complete: true, limit };
   const unproven = (reason: ShareReconciliationReason, complete = true): ShareReconciliationResult => ({
     outcome: 'unproven', reason, mutationRetryAllowed: false, inventory: { ...inventory, complete },
   });
   let rows;
   try {
-    const result = await store.query(`SELECT ?job ?payload WHERE { GRAPH <${graphUri}> {
-      ?job <${PROMOTE_CONTEXT_GRAPH_ID}> ${literal(expected.contextGraphId)} .
+    const result = await store.query(`SELECT DISTINCT ?job ?payload ?indexedContext WHERE { GRAPH <${graphUri}> {
+      ?job ?predicate ?object .
       OPTIONAL { ?job <${PROMOTE_PAYLOAD}> ?payload }
+      OPTIONAL { ?job <${PROMOTE_CONTEXT_GRAPH_ID}> ?indexedContext }
     } } LIMIT ${limit + 1}`, { source: 'publisher.asyncPromote.reconcile', signal: AbortSignal.timeout(10_000) });
     if (result.type !== 'bindings') return unproven('incomplete_inventory', false);
     rows = result.bindings;
@@ -87,11 +88,14 @@ export async function reconcileRetainedShare(
   let scoped = false, legacy = false, unfinished = false;
   for (const row of rows) {
     const job = parseJobPayload(row.payload);
-    if (!job || row.job !== jobSubject(job.jobId) || job.request.contextGraphId !== expected.contextGraphId)
+    if (!job || row.job !== jobSubject(job.jobId) || !row.indexedContext)
       return unproven('incomplete_inventory', false);
+    try { if (parseLiteral(row.indexedContext) !== job.request.contextGraphId) return unproven('incomplete_inventory', false); }
+    catch { return unproven('incomplete_inventory', false); }
     if (seen.has(job.jobId)) return unproven('conflicting_evidence', false);
     seen.add(job.jobId);
     const request = job.request;
+    if (request.contextGraphId !== expected.contextGraphId) continue;
     if (request.assertionName !== expected.assertionName || request.subGraphName !== expected.subGraphName
       || !sameEntities(request.entities, expected.entities)) continue;
     if (!request.agentAddress?.trim()) { legacy = true; continue; }

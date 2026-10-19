@@ -564,4 +564,4 @@ export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
 export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } from './assertion-lifecycle-record.js';
 
 export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
-export { reconcileRetainedShare, validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
+export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';

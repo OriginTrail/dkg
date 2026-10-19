@@ -3,8 +3,8 @@ import { shareEvidenceMatchesRequest } from '../src/share-completion-evidence.js
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
-import { reconcileRetainedShare, validateShareReconciliationInput } from '../src/share-reconciliation.js';
-import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_PAYLOAD, jobSubject, literal, serializeJobRecord } from '../src/async-promote-queue-utils.js';
+import { validateShareReconciliationInput } from '../src/share-reconciliation.js';
+import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_PAYLOAD, PROMOTE_CONTEXT_GRAPH_ID, jobSubject, literal, serializeJobRecord } from '../src/async-promote-queue-utils.js';
 import { SHARE_AUTHOR, shareEvidence } from './_helpers/share-completion-evidence.js';
 
 const proof = shareEvidence();
@@ -23,6 +23,27 @@ describe('retained share reconciliation', () => {
       ...(withEvidence ? { shareEvidence: proof } : {}) });
     return id;
   }
+  it('exposes reconciliation only through the synchronized queue capability', async () => {
+    const exports = await import('../src/index.js');
+    expect(exports).not.toHaveProperty('reconcileRetainedShare');
+    expect(exports).not.toHaveProperty('reconcileRetainedShareUnlocked');
+  });
+  it.each(['missing', 'mismatched'] as const)('cannot overlook a retained payload with a %s context index', async kind => {
+    await complete();
+    const hiddenId = await complete();
+    await store.deleteByPattern({ graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
+      subject: jobSubject(hiddenId), predicate: PROMOTE_CONTEXT_GRAPH_ID });
+    if (kind === 'mismatched') await store.insert([{ graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
+      subject: jobSubject(hiddenId), predicate: PROMOTE_CONTEXT_GRAPH_ID, object: literal('another-context') }]);
+    expect(await queue.reconcileShare(input)).toMatchObject({ outcome: 'unproven', reason: 'incomplete_inventory', inventory: { complete: false } });
+  });
+  it('ignores valid unrelated-context records after checking their canonical identity', async () => {
+    const id = await complete(), job = (await queue.getStatus(id))!;
+    await store.insert(serializeJobRecord({ ...job, jobId: 'unrelated',
+      request: { ...request, contextGraphId: 'another-context' }, result: undefined,
+    }, DEFAULT_PROMOTE_CONTROL_GRAPH_URI).jobQuads);
+    expect(await queue.reconcileShare(input)).toMatchObject({ outcome: 'proven', jobId: id });
+  });
   it('proves actual persisted completion after queue reconstruction without another enqueue', async () => {
     const id = await complete();
     const next = new TripleStoreAsyncPromoteQueue(store);
@@ -38,12 +59,12 @@ describe('retained share reconciliation', () => {
     { entities: ['urn:partial'] }, { subGraphName: 'other' }, { shareOperationId: 'previous-epoch' },
   ])('does not associate a different exact selector: %j', async different => {
     await complete();
-    expect(await reconcileRetainedShare(store, { ...input, ...different })).toMatchObject({
+    expect(await queue.reconcileShare({ ...input, ...different })).toMatchObject({
       outcome: 'unproven', mutationRetryAllowed: false });
   });
   it('rejects an internally inconsistent author and native identity before reads', async () => {
     const query = vi.spyOn(store, 'query');
-    await expect(reconcileRetainedShare(store, { ...input, authorAddress: '0x5555555555555555555555555555555555555555' })).rejects.toThrow('author mismatch');
+    await expect(queue.reconcileShare({ ...input, authorAddress: '0x5555555555555555555555555555555555555555' })).rejects.toThrow('author mismatch');
     expect(query).not.toHaveBeenCalled();
   });
   it('does not choose between multiple successful matching jobs', async () => {

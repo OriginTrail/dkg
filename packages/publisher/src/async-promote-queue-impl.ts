@@ -1,4 +1,4 @@
-import { reconcileRetainedShare, validateShareReconciliationInput, type ShareReconciliationInput } from './share-reconciliation.js';
+import { reconcileRetainedShareUnlocked, validateShareReconciliationInput, type ShareReconciliationInput } from './share-reconciliation.js';
 import { readShareCompletionEvidence } from './share-completion-evidence.js';
 import { promoteSuccessTransition } from './async-promote-success.js';
 import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
@@ -204,9 +204,9 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     });
   }
 
-  reconcileShare(input: ShareReconciliationInput) {
+  async reconcileShare(input: ShareReconciliationInput) {
     const expected = validateShareReconciliationInput(input);
-    return this.withMutationLock(() => reconcileRetainedShare(this.store, expected, this.graphUri));
+    return this.withMutationLock(() => reconcileRetainedShareUnlocked(this.store, expected, this.graphUri));
   }
 
   private async listUnlocked(
