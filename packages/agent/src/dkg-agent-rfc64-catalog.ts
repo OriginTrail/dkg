@@ -5263,8 +5263,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           store: this.store,
           verifyIssuerSignature: clients.verifyIssuerSignature,
           beforeAppliedHeadCommit,
-          acquireLegacySwmBoundaryLease: (scope) =>
-            acquireRfc64LegacySwmBoundaryReceiverLeaseV1(this, scope),
+          acquireLegacySwmBoundaryLease: (scope, request) =>
+            acquireRfc64LegacySwmBoundaryReceiverLeaseV1(this, scope, request),
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         readNativeResourceStats = () => nativeReceiver.resourceStats();

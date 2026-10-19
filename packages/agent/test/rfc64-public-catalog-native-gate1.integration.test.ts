@@ -423,6 +423,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-stale-replay');
     await mkdir(boundaryRoot, { mode: 0o700 });
     await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    const leaseRequests: unknown[] = [];
     const receiver = fixture.createReceiver(
       fixture.receiverPersistence.inventory,
       undefined,
@@ -432,10 +433,15 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       undefined,
       undefined,
       undefined,
-      (scope) => acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope),
+      (scope, request) => {
+        leaseRequests.push(request);
+        return acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope, request);
+      },
     );
     await expect(fixture.synchronize(fixture.announcement, receiver))
       .resolves.toMatchObject({ appliedHeadStatus: 'applied' });
+    // A first apply takes a lease for new data; the replay below names itself.
+    expect(leaseRequests).toEqual([{ replay: false }]);
     const targetGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
       + `/${AUTHOR}/${KA_NUMBER}`;
     const companion = prepareRfc64LateLegacySwmBoundaryV1(
@@ -464,6 +470,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
         code: 'catalog-native-receiver-history',
         message: expect.stringContaining('precedes its durable late SWM generation'),
       });
+    expect(leaseRequests).toEqual([{ replay: false }, { replay: true }]);
     const preserved = await fixture.receiverStore.query(
       `SELECT ?o WHERE { GRAPH <${targetGraph}> { `
         + `<urn:test:newer-replay-root> <urn:test:version> ?o } } LIMIT 1`,
@@ -3445,6 +3452,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     ) => Promise<ReadonlySet<string>>,
     acquireLegacySwmBoundaryLease?: (
       scope: Readonly<AuthorCatalogScopeV1>,
+      request: Readonly<{ replay: boolean }>,
     ) => ReturnType<typeof acquireRfc64LegacySwmBoundaryReceiverLeaseV1>,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
     headTransport: { fetchCatalogHead: receiverHeadFetch },
