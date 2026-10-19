@@ -62,6 +62,13 @@ describe('retained share reconciliation', () => {
     expect(await queue.reconcileShare({ ...input, ...different })).toMatchObject({
       outcome: 'unproven', mutationRetryAllowed: false });
   });
+  it('normalizes mixed-case identity before canonical scalar validation', () => {
+    const normalized = validateShareReconciliationInput({ ...input,
+      authorAddress: `0x${input.authorAddress.slice(2).toUpperCase()}`,
+      merkleRoot: `0x${input.merkleRoot.slice(2).toUpperCase()}` });
+    expect(normalized.authorAddress).toBe(input.authorAddress.toLowerCase());
+    expect(normalized.merkleRoot).toBe(input.merkleRoot.toLowerCase());
+  });
   it('rejects an internally inconsistent author and native identity before reads', async () => {
     const query = vi.spyOn(store, 'query');
     await expect(queue.reconcileShare({ ...input, authorAddress: '0x5555555555555555555555555555555555555555' })).rejects.toThrow('author mismatch');
@@ -173,7 +180,7 @@ describe('retained share reconciliation', () => {
       shareEvidence: { ...proof, agentAddress: 'different-peer' } })).rejects.toThrow('does not match');
     expect((await queue.getStatus(id))?.state).toBe('running');
   });
-  it.each([{ entities: undefined }, { assertionVersion: '01' }, { assertionVersion: '18446744073709551616' },
+  it.each([{ entities: undefined }, { assertionVersion: '0' }, { assertionVersion: '01' }, { authorAddress: `0x${'00'.repeat(20)}` }, { assertionVersion: '18446744073709551616' },
     { merkleRoot: 'not-a-root' }, { shareOperationId: 'with whitespace' }])('rejects incomplete or malformed intent %j', patch => {
     expect(() => validateShareReconciliationInput({ ...input, ...patch })).toThrow();
   });

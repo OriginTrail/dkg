@@ -1,4 +1,4 @@
-import { parseDeterministicKnowledgeAssetUal, validateAssertionName } from '@origintrail-official/dkg-core';
+import { assertCanonicalDigest, assertCanonicalEvmAddress, parseCanonicalDecimalU64, parseDeterministicKnowledgeAssetUal, validateAssertionName } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_CONTEXT_GRAPH_ID, PROMOTE_PAYLOAD,
   jobSubject, parseLiteral, normalizePromoteAgentLane, parseJobPayload } from './async-promote-queue-utils.js';
@@ -37,11 +37,11 @@ export function validateShareReconciliationInput(value: unknown): ShareReconcili
   if (!validateAssertionName(v.assertionName as string).valid) throw new Error('Invalid reconciliation assertionName');
   if (v.subGraphName !== undefined && (typeof v.subGraphName !== 'string' || !v.subGraphName || v.subGraphName.length > 2048))
     throw new Error('Invalid reconciliation subGraphName');
-  if (!/^0x[0-9a-fA-F]{40}$/.test(v.authorAddress as string)
-    || !/^0x[0-9a-fA-F]{64}$/.test(v.merkleRoot as string)
-    || !/^[1-9][0-9]{0,19}$/.test(v.assertionVersion as string)
-    || BigInt(v.assertionVersion as string) > (1n << 64n) - 1n)
-    throw new Error('Invalid reconciliation author, root or version');
+  const authorAddress = (v.authorAddress as string).toLowerCase(), merkleRoot = (v.merkleRoot as string).toLowerCase();
+  assertCanonicalEvmAddress(authorAddress, 'reconciliation authorAddress');
+  assertCanonicalDigest(merkleRoot, 'reconciliation merkleRoot');
+  if (parseCanonicalDecimalU64(v.assertionVersion, 'reconciliation assertionVersion') === 0n)
+    throw new Error('Reconciliation assertionVersion must be positive');
   if (v.shareOperationId !== undefined && (typeof v.shareOperationId !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(v.shareOperationId)))
     throw new Error('Invalid reconciliation operation');
@@ -49,12 +49,12 @@ export function validateShareReconciliationInput(value: unknown): ShareReconcili
     || !v.entities.every(e => typeof e === 'string' && e.length > 0 && e.length <= 2048)))
     throw new Error('An explicit reconciliation entity selector is required');
   const ual = parseDeterministicKnowledgeAssetUal(v.kaUal as string);
-  if (ual.agentAddress !== (v.authorAddress as string).toLowerCase()) throw new Error('Reconciliation UAL author mismatch');
+  if (ual.agentAddress !== authorAddress) throw new Error('Reconciliation UAL author mismatch');
   return { contextGraphId: v.contextGraphId as string, assertionName: v.assertionName as string,
     agentAddress: normalizePromoteAgentLane(v.agentAddress as string), authorAddress: ual.agentAddress,
     ...(v.subGraphName === undefined ? {} : { subGraphName: v.subGraphName as string }),
     entities: v.entities === 'all' ? 'all' : [...new Set(v.entities as string[])].sort(),
-    kaUal: ual.ual, assertionVersion: v.assertionVersion as string, merkleRoot: (v.merkleRoot as string).toLowerCase(),
+    kaUal: ual.ual, assertionVersion: v.assertionVersion as string, merkleRoot,
     ...(v.shareOperationId === undefined ? {} : { shareOperationId: v.shareOperationId as string }),
   };
 }

@@ -18,6 +18,8 @@ export type PublisherAssertionPromoteOptions = {
   subGraphName?: string;
   publisherPeerId?: string;
   senderAgentAddress?: string;
+  /** Explicit expected seal author, checked inside the lifecycle lock before sharing. */
+  authorAgentAddress?: string;
   /** Do not encrypt or emit a network-ready payload for a local capture. */
   localOnly?: boolean;
   /** Immutable access envelope persisted with the graph-scoped share. */

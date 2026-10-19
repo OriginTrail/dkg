@@ -158,6 +158,36 @@ async function confirmVmUpdate(fixture: Awaited<ReturnType<typeof publishWhileHa
 }
 
 describe('durable synchronous share ownership', () => {
+  it('completes an ordinary share with a matching mixed-case author hint', async () => {
+    const { store, agent, finalized } = await setup();
+    const id = await agent.promoteQueue.enqueue({ contextGraphId: CG, assertionName: NAME, agentAddress: AUTHOR,
+      authorAgentAddress: signer.address, entities: 'all' });
+    const job = (await agent.promoteQueue.claimNext('author-check'))!;
+    expect(await runPromoteJob({ job, queue: agent.promoteQueue, workerId: 'author-check',
+      runPromote: (r, executionAuthority) => executePromoteRequest(agent, r, { executionAuthority }),
+      now: Date.now, heartbeatIntervalMs: 0, log: () => {} })).toMatchObject({ outcome: 'succeeded' });
+    expect((await agent.promoteQueue.getStatus(id))?.result?.shareEvidence?.seal.authorAddress).toBe(AUTHOR);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    expect(await store.countQuads(finalized.graphUri)).toBe(0);
+    await store.close();
+  });
+  it('rejects a mismatched share author before SWM commit through the real worker', async () => {
+    const { store, agent, finalized } = await setup();
+    const request = { contextGraphId: CG, assertionName: NAME, agentAddress: AUTHOR,
+      authorAgentAddress: '0x3333333333333333333333333333333333333333', entities: 'all' as const };
+    const id = await agent.promoteQueue.enqueue(request), job = (await agent.promoteQueue.claimNext('author-check'))!;
+    const gossip = vi.spyOn(agent, 'publishWorkspaceGossip');
+    const result = await runPromoteJob({ job, queue: agent.promoteQueue, workerId: 'author-check',
+      runPromote: (r, executionAuthority) => executePromoteRequest(agent, r, { executionAuthority }),
+      now: Date.now, heartbeatIntervalMs: 0, log: () => {} });
+    expect(result).toMatchObject({ outcome: 'failed_terminal', cause: { code: 'KA_SHARE_AUTHOR_MISMATCH' } });
+    expect((await agent.promoteQueue.getStatus(id))?.state).toBe('failed');
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
+    expect(gossip).not.toHaveBeenCalled();
+    await store.close();
+  });
+
   it.each(['unowned-precommit', 'bound-precommit', 'committed-missing-layer'])('preflights only new uncommitted admission (%s)', async state => {
     const { store, agent, publisher, finalized } = await setup();
     const opts = { publisherPeerId: agent.node.peerId.toString(), confirmBeforeCommit: async () => { throw new CuratorUnconfirmedError(CG); } };
