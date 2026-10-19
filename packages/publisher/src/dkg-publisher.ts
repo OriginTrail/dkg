@@ -8249,7 +8249,7 @@ export class DKGPublisher implements Publisher {
     return this.withAssertionLifecycleWriteLock(request.contextGraphId, request.assertionName,
       request.agentAddress, request.subGraphName, async () => {
         await assertPromoteRecoveryBinding(this.store, request.contextGraphId, request.assertionName,
-          request.agentAddress, { subGraphName: request.subGraphName, recoveryBinding: request.recoveryBinding },
+          request.agentAddress, { subGraphName: request.subGraphName, authorAgentAddress: request.authorAgentAddress, recoveryBinding: request.recoveryBinding },
           () => this.clearSwmShareCompleteUnlocked(request.contextGraphId, request.assertionName, request.agentAddress, request.subGraphName), 'admission');
         return admit();
       });

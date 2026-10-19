@@ -8,6 +8,11 @@ export function assertPromoteSeal(seal: AssertionSeal | null | undefined, subjec
   if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) throw new LegacyKnowledgeAssetReadOnlyError();
   if (!seal.kaUal || !seal.assertionVersion || seal.publicTripleCount === undefined || seal.privateTripleCount === undefined)
     throw new Error(`Graph-scoped assertion seal for <${subject}> is incomplete`);
+  assertPromoteAuthor(seal, authorAgentAddress);
+}
+
+/** Shared by locked preparation, admission and execution; never retires an existing owner. */
+export function assertPromoteAuthor(seal: AssertionSeal, authorAgentAddress?: string): void {
   if (authorAgentAddress && seal.authorAddress.toLowerCase() !== authorAgentAddress.toLowerCase())
     throw Object.assign(new Error('The requested share author does not match the finalized assertion seal'),
       { code: 'KA_SHARE_AUTHOR_MISMATCH' });

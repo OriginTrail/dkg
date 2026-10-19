@@ -1,5 +1,5 @@
 import {
-  computeCanonicalGraphScopedAuthorSealDigestV1, assertCanonicalGraphScopedAuthorSealV1, canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  CanonicalGraphScopedAuthorSealError, computeCanonicalGraphScopedAuthorSealDigestV1, assertCanonicalGraphScopedAuthorSealV1, canonicalGraphScopedAuthorSealFromAssertionSealV1,
   type AssertionSeal, type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 import type { PromoteRequest } from './async-promote-queue-types.js';
@@ -41,9 +41,16 @@ export function tryCreateShareCompletionEvidence(
   contextGraphId: string, assertionName: string, agentAddress: string,
   subGraphName: string | undefined, seal: AssertionSeal, shareOperationId: string,
 ): ShareCompletionEvidence | undefined {
-  try { return readShareCompletionEvidence({ version: 1, contextGraphId, assertionName, agentAddress,
-    subGraphName, entities: 'all', shareOperationId, seal: canonicalGraphScopedAuthorSealFromAssertionSealV1(seal) }); }
-  catch { return undefined; } // Previously accepted older seals remain shareable without proof.
+  let canonicalSeal: Readonly<CanonicalGraphScopedAuthorSealV1>;
+  try { canonicalSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(seal); }
+  catch (error) {
+    if (error instanceof CanonicalGraphScopedAuthorSealError) return undefined;
+    throw error;
+  }
+  // Only recognized unsupported seal formats use the compatibility fallback.
+  // Invalid producer scope/operation and implementation errors must surface before commit.
+  return readShareCompletionEvidence({ version: 1, contextGraphId, assertionName, agentAddress,
+    subGraphName, entities: 'all', shareOperationId, seal: canonicalSeal });
 }
 
 export function shareEvidenceMatchesRequest(evidence: ShareCompletionEvidence, request: PromoteRequest): boolean {

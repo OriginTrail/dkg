@@ -158,6 +158,36 @@ async function confirmVmUpdate(fixture: Awaited<ReturnType<typeof publishWhileHa
 }
 
 describe('durable synchronous share ownership', () => {
+  it('rechecks the author before admitting a prepared durable owner', async () => {
+    const { store, agent, finalized } = await setup();
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    await expect(agent.assertion.admitDurableShare({ contextGraphId: CG, assertionName: NAME, entities: 'all',
+      ...prepared, authorAgentAddress: '0x3333333333333333333333333333333333333333' }, 'admission-check'))
+      .rejects.toMatchObject({ code: 'KA_SHARE_AUTHOR_MISMATCH' });
+    expect(await agent.promoteQueue.list()).toHaveLength(0);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    daemonState.promoteWorkerAvailable = true;
+    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, authorAgentAddress: AUTHOR }))
+      .resolves.toMatchObject({ publishReady: true });
+    await store.close();
+  });
+  it('rejects a synchronous author mismatch before ownership and permits the corrected request', async () => {
+    const { store, agent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR,
+      authorAgentAddress: '0x3333333333333333333333333333333333333333' }))
+      .rejects.toMatchObject({ code: 'KA_SHARE_AUTHOR_MISMATCH' });
+    expect(await agent.promoteQueue.list()).toHaveLength(0);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
+    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, authorAgentAddress: signer.address }))
+      .resolves.toMatchObject({ promotedCount: 1, publishReady: true });
+    const jobs = await agent.promoteQueue.list();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].state).toBe('succeeded');
+    await store.close();
+  });
+
   it('completes an ordinary share with a matching mixed-case author hint', async () => {
     const { store, agent, finalized } = await setup();
     const id = await agent.promoteQueue.enqueue({ contextGraphId: CG, assertionName: NAME, agentAddress: AUTHOR,

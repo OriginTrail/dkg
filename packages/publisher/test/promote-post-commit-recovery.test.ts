@@ -11,7 +11,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { ASSERTION_SEAL_PREDICATES, contextGraphAssertionUri, contextGraphMetaUri, TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { ASSERTION_SEAL_PREDICATES, assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri, TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
@@ -24,6 +24,8 @@ import {
   getPromoteFailureDisposition,
   type PromoteAttemptError,
 } from '../src/index.js';
+import * as shareEvidenceProducer from '../src/share-completion-evidence.js';
+import { readAssertionPromoteEvidence } from '../src/assertion-promote-evidence.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
 const CG_ID = 'post-commit-recovery-cg';
@@ -166,6 +168,32 @@ async function createFixture(settle: (committed: boolean | undefined) => void) {
 }
 
 describe('promote post-commit recovery', () => {
+  it('does not disguise invalid producer scope or unexpected seal construction failures as legacy', async () => {
+    const fixture = await createFixture(() => {});
+    const { seal } = await readAssertionPromoteEvidence(fixture.store, CG_ID, ASSERTION_NAME, AGENT);
+    expect(seal).toBeTruthy();
+    expect(() => shareEvidenceProducer.tryCreateShareCompletionEvidence(CG_ID, ASSERTION_NAME, AGENT,
+      undefined, seal!, 'invalid operation')).toThrow('Unsupported share completion evidence');
+    const unexpected = new Error('unexpected seal conversion failure');
+    const brokenSeal = new Proxy(seal!, { get(target, property, receiver) {
+      if (property === 'merkleRoot') throw unexpected;
+      return Reflect.get(target, property, receiver);
+    } });
+    expect(() => shareEvidenceProducer.tryCreateShareCompletionEvidence(CG_ID, ASSERTION_NAME, AGENT,
+      undefined, brokenSeal, 'valid-operation')).toThrow(unexpected);
+  });
+  it('propagates unexpected evidence construction failure before sharing commits', async () => {
+    const fixture = await createFixture(() => {});
+    const unexpected = new Error('unexpected evidence producer failure');
+    const create = vi.spyOn(shareEvidenceProducer, 'tryCreateShareCompletionEvidence').mockImplementationOnce(() => { throw unexpected; });
+    try {
+      expect((await fixture.attempt()).failure).toBe(unexpected);
+      expect(await fixture.store.countQuads(fixture.finalized.sharedGraphUri)).toBe(0);
+      expect(await fixture.workingMemoryCount()).toBe(TRIPLES.length);
+      expect(await fixture.hasCompletionMarker()).toBe(false);
+    } finally { create.mockRestore(); }
+  });
+
   it('preserves ordinary legacy seal sharing without fabricating unsupported evidence', async () => {
     const fixture = await createFixture(() => {});
     await fixture.store.deleteByPattern({ graph: contextGraphMetaUri(CG_ID),
@@ -188,16 +216,24 @@ describe('promote post-commit recovery', () => {
       assertionName: ASSERTION_NAME, agentAddress: AGENT, entities: 'all',
       seal: { kaUal: fixture.finalized.kaUal, assertionVersion: fixture.finalized.assertionVersion,
         publicTripleCount: String(TRIPLES.length), authorAddress: AGENT } });
-    expect(evidence?.shareOperationId).toBeTruthy();
+    const committed = await fixture.store.query(`SELECT ?operation WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> {
+      <${assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME)}> <http://dkg.io/ontology/shareOperationId> ?operation
+    } }`);
+    expect(committed.type).toBe('bindings');
+    if (committed.type !== 'bindings') throw new Error('missing committed operation');
+    expect(committed.bindings).toHaveLength(1);
+    const committedOperationId = JSON.parse(committed.bindings[0].operation);
+    expect(evidence?.shareOperationId).toBe(committedOperationId);
     await fixture.expectExactSwmGraph();
     const reconciled = await reopened.reconcileShare({ contextGraphId: CG_ID,
       assertionName: ASSERTION_NAME, agentAddress: AGENT, authorAddress: AGENT, entities: 'all',
       kaUal: fixture.finalized.kaUal, assertionVersion: fixture.finalized.assertionVersion,
-      merkleRoot: evidence!.seal.assertionMerkleRoot, shareOperationId: evidence!.shareOperationId });
+      merkleRoot: evidence!.seal.assertionMerkleRoot, shareOperationId: committedOperationId });
     expect(reconciled).toMatchObject({ outcome: 'proven', jobId: fixture.jobId, evidence });
     // Replaying the same committed operation must retain its original identity.
     const replay = await fixture.publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
     expect(replay.shareEvidence).toEqual(evidence);
+    expect(replay.shareEvidence?.shareOperationId).toBe(committedOperationId);
   });
 
   it.each([
