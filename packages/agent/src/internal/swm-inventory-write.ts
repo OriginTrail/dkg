@@ -21,6 +21,14 @@ export class SwmInventoryWriteFailure extends Error {
   }
 }
 
+/** A share replayed later whose seal or shared copy has moved on: its row can never be written. */
+export class SwmInventoryShareSuperseded extends Error {
+  readonly code = 'SWM_INVENTORY_SHARE_SUPERSEDED';
+  constructor(readonly reason: 'missing-seal' | 'workspace-mismatch') {
+    super(`The shared copy no longer matches the share (${reason})`);
+  }
+}
+
 /** Local readiness only: accepted policy and catalog service may arrive after startup. */
 export class SwmCatalogAuthorityNotReady extends Error {
   readonly code = 'SWM_CATALOG_AUTHORITY_NOT_READY';

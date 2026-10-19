@@ -80,4 +80,6 @@ export async function finishDurableShare(
     if (shareOperationId !== null && !params.recoveryBinding?.inventoryRequired) schedule({ ...params, shareOperationId });
   }
   if (params.recoveryBinding && params.recoveryBinding.inventoryRequired) await commitDurableShareInventory(agent, params);
+  // Admitted without the handoff: the row stays owed, durably, until a later lane writes it.
+  else if (params.recoveryBinding) await runPromoteCommittedFinalization(() => agent.recordRfc64OwedShareInventoryV1(params));
 }

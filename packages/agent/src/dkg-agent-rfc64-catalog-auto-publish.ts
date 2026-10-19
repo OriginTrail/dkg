@@ -1,7 +1,7 @@
 import type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1 } from './internal/promote/swm-handoff-types.js';
 export type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1, BoundDurableSwmPromotionParamsV1 } from './internal/promote/swm-handoff-types.js';
 import { repairConfirmedPlacement } from './internal/confirmed-placement-repair.js';
-import { requireInventoryRemovalLane, SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
+import { requireInventoryRemovalLane, SwmInventoryShareSuperseded, SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
 import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -836,9 +836,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /** Prepare and commit inventory with scope fencing; throws without suppressing failures. */
+  /** Prepare and commit inventory with scope fencing; throws without suppressing failures (a typed one for a superseded share, when asked). */
   async commitRfc64SwmAuthorInventoryV1(
-    this: DKGAgent, params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
+    this: DKGAgent, params: RecordRfc64SwmAuthorInventoryShadowParamsV1, options: Readonly<{ staleShareIsTerminal?: boolean }> = {},
   ): Promise<SwmInventoryWriteOutcome> {
     let kaUal: string | null = null;
     let phase: SwmInventoryWriteFailure['phase'] = 'authority';
@@ -847,7 +847,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     try {
       if (this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName) === null) return dormant('inactive-lane');
       phase = 'preparation-read';
-      const prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(params, { allowTerminalStale: false });
+      const prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(params, { allowTerminalStale: options.staleShareIsTerminal === true });
+      if (prepared.status === 'stale' && (prepared.reason === 'missing-seal' || prepared.reason === 'workspace-mismatch')) throw new SwmInventoryShareSuperseded(prepared.reason);
       if (prepared.status === 'stale') return dormant(prepared.reason === 'policy-mismatch' ? 'policy-mismatch' : 'vm-confirmed');
       kaUal = prepared.row.kaUal;
       phase = 'authority';
