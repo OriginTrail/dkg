@@ -3474,6 +3474,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (previousAuthorityProgress?.state !== 'accepted' || authorityGenerationChanged) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
+        this.requestRfc64OwedShareInventoryDrainV1(); // Shares admitted behind the fence owe their rows now.
       }
       this.scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
         contextGraphId,
