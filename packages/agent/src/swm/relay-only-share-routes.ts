@@ -14,14 +14,18 @@
  *    sub-graph, as a subscriber does ({@link coreHostsPublicGraph}). It used to
  *    decline it because it does not subscribe to the graph. The catalog keeps
  *    the root scope, and the share handler's checks all still run. Other
- *    members then pull the share from the Core.
- * 2. The author makes the graph's owner one of the share's followers,
- *    connecting to it through a relay when the two are not connected
- *    ({@link routeShareToGraphOwner}). A pulled copy carries no author seal,
- *    and the owner needs the seal to publish a member's asset to Verified
- *    Memory, so the owner must get the share itself. An Edge keeps no
- *    `agents` phonebook, so it looks the owner's wallet up in a Core's
- *    phonebook on demand when it cannot map the owner to a peer.
+ *    members then pull the share from the Core. A pulled copy carries no
+ *    author seal, and the owner needs the seal to publish a member's asset to
+ *    Verified Memory, so the owner must get the member's signed share itself:
+ *    the Core passes it on, the bytes unchanged, to the owner's peers it is
+ *    connected to (`owner-share-forward.ts`). That is how the share reaches
+ *    the owner when the member cannot find the owner.
+ * 2. The fallback: the author makes the graph's owner one of the share's
+ *    followers, connecting to it through a relay when the two are not
+ *    connected ({@link routeShareToGraphOwner}), for a Core that does not pass
+ *    shares on and an owner it is not connected to. An Edge keeps no `agents`
+ *    phonebook, so it looks the owner's wallet up in a Core's phonebook on
+ *    demand when it cannot map the owner to a peer.
  * 3. When none of a share's recipients is a Core, which is the case while no
  *    Core subscribes to the graph yet, the author sends the share to the Cores
  *    it is connected to as well ({@link needsHoldingCores}), as it sends

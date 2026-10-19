@@ -201,6 +201,22 @@ async function ownerPeerIds(
   ].slice(0, CORE_HOSTED_DEFINITION_MAX_OWNER_PEERS);
 }
 
+/**
+ * The peer ids of `owner`'s nodes for a graph, connected ones first, as the
+ * hosted definition's fetch names them: the curator node of the held
+ * definition, the agent registry's entries for the owner wallet, the peer the
+ * definition was last installed from. A Core passes a member's share on to
+ * them (`swm/owner-share-forward.ts`). Reads the local store only.
+ */
+export async function coreHostedOwnerPeerIds(
+  agentObject: object,
+  contextGraphId: string,
+  owner: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return ownerPeerIds(agentObject as CoreHostedDefinitionAgent, stateOf(agentObject), contextGraphId, owner, signal);
+}
+
 function connectedPeerIds(agent: CoreHostedDefinitionAgent): Set<string> {
   return new Set(agent.node.libp2p.getConnections().map((connection) => connection.remotePeer.toString()));
 }
