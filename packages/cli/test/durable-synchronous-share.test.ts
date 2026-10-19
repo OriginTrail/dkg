@@ -174,9 +174,11 @@ describe('durable synchronous share ownership', () => {
   it('rejects a synchronous author mismatch before ownership and permits the corrected request', async () => {
     const { store, agent, finalized } = await setup();
     daemonState.promoteWorkerAvailable = true;
-    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR,
-      authorAgentAddress: '0x3333333333333333333333333333333333333333' }))
-      .rejects.toMatchObject({ code: 'KA_SHARE_AUTHOR_MISMATCH' });
+    const mismatch = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR,
+      authorAgentAddress: '0x3333333333333333333333333333333333333333' }).catch(error => error);
+    expect(mismatch).toMatchObject({ code: 'KA_SHARE_AUTHOR_MISMATCH' });
+    expect(classifySynchronousShareFailure(mismatch, { contextGraphId: CG, name: NAME, phase: 'swm-share' }))
+      .toMatchObject({ status: 409, body: { code: 'KA_SHARE_AUTHOR_MISMATCH' } });
     expect(await agent.promoteQueue.list()).toHaveLength(0);
     expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
     expect(await store.countQuads(finalized.graphUri)).toBe(1);
