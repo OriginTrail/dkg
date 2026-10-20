@@ -6,6 +6,7 @@ import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
+import type { KnowledgeAssetMintLookupOptions, KnowledgeAssetMintResolution } from './knowledge-asset-mint-evidence.js';
 import type { KnowledgeAssetVersionSnapshotReadOptions } from './ka-version-snapshot-report.js';
 import type { ethers } from 'ethers';
 import type { RpcRequestClass } from './rpc-request-transport.js';
@@ -1666,6 +1667,16 @@ export interface ChainAdapter {
     txHash: string,
     options?: CanonicalFinalizationReceiptReadOptions,
   ): Promise<CanonicalFinalizationReceiptResolution>;
+
+  /**
+   * Find and verify the transaction that minted `kaId`, for a publish whose
+   * transaction mined after the node stopped waiting. All facts of a
+   * `confirmed` answer come from one receipt at the configured finality depth.
+   */
+  resolveKnowledgeAssetMint?(
+    kaId: bigint,
+    options?: KnowledgeAssetMintLookupOptions,
+  ): Promise<KnowledgeAssetMintResolution>;
 
   /**
    * Required TRAC amount for publishing (from stake-weighted ask and byte size).
