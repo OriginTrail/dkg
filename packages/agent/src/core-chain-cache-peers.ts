@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { parseLibp2pConnectCandidate, connectLibp2pCandidate } from '@origintrail-official/dkg-core';
+import { parseLibp2pConnectCandidate } from '@origintrail-official/dkg-core';
 import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
 import { probeSnapshotPeerBatches } from './public-snapshot-peer-probes.js';
 
@@ -40,11 +40,4 @@ export function createCoreChainCacheContentPeers(ports: {
       }
     },
   };
-}
-export async function connectCoreChainCacheSeed(
-  libp2p: Parameters<typeof connectLibp2pCandidate>[0],
-  candidate: NonNullable<ReturnType<typeof parseLibp2pConnectCandidate>>,
-  signal: AbortSignal,
-): Promise<void> {
-  await connectLibp2pCandidate(libp2p, candidate, { expectedPeerId: candidate.targetPeerId, signal, timeoutMs: 5_000 });
 }

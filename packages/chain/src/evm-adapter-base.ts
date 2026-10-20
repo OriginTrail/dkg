@@ -1268,7 +1268,7 @@ export class EVMChainAdapterBase {
     if (!ethers.isAddress(address)) return 0n;
     const checksum = ethers.getAddress(address);
     activeRpcRequestAbortSignal()?.throwIfAborted();
-    await this.init();
+    if (!this.initialized) await this.init();
     activeRpcRequestAbortSignal()?.throwIfAborted();
     const previousIdentityStorage = this.contracts.identityStorage;
     // #1583 — keep the `{ refresh: true }` re-resolve. Pre-#1583 this re-hit the
@@ -1306,7 +1306,7 @@ export class EVMChainAdapterBase {
     caller.signal?.throwIfAborted();
     // Initialization tracks its own waiters: preserve their progress and let
     // it stop when all callers leave before sharing the cached value read.
-    await this.init();
+    if (!this.initialized) await this.init();
     caller.signal?.throwIfAborted();
     const identityId = await this.identityIdCache.getOrLoad(address, (checksum, onProgress) =>
       withDetachedRpcRequestContext(caller.requestClass, () => withRpcRequestContext(

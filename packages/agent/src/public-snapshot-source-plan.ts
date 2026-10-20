@@ -5,9 +5,9 @@ import type { DKGAgent } from './dkg-agent.js';
 import type { ResolvedDKGAgentConfig } from './dkg-agent-types.js';
 import type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { DKG_CORE_CHAIN_CACHE } from './core-chain-cache-config.js';
-import { coreChainCacheSeeds, connectCoreChainCacheSeed, createCoreChainCacheContentPeers } from './core-chain-cache-peers.js';
+import { coreChainCacheSeeds, createCoreChainCacheContentPeers } from './core-chain-cache-peers.js';
 import { bindSnapshotRequest, bindSnapshotSourcePolicy, type SnapshotRequest, type SnapshotSourcePolicyName } from './public-snapshot-policy.js';
-import { ensurePeerConnected } from './p2p/peer-connect.js';
+import { connectToMultiaddr, ensurePeerConnected } from './p2p/peer-connect.js';
 import { selectSnapshotSources } from './public-snapshot-sources.js';
 
 interface SnapshotSourceReport {
@@ -60,7 +60,7 @@ export async function createPublicSnapshotSourcePlan(agent: SourceHost, options:
     candidates: async () => inventoryCandidates,
     connect: async (peer, requestSignal) => {
       if (!cache) return agent.ensurePeerConnected(peer, { signal: requestSignal });
-      if (seeds.has(peer)) await connectCoreChainCacheSeed(agent.node.libp2p, seeds.get(peer)!, requestSignal);
+      if (seeds.has(peer)) await connectToMultiaddr(agent.node.libp2p, seeds.get(peer)!, undefined, { signal: requestSignal });
       else await ensurePeerConnected(agent.peerResolver, peer, { signal: requestSignal });
       if (!await agent.networkAdmissionCoordinator.ensureCacheAdmitted(peer, createOperationContext('connect'), { signal: requestSignal }))
         throw new Error('Peer is not admitted for chain-cache authentication');
@@ -68,7 +68,7 @@ export async function createPublicSnapshotSourcePlan(agent: SourceHost, options:
   }, signal);
   const content = cache ? createCoreChainCacheContentPeers({ candidates: contentCandidates, self: agent.peerId,
     connect: (peer, requestSignal) => dataSeeds.has(peer)
-      ? connectCoreChainCacheSeed(agent.node.libp2p, dataSeeds.get(peer)!, requestSignal)
+      ? connectToMultiaddr(agent.node.libp2p, dataSeeds.get(peer)!, undefined, { signal: requestSignal })
       : agent.ensurePeerConnected(peer, { signal: requestSignal }),
     admit: (peer, requestSignal) => agent.networkAdmissionCoordinator.ensureAdmitted(peer, createOperationContext('sync'), { signal: requestSignal }),
   }, signal) : undefined;

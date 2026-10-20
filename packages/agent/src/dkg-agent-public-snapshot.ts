@@ -1,5 +1,5 @@
 import { PublicSnapshotProofRuntime } from './public-snapshot-proof-runtime.js';
-import { DKG_CORE_CHAIN_CACHE } from './core-chain-cache-config.js';
+import { resolveSnapshotSourcePolicies, type SnapshotSourcePolicyName } from './public-snapshot-policy.js';
 import { registerCoreChainCacheHandlers } from './core-chain-cache-handler.js';
 import { createPublicSnapshotSourcePlan } from './public-snapshot-source-plan.js';
 import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
@@ -31,8 +31,8 @@ import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } fr
 import { registerSnapshotSourceHandler } from './public-snapshot-source-handler.js';
 export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export class PublicSnapshotMethods extends DKGAgentBase {
-  getPublicSnapshotSourcePolicies(this: DKGAgent): readonly string[] {
-    return [...(this.chain.chainId === 'base:8453' ? ['base-mainnet-registered-cores'] : []), ...(this.config.coreChainCacheNetworks.length ? [DKG_CORE_CHAIN_CACHE] : [])];
+  getPublicSnapshotSourcePolicies(this: DKGAgent): readonly SnapshotSourcePolicyName[] {
+    return resolveSnapshotSourcePolicies(this.chain, this.config.coreChainCacheNetworks).map(policy => policy.name);
   }
   startPublicGraphSnapshots(this: DKGAgent): void {
     if (this.config.nodeRole !== 'core') return;

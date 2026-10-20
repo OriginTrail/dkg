@@ -2,8 +2,9 @@ import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import type { ProtocolRouter } from '@origintrail-official/dkg-core';
 import { PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES } from '@origintrail-official/dkg-chain';
-import { bindSnapshotRequest, bindSnapshotSourcePolicy } from '../src/public-snapshot-policy.js';
+import { bindSnapshotRequest, bindSnapshotSourcePolicy, type SnapshotSourcePolicyName } from '../src/public-snapshot-policy.js';
 import { createPublicSnapshotSourcePlan } from '../src/public-snapshot-source-plan.js';
+import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 import { PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from '../src/public-snapshot-reader.js';
 import { BASE_MAINNET_SOURCE_POLICY, PUBLIC_SNAPSHOT_SOURCE_PROTOCOL, sourceProofPayload,
   type SnapshotSourceChallenge } from '../src/public-snapshot-source-proof.js';
@@ -23,6 +24,19 @@ function expectRequest(send: ReturnType<typeof vi.fn<ProtocolRouter['send']>>, p
   expect(call[0]).toBe('core'); expect(call[1]).toBe(protocol);
   expect(decode(call[2])).toEqual({ version: 1, ...scope, refresh: true, ...expected });
   expect(call[3]).toEqual({ signal, timeoutMs: 115_000, maxReadBytes: PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES });
+}
+
+function expectPolicies(policyChain: Parameters<typeof bindSnapshotSourcePolicy>[0]['chain'],
+  networks: readonly CoreChainCacheNetwork[], expected: readonly SnapshotSourcePolicyName[]) {
+  const host = { chain: policyChain, config: { coreChainCacheNetworks: networks } };
+  const advertised: readonly SnapshotSourcePolicyName[] = PublicSnapshotMethods.prototype.getPublicSnapshotSourcePolicies.call(host as never);
+  expect(advertised).toEqual(expected);
+  for (const sourcePolicy of [BASE_MAINNET_SOURCE_POLICY, DKG_CORE_CHAIN_CACHE] as const) {
+    const bind = () => bindSnapshotSourcePolicy({ chain: policyChain, networks, sourcePolicy,
+      selfPeerId: 'requester', send: async () => reply, scope });
+    if (advertised.includes(sourcePolicy)) expect(bind()).toHaveProperty('probe');
+    else expect(bind).toThrow(/unavailable/);
+  }
 }
 
 describe('snapshot request and authenticated discovery boundaries', () => {
@@ -50,6 +64,9 @@ describe('snapshot request and authenticated discovery boundaries', () => {
     const input = { sourcePolicy: BASE_MAINNET_SOURCE_POLICY, selfPeerId: 'requester', chain, networks: [], send, scope };
     expect(() => bindSnapshotSourcePolicy(input)).toThrow('verification unavailable');
     expect(send).not.toHaveBeenCalled();
+    expectPolicies(chain, [], []);
+    expectPolicies({ ...chain, verifyACKIdentity: verify }, [], [BASE_MAINNET_SOURCE_POLICY]);
+    expectPolicies({ ...chain, chainId: 'gnosis:100', verifyACKIdentity: verify }, [], []);
     const policy = bindSnapshotSourcePolicy({ ...input, chain: { ...chain, verifyACKIdentity: verify } });
     expect(await policy.probe('core', 'a'.repeat(64), signal)).toBe(true);
     expect(verify).toHaveBeenCalledWith(wallet.address, 7n, { signal });
@@ -70,6 +87,10 @@ describe('snapshot request and authenticated discovery boundaries', () => {
     const send = vi.fn<ProtocolRouter['send']>(async (_peer, protocol, bytes) => protocol === CORE_CHAIN_CACHE_SOURCE_PROTOCOL
       ? encode({ ...registration, signature: await wallet.signMessage(cacheProofPayload(decode(bytes) as SnapshotSourceChallenge, registration)) }) : reply);
     const input = { sourcePolicy: DKG_CORE_CHAIN_CACHE, chain, networks, selfPeerId: 'requester', send, scope };
+    expectPolicies(chain, networks, [DKG_CORE_CHAIN_CACHE]);
+    expectPolicies({ ...chain, verifyACKIdentity: verify }, networks, [BASE_MAINNET_SOURCE_POLICY, DKG_CORE_CHAIN_CACHE]);
+    expectPolicies({ ...chain, deploymentId: '' }, networks, []);
+    expectPolicies(chain, [], []);
     expect(() => bindSnapshotSourcePolicy({ ...input, networks: [] })).toThrow('unavailable');
     expect(() => bindSnapshotSourcePolicy({ ...input, chain: { ...chain, deploymentId: '' } })).toThrow('unavailable');
     const policy = bindSnapshotSourcePolicy(input);
