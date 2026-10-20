@@ -2737,6 +2737,9 @@ export class DKGPublisher implements Publisher {
       : await this.publisherPlanner.prepare(publisherContextGraphId);
     const chainV10Ready = publisherPlanning.chainV10Ready;
     const canAttemptOnChainPublish = publisherPlanning.canAttemptOnChainPublish;
+    if (adoptOnly && (publisherContextGraphId === undefined || !chainV10Ready)) {
+      throw new Error('adoptExistingMint requires an on-chain context graph id and a V10-ready chain');
+    }
 
     // RFC-001 §9.x — sign-at-creation. The publisher is a pure
     // transport layer for the AuthorAttestation: the seal is built at
