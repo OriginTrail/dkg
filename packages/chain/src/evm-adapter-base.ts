@@ -30,6 +30,7 @@ import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-author
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  IdentityReadOptions,
   EventScanHorizonLease,
   ContextGraphLiveAuthority,
   ContextGraphAuthorityIndexRevisionReader,
@@ -3312,15 +3313,16 @@ export class EVMChainAdapterBase {
   // Identity
   // =====================================================================
 
-  async getIdentityId(options: ChainReadOptions = {}): Promise<bigint> {
+  async getIdentityId(options: IdentityReadOptions = {}): Promise<bigint> {
     return withRpcRequestContext(options, async () => {
       const signal = activeRpcRequestAbortSignal();
       signal?.throwIfAborted();
-      // A bounded request owns its read; never join an unrelated cached flight
-      // or let this caller's cancellation abort a shared identity-cache load.
-      const identityId = await (signal
+      // Shared loads belong to the adapter, not to the first cancellable waiter.
+      // Independent proof reads keep their caller's physical-work ownership.
+      const identityId = await (options.ownership === 'independent'
         ? this.readIdentityIdFromStorage(this.signer.address)
-        : this.readIdentityIdForAddress(this.signer.address));
+        : withDetachedRpcRequestContext(activeRpcRequestContext().requestClass,
+          () => this.readIdentityIdForAddress(this.signer.address)));
       signal?.throwIfAborted();
       return identityId;
     });

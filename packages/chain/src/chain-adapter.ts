@@ -1368,6 +1368,12 @@ export interface ChainReadOptions {
   signal?: AbortSignal;
 }
 
+/** Select identity-read ownership explicitly; cancellation never selects a cache policy. */
+export interface IdentityReadOptions extends ChainReadOptions {
+  /** Shared cached reads are the default; independent reads belong to this request. */
+  ownership?: 'shared' | 'independent';
+}
+
 /** Read options for resolving one publish transaction's receipt. */
 export interface PublishReceiptReadOptions extends ChainReadOptions {
   /**
@@ -1557,7 +1563,7 @@ export interface ChainAdapter {
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
-  getIdentityId(options?: ChainReadOptions): Promise<bigint>;
+  getIdentityId(options?: IdentityReadOptions): Promise<bigint>;
   /**
    * OT-RFC-39 — resolve an arbitrary operational EOA to its on-chain
    * identityId. Returns 0n for addresses that are not registered

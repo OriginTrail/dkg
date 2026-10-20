@@ -101,6 +101,7 @@ describe('registered Base mainnet snapshot sources', () => {
     expect(Object.isFrozen(peers)).toBe(true);
     expect(calls.sort()).toEqual(['core', 'forged']);
     expect(f.chain.verifyACKIdentity).toHaveBeenCalledWith(f.wallet.address, 7n, { signal: expect.any(AbortSignal) });
+    expect(f.chain.getIdentityId).toHaveBeenCalledWith({ signal: expect.any(AbortSignal), ownership: 'independent' });
   });
 
   it('rejects replay across nonce, graph, caller, responder and deployment', async () => {

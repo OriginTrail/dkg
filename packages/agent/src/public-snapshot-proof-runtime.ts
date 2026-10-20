@@ -30,7 +30,7 @@ export class PublicSnapshotProofRuntime {
       const operation = (async () => {
         await request.validate();
         assertCurrent();
-        const identityId = (await this.chain.getIdentityId({ signal: lifetime.signal })).toString();
+        const identityId = (await this.chain.getIdentityId({ signal: lifetime.signal, ownership: 'independent' })).toString();
         assertCurrent();
         const proof = request.proof(identityId);
         const signature = await this.chain.signMessage!(proof.payload, { signal: lifetime.signal });

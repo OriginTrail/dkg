@@ -9,6 +9,7 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  IdentityReadOptions,
   ContextGraphAuthorityReadOptions,
   ContextGraphLiveAuthorityReadOptions,
   CreateKCParams,
@@ -275,7 +276,7 @@ export class MockChainAdapter implements ChainAdapter {
     this.nextContextGraphId = initialContextGraphId;
   }
 
-  async getIdentityId(options: ChainReadOptions = {}): Promise<bigint> {
+  async getIdentityId(options: IdentityReadOptions = {}): Promise<bigint> {
     options.signal?.throwIfAborted();
     const existing = this.identities.get(this.signerAddress);
     return existing ?? 0n;
