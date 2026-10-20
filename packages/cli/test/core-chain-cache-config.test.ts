@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as chain from '@origintrail-official/dkg-chain';
 import { buildCoreChainCacheConfig } from '../src/daemon/core-chain-cache-config.js';
 import { loadBundledNetworkRegistry, type NetworkConfig } from '../src/config.js';
 
@@ -27,6 +28,21 @@ describe('official chain-cache deployment configuration', () => {
     const expected = name.startsWith('mainnet') ? ['base:1', 'gnosis:2'] : ['base:3', 'gnosis:4'];
     expect(result.coreChainCacheNetworks?.map(n => n.registry.chainId)).toEqual(expected);
     for (const n of result.coreChainCacheNetworks!) { expect(n.registry.rpcUsage()).toEqual({}); n.registry.destroy(); }
+  });
+  it('normalizes ordered own and foreign endpoints before applying the eight-endpoint bound', () => {
+    const create = vi.spyOn(chain, 'createEvmCoreChainCacheRegistry');
+    const own = registry['mainnet-a'];
+    const foreign = registry['mainnet-b'];
+    const configured = { ...registry, 'mainnet-b': { ...foreign, chain: { ...foreign.chain!,
+      rpcUrl: ' http://127.0.0.1:4 ', rpcUrls: ['http://127.0.0.1:4', ' http://127.0.0.1:5 '] } } };
+    const result = buildCoreChainCacheConfig({ enabled: true, role: 'edge', networkName: 'mainnet-a',
+      networkId: own.networkId, chain: { ...own.chain!, rpcUrl: ' http://127.0.0.1:2 ',
+        rpcUrls: [...Array(9).fill('http://127.0.0.1:2'), ' http://127.0.0.1:3 ', ''] } }, configured);
+    try {
+      expect(create.mock.calls.map(([options]) => options.rpcUrls)).toEqual([
+        ['http://127.0.0.1:2', 'http://127.0.0.1:3'], ['http://127.0.0.1:4', 'http://127.0.0.1:5'],
+      ]);
+    } finally { result.coreChainCacheNetworks!.forEach(n => n.registry.destroy()); create.mockRestore(); }
   });
   it('refuses custom hubs and private environments and leaves an unconfigured Edge opted out', () => {
     const own = registry['mainnet-a'];

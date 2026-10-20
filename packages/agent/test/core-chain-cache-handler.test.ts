@@ -105,3 +105,13 @@ it('captures trust configuration so later input mutations cannot widen a running
   expect(Object.isFrozen(captured[0].identity)).toBe(true);
   expect(() => snapshotCoreChainCacheNetworks(true, f.networks, { ...identity, networkId: 'testnet' }, scope.deploymentId)).toThrow();
 });
+
+it('normalizes an opted-out cache to a required immutable empty collection', () => {
+  const disabled = snapshotCoreChainCacheNetworks(false, undefined, identity, undefined);
+  expect(disabled).toEqual([]);
+  expect(Object.isFrozen(disabled)).toBe(true);
+  const f = fixture(async () => { throw new Error('unused'); });
+  f.handlers.clear();
+  registerCoreChainCacheHandlers({ ...f.agent, networks: disabled } as never);
+  expect(f.handlers.size).toBe(0);
+});

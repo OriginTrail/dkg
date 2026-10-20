@@ -60,8 +60,8 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
   };
   // Ask the peers for one selection until it is stored, every peer has
   // answered for it, or the job ends.
-  const recover = async (batch: readonly string[], transport: ExactTransport, peers: readonly string[]) => {
-    const answered = new Set<string>();
+  const recover = async (batch: readonly string[], transport: ExactTransport, peers: readonly string[],
+    answered: Set<string>, deferBusy = false) => {
     for (;;) {
       let wait: 'admission' | 'peer' | undefined;
       for (const peer of peers) {
@@ -77,6 +77,8 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
         else { wait = 'admission'; break; }
       }
       if (wait === undefined || batch.every(ual => committed.has(ual))) return;
+      // A busy batch must not hide healthy suppliers that have not been admitted yet.
+      if (wait === 'peer' && deferBusy) return;
       host.log.info(ctx, `Snapshot recovery for "${contextGraphId}" is waiting for `
         + `${wait === 'admission' ? 'local sync capacity' : 'a busy core'}: ${committed.size}/${uals.length} committed`);
       const waited = wait === 'admission'
@@ -90,13 +92,23 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
   for (let offset = 0; offset < uals.length; offset += 10) {
     const batch = uals.slice(offset, offset + 10);
     await skipHeld(batch);
-    for await (const peers of options.peerBatches()) {
-      await recover(batch, "stream-preferred", peers);
+    const admitted = new Set<string>(), streamAnswered = new Set<string>();
+    const legacyAnswered = new Map(batch.map(ual => [ual, new Set<string>()]));
+    const visit = async (peers: readonly string[], deferBusy: boolean) => {
+      await recover(batch, "stream-preferred", peers, streamAnswered, deferBusy);
       // The stream profile excludes private commitments. Only missing assets
       // use the bounded singleton transport, with identical authentication.
-      for (const ual of batch) if (!committed.has(ual)) await recover([ual], "legacy", peers);
+      for (const ual of batch) if (!committed.has(ual))
+        await recover([ual], "legacy", peers, legacyAnswered.get(ual)!, deferBusy);
+    };
+    for await (const peers of options.peerBatches()) {
+      peers.forEach(peer => admitted.add(peer));
+      await visit(peers, true);
       if (batch.every(ual => committed.has(ual))) break;
     }
+    // Preserve each peer's answers and setback history while retrying only
+    // deferred work, after every available content batch had its first turn.
+    if (batch.some(ual => !committed.has(ual))) await visit([...admitted], false);
     if (batch.some(ual => !committed.has(ual))) throw incomplete();
   }
   return { committed, alreadyPresent };

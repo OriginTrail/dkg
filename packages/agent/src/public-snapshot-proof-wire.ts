@@ -7,6 +7,7 @@ export interface SnapshotSourceChallenge {
   chainId: string; deploymentId: string; contextGraphId: string; onChainId: string;
 }
 export interface SnapshotProofFields { identityId: string; signature: string }
+export interface CoreChainCacheProof extends SnapshotProofFields { chainId: string; deploymentId: string }
 const boundedString = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 256;
 
@@ -26,10 +27,19 @@ export function decodeSnapshotChallenge(bytes: Uint8Array): SnapshotSourceChalle
     responderPeerId: c.responderPeerId, chainId: c.chainId, deploymentId: c.deploymentId,
     contextGraphId: c.contextGraphId, onChainId: c.onChainId };
 }
-export function decodeSnapshotProof(bytes: Uint8Array, keys: string): (SnapshotProofFields & Record<string, unknown>) | null {
-  const p = decodeObject(bytes);
-  if (!p || Object.keys(p).sort().join(',') !== keys
-    || typeof p.identityId !== 'string' || !/^[1-9][0-9]{0,21}$/.test(p.identityId) || BigInt(p.identityId) >= 2n ** 72n
+function proofFields(p: Record<string, unknown>): SnapshotProofFields | null {
+  if (typeof p.identityId !== 'string' || !/^[1-9][0-9]{0,21}$/.test(p.identityId) || BigInt(p.identityId) >= 2n ** 72n
     || typeof p.signature !== 'string' || !/^0x[0-9a-fA-F]{130}$/.test(p.signature)) return null;
-  return { ...p, identityId: p.identityId, signature: p.signature };
+  return { identityId: p.identityId, signature: p.signature };
+}
+export function decodeSnapshotProof(bytes: Uint8Array): SnapshotProofFields | null {
+  const p = decodeObject(bytes);
+  return p && Object.keys(p).sort().join(',') === 'identityId,signature' ? proofFields(p) : null;
+}
+export function decodeCoreChainCacheProof(bytes: Uint8Array): CoreChainCacheProof | null {
+  const p = decodeObject(bytes);
+  if (!p || Object.keys(p).sort().join(',') !== 'chainId,deploymentId,identityId,signature'
+    || typeof p.chainId !== 'string' || typeof p.deploymentId !== 'string') return null;
+  const fields = proofFields(p);
+  return fields ? { ...fields, chainId: p.chainId, deploymentId: p.deploymentId } : null;
 }

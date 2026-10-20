@@ -31,7 +31,7 @@ export async function verifySourceProof(
   verify: NonNullable<ChainAdapter['verifyACKIdentity']>, signal: AbortSignal,
 ): Promise<boolean> {
   signal.throwIfAborted();
-  const proof = decodeSnapshotProof(bytes, 'identityId,signature');
+  const proof = decodeSnapshotProof(bytes);
   if (!proof) return false;
   const signer = ethers.verifyMessage(sourceProofPayload(challenge, proof.identityId), proof.signature);
   // This checks the signing operational key AND active ShardingTable membership.

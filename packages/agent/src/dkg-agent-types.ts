@@ -2025,6 +2025,7 @@ export interface DKGAgentACKTransportOptions {
 export type ResolvedDKGAgentConfig =
   Omit<
     DKGAgentConfig,
+    | 'DKG_Core_chain_cache' | 'coreChainCacheNetworks'
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
@@ -2041,6 +2042,7 @@ export type ResolvedDKGAgentConfig =
     | 'rfc64CatalogDeploymentProfile'
     | 'contextGraphSubscriptionRehydrationEnabled'
   > & {
+    readonly coreChainCacheNetworks: readonly CoreChainCacheNetwork[];
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;

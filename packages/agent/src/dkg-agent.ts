@@ -1465,6 +1465,7 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
     delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
     delete configWithoutRfc64CatalogControls.syncBackoffJitter;
+    delete configWithoutRfc64CatalogControls.DKG_Core_chain_cache;
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
       coreChainCacheNetworks: snapshotCoreChainCacheNetworks(config.DKG_Core_chain_cache,
@@ -1493,9 +1494,7 @@ export class DKGAgent extends DKGAgentBase {
       announceAddresses: config.announceAddresses,
       bootstrapPeers: config.bootstrapPeers,
       relayPeers: config.relayPeers,
-      otherNetworkRelays: config.DKG_Core_chain_cache
-        ? config.otherNetworkRelays?.filter(addr => !resolvedConfig.coreChainCacheNetworks?.some(n => n.relays.includes(addr)))
-        : config.otherNetworkRelays,
+      otherNetworkRelays: config.otherNetworkRelays?.filter(addr => !resolvedConfig.coreChainCacheNetworks.some(n => n.relays.includes(addr))),
       networkPeerIsolation: config.networkPeerIsolation,
       enableMdns: !config.bootstrapPeers?.length && !config.relayPeers?.length,
       privateKey: keypair.secretKey,
@@ -2991,7 +2990,7 @@ export class DKGAgent extends DKGAgentBase {
     // creation. A timeout retains ownership and blocks store/network teardown.
     await this.randomSamplingRuntime?.stop();
     // Graph-scoped foreground/serving work has physically drained above.
-    for (const network of this.config.coreChainCacheNetworks ?? []) network.registry.destroy();
+    for (const network of this.config.coreChainCacheNetworks) network.registry.destroy();
     // rc.9 PR-G codex follow-up #G3: drain background substrate
     // fan-outs spawned by `publishWorkspaceGossip` (G2's
     // fire-and-forget detach) before tearing down libp2p. Without

@@ -2236,7 +2236,7 @@ export class DKGAgentBase {
    */
   drainRpcUsage(): RpcUsageWindow {
     const normal = this.chain.drainRpcUsage?.() ?? emptyRpcUsageWindow();
-    const cache = this.config?.coreChainCacheNetworks;
-    return cache?.length ? mergeRpcUsageWindows(normal, ...cache.map(n => n.registry.drainRpcUsage?.())) : normal;
+    const cache = this.config.coreChainCacheNetworks;
+    return cache.length ? mergeRpcUsageWindows(normal, ...cache.map(n => n.registry.drainRpcUsage?.())) : normal;
   }
 }

@@ -2,7 +2,7 @@
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { RpcUsageScope } from '@origintrail-official/dkg-chain';
 import type { DKGAgent } from './dkg-agent.js';
-import type { DKGAgentConfig } from './dkg-agent-types.js';
+import type { ResolvedDKGAgentConfig } from './dkg-agent-types.js';
 import type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { DKG_CORE_CHAIN_CACHE } from './core-chain-cache-config.js';
 import { coreChainCacheSeeds, connectCoreChainCacheSeed, createCoreChainCacheContentPeers } from './core-chain-cache-peers.js';
@@ -24,7 +24,7 @@ interface SnapshotSourcePlan {
 }
 interface SourceHost extends Pick<DKGAgent, 'peerId' | 'router' | 'node' | 'discovery'
   | 'peerResolver' | 'networkAdmissionCoordinator'> {
-  config: Pick<DKGAgentConfig, 'DKG_Core_chain_cache' | 'coreChainCacheNetworks'>;
+  config: Pick<ResolvedDKGAgentConfig, 'coreChainCacheNetworks'>;
   chain: Parameters<typeof bindSnapshotSourcePolicy>[0]['chain'];
   ensurePeerConnected: OmitThisParameter<DKGAgent['ensurePeerConnected']>;
 }
@@ -34,9 +34,8 @@ interface SourceHost extends Pick<DKGAgent, 'peerId' | 'router' | 'node' | 'disc
 export async function createPublicSnapshotSourcePlan(agent: SourceHost, options: PublicSnapshotSyncOptions,
   signal: AbortSignal, rpcScope: RpcUsageScope): Promise<SnapshotSourcePlan> {
   const cache = options.sourcePolicy === DKG_CORE_CHAIN_CACHE;
-  const networks = cache ? agent.config.coreChainCacheNetworks ?? [] : [];
-  if (cache && (!agent.config.DKG_Core_chain_cache || !networks.some(n =>
-    n.registry.chainId === agent.chain.chainId && n.registry.deploymentId === agent.chain.deploymentId)))
+  const networks = cache ? agent.config.coreChainCacheNetworks : [];
+  if (cache && !networks.length)
     throw new Error('DKG_Core_chain_cache is unavailable for this deployment');
   const policy = bindSnapshotSourcePolicy({ sourcePolicy: options.sourcePolicy, chain: agent.chain,
     selfPeerId: agent.peerId, networks, send: agent.router.send.bind(agent.router), scope: { contextGraphId: options.contextGraphId, onChainId: options.onChainId } });

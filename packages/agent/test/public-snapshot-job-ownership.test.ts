@@ -143,7 +143,7 @@ describe('public snapshot job ownership', () => {
     expect(a.router.send).not.toHaveBeenCalled(); expect(a.chain.readPublicGraphSnapshot).not.toHaveBeenCalled();
   });
   it("refuses a retained inactive source and fences a source deselected during a read", async () => {
-    const {a,invalidate} = fixture(); a.config={nodeRole:'core'};
+    const {a,invalidate} = fixture(); a.config={nodeRole:'core',coreChainCacheNetworks:[]};
     let handler!: (bytes: Uint8Array, peer: { toString(): string }) => Promise<Uint8Array>;
     a.router.register=(_p:string,h: typeof handler)=>{handler=h;};
     PublicSnapshotMethods.prototype.startPublicGraphSnapshots.call(a);

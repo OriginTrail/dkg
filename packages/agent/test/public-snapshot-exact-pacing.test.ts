@@ -19,11 +19,13 @@ function outcome(extra: Partial<ExactKnowledgeAssetSyncResult> = {}): ExactKnowl
 type Request = Parameters<typeof exactRecovery.runExactRecovery>[0];
 const selected = (request: Request) => exactAssetUalsForSelection(request.policy.selection);
 
-function recover(options: { deadline?: number; signal?: AbortSignal; peers?: string[]; canAdmit?: () => boolean;
+function recover(options: { deadline?: number; signal?: AbortSignal; peers?: string[]; uals?: string[];
+  peerBatches?: () => AsyncIterable<readonly string[]>; canAdmit?: () => boolean;
   holds?: (ual: string) => Promise<boolean>; owned?: () => boolean } = {}) {
   const signal = options.signal ?? new AbortController().signal;
   return recoverPublicSnapshotExact(host, {
-    contextGraphId: graph, peerBatches: async function* () { yield options.peers ?? ['core-a']; }, uals, evidence, signal,
+    contextGraphId: graph, peerBatches: options.peerBatches ?? (async function* () { yield options.peers ?? ['core-a']; }),
+    uals: options.uals ?? uals, evidence, signal,
     assertCurrent: () => {
       if (signal.aborted) throw new Error('job cancelled');
       if (options.owned && !options.owned()) throw new Error('Snapshot job ownership changed');
@@ -72,6 +74,40 @@ describe('public snapshot exact recovery pacing', () => {
     expect(result).toHaveProperty('value');
     // Each batch: one stream attempt, then the bounded singleton transport, as before.
     expect(transports).toEqual(['stream-preferred', ...Array(10).fill('legacy'), 'stream-preferred', 'legacy', 'legacy']);
+  });
+
+  it('uses a healthy later content batch before waiting on a busy first batch', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const startedAt = Date.now();
+    const calls: string[] = [];
+    vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async request => {
+      calls.push(request.remotePeerId);
+      return request.remotePeerId === 'busy-first' ? outcome({ streamOutcome: 'responder-busy' })
+        : outcome({ committedExactAssetUals: selected(request), disposition: 'found', streamOutcome: 'complete' });
+    });
+    const result = await recover({ uals: [uals[0]!], deadline: startedAt + PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS,
+      peerBatches: async function* () { yield ['busy-first']; yield ['healthy-later']; } });
+    expect(result).toEqual({ committed: new Set([uals[0]]), alreadyPresent: 0 });
+    expect(calls).toEqual(['busy-first', 'healthy-later']);
+    expect(Date.now()).toBe(startedAt);
+  });
+
+  it('retries deferred busy peers after later batches answer without the asset', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const calls: Array<{ peer: string; at: number }> = [];
+    let busyAttempts = 0;
+    vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async request => {
+      calls.push({ peer: request.remotePeerId, at: Date.now() });
+      if (request.remotePeerId === 'busy-first') return ++busyAttempts === 1
+        ? outcome({ streamOutcome: 'responder-busy' })
+        : outcome({ committedExactAssetUals: selected(request), disposition: 'found', streamOutcome: 'complete' });
+      return outcome();
+    });
+    const result = await settle(recover({ uals: [uals[0]!],
+      peerBatches: async function* () { yield ['busy-first']; yield ['empty-later']; } }));
+    expect(result).toEqual({ value: { committed: new Set([uals[0]]), alreadyPresent: 0 } });
+    expect(calls.map(c => c.peer)).toEqual(['busy-first', 'empty-later', 'empty-later', 'busy-first']);
+    expect(calls[3]!.at - calls[0]!.at).toBeGreaterThanOrEqual(15_000);
   });
 
   it('keeps the committed count when the configured cores stay busy until the job limit', async () => {

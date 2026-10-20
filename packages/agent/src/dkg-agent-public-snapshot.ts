@@ -32,14 +32,14 @@ import { registerSnapshotSourceHandler } from './public-snapshot-source-handler.
 export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export class PublicSnapshotMethods extends DKGAgentBase {
   getPublicSnapshotSourcePolicies(this: DKGAgent): readonly string[] {
-    return [...(this.chain.chainId === 'base:8453' ? ['base-mainnet-registered-cores'] : []), ...(this.config.DKG_Core_chain_cache && this.config.coreChainCacheNetworks?.length ? [DKG_CORE_CHAIN_CACHE] : [])];
+    return [...(this.chain.chainId === 'base:8453' ? ['base-mainnet-registered-cores'] : []), ...(this.config.coreChainCacheNetworks.length ? [DKG_CORE_CHAIN_CACHE] : [])];
   }
   startPublicGraphSnapshots(this: DKGAgent): void {
     const proofRuntime = new PublicSnapshotProofRuntime(this.chain, this.workLifetime);
-    const cache = this.config.DKG_Core_chain_cache ? registerCoreChainCacheHandlers({
+    const cache = registerCoreChainCacheHandlers({
       nodeRole: this.config.nodeRole ?? "edge", chain: this.chain, peerId: this.peerId, router: this.router,
-      proofRuntime, workLifetime: this.workLifetime, networks: this.config.coreChainCacheNetworks ?? [],
-    }) : undefined;
+      proofRuntime, workLifetime: this.workLifetime, networks: this.config.coreChainCacheNetworks,
+    });
     if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
       return;
     registerSnapshotSourceHandler({

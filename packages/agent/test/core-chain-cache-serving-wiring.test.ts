@@ -21,7 +21,7 @@ function fixture() {
     ({ observedAt: Date.now(), expiresAt: Date.now() + 120_000 }) as PublicGraphSnapshot);
   const sign = vi.fn(async (_bytes: Uint8Array, _options: { signal: AbortSignal }) => signature);
   const agent = { chain: { ...scope, readPublicGraphSnapshot: read, getIdentityId: async () => 7n, signMessage: sign },
-    config: { nodeRole: 'core', DKG_Core_chain_cache: true, coreChainCacheNetworks: [{
+    config: { nodeRole: 'core', coreChainCacheNetworks: [{
       registry: { ...scope, readPublicGraphSnapshot: read }, relays: [], identity: { chainId: scope.chainId },
     }] }, peerId: 'core', workLifetime,
     subscribedContextGraphs: new Map(['one', 'two', 'three', 'four'].map(g => [g, { coreHosted: true, onChainId: '1' }])),

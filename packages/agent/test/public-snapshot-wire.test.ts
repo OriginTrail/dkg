@@ -20,7 +20,7 @@ it('keeps malformed wire input outside subscription and chain admission with a u
   let handler!: (data: Uint8Array) => Promise<Uint8Array>;
   const chain = { readPublicGraphSnapshot: vi.fn() }, subscriptions = { get: vi.fn() };
   const router = { register: vi.fn((_protocol, read) => { handler = read; }) };
-  PublicSnapshotMethods.prototype.startPublicGraphSnapshots.call({ config: { nodeRole: 'core' }, chain, router,
+  PublicSnapshotMethods.prototype.startPublicGraphSnapshots.call({ config: { nodeRole: 'core', coreChainCacheNetworks: [] }, chain, router,
     subscribedContextGraphs: subscriptions, workLifetime: new AgentWorkLifetime(),   } as never);
   expect(router.register.mock.calls[0]?.[2]).toEqual({ maxReadBytes: PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES });
   for (const wire of invalidRequests) {

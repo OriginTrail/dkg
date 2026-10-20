@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createEvmCoreChainCacheRegistry, type RpcRequestAdmission } from '@origintrail-official/dkg-chain';
+import { createEvmCoreChainCacheRegistry, resolveRpcUrls, type RpcRequestAdmission } from '@origintrail-official/dkg-chain';
 import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
 import { loadBundledNetworkRegistry, validateNetworkConfigReadiness, type NetworkConfig } from '../config.js';
 
@@ -32,7 +32,7 @@ export function buildCoreChainCacheConfig(input: {
     const chain = network.chain!;
     // Respect the operator's endpoints for its own deployment; foreign endpoints are local shipped configuration.
     const connection = key === name ? input.chain! : chain;
-    const urls = [...new Set([connection.rpcUrl ?? chain.rpcUrl, ...(connection.rpcUrls ?? [])])];
+    const urls = resolveRpcUrls(connection.rpcUrl ?? chain.rpcUrl, connection.rpcUrls ? [...connection.rpcUrls] : undefined);
     return Object.freeze({
       identity: Object.freeze({ networkId: network.networkId, genesisId: network.genesisId,
         chainId: chain.chainId, networkConfigName: key }),

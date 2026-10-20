@@ -13,8 +13,7 @@ export function registerCoreChainCacheHandlers(agent: {
   router: Pick<ProtocolRouter, 'register'>; workLifetime: AgentWorkLifetime;
   networks: readonly CoreChainCacheNetwork[]; proofRuntime: PublicSnapshotProofRuntime;
 }): { runtime: PublicSnapshotServingRuntime } | undefined {
-  if (agent.nodeRole !== 'core' || !agent.chain.signMessage || !agent.networks.some(n =>
-    n.registry.chainId === agent.chain.chainId && n.registry.deploymentId === agent.chain.deploymentId)) return;
+  if (agent.nodeRole !== 'core' || !agent.chain.signMessage || !agent.networks.length) return;
   const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
   const unavailable = () => encode({ unavailable: true });
   agent.router.register(CORE_CHAIN_CACHE_SOURCE_PROTOCOL, (bytes, remote) => agent.proofRuntime.respond(remote.toString(), () => {
