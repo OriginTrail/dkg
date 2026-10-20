@@ -50,6 +50,28 @@ async function fixture() {
 }
 
 describe('registered Base mainnet snapshot sources', () => {
+  it('rejects malformed challenge fields without accepting extra keys', () => {
+    expect(decodeSourceChallenge(encode(challenge))).toEqual(challenge);
+    for (const invalid of [null, [], 1, {}, { ...challenge, extra: true },
+      { ...challenge, version: '1' }, { ...challenge, nonce: 12 },
+      { ...challenge, requesterPeerId: 12 }, { ...challenge, responderPeerId: '' },
+      { ...challenge, requesterPeerId: 'p'.repeat(257) }, { ...challenge, chainId: 'base:84532' },
+      { ...challenge, deploymentId: [] }, { ...challenge, onChainId: 14 }]) {
+      expect(() => decodeSourceChallenge(encode(invalid))).toThrow();
+    }
+  });
+
+  it('rejects malformed proofs before invoking registration verification', async () => {
+    const verify = vi.fn(async () => true), validShape = { identityId: '7', signature: '0x' + '1'.repeat(130) };
+    for (const invalid of [null, [], 1, {}, { ...validShape, extra: true },
+      { ...validShape, identityId: 7 }, { ...validShape, identityId: '0' },
+      { ...validShape, identityId: (2n ** 72n).toString() },
+      { ...validShape, signature: [] }, { ...validShape, signature: 'invalid' }]) {
+      expect(await verifySourceProof(encode(invalid), challenge, verify, signal())).toBe(false);
+    }
+    expect(verify).not.toHaveBeenCalled();
+  });
+
   it('authenticates a real signed challenge then pins only registered reachable sources', async () => {
     const f = await fixture();
     const calls: string[] = [];
