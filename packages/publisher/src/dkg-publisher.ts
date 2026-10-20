@@ -156,7 +156,6 @@ import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
 import {
   PublisherPlanner,
   coercePublisherAddress,
-  type FinalizedPublisherPlan,
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
@@ -2700,8 +2699,8 @@ export class DKGPublisher implements Publisher {
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
     const graphPublish = resolveGraphScopedPublishDescriptor({ kind: 'initial', options });
-    // Reconcile records the seal's existing mint: no funding plan, member
-    // ciphertext, ACK round or transaction.
+    // Reconcile records the seal's existing mint: no signer or funding plan,
+    // member ciphertext, ACK round or transaction.
     const adoptOnly = options.adoptExistingMint;
     if (adoptOnly && !graphPublish) throw new Error('adoptExistingMint requires a sealed graph-scoped publish');
     assertPublicationPricingPolicyApplicable(pricingPolicy, {
@@ -2733,7 +2732,9 @@ export class DKGPublisher implements Publisher {
     // can be resolved at all, the on-chain branch throws
     // `PublisherWalletRequiredError` instead of silently degrading.
     const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
-    const publisherPlanning = await this.publisherPlanner.prepare(publisherContextGraphId);
+    const publisherPlanning = adoptOnly
+      ? await this.publisherPlanner.prepareMintAdoption()
+      : await this.publisherPlanner.prepare(publisherContextGraphId);
     const chainV10Ready = publisherPlanning.chainV10Ready;
     const canAttemptOnChainPublish = publisherPlanning.canAttemptOnChainPublish;
 
@@ -3155,13 +3156,11 @@ export class DKGPublisher implements Publisher {
       networkVisibleByteSize,
       fullContentByteSize: payloadMeasurement.fullContentByteSize,
     });
-    const finalizedPublisherPlan: FinalizedPublisherPlan = adoptOnly
-      ? { kind: 'local', publisherAddress: this.localTentativePublisherAddress(), publishEpochs: 0, tokenAmount: 0n }
-      : await publisherPlanning.finalize({
-        explicitPublishEpochs,
-        billableByteSize: publicationPricing.billableByteSize,
-        ctx,
-      });
+    const finalizedPublisherPlan = await publisherPlanning.finalize({
+      explicitPublishEpochs,
+      billableByteSize: publicationPricing.billableByteSize,
+      ctx,
+    });
     const publisherSigner = finalizedPublisherPlan.kind === 'on-chain'
       ? finalizedPublisherPlan.signer
       : undefined;

@@ -117,6 +117,25 @@ export class PublisherPlanner {
     };
   }
 
+  /**
+   * Planning for recording a sealed publish's existing mint: V10 readiness
+   * only. No signer, funding or price is resolved, because nothing is sent.
+   */
+  async prepareMintAdoption(): Promise<PreparedPublisherPlanning> {
+    const chainV10Ready = await this.refreshChainV10Readiness();
+    const publisherAddress = this.dependencies.localTentativePublisherAddress();
+    return {
+      chainV10Ready,
+      canAttemptOnChainPublish: chainV10Ready,
+      finalize: async (input) => ({
+        kind: 'local',
+        publisherAddress,
+        publishEpochs: input.explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS,
+        tokenAmount: 0n,
+      }),
+    };
+  }
+
   private async prepareState(contextGraphId: bigint | undefined): Promise<PublisherPlanningState> {
     const chainV10Ready = await this.refreshChainV10Readiness();
     if (contextGraphId === undefined || !chainV10Ready) {
