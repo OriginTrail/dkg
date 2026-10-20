@@ -233,9 +233,15 @@ export class StuckTransactionRecovery {
         return this.now() + this.options.receiptTimeoutMs;
       case 'replace': {
         const sent = await this.replace(newest, head.baseFeePerGas, decision.reason);
-        if (!sent || !decision.renewDeadline) return;
-        this.renewals += 1;
-        return this.now() + this.options.receiptTimeoutMs;
+        if (!sent) return;
+        if (decision.renewDeadline) {
+          this.renewals += 1;
+          return this.now() + this.options.receiptTimeoutMs;
+        }
+        // Signing and broadcasting can run past the deadline; the new hash still
+        // gets a check interval of polling before the wait may give up.
+        const pollUntilMs = this.now() + this.options.checkIntervalMs;
+        return pollUntilMs > context.deadlineMs ? pollUntilMs : undefined;
       }
     }
   }

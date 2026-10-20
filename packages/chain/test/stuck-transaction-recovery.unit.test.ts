@@ -336,20 +336,26 @@ describe('receipt wait over a transaction and its replacements', () => {
   async function waitWithRecovery(params: {
     minedHash: (hashes: readonly string[]) => string | undefined;
     baseFeePerGas?: bigint;
+    /** The chain the recovery reads; a test may advance its nonce as a transaction mines. */
+    chain?: FakeChain;
+    receiptTimeoutMs?: number;
+    checkIntervalMs?: number;
+    pollIntervalMs?: number;
     broadcast?: StuckTransactionPort['broadcast'];
     receiptFor?: (hash: string, hashes: readonly string[]) => FakeReceipt | null;
     isReceiptEligible?: (receipt: FakeReceipt) => Promise<boolean>;
   }) {
     vi.useFakeTimers({ now: 0 });
     const original = await strandedPublish();
-    const chain = { latestNonce: 6722, baseFeePerGas: params.baseFeePerGas ?? 4_900_000n };
+    const chain = params.chain ?? { latestNonce: 6722, baseFeePerGas: params.baseFeePerGas ?? 4_900_000n };
+    const receiptTimeoutMs = params.receiptTimeoutMs ?? 600_000;
     const { port, broadcasts } = fakePort(chain, params.broadcast ? { broadcast: params.broadcast } : {});
     const recovery = new StuckTransactionRecovery({
       original,
       nonce: 6722,
       label: 'V10 publish',
-      receiptTimeoutMs: 600_000,
-      checkIntervalMs: 30_000,
+      receiptTimeoutMs,
+      checkIntervalMs: params.checkIntervalMs ?? 30_000,
       port,
       log: () => {},
     });
@@ -358,8 +364,8 @@ describe('receipt wait over a transaction and its replacements', () => {
       txHash: original.txHash,
       txHashes: () => recovery.txHashes(),
       timeoutTxHash: () => recovery.latestTxHash(),
-      receiptTimeoutMs: 600_000,
-      pollIntervalMs: 2_000,
+      receiptTimeoutMs,
+      pollIntervalMs: params.pollIntervalMs ?? 2_000,
       getReceipt: async (hash) => {
         lookups.push(hash);
         if (params.receiptFor) return params.receiptFor(hash, recovery.txHashes());
@@ -454,5 +460,29 @@ describe('receipt wait over a transaction and its replacements', () => {
       status: 'fulfilled',
       receipt: { hash: broadcasts[0], blockHash: CANONICAL },
     });
+  });
+
+  // otReviewAgent on #3393: an underpriced replacement started before the deadline whose
+  // broadcast returns after it, mined by then. The deadline check alone would see the consumed
+  // nonce and give up without ever looking up the new hash.
+  it('looks up a replacement whose broadcast finishes after the deadline before giving up', async () => {
+    const chain = { latestNonce: 6722, baseFeePerGas: 4_900_000n };
+    let minedReplacement: string | undefined;
+    const { outcome, lookups } = await waitWithRecovery({
+      chain,
+      receiptTimeoutMs: 1_000,
+      checkIntervalMs: 250,
+      pollIntervalMs: 100,
+      minedHash: () => minedReplacement,
+      broadcast: async (_signedTx, txHash) => {
+        // Starts at the first check (~300 ms) and returns at ~1,150 ms, mined by then.
+        await new Promise((resolve) => setTimeout(resolve, 850));
+        chain.latestNonce = 6723;
+        minedReplacement = txHash;
+      },
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(outcome).resolves.toMatchObject({ status: 'fulfilled', receipt: { hash: minedReplacement } });
+    expect(lookups).toContain(minedReplacement);
   });
 });
