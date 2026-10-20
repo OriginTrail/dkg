@@ -7,16 +7,16 @@ export const rpcUsageObserverContext = new AsyncLocalStorage<RpcUsageObserver>()
 
 /** Observe physical requests without draining or changing daemon-wide telemetry. */
 export class RpcUsageScope {
-  private readonly counts = new WeakMap<object, Record<string, number>>();
+  private readonly counts = new WeakMap<object, Map<string, number>>();
   run<T>(operation: () => T): T {
     return rpcUsageObserverContext.run((owner, method) => {
       let methods = this.counts.get(owner);
-      if (!methods) { methods = {}; this.counts.set(owner, methods); }
-      methods[method] = (methods[method] ?? 0) + 1;
+      if (!methods) { methods = new Map(); this.counts.set(owner, methods); }
+      methods.set(method, (methods.get(method) ?? 0) + 1);
     }, operation);
   }
   usage(owner: object): Readonly<Record<string, number>> {
-    return Object.freeze({ ...this.counts.get(owner) });
+    return Object.freeze(Object.fromEntries(this.counts.get(owner) ?? []));
   }
 }
 

@@ -28,6 +28,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
 import { boundedRpcMethodLabel } from './rpc-method-labels.js';
+import { recordScopedRpcUsage, type RpcUsageScope } from './rpc-usage-scope.js';
 export { KNOWN_RPC_METHODS, boundedRpcMethodLabel } from './rpc-method-labels.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
@@ -795,6 +796,7 @@ export function boundedRpcEndpointSlotLabel(
  */
 export class RpcUsageTracker {
   private window = new Map<string, number>();
+  private readonly cumulativeMethods = new Map<string, number>();
   private ethCallConsumers = new Map<string, number>();
   private headerAttributions = new Map<
     string,
@@ -840,6 +842,9 @@ export class RpcUsageTracker {
     // arithmetic that cannot realistically throw, and it must never be
     // skipped because an OPTIONAL sink misbehaved.
     const raw = typeof method === 'string' && method.length > 0 && method.length <= 128 ? method : 'other';
+    const cumulativeKey = this.cumulativeMethods.has(raw) || this.cumulativeMethods.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
+    this.cumulativeMethods.set(cumulativeKey, (this.cumulativeMethods.get(cumulativeKey) ?? 0) + 1);
+    recordScopedRpcUsage(this, raw);
     const key = this.window.has(raw) || this.window.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
     this.window.set(key, (this.window.get(key) ?? 0) + 1);
     if (raw === 'eth_call') {
@@ -918,6 +923,11 @@ export class RpcUsageTracker {
     }
   }
 
+  /** Per-recorder totals or issuer-owned counts; neither view is drained. */
+  rpcUsage(scope?: RpcUsageScope): Readonly<Record<string, number>> {
+    return scope ? scope.usage(this) : Object.freeze(Object.fromEntries(this.cumulativeMethods));
+  }
+
   /**
    * Return the DELTA since the previous drain and reset the window. Deltas (not
    * cumulative totals) are what the daemon logs, so `sum_over_time` in Grafana
@@ -965,6 +975,7 @@ export class RpcUsageTracker {
  */
 export interface RpcUsageRecorder extends RpcUsageDrainable {
   record(method: string, endpointSlot?: number): void;
+  rpcUsage(scope?: RpcUsageScope): Readonly<Record<string, number>>;
 }
 
 export function createRpcUsageRecorder(
@@ -975,5 +986,6 @@ export function createRpcUsageRecorder(
   return Object.freeze({
     record: (method: string, endpointSlot?: number) => tracker.record(method, endpointSlot),
     drainRpcUsage: () => tracker.drainWindow(),
+    rpcUsage: (scope?: RpcUsageScope) => tracker.rpcUsage(scope),
   });
 }

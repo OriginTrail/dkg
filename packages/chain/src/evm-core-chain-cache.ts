@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createRpcUsageRecorder } from './rpc-usage.js';
-import { recordScopedRpcUsage } from './rpc-usage-scope.js';
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 import { createRpcRequestProvider, withRpcRequestContext, type RpcRequestAdmission } from './rpc-request-transport.js';
 import { loadAbi } from './evm-adapter-abi.js';
@@ -23,16 +22,12 @@ export function createEvmCoreChainCacheRegistry(config: {
     || config.rpcUrls.length > 8 || !Number.isSafeInteger(config.finalityConfirmations) || config.finalityConfirmations < 1)
     throw new Error('Invalid DKG Core chain cache registry');
   const deploymentId = `${config.chainId}:hub=${config.hubAddress.toLowerCase()}`;
-  const counts: Record<string, number> = {};
   const accounting = createRpcUsageRecorder(() => config.chainId, "other");
   let ownedProviders: JsonRpcProvider[] | undefined;
   const providers = () => ownedProviders ??= config.rpcUrls.map((url, endpointSlot) => createRpcRequestProvider(url, {
     admission: config.admission, endpointSlot, network: ethers.Network.from(numeric),
     providerOptions: { cacheTimeout: -1, batchMaxCount: 1 },
-    onRequest: (method, slot) => {
-      accounting.record(method, slot); counts[method] = (counts[method] ?? 0) + 1;
-      recordScopedRpcUsage(counts, method);
-    },
+    onRequest: (method, slot) => accounting.record(method, slot),
   }));
   return {
     chainId: config.chainId, deploymentId,
@@ -62,7 +57,7 @@ export function createEvmCoreChainCacheRegistry(config: {
     readPublicGraphSnapshot: (graph, onChainId, options) => withRpcRequestContext({ signal: options.signal }, () =>
       readEvmPublicGraphSnapshot({ ...config, deploymentId, providers: providers() }, graph, onChainId, options)),
     drainRpcUsage: () => accounting.drainRpcUsage(),
-    rpcUsage: scope => scope ? scope.usage(counts) : Object.freeze({ ...counts }),
+    rpcUsage: scope => accounting.rpcUsage(scope),
     destroy: () => { for (const provider of ownedProviders ?? []) provider.destroy(); ownedProviders = undefined; },
   };
 }
