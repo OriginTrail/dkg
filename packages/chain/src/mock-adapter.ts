@@ -2304,7 +2304,7 @@ export class MockChainAdapter implements ChainAdapter {
    */
   /** Preview the txHash that the next txResult() call will produce (read-only). */
   private peekTxHash(): string {
-    return `0x${this.nextBlock.toString(16).padStart(64, '0')}${this.txIndexInBlock.toString(16).padStart(4, '0')}`;
+    return `0x${this.nextBlock.toString(16).padStart(60, '0')}${this.txIndexInBlock.toString(16).padStart(4, '0')}`;
   }
 
   private pushEvent(type: string, data: Record<string, unknown>): void {
@@ -2314,7 +2314,7 @@ export class MockChainAdapter implements ChainAdapter {
   private txResult(success: boolean): TxResult {
     const blockNumber = this.nextBlock;
     const txIndex = this.txIndexInBlock++;
-    const hash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
+    const hash = `0x${blockNumber.toString(16).padStart(60, '0')}${txIndex.toString(16).padStart(4, '0')}`;
 
     if (this.autoMine) this.advanceBlock();
     return { hash, blockNumber, txIndex, success };

@@ -10,7 +10,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { buildAuthorAttestationTypedData } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import {
+  computeFlatKCRootV10,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  type DKGPublisher,
+} from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent, reconcileKnowledgeAssetMint } from '../src/index.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
@@ -58,8 +62,9 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
    * unobserved. `publisherAddress` gives the node a wallet to publish with.
    */
   async function strandedAsset(chain: MockChainAdapter, publisherAddress?: string) {
+    const store = new OxigraphStore();
     agent = await DKGAgent.create({
-      name: 'LateMintNode', listenPort: 0, listenHost: '127.0.0.1', store: new OxigraphStore(),
+      name: 'LateMintNode', listenPort: 0, listenHost: '127.0.0.1', store,
       chainAdapter: chain, nodeRole: 'core', skills: [], kaNumberAllocator: makeTestKaNumberAllocator(),
       ...(publisherAddress ? { publisherAddress } : {}),
     });
@@ -100,7 +105,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     const history = () => agent!.assertion.history(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR });
     expect(await history()).toMatchObject({ status: 'swm-shared', reservedUal: sealed.kaUal });
     const createKnowledgeAssets = vi.spyOn(chain, 'createKnowledgeAssets');
-    return { agent, sealed, lostMint, history, createKnowledgeAssets };
+    return { agent, store, sealed, lostMint, history, createKnowledgeAssets };
   }
 
   it('records the late mint on the vm/publish retry that reverts KaIdAlreadyMinted', async () => {
@@ -129,5 +134,30 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
     await expect(reconcileKnowledgeAssetMint(agent, { contextGraphId: CONTEXT_GRAPH, name: NAME }))
       .resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+  });
+
+  it('reconcile completes after a run that recorded the mint but failed before the lifecycle stamp', async () => {
+    const { agent, store, sealed, lostMint, history } = await strandedAsset(new MockChainAdapter());
+    const input = { contextGraphId: CONTEXT_GRAPH, name: NAME };
+    // The terminus failure: VM content and metadata recorded, then the shared-memory cleanup throws.
+    const publisher = (agent as unknown as { publisher: DKGPublisher }).publisher;
+    const cleanup = vi.spyOn(publisher, 'clearPublishedKnowledgeAssetSwm')
+      .mockRejectedValueOnce(new Error('Triple-store response exceeds byte limit: found 8396603, limit 8388608'));
+    await expect(reconcileKnowledgeAssetMint(agent, input)).rejects.toThrow(/exceeds byte limit/);
+    expect(await history()).toMatchObject({ status: 'swm-shared' });
+    cleanup.mockRestore();
+
+    await expect(reconcileKnowledgeAssetMint(agent, input))
+      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+    await expect(reconcileKnowledgeAssetMint(agent, input))
+      .resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, { contextGraphId: CONTEXT_GRAPH, ual: sealed.kaUal }))
+      .toMatchObject({ state: 'confirmed', envelope: { transactionHash: lostMint.txHash } });
+    const publishedAt = await store.query(
+      `SELECT ?at WHERE { GRAPH <did:dkg:context-graph:${CONTEXT_GRAPH}/_meta> { <${sealed.kaUal}> <http://dkg.io/ontology/publishedAt> ?at } }`,
+    );
+    expect(publishedAt.type === 'bindings' && publishedAt.bindings).toHaveLength(1);
   });
 });

@@ -18,7 +18,12 @@ import {
   type OnChainPublishResult,
   type V10PublishParams,
 } from '@origintrail-official/dkg-chain';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
+import {
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  type ConfirmedGraphKnowledgeAssetMetadataEnvelope,
+} from './metadata.js';
 
 export const MINT_ADOPTION_REFUSED_CODE = 'KA_MINT_ADOPTION_REFUSED';
 
@@ -37,7 +42,9 @@ export type MintAdoptionRefusalReason =
   | 'mint-receipt-invalid'
   | 'root-mismatch'
   | 'context-graph-mismatch'
-  | 'author-mismatch';
+  | 'author-mismatch'
+  /** The node already holds a record of this KA that does not describe the sealed content. */
+  | 'existing-record-conflict';
 
 /** Missing or not-yet-final evidence can appear later; a mismatch never changes. */
 const RETRYABLE_REFUSALS: ReadonlySet<MintAdoptionRefusalReason> = new Set([
@@ -152,6 +159,44 @@ export async function mintOrAdoptKnowledgeAssets(
     }
     return { result: await adoptExistingMint(chain, expected, { revert: error }), adopted: true };
   }
+}
+
+/**
+ * Whether an adopted mint is already recorded locally. The run that minted it
+ * may have recorded it before failing, or the node's chain reconcile may have
+ * materialized it. Either record must describe exactly the sealed content and
+ * this transaction; then the caller keeps it instead of adding a second set of
+ * rows. Anything else refuses before the caller writes.
+ */
+export async function adoptedMintAlreadyRecorded(
+  store: TripleStore,
+  input: {
+    contextGraphId: string;
+    ual: string;
+    mint: OnChainPublishResult;
+    expected: Omit<ConfirmedGraphKnowledgeAssetMetadataEnvelope, 'transactionHash' | 'subGraphName' | 'batchId'>;
+  },
+): Promise<boolean> {
+  const { mint, expected } = input;
+  const existing = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, input);
+  if (existing.state === 'absent') return false;
+  const recorded = existing.state === 'confirmed' ? existing.envelope : undefined;
+  const hex = (bytes?: Uint8Array) => (bytes ? ethers.hexlify(bytes) : undefined);
+  if (
+    recorded
+    && recorded.assertionVersion === expected.assertionVersion
+    && recorded.assertionGraph === expected.assertionGraph
+    && recorded.publicTripleCount === expected.publicTripleCount
+    && recorded.privateTripleCount === expected.privateTripleCount
+    && hex(recorded.privateMerkleRoot) === hex(expected.privateMerkleRoot)
+    && hex(recorded.merkleRoot) === hex(expected.merkleRoot)
+    && recorded.batchId === (mint.kaId ?? mint.batchId)
+    && (recorded.transactionHash === undefined || recorded.transactionHash.toLowerCase() === mint.txHash.toLowerCase())
+  ) {
+    return true;
+  }
+  throw new MintAdoptionRefusedError('existing-record-conflict', mint.kaId ?? mint.batchId,
+    `the local record of ${input.ual} is ${existing.state === 'invalid' ? 'unreadable' : 'for other content or another transaction'}`);
 }
 
 function publishResultFromMint(mint: KnowledgeAssetMintEvidence): OnChainPublishResult {

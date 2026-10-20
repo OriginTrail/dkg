@@ -29,7 +29,12 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
-import { MintAdoptionRefusedError, generatedPrivateCatalogTripleKeys } from '../src/index.js';
+import {
+  MintAdoptionRefusedError,
+  generateGraphKnowledgeAssetMetadata,
+  generatedPrivateCatalogTripleKeys,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+} from '../src/index.js';
 import { buildSeal, mockSealCtx } from './_helpers/seal.js';
 import { mockChainStubACKProvider } from './_helpers/acks.js';
 
@@ -184,6 +189,30 @@ async function strandedPublishFixture() {
     const result = await store.query(`SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
     return result.type === 'bindings' ? Number(String(result.bindings[0]?.['n']).replace(/^"(\d+)".*$/, '$1')) : -1;
   };
+  /** How many values each metadata predicate of the asset's UAL holds. */
+  const metadataValueCounts = async () => {
+    const result = await store.query(
+      `SELECT ?p (COUNT(?o) AS ?n) WHERE { GRAPH <did:dkg:context-graph:${CONTEXT_GRAPH}/_meta> { <${ual}> ?p ?o } } GROUP BY ?p`,
+    );
+    return result.type === 'bindings'
+      ? Object.fromEntries(result.bindings.map((row) => [
+        String(row['p']).replace(DKG, 'dkg:'), Number(String(row['n']).replace(/^"(\d+)".*$/, '$1')),
+      ]))
+      : {};
+  };
+  /** The confirmed record a node's chain reconcile writes for a mint it observed, as a receiver would. */
+  const reconcileMaterialized = async (merkleRoot: Uint8Array = seal.expectedMerkleRoot) => {
+    await store.insert([
+      ...generateGraphKnowledgeAssetMetadata({
+        ual, contextGraphId: CONTEXT_GRAPH, merkleRoot, publisherPeerId: 'chain-reconcile', accessPolicy: 'public',
+        allowedPeers: [], timestamp: new Date(0), assertionVersion: 1, authorAddress: wallet.address,
+        publicTripleCount: 1, privateTripleCount: 0, assertionGraph: vmGraph,
+      }, { status: 'confirmed', confirmation: {
+        kind: 'finalized-materialization', provenance: { batchId: kaId, materializedVersion: { blockNumber: 1, txIndex: 0 } },
+      } }),
+      { ...LOT, graph: vmGraph },
+    ]);
+  };
   const recordedTxHashes = async () => {
     const result = await store.query(
       `SELECT ?tx WHERE { GRAPH ?g { <${ual}> <${DKG}transactionHash> ?tx } }`,
@@ -191,7 +220,10 @@ async function strandedPublishFixture() {
     return result.type === 'bindings' ? result.bindings.map((row) => String(row['tx']).replace(/^"|"$/g, '')) : [];
   };
 
-  return { chain, store, publish, strand, mintForeign, kaId, ual, swmGraph, vmGraph, acks, encrypt, graphSize, recordedTxHashes };
+  return {
+    chain, store, publisher, publish, strand, mintForeign, reconcileMaterialized, kaId, ual, swmGraph, vmGraph, acks, encrypt,
+    graphSize, recordedTxHashes, metadataValueCounts,
+  };
 }
 
 async function expectNothingRecorded(fixture: Awaited<ReturnType<typeof strandedPublishFixture>>) {
@@ -282,6 +314,54 @@ describe('a sealed publish whose transaction mined after the node stopped waitin
     expect(fixture.encrypt).not.toHaveBeenCalled();
     expect(await fixture.graphSize(fixture.vmGraph)).toBe(1);
     expect(await fixture.recordedTxHashes()).toEqual([original.txHash]);
+  });
+
+  it('records over what a failed run left without adding a second set of metadata', async () => {
+    const fixture = await strandedPublishFixture();
+    const original = await fixture.strand();
+    // As on terminus: the run recorded VM content and metadata, then failed in the shared-memory cleanup.
+    const cleanup = vi.spyOn(fixture.publisher, 'clearPublishedKnowledgeAssetSwm')
+      .mockRejectedValueOnce(new Error('Triple-store response exceeds byte limit: found 8396603, limit 8388608'));
+    await expect(fixture.publish({})).rejects.toThrow(/exceeds byte limit/);
+    expect(await fixture.recordedTxHashes()).toEqual([original.txHash]);
+    const recorded = await fixture.metadataValueCounts();
+    cleanup.mockRestore();
+
+    await expect(fixture.publish({})).resolves.toMatchObject({ status: 'confirmed', onChainResult: { txHash: original.txHash } });
+
+    expect(await fixture.metadataValueCounts()).toEqual(recorded);
+    expect(recorded).toMatchObject({ 'dkg:publishedAt': 1, 'dkg:status': 1, 'dkg:transactionHash': 1, 'dkg:confirmationKind': 1 });
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(fixture.store, { contextGraphId: CONTEXT_GRAPH, ual: fixture.ual }))
+      .toMatchObject({ state: 'confirmed', envelope: { transactionHash: original.txHash } });
+    expect(await fixture.graphSize(fixture.swmGraph)).toBe(0);
+  });
+
+  it('keeps the record chain reconcile materialized for the late mint', async () => {
+    const fixture = await strandedPublishFixture();
+    const original = await fixture.strand();
+    await fixture.reconcileMaterialized();
+    const materialized = await fixture.metadataValueCounts();
+
+    await expect(fixture.publish({})).resolves.toMatchObject({ status: 'confirmed', onChainResult: { txHash: original.txHash } });
+
+    expect(await fixture.metadataValueCounts()).toEqual(materialized);
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(fixture.store, { contextGraphId: CONTEXT_GRAPH, ual: fixture.ual }))
+      .toMatchObject({ state: 'confirmed' });
+    expect(await fixture.graphSize(fixture.vmGraph)).toBe(1);
+  });
+
+  it('refuses before writing when the existing record describes other content', async () => {
+    const fixture = await strandedPublishFixture();
+    await fixture.strand();
+    await fixture.reconcileMaterialized(ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('other content'))));
+    await fixture.store.deleteByPattern({ graph: fixture.vmGraph });
+    const before = await fixture.metadataValueCounts();
+
+    await expect(fixture.publish({})).rejects.toMatchObject({ reason: 'existing-record-conflict', retryable: false });
+
+    expect(await fixture.metadataValueCounts()).toEqual(before);
+    expect(await fixture.graphSize(fixture.vmGraph)).toBe(0);
+    expect(await fixture.graphSize(fixture.swmGraph)).toBe(1);
   });
 
   it('reconcile of an unminted reservation refuses as not minted and sends nothing', async () => {

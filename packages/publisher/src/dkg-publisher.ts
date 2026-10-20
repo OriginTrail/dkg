@@ -159,7 +159,7 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
-import { mintOrAdoptKnowledgeAssets } from './adopt-existing-mint.js';
+import { adoptedMintAlreadyRecorded, mintOrAdoptKnowledgeAssets } from './adopt-existing-mint.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -4111,6 +4111,18 @@ export class DKGPublisher implements Publisher {
           },
         });
 
+        // An adopted mint may already be recorded, by the run that minted it or by
+        // chain reconcile: keep that record rather than write a second one.
+        const keepAdoptedRecord = adoptedMint && graphPublish !== undefined && await adoptedMintAlreadyRecorded(
+          this.store, { contextGraphId, ual, mint: onChainResult, expected: {
+            assertionVersion: graphPublish.scope.assertionVersion,
+            assertionGraph: knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, graphPublish.scope, options.subGraphName),
+            publicTripleCount: graphPublish.publicTripleCount,
+            privateTripleCount: graphPublish.privateTripleCount,
+            ...(privateRoots[0] ? { privateMerkleRoot: privateRoots[0] } : {}),
+            merkleRoot: kcMerkleRoot,
+          } },
+        );
         for (const km of kaMetadata) {
           km.kcUal = ual;
         }
@@ -4175,7 +4187,7 @@ export class DKGPublisher implements Publisher {
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
           );
         }
-        if (graphPublish) {
+        if (graphPublish && !keepAdoptedRecord) {
           await replaceLocallyTrustedKnowledgeAssetControls(
             this.store,
             graphPublish.scope.ual,
@@ -4215,7 +4227,7 @@ export class DKGPublisher implements Publisher {
         } else {
           await this.store.insert(vmQuads);
         }
-        await this.store.insert(confirmedQuads);
+        if (!keepAdoptedRecord) await this.store.insert(confirmedQuads);
         // GH #1078 — supersede/persist private slices only now that the chain
         // has confirmed (before returning 'confirmed', so no read sees the KA
         // confirmed without its private data).
