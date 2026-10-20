@@ -72,6 +72,33 @@ describe('transaction fee pricing at preparation', () => {
     expect(prepared).toMatchObject({ type: 2, maxFeePerGas: 16_000_000n, maxPriorityFeePerGas: 1_000_000n });
   });
 
+  // otReviewAgent on #3393: ethers estimates gas with the fees it is given, and the RPC checks
+  // them against the balance, so the operator cap applies before the estimate.
+  it('estimates gas under the operator fee cap, so a wallet that affords the capped fee is not refused', async () => {
+    const cap = 100_000_000n; // 0.1 gwei
+    const balance = 50_000_000_000_000n; // 0.00005 xDAI: affords 50k gas at the cap, not at 2 gwei
+    const estimatedWith: bigint[] = [];
+    const adapter: any = new EVMChainAdapter(config({ staticNetwork: false, maxFeePerGasWei: cap }));
+    const wallet = new ethers.Wallet(PRIVATE_KEY).connect({
+      getNetwork: async () => ({ chainId: 100n, name: 'stub' }),
+      estimateGas: async (tx: ethers.TransactionRequest) => {
+        const maxFeePerGas = BigInt(tx.maxFeePerGas ?? 0n);
+        estimatedWith.push(maxFeePerGas);
+        if (maxFeePerGas * 50_000n > balance) throw new Error('insufficient funds for gas * price + value');
+        return 50_000n;
+      },
+      getTransactionCount: async () => 6722,
+      getBlock: async () => ({ baseFeePerGas: 23n }),
+      send: async () => '0x64',
+      resolveName: async (name: string) => name,
+      _isProvider: true,
+    } as never);
+
+    const prepared = await adapter.prepareSignerTransaction(wallet, request);
+    expect(estimatedWith).toEqual([cap]);
+    expect(prepared).toMatchObject({ gasLimit: 50_000n, maxFeePerGas: cap, maxPriorityFeePerGas: cap });
+  });
+
   it('keeps the operator fee cap above the floor', async () => {
     const cap = 1_500_000_000n;
     const adapter: any = new EVMChainAdapter(config({ staticNetwork: false, maxFeePerGasWei: cap }));

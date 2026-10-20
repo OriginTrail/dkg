@@ -1995,9 +1995,12 @@ export class EVMChainAdapterBase {
     signer: EvmSigner,
     populated: ethers.TransactionRequest,
   ): Promise<ethers.TransactionRequest> {
-    // Headroom over the latest base fee and the chain's floor (evm-fee-policy.ts).
+    // Headroom over the latest base fee and the chain's floor (evm-fee-policy.ts), under the
+    // operator cap already: ethers estimates gas with these fees, checked against the balance.
     const priced = await priceTransactionRequest(signer.provider, populated, this.feeFloor);
-    const filled = await signer.populateTransaction(priced.transaction);
+    const filled = await signer.populateTransaction(this.maxFeePerGasWei === undefined
+      ? priced.transaction
+      : applyTransactionFeeCap(priced.transaction, this.maxFeePerGasWei));
     if (this.maxFeePerGasWei === undefined) return filled;
     let baseFeePerGas = priced.baseFeePerGas;
     if (baseFeePerGas === undefined && filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
