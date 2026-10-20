@@ -15,7 +15,7 @@ import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './as
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { AuthorSigner, ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type { AuthorSigner, ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal, ReplacementBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import { fallbackAuthorResolver, type FallbackAuthor } from './fallback-author.js';
@@ -602,6 +602,13 @@ function formatGossipLimit(bytes: number): string {
  *
  * `didWriteAhead()` is how the call sites keep the surrounding `try/finally` contract: the
  * balancing `chain:writeahead:end` is emitted only if `:start` actually fired.
+ *
+ * `onBeforeReplacementBroadcast` is the adapter's stuck-transaction speed-up opt-in, offered only
+ * when no durable `onBeforeBroadcast` is attached. That record (the async publisher's) holds
+ * exactly one hash per transaction, and its recovery recognizes no other: a same-nonce replacement
+ * mined in place of that hash would leave the job holding its wallet with a publish it cannot
+ * see. Without it the result simply carries whichever hash was mined, and the replacement's
+ * identity travels as a `chain:txreplaced:tx-<hash>` breadcrumb, as the original's does.
  */
 function createWriteAheadHook(hooks: {
   onPhase?: PhaseCallback;
@@ -618,6 +625,7 @@ function createWriteAheadHook(hooks: {
 }): {
   emitWriteAheadStart: (signal: PreBroadcastSignal) => Promise<void>;
   didWriteAhead: () => boolean;
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void>;
 } {
   const { onPhase, onBeforeBroadcast, operationKind } = hooks;
   let wroteAhead = false;
@@ -643,6 +651,15 @@ function createWriteAheadHook(hooks: {
       // The DURABLE boundary is LAST, so nothing fallible runs between it and the send.
       await onBeforeBroadcast?.({ ...signal, operationKind });
     },
+    ...(onBeforeBroadcast === undefined
+      ? {
+        onBeforeReplacementBroadcast: async (signal: ReplacementBroadcastSignal) => {
+          const phase = `chain:txreplaced:tx-${signal.txHash}`;
+          await emitPhase(phase, 'start');
+          await emitPhase(phase, 'end');
+        },
+      }
+      : {}),
   };
 }
 
@@ -4027,6 +4044,9 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
             onBroadcastAccepted: (signal) =>
               onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
+            ...(writeAhead.onBeforeReplacementBroadcast
+              ? { onBeforeReplacementBroadcast: writeAhead.onBeforeReplacementBroadcast }
+              : {}),
           });
         } finally {
           if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
@@ -5526,6 +5546,9 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
             onBroadcastAccepted: (signal) =>
               onBroadcastAccepted?.({ ...signal, operationKind: 'update' }),
+            ...(writeAhead.onBeforeReplacementBroadcast
+              ? { onBeforeReplacementBroadcast: writeAhead.onBeforeReplacementBroadcast }
+              : {}),
           });
         } catch (v10Err) {
           const errorName = extractV10UpdateRejectionName(v10Err);

@@ -62,6 +62,7 @@ export default defineConfig({
       'test/async-lift-runner.test.ts',
       'test/async-lift-runner-wallet-wake.test.ts',
       'test/pre-broadcast-signal-await.test.ts',
+      'test/stuck-transaction-speed-up-opt-in.test.ts',
       'test/async-lift-admission-clear-2270.test.ts',
       'test/async-lift-store-rejection-2940.test.ts',
       'test/async-lift-store-rejection-recovery-2940.test.ts',
