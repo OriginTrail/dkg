@@ -57,7 +57,7 @@ export async function verifySourceProof(
   const signer = ethers.verifyMessage(sourceProofPayload(challenge, proof.identityId), proof.signature);
   // This checks the signing operational key AND active ShardingTable membership.
   // A wallet address copied into an unsigned phonebook profile proves neither.
-  const valid = await verify(signer, BigInt(proof.identityId));
+  const valid = await verify(signer, BigInt(proof.identityId), { signal });
   signal.throwIfAborted();
   return valid;
 }

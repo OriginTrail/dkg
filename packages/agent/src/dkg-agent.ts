@@ -1,6 +1,6 @@
 import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
-import { resolvePreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
+import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
 import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 
@@ -1222,9 +1222,10 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
-    resolvePreparedContentCacheConfig(inputConfig.preparedContentCache, inputConfig.dataDir, inputConfig.nodeRole);
+    const preparedContentCache = normalizeAgentPreparedCacheConfig(inputConfig);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
+      preparedContentCache,
       authorityIndex,
       syncContextGraphPriorities: resolveSyncContextGraphPriorities(
         inputConfig.syncContextGraphPriorities,

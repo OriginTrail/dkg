@@ -56,11 +56,8 @@ function decodeManifest(header: string, key: string | undefined, encodedBytes: n
 }
 
 export function resolvePreparedContentCacheConfig(
-  config: PreparedContentCacheConfig | undefined, dataDir?: string, nodeRole?: 'core' | 'edge',
+  config: PreparedContentCacheConfig | undefined, dataDir?: string,
 ) {
-  // Persistent cores retain verified public exports across restarts. Ephemeral
-  // SDK agents and edges keep their footprint unless explicitly configured.
-  if (config === undefined && nodeRole === 'core' && dataDir) config = { enabled: true };
   if (config === undefined) return undefined;
   if (!config || typeof config !== 'object' || typeof config.enabled !== 'boolean') {
     throw new TypeError('preparedContentCache.enabled must be boolean');

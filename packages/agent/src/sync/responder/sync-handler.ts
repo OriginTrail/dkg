@@ -109,7 +109,6 @@ interface RegisterSyncHandlerParams {
   store: TripleStore;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   preparedContentCache?: PreparedContentCacheConfig;
-  nodeRole?: 'core' | 'edge';
   dataDir?: string;
   peerId: string;
   parseSyncRequest: (data: Uint8Array) => SyncRequestEnvelope;
@@ -502,7 +501,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeA
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
     responderSnapshotBudget,
   );
-  const preparedOptions = resolvePreparedContentCacheConfig(params.preparedContentCache, params.dataDir, params.nodeRole);
+  const preparedOptions = resolvePreparedContentCacheConfig(params.preparedContentCache, params.dataDir);
   let cacheWarned = false;
   const preparedContentCache = preparedOptions ? createPreparedContentCache(preparedOptions, (error, operation) => {
     if (cacheWarned) return;

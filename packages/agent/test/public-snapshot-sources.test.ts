@@ -1,6 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 import { MockChainAdapter, sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { registerSnapshotSourceHandler } from '../src/public-snapshot-source-handler.js';
@@ -19,6 +24,7 @@ const challenge: SnapshotSourceChallenge = {
 };
 const encode = (v: unknown) => new TextEncoder().encode(JSON.stringify(v));
 const signal = () => new AbortController().signal;
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 async function fixture() {
   const wallet = ethers.Wallet.createRandom();
@@ -58,7 +64,7 @@ describe('registered Base mainnet snapshot sources', () => {
     expect(peers).toEqual(['core']);
     expect(Object.isFrozen(peers)).toBe(true);
     expect(calls.sort()).toEqual(['core', 'forged']);
-    expect(f.chain.verifyACKIdentity).toHaveBeenCalledWith(f.wallet.address, 7n);
+    expect(f.chain.verifyACKIdentity).toHaveBeenCalledWith(f.wallet.address, 7n, { signal: expect.any(AbortSignal) });
   });
 
   it('rejects replay across nonce, graph, caller, responder and deployment', async () => {
@@ -129,13 +135,120 @@ describe('registered Base mainnet snapshot sources', () => {
   });
 });
 
+it.each(['connect', 'send', 'verify'] as const)('cancels active %s probes before another batch starts', async stage => {
+  const f = await fixture(), parent = new AbortController();
+  const probes: AbortSignal[] = [];
+  const held = (probe: AbortSignal) => new Promise<void>((_resolve, reject) => {
+    probes.push(probe);
+    probe.addEventListener('abort', () => reject(probe.reason), { once: true });
+  });
+  const connect = vi.fn(async (_peer: string, probe: AbortSignal) => { if (stage === 'connect') await held(probe); });
+  const send = vi.fn(async (_peer: string, _protocol: string, bytes: Uint8Array, options?: { signal?: AbortSignal }) => {
+    if (stage === 'send') await held(options!.signal!);
+    return encode({ identityId: '7', signature: await f.wallet.signMessage(sourceProofPayload(decodeSourceChallenge(bytes), '7')) });
+  });
+  const verify = vi.fn(async (_address: string, _id: bigint, options?: { signal?: AbortSignal }) => {
+    if (stage === 'verify') await held(options!.signal!);
+    return true;
+  });
+  const job = selectSnapshotSources({ selfPeerId: 'requester', chain: { ...f.chain, verifyACKIdentity: verify },
+    candidates: async () => Array.from({ length: 12 }, (_, i) => `peer-${i}`), connect, send }, scope, parent.signal);
+  let settled = false;
+  const outcome = job.catch(error => error).finally(() => { settled = true; });
+  try {
+    await vi.waitFor(() => expect(probes).toHaveLength(4));
+    parent.abort(new Error('stop probes'));
+    await vi.waitFor(() => expect(settled).toBe(true));
+    expect(await outcome).toMatchObject({ message: 'stop probes' });
+    expect(connect).toHaveBeenCalledTimes(4);
+    expect(probes.every(probe => probe.aborted)).toBe(true);
+    expect(getEventListeners(parent.signal, 'abort')).toHaveLength(0);
+  } finally { parent.abort(); await outcome; }
+});
 
-it('runs automatic source selection through real agents and an authenticated loopback connection', async () => {
+it.each(['connect', 'send', 'verify'] as const)('enforces the ten-second %s probe deadline', async stage => {
+  const f = await fixture();
+  vi.useFakeTimers();
+  let probe!: AbortSignal;
+  const hold = async (signal: AbortSignal) => {
+    probe = signal;
+    await new Promise<void>((_resolve, reject) => probe.addEventListener('abort', () => reject(probe.reason), { once: true }));
+  };
+  const verify = vi.fn(async (_address: string, _id: bigint, options?: { signal?: AbortSignal }) => {
+    if (stage === 'verify') await hold(options!.signal!);
+    return true;
+  });
+  let settled = false;
+  const outcome = selectSnapshotSources({ selfPeerId: 'requester', chain: { ...f.chain, verifyACKIdentity: verify },
+    candidates: async () => ['core'], connect: async (_peer, signal) => { if (stage === 'connect') await hold(signal); },
+    send: async (_peer, _protocol, bytes, options) => {
+      if (stage === 'send') await hold(options!.signal!);
+      return f.handler(bytes, { toString: () => 'requester' });
+    },
+  }, scope, signal()).catch(error => error).finally(() => { settled = true; });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(probe).toBeInstanceOf(AbortSignal);
+  await vi.advanceTimersByTimeAsync(9_999);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(probe.aborted).toBe(true);
+  expect(await outcome).toMatchObject({ message: 'No registered Base mainnet core proved snapshot availability' });
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('retains the snapshot slot and physical ownership until all cancelled probes retire', async () => {
+  const f = await fixture(), parent = new AbortController(), lifetime = new AgentWorkLifetime();
+  const releases: Array<() => void> = [], probes: AbortSignal[] = [];
+  const peers = Array.from({ length: 8 }, (_, i) => `peer-${i}`);
+  const send = vi.fn(async (_peer, _protocol, _bytes, options) => {
+    probes.push(options.signal);
+    await new Promise<void>(resolve => { releases.push(resolve); });
+    throw new Error('transport retired');
+  });
+  const agent = { started: true, peerId: 'requester', workLifetime: lifetime, chain: f.chain,
+    subscribedContextGraphs: new Map(), contextGraphBindingState: { capture: () => 0, isGenerationCurrent: () => true },
+    node: { libp2p: { getConnections: () => peers.map(peer => ({ remotePeer: { toString: () => peer } })) } },
+    discovery: { findSnapshotCorePeerIds: async () => [] }, ensurePeerConnected: async () => {}, router: { send } };
+  const run = () => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(agent as never,
+    { ...scope, trustedCorePeerIds: [], sourcePolicy: BASE_MAINNET_SOURCE_POLICY, signal: parent.signal });
+  let settled = false, drained = false;
+  const outcome = run().catch(error => error).finally(() => { settled = true; });
+  try {
+    await vi.waitFor(() => expect(releases).toHaveLength(4));
+    parent.abort(new Error('cancel snapshot'));
+    const drain = lifetime.drain().then(() => { drained = true; });
+    for (const release of releases.slice(0, 3)) release();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(settled).toBe(false); expect(drained).toBe(false);
+    expect(lifetime.physicalRuns.size).toBe(1);
+    await expect(run()).rejects.toThrow('already running');
+    releases[3]!(); await outcome; await drain;
+    expect(lifetime.physicalRuns.size).toBe(0);
+    expect(send).toHaveBeenCalledTimes(4);
+    expect(probes.every(probe => probe.aborted)).toBe(true);
+    await expect(run()).rejects.toThrow('cancel snapshot');
+    expect(getEventListeners(parent.signal, 'abort')).toHaveLength(0);
+  } finally { parent.abort(); releases.forEach(release => release()); await outcome; await lifetime.drain(); }
+});
+
+it('commits a verified asset through an automatically selected loopback core and never fetches from a rejected core', async () => {
   const wallet = ethers.Wallet.createRandom();
   const chain = new MockChainAdapter('base:8453', wallet.address, { initialContextGraphId: 14n });
   Object.defineProperty(chain, 'deploymentId', { get: () => deploymentId });
   await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: ethers.id(scope.contextGraphId) });
   const signing = await fixture();
+  const kaId = (BigInt(wallet.address) << 96n) | 1n;
+  const ual = `did:dkg:base:8453/${wallet.address.toLowerCase()}/1`;
+  const assertionGraph = knowledgeAssetLayerGraphUri(scope.contextGraphId, MemoryLayer.VerifiableMemory,
+    createGraphKnowledgeAssetScope(ual, 1));
+  const data: Quad[] = [{ subject: 'urn:verified-asset', predicate: 'urn:value', object: '"selected core payload"', graph: assertionGraph }];
+  const root = computeFlatKCRootV10(data, []);
+  const metadata = generateGraphKnowledgeAssetMetadata({ contextGraphId: scope.contextGraphId, ual, assertionGraph,
+    merkleRoot: root, publisherPeerId: 'fixture', accessPolicy: 'public', timestamp: new Date(0),
+    assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0,
+  }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
+    batchId: kaId, materializedVersion: { blockNumber: 1, txIndex: 0 },
+  } } });
   Object.assign(chain, { getIdentityId: signing.chain.getIdentityId,
     signMessage: signing.chain.signMessage, verifyACKIdentity: signing.chain.verifyACKIdentity,
     readPublicGraphSnapshot: async () => sealPublicGraphSnapshot({
@@ -143,27 +256,36 @@ it('runs automatic source selection through real agents and an authenticated loo
       nameHash: ethers.id(scope.contextGraphId), contextGraphStorage: `0x${'2'.repeat(40)}`,
       assetStorage: `0x${'3'.repeat(40)}`, blockNumber: '1', blockHash: `0x${'4'.repeat(64)}`,
       finalityConfirmations: 1, observedAt: Date.now(), expiresAt: Date.now() + 120000,
-      accessPolicy: 0, assets: [],
+      accessPolicy: 0, assets: [{ id: kaId.toString(), root: ethers.hexlify(root), version: '1' }],
     }),
   });
   const agents: DKGAgent[] = [];
   try {
-    for (const nodeRole of ['core', 'edge'] as const) {
+    for (const nodeRole of ['core', 'edge', 'core'] as const) {
       const agent = await DKGAgent.create({ name: `SnapshotSource-${nodeRole}`, nodeRole,
         chainAdapter: chain, listenHost: '127.0.0.1', listenPort: 0,
         randomSamplingUseWorkerThread: false, syncOnConnectEnabled: false,
         syncReconcilerEnabled: false, vmReconcilerEnabled: false });
       agents.push(agent); await agent.start(); await agent.awaitInitialChainPoll();
     }
-    const [core, edge] = agents;
+    const [core, edge, rejected] = agents;
+    await core.store.insert([...data, ...metadata]);
     core.subscribeToContextGraph(scope.contextGraphId, { onChainId: scope.onChainId,
       syncMode: 'on-demand', trackSyncScope: false });
     await edge.connectTo(core.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    await edge.connectTo(rejected.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    const sends = vi.spyOn(edge.router, 'send');
+    const streams = vi.spyOn(edge.router, 'withDuplexStream');
     const result = await edge.syncPublicGraphSnapshot({ ...scope, trustedCorePeerIds: [],
       sourcePolicy: BASE_MAINNET_SOURCE_POLICY });
     expect(result).toMatchObject({ sourcePolicy: BASE_MAINNET_SOURCE_POLICY,
       selectedCorePeerIds: [core.peerId], sourceCore: core.peerId, coverageSourceCore: core.peerId,
-      completeAsOfSnapshot: true, current: true, assets: 0, committed: 0 });
-    expect(signing.chain.verifyACKIdentity).toHaveBeenCalledWith(signing.wallet.address, 7n);
+      completeAsOfSnapshot: true, current: true, assets: 1, committed: 1 });
+    expect(await edge.store.query(`SELECT ?value WHERE { GRAPH <${assertionGraph}> { <urn:verified-asset> <urn:value> ?value } }`))
+      .toMatchObject({ type: 'bindings', bindings: [{ value: '"selected core payload"' }] });
+    expect(sends.mock.calls.filter(([peer]) => peer === rejected.peerId).map(([, protocol]) => protocol))
+      .toEqual([PUBLIC_SNAPSHOT_SOURCE_PROTOCOL]);
+    expect(streams.mock.calls.some(([peer]) => peer === rejected.peerId)).toBe(false);
+    expect(signing.chain.verifyACKIdentity).toHaveBeenCalledWith(signing.wallet.address, 7n, { signal: expect.any(AbortSignal) });
   } finally { for (const agent of agents.reverse()) await agent.stop(); }
 });

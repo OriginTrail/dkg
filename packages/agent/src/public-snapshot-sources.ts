@@ -2,7 +2,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { startRequestAbortLifecycle, type ProtocolRouter } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { mapWithConcurrency } from './map-with-concurrency.js';
+import { mapWithConcurrencyDrained } from './map-with-concurrency.js';
 import {
   PUBLIC_SNAPSHOT_SOURCE_PROTOCOL, PUBLIC_SNAPSHOT_SOURCE_MAX_BYTES,
   verifySourceProof, type SnapshotSourceChallenge,
@@ -37,10 +37,13 @@ export async function selectSnapshotSources(
   const selected: string[] = [];
   for (let offset = 0; offset < candidates.length && selected.length < 4; offset += 4) {
     signal.throwIfAborted();
-    const proven = await mapWithConcurrency(candidates.slice(offset, offset + 4), 4, async ({ peer }) => {
+    // Keep every admitted probe in the job's physical lifetime, including a
+    // dependency still retiring after a sibling observes cancellation.
+    const proven = await mapWithConcurrencyDrained(candidates.slice(offset, offset + 4), 4, async ({ peer }) => {
       const lifetime = startRequestAbortLifecycle(10_000, [signal]);
       try {
         await ports.connect(peer, lifetime.signal);
+        lifetime.signal.throwIfAborted();
         const challenge: SnapshotSourceChallenge = {
           version: 1, nonce, requesterPeerId: ports.selfPeerId, responderPeerId: peer,
           chainId: ports.chain.chainId, deploymentId: ports.chain.deploymentId!, ...scope,

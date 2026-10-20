@@ -11,7 +11,8 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
-import type { VerifyACKIdentityResult } from './chain-adapter.js';
+import type { ChainReadOptions, VerifyACKIdentityResult } from './chain-adapter.js';
+import { activeRpcRequestAbortSignal, withRpcRequestContext } from './rpc-request-transport.js';
 import { OPERATIONAL_KEY_PURPOSE } from './evm-adapter-constants.js';
 import { localPrivateKeyOf } from './evm-signer.js';
 
@@ -80,39 +81,49 @@ export class AckSignMethods extends EVMChainAdapterBase {
   async verifyACKIdentityDetailed(
     recoveredAddress: string,
     claimedIdentityId: bigint,
+    options: ChainReadOptions = {},
   ): Promise<VerifyACKIdentityResult> {
-    try {
-      await this.init();
-      const identityStorage = await this.resolveContract('IdentityStorage');
-      if (!identityStorage) return { valid: false, reason: 'rpc-error' };
+    return withRpcRequestContext({ signal: options.signal }, async () => {
+      try {
+        activeRpcRequestAbortSignal()?.throwIfAborted();
+        await this.init();
+        activeRpcRequestAbortSignal()?.throwIfAborted();
+        const identityStorage = await this.resolveContract('IdentityStorage');
+        activeRpcRequestAbortSignal()?.throwIfAborted();
+        if (!identityStorage) return { valid: false, reason: 'rpc-error' };
 
-      const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
-      const hasPurpose: boolean = await this.readContract(
-        identityStorage, 'identityStorage.keyHasPurpose',
-        'keyHasPurpose', claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE,
-      );
-      if (!hasPurpose) return { valid: false, reason: 'key-not-registered' };
+        const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
+        const hasPurpose: boolean = await this.readContract(
+          identityStorage, 'identityStorage.keyHasPurpose',
+          'keyHasPurpose', claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE,
+        );
+        activeRpcRequestAbortSignal()?.throwIfAborted();
+        if (!hasPurpose) return { valid: false, reason: 'key-not-registered' };
 
-      const shardingTableStorage = await this.resolveContract('ShardingTableStorage');
-      if (!shardingTableStorage) return { valid: false, reason: 'rpc-error' };
-      const inST: boolean = Boolean(await this.readContract(
-        shardingTableStorage, 'shardingTableStorage.nodeExists',
-        'nodeExists', claimedIdentityId,
-      ));
-      if (!inST) return { valid: false, reason: 'not-in-sharding-table' };
-      return { valid: true };
-    } catch {
-      // Any chain-side throw (filter expired, RPC rate-limit, contract
-      // resolution failure mid-call) is reported as `rpc-error` so the
-      // ACKCollector can log it distinctly from a definitive negative.
-      // Mirrors the existing wrapper in `dkg-agent.ts:createV10ACKProvider`
-      // which used to swallow these exceptions as `false`, conflating
-      // transient infra failures with permanent rejections.
-      return { valid: false, reason: 'rpc-error' };
-    }
+        const shardingTableStorage = await this.resolveContract('ShardingTableStorage');
+        activeRpcRequestAbortSignal()?.throwIfAborted();
+        if (!shardingTableStorage) return { valid: false, reason: 'rpc-error' };
+        const inST: boolean = Boolean(await this.readContract(
+          shardingTableStorage, 'shardingTableStorage.nodeExists',
+          'nodeExists', claimedIdentityId,
+        ));
+        activeRpcRequestAbortSignal()?.throwIfAborted();
+        if (!inST) return { valid: false, reason: 'not-in-sharding-table' };
+        return { valid: true };
+      } catch {
+        activeRpcRequestAbortSignal()?.throwIfAborted();
+        // Any chain-side throw (filter expired, RPC rate-limit, contract
+        // resolution failure mid-call) is reported as `rpc-error` so the
+        // ACKCollector can log it distinctly from a definitive negative.
+        // Mirrors the existing wrapper in `dkg-agent.ts:createV10ACKProvider`
+        // which used to swallow these exceptions as `false`, conflating
+        // transient infra failures with permanent rejections.
+        return { valid: false, reason: 'rpc-error' };
+      }
+    });
   }
 
-  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint, options: ChainReadOptions = {}): Promise<boolean> {
     // PR #711 + rc.12: delegate to the structured variant so the off-chain
     // gate stays in lockstep with the on-chain `KnowledgeAssetsLifecycle` ACK-
     // signer check (operational-key purpose AND sharding-table membership).
@@ -122,7 +133,7 @@ export class AckSignMethods extends EVMChainAdapterBase {
     // `StakingV10` whenever a node crosses `minimumStake`. PR #732's
     // lazy-cache perf optimization is unaffected — the other call sites
     // in this file pick up `getIdentityStorage()` via the auto-merge.
-    return (await this.verifyACKIdentityDetailed(recoveredAddress, claimedIdentityId)).valid;
+    return (await this.verifyACKIdentityDetailed(recoveredAddress, claimedIdentityId, options)).valid;
   }
 
   async verifySyncIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {

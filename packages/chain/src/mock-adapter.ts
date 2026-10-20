@@ -1,4 +1,5 @@
 import { normalizeContextGraphNameHashBatch } from './context-graph-name-hash-resolver.js';
+import { verifyMockACKIdentity } from './mock-ack-identity.js';
 import type {
   ChainAdapter,
   IdentityProof,
@@ -1483,8 +1484,8 @@ export class MockChainAdapter implements ChainAdapter {
     return identityId > 0n;
   }
 
-  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
-    return (await this.verifyACKIdentityDetailed(recoveredAddress, claimedIdentityId)).valid;
+  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint, options: ChainReadOptions = {}): Promise<boolean> {
+    return (await this.verifyACKIdentityDetailed(recoveredAddress, claimedIdentityId, options)).valid;
   }
 
   /**
@@ -1497,14 +1498,9 @@ export class MockChainAdapter implements ChainAdapter {
   async verifyACKIdentityDetailed(
     recoveredAddress: string,
     claimedIdentityId: bigint,
+    options: ChainReadOptions = {},
   ): Promise<VerifyACKIdentityResult> {
-    const normalizedAddress = recoveredAddress.toLowerCase();
-    for (const [addr, id] of this.identities) {
-      if (id === claimedIdentityId && addr.toLowerCase() === normalizedAddress) {
-        return { valid: true };
-      }
-    }
-    return { valid: false, reason: 'key-not-registered' };
+    return verifyMockACKIdentity(this.identities, recoveredAddress, claimedIdentityId, options);
   }
 
   async isOperationalWalletRegistered(identityId: bigint, address: string): Promise<boolean> {

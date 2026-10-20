@@ -2092,7 +2092,7 @@ export interface ChainAdapter {
   isShardingTableMember?(identityId: bigint): Promise<boolean>;
 
   /** Verify that a recovered signer address is a registered operational key for the given identity. */
-  verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
+  verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint, options?: ChainReadOptions): Promise<boolean>;
 
   /**
    * Same gate as `verifyACKIdentity`, but returns the FAILING gate so callers
@@ -2108,6 +2108,7 @@ export interface ChainAdapter {
   verifyACKIdentityDetailed?(
     recoveredAddress: string,
     claimedIdentityId: bigint,
+    options?: ChainReadOptions,
   ): Promise<VerifyACKIdentityResult>;
 
   /** Idempotently register local operational wallets for an existing identity. */

@@ -2,13 +2,16 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { resolvePreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
+import { DKGAgent } from '../src/dkg-agent.js';
+import type { PreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
 import { registerSyncHandler, type ExperimentalExactBatchResponderResources } from '../src/sync/responder/sync-handler.js';
 import { resolveExactBatchStreamEnabled } from '../src/sync/sync-switches.js';
 import { exactAssetExportFixture } from './fixtures/exact-asset-export.js';
 
 const directories: string[] = [];
+const agents: DKGAgent[] = [];
 afterEach(async () => {
+  for (const agent of agents.splice(0)) await agent.stop();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
@@ -26,28 +29,39 @@ it('enables the compatible stream by default while preserving both explicit off 
   expect(resolveExactBatchStreamEnabled()).toBe(false);
 });
 
-it('enables durable copies only for persistent cores and preserves operator overrides', () => {
-  const dataDir = join(tmpdir(), 'default-core');
-  expect(resolvePreparedContentCacheConfig(undefined, dataDir, 'core')).toMatchObject({
-    directory: join(dataDir, 'prepared-content-v1'), maxBytes: 1024 ** 3, maxEntries: 8192, ttlMs: 21_600_000,
+it.each([
+  { nodeRole: 'core' as const, persistent: true, enabled: true },
+  { nodeRole: 'edge' as const, persistent: true, enabled: false },
+  { nodeRole: 'core' as const, persistent: false, enabled: false },
+  { nodeRole: undefined, persistent: true, enabled: false },
+  { nodeRole: 'core' as const, persistent: true, enabled: false, override: { enabled: false } },
+  { nodeRole: 'edge' as const, persistent: true, enabled: true, override: { enabled: true, maxBytes: 4096 } },
+])('normalizes cache defaults at agent creation: %j', async ({ nodeRole, persistent, enabled, override }) => {
+  const dataDir = persistent ? await mkdtemp(join(tmpdir(), 'default-core-')) : undefined;
+  if (dataDir) directories.push(dataDir);
+  const agent = await DKGAgent.create({ name: 'CacheDefaults', nodeRole, dataDir,
+    preparedContentCache: override as PreparedContentCacheConfig | undefined });
+  agents.push(agent);
+  expect(agent.config.preparedContentCache).toMatchObject({ enabled });
+  if (enabled) expect(agent.config.preparedContentCache).toMatchObject({
+    directory: join(dataDir!, 'prepared-content-v1'), maxBytes: 1024 ** 3, maxEntries: 8192, ttlMs: 21_600_000,
+    ...override,
   });
-  expect(resolvePreparedContentCacheConfig(undefined, dataDir, 'edge')).toBeUndefined();
-  expect(resolvePreparedContentCacheConfig(undefined, undefined, 'core')).toBeUndefined();
-  expect(resolvePreparedContentCacheConfig({ enabled: false }, dataDir, 'core')).toBeUndefined();
-  expect(resolvePreparedContentCacheConfig({ enabled: true, maxBytes: 4096 }, dataDir, 'core'))
-    .toMatchObject({ maxBytes: 4096 });
 });
 
 it('reuses default core exports after restart and still rejects a changed public policy', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'core-default-cache-'));
   directories.push(directory);
+  const agent = await DKGAgent.create({ name: 'PersistentCoreCache', nodeRole: 'core', dataDir: directory });
+  agents.push(agent);
   const f = exactAssetExportFixture(4);
   const start = () => {
     let resources!: ExperimentalExactBatchResponderResources;
     const owner = registerSyncHandler({
       register: () => {}, protocolSync: '/test/default-cache', syncDeniedResponse: 'denied',
       syncPageSize: 8192, sharedMemoryTtlMs: 0, store: f.store, peerId: 'core',
-      dataDir: directory, nodeRole: 'core', parseSyncRequest: bytes => JSON.parse(new TextDecoder().decode(bytes)),
+      preparedContentCache: agent.config.preparedContentCache,
+      dataDir: directory, parseSyncRequest: bytes => JSON.parse(new TextDecoder().decode(bytes)),
       authorizeSyncRequest: async () => true, logWarn: () => {}, logDebug: () => {},
       onExperimentalExactBatchResources: value => { resources = value; },
     });
