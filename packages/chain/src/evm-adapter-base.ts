@@ -38,6 +38,7 @@ import type {
   OnChainPublishResult,
   OperationalSigning,
   PreBroadcastSignal,
+  ReplacementBroadcastSignal,
   SignedTransactionEnvelope,
   BrowserWalletRpcMethod,
 } from './chain-adapter.js';
@@ -134,6 +135,16 @@ import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, D
 } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
+import {
+  chainFeeFloor,
+  priceEip1559Fees,
+  priceTransactionRequest,
+  readSuggestedPriorityFee,
+  signedEip1559Fees,
+  type ChainFeeFloor,
+} from './evm-fee-policy.js';
+import { numericChainIdOf } from './configured-chain-id.js';
+import { StuckTransactionRecovery, stuckTransactionCheckIntervalMs } from './stuck-transaction-recovery.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
 import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
 import {
@@ -681,6 +692,9 @@ export class EVMChainAdapterBase {
   protected readonly receiptFinality: EvmReceiptFinalityReader;
 
   protected readonly maxFeePerGasWei?: bigint;
+
+  /** The configured chain's fee floor (see evm-fee-policy.ts), if it has one. */
+  protected readonly feeFloor?: ChainFeeFloor;
 
   protected readonly configuredStaticChainId?: bigint;
 
@@ -1573,6 +1587,7 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
+    this.feeFloor = chainFeeFloor(numericChainIdOf(this.chainId));
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
@@ -1912,12 +1927,25 @@ export class EVMChainAdapterBase {
     return contract.connect(runner) as Contract;
   }
 
+  /**
+   * Wait for a broadcast transaction's receipt. With a `recovery`, the wait
+   * also polls the transaction's same-nonce replacements and lets the recovery
+   * speed it up while it is stuck (see stuck-transaction-recovery.ts); the
+   * timeout then names the most recent hash and every one it replaced.
+   */
   protected async waitForReceiptWithFailover(
     txHash: string,
     label: string,
+    recovery?: StuckTransactionRecovery,
   ): Promise<ethers.TransactionReceipt> {
     return waitForReceiptWithDeadline({
       txHash,
+      ...(recovery
+        ? {
+          txHashes: () => recovery.txHashes(),
+          onPending: (context: { deadlineMs: number; deadlineReached: boolean }) => recovery.onPending(context),
+        }
+        : {}),
       receiptTimeoutMs: this.receiptTimeoutMs,
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
@@ -1925,9 +1953,61 @@ export class EVMChainAdapterBase {
         await this.receiptFinality.read(receipt, { deadlineMs })
       ) !== null,
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
-      formatTimeoutMessage: ({ lastError }) =>
-        `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
+      formatTimeoutMessage: ({ txHash: waitedTxHash, lastError }) =>
+        `${label} tx ${waitedTxHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
+        (recovery?.describeTimeout() ?? '') +
         (lastError ? ` (last RPC error: ${hostOnlyRpcText(errorMessage(lastError))})` : ''),
+    });
+  }
+
+  /**
+   * Speed-up state for one broadcast transaction (stuck-transaction-recovery.ts),
+   * or undefined when it cannot be re-priced: its nonce was not read at
+   * signing, or it is not an EIP-1559 transaction.
+   */
+  protected createStuckTransactionRecovery(params: {
+    signer: EvmSigner;
+    signedTx: string;
+    txHash: string;
+    nonce: number | undefined;
+    label: string;
+    beforeBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
+    onReplaced?: () => void;
+  }): StuckTransactionRecovery | undefined {
+    if (params.nonce === undefined) return undefined;
+    const fees = signedEip1559Fees(params.signedTx);
+    if (!fees) return undefined;
+    const { signer, label } = params;
+    return new StuckTransactionRecovery({
+      original: { txHash: params.txHash, signedTx: params.signedTx, fees },
+      nonce: params.nonce,
+      label,
+      receiptTimeoutMs: this.receiptTimeoutMs,
+      checkIntervalMs: stuckTransactionCheckIntervalMs(this.receiptTimeoutMs),
+      maxFeePerGasCap: this.maxFeePerGasWei,
+      port: {
+        // One endpoint answers both, so the nonce and base fee describe one head.
+        readChainHead: () => this.readTipProvider('stuck transaction check', async (provider) => {
+          const [latestNonce, block] = await Promise.all([
+            provider.getTransactionCount(signer.address, 'latest'),
+            provider.getBlock('latest'),
+          ]);
+          return { latestNonce, baseFeePerGas: block?.baseFeePerGas ?? null };
+        }),
+        priceFees: (baseFeePerGas) => this.readProvider('replacement fee pricing', async (provider) =>
+          priceEip1559Fees({
+            baseFeePerGas,
+            suggestedPriorityFeePerGas: await readSuggestedPriorityFee(provider),
+            floor: this.feeFloor,
+          })),
+        sign: async (request) => {
+          const { signedTx, parsed } = await signTransactionOnce(signer, request);
+          return { signedTx, txHash: parsed.hash ?? '0x' };
+        },
+        ...(params.beforeBroadcast ? { beforeBroadcast: params.beforeBroadcast } : {}),
+        broadcast: (signedTx, txHash) => this.broadcastSignedTransactionWithRetries(signedTx, txHash, label),
+        ...(params.onReplaced ? { onReplaced: params.onReplaced } : {}),
+      },
     });
   }
 
@@ -1958,10 +2038,12 @@ export class EVMChainAdapterBase {
     signer: EvmSigner,
     populated: ethers.TransactionRequest,
   ): Promise<ethers.TransactionRequest> {
-    const filled = await signer.populateTransaction(populated);
+    // Headroom over the latest base fee and the chain's floor (evm-fee-policy.ts).
+    const priced = await priceTransactionRequest(signer.provider, populated, this.feeFloor);
+    const filled = await signer.populateTransaction(priced.transaction);
     if (this.maxFeePerGasWei === undefined) return filled;
-    let baseFeePerGas: bigint | null | undefined;
-    if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
+    let baseFeePerGas = priced.baseFeePerGas;
+    if (baseFeePerGas === undefined && filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
       baseFeePerGas = (await signer.provider?.getBlock('latest'))?.baseFeePerGas;
     }
     return applyTransactionFeeCap(filled, this.maxFeePerGasWei, baseFeePerGas);
@@ -2015,6 +2097,12 @@ export class EVMChainAdapterBase {
     signedTx: string,
     txHash: string,
     label: string,
+    /**
+     * Lets the receipt wait speed the transaction up while it is stuck: the
+     * wallet that signed it, the nonce read at signing, and the lane-progress
+     * callback a replacement refreshes. Without it the wait never replaces.
+     */
+    speedUp?: { signer: EvmSigner; nonce: number | undefined; markProgress?: () => void },
   ): Promise<ethers.TransactionReceipt> {
     // Bounded set-retry, BROADCAST phase ONLY: after a full per-endpoint
     // broadcast pass exhausts with a retryable error (a brief all-endpoints-429),
@@ -2024,9 +2112,18 @@ export class EVMChainAdapterBase {
     // idempotent (`isKnownTransactionError`), and the WAL `onBroadcast` already
     // fired once upstream. The receipt wait is NOT re-broadcast (it owns its own
     // poll + deadline), so lock-hold (held across the retries for the V10 path)
-    // stays bounded.
+    // stays bounded. A stuck transaction's same-nonce replacement is the
+    // receipt wait's own, bounded step (stuck-transaction-recovery.ts).
     await this.broadcastSignedTransactionWithRetries(signedTx, txHash, label);
-    return this.waitForReceiptWithFailover(txHash, label).catch(explainOutOfGasRevert(signedTx));
+    const recovery = speedUp && this.createStuckTransactionRecovery({
+      signer: speedUp.signer,
+      signedTx,
+      txHash,
+      nonce: speedUp.nonce,
+      label,
+      ...(speedUp.markProgress ? { onReplaced: speedUp.markProgress } : {}),
+    });
+    return this.waitForReceiptWithFailover(txHash, label, recovery).catch(explainOutOfGasRevert(signedTx));
   }
 
   /** Broadcast one immutable signed transaction with bounded endpoint-set retries. */
@@ -2075,6 +2172,12 @@ export class EVMChainAdapterBase {
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<SignedTransactionEnvelope>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
     onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void,
+    /**
+     * The caller's opt-in to stuck-transaction speed-up, awaited before each
+     * replacement is broadcast (see `V10PublishParams.onBeforeReplacementBroadcast`).
+     * Absent, the receipt wait never replaces.
+     */
+    onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void,
   ): Promise<ethers.TransactionReceipt> {
     const prepared = await this.withSerializedSignerWrite(signer, async (ctx) => {
       const { signedTx, txHash: preBroadcastTxHash, nonce } = await buildSignedTx(ctx);
@@ -2122,12 +2225,24 @@ export class EVMChainAdapterBase {
           `tx=${preBroadcastTxHash}: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
         );
       }
-      return { preBroadcastTxHash };
+      return { preBroadcastTxHash, signedTx, nonce };
     }, label);
 
+    // A replacement keeps the nonce, so the speed-up runs outside the lane:
+    // every later same-wallet write already holds a higher nonce. Replacements
+    // never reach `onBroadcast` (its latch fires once) or `onBroadcastAccepted`.
+    const recovery = onBeforeReplacementBroadcast && this.createStuckTransactionRecovery({
+      signer,
+      signedTx: prepared.signedTx,
+      txHash: prepared.preBroadcastTxHash,
+      nonce: prepared.nonce,
+      label: `V10 ${label}`,
+      beforeBroadcast: onBeforeReplacementBroadcast,
+    });
     const receipt = await this.waitForReceiptWithFailover(
       prepared.preBroadcastTxHash,
       `V10 ${label}`,
+      recovery,
     );
     if (!receipt) onNullReceipt(prepared.preBroadcastTxHash);
     return receipt;
@@ -2204,6 +2319,7 @@ export class EVMChainAdapterBase {
             innerSigner,
             label,
             opts,
+            markProgress,
           );
           markProgress();
           return receipt;
@@ -2230,6 +2346,9 @@ export class EVMChainAdapterBase {
     // (stake settle at `block.timestamp`) are such cases. When set, we estimate
     // once and add the headroom `bufferedGasLimit` computes from these options.
     opts?: GasLimitBufferOptions,
+    // The holding lane's progress callback: a stuck-transaction replacement
+    // during the receipt wait is write-stage progress.
+    markProgress?: () => void,
   ): Promise<ethers.TransactionReceipt> {
     // Parent span for the whole send. Broadcast + receipt-wait open their own
     // nested spans/metrics (chain.tx_submit / chain.tx_wait) inside
@@ -2251,7 +2370,13 @@ export class EVMChainAdapterBase {
         }
         const { signedTx, txHash } = signed;
         span.setAttribute('dkg.tx_hash', txHash);
-        return this.sendSignedTransactionAndWait(signedTx, txHash, label);
+        // No caller of a standalone write keeps its hash before the receipt
+        // returns, so any of its same-nonce replacements may be the one mined.
+        return this.sendSignedTransactionAndWait(signedTx, txHash, label, {
+          signer,
+          nonce: signed.nonce,
+          ...(markProgress ? { markProgress } : {}),
+        });
       },
       { attributes: { 'rpc.method': 'eth_sendRawTransaction', 'dkg.chain_id': this.chainId } },
     );
@@ -4230,6 +4355,7 @@ export class EVMChainAdapterBase {
         throw new Error('Transaction receipt is null');
       },
       params.onBroadcastAccepted,
+      params.onBeforeReplacementBroadcast,
     ).catch(async (err: unknown) => {
       // Turn an insufficient-funds failure (native gas OR a zero-TRAC
       // transferFrom revert) on the selected wallet into an actionable

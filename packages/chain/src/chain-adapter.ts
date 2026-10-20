@@ -1103,6 +1103,23 @@ export interface V10PublishParams {
    * undo an accepted transaction and therefore must not fail the chain write.
    */
   onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /**
+   * Opts this write into stuck-transaction speed-up. While its receipt wait
+   * runs, a publish tx that holds the wallet's next nonce and is priced below
+   * the base fee, or is still unmined at the receipt deadline, is re-signed at
+   * the same nonce with higher fees and broadcast again; the call then resolves
+   * with the receipt of whichever hash is mined, so `txHash` may differ from
+   * the one {@link onBroadcast} saw.
+   *
+   * Invoked before each replacement is broadcast, never for the original
+   * (that is {@link onBroadcast}'s). **Fail-closed**: if it throws, that
+   * replacement is not sent. Omitted, the adapter never replaces this write:
+   * a caller whose durable record holds exactly one hash per transaction must
+   * omit it, since a replacement mined in place of that hash would be one it
+   * cannot recognize. Neither this hook nor a failed replacement ever turns
+   * into the call's error.
+   */
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
 
 export interface V10UpdateKAParams {
@@ -1156,6 +1173,8 @@ export interface V10UpdateKAParams {
   onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
   /** Post-send counterpart to {@link onBroadcast}; see V10PublishParams. */
   onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /** Stuck-transaction speed-up opt-in; see {@link V10PublishParams.onBeforeReplacementBroadcast}. */
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
 
 /**
@@ -1362,6 +1381,17 @@ export interface PreBroadcastSignal {
    * recovery treats that as "no proof of absence available" rather than guessing.
    */
   readonly nonce?: number;
+}
+
+/**
+ * A same-nonce replacement of a stuck transaction, signed and about to be sent: the same
+ * calldata at higher fees. At most one of `replacesTxHashes` and `txHash` can ever be mined,
+ * and whichever is mined carries the operation.
+ */
+export interface ReplacementBroadcastSignal extends PreBroadcastSignal {
+  readonly nonce: number;
+  /** Every earlier hash of this transaction, oldest (the original) first. */
+  readonly replacesTxHashes: readonly string[];
 }
 
 export interface ChainReadOptions {
