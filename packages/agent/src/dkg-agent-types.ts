@@ -1617,7 +1617,7 @@ export interface DKGAgentConfig {
   syncAdmission?: SyncAdmissionConfig;
   /** Daemon-local retained responder snapshot row/estimated-byte policy. */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
-  /** Opt-in persistent verified public assertion bytes, never cached authority. */
+  /** Persistent verified public assertion bytes. Default on for cores with dataDir; never cached authority. */
   preparedContentCache?: PreparedContentCacheConfig;
   /**
    * Local requester/responder priority by Context Graph ID. Higher runs first.

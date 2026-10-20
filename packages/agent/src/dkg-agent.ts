@@ -1222,7 +1222,7 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
-    resolvePreparedContentCacheConfig(inputConfig.preparedContentCache, inputConfig.dataDir);
+    resolvePreparedContentCacheConfig(inputConfig.preparedContentCache, inputConfig.dataDir, inputConfig.nodeRole);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
       authorityIndex,

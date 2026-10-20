@@ -22,7 +22,7 @@ A marked graph stays marked across partial imports, process restarts and subsequ
 
 ## Use
 
-Deploy this capability on the selected cores and receiver. Core streaming must already be enabled (`DKG_EXACT_BATCH_STREAM_ENABLED=1`) and the source core must subscribe to the graph. A fresh receiver installs an on-demand subscription only after accepting a valid public snapshot; this does not schedule the separate legacy catch-up endpoint. This change does not enable flags or alter services remotely.
+Deploy this capability on the selected cores and receiver. Capable nodes negotiate exact-batch streaming by default; an explicit `DKG_EXACT_BATCH_STREAM_ENABLED=0` disables it. The source core must subscribe to the graph. A fresh receiver installs an on-demand subscription only after accepting a valid public snapshot; this does not schedule the separate legacy catch-up endpoint. This change does not alter services remotely.
 
 The administrator-only daemon endpoint starts one owned job per node:
 
