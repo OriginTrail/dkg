@@ -39,11 +39,11 @@ export function translateNetworkAdmissionErrorAtProtocolBoundary(
 
 /** Build the admission callback installed into ProtocolRouter by lifecycle. */
 export function createNetworkAdmissionProtocolCheck(
-  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted'> & Partial<Pick<NetworkAdmissionCoordinator, 'ensureCacheAdmitted'>>,
+  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted' | 'ensureCacheAdmitted'>,
 ): NonNullable<ProtocolRouterOptions['isPeerAccepted']> {
   return async (peerId, protocolId, direction, options) => {
     try {
-      const admit = isCoreChainCacheProtocol(protocolId) && coordinator.ensureCacheAdmitted
+      const admit = isCoreChainCacheProtocol(protocolId)
         ? coordinator.ensureCacheAdmitted.bind(coordinator) : coordinator.ensureAdmitted.bind(coordinator);
       return await admit(
         peerId,
@@ -69,7 +69,7 @@ export function createNetworkAdmissionProtocolCheck(
  * I/O order the way a probing check there would.
  */
 export function createNetworkAdmissionRouterPolicy(
-  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted' | 'isRejectedPeer'> & Partial<Pick<NetworkAdmissionCoordinator, 'ensureCacheAdmitted'>>,
+  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted' | 'ensureCacheAdmitted' | 'isRejectedPeer'>,
 ): NetworkAdmissionRouterPolicy {
   return {
     isPeerAccepted: createNetworkAdmissionProtocolCheck(coordinator),
