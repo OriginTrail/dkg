@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AckSignMethods } from '../src/evm-adapter-ack-sign.js';
+import { MockChainAdapter } from '../src/mock-adapter.js';
 import { activeRpcRequestAbortSignal, withRpcRequestContext } from '../src/rpc-request-transport.js';
 
 const address = `0x${'1'.repeat(40)}`;
@@ -34,6 +35,21 @@ function fixture(hold?: string, answers = [true, true]) {
 }
 
 describe('cancellable ACK identity verification', () => {
+  it('keeps mock registration decisions and cancellation consistent through both public APIs', async () => {
+    const signer = `0x${'ab'.repeat(20)}`;
+    const adapter = new MockChainAdapter('mock:31337', signer);
+    expect(await adapter.verifyACKIdentity(signer, 1n)).toBe(false);
+    const identity = await adapter.ensureProfile();
+    expect(await adapter.verifyACKIdentity(signer.toUpperCase(), identity)).toBe(true);
+    expect(await adapter.verifyACKIdentityDetailed(signer, identity)).toEqual({ valid: true });
+    expect(await adapter.verifyACKIdentity(signer, identity + 1n)).toBe(false);
+    expect(await adapter.verifyACKIdentityDetailed(address, identity))
+      .toEqual({ valid: false, reason: 'key-not-registered' });
+    const reason = new Error('mock proof cancelled'), signal = AbortSignal.abort(reason);
+    await expect(adapter.verifyACKIdentity(signer, identity, { signal })).rejects.toBe(reason);
+    await expect(adapter.verifyACKIdentityDetailed(signer, identity, { signal })).rejects.toBe(reason);
+  });
+
   it.each(['init', 'IdentityStorage', 'keyHasPurpose', 'ShardingTableStorage', 'nodeExists'])(
     'cancels a stalled %s read without starting later reads', async stage => {
       const f = fixture(stage), abort = new AbortController();
