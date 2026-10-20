@@ -4,6 +4,7 @@ import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { PublicSnapshotAdmission } from './public-snapshot-admission.js';
+import type { SnapshotProofCodec, UnsignedSnapshotProof } from './public-snapshot-proof-wire.js';
 
 /** Shared physical request ownership for both proof protocols on one node. */
 export class PublicSnapshotProofRuntime {
@@ -13,10 +14,11 @@ export class PublicSnapshotProofRuntime {
     private readonly workLifetime: AgentWorkLifetime,
   ) {}
 
-  async respond(peer: string, authorize: (signal: AbortSignal) => {
+  async respond<Proof extends UnsignedSnapshotProof>(peer: string, authorize: (signal: AbortSignal) => {
     assertCurrent(): void;
     validate(): Promise<void>;
-    proof(identityId: string): { fields: Record<string, string>; payload: Uint8Array };
+    proof(identityId: string): Proof;
+    codec: SnapshotProofCodec<Proof>;
   }): Promise<Uint8Array> {
     const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
     const lifetime = startRequestAbortLifecycle(10_000, [this.workLifetime.signal]);
@@ -33,11 +35,11 @@ export class PublicSnapshotProofRuntime {
         const identityId = (await this.chain.getIdentityId({ signal: lifetime.signal, ownership: 'independent' })).toString();
         assertCurrent();
         const proof = request.proof(identityId);
-        const signature = await this.chain.signMessage!(proof.payload, { signal: lifetime.signal });
+        const signature = await this.chain.signMessage!(request.codec.payload(proof), { signal: lifetime.signal });
         assertCurrent();
-        return encode({ ...proof.fields, signature: ethers.Signature.from({
+        return request.codec.encode(proof, ethers.Signature.from({
           r: ethers.hexlify(signature.r), yParityAndS: ethers.hexlify(signature.vs),
-        }).serialized });
+        }).serialized);
       })();
       this.workLifetime.track(operation);
       return await operation;

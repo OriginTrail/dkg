@@ -6,7 +6,8 @@ export const PUBLIC_SNAPSHOT_SOURCE_PROTOCOL = '/dkg/10.0.0/public-snapshot-sour
 export { SNAPSHOT_PROOF_MAX_BYTES as PUBLIC_SNAPSHOT_SOURCE_MAX_BYTES } from './public-snapshot-proof-wire.js';
 export const BASE_MAINNET_SOURCE_POLICY = 'base-mainnet-registered-cores' as const;
 
-import { decodeSnapshotChallenge, decodeSnapshotProof, type SnapshotSourceChallenge } from './public-snapshot-proof-wire.js';
+import { decodeSnapshotChallenge, decodeSnapshotProof, encodeSnapshotProof,
+  type SnapshotSourceChallenge, type SnapshotProofCodec, type UnsignedSnapshotProof } from './public-snapshot-proof-wire.js';
 export type { SnapshotSourceChallenge } from './public-snapshot-proof-wire.js';
 
 export function sourceProofPayload(challenge: SnapshotSourceChallenge, identityId: string): Uint8Array {
@@ -17,6 +18,11 @@ export function sourceProofPayload(challenge: SnapshotSourceChallenge, identityI
     challenge.requesterPeerId, challenge.responderPeerId, challenge.chainId,
     challenge.deploymentId, challenge.contextGraphId, challenge.onChainId, identityId,
   ]))));
+}
+
+export function sourceProofCodec(challenge: SnapshotSourceChallenge): SnapshotProofCodec<UnsignedSnapshotProof> {
+  return { payload: proof => sourceProofPayload(challenge, proof.identityId),
+    encode: (proof, signature) => encodeSnapshotProof({ ...proof, signature }) };
 }
 
 export function decodeSourceChallenge(bytes: Uint8Array): SnapshotSourceChallenge {

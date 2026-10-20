@@ -5,7 +5,7 @@ import type { AgentWorkLifetime } from './agent-work-lifetime.js';
 import type { PublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
 import type { PublicSnapshotProofRuntime } from './public-snapshot-proof-runtime.js';
 import { decodeCoreChainCacheSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
-import { CACHE_PROOF_MAX_BYTES, decodeCacheChallenge, cacheProofPayload } from './core-chain-cache-proof.js';
+import { CACHE_PROOF_MAX_BYTES, decodeCacheChallenge, cacheProofCodec } from './core-chain-cache-proof.js';
 import { CORE_CHAIN_CACHE_SOURCE_PROTOCOL, CORE_CHAIN_CACHE_SNAPSHOT_PROTOCOL, type CoreChainCacheNetwork } from './core-chain-cache-config.js';
 
 export function registerCoreChainCacheHandlers(agent: {
@@ -24,10 +24,8 @@ export function registerCoreChainCacheHandlers(agent: {
       throw new Error('Unavailable');
     return {
       assertCurrent: () => {}, validate: async () => {},
-      proof: identityId => {
-        const fields = { chainId: agent.chain.chainId, deploymentId: agent.chain.deploymentId!, identityId };
-        return { fields, payload: cacheProofPayload(challenge, fields) };
-      },
+      proof: identityId => ({ chainId: agent.chain.chainId, deploymentId: agent.chain.deploymentId!, identityId }),
+      codec: cacheProofCodec(challenge),
     };
   }), { maxReadBytes: CACHE_PROOF_MAX_BYTES });
 

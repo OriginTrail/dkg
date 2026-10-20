@@ -6,8 +6,22 @@ export interface SnapshotSourceChallenge {
   version: 1; nonce: string; requesterPeerId: string; responderPeerId: string;
   chainId: string; deploymentId: string; contextGraphId: string; onChainId: string;
 }
-export interface SnapshotProofFields { identityId: string; signature: string }
-export interface CoreChainCacheProof extends SnapshotProofFields { chainId: string; deploymentId: string }
+export interface UnsignedSnapshotProof { identityId: string }
+export interface UnsignedCoreChainCacheProof extends UnsignedSnapshotProof { chainId: string; deploymentId: string }
+export interface SnapshotProofFields extends UnsignedSnapshotProof { signature: string }
+export interface CoreChainCacheProof extends UnsignedCoreChainCacheProof { signature: string }
+export interface SnapshotProofCodec<Proof extends UnsignedSnapshotProof> {
+  payload: (proof: Proof) => Uint8Array;
+  encode: (proof: Proof, signature: string) => Uint8Array;
+}
+
+export function encodeSnapshotProof(p: SnapshotProofFields): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({ identityId: p.identityId, signature: p.signature }));
+}
+export function encodeCoreChainCacheProof(p: CoreChainCacheProof): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({ chainId: p.chainId, deploymentId: p.deploymentId,
+    identityId: p.identityId, signature: p.signature }));
+}
 const boundedString = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 256;
 

@@ -3,7 +3,7 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { ProtocolRouter } from '@origintrail-official/dkg-core';
 import type { PublicSnapshotProofRuntime } from './public-snapshot-proof-runtime.js';
 import {
-  decodeSourceChallenge, sourceProofPayload,
+  decodeSourceChallenge, sourceProofCodec,
   PUBLIC_SNAPSHOT_SOURCE_PROTOCOL, PUBLIC_SNAPSHOT_SOURCE_MAX_BYTES,
 } from './public-snapshot-source-proof.js';
 
@@ -30,7 +30,7 @@ export function registerSnapshotSourceHandler(agent: {
       validate: async () => {
         if (await agent.isPrivateContextGraph(challenge.contextGraphId, { signal })) throw new Error('Unavailable');
       },
-      proof: identityId => ({ fields: { identityId }, payload: sourceProofPayload(challenge, identityId) }),
+      proof: identityId => ({ identityId }), codec: sourceProofCodec(challenge),
     };
   }), { maxReadBytes: PUBLIC_SNAPSHOT_SOURCE_MAX_BYTES });
 }
