@@ -1,5 +1,6 @@
 import { handleShareJobCollection } from './share-job-collection.js';
 import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
+import { handleKnowledgeAssetMintReconcile } from './knowledge-asset-mint-reconcile.js';
 import { promoteConflictResponse } from './promote-admission-response.js';
 import { partialDurableShareFailure, classifySynchronousShareFailure, synchronousShareFailureDecision } from './durable-share-response.js';
 import { durableSynchronousShare, shareOperationFields, synchronousShareSuccessBody } from './durable-synchronous-share.js';
@@ -97,6 +98,7 @@ import {
   respondAmbiguousAssertionAuthor,
   respondAuthorSelectionError,
   respondPublicationPricingPolicyError,
+  respondMintAdoptionRefused,
 } from './knowledge-assets-error-mapping.js';
 
 const PREFIX = "/api/knowledge-assets";
@@ -175,12 +177,9 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
   "schemeVersion",
 ] as const;
 
-
-
 function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
 }
-
 
 function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): boolean {
   if (classifyKaIdentifier(seg, { includeCompact: false }).kind !== "kaId") return false;
@@ -1053,6 +1052,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   const verb = segs[2];
 
   if (method === 'POST' && layer === 'vm' && verb === 'repair-descriptor') return handlePublishedDescriptorRepair(ctx, name, writePreflightContextGraphOpts);
+  if (method === 'POST' && layer === 'vm' && verb === 'reconcile') return handleKnowledgeAssetMintReconcile(ctx, name, writePreflightContextGraphOpts);
   // Shared GET preflight: decode/validate the :identifier, require + normalize
   // contextGraphId, validate subGraphName, extract optional agentAddress. For
   // agent-scoped bearer tokens, omitted agentAddress defaults to the token's
@@ -1643,7 +1643,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // GH#1786 — must precede the precondition branch below, which would otherwise
         // relabel an author-selection failure whose message happens to contain
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
-        if (respondPublicationPricingPolicyError(res, e)) return;
+        if (respondPublicationPricingPolicyError(res, e) || respondMintAdoptionRefused(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;
         // GH#2958 — the finalized version is not the next publishable one (the async lane maps

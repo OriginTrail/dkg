@@ -6,6 +6,7 @@ import type {
   ContextGraphAssetFetchResult,
   ContextGraphReconcileResult,
   ContextGraphSyncMode,
+  KnowledgeAssetMintReconcileResult,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
 import type {
@@ -1105,6 +1106,10 @@ export class ApiClient {
     }, knowledgeAssetMutationDeadline(name, contextGraphId, subGraphName));
   }
 
+  async knowledgeAssetReconcileMint(contextGraphId: string, name: string, options?: { subGraphName?: string; txHash?: string }): Promise<KnowledgeAssetMintReconcileResult> {
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/reconcile`, { contextGraphId, ...(options ?? {}) });
+  }
+
   async knowledgeAssetPublishAsync(
     contextGraphId: string,
     name: string,
@@ -1116,9 +1121,6 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
-      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
-      // the daemon so it is rejected 400, rather than being silently omitted here and
-      // letting normal author resolution publish a different author.
       ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });

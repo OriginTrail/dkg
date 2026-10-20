@@ -497,6 +497,39 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.status) console.log(`  Status:  ${result.status}`);
     }));
 
+  addSubGraphOption(addContextGraphOption(
+    kaCmd
+      .command('reconcile <name>')
+      .description(
+        'Record a Knowledge Asset whose VM publish transaction mined after the node stopped waiting. '
+          + 'Verifies the mint of its reserved id against the seal; sends no transaction (node admin)',
+      )
+      .option('--tx-hash <hash>', 'Mint transaction hash, if known (otherwise found from the creation log)')
+      .option('--json', 'Print JSON'),
+  ))
+    .action(async (name: string, opts: ActionOpts) => runAction(async () => {
+      const contextGraphId = requiredContextGraphId(opts);
+      const client = await ApiClient.connect();
+      const result = await client.knowledgeAssetReconcileMint(contextGraphId, name, {
+        ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
+        ...(typeof opts.txHash === 'string' ? { txHash: opts.txHash } : {}),
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      if (result.status === 'already-published') {
+        console.log(`Knowledge asset "${name}" is already published${result.ual ? ` as ${result.ual}` : ''}; nothing to do.`);
+        return;
+      }
+      console.log('Knowledge asset late mint recorded:');
+      console.log(`  Name:    ${name}`);
+      console.log(`  KA ID:   ${result.kaId}`);
+      console.log(`  UAL:     ${result.ual}`);
+      console.log(`  Tx hash: ${result.txHash}`);
+      console.log(`  Block:   ${result.blockNumber}`);
+    }));
+
   addFinalizedPublishOptions(addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('publish-async <name>')
