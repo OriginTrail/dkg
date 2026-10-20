@@ -135,16 +135,13 @@ import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, D
 } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
-import {
-  chainFeeFloor,
-  priceEip1559Fees,
-  priceTransactionRequest,
-  readSuggestedPriorityFee,
-  signedEip1559Fees,
-  type ChainFeeFloor,
-} from './evm-fee-policy.js';
+import { chainFeeFloor, priceTransactionRequest, type ChainFeeFloor } from './evm-fee-policy.js';
 import { numericChainIdOf } from './configured-chain-id.js';
-import { StuckTransactionRecovery, stuckTransactionCheckIntervalMs } from './stuck-transaction-recovery.js';
+import {
+  StuckTransactionRecovery,
+  stuckTransactionRecoveryFor,
+  type StuckTransactionTarget,
+} from './stuck-transaction-recovery.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
 import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
 import {
@@ -1928,10 +1925,8 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Wait for a broadcast transaction's receipt. With a `recovery`, the wait
-   * also polls the transaction's same-nonce replacements and lets the recovery
-   * speed it up while it is stuck (see stuck-transaction-recovery.ts); the
-   * timeout then names the most recent hash and every one it replaced.
+   * Wait for a broadcast transaction's receipt; a `recovery` also polls its
+   * same-nonce replacements and speeds it up while it is stuck.
    */
   protected async waitForReceiptWithFailover(
     txHash: string,
@@ -1960,54 +1955,15 @@ export class EVMChainAdapterBase {
     });
   }
 
-  /**
-   * Speed-up state for one broadcast transaction (stuck-transaction-recovery.ts),
-   * or undefined when it cannot be re-priced: its nonce was not read at
-   * signing, or it is not an EIP-1559 transaction.
-   */
-  protected createStuckTransactionRecovery(params: {
-    signer: EvmSigner;
-    signedTx: string;
-    txHash: string;
-    nonce: number | undefined;
-    label: string;
-    beforeBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
-    onReplaced?: () => void;
-  }): StuckTransactionRecovery | undefined {
-    if (params.nonce === undefined) return undefined;
-    const fees = signedEip1559Fees(params.signedTx);
-    if (!fees) return undefined;
-    const { signer, label } = params;
-    return new StuckTransactionRecovery({
-      original: { txHash: params.txHash, signedTx: params.signedTx, fees },
-      nonce: params.nonce,
-      label,
+  /** Speed-up state for one broadcast transaction; see stuck-transaction-recovery.ts. */
+  protected createStuckTransactionRecovery(target: StuckTransactionTarget): StuckTransactionRecovery | undefined {
+    return stuckTransactionRecoveryFor(target, {
       receiptTimeoutMs: this.receiptTimeoutMs,
-      checkIntervalMs: stuckTransactionCheckIntervalMs(this.receiptTimeoutMs),
       maxFeePerGasCap: this.maxFeePerGasWei,
-      port: {
-        // One endpoint answers both, so the nonce and base fee describe one head.
-        readChainHead: () => this.readTipProvider('stuck transaction check', async (provider) => {
-          const [latestNonce, block] = await Promise.all([
-            provider.getTransactionCount(signer.address, 'latest'),
-            provider.getBlock('latest'),
-          ]);
-          return { latestNonce, baseFeePerGas: block?.baseFeePerGas ?? null };
-        }),
-        priceFees: (baseFeePerGas) => this.readProvider('replacement fee pricing', async (provider) =>
-          priceEip1559Fees({
-            baseFeePerGas,
-            suggestedPriorityFeePerGas: await readSuggestedPriorityFee(provider),
-            floor: this.feeFloor,
-          })),
-        sign: async (request) => {
-          const { signedTx, parsed } = await signTransactionOnce(signer, request);
-          return { signedTx, txHash: parsed.hash ?? '0x' };
-        },
-        ...(params.beforeBroadcast ? { beforeBroadcast: params.beforeBroadcast } : {}),
-        broadcast: (signedTx, txHash) => this.broadcastSignedTransactionWithRetries(signedTx, txHash, label),
-        ...(params.onReplaced ? { onReplaced: params.onReplaced } : {}),
-      },
+      feeFloor: this.feeFloor,
+      readHead: (label, read) => this.readTipProvider(label, read),
+      read: (label, read) => this.readProvider(label, read),
+      broadcast: (signedTx, txHash, label) => this.broadcastSignedTransactionWithRetries(signedTx, txHash, label),
     });
   }
 

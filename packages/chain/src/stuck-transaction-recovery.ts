@@ -28,15 +28,21 @@
  * the original may still be mined, so the outcome stays the receipt wait's.
  */
 
+import type { JsonRpcProvider } from 'ethers';
 import type { ReplacementBroadcastSignal } from './chain-adapter.js';
 import { errorMessage } from './evm-adapter-errors.js';
 import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
 import {
+  type ChainFeeFloor,
   type Eip1559Fees,
   isAcceptedReplacement,
+  priceEip1559Fees,
+  readSuggestedPriorityFee,
   replacementFees,
   replacementTransactionRequest,
+  signedEip1559Fees,
 } from './evm-fee-policy.js';
+import { signTransactionOnce, type EvmSigner } from './evm-signer.js';
 import { hostOnlyRpcText } from './rpc-failover-log.js';
 
 /** How often a pending transaction is checked against the account nonce and base fee. */
@@ -284,6 +290,75 @@ export class StuckTransactionRecovery {
     );
     return true;
   }
+}
+
+/** A broadcast transaction a recovery may speed up, and the hooks around its replacements. */
+export interface StuckTransactionTarget {
+  /** The wallet that signed it; it signs every replacement too. */
+  readonly signer: EvmSigner;
+  readonly signedTx: string;
+  readonly txHash: string;
+  /** The nonce read at signing. Without it nothing can be proven about the slot. */
+  readonly nonce: number | undefined;
+  readonly label: string;
+  readonly beforeBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
+  readonly onReplaced?: () => void;
+}
+
+/** The adapter plumbing a recovery runs on. */
+export interface StuckTransactionChain {
+  readonly receiptTimeoutMs: number;
+  readonly maxFeePerGasCap?: bigint;
+  readonly feeFloor?: ChainFeeFloor;
+  /** A tip-fresh read served by one endpoint. */
+  readonly readHead: <T>(label: string, read: (provider: JsonRpcProvider) => Promise<T>) => Promise<T>;
+  readonly read: <T>(label: string, read: (provider: JsonRpcProvider) => Promise<T>) => Promise<T>;
+  readonly broadcast: (signedTx: string, txHash: string, label: string) => Promise<void>;
+}
+
+/**
+ * The recovery for one broadcast transaction, or undefined when it cannot be
+ * re-priced: its nonce was not read at signing, or it is not EIP-1559.
+ */
+export function stuckTransactionRecoveryFor(
+  target: StuckTransactionTarget,
+  chain: StuckTransactionChain,
+): StuckTransactionRecovery | undefined {
+  if (target.nonce === undefined) return undefined;
+  const fees = signedEip1559Fees(target.signedTx);
+  if (!fees) return undefined;
+  const { signer, label } = target;
+  return new StuckTransactionRecovery({
+    original: { txHash: target.txHash, signedTx: target.signedTx, fees },
+    nonce: target.nonce,
+    label,
+    receiptTimeoutMs: chain.receiptTimeoutMs,
+    checkIntervalMs: stuckTransactionCheckIntervalMs(chain.receiptTimeoutMs),
+    maxFeePerGasCap: chain.maxFeePerGasCap,
+    port: {
+      // One endpoint answers both, so the nonce and base fee describe one head.
+      readChainHead: () => chain.readHead('stuck transaction check', async (provider) => {
+        const [latestNonce, block] = await Promise.all([
+          provider.getTransactionCount(signer.address, 'latest'),
+          provider.getBlock('latest'),
+        ]);
+        return { latestNonce, baseFeePerGas: block?.baseFeePerGas ?? null };
+      }),
+      priceFees: (baseFeePerGas) => chain.read('replacement fee pricing', async (provider) =>
+        priceEip1559Fees({
+          baseFeePerGas,
+          suggestedPriorityFeePerGas: await readSuggestedPriorityFee(provider),
+          floor: chain.feeFloor,
+        })),
+      sign: async (request) => {
+        const { signedTx, parsed } = await signTransactionOnce(signer, request);
+        return { signedTx, txHash: parsed.hash ?? '0x' };
+      },
+      ...(target.beforeBroadcast ? { beforeBroadcast: target.beforeBroadcast } : {}),
+      broadcast: (signedTx, txHash) => chain.broadcast(signedTx, txHash, label),
+      ...(target.onReplaced ? { onReplaced: target.onReplaced } : {}),
+    },
+  });
 }
 
 function capFees(fees: Eip1559Fees, cap: bigint | undefined): Eip1559Fees {

@@ -1104,20 +1104,12 @@ export interface V10PublishParams {
    */
   onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
   /**
-   * Opts this write into stuck-transaction speed-up. While its receipt wait
-   * runs, a publish tx that holds the wallet's next nonce and is priced below
-   * the base fee, or is still unmined at the receipt deadline, is re-signed at
-   * the same nonce with higher fees and broadcast again; the call then resolves
-   * with the receipt of whichever hash is mined, so `txHash` may differ from
-   * the one {@link onBroadcast} saw.
-   *
-   * Invoked before each replacement is broadcast, never for the original
-   * (that is {@link onBroadcast}'s). **Fail-closed**: if it throws, that
-   * replacement is not sent. Omitted, the adapter never replaces this write:
-   * a caller whose durable record holds exactly one hash per transaction must
-   * omit it, since a replacement mined in place of that hash would be one it
-   * cannot recognize. Neither this hook nor a failed replacement ever turns
-   * into the call's error.
+   * Opts this write into stuck-transaction speed-up (stuck-transaction-recovery.ts): re-signing
+   * it at the same nonce with higher fees. Awaited before each replacement is broadcast, never for
+   * the original; **fail-closed**: a throw means that replacement is not sent. The call resolves
+   * with whichever hash is mined, which may differ from the one {@link onBroadcast} saw, so a
+   * caller whose durable record holds one hash per transaction must omit it. Neither this hook
+   * nor a failed replacement ever becomes the call's error.
    */
   onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
