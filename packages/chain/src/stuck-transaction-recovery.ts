@@ -20,7 +20,8 @@
  * |-----------------------|-------------------------------|-------------------------------------|
  * | equal: next to mine   | replace if priced below base  | replace and renew the deadline      |
  * | lower: queued behind  | wait                          | renew the deadline (still ours)     |
- * | higher: slot consumed | wait (our receipt may follow) | give up: the timeout surfaces       |
+ * | higher: slot consumed | wait (our receipt may follow) | look every hash up once more, then  |
+ * |                       |                               | give up: the timeout surfaces       |
  *
  * Replacing does not change the nonce, so it never races the wallet's nonce
  * lane: every later transaction already holds a higher one. A replacement that
@@ -34,6 +35,7 @@
 import type { JsonRpcProvider } from 'ethers';
 import type { ReplacementBroadcastSignal } from './chain-adapter.js';
 import { errorMessage } from './evm-adapter-errors.js';
+import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
 import { applyTransactionFeeCap } from './evm-fee-cap.js';
 import {
   type ChainFeeFloor,
@@ -50,6 +52,13 @@ import { hostOnlyRpcText } from './rpc-failover-log.js';
 
 /** How often a pending transaction is checked against the account nonce and base fee. */
 export const STUCK_TRANSACTION_CHECK_INTERVAL_MS = 30_000;
+
+/**
+ * Absolute budget of each recovery read, also after the receipt deadline: the
+ * receipt wait awaits its checks, so a stalled read on a single-RPC node (whose
+ * reads are otherwise uncapped) must not hold up the wait or a wallet lane.
+ */
+export const STUCK_TRANSACTION_READ_BUDGET_MS = RPC_READ_STALL_TIMEOUT_MS;
 
 /** Most same-nonce replacements one transaction gets. */
 export const MAX_STUCK_TRANSACTION_REPLACEMENTS = 5;
@@ -71,6 +80,7 @@ export function stuckTransactionCheckIntervalMs(receiptTimeoutMs: number): numbe
 export type StuckTransactionDecision =
   | { readonly action: 'wait' }
   | { readonly action: 'give-up' }
+  | { readonly action: 'final-lookup' }
   | { readonly action: 'renew-deadline' }
   | { readonly action: 'replace'; readonly reason: 'underpriced' | 'unmined'; readonly renewDeadline: boolean };
 
@@ -87,9 +97,16 @@ export function decideStuckTransaction(input: {
   readonly deadlineReached: boolean;
   readonly replacementsLeft: number;
   readonly renewalsLeft: number;
+  /**
+   * Whether the hashes have yet to be looked up once after the slot was seen
+   * consumed: the transaction that consumed it may be one of ours that was
+   * sent after the last lookup.
+   */
+  readonly finalLookupLeft: boolean;
 }): StuckTransactionDecision {
   if (input.latestNonce > input.nonce) {
-    return { action: input.deadlineReached ? 'give-up' : 'wait' };
+    if (!input.deadlineReached) return { action: 'wait' };
+    return { action: input.finalLookupLeft ? 'final-lookup' : 'give-up' };
   }
   if (input.latestNonce < input.nonce) {
     if (!input.deadlineReached) return { action: 'wait' };
@@ -160,6 +177,7 @@ export class StuckTransactionRecovery {
   private renewals = 0;
   /** The latest hash an endpoint accepted; the original until a replacement is. */
   private acceptedTxHash: string;
+  private finalLookupDone = false;
   private nextCheckAtMs: number;
 
   constructor(private readonly options: StuckTransactionRecoveryOptions) {
@@ -219,11 +237,16 @@ export class StuckTransactionRecovery {
       deadlineReached: context.deadlineReached,
       replacementsLeft: this.maxReplacements - this.replacements,
       renewalsLeft: this.maxDeadlineRenewals - this.renewals,
+      finalLookupLeft: !this.finalLookupDone,
     });
     switch (decision.action) {
       case 'wait':
       case 'give-up':
         return;
+      case 'final-lookup':
+        // The renewed wait looks every hash up before anything else.
+        this.finalLookupDone = true;
+        return this.now() + this.options.checkIntervalMs;
       case 'renew-deadline':
         this.renewals += 1;
         this.log(
@@ -320,9 +343,10 @@ export interface StuckTransactionChain {
   readonly receiptTimeoutMs: number;
   readonly maxFeePerGasCap?: bigint;
   readonly feeFloor?: ChainFeeFloor;
-  /** A tip-fresh read served by one endpoint. */
-  readonly readHead: <T>(label: string, read: (provider: JsonRpcProvider) => Promise<T>) => Promise<T>;
-  readonly read: <T>(label: string, read: (provider: JsonRpcProvider) => Promise<T>) => Promise<T>;
+  /** A tip-fresh read served by one endpoint, abandoned at `deadlineMs`. */
+  readonly readHead: <T>(label: string, read: (provider: JsonRpcProvider) => Promise<T>, deadlineMs: number) => Promise<T>;
+  /** A read abandoned at `deadlineMs`. */
+  readonly read: <T>(label: string, read: (provider: JsonRpcProvider) => Promise<T>, deadlineMs: number) => Promise<T>;
   readonly broadcast: (signedTx: string, txHash: string, label: string) => Promise<void>;
 }
 
@@ -353,13 +377,13 @@ export function stuckTransactionRecoveryFor(
           provider.getBlock('latest'),
         ]);
         return { latestNonce, baseFeePerGas: block?.baseFeePerGas ?? null };
-      }),
+      }, Date.now() + STUCK_TRANSACTION_READ_BUDGET_MS),
       priceFees: (baseFeePerGas) => chain.read('replacement fee pricing', async (provider) =>
         priceEip1559Fees({
           baseFeePerGas,
           suggestedPriorityFeePerGas: await readSuggestedPriorityFee(provider),
           floor: chain.feeFloor,
-        })),
+        }), Date.now() + STUCK_TRANSACTION_READ_BUDGET_MS),
       sign: async (request) => {
         const { signedTx, parsed } = await signTransactionOnce(signer, request);
         return { signedTx, txHash: parsed.hash ?? '0x' };

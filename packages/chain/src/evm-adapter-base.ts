@@ -1962,8 +1962,8 @@ export class EVMChainAdapterBase {
       receiptTimeoutMs: this.receiptTimeoutMs,
       maxFeePerGasCap: this.maxFeePerGasWei,
       feeFloor: this.feeFloor,
-      readHead: (label, read) => this.readTipProvider(label, read),
-      read: (label, read) => this.readProvider(label, read),
+      readHead: (label, read, deadlineMs) => this.readTipProvider(label, read, { deadlineMs }),
+      read: (label, read, deadlineMs) => this.readProvider(label, read, { deadlineMs }),
       broadcast: (signedTx, txHash, label) => this.broadcastSignedTransactionWithRetries(signedTx, txHash, label),
     });
   }

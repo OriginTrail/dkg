@@ -138,6 +138,16 @@ describe('V10 write speed-up through the adapter', () => {
     const events: string[] = [];
     const { sent } = stubGnosis(adapter, events);
     const replacements: ReplacementBroadcastSignal[] = [];
+    // The recovery's own reads reach the RPC client with an absolute deadline
+    // (`readTipProvider` delegates to `readProvider`).
+    const recoveryReads: Array<[string, unknown]> = [];
+    const readProvider = (adapter as any).readProvider.bind(adapter);
+    (adapter as any).readProvider = (label: string, fn: unknown, opts?: { deadlineMs?: number }) => {
+      if (label === 'stuck transaction check' || label === 'replacement fee pricing') {
+        recoveryReads.push([label, opts?.deadlineMs]);
+      }
+      return readProvider(label, fn, opts);
+    };
 
     const receipt = await (adapter as any).dispatchSerializedV10Write(
       signer,
@@ -169,6 +179,8 @@ describe('V10 write speed-up through the adapter', () => {
     expect(replacement.from).toBe(signer.address);
     expect(replacement.maxFeePerGas).toBe(2n * GWEI);
     expect(replacement.maxPriorityFeePerGas).toBe(GWEI);
+    expect(recoveryReads.map(([label]) => label)).toEqual(['stuck transaction check', 'replacement fee pricing']);
+    for (const [, deadlineMs] of recoveryReads) expect(deadlineMs).toBeTypeOf('number');
   });
 
   it('never replaces a V10 write whose caller did not opt in, and times out as before', async () => {

@@ -4,9 +4,12 @@ import { ethers } from 'ethers';
 import {
   MAX_STUCK_TRANSACTION_DEADLINE_RENEWALS,
   STUCK_TRANSACTION_CHECK_INTERVAL_MS,
+  STUCK_TRANSACTION_READ_BUDGET_MS,
   StuckTransactionRecovery,
   decideStuckTransaction,
   stuckTransactionCheckIntervalMs,
+  stuckTransactionRecoveryFor,
+  type StuckTransactionChain,
   type StuckTransactionPort,
 } from '../src/stuck-transaction-recovery.js';
 import { chainFeeFloor, priceEip1559Fees } from '../src/evm-fee-policy.js';
@@ -106,6 +109,7 @@ describe('stuck-transaction decision', () => {
     maxFeePerGas: 614n,
     replacementsLeft: 5,
     renewalsLeft: 2,
+    finalLookupLeft: true,
   };
 
   it('replaces the next-to-mine transaction once the base fee has passed its cap', () => {
@@ -135,9 +139,12 @@ describe('stuck-transaction decision', () => {
       .toEqual({ action: 'give-up' });
   });
 
-  it('never replaces once the nonce is consumed, and lets the timeout surface at the deadline', () => {
+  it('never replaces once the nonce is consumed; at the deadline it looks every hash up once more, then gives up', () => {
     expect(decideStuckTransaction({ ...base, latestNonce: 6723, deadlineReached: false })).toEqual({ action: 'wait' });
-    expect(decideStuckTransaction({ ...base, latestNonce: 6723, deadlineReached: true })).toEqual({ action: 'give-up' });
+    expect(decideStuckTransaction({ ...base, latestNonce: 6723, deadlineReached: true }))
+      .toEqual({ action: 'final-lookup' });
+    expect(decideStuckTransaction({ ...base, latestNonce: 6723, deadlineReached: true, finalLookupLeft: false }))
+      .toEqual({ action: 'give-up' });
   });
 
   it('checks every 30 s, or four times per receipt timeout when that is shorter', () => {
@@ -224,8 +231,11 @@ describe('StuckTransactionRecovery', () => {
     clock.now = 30_000;
     await recovery.onPending({ deadlineMs: 600_000, deadlineReached: false });
     clock.now = 600_000;
-    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBeUndefined();
-    expect(events).toEqual(['read', 'read']);
+    // One more look at every hash: the transaction that consumed the slot may be ours.
+    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBe(630_000);
+    clock.now = 630_000;
+    await expect(recovery.onPending({ deadlineMs: 630_000, deadlineReached: true })).resolves.toBeUndefined();
+    expect(events).toEqual(['read', 'read', 'read']);
     expect(recovery.txHashes()).toEqual([original.txHash]);
   });
 
@@ -484,5 +494,103 @@ describe('receipt wait over a transaction and its replacements', () => {
     await vi.advanceTimersByTimeAsync(2_000);
     await expect(outcome).resolves.toMatchObject({ status: 'fulfilled', receipt: { hash: minedReplacement } });
     expect(lookups).toContain(minedReplacement);
+  });
+
+  // otReviewAgent on #3393, with the production 2 s poll: the sleep after a late broadcast can
+  // use up its whole extension, and the slot is then seen consumed by that very replacement.
+  it('looks a late replacement up when the poll sleep used up its extension (4 s timeout, 2 s poll)', async () => {
+    const chain = { latestNonce: 6722, baseFeePerGas: 4_900_000n };
+    let minedReplacement: string | undefined;
+    const { outcome, lookups } = await waitWithRecovery({
+      chain,
+      receiptTimeoutMs: 4_000,
+      checkIntervalMs: stuckTransactionCheckIntervalMs(4_000),
+      pollIntervalMs: 2_000,
+      minedHash: () => minedReplacement,
+      broadcast: async (_signedTx, txHash) => {
+        // Starts at the 2 s check and returns at 4.5 s, mined by then.
+        await new Promise((resolve) => setTimeout(resolve, 2_500));
+        chain.latestNonce = 6723;
+        minedReplacement = txHash;
+      },
+    });
+    await vi.advanceTimersByTimeAsync(8_000);
+    await expect(outcome).resolves.toMatchObject({ status: 'fulfilled', receipt: { hash: minedReplacement } });
+    expect(lookups).toContain(minedReplacement);
+  });
+});
+
+describe('recovery read budgets', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // otReviewAgent on #3393: a single-RPC node's reads have no attempt cap, and the receipt wait
+  // awaits its checks, so each recovery read carries its own absolute deadline.
+  it('gives the chain-head and fee-pricing reads an absolute deadline', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const original = await strandedPublish();
+    const deadlines: Array<[string, number]> = [];
+    const chain: StuckTransactionChain = {
+      receiptTimeoutMs: 600_000,
+      feeFloor: chainFeeFloor(100n),
+      readHead: async (label, _read, deadlineMs) => {
+        deadlines.push([label, deadlineMs]);
+        return { latestNonce: 6722, baseFeePerGas: 4_900_000n } as never;
+      },
+      read: async (label, _read, deadlineMs) => {
+        deadlines.push([label, deadlineMs]);
+        return { maxFeePerGas: 2n * GWEI, maxPriorityFeePerGas: GWEI } as never;
+      },
+      broadcast: async () => {},
+    };
+    const recovery = stuckTransactionRecoveryFor({
+      signer: wallet,
+      signedTx: original.signedTx,
+      txHash: original.txHash,
+      nonce: 6722,
+      label: 'V10 publish',
+    }, chain)!;
+
+    vi.setSystemTime(30_000);
+    await recovery.onPending({ deadlineMs: 600_000, deadlineReached: false });
+    expect(deadlines).toEqual([
+      ['stuck transaction check', 30_000 + STUCK_TRANSACTION_READ_BUDGET_MS],
+      ['replacement fee pricing', 30_000 + STUCK_TRANSACTION_READ_BUDGET_MS],
+    ]);
+  });
+
+  it('lets the receipt timeout surface when the chain-head read stalls until its budget', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const original = await strandedPublish();
+    // A read that only ends when its deadline aborts it, as the RPC client does.
+    const stalled = <T>(_label: string, _read: unknown, deadlineMs: number) =>
+      new Promise<T>((_resolve, reject) => {
+        setTimeout(() => reject(new Error('stuck transaction check timed out')), deadlineMs - Date.now());
+      });
+    const recovery = stuckTransactionRecoveryFor({
+      signer: wallet,
+      signedTx: original.signedTx,
+      txHash: original.txHash,
+      nonce: 6722,
+      label: 'V10 publish',
+    }, {
+      receiptTimeoutMs: 1_000,
+      readHead: stalled,
+      read: stalled,
+      broadcast: async () => {},
+    })!;
+    const outcome = waitForReceiptWithDeadline({
+      txHash: original.txHash,
+      txHashes: () => recovery.txHashes(),
+      receiptTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+      getReceipt: async () => null,
+      assertSuccessfulReceipt: () => {},
+      onPending: (context) => recovery.onPending(context),
+      formatTimeoutMessage: ({ txHash }) => `tx ${txHash} timed out`,
+    }).then(() => 'resolved', (err: { code?: string }) => err.code);
+    await vi.advanceTimersByTimeAsync(1_000 + 2 * STUCK_TRANSACTION_READ_BUDGET_MS);
+    await expect(outcome).resolves.toBe('RPC_TIMEOUT');
   });
 });
