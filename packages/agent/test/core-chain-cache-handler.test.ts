@@ -67,7 +67,8 @@ it('shares proof admission between legacy and cache protocols', () => {
   const releases = ['one', 'two', 'three', 'four'].map(p => f.serving.sourceAdmission.acquire(p));
   expect(() => f.serving.sourceAdmission.acquire('fifth')).toThrow('busy');
   releases[0](); releases[0]();
-  const fifth = f.serving.sourceAdmission.acquire('fifth');
+  const fifth = f.serving.sourceAdmission.acquire('one');
+  releases[0](); // A stale release cannot retire this peer's newer lease.
   expect(() => f.serving.sourceAdmission.acquire('sixth')).toThrow('busy');
   fifth(); releases.slice(1).forEach(r => r());
 });

@@ -21,6 +21,7 @@ export class PublicSnapshotAdmission {
     entry.builds += 1;
     entry.active = true;
     this.active += 1;
-    return () => { if (entry.active) { entry.active = false; this.active -= 1; } };
+    let released = false;
+    return () => { if (!released) { released = true; entry.active = false; this.active -= 1; } };
   }
 }
