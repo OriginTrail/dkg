@@ -24,7 +24,7 @@ function identityFixture(held?: string, cooperative = true) {
     });
   });
   const adapter = {
-    signer: { address }, contracts: {},
+    signer: { address }, contracts: {}, identityIdCache: new IdentityIdCache(address),
     init: () => step('init'),
     getIdentityStorage: async () => { await step('storage'); return {}; },
     identityStorageAddressChanged: async () => { await step('rotation'); return false; },
@@ -85,9 +85,9 @@ describe('source responder identity and signing cancellation', () => {
   });
 
   it('fences a cancelled shared waiter without aborting or poisoning the shared cached load', async () => {
-    const f = identityFixture('read'), cache = new IdentityIdCache(address), abort = new AbortController();
-    f.adapter.readIdentityIdForAddress.mockImplementation(addr => cache.getOrLoad(addr,
-      checksum => f.adapter.readIdentityIdFromStorage(checksum)));
+    const f = identityFixture('read'), abort = new AbortController();
+    f.adapter.readIdentityIdForAddress.mockImplementation(addr =>
+      EVMChainAdapterBase.prototype['readIdentityIdForAddress'].call(f.adapter as never, addr));
     let settled = false;
     const first = f.get(abort.signal, 'shared').catch(error => error).finally(() => { settled = true; });
     const second = f.get(undefined, 'shared');
@@ -95,13 +95,31 @@ describe('source responder identity and signing cancellation', () => {
       await f.entered;
       const reason = new Error('shared waiter stopped'); abort.abort(reason);
       await Promise.resolve(); expect(settled).toBe(false);
-      expect(f.signals).toEqual([undefined, undefined, undefined, undefined]);
+      expect(f.signals.filter((_signal, i) => f.step.mock.calls[i][0] !== 'init'))
+        .toEqual([undefined, undefined, undefined]);
       f.release();
       expect(await first).toBe(reason);
       expect(await second).toBe(7n);
       expect(await f.get(undefined, 'shared')).toBe(7n);
-      expect(f.step).toHaveBeenCalledTimes(4);
+      expect(f.step.mock.calls.filter(([stage]) => stage !== 'init'))
+        .toEqual([['storage'], ['rotation'], ['read']]);
     } finally { f.release(); await Promise.all([first, second]); }
+  });
+
+  it('also fences arbitrary-address cached reads before dispatch and after physical settlement', async () => {
+    const f = identityFixture('read'), abort = new AbortController();
+    const read = () => EVMChainAdapterBase.prototype['readIdentityIdForAddress'].call(f.adapter as never, address);
+    const first = withRpcRequestContext({ signal: abort.signal }, read).catch(error => error);
+    await f.entered;
+    const reason = new Error('address waiter stopped'); abort.abort(reason);
+    const second = read();
+    f.release();
+    expect(await first).toBe(reason); expect(await second).toBe(7n);
+    const calls = f.step.mock.calls.length;
+    await expect(withRpcRequestContext({ signal: abort.signal }, read)).rejects.toBe(reason);
+    expect(f.step).toHaveBeenCalledTimes(calls);
+    expect(f.step.mock.calls.filter(([stage]) => stage !== 'init'))
+      .toEqual([['storage'], ['rotation'], ['read']]);
   });
 
   it('retains non-cancellable signing until settlement and refuses a late signature', async () => {

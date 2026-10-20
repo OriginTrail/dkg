@@ -6,19 +6,19 @@ import type { ResolvedDKGAgentConfig } from './dkg-agent-types.js';
 import type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { DKG_CORE_CHAIN_CACHE } from './core-chain-cache-config.js';
 import { coreChainCacheSeeds, connectCoreChainCacheSeed, createCoreChainCacheContentPeers } from './core-chain-cache-peers.js';
-import { bindSnapshotSourcePolicy, type SnapshotSourcePolicy } from './public-snapshot-policy.js';
+import { bindSnapshotRequest, bindSnapshotSourcePolicy, type SnapshotRequest, type SnapshotSourcePolicyName } from './public-snapshot-policy.js';
 import { ensurePeerConnected } from './p2p/peer-connect.js';
 import { selectSnapshotSources } from './public-snapshot-sources.js';
 
 interface SnapshotSourceReport {
-  sourcePolicy?: string;
+  sourcePolicy?: SnapshotSourcePolicyName;
   selectedCorePeerIds?: readonly string[];
   contentPeerIds?: readonly string[];
   chainCacheRpcUsage?: { chainId: string; methods: Readonly<Record<string, number>> }[];
 }
 interface SnapshotSourcePlan {
   inventoryPeers: readonly string[];
-  request: SnapshotSourcePolicy['request'];
+  request: SnapshotRequest;
   contentPeerBatches(): AsyncIterable<readonly string[]>;
   report(): SnapshotSourceReport;
 }
@@ -33,17 +33,17 @@ interface SourceHost extends Pick<DKGAgent, 'peerId' | 'router' | 'node' | 'disc
  * inventory authentication and lazy, separately admitted content recovery. */
 export async function createPublicSnapshotSourcePlan(agent: SourceHost, options: PublicSnapshotSyncOptions,
   signal: AbortSignal, rpcScope: RpcUsageScope): Promise<SnapshotSourcePlan> {
-  const cache = options.sourcePolicy === DKG_CORE_CHAIN_CACHE;
-  const networks = cache ? agent.config.coreChainCacheNetworks : [];
-  if (cache && !networks.length)
-    throw new Error('DKG_Core_chain_cache is unavailable for this deployment');
-  const policy = bindSnapshotSourcePolicy({ sourcePolicy: options.sourcePolicy, chain: agent.chain,
-    selfPeerId: agent.peerId, networks, send: agent.router.send.bind(agent.router), scope: { contextGraphId: options.contextGraphId, onChainId: options.onChainId } });
+  const send = agent.router.send.bind(agent.router);
+  const scope = { contextGraphId: options.contextGraphId, onChainId: options.onChainId };
   if (!options.sourcePolicy) {
     const peers = Object.freeze([...options.trustedCorePeerIds]);
-    return { inventoryPeers: peers, request: policy.request,
+    return { inventoryPeers: peers, request: bindSnapshotRequest(send, scope),
       contentPeerBatches: async function* () { yield peers; }, report: () => ({}) };
   }
+  const cache = options.sourcePolicy === DKG_CORE_CHAIN_CACHE;
+  const networks = cache ? agent.config.coreChainCacheNetworks : [];
+  const policy = bindSnapshotSourcePolicy({ sourcePolicy: options.sourcePolicy, chain: agent.chain,
+    selfPeerId: agent.peerId, networks, send, scope });
   signal.throwIfAborted();
   const seeds = coreChainCacheSeeds(networks);
   const dataSeeds = coreChainCacheSeeds(networks.filter(n => n.registry.deploymentId === agent.chain.deploymentId));

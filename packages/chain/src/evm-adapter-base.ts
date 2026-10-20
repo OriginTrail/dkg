@@ -1301,7 +1301,20 @@ export class EVMChainAdapterBase {
   }
 
   protected async readIdentityIdForAddress(address: string): Promise<bigint> {
-    return this.identityIdCache.getOrLoad(address, (checksum) => this.readIdentityIdFromStorage(checksum));
+    if (!ethers.isAddress(address)) return 0n;
+    const caller = activeRpcRequestContext();
+    caller.signal?.throwIfAborted();
+    // Initialization tracks its own waiters: preserve their progress and let
+    // it stop when all callers leave before sharing the cached value read.
+    await this.init();
+    caller.signal?.throwIfAborted();
+    const identityId = await this.identityIdCache.getOrLoad(address, (checksum, onProgress) =>
+      withDetachedRpcRequestContext(caller.requestClass, () => withRpcRequestContext(
+        { onProgress, admissionPriority: caller.admissionPriority },
+        () => this.readIdentityIdFromStorage(checksum),
+      )), caller);
+    caller.signal?.throwIfAborted();
+    return identityId;
   }
 
   protected async refreshIdentityIdForAddress(address: string): Promise<bigint> {
@@ -3321,8 +3334,7 @@ export class EVMChainAdapterBase {
       // Independent proof reads keep their caller's physical-work ownership.
       const identityId = await (options.ownership === 'independent'
         ? this.readIdentityIdFromStorage(this.signer.address)
-        : withDetachedRpcRequestContext(activeRpcRequestContext().requestClass,
-          () => this.readIdentityIdForAddress(this.signer.address)));
+        : this.readIdentityIdForAddress(this.signer.address));
       signal?.throwIfAborted();
       return identityId;
     });

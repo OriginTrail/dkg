@@ -4,10 +4,10 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { PublicSnapshotMode, PublicSnapshotObservation } from './public-snapshot-evidence.js';
 
 export const PUBLIC_GRAPH_SNAPSHOT_PROTOCOL = '/dkg/10.0.0/public-graph-snapshot/1';
-import type { SnapshotSourcePolicy } from './public-snapshot-policy.js';
+import type { SnapshotRequest } from './public-snapshot-policy.js';
 export function createPublicSnapshotReader(options: {
   mode: PublicSnapshotMode;
-  chain: Pick<ChainAdapter, 'readPublicGraphSnapshot'>; request: SnapshotSourcePolicy['request'];
+  chain: Pick<ChainAdapter, 'readPublicGraphSnapshot'>; request: SnapshotRequest;
   peers: readonly string[]; signal: AbortSignal; assertCurrent(): void;
   expected: Parameters<typeof decodePublicGraphSnapshot>[1];
 }): (refresh?: boolean) => Promise<PublicSnapshotObservation> {
