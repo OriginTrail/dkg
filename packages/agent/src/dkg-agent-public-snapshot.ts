@@ -9,7 +9,7 @@ import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
 import { createPublicSnapshotHeldAssetCheck } from './public-snapshot-held-assets.js';
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { PublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
+import { createPublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
 import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
@@ -35,13 +35,14 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     return [...(this.chain.chainId === 'base:8453' ? ['base-mainnet-registered-cores'] : []), ...(this.config.coreChainCacheNetworks.length ? [DKG_CORE_CHAIN_CACHE] : [])];
   }
   startPublicGraphSnapshots(this: DKGAgent): void {
+    if (this.config.nodeRole !== 'core') return;
     const proofRuntime = new PublicSnapshotProofRuntime(this.chain, this.workLifetime);
-    const cache = registerCoreChainCacheHandlers({
-      nodeRole: this.config.nodeRole ?? "edge", chain: this.chain, peerId: this.peerId, router: this.router,
-      proofRuntime, workLifetime: this.workLifetime, networks: this.config.coreChainCacheNetworks,
+    const runtime = createPublicSnapshotServingRuntime(this.chain, this.config.coreChainCacheNetworks, this.workLifetime);
+    registerCoreChainCacheHandlers({
+      nodeRole: this.config.nodeRole, chain: this.chain, peerId: this.peerId, router: this.router,
+      proofRuntime, runtime, workLifetime: this.workLifetime, networks: this.config.coreChainCacheNetworks,
     });
-    if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
-      return;
+    if (!this.chain.readPublicGraphSnapshot) return;
     registerSnapshotSourceHandler({
       nodeRole: this.config.nodeRole, chain: this.chain, router: this.router,
       peerId: this.peerId, proofRuntime,
@@ -55,10 +56,6 @@ export class PublicSnapshotMethods extends DKGAgentBase {
         };
       },
     });
-    const runtime = cache?.runtime ?? new PublicSnapshotServingRuntime(
-      ({ contextGraphId, onChainId }, signal) => this.chain.readPublicGraphSnapshot!(contextGraphId, onChainId, { signal }),
-      this.workLifetime,
-    );
     this.router.register(
       PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
       async (data, peer) => {

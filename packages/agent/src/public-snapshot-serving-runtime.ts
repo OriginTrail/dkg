@@ -1,6 +1,7 @@
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
 // SPDX-License-Identifier: Apache-2.0
-import type { PublicGraphSnapshot } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, PublicGraphSnapshot } from '@origintrail-official/dkg-chain';
+import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
 import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
 import { PublicSnapshotAdmission } from './public-snapshot-admission.js';
 
@@ -8,6 +9,25 @@ export interface PublicSnapshotScope {
   readonly deploymentId: string;
   readonly contextGraphId: string;
   readonly onChainId: string;
+}
+
+/** Lifecycle-owned backend selection for both snapshot protocols. Cache-capable
+ * cores use the configured registry readers; legacy-only cores retain their
+ * chain adapter. Handler registration never owns a separate serving budget. */
+export function createPublicSnapshotServingRuntime(
+  chain: ChainAdapter,
+  networks: readonly CoreChainCacheNetwork[],
+  lifetime: AgentWorkLifetime,
+): PublicSnapshotServingRuntime {
+  return new PublicSnapshotServingRuntime(({ deploymentId, contextGraphId, onChainId }, signal) => {
+    if (chain.signMessage && networks.length) {
+      const registry = networks.find(network => network.registry.deploymentId === deploymentId)?.registry;
+      if (!registry) throw new Error('Unavailable');
+      return registry.readPublicGraphSnapshot(contextGraphId, onChainId, { signal });
+    }
+    if (deploymentId !== chain.deploymentId || !chain.readPublicGraphSnapshot) throw new Error('Unavailable');
+    return chain.readPublicGraphSnapshot(contextGraphId, onChainId, { signal });
+  }, lifetime);
 }
 
 /** Agent-owned serving: cache, physical build admission and one disposable node-bound deadline.

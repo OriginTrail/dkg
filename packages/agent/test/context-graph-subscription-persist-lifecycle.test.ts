@@ -328,7 +328,7 @@ function shutdownAgent(overrides: Record<string, unknown> = {}): any {
   const closeStore = vi.fn(async () => {});
   Object.assign(agent, {
     started: true,
-    config: {},
+    config: { coreChainCacheNetworks: [] },
     chainPoller: null,
     contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { parseLibp2pConnectCandidate, connectLibp2pCandidate } from '@origintrail-official/dkg-core';
 import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
-import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
-import { mapWithConcurrencyDrained } from './map-with-concurrency.js';
+import { probeSnapshotPeerBatches } from './public-snapshot-peer-probes.js';
 
 /** Bootstrap addresses are discovery hints only. Every supplier still proves registration. */
 export function coreChainCacheSeeds(networks: readonly CoreChainCacheNetwork[]) {
@@ -22,8 +21,11 @@ export function createCoreChainCacheContentPeers(ports: {
   admit(peer: string, signal: AbortSignal): Promise<boolean>;
 }, signal: AbortSignal): { batches(): AsyncIterable<readonly string[]>; selected: readonly string[] } {
   const peers = [...new Set(ports.candidates)].filter(p => p !== ports.self).slice(0, 16);
-  const selected: string[] = [], batches: string[][] = [];
-  let offset = 0;
+  const selected: string[] = [], batches: Array<readonly string[]> = [];
+  const probes = probeSnapshotPeerBatches({ candidates: peers,
+    connect: (peer, probeSignal) => ports.connect(peer, probeSignal),
+    authenticate: (peer, probeSignal) => ports.admit(peer, probeSignal),
+  }, signal);
   return {
     selected,
     async *batches() {
@@ -31,22 +33,10 @@ export function createCoreChainCacheContentPeers(ports: {
       for (;;) {
         signal.throwIfAborted();
         if (index < batches.length) { yield batches[index++]; continue; }
-        if (offset >= peers.length) return;
-        const candidates = peers.slice(offset, offset + 4); offset += candidates.length;
-        const batch = await mapWithConcurrencyDrained(candidates, 4, async peer => {
-          const lifetime = startRequestAbortLifecycle(10_000, [signal]);
-          try {
-            await ports.connect(peer, lifetime.signal);
-            lifetime.signal.throwIfAborted();
-            const admitted = await ports.admit(peer, lifetime.signal);
-            lifetime.signal.throwIfAborted();
-            return admitted ? peer : null;
-          } catch { signal.throwIfAborted(); return null; }
-          finally { lifetime.release(); }
-        });
+        const batch = await probes.next();
         signal.throwIfAborted();
-        const accepted = batch.filter((p): p is string => p !== null);
-        if (accepted.length) { batches.push(accepted); selected.push(...accepted); }
+        if (batch.done) return;
+        batches.push(batch.value); selected.push(...batch.value);
       }
     },
   };

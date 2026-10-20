@@ -5,6 +5,7 @@ import { ethers } from 'ethers';
 import type { ChainAdapter, PublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { registerCoreChainCacheHandlers } from '../src/core-chain-cache-handler.js';
+import { createPublicSnapshotServingRuntime } from '../src/public-snapshot-serving-runtime.js';
 import { CORE_CHAIN_CACHE_SOURCE_PROTOCOL as source, CORE_CHAIN_CACHE_SNAPSHOT_PROTOCOL as snapshot,
   snapshotCoreChainCacheNetworks, type CoreChainCacheNetwork } from '../src/core-chain-cache-config.js';
 
@@ -21,11 +22,12 @@ function fixture(read: (...args: any[]) => Promise<PublicGraphSnapshot>) {
   const networks: CoreChainCacheNetwork[] = [{ identity, relays: [], registry: { ...scope,
     readPublicGraphSnapshot: read, verifyACKIdentity: async () => true, rpcUsage: () => ({}), destroy() {} } }];
   const chain = { ...scope, getIdentityId: async () => 7n, signMessage: vi.fn() } as unknown as ChainAdapter;
-  const agent = { nodeRole: 'core', chain, peerId: 'core', workLifetime, networks, proofRuntime: new PublicSnapshotProofRuntime(chain, workLifetime),
+  const runtime = createPublicSnapshotServingRuntime(chain, networks, workLifetime);
+  const agent = { nodeRole: 'core', chain, peerId: 'core', workLifetime, networks, runtime, proofRuntime: new PublicSnapshotProofRuntime(chain, workLifetime),
     router: { register: (p: string, h: Handler, o: { maxReadBytes: number }) => { handlers.set(p, h); limits.set(p, o.maxReadBytes); } } };
-  const serving = registerCoreChainCacheHandlers(agent as never)!;
+  registerCoreChainCacheHandlers(agent as never);
   const send = async (protocol: string, value: unknown, peer = 'edge') => decode(await handlers.get(protocol)!(encode(value), { toString: () => peer }));
-  return { agent, handlers, limits, send, workLifetime, networks, serving };
+  return { agent, handlers, limits, send, workLifetime, networks, runtime };
 }
 
 it('refuses unconfigured scopes and private inventory without leaking chain errors', async () => {
@@ -53,7 +55,7 @@ it('retains the shared two-build limit and physical ownership after cancellation
   const b = f.send(snapshot, { ...request, contextGraphId: 'second' }, 'b');
   expect(await f.send(snapshot, { ...request, contextGraphId: 'third' }, 'c')).toEqual({ unavailable: true });
   // Legacy requests use this same runtime; neither protocol gets extra builder slots.
-  await expect(f.serving.runtime.get('legacy', { deploymentId: scope.deploymentId, contextGraphId: 'legacy', onChainId: '1' })).rejects.toThrow('busy');
+  await expect(f.runtime.get('legacy', { deploymentId: scope.deploymentId, contextGraphId: 'legacy', onChainId: '1' })).rejects.toThrow('busy');
   expect(signals).toHaveLength(2);
   f.workLifetime.close();
   expect(signals.every(s => s.aborted)).toBe(true);

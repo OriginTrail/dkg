@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash, randomBytes } from 'node:crypto';
-import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
-import { mapWithConcurrencyDrained } from './map-with-concurrency.js';
+import { probeSnapshotPeerBatches } from './public-snapshot-peer-probes.js';
 import type { SnapshotSourcePolicy } from './public-snapshot-policy.js';
 
 export interface SnapshotSourcePorts extends Pick<SnapshotSourcePolicy, 'probe' | 'unavailableMessage'> {
@@ -24,26 +23,14 @@ export async function selectSnapshotSources(
   const candidates = [...new Set(await ports.candidates(signal))]
     .filter(peer => typeof peer === 'string' && peer.length > 0 && peer.length <= 256 && peer !== ports.selfPeerId)
     .map(peer => ({ peer, rank: rank(peer) })).sort((a, b) => a.rank.localeCompare(b.rank))
-    .slice(0, 16);
+    .slice(0, 16).map(candidate => candidate.peer);
   const selected: string[] = [];
-  for (let offset = 0; offset < candidates.length && selected.length < 4; offset += 4) {
-    signal.throwIfAborted();
-    // Keep every admitted probe in the job's physical lifetime, including a
-    // dependency still retiring after a sibling observes cancellation.
-    const proven = await mapWithConcurrencyDrained(candidates.slice(offset, offset + 4), 4, async ({ peer }) => {
-      const lifetime = startRequestAbortLifecycle(10_000, [signal]);
-      try {
-        await ports.connect(peer, lifetime.signal);
-        lifetime.signal.throwIfAborted();
-        const valid = await ports.probe(peer, nonce, lifetime.signal);
-        lifetime.signal.throwIfAborted();
-        return valid ? peer : null;
-      } catch {
-        signal.throwIfAborted();
-        return null;
-      } finally { lifetime.release(); }
-    });
-    selected.push(...proven.filter((p): p is string => p !== null).slice(0, 4 - selected.length));
+  for await (const proven of probeSnapshotPeerBatches({
+    candidates, connect: (peer, probeSignal) => ports.connect(peer, probeSignal),
+    authenticate: (peer, probeSignal) => ports.probe(peer, nonce, probeSignal),
+  }, signal)) {
+    selected.push(...proven.slice(0, 4 - selected.length));
+    if (selected.length === 4) break;
   }
   signal.throwIfAborted();
   if (!selected.length) throw new Error(ports.unavailableMessage);

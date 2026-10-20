@@ -14,16 +14,17 @@ type Handler = (bytes: Uint8Array, remote: { toString(): string }) => Promise<Ui
 const signature = { r: ethers.getBytes('0x' + '1'.repeat(64)), vs: ethers.getBytes('0x' + '2'.repeat(64)) };
 afterEach(() => vi.useRealTimers());
 
-function fixture() {
+function fixture(cacheEnabled = true) {
   const handlers = new Map<string, Handler>();
   const workLifetime = new AgentWorkLifetime();
   const read = vi.fn(async (_graph: string, _id: string, _options: { signal: AbortSignal }) =>
     ({ observedAt: Date.now(), expiresAt: Date.now() + 120_000 }) as PublicGraphSnapshot);
+  const legacyRead = vi.fn((graph: string, id: string, options: { signal: AbortSignal }) => read(graph, id, options));
   const sign = vi.fn(async (_bytes: Uint8Array, _options: { signal: AbortSignal }) => signature);
-  const agent = { chain: { ...scope, readPublicGraphSnapshot: read, getIdentityId: async () => 7n, signMessage: sign },
-    config: { nodeRole: 'core', coreChainCacheNetworks: [{
+  const agent = { chain: { ...scope, readPublicGraphSnapshot: legacyRead, getIdentityId: async () => 7n, signMessage: sign },
+    config: { nodeRole: 'core', coreChainCacheNetworks: cacheEnabled ? [{
       registry: { ...scope, readPublicGraphSnapshot: read }, relays: [], identity: { chainId: scope.chainId },
-    }] }, peerId: 'core', workLifetime,
+    }] : [] }, peerId: 'core', workLifetime,
     subscribedContextGraphs: new Map(['one', 'two', 'three', 'four'].map(g => [g, { coreHosted: true, onChainId: '1' }])),
     contextGraphBindingState: { capture: () => 0, isGenerationCurrent: () => true }, isPrivateContextGraph: async () => false,
     router: { register: (p: string, h: Handler) => { handlers.set(p, h); } },
@@ -36,8 +37,16 @@ function fixture() {
     contextGraphId: 'one', onChainId: '1', nonce: 'a'.repeat(64), requesterPeerId: peer, responderPeerId: 'core' }, peer);
   const snapshot = (protocol: string, graph: string, peer: string) => send(protocol, { version: 1,
     ...(protocol === CORE_CHAIN_CACHE_SNAPSHOT_PROTOCOL ? scope : {}), contextGraphId: graph, onChainId: '1', refresh: false }, peer);
-  return { workLifetime, read, sign, proof, snapshot };
+  return { workLifetime, read, legacyRead, sign, proof, snapshot };
 }
+
+it.each([true, false])('preserves ordinary-handler backend selection with chain cache enabled=%s', async enabled => {
+  const f = fixture(enabled);
+  expect(await f.snapshot(PUBLIC_GRAPH_SNAPSHOT_PROTOCOL, 'one', 'legacy-edge')).toHaveProperty('observedAt');
+  expect(f.read).toHaveBeenCalledTimes(1);
+  expect(f.legacyRead).toHaveBeenCalledTimes(enabled ? 0 : 1);
+  await f.workLifetime.drain();
+});
 
 it('shares the four proof slots across registered legacy/cache handlers until physical signing settles', async () => {
   vi.useFakeTimers();

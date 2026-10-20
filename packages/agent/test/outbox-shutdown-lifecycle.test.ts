@@ -32,7 +32,7 @@ import { Rfc64BackgroundWorkDispatcherV1 } from
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.chain = new MockChainAdapter();
-  agent.config = {};
+  agent.config = { coreChainCacheNetworks: [] };
   agent.workLifetime = new AgentWorkLifetime();
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
