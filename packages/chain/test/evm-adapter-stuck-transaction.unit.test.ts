@@ -211,9 +211,12 @@ describe('V10 write speed-up through the adapter', () => {
       undefined,
       async () => {},
     ).catch((err: unknown) => err);
+    // The timeout still names the transaction an endpoint is known to hold. Each refused
+    // replacement was given its own window in case an earlier endpoint took it.
     expect(failure).toMatchObject({ code: 'RPC_TIMEOUT', txHash: original.txHash });
     expect(String((failure as Error).message)).toContain('timed out waiting for a receipt after 1000ms');
-    expect(events).toHaveLength(2);
+    expect(String((failure as Error).message)).toContain('deadline renewed 2x');
+    expect(events).toHaveLength(3);
   });
 
   it('replaces a stuck standalone write, which keeps the receipt it is waited for', async () => {

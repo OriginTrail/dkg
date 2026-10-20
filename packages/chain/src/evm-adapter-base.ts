@@ -1938,6 +1938,7 @@ export class EVMChainAdapterBase {
       ...(recovery
         ? {
           txHashes: () => recovery.txHashes(),
+          timeoutTxHash: () => recovery.latestTxHash(),
           onPending: (context: { deadlineMs: number; deadlineReached: boolean }) => recovery.onPending(context),
         }
         : {}),

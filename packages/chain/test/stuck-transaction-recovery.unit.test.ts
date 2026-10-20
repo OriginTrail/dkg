@@ -194,7 +194,8 @@ describe('StuckTransactionRecovery', () => {
 
     await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBe(1_200_000);
     expect(broadcasts).toHaveLength(1);
-    expect(recovery.describeTimeout()).toBe(` (nonce 6722; it replaced ${original.txHash}; deadline renewed 1x)`);
+    expect(recovery.latestTxHash()).toBe(broadcasts[0]);
+    expect(recovery.describeTimeout()).toBe(` (nonce 6722; also sent as ${original.txHash}; deadline renewed 1x)`);
   });
 
   it('keeps waiting behind an earlier nonce without replacing, at most the bounded number of times', async () => {
@@ -243,38 +244,33 @@ describe('StuckTransactionRecovery', () => {
     expect(logs.join('\n')).toContain('replacement failed: write-ahead store unavailable');
   });
 
-  it('keeps a replacement the RPC rejected out of the outcome and out of the polled hashes', async () => {
-    const original = await strandedPublish();
-    const chain = { latestNonce: 6722, baseFeePerGas: 4_900_000n };
-    const { port } = fakePort(chain, {
-      broadcast: async () => {
-        throw Object.assign(new Error('insufficient funds for gas * price + value'), { code: 'INSUFFICIENT_FUNDS' });
-      },
+  // otReviewAgent on #3393: a failover broadcast can be accepted by one endpoint whose answer is
+  // lost, then rejected by the next (nonce too low once it has mined, or insufficient funds), so
+  // a broadcast error never proves the replacement reached no mempool.
+  for (const [name, failure] of [
+    ['an endpoint rejected', Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' })],
+    ['an endpoint refused for funds', Object.assign(new Error('insufficient funds for gas * price + value'), { code: 'INSUFFICIENT_FUNDS' })],
+    ['broadcast failed in transport', Object.assign(new Error('broadcast failed on all configured RPC endpoints'), { code: 'RPC_ENDPOINTS_EXHAUSTED' })],
+  ] as const) {
+    it(`keeps polling a replacement ${name}, and waits for it past the deadline`, async () => {
+      const original = await strandedPublish();
+      const chain = { latestNonce: 6722, baseFeePerGas: 4_900_000n };
+      const { port, broadcasts } = fakePort(chain, {
+        broadcast: async (_signedTx, txHash) => {
+          broadcasts.push(txHash);
+          throw failure;
+        },
+      });
+      const clock = { now: 600_000 };
+      const { recovery, logs } = recoveryFor(original, port, clock);
+
+      await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBe(1_200_000);
+      expect(recovery.txHashes()).toEqual([original.txHash, broadcasts[0]]);
+      // The timeout still names the transaction an endpoint is known to hold.
+      expect(recovery.latestTxHash()).toBe(original.txHash);
+      expect(logs.join('\n')).toContain('may not have been accepted, still polling it');
     });
-    const clock = { now: 600_000 };
-    const { recovery, logs } = recoveryFor(original, port, clock);
-
-    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBeUndefined();
-    expect(recovery.txHashes()).toEqual([original.txHash]);
-    expect(logs.join('\n')).toContain('was not accepted: insufficient funds');
-  });
-
-  it('polls a replacement whose broadcast failed in transport, since an endpoint may have taken it', async () => {
-    const original = await strandedPublish();
-    const chain = { latestNonce: 6722, baseFeePerGas: 4_900_000n };
-    const { port } = fakePort(chain, {
-      broadcast: async () => {
-        throw Object.assign(new Error('V10 publish broadcast failed on all configured RPC endpoints'), {
-          code: 'RPC_ENDPOINTS_EXHAUSTED',
-        });
-      },
-    });
-    const clock = { now: 600_000 };
-    const { recovery } = recoveryFor(original, port, clock);
-
-    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBeUndefined();
-    expect(recovery.txHashes()).toHaveLength(2);
-  });
+  }
 
   it('does not replace when the operator fee cap leaves no room for a bump', async () => {
     const original = await strandedPublish();
@@ -335,13 +331,19 @@ describe('receipt wait over a transaction and its replacements', () => {
     vi.useRealTimers();
   });
 
+  type FakeReceipt = { hash: string; status: number; blockHash?: string };
+
   async function waitWithRecovery(params: {
     minedHash: (hashes: readonly string[]) => string | undefined;
+    baseFeePerGas?: bigint;
+    broadcast?: StuckTransactionPort['broadcast'];
+    receiptFor?: (hash: string, hashes: readonly string[]) => FakeReceipt | null;
+    isReceiptEligible?: (receipt: FakeReceipt) => Promise<boolean>;
   }) {
     vi.useFakeTimers({ now: 0 });
     const original = await strandedPublish();
-    const chain = { latestNonce: 6722, baseFeePerGas: 4_900_000n };
-    const { port, broadcasts } = fakePort(chain);
+    const chain = { latestNonce: 6722, baseFeePerGas: params.baseFeePerGas ?? 4_900_000n };
+    const { port, broadcasts } = fakePort(chain, params.broadcast ? { broadcast: params.broadcast } : {});
     const recovery = new StuckTransactionRecovery({
       original,
       nonce: 6722,
@@ -352,15 +354,18 @@ describe('receipt wait over a transaction and its replacements', () => {
       log: () => {},
     });
     const lookups: string[] = [];
-    const outcome = waitForReceiptWithDeadline({
+    const outcome = waitForReceiptWithDeadline<FakeReceipt>({
       txHash: original.txHash,
       txHashes: () => recovery.txHashes(),
+      timeoutTxHash: () => recovery.latestTxHash(),
       receiptTimeoutMs: 600_000,
       pollIntervalMs: 2_000,
       getReceipt: async (hash) => {
         lookups.push(hash);
+        if (params.receiptFor) return params.receiptFor(hash, recovery.txHashes());
         return params.minedHash(recovery.txHashes()) === hash ? { hash, status: 1 } : null;
       },
+      ...(params.isReceiptEligible ? { isReceiptEligible: params.isReceiptEligible } : {}),
       assertSuccessfulReceipt: () => {},
       onPending: (context) => recovery.onPending(context),
       formatTimeoutMessage: ({ txHash }) => `tx ${txHash} timed out${recovery.describeTimeout()}`,
@@ -398,5 +403,56 @@ describe('receipt wait over a transaction and its replacements', () => {
     expect(reason.code).toBe('RPC_TIMEOUT');
     expect(reason.txHash).toBe(broadcasts[broadcasts.length - 1]);
     expect(reason.message).toContain(original.txHash);
+  });
+
+  // otReviewAgent on #3393: one endpoint mines the replacement but loses its answer, and the next
+  // reports nonce too low. The broadcast fails, yet the operation succeeded.
+  it('resolves with a replacement an endpoint mined though the broadcast reported nonce too low', async () => {
+    let replacementHash: string | undefined;
+    const { outcome } = await waitWithRecovery({
+      minedHash: () => replacementHash,
+      broadcast: async (_signedTx, txHash) => {
+        replacementHash = txHash;
+        throw Object.assign(new Error('nonce too low'), { code: 'NONCE_EXPIRED' });
+      },
+    });
+    await vi.advanceTimersByTimeAsync(40_000);
+    await expect(outcome).resolves.toMatchObject({ status: 'fulfilled', receipt: { hash: replacementHash } });
+  });
+
+  it('gives a replacement sent with an uncertain outcome at the deadline its own receipt window', async () => {
+    let replacementHash: string | undefined;
+    const { outcome } = await waitWithRecovery({
+      // Correctly priced, so nothing happens before the deadline.
+      baseFeePerGas: 23n,
+      minedHash: () => replacementHash,
+      broadcast: async (_signedTx, txHash) => {
+        replacementHash = txHash;
+        throw Object.assign(new Error('broadcast timed out'), { code: 'RPC_ENDPOINTS_EXHAUSTED' });
+      },
+    });
+    await vi.advanceTimersByTimeAsync(600_000 + 10_000);
+    await expect(outcome).resolves.toMatchObject({ status: 'fulfilled', receipt: { hash: replacementHash } });
+  });
+
+  it('does not let an ineligible original receipt hide the replacement receipt', async () => {
+    const ORPHANED = `0x${'0a'.repeat(32)}`;
+    const CANONICAL = `0x${'0b'.repeat(32)}`;
+    const { outcome, broadcasts } = await waitWithRecovery({
+      minedHash: () => undefined,
+      // After the reorg one endpoint still serves the original's receipt from an orphaned block,
+      // while the replacement sits in the canonical chain.
+      receiptFor: (hash, hashes) => {
+        if (hashes.length < 2) return null;
+        if (hash === hashes[0]) return { hash, status: 1, blockHash: ORPHANED };
+        return hash === hashes[1] ? { hash, status: 1, blockHash: CANONICAL } : null;
+      },
+      isReceiptEligible: async (receipt) => receipt.blockHash === CANONICAL,
+    });
+    await vi.advanceTimersByTimeAsync(40_000);
+    await expect(outcome).resolves.toMatchObject({
+      status: 'fulfilled',
+      receipt: { hash: broadcasts[0], blockHash: CANONICAL },
+    });
   });
 });

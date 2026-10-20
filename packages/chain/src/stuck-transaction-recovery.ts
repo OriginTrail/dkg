@@ -26,12 +26,15 @@
  * lane: every later transaction already holds a higher one. A replacement that
  * cannot be made or sent is logged and never becomes the operation's error;
  * the original may still be mined, so the outcome stays the receipt wait's.
+ * Once its broadcast starts, a replacement counts as possibly sent, whatever
+ * the broadcast reports: an endpoint that took it can lose its answer and a
+ * later one then reject it, so its hash is polled and waited for.
  */
 
 import type { JsonRpcProvider } from 'ethers';
 import type { ReplacementBroadcastSignal } from './chain-adapter.js';
 import { errorMessage } from './evm-adapter-errors.js';
-import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
+import { applyTransactionFeeCap } from './evm-fee-cap.js';
 import {
   type ChainFeeFloor,
   type Eip1559Fees,
@@ -155,10 +158,13 @@ export class StuckTransactionRecovery {
   private readonly maxDeadlineRenewals: number;
   private replacements = 0;
   private renewals = 0;
+  /** The latest hash an endpoint accepted; the original until a replacement is. */
+  private acceptedTxHash: string;
   private nextCheckAtMs: number;
 
   constructor(private readonly options: StuckTransactionRecoveryOptions) {
     this.tracked = [options.original];
+    this.acceptedTxHash = options.original.txHash;
     this.now = options.now ?? Date.now;
     this.log = options.log ?? ((message) => console.warn(message));
     this.maxReplacements = options.maxReplacements ?? MAX_STUCK_TRANSACTION_REPLACEMENTS;
@@ -171,20 +177,19 @@ export class StuckTransactionRecovery {
     return this.tracked.map((tx) => tx.txHash);
   }
 
-  /** The most recently sent hash: the one most likely to be mined. */
+  /** The latest hash an endpoint accepted: the one most likely to be mined. */
   latestTxHash(): string {
-    return this.tracked[this.tracked.length - 1].txHash;
+    return this.acceptedTxHash;
   }
 
   /**
-   * A suffix for the timeout message: the replaced hashes, and how many times
-   * the deadline was renewed. Empty when neither happened.
+   * A suffix for the timeout message: the other hashes it was sent as, and how
+   * many times the deadline was renewed. Empty when neither happened.
    */
   describeTimeout(): string {
     const parts: string[] = [];
-    if (this.tracked.length > 1) {
-      parts.push(`it replaced ${this.tracked.slice(0, -1).map((tx) => tx.txHash).join(', ')}`);
-    }
+    const others = this.txHashes().filter((txHash) => txHash !== this.acceptedTxHash);
+    if (others.length > 0) parts.push(`also sent as ${others.join(', ')}`);
     if (this.renewals > 0) parts.push(`deadline renewed ${this.renewals}x`);
     return parts.length === 0 ? '' : ` (nonce ${this.options.nonce}; ${parts.join('; ')})`;
   }
@@ -235,7 +240,7 @@ export class StuckTransactionRecovery {
     }
   }
 
-  /** Sign, checkpoint and broadcast one replacement; true when an endpoint accepted it. */
+  /** Sign, checkpoint and broadcast one replacement; true once its broadcast started. */
   private async replace(
     previous: TrackedTransaction,
     baseFeePerGas: bigint | null,
@@ -249,7 +254,10 @@ export class StuckTransactionRecovery {
     let signed: { signedTx: string; txHash: string };
     try {
       const market = baseFeePerGas === null ? previous.fees : await port.priceFees(baseFeePerGas);
-      fees = capFees(replacementFees(previous.fees, market), this.options.maxFeePerGasCap);
+      const cap = this.options.maxFeePerGasCap;
+      fees = cap === undefined
+        ? replacementFees(previous.fees, market)
+        : applyTransactionFeeCap(replacementFees(previous.fees, market), cap);
       if (!isAcceptedReplacement(previous.fees, fees)) {
         this.log(
           `[chain] ${label} tx ${previous.txHash} at nonce ${nonce} is stuck (${why}) but cannot be ` +
@@ -267,22 +275,18 @@ export class StuckTransactionRecovery {
       this.log(`[chain] ${label} tx ${previous.txHash} at nonce ${nonce} is stuck (${why}); replacement failed: ${describeError(err)}`);
       return false;
     }
-    const replacement = { txHash: signed.txHash, signedTx: signed.signedTx, fees };
+    this.tracked.push({ txHash: signed.txHash, signedTx: signed.signedTx, fees });
     this.replacements += 1;
     try {
       await port.broadcast(signed.signedTx, signed.txHash);
     } catch (err) {
-      // A definitive rejection (insufficient funds, underpriced, nonce too
-      // low) left it in no mempool. Any other failure may have come after an
-      // endpoint accepted it, so its hash is polled as if it had been sent.
-      if (classifyRpcRetryDisposition(err) !== 'fail') this.tracked.push(replacement);
       this.log(
         `[chain] ${label} tx ${previous.txHash} at nonce ${nonce} is stuck (${why}); replacement ` +
-        `${signed.txHash} was not accepted: ${describeError(err)}`,
+        `${signed.txHash} may not have been accepted, still polling it: ${describeError(err)}`,
       );
-      return false;
+      return true;
     }
-    this.tracked.push(replacement);
+    this.acceptedTxHash = signed.txHash;
     port.onReplaced?.();
     this.log(
       `[chain] ${label} tx ${previous.txHash} at nonce ${nonce} is stuck (${why}); replaced it with ` +
@@ -359,13 +363,6 @@ export function stuckTransactionRecoveryFor(
       ...(target.onReplaced ? { onReplaced: target.onReplaced } : {}),
     },
   });
-}
-
-function capFees(fees: Eip1559Fees, cap: bigint | undefined): Eip1559Fees {
-  if (cap === undefined) return fees;
-  const maxFeePerGas = fees.maxFeePerGas > cap ? cap : fees.maxFeePerGas;
-  const maxPriorityFeePerGas = fees.maxPriorityFeePerGas > maxFeePerGas ? maxFeePerGas : fees.maxPriorityFeePerGas;
-  return { maxFeePerGas, maxPriorityFeePerGas };
 }
 
 /** An error's text for a log line, without the request URL (it may carry an API key). */

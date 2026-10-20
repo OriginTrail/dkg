@@ -15,10 +15,13 @@ export interface WaitForReceiptWithDeadlineOptions<TReceipt> {
    * Every hash that may carry this operation's receipt, polled in order on each
    * tick; read again on every tick, so it may grow while the wait runs (a stuck
    * transaction's same-nonce replacements join the original). The first one
-   * with a receipt decides the outcome. Defaults to `[txHash]`; the timeout
-   * names the last one.
+   * with an eligible receipt decides the outcome: an ineligible one (not yet
+   * final, or no longer canonical) does not stop the others being looked up.
+   * Defaults to `[txHash]`.
    */
   txHashes?: () => readonly string[];
+  /** The hash the timeout names; defaults to the last of `txHashes`. */
+  timeoutTxHash?: () => string;
   receiptTimeoutMs: number;
   pollIntervalMs: number;
   /**
@@ -65,47 +68,42 @@ export async function waitForReceiptWithDeadline<TReceipt>(
 
   for (;;) {
     while (Date.now() < deadlineMs) {
-      let receipt: TReceipt | null = null;
-      try {
-        for (const txHash of txHashes()) {
+      for (const txHash of txHashes()) {
+        let receipt: TReceipt | null = null;
+        try {
           receipt = await options.getReceipt(txHash, { deadlineMs });
-          if (receipt) break;
-        }
-      } catch (err) {
-        // A transport-class failure inside this budgeted wait consumes budget, never the
-        // operation: an exhausted endpoint pass (RPC_RECEIPT_LOOKUP_FAILED — classified
-        // non-retryable so ONE-SHOT lookups fail fast) or any other chain-namespaced
-        // transport code keeps polling until the deadline, exactly like a retryable blip.
-        // The tx may already be on the wire, so dying here with budget left would demote a
-        // healthy publish into the recovery lane over a single flaky poll tick. Once the
-        // deadline is consumed, the operation-level RPC_TIMEOUT below is authoritative,
-        // carrying the last transport error as cause. Everything outside the retryable and
-        // transport sets (deterministic classifications) still aborts immediately.
-        if (!isRetryableRpcError(err) && !isChainRpcTransportError(err)) throw err;
-        if (Date.now() >= deadlineMs) {
+        } catch (err) {
+          // A transport-class failure inside this budgeted wait consumes budget, never the
+          // operation: an exhausted endpoint pass (RPC_RECEIPT_LOOKUP_FAILED — classified
+          // non-retryable so ONE-SHOT lookups fail fast) or any other chain-namespaced
+          // transport code keeps polling until the deadline, exactly like a retryable blip.
+          // The tx may already be on the wire, so dying here with budget left would demote a
+          // healthy publish into the recovery lane over a single flaky poll tick. Once the
+          // deadline is consumed, the operation-level RPC_TIMEOUT below is authoritative,
+          // carrying the last transport error as cause. Everything outside the retryable and
+          // transport sets (deterministic classifications) still aborts immediately.
+          if (!isRetryableRpcError(err) && !isChainRpcTransportError(err)) throw err;
           lastError = err;
-          break;
+          continue;
         }
-        lastError = err;
-      }
 
-      // Receipt validation is deliberately OUTSIDE the transport-retry catch.
-      // A deterministic mined revert must remain CALL_EXCEPTION even when the
-      // lookup completes at or just after the operation deadline.
-      if (receipt) {
+        // Receipt validation is deliberately OUTSIDE the transport-retry catch.
+        // A deterministic mined revert must remain CALL_EXCEPTION even when the
+        // lookup completes at or just after the operation deadline.
+        if (!receipt) continue;
         let eligible = false;
         try {
           eligible = await options.isReceiptEligible?.(receipt, { deadlineMs }) ?? true;
         } catch (err) {
           if (!isRetryableRpcError(err)) throw err;
           lastError = err;
-          if (Date.now() >= deadlineMs) break;
         }
         if (eligible) {
           options.assertSuccessfulReceipt(receipt);
           return receipt;
         }
       }
+      if (Date.now() >= deadlineMs) break;
 
       const extendedMs = await options.onPending?.({ deadlineMs, deadlineReached: false });
       if (typeof extendedMs === 'number' && extendedMs > deadlineMs) deadlineMs = extendedMs;
@@ -120,7 +118,7 @@ export async function waitForReceiptWithDeadline<TReceipt>(
   }
 
   const waitedHashes = txHashes();
-  const txHash = waitedHashes[waitedHashes.length - 1] ?? options.txHash;
+  const txHash = options.timeoutTxHash?.() ?? waitedHashes[waitedHashes.length - 1] ?? options.txHash;
   throw createRpcTimeoutError(
     options.formatTimeoutMessage({
       txHash,
