@@ -1134,6 +1134,12 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
 
+  packages/kafka-source:
+    dependencies:
+      kafkajs:
+        specifier: 2.2.4
+        version: 2.2.4
+
   packages/local-llm:
     dependencies:
       '@origintrail-official/dkg-http-utils':
@@ -5825,6 +5831,10 @@ packages:
 
   jsonschema@1.5.0:
     resolution: {integrity: sha512-K+A9hhqbn0f3pJX17Q/7H6yQfD/5OXgdrR5UE12gMXCiN9D5Xq2o5mddV2QEcX/bjla99ASsAAQUyMCCRWAEhw==}
+
+  kafkajs@2.2.4:
+    resolution: {integrity: sha512-j/YeapB1vfPT2iOIUn/vxdyKEuhuY2PxMBvf5JWux6iSaukAccrMtXEY/Lb7OvavDhOWME589bpLrEdnVHjfjA==}
+    engines: {node: '>=14.0.0'}
 
   kapsule@1.16.3:
     resolution: {integrity: sha512-4+5mNNf4vZDSwPhKprKwz3330iisPrb08JyMgbsdFrimBCKNHecua/WBwvVg3n7vwx0C1ARjfhwIpbrbd9n5wg==}
@@ -12807,6 +12817,8 @@ snapshots:
   jsonpointer@5.0.1: {}
 
   jsonschema@1.5.0: {}
+
+  kafkajs@2.2.4: {}
 
   kapsule@1.16.3:
     dependencies:
