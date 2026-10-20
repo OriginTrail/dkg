@@ -164,9 +164,11 @@ describe('public snapshot job ownership', () => {
   it.each(['subscription', 'lifetime'] as const)('retires a held initial read when %s changes', async change => {
     const {a,invalidate} = fixture();
     let release!: (value: ReturnType<typeof snapshot>) => void;
-    a.chain.readPublicGraphSnapshot.mockImplementationOnce(() => new Promise(resolve => {release = resolve;}));
+    let entered!: () => void;
+    const initialReadEntered = new Promise<void>(resolve => { entered = resolve; });
+    a.chain.readPublicGraphSnapshot.mockImplementationOnce(() => new Promise(resolve => {release = resolve; entered();}));
     const job = run(a, 'rpc-only'); const rejected = expect(job).rejects.toThrow('ownership');
-    await Promise.resolve();
+    await initialReadEntered;
     expect(a.workLifetime.physicalRuns.size).toBe(1);
     if(change === 'subscription') invalidate();
     else { a.workLifetime.close(); a.workLifetime.open(); }
