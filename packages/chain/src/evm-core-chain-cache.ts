@@ -6,7 +6,7 @@ import { createRpcRequestProvider, withRpcRequestContext, type RpcRequestAdmissi
 import { loadAbi } from './evm-adapter-abi.js';
 import { readFirstProviderWithTransientRetry } from './rpc-provider-fallback.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
-import { readEvmPublicGraphSnapshot } from './evm-adapter-public-graph-snapshot.js';
+import { readEvmPublicGraphSnapshot } from './evm-public-graph-snapshot.js';
 import { verifyEvmRegisteredIdentity } from './evm-registered-identity.js';
 import { numericChainIdOf } from './configured-chain-id.js';
 import type { CoreChainCacheRegistry } from './core-chain-cache-registry.js';
