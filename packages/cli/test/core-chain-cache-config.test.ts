@@ -53,4 +53,20 @@ describe('official chain-cache deployment configuration', () => {
     expect(buildCoreChainCacheConfig({ role: 'edge' }, registry)).toEqual({ DKG_Core_chain_cache: false });
     expect(buildCoreChainCacheConfig({ enabled: false, role: 'core' }, registry)).toEqual({ DKG_Core_chain_cache: false });
   });
+  it.each(['mainnet-base', 'testnet'])('keeps a default %s core with nine endpoints valid', name => {
+    const create = vi.spyOn(chain, 'createEvmCoreChainCacheRegistry');
+    const own = loadBundledNetworkRegistry()[name];
+    const urls = Array.from({ length: 9 }, (_, i) => `http://127.0.0.1:${10 + i}`);
+    const configuredChain = { ...own.chain!, rpcUrl: urls[0]!, rpcUrls: urls.slice(1) };
+    const original = structuredClone(configuredChain);
+    let result: ReturnType<typeof buildCoreChainCacheConfig> | undefined;
+    try {
+      result = buildCoreChainCacheConfig({ role: 'core', networkName: name,
+        networkId: own.networkId, chain: configuredChain });
+      expect(result.DKG_Core_chain_cache).toBe(true);
+      expect(create.mock.calls.find(([c]) => c.chainId === own.chain!.chainId)![0].rpcUrls).toEqual(urls.slice(0, 8));
+      expect(configuredChain).toEqual(original);
+      expect(chain.resolveRpcUrls(configuredChain.rpcUrl, configuredChain.rpcUrls)).toEqual(urls);
+    } finally { result?.coreChainCacheNetworks?.forEach(n => n.registry.destroy()); create.mockRestore(); }
+  });
 });

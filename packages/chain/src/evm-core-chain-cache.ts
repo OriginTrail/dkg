@@ -10,6 +10,8 @@ import { verifyEvmRegisteredIdentity } from './evm-registered-identity.js';
 import { numericChainIdOf } from './configured-chain-id.js';
 import type { CoreChainCacheRegistry } from './core-chain-cache-registry.js';
 
+export const CORE_CHAIN_CACHE_MAX_RPC_ENDPOINTS = 8;
+
 /** Wallet-free, lazy RPC reader. It never starts a chain index, sends transactions or signs. */
 export function createEvmCoreChainCacheRegistry(config: {
   chainId: string; hubAddress: string; rpcUrls: readonly string[]; finalityConfirmations: number;
@@ -19,7 +21,7 @@ export function createEvmCoreChainCacheRegistry(config: {
   const numeric = numericChainIdOf(config.chainId);
   if (numeric === undefined || numeric > BigInt(Number.MAX_SAFE_INTEGER) || !ethers.isAddress(config.hubAddress)
     || config.hubAddress === ethers.ZeroAddress || !config.rpcUrls.length
-    || config.rpcUrls.length > 8 || !Number.isSafeInteger(config.finalityConfirmations) || config.finalityConfirmations < 1)
+    || config.rpcUrls.length > CORE_CHAIN_CACHE_MAX_RPC_ENDPOINTS || !Number.isSafeInteger(config.finalityConfirmations) || config.finalityConfirmations < 1)
     throw new Error('Invalid DKG Core chain cache registry');
   const deploymentId = `${config.chainId}:hub=${config.hubAddress.toLowerCase()}`;
   const accounting = createRpcUsageRecorder(() => config.chainId, "other");

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createEvmCoreChainCacheRegistry, resolveRpcUrls, type RpcRequestAdmission } from '@origintrail-official/dkg-chain';
+import { createEvmCoreChainCacheRegistry, CORE_CHAIN_CACHE_MAX_RPC_ENDPOINTS, resolveRpcUrls, type RpcRequestAdmission } from '@origintrail-official/dkg-chain';
 import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
 import { loadBundledNetworkRegistry, validateNetworkConfigReadiness, type NetworkConfig } from '../config.js';
 
@@ -38,7 +38,8 @@ export function buildCoreChainCacheConfig(input: {
         chainId: chain.chainId, networkConfigName: key }),
       relays: Object.freeze([...network.relays]),
       registry: createEvmCoreChainCacheRegistry({ chainId: chain.chainId, hubAddress: chain.hubAddress,
-        rpcUrls: urls, finalityConfirmations: connection.finalityConfirmations ?? chain.finalityConfirmations ?? 1,
+        rpcUrls: urls.slice(0, CORE_CHAIN_CACHE_MAX_RPC_ENDPOINTS),
+        finalityConfirmations: connection.finalityConfirmations ?? chain.finalityConfirmations ?? 1,
         admission: input.admission }),
     });
   })) };

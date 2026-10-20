@@ -125,6 +125,28 @@ describe('public snapshot exact recovery pacing', () => {
     expect(Date.now()).toBeLessThanOrEqual(deadline - PUBLIC_SNAPSHOT_FINAL_READ_RESERVE_MS);
   });
 
+  it('waits for local admission before discovering more peers and closes discovery after success', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const calls: string[] = [], discovered: string[] = [];
+    let closed = false;
+    vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async request => {
+      calls.push(request.remotePeerId);
+      return calls.length === 1 ? outcome({ admission: 'local-admission-deferred' })
+        : outcome({ committedExactAssetUals: selected(request), disposition: 'found', streamOutcome: 'complete' });
+    });
+    const result = await settle(recover({ uals: [uals[0]!], canAdmit: () => true,
+      peerBatches: async function* () {
+        try {
+          discovered.push('first'); yield ['first'];
+          discovered.push('later'); yield ['later'];
+        } finally { closed = true; }
+      } }));
+    expect(result).toEqual({ value: { committed: new Set([uals[0]]), alreadyPresent: 0 } });
+    expect(calls).toEqual(['first', 'first']);
+    expect(discovered).toEqual(['first']);
+    expect(closed).toBe(true);
+  });
+
   it('keeps the committed count when the job limit passes during an attempt', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const deadline = Date.now() + 600_000;
