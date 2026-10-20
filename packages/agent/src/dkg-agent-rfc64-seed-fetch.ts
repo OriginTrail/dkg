@@ -89,6 +89,16 @@ export interface Rfc64UnregisteredAuthoritySeedPeerSelectionOptionsV1 {
    * group's window; without it the selection is the deterministic first window.
    */
   readonly contextGraphId?: string;
+  /**
+   * A smaller window than {@link RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1}
+   * for a caller that asks fewer peers per attempt (the sub-graph lookup of a
+   * write, a Core's fetch of a hosted graph's definition). The selection owns
+   * the rotation, so successive attempts still tile every connected peer: a
+   * caller that cut the full window down itself would rotate twice and could
+   * skip peers for good. At least one slot stays with non-core peers while any
+   * are connected (the reserved count, or half the window when that is less).
+   */
+  readonly maxPeers?: number;
 }
 
 /** Per-agent, per-scope count of peer-window selections (rotation state). */
@@ -251,12 +261,16 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
     const admitted = new Set([...connected].filter(
       (peerId) => coordinator === undefined || !coordinator.isRejectedPeer(peerId),
     ));
-    const cap = RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1;
+    const cap = options.maxPeers === undefined
+      ? RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1
+      : Math.max(1, Math.min(RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1, Math.floor(options.maxPeers)));
+    const reservedNonCores = Math.min(RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1, Math.max(1, Math.floor(cap / 2)));
     const { contextGraphId } = options;
 
+    const attempt = contextGraphId === undefined ? 0 : nextPeerWindowAttempt(this, contextGraphId);
     // 1. Provider hint: pins the accepted policy manifest names for this graph
     //    are the peers most likely to hold the complete graph (and its `_meta`).
-    const selected: string[] = [];
+    const hints: string[] = [];
     if (contextGraphId !== undefined) {
       // Absent on partially wired agents (mixin-prototype tests); a real agent
       // always constructs the runtime before start.
@@ -265,24 +279,24 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
         | undefined;
       const pinned = runtime?.resolveConfiguredCompleteProviderPeerIds(contextGraphId) ?? [];
       for (const providerPeerId of pinned) {
-        if (selected.length >= cap) break;
-        if (admitted.has(providerPeerId) && !selected.includes(providerPeerId)) {
-          selected.push(providerPeerId);
-        }
+        if (admitted.has(providerPeerId) && !hints.includes(providerPeerId)) hints.push(providerPeerId);
       }
     }
+    // 2. The peer that last served this scope's seed.
     const seedSource = contextGraphId === undefined
       ? undefined
       : rfc64SeedSourcePeersV1.get(this)?.get(contextGraphId);
-    if (
-      seedSource !== undefined
-      && selected.length < cap
-      && admitted.has(seedSource)
-      && !selected.includes(seedSource)
-    ) {
-      selected.push(seedSource);
+    if (seedSource !== undefined && admitted.has(seedSource) && !hints.includes(seedSource)) {
+      hints.push(seedSource);
     }
-    const hinted = new Set(selected);
+    // Hints lead the window. When they would fill it while other peers are
+    // connected, they leave one slot and rotate among themselves, so no
+    // connected peer stays out of reach of every attempt (a small window of a
+    // graph with several pinned providers would otherwise never move).
+    const hinted = new Set(hints);
+    const othersConnected = [...admitted].some((peerId) => !hinted.has(peerId));
+    const hintTake = hints.length >= cap && othersConnected ? cap - 1 : Math.min(hints.length, cap);
+    const selected: string[] = rotatedPeerWindow(hints, hintTake, attempt);
     const isCore = (peerId: string) => this.peerCapabilityRegistry?.supportsCore(peerId) === true;
     const cores: string[] = [];
     const nonCores: string[] = [];
@@ -297,14 +311,9 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
     const remaining = cap - selected.length;
     let nonCoreTake = nonCores.length === 0
       ? 0
-      : Math.min(
-        nonCores.length,
-        RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1,
-        remaining,
-      );
+      : Math.min(nonCores.length, reservedNonCores, remaining);
     const coreTake = Math.min(cores.length, remaining - nonCoreTake);
     nonCoreTake = Math.min(nonCores.length, remaining - coreTake);
-    const attempt = contextGraphId === undefined ? 0 : nextPeerWindowAttempt(this, contextGraphId);
     selected.push(
       ...rotatedPeerWindow(cores, coreTake, attempt),
       ...rotatedPeerWindow(nonCores, nonCoreTake, attempt),

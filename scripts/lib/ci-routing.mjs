@@ -103,11 +103,14 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: EVM_SCOPES,
   },
   'packages/query': {
+    // The UI assertion paging suite runs the real scoped query engine.
     lanes: [
+      'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
       'bura_cli',
       'bura_query',
+      'kosava_node_ui',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -117,6 +120,7 @@ export const WORKSPACE_RULES = Object.freeze({
   'packages/publisher': {
     lanes: [
       'tornado_publisher',
+      'tornado_blazegraph',
       'tornado_agent',
       'bura_cli',
       'kosava_supporting',
@@ -299,14 +303,15 @@ const BLAZEGRAPH_ARM64_PATTERNS = [
 // scripts/lib/__tests__/ci-delta-routing.test.mjs derives that set from the
 // suite's imports and fails when a file it loads is missing here.
 const IDENTITY_WALLET_EVM_PATTERNS = [
+  /^packages\/node-ui\/src\/rdf-literal\.ts$/,
   /^packages\/node-ui\/src\/ui\/web3\//,
   /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,
-  /^packages\/node-ui\/src\/ui\/(?:api|http|identity-wallet-api|pca-api)\.ts$/,
-  /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken)|stores\/wallet)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:api|assertion-identity|assertions-page|query-bindings|query-api|query-transport|http|identity-wallet-api|pca-api)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken|randomUUID|read-cache)|stores\/wallet)\.ts$/,
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
   /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/read-authority-diagnostics|context-graph-identifiers|auth|boolean-env-override|config|oxigraph-memory-limits|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/reconcile-unavailable|daemon\/read-authority-diagnostics|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
@@ -420,6 +425,12 @@ export const PATH_TRIGGERS = Object.freeze([
   // Files other packages load by relative path, outside their declared
   // dependencies.
   {
+    patterns: [/^packages\/publisher\/src\/(?:metadata|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
+    lanes: ['kosava_node_ui'],
+    evmScopes: [],
+    reason: 'the UI reserved-UAL regression loads the publisher metadata writer and its helpers',
+  },
+  {
     patterns: [/^packages\/agent\/src\/sync\/(?:exact-assets|exact-batch-stream-contract|wire-compression)\.ts$/],
     lanes: ['tornado_core'],
     evmScopes: [],
@@ -432,7 +443,7 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the agent memory-layer tests import the CLI markdown extractor',
   },
   {
-    patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|oxigraph-memory-limits|runtime-assets)\.ts$/],
+    patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/],
     // The EPCIS lanes are Blazegraph and supporting; the CLI rule already
     // selects Blazegraph.
     lanes: ['kosava_supporting'],
@@ -450,6 +461,7 @@ export const PATH_TRIGGERS = Object.freeze([
     // reads these sources and asserts their authority RPC call sites.
     patterns: [
       /^packages\/agent\/src\/dkg-agent-(?:cg-registry|context-graph|join|lifecycle|query)\.ts$/,
+      /^packages\/agent\/src\/remote-query-handler\.ts$/,
       /^packages\/publisher\/src\/workspace-handler\.ts$/,
       /^packages\/cli\/src\/daemon\/routes\/(?:memory|query-catalog)\.ts$/,
     ],

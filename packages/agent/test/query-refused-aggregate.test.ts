@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import type { QueryOptions } from '@origintrail-official/dkg-query';
 import { DKGAgent } from '../src/dkg-agent.js';
+
+const stores: OxigraphStore[] = [];
+afterEach(async () => { await Promise.all(stores.splice(0).map(store => store.close())); });
 
 const OWNER = '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa';
 const OTHER = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -13,12 +17,14 @@ function node(overrides: Record<string, unknown> = {}) {
   const query = vi.fn(async (_sparql: string, _options?: QueryOptions) => (
     { bindings: [{ cnt: '"4"^^<http://www.w3.org/2001/XMLSchema#integer>' }] }
   ));
+  const store = new OxigraphStore();
+  stores.push(store);
   const agent = Object.create(DKGAgent.prototype) as DKGAgent;
   Object.assign(agent, {
     defaultAgentAddress: OWNER, config: {}, log: { info() {}, warn() {}, debug() {}, error() {} },
-    queryEngine: { query }, subscribedContextGraphs: new Map(),
+    store, queryEngine: { query }, subscribedContextGraphs: new Map(),
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', source: 'system', reason: 'test', metadataBootstrap: 'eligible' }),
-    canUseSharedMemoryForContextGraph: async () => true,
+    resolveSharedMemoryReadAdmission: async () => ({ outcome: 'allowed' }),
     ...overrides,
   });
   Object.defineProperty(agent, 'peerId', { value: 'RefusedAggregatePeer', configurable: true });
@@ -38,9 +44,19 @@ describe('a count the node refuses to read', () => {
   });
 
   it('reads as a count of nothing when shared memory is closed to the caller', async () => {
-    const { agent, query } = node({ canUseSharedMemoryForContextGraph: async () => false });
+    const { agent, query } = node({ resolveSharedMemoryReadAdmission: async () => ({ outcome: 'denied' }) });
     expect(await agent.query(COUNT, { contextGraphId: 'cg-1', view: 'shared-working-memory', callerAgentAddress: OTHER }))
       .toEqual(NO_DATA_COUNT);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('preserves caller cancellation rather than presenting it as an empty legacy read', async () => {
+    const controller = new AbortController(), reason = new Error('caller cancelled during admission');
+    const { agent, query } = node({ resolveSharedMemoryReadAdmission: async () => {
+      controller.abort(reason); return { outcome: 'unavailable', error: reason };
+    } });
+    await expect(agent.query(COUNT, { contextGraphId: 'cg-1', view: 'shared-working-memory',
+      callerAgentAddress: OTHER, signal: controller.signal })).rejects.toBe(reason);
     expect(query).not.toHaveBeenCalled();
   });
 

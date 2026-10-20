@@ -1,3 +1,7 @@
+import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
+import { promoteConflictResponse } from './promote-admission-response.js';
+import { partialDurableShareFailure, classifySynchronousShareFailure, synchronousShareFailureDecision } from './durable-share-response.js';
+import { durableSynchronousShare, shareOperationFields, synchronousShareSuccessBody } from './durable-synchronous-share.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { classifyKaIdentifier, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
@@ -1020,7 +1024,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           // Carry the same resolved author into the share. The asset is already
           // sealed (finalize above), so promote shares the existing seal verbatim
           // and passing the author keeps the whole atomic flow in one namespace.
-          const share = await agent.assertion.promote(resolvedContextGraphId, name, {
+          const share = await durableSynchronousShare(agent, resolvedContextGraphId, name, {
             subGraphName,
             ...atomicAuthorLane,
             awaitCuratorAck,
@@ -1030,7 +1034,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.promotedCount = share.promotedCount;
           result.sealed = share.sealed;
           result.publishReady = share.publishReady;
-          if (share.shareOperationId) result.shareOperationId = share.shareOperationId;
+          Object.assign(result, shareOperationFields(share));
           // #1116: the one-shot finalizes BEFORE sharing, so a shared asset is
           // normally sealed ("swm-shared"). The unsealed status is only reachable
           // if a future path shares without sealing.
@@ -1040,8 +1044,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "promoted", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
           }
         } catch (e: any) {
-          if (respondWithPartialStoreFailure(e, 'swm-share')) return;
-          errors.push({ phase: "swm-share", error: sanitizeRpcMessage(e?.message ?? String(e)) });
+          const decision = synchronousShareFailureDecision(e, { contextGraphId: resolvedContextGraphId, name, subGraphName, phase: 'swm-share' });
+          if (decision.partialDisposition === 'respond') {
+            const failure = decision.response;
+            return jsonResponse(res, failure.status, partialDurableShareFailure(result, failure.body, name), undefined, failure.headers);
+          }
+          Object.assign(result, decision.recovery);
+          errors.push({ phase: "swm-share", error: decision.message });
         }
       }
       if (alsoPublishVm === true || (typeof alsoPublishVm === "object" && alsoPublishVm !== null)) {
@@ -1112,6 +1121,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   const layer = segs[1]; // wm | swm | vm | undefined
   const verb = segs[2];
 
+  if (method === 'POST' && layer === 'vm' && verb === 'repair-descriptor') return handlePublishedDescriptorRepair(ctx, name, writePreflightContextGraphOpts);
   // Shared GET preflight: decode/validate the :identifier, require + normalize
   // contextGraphId, validate subGraphName, extract optional agentAddress. For
   // agent-scoped bearer tokens, omitted agentAddress defaults to the token's
@@ -1373,7 +1383,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         skipSeal = parsed.skipSeal;
       }
       try {
-        const share = await agent.assertion.promote(contextGraphId, name, {
+        const share = await durableSynchronousShare(agent, contextGraphId, name, {
           entities: parsed.entities,
           subGraphName,
           awaitCuratorAck,
@@ -1384,34 +1394,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
           recordActivityAndNotify(ctx, { contextGraphId, kind: "promoted", actorAgentAddress: requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
         }
-        // A durable idempotent replay returns zero newly-promoted rows together
-        // with the original shareOperationId. That is an already-completed share,
-        // not an ownership skip, so preserve its sealed/publish-ready status.
-        const durableReplay = share.promotedCount === 0 && Boolean(share.shareOperationId);
-        const swmShared = share.promotedCount > 0 || durableReplay;
-        return jsonResponse(res, 200, {
-          swmShared,
-          promotedCount: share.promotedCount,
-          ...(share.sealed !== undefined ? { sealed: swmShared && share.sealed } : {}),
-          ...(share.publishReady !== undefined ? { publishReady: swmShared && share.publishReady } : {}),
-          ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
-        });
+        return jsonResponse(res, 200, synchronousShareSuccessBody(share));
       } catch (e: any) {
-        if (respondIfStoreUnavailable(res, e)) return;
-        // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
-        // carries the recovery hint. Everything else (e.g. the curator-ack 503)
-        // propagates to the outer handler unchanged.
-        if (e?.code === "UNSEALED_SHARE_BLOCKED") {
-          return jsonResponse(res, 409, { code: "UNSEALED_SHARE_BLOCKED", error: e.message, recovery: e.recovery });
-        }
-        if (e?.code === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
-          return jsonResponse(res, 409, {
-            code: "KA_NAMED_GRAPH_SHARE_UNSUPPORTED",
-            error: e.message,
-            namedGraphs: Array.isArray(e.namedGraphs) ? e.namedGraphs : undefined,
-          });
-        }
-        throw e;
+        const failure = classifySynchronousShareFailure(e, { contextGraphId, name, subGraphName, phase: 'swm-share' });
+        return jsonResponse(res, failure.status, failure.body, undefined, failure.headers);
       }
     }
 
@@ -1462,10 +1448,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {
-          return jsonResponse(res, 409, {
-            error: err.message,
-            existingJobId: err.existingJobId,
-          });
+          return jsonResponse(res, 409, promoteConflictResponse(err));
         }
         if (
           err.message?.includes("required") ||

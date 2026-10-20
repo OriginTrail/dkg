@@ -49,11 +49,11 @@ import {
 import {
   canonicalGraphScopedSnapshotManifestQuads,
   canonicalizeGraphScopedSwmHeadRows,
-  discoverSwmRecoverySubGraphNames,
   materializeGraphScopedSwmRecoveryAsset,
   parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
+import { admitServedSubGraphNames } from './served-sub-graph-admission.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 import {
   createRecoveryExecutionAdmission,
@@ -61,6 +61,7 @@ import {
   type RecoveryExecutionGuard,
 } from './recovery-execution-guard.js';
 import { canonicalQuadKey } from './quad-key.js';
+import { storedVersionOutranksDescriptor } from './swm-stored-head-proof.js';
 
 const sharedMemorySyncFetchSharingIdentity = createSyncFetchSharingIdentity();
 const directSnapshotWalkFetchSharingIdentity = createSyncFetchSharingIdentity();
@@ -353,6 +354,8 @@ export type SharedMemorySyncMode = Readonly<
 export interface SharedMemorySyncContext {
   /** One discriminant owns every selected-recovery-only capability. */
   mode: SharedMemorySyncMode;
+  /** Read the peer's state at the call: the round joins no page fetch of another round. */
+  freshSnapshot?: boolean;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphIds: string[];
@@ -414,6 +417,8 @@ export interface SharedMemorySyncContext {
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
+  /** True when `<graph>/<name>` is a context graph of this node's own: never admitted as a served sub-graph. */
+  isOwnContextGraph?: (contextGraphId: string, name: string) => Promise<boolean>;
   /**
    * False for the 10.0.16 named-subgraph compatibility lane. Remote aggregate
    * pages are still fetched, but root-scope rows are removed before verifier,
@@ -427,21 +432,6 @@ export interface SharedMemorySyncContext {
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
-}
-
-
-/**
- * True when the locally stored head version outranks the descriptor we are
- * about to materialize. BigInt-compared when both parse; anything unparseable
- * is treated as OUTRANKING — failing safe means never destroying local state
- * whose ordering we cannot establish.
- */
-function storedVersionOutranksDescriptor(stored: string, descriptorVersion: string): boolean {
-  try {
-    return BigInt(stored) > BigInt(descriptorVersion);
-  } catch {
-    return true;
-  }
 }
 
 export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(async context => {
@@ -461,6 +451,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
+    isOwnContextGraph,
     includeRootScope = true,
     stopOnBackoffWorthyFailure = false,
     deleteCheckpoint,
@@ -482,6 +473,9 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
   const recoveryGuard = context.mode.kind === 'selected-recovery'
     ? context.mode.recoveryGuard
     : undefined;
+  const roundFetchSharingIdentity = context.freshSnapshot === true
+    ? createSyncFetchSharingIdentity()
+    : sharedMemorySyncFetchSharingIdentity;
   const recoveryBoundary = createRecoveryExecutionAdmission(recoveryGuard);
   recoveryBoundary.assertCurrent();
   const fetchRecoveryPages = (
@@ -620,7 +614,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
       const workAdmission = composeSyncWorkAdmission({
         deadline,
-        fetchSharingIdentity: sharedMemorySyncFetchSharingIdentity,
+        fetchSharingIdentity: roundFetchSharingIdentity,
       });
 
       logInfo(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
@@ -689,16 +683,10 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         : wsMetaResult.quads.filter((quad) => (
           isNamedSubgraphSharedMemoryMetaGraph(pid, quad.graph)
         ));
-      const verificationSubGraphNames = includeRootScope
-        ? registeredSubGraphNames
-        : [...new Set([
-          ...(registeredSubGraphNames ?? []),
-          ...discoverSwmRecoverySubGraphNames({
-            contextGraphId: pid,
-            metaQuads: fetchedMetaQuads,
-            excludedSubGraphNames,
-          }),
-        ])];
+      // Every lane admits the sub-graphs the responder serves (#3301).
+      const verificationSubGraphNames = await recoveryBoundary.read(() => admitServedSubGraphNames({
+        contextGraphId: pid, metaQuads: fetchedMetaQuads, registeredSubGraphNames, excludedSubGraphNames, isOwnContextGraph,
+      }));
       const processed = await recoveryBoundary.read(() => processSharedMemoryBatch(
         fetchedDataQuads,
         fetchedMetaQuads,
@@ -970,14 +958,6 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
        * the round's bulk append re-stacks it onto the repaired head.
        */
       /**
-       * The ONE preserve step: withholding the losing descriptor id from
-       * every later write this round (per-KA meta insert AND the bulk append)
-       * is inseparable from the decision to preserve — a caller that decided
-       * without withholding would let the bulk append re-stack the rejected
-       * id onto the head it just protected. Both preserve paths below go
-       * through here.
-       */
-      /**
        * The ONE preserve operation: DECIDING is WITHHOLDING. When a stored
        * identity wins, the losing descriptor id row is suppressed from every
        * later write this round (per-KA meta insert AND the bulk append) in
@@ -1011,6 +991,19 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         }
         await insertVerifiedDescriptorMeta(descriptor);
       };
+      /**
+       * A newer stored head is kept either way; it makes the asset held only
+       * with its own content in the store. Without it the asset is missing.
+       */
+      const supersededAssetIsHeld = async (descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean> => {
+        if (await snapshotMaterializer!.isNewerStoredHeadMaterialized(pid, descriptor)) {
+          summary.alreadyHeldAssets += 1;
+          return true;
+        }
+        summary.supersededUnprovenAssets += 1;
+        logWarn(ctx, `SWM sync for "${pid}": the stored head of ${descriptor.kaUal} is newer, but its content is not here`);
+        return false;
+      };
       // Graph-backed legacy descriptors do not enter the immutable snapshot
       // manifest: their source bytes travel in the aggregate data phase. An
       // already-materialized root can nevertheless predate late-boundary
@@ -1029,6 +1022,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                 && ordinaryRootSnapshotApplyAllowed?.(pid) === false;
               if (ordinaryDenied()) {
                 snapshotCommit.suppressRows(descriptor.metadataQuads);
+                summary.catalogDeferredAssets += 1;
                 return;
               }
               const storedHead = await snapshotMaterializer!.readStoredHead(descriptor);
@@ -1042,6 +1036,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                 snapshotCommit.suppressRows(descriptor.metadataQuads.filter(
                   (quad) => quad.subject === descriptor.headSubject,
                 ));
+                await supersededAssetIsHeld(descriptor);
                 return;
               }
               let exactGraph = await snapshotMaterializer!
@@ -1064,6 +1059,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
               }
               if (ordinaryDenied()) {
                 snapshotCommit.suppressRows(descriptor.metadataQuads);
+                summary.catalogDeferredAssets += 1;
                 return;
               }
               // `admitAsyncMutation` proves currency only when this callback
@@ -1080,6 +1076,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
               if (companion === undefined) {
                 if (!materializedNewGraph) {
                   await repairOrReplaceHead(descriptor);
+                  summary.alreadyHeldAssets += 1;
                   return;
                 }
                 await snapshotMaterializer!.replaceGraph(
@@ -1099,6 +1096,8 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                 materializedQuads += exactGraph.length;
                 summary.insertedTriples += exactGraph.length;
                 summary.insertedDataTriples += exactGraph.length;
+              } else {
+                summary.alreadyHeldAssets += 1;
               }
             },
           ));
@@ -1152,6 +1151,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                   snapshotCommit.suppressRows(descriptor.metadataQuads);
                   materializedKeys.add(graphKey);
                   deferredToCatalogAuthority = true;
+                  summary.catalogDeferredAssets += 1;
                   logDebug(ctx, `SWM sync for "${pid}": deferred root snapshot `
                     + `${snapshotRef} to RFC-64 catalog authority`);
                   return true;
@@ -1214,6 +1214,11 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                   snapshotCommit.suppressRows(descriptor.metadataQuads.filter(
                     (quad) => quad.subject === descriptor.headSubject,
                   ));
+                  if (!(await supersededAssetIsHeld(descriptor))) {
+                    // Neither version's content is here: the ref stays unresolved.
+                    refMaterialized = false;
+                    return;
+                  }
                   materializedKeys.add(graphKey);
                   logDebug(ctx, `SWM sync for "${pid}": snapshot ${snapshotRef} superseded by `
                     + `stored version ${storedHead.version} (descriptor ${descriptor.assertionVersion}); skipping`);
@@ -1319,6 +1324,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                   // while this lock is held. The bulk append owns no head rows.
                   await insertVerifiedDescriptorMeta(descriptor);
                   materializedKeys.add(graphKey);
+                  summary.alreadyHeldAssets += 1;
                   return;
                 }
                 const asset = await materializeGraphScopedSwmRecoveryAsset({

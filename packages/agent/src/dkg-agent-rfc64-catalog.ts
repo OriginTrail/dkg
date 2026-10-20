@@ -72,7 +72,11 @@ import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { noteCatalogHeadReplayFollower, sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
+import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
+import {
+  answerRfc64CatalogHeadReplayRequestV1,
+  rfc64CatalogReplayPeerFailureV1,
+} from './internal/catalog-head-replay-peers.js';
 import { yieldMainThread } from './main-thread-time-slice.js';
 import {
   isApprovedPrivateReplicaDelegationActive,
@@ -104,8 +108,10 @@ import {
   resolveRfc64CatalogAuthorizationRosterV1,
   type AcceptRfc64CatalogAccessSnapshotInputV1,
   type AcceptedRfc64CatalogAccessSnapshotV1,
+  type Rfc64CatalogAccessPolicyRegistryOptionsV1,
   type Rfc64CatalogLocalAuthorizationScopeV1,
 } from './rfc64/catalog-access-policy-v1.js';
+import { scopeRfc64CatalogAccessAuthorityV1 } from './rfc64/manual-catalog-authority-scope-v1.js';
 import type {
   Rfc64PublicCatalogCurrentReceiverReconcilerV1,
 } from './rfc64/public-catalog-receiver-v1.js';
@@ -1071,7 +1077,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             error instanceof Rfc64PublicCatalogTransportErrorV1
             && error.code === 'catalog-transport-policy-denied'
           ) return Object.freeze({ status: 'not-provider' as const });
-          throw error;
+          throw rfc64CatalogReplayPeerFailureV1(this.log, contextGraphId, remotePeerId, error);
         }
       },
       whenReceiverIdleForContextGraph: async (contextGraphId, signal) => {
@@ -1123,11 +1129,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         reannounce: (replayPeerId) =>
           this.reannounceRfc64CatalogHeadsToPeerV1(replayPeerId),
         replay: (contextGraphId, replayDemand) =>
-          this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
-            kind: 'connection-demand',
-            replayDemand,
-          }),
-        warn: (message) => this.log.warn(createOperationContext('system'), message),
+          this.requestRfc64CatalogHeadReplayV1(contextGraphId, { kind: 'connection-demand', replayDemand }),
+        replayStatus: (contextGraphId) => this.rfc64CatalogReplayRecoveryRuntimeV1().status(
+          contextGraphId, this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)?.policyDigest ?? ''),
+        log: (level, message) => this.log[level](createOperationContext('system'), message),
       });
       rfc64CatalogReplayConnectionRuntimesV1.set(this, runtime);
     }
@@ -1822,6 +1827,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         authorityEra: '0' as DecimalU64V1,
       })
       : null;
+  }
+
+  /** This node's catalog identity authority, per graph (`rfc64/manual-catalog-authority-scope-v1.ts`). */
+  rfc64CatalogAccessAuthorityV1(this: DKGAgent): Rfc64CatalogAccessPolicyRegistryOptionsV1 {
+    return scopeRfc64CatalogAccessAuthorityV1({
+      manual: this.config.rfc64CatalogAccessPolicyAuthority,
+      manualContextGraphs: this.config.rfc64CatalogManualTrustRootContextGraphs,
+      resolveLocalAgentAddress: (contextGraphId, scope) =>
+        this.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId, scope),
+      resolveRemoteAgentAddress: (peerId, contextGraphId) =>
+        this.resolveRfc64CatalogRemoteAgentAddressV1(peerId, contextGraphId),
+    });
   }
 
   /**
@@ -4042,16 +4059,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       router: this.router,
       controlObjects: persistence.controlObjects,
       localPeerId: this.peerId,
-      accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority
-        ?? {
-          resolveLocalAgentAddress: (contextGraphId, authorizationScope) =>
-            this.resolveRfc64CatalogLocalAgentAddressV1(
-              contextGraphId,
-              authorizationScope,
-            ),
-          resolveRemoteAgentAddress: (peerId, contextGraphId) =>
-            this.resolveRfc64CatalogRemoteAgentAddressV1(peerId, contextGraphId),
-        },
+      accessPolicyAuthority: this.rfc64CatalogAccessAuthorityV1(),
       native: this.createRfc64PublicCatalogNativeOptionsV1(verifyIssuerSignature),
       verifyIssuerSignature,
       resolveContextGraphAuthority: (contextGraphId, direction) =>
@@ -4203,11 +4211,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             new Error('RFC-64 catalog reconciliation ended without applying the scheduled head'),
           );
         },
-        onHeadApplied: (announcement) => {
+        onHeadApplied: (announcement, remotePeerId) => {
           const authorAddress = announcement.authorAddress.toLowerCase();
           if (!this.listLocalAgents().some(
             ({ agentAddress }) => agentAddress.toLowerCase() === authorAddress,
-          )) return;
+          )) return this.forwardRemoteRfc64CatalogHeadV1(announcement, remotePeerId);
           this.requestRfc64SwmCatalogProjectionV1({
             contextGraphId: announcement.contextGraphId,
             authorAddress: authorAddress as EvmAddressV1,
@@ -4259,27 +4267,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       catalogHeadDelivery: this.rfc64CatalogHeadDeliveryPortsV1(),
-      onCatalogHeadReplayRequested: (request, remotePeerId) => {
-        const admission = this.tryQueueRfc64CatalogHeadReplayV1(remotePeerId, request);
-        if (admission.status === 'busy') return admission;
-        if (admission.newlyQueued) {
-          void admission.completion
-            .then((result) => {
-              // A peer that asks for a graph's catalog heads under the policy this node holds follows the graph.
-              noteCatalogHeadReplayFollower(sharedMemoryFollowersOf(this), this.rfc64PublicCatalogServiceV1?.acceptedPolicySnapshot(request.networkId, request.contextGraphId)?.policyDigest, request, remotePeerId);
-              if (result.announced > 0) {
-                this.log.info(ctx, `Replayed ${result.announced} RFC-64 catalog head(s) to ${remotePeerId.slice(-8)}`);
-              }
-            })
-            .catch((error: unknown) => {
-              this.log.warn(
-                ctx,
-                `RFC-64 catalog head replay failed for ${remotePeerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`,
-              );
-            });
-        }
-        return admission;
-      },
+      onCatalogHeadReplayRequested: (request, remotePeerId) => answerRfc64CatalogHeadReplayRequestV1({
+        request,
+        remotePeerId,
+        followers: sharedMemoryFollowersOf(this),
+        acceptedPolicyDigest: this.rfc64PublicCatalogServiceV1
+          ?.acceptedPolicySnapshot(request.networkId, request.contextGraphId)?.policyDigest,
+        queue: () => this.tryQueueRfc64CatalogHeadReplayV1(remotePeerId, request),
+        log: { info: (message) => this.log.info(ctx, message), warn: (message) => this.log.warn(ctx, message) },
+      }),
     });
     return service;
   }
@@ -5253,7 +5249,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             retirement.subGraphName,
             ctx,
             retirement.kaUal,
-          ),
+          ).then(() => {}),
           logInfo: (ctx, message) => this.log.info(ctx, message),
         });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1<

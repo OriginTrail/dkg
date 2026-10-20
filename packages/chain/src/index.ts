@@ -1,3 +1,4 @@
+export * from './public-graph-snapshot.js';
 export * from './chain-adapter.js';
 export {
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
@@ -98,6 +99,7 @@ export {
 } from './finalized-vm-chain-inventory.js';
 export {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+  FinalizedVmChainInventoryLimitErrorV1,
   createFinalizedVmChainScannerV1,
   scanFinalizedVmChainInventoryInSnapshotV1,
   type FinalizedVmChainScanRequestV1,
@@ -426,3 +428,5 @@ export {
 } from './evm-chain-index-runtime.js';
 
 export { normalizeKnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateMetadata } from './knowledge-asset-update-identity.js';
+
+export { isPublicGraphSnapshotScope } from './public-graph-snapshot-scope.js';

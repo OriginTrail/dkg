@@ -9,6 +9,7 @@
  * the distinction between an authoritative denial and unavailable authority.
  */
 
+import { readQueryAuthorityDependency } from './query-authority-dependency.js';
 import { CONTEXT_GRAPH_AUTHORITY_RPC_SITES, withRpcUsageSite } from '@origintrail-official/dkg-chain';
 import {
   contextGraphReadAuthorityDependencyOf,
@@ -161,6 +162,7 @@ export class ContextGraphReadAuthorityUnavailableError extends Error {
 }
 
 export interface ContextGraphReadAuthorityInput {
+  signal?: AbortSignal;
   contextGraphId: string;
   callerAgentAddress?: string;
   allowSubscriptionFallback: boolean;
@@ -233,13 +235,26 @@ export interface ContextGraphReadAuthorityResolution {
 export async function resolveContextGraphReadAuthorityResolution(
   input: ContextGraphReadAuthorityInput,
 ): Promise<ContextGraphReadAuthorityResolution> {
+  // Cancellation always rejects with the caller's reason at this boundary;
+  // domain-error classification below applies only to active requests.
+  input.signal?.throwIfAborted();
+  try {
+    return await resolveActiveContextGraphReadAuthority(input);
+  } finally {
+    input.signal?.throwIfAborted();
+  }
+}
+
+async function resolveActiveContextGraphReadAuthority(
+  input: ContextGraphReadAuthorityInput,
+): Promise<ContextGraphReadAuthorityResolution> {
   if (input.isSystemContextGraph) {
     return { decision: allowedDecision({ source: 'system', reason: 'system-context-graph', metadataBootstrap: 'eligible', grantScope: 'public' }) };
   }
 
   let registeredAuthority: RegisteredContextGraphAuthority;
   try {
-    registeredAuthority = await input.getRegisteredAuthority();
+    registeredAuthority = await readQueryAuthorityDependency(input.signal, () => input.getRegisteredAuthority());
   } catch (error) {
     return {
       decision: unavailable(
@@ -286,7 +301,7 @@ async function resolveReadAuthorityFromRegistration(
     }
     let allowedPeers: string[] | null;
     try {
-      allowedPeers = await input.getAllowedPeers();
+      allowedPeers = await readQueryAuthorityDependency(input.signal, () => input.getAllowedPeers());
     } catch (error) {
       return unavailable(
         'registered-chain',
@@ -330,7 +345,7 @@ async function resolveReadAuthorityFromRegistration(
 
   let isPrivate: boolean;
   try {
-    isPrivate = await input.isPrivateLocalGraph();
+    isPrivate = await readQueryAuthorityDependency(input.signal, () => input.isPrivateLocalGraph());
   } catch (error) {
     return unavailable('legacy-local', 'local-access-policy-unavailable', contextGraphReadAuthorityDependencyOf(error));
   }
@@ -338,14 +353,14 @@ async function resolveReadAuthorityFromRegistration(
 
   let allowedPeers: string[] | null;
   try {
-    allowedPeers = await input.getAllowedPeers();
+    allowedPeers = await readQueryAuthorityDependency(input.signal, () => input.getAllowedPeers());
   } catch (error) {
     return unavailable('legacy-local', 'peer-authority-unavailable', contextGraphReadAuthorityDependencyOf(error));
   }
 
   let agentGateAddresses: string[] | null;
   try {
-    agentGateAddresses = await input.getLocalAgentGate();
+    agentGateAddresses = await readQueryAuthorityDependency(input.signal, () => input.getLocalAgentGate());
   } catch (error) {
     return unavailable('legacy-local', 'local-agent-authority-unavailable', contextGraphReadAuthorityDependencyOf(error));
   }
@@ -368,7 +383,7 @@ async function resolveReadAuthorityFromRegistration(
 
   let participants: string[] | null;
   try {
-    participants = await input.getLegacyParticipants();
+    participants = await readQueryAuthorityDependency(input.signal, () => input.getLegacyParticipants());
   } catch (error) {
     return unavailable(
       'legacy-local',
@@ -405,7 +420,7 @@ async function resolveReadAuthorityFromRegistration(
 
   let localIdentityId = 0n;
   try {
-    localIdentityId = await input.getLocalIdentityId();
+    localIdentityId = await readQueryAuthorityDependency(input.signal, () => input.getLocalIdentityId());
   } catch {
     // Preserve the legacy decision: identity lookup failure does not turn a
     // positive participant or peer fact into a denial, but supplies no allow.

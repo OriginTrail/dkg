@@ -3072,6 +3072,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // Late deliveries now reach quorum the same way fast
       // ones do.
       this.maybeEmitSwmShareAck(outcome).catch(() => { /* swallowed; logged inside */ });
+      this.noticeSwmFollowersAfterApplyV1(outcome, fromPeerId, data);
       return new Uint8Array();
     }
     if (outcome.retryable) {

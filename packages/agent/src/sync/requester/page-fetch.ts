@@ -159,7 +159,7 @@ export function deleteSyncPageCheckpoint(
   checkpointStore.delete(checkpointKey);
 }
 
-function isSyncResponderSessionInvalidError(err: unknown): boolean {
+export function isSyncResponderSessionInvalidError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const message = err.message.toLowerCase();
   return message.includes('sync session') && (

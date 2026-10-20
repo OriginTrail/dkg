@@ -1,5 +1,8 @@
+import type { QueryOptions } from '../triple-store.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
+import { withheldGraphQueryDataset } from './withheld-graph-dataset.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { mkdir, open, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -19,6 +22,7 @@ import {
 } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
+import { buildAtomicSubjectAndInsertUpdate } from '../atomic-subject-insert.js';
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
@@ -60,6 +64,7 @@ type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
   readonly writeRevisionCoverage = 'all-writers' as const;
+  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
@@ -319,7 +324,10 @@ export class OxigraphStore implements TripleStore {
     // The embedded Oxigraph binding executes synchronously, so a caller abort
     // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
     // HTTP backend when long sync queries need prompt cancellation.
-    const result = this.store.query(sparql);
+    const withheld = options?.withheldGraphRoots;
+    const result = withheld?.length
+      ? this.store.query(sparql, withheldGraphQueryDataset(this.store, withheld, this.graphEnumerationVisibility))
+      : this.store.query(sparql);
     throwIfAborted(options?.signal);
 
     if (typeof result === 'boolean') {
@@ -420,6 +428,15 @@ export class OxigraphStore implements TripleStore {
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    const plan = buildAtomicAssetGroupUpdate(assets);
+    statements.checkIris.replaceAssetGroup(assets);
+    options?.signal?.throwIfAborted();
+    this.store.update(plan.update);
+    this.scheduleFlush();
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: plan.graphs });
+  }
+
   async replaceGraphAndSubject(
     graphUri: string,
     graphQuads: DKGQuad[],
@@ -476,6 +493,26 @@ export class OxigraphStore implements TripleStore {
     // rolls the whole thing back.
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
     statements.checkIris.replaceSubject(graphUri, subject, quads);
+    this.store.update(update);
+    this.scheduleFlush();
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string, subject: string, replacementQuads: DKGQuad[], insertQuads: DKGQuad[],
+    options?: TripleStoreQueryOptions,
+  ): Promise<void> {
+    throwIfAborted(options?.signal);
+    const quads = [...replacementQuads, ...insertQuads];
+    const guarded = quads.filter(q => !(q.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(q.graph)));
+    if (guarded.length > 0) {
+      assertQuadLiteralsMutf8Safe(guarded, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphStore.replaceSubjectAndInsert',
+      });
+    }
+    const update = buildAtomicSubjectAndInsertUpdate(graphUri, subject, replacementQuads, insertQuads);
+    statements.checkIris.replaceSubjectAndInsert(graphUri, subject, quads);
     this.store.update(update);
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
@@ -543,7 +580,7 @@ export class OxigraphStore implements TripleStore {
         const g = row.get('g');
         return g ? g.value : '';
       })
-      .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+      .filter(this.graphEnumerationVisibility);
   }
 
   async deleteBySubjectPrefix(

@@ -1,4 +1,5 @@
 import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
 // daemon/routes/memory.ts
 //
 // Route handlers for shared-memory / workspace write + publish + conditional-write, memory turn/search.
@@ -1703,6 +1704,10 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     } catch (err: any) {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
+      }
+      // A sub-graph neither this node nor the graph's peers hold (#3293).
+      if (err?.code === SUB_GRAPH_NOT_FOUND_CODE) {
+        return jsonResponse(res, 400, { code: err.code, error: err.message });
       }
       return jsonResponse(res, 500, { error: `Failed to write turn to ${targetLayer}: ${err.message}` });
     }

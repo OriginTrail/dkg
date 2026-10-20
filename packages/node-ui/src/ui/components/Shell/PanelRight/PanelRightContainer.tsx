@@ -1,9 +1,9 @@
+import { randomUUID } from '../../../lib/randomUUID.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useJourneyStore } from '../../../stores/journey.js';
 import { useProjectsStore } from '../../../stores/projects.js';
 import {
   importFile,
-  type AgentIdentity,
   type LocalAgentChatAttachmentRef,
   type LocalAgentIntegration,
   type LocalAgentStreamEvent,
@@ -51,10 +51,6 @@ import {
 } from './selection.js';
 import type { AgentInfo, ConnectionRow, LocalAgentAttachmentDraft, LocalAgentAttachmentStatus, LocalAgentMessage, LocalAgentSessionSummary } from './types.js';
 
-function useSharedCurrentAgent(): AgentIdentity | null {
-  return useSharedCurrentAgentRaw().data;
-}
-
 export function PanelRight() {
   const { stage, advance } = useJourneyStore();
   const [mode, setMode] = useState<'agents' | 'network' | 'sessions'>('agents');
@@ -67,7 +63,7 @@ export function PanelRight() {
   // race-fetch its own copy of the current agent on every mount
   // (BUG-007). The boolean `loading` flag is intentionally ignored;
   // callers below already null-check `currentAgent`.
-  const currentAgent = useSharedCurrentAgent();
+  const { data: currentAgent } = useSharedCurrentAgentRaw();
 
   const [integrations, setIntegrations] = useState<LocalAgentIntegration[]>([]);
   const [selectedIntegrationId, setSelectedIntegrationId] = useState('openclaw');
@@ -231,10 +227,10 @@ export function PanelRight() {
     if (uniqueFiles.length === 0) return;
 
     const drafts = uniqueFiles.map((file) => ({
-      id: `${conversationKey}:${file.name}:${file.size}:${file.lastModified}:${crypto.randomUUID()}`,
+      id: `${conversationKey}:${file.name}:${file.size}:${file.lastModified}:${randomUUID()}`,
       file,
       contextGraphId,
-      assertionName: `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`,
+      assertionName: `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`,
       status: 'queued' as const,
     }));
 
@@ -510,7 +506,7 @@ export function PanelRight() {
         return;
       }
 
-      correlationId = crypto.randomUUID();
+      correlationId = randomUUID();
       const importSummary = buildAttachmentImportSummary(importContext.results);
       const textWithImportSummary = [text, importSummary].filter((part) => part.length > 0).join('\n\n');
       messageText = text
@@ -664,6 +660,10 @@ export function PanelRight() {
               : message,
           ),
         );
+      } else {
+        // Failures before the optimistic bubbles exist must still be visible.
+        // Keep the composer intact so the user can retry.
+        setConnectError(failureReason);
       }
       if (!isUserAbort && integrationId === 'hermes' && assistantId && messageText) {
         void (async () => {

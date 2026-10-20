@@ -14,7 +14,7 @@ import { TX_HASH, createAsyncLift2270Harness, expectFailed } from './_helpers/as
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { RETRY_LANE, adapterRewrap, createStoreRejectionFixtures, rawLiftRequest, schedulerBusy } from './_helpers/store-rejection-2940.js';
-import type { FlushableStore, InsertableStore } from './_helpers/store-rejection-2940.js';
+import { CONTROL_STATUS } from '../src/async-lift-control-plane.js';
 
 describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: post-dispatch recovery', () => {
   const h = createAsyncLift2270Harness();
@@ -91,20 +91,22 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: p
       // Recording this failure "from validated" would discard that evidence — it must degrade to
       // today's held failure instead, and must never throw out of failure recording.
       const attempts = { n: 0 };
-      const store = h.store as unknown as FlushableStore & InsertableStore;
-      const originalInsert = store.insert.bind(store);
+      const store = h.store;
+      const originalWrite = store.replaceSubjectAndInsert.bind(store);
       let armed = false;
-      let rollbackInsertRejected = false;
+      let rollbackWriteRejected = false;
+      let rollbackTargetStatus: string | undefined;
       store.flush = async () => {
         armed = true;
         throw schedulerBusy();
       };
-      store.insert = async (...args: unknown[]) => {
-        if (armed && !rollbackInsertRejected) {
-          rollbackInsertRejected = true;
+      store.replaceSubjectAndInsert = async (...args) => {
+        if (armed && !rollbackWriteRejected) {
+          rollbackWriteRejected = true;
+          rollbackTargetStatus = args[2].find((quad) => quad.predicate === CONTROL_STATUS)?.object;
           throw schedulerBusy();
         }
-        return await originalInsert(...args);
+        return await originalWrite(...args);
       };
       const publisher = h.createPublisher({
         ...RETRY_LANE,
@@ -125,7 +127,8 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: p
 
       const failed = expectFailed(await publisher.processNext('wallet-1'));
 
-      expect(rollbackInsertRejected).toBe(true);
+      expect(rollbackWriteRejected).toBe(true);
+      expect(rollbackTargetStatus).toBe('"validated"');
       expect(failed.failure.failedFromState).toBe('broadcast');
       expect(failed.broadcast?.txHash).toBe(TX_HASH);
       expect(failed.failure.code).not.toBe('workspace_unavailable');

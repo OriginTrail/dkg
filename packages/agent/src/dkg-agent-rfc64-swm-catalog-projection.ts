@@ -1,11 +1,15 @@
+import { catalogAuthoringApplicability } from './internal/catalog-authoring-applicability.js';
+import { SwmCatalogAuthorityNotReady } from './internal/swm-inventory-write.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /** Selected-CG durable SWM-inventory to signed-catalog projection owner. */
 
 import {
+  assertCanonicalDeterministicUalV1,
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   computeSwmAuthorInventoryScopeDigestV1,
+  createOperationContext,
   type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
@@ -17,6 +21,7 @@ import {
   type NetworkIdV1,
   type PositiveDecimalU64V1,
   type SwmAuthorInventoryScopeV1,
+  type SwmAuthorInventorySnapshotV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
@@ -79,6 +84,8 @@ import {
   type CatalogPlacementAttemptV1,
 } from './internal/catalog-placement-timing.js';
 import { readOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
+import { healFinalizedSwmInventoryRowsV1 } from './internal/finalized-row-heal.js';
+import { catalogRepairDiagnosticV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   './rfc64/finalized-private-placement-repair-store-v1.js';
 
@@ -147,6 +154,78 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
     if (lane === null) return null;
     return this.reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(lane, params);
+  }
+
+  /**
+   * GH#3134 — this node retired its shared-memory copy of an asset because the asset is finalized,
+   * which happens on an author's node when a curator publishes the author's shared asset under the
+   * author's seal. The asset's row in the author's SWM inventory has no shared-memory head left to
+   * resolve, and on a lane that drops confirmed rows it fails every later projection of the
+   * author's catalog. So the row goes, as at the publishing node's confirmation; a finalized
+   * private lane keeps its rows. Detached, and read only after the author's queued inventory work:
+   * a share observer that already prepared the asset's row commits first. Never throws.
+   */
+  scheduleRfc64SwmInventoryRowRemovalAfterFinalizedTwinV1(
+    this: DKGAgent,
+    input: Readonly<{
+      contextGraphId: string;
+      kaUal: string;
+      assertionVersion: string;
+      subGraphName?: string;
+    }>,
+  ): void {
+    const ctx = createOperationContext('system');
+    const failed = (cause: unknown) => this.log.warn(
+      ctx,
+      `RFC-64 SWM inventory row of finalized ${input.kaUal} was not removed: `
+        + (cause instanceof Error ? cause.message : String(cause)),
+    );
+    try {
+      const persistence = this.rfc64PersistenceV1;
+      if (persistence === undefined) return;
+      // Without an active authoring lane this node keeps no inventory to project for the graph.
+      const decision = this.resolveRfc64CatalogAuthoringLaneDecisionV1(
+        input.contextGraphId,
+        input.subGraphName ?? null,
+      );
+      if (decision.status !== 'active' || decision.lane.acceptsFinalizedVmRepair) return;
+      const contextGraphId = input.contextGraphId as ContextGraphIdV1;
+      const authorAddress = assertCanonicalDeterministicUalV1(input.kaUal).agentAddress;
+      const scope = Object.freeze({ ...decision.lane.scopeBase, authorAddress }) as SwmAuthorInventoryScopeV1;
+      const scopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
+      const runtime = rfc64SwmInventoryShadowRuntimeV1(this);
+      const lane = { contextGraphId, authorAddress };
+      // No inventory and no share of this author's on its way into one: no row to remove.
+      if (
+        persistence.swmAuthorInventory.readSwmAuthorInventoryHeadDigestV1(scopeDigest, authorAddress) === null
+        && !runtime.hasInventoryWrites(lane)
+      ) return;
+      runtime.scheduleAfterInventoryWrites(lane, input.kaUal, async () => {
+        if (runtime.shutdownSignal.aborted) return;
+        try {
+          const row = this.rfc64PersistenceV1?.swmAuthorInventory.readSwmAuthorInventoryRowV1(
+            scopeDigest,
+            authorAddress,
+            input.kaUal as CanonicalDeterministicUalV1,
+          ) ?? null;
+          // A newer share's row has its own shared-memory head.
+          if (row === null || BigInt(row.assertionVersion) > BigInt(input.assertionVersion)) return;
+          const removed = await this.removeRfc64SwmAuthorInventoryRowV1({
+            contextGraphId,
+            scope,
+            expectedRow: { assertionVersion: row.assertionVersion, kaUal: row.kaUal, sealDigest: row.sealDigest },
+            signal: runtime.shutdownSignal,
+          });
+          if (removed.status !== 'applied' && removed.status !== 'absent') return;
+          this.requestRfc64SwmCatalogProjectionV1({ contextGraphId, authorAddress, ctx });
+          if (removed.status === 'applied') this.log.info(ctx, `Removed the RFC-64 SWM inventory row of finalized ${row.kaUal}`);
+        } catch (cause) {
+          if (!runtime.shutdownSignal.aborted) failed(cause);
+        }
+      });
+    } catch (cause) {
+      failed(cause);
+    }
   }
 
   /**
@@ -245,6 +324,28 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     }, placement);
+  }
+
+  requiresRfc64ShareInventoryV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined): boolean {
+    return this.resolveRfc64ShareInventoryApplicabilityV1(contextGraphId, subGraphName).status === 'required';
+  }
+
+  /**
+   * A bound share owes the signed-inventory handoff only where the commit-time lane can be
+   * active. A fenced or non-responsible authority keeps the obligation above, but the share
+   * completes and its row goes to the detached observer, like an unbound share.
+   */
+  requiresRfc64ShareInventoryHandoffV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined): boolean {
+    const decision = this.resolveRfc64ShareInventoryApplicabilityV1(contextGraphId, subGraphName);
+    return decision.status === 'required' && decision.authority.authoringAllowed === true;
+  }
+
+  /** One receiver-authority read per decision; readiness gaps throw their typed cause. */
+  private resolveRfc64ShareInventoryApplicabilityV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined) {
+    const decision = catalogAuthoringApplicability({ authority: this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+      config: this.config, service: this.rfc64PublicCatalogServiceV1 }, contextGraphId, subGraphName);
+    if (decision.status === 'unavailable') throw decision.error;
+    return decision;
   }
 
   /** Canonical selected-CG admission shared by inventory and projection. */
@@ -382,7 +483,11 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           row,
           signal,
         }),
+      }).catch(async (failure: unknown) => {
+        if (!await this.healRfc64SwmInventoryAfterProjectionFailureV1(lane, snapshot, failure, params)) throw failure;
+        return null;
       });
+      if (prepared === null) continue;
       throwIfAbortedV1(params.signal);
       lane.service.acceptedPolicySnapshotForCatalogScope(prepared.catalogScope);
       const deployment = await this.resolveRfc64AutoPublishDeploymentProfileV1(
@@ -444,20 +549,66 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }
   }
 
+  /**
+   * GH#3134 — a projection that failed on its inventory's integrity sweeps rows of finalized
+   * assets whose shared-memory copy is already retired out of the author's inventory, once per
+   * inventory head (`healFinalizedSwmInventoryRowsV1`). True when rows went and the projection
+   * runs again. A finalized private lane keeps its rows.
+   */
+  private async healRfc64SwmInventoryAfterProjectionFailureV1(
+    this: DKGAgent,
+    lane: ResolvedRfc64CatalogAuthoringLaneV1,
+    snapshot: SwmAuthorInventorySnapshotV1,
+    failure: unknown,
+    params: ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
+  ): Promise<boolean> {
+    if (lane.acceptsFinalizedVmRepair || catalogRepairDiagnosticV1(failure).kind !== 'integrity') return false;
+    const ctx = createOperationContext('system');
+    const scope = Object.freeze({ ...lane.scopeBase, authorAddress: params.authorAddress }) as SwmAuthorInventoryScopeV1;
+    const scopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
+    try {
+      const healed = await healFinalizedSwmInventoryRowsV1(this, {
+        store: this.store,
+        contextGraphId: params.contextGraphId,
+        authorAddress: params.authorAddress,
+        snapshot,
+        ...(params.signal === undefined ? {} : { signal: params.signal }),
+        removeRow: async (row) => (await this.removeRfc64SwmAuthorInventoryRowV1({
+          contextGraphId: params.contextGraphId,
+          scope,
+          expectedRow: { assertionVersion: row.assertionVersion, kaUal: row.kaUal, sealDigest: row.sealDigest },
+          ...(params.signal === undefined ? {} : { signal: params.signal }),
+        })).status,
+      });
+      if (healed > 0) {
+        this.log.info(ctx, `RFC-64 SWM inventory of ${params.authorAddress} in ${params.contextGraphId}: `
+          + `removed ${healed} row(s) of finalized assets whose shared-memory copy was retired`);
+      }
+      // A row that other work removed or replaced since the failed read may have been its cause.
+      return healed > 0 || this.rfc64PersistenceV1?.swmAuthorInventory
+        .readSwmAuthorInventoryHeadDigestV1(scopeDigest, params.authorAddress) !== snapshot.head.objectDigest;
+    } catch (cause) {
+      // A cancelled sweep ends the projection attempt with its cancellation.
+      if (params.signal?.aborted === true) throw cause;
+      this.log.warn(ctx, `RFC-64 SWM inventory rows of finalized assets were not swept: `
+        + (cause instanceof Error ? cause.message : String(cause)));
+      return false;
+    }
+  }
+
   private resolveRfc64CatalogAuthoringLaneDecisionV1(
     this: DKGAgent,
     contextGraphId: string,
     subGraphName: string | null | undefined,
   ): Rfc64CatalogAuthoringLaneDecisionV1 {
-    if (!this.resolveRfc64CatalogReceiverAuthorityV1(
-      contextGraphId,
-    ).authoringAllowed) return Object.freeze({ status: 'inactive' });
+    const applicability = catalogAuthoringApplicability({ authority: this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+      config: this.config, service: this.rfc64PublicCatalogServiceV1 }, contextGraphId, subGraphName);
+    if (applicability.status === 'excluded') return Object.freeze({ status: 'inactive' });
+    if (applicability.status === 'unavailable') return applicability;
+    if (!applicability.authority.authoringAllowed) return Object.freeze({ status: 'inactive' });
     const authoringPolicy = this.config.rfc64CatalogAuthoringPolicy;
     const exactControl = authoringPolicy?.byContextGraph[contextGraphId];
     const publicDefault = authoringPolicy?.publicDefault;
-    if (
-      subGraphName !== undefined && subGraphName !== null
-    ) return Object.freeze({ status: 'inactive' });
     assertContextGraphIdV1(contextGraphId, 'RFC-64 catalog authoring contextGraphId');
     const networkId = (this.config.rfc64CatalogDeploymentProfile?.networkId
       ?? this.config.networkIdentity?.chainId) as NetworkIdV1 | undefined;
@@ -471,27 +622,15 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     if (service === undefined) {
       return Object.freeze({
         status: 'unavailable',
-        error: new Error('RFC-64 public catalog service is unavailable'),
+        error: new SwmCatalogAuthorityNotReady('service-unavailable'),
       });
     }
     const acceptedPolicy = service.acceptedPolicySnapshot(networkId, contextGraphId);
     if (acceptedPolicy === null) {
       return Object.freeze({
         status: 'unavailable',
-        error: new Error(
-          'RFC-64 catalog authoring requires an independently accepted current policy',
-        ),
+        error: new SwmCatalogAuthorityNotReady('policy-not-accepted'),
       });
-    }
-    if (
-      exactControl === undefined
-      && publicDefault !== undefined
-      && acceptedPolicy.policy.accessPolicy === 1
-    ) {
-      // The compatibility fallback is intentionally public-only. A private
-      // policy in the same bootstrap manifest is neither an authoring failure
-      // nor an invitation to reinterpret that fallback as private authority.
-      return Object.freeze({ status: 'inactive' });
     }
     const defaultPeers = Object.freeze([...new Set(
       this.node.libp2p.getConnections()

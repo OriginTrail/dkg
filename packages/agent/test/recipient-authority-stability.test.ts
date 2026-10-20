@@ -1,9 +1,17 @@
+import { createStorageAckLedgerTimestampWriter } from '../src/internal/storage-ack-ledger-timestamp-writer.js';
+import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGPublisher, generatedPrivateCatalogFloorQuads } from '@origintrail-official/dkg-publisher';
+import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
 import {
   DKG_ONTOLOGY,
+  TypedEventBus,
+  generateEd25519Keypair,
+  contextGraphCatalogUri,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   computeWorkspaceAgentEncryptionKeyRevocationPayload,
   contextGraphDataUri,
@@ -15,6 +23,8 @@ import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publishe
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
+import { VmPromotionMethods } from '../src/dkg-agent-vm-promotion.js';
+import { STORAGE_ACK_LEDGER_GRAPH, STORAGE_ACK_LEDGER_PREDICATES } from '@origintrail-official/dkg-publisher';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
 import {
@@ -240,6 +250,34 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     expect(resolution.recipients).toHaveLength(count);
   };
 
+  it('keeps exact private recipients while real ACK-ledger timestamp marks run in every window', async () => {
+    let marks = 0;
+    const { host, ready, context } = churningHost({
+      seed: profileKeys,
+      during: async (read, ctx) => {
+        if (read === 1) return;
+        marks += 1;
+        await VmPromotionMethods.prototype.markStorageAckLedger.call(
+          { store: ctx.store, storageAckLedgerTimestampWriter: createStorageAckLedgerTimestampWriter(
+            ctx.stack.innerStore, createObservedStoreMutation(() => {}, createProjectionMutationObserver(() => ctx.stack.projection)),
+          ) } as never,
+          'urn:dkg:share:test:storage-ack-stable', STORAGE_ACK_LEDGER_PREDICATES.registeredAt,
+          Date.UTC(2026, 0, 1, 0, 0, marks),
+        );
+      },
+    });
+    await ready;
+    const before = await context.stack.innerStore.query(`SELECT ?s ?p ?o WHERE { GRAPH <${PROFILE_GRAPH}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`);
+    let error: unknown;
+    const result = await resolve(host).catch(cause => { error = cause; return undefined; });
+    expect(await context.stack.innerStore.query(`SELECT ?s ?p ?o WHERE { GRAPH <${PROFILE_GRAPH}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`)).toEqual(before);
+    const ledger = await context.store.query(`SELECT ?at WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { <urn:dkg:share:test:storage-ack-stable> <${STORAGE_ACK_LEDGER_PREDICATES.registeredAt}> ?at } }`);
+    expect(ledger.type === 'bindings' && ledger.bindings.length).toBe(1);
+    if (error) expect(error).toMatchObject({ code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE', site: 'revision-moved' });
+    expect(marks).toBeGreaterThan(0);
+    expect(error).toBeUndefined();
+    expectRecipients(result!, 2);
+  });
   const REVISION_MOVED = { ...TRANSPORT_CHANGED, site: 'revision-moved' };
 
   const allowedPeerQuad = (peerId: string): Quad => ({
@@ -272,6 +310,112 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     expect(projection.peerGateRevision.read(CONTEXT_GRAPH_ID)).toBe(peerGate);
   });
 
+  it('keeps private recipients stable during actual publisher catalog-floor replacement', async () => {
+    let publisher!: DKGPublisher;
+    let publications = 0;
+    const catalogGraph = contextGraphCatalogUri(CONTEXT_GRAPH_ID);
+    const floor = generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH_ID, catalogGraph);
+    const { host, ready, context, projection } = churningHost({
+      seed: (ctx) => [...profileKeys(ctx), ...floor,
+        allowedPeerQuad(ctx.peerId), allowedPeerQuad(ctx.otherPeerId)],
+      during: async (read) => {
+        if (read === 1) return;
+        publications += 1;
+        // This uses the actual persistCatalogEntry closure. NoChain chooses its
+        // intentional-local terminal caller; the confirmed caller shares the
+        // identical clear/insert closure. Neither publisher nor store is mocked.
+        const result = await publisher.publish({
+          contextGraphId: CONTEXT_GRAPH_ID,
+          quads: [
+            { subject: `urn:catalog-floor:publication:${publications}`,
+              predicate: 'urn:catalog-floor:payload', object: '"stable"', graph: '' },
+            ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH_ID),
+          ],
+        });
+        expect(result.status).toBe('tentative');
+      },
+    });
+    await ready;
+    publisher = new DKGPublisher({
+      store: context.store, chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair(),
+    });
+    const gateHost = { getCgMeta: (id: string) => projection.get(id) };
+    host.getContextGraphAllowedPeers.mockImplementation(() => (
+      ContextGraphRegistryMethods.prototype.getContextGraphAllowedPeers.call(gateHost as never, CONTEXT_GRAPH_ID)
+    ));
+    const readFloor = () => context.store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${catalogGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
+    );
+    const beforeFloor = await readFloor();
+    const beforePeers = await host.getContextGraphAllowedPeers();
+    const beforeKeys = projection.recipientKeyRouteFence.revision;
+    let failure: unknown;
+    const result = await resolve(host).catch((error) => { failure = error; return undefined; });
+    expect(await readFloor()).toEqual(beforeFloor);
+    expect(await host.getContextGraphAllowedPeers()).toEqual(beforePeers);
+    expect(projection.recipientKeyRouteFence.revision).toBe(beforeKeys);
+    expect(publications).toBeGreaterThan(0);
+    if (failure) expect(failure).toMatchObject({ code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE', site: 'revision-moved' });
+    expect(failure).toBeUndefined();
+    expectRecipients(result!, 2);
+    expect(publications).toBe(1);
+  });
+  it('invalidates catalog access projection and node-wide snapshots without trusting catalog peer facts', async () => {
+    const { store, projection } = createChurnStack();
+    const graph = contextGraphCatalogUri(CONTEXT_GRAPH_ID);
+    const subject = contextGraphDataUri(CONTEXT_GRAPH_ID);
+    const hostilePeer = { subject, predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
+      object: '"12D3KooWUntrustedCatalogPeer"', graph };
+    await store.insert([
+      { subject, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: contextGraphMetaUri(CONTEXT_GRAPH_ID) },
+      ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH_ID, graph), hostilePeer,
+    ]);
+    expect(await projection.get(CONTEXT_GRAPH_ID)).toMatchObject({ accessPolicy: 'private', allowedPeers: [] });
+    const gate = projection.peerGateRevision.read(CONTEXT_GRAPH_ID);
+    const revision = projection.readAuthorityFactsRevision;
+    await store.deleteByPatternWithoutCount!({ graph, subject });
+    expect(await projection.get(CONTEXT_GRAPH_ID)).toMatchObject({ accessPolicy: 'public', allowedPeers: [] });
+    expect(projection.readAuthorityFactsRevision).toBeGreaterThan(revision);
+    expect(projection.peerGateRevision.read(CONTEXT_GRAPH_ID)).toBe(gate);
+    await store.insert([...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH_ID, graph), hostilePeer]);
+    expect(await projection.get(CONTEXT_GRAPH_ID)).toMatchObject({ accessPolicy: 'private', allowedPeers: [] });
+    expect(projection.peerGateRevision.read(CONTEXT_GRAPH_ID)).toBe(gate);
+  });
+
+  it.each(['changed', 'indeterminate'] as const)('still fences a %s key removal in the catalog graph', async (outcome) => {
+    const graph = contextGraphCatalogUri(CONTEXT_GRAPH_ID);
+    const { host, ready } = churningHost({
+      seed: (ctx) => profileKeys(ctx).map((quad) => ({ ...quad, graph })),
+      during: async (read, ctx) => {
+        if (read !== 4) return;
+        if (outcome === 'indeterminate') {
+          vi.spyOn(ctx.stack.innerStore, 'deleteByPatternWithoutCount').mockRejectedValueOnce(new Error('unknown storage outcome'));
+          await expect(ctx.store.deleteByPatternWithoutCount!({ graph, subject: ctx.memberUri })).rejects.toThrow('unknown storage outcome');
+        } else {
+          await ctx.store.deleteByPatternWithoutCount!({ graph, subject: ctx.memberUri });
+        }
+      },
+      churn: [2, 3],
+    });
+    await ready;
+    await expect(resolve(host)).rejects.toMatchObject(REVISION_MOVED);
+  });
+
+  it.each([
+    ['meta named catalog', contextGraphMetaUri(`${CONTEXT_GRAPH_ID}/_catalog`)],
+    ['bracketed catalog', `<${contextGraphCatalogUri(CONTEXT_GRAPH_ID)}>`],
+    ['quoted catalog', `"${contextGraphCatalogUri(CONTEXT_GRAPH_ID)}"`],
+    ['unsafe catalog', `${contextGraphDataUri(CONTEXT_GRAPH_ID)} /_catalog`],
+  ])('does not exempt %s from peer-gate invalidation', (_label, graph) => {
+    const { projection } = createChurnStack();
+    const id = graph.endsWith('/_meta') ? `${CONTEXT_GRAPH_ID}/_catalog` : CONTEXT_GRAPH_ID;
+    const before = projection.peerGateRevision.read(id);
+    // Invalid terms cannot safely be handed to a real adapter. Exercise the
+    // observer input boundary; the production wrapper provides this descriptor.
+    projection.invalidateStoreMutation({ removals: [{ graph }] });
+    expect(projection.peerGateRevision.read(id)).not.toBe(before);
+  });
   it('keeps the quiet path at two authority reads and one collect', async () => {
     const { host, ready } = churningHost({ seed: profileKeys });
     await ready;

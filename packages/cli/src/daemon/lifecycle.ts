@@ -17,8 +17,7 @@ import {
   contextGraphIdsFromLocalRootMetaGraphs,
   contextGraphIdsFromMetricSubscriptionCandidates,
   countContextGraphsFromGraphUris,
-  GET_TOTAL_TRIPLES_SPARQL,
-  parseRdfInt,
+  createStoreCountMetrics,
   shadowContextGraphIdsFromMetricSubscriptionCandidates,
 } from "./metrics-queries.js";
 import { createMetricsPresence } from "./metrics-presence.js";
@@ -207,6 +206,10 @@ import {
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
 import { registerJoinMetadataEmptyVmSettlement } from '../context-graph-empty-vm-readiness.js';
+import { startActivationCatchups } from './context-graph-activation-catchup.js';
+import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
+import { endContextGraphWriteReadinessWaits } from './context-graph-write-readiness.js';
+import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -222,6 +225,7 @@ import {
 } from '../../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../extraction-status.js';
 import { FileStore } from '../file-store.js';
+import { createEntitySearch } from '../entity-search/runtime.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
@@ -1255,7 +1259,14 @@ async function runDaemonInnerWithStartupOwnership(
 
   let startupUncaughtExceptionHandler: NodeJS.UncaughtExceptionListener | undefined;
   let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
+  // Stops what would start catch-up jobs later; replaced once they exist.
+  let stopCatchupTriggers = (): void => {};
   registerStartupFailureCleanup(async () => {
+    try {
+      stopCatchupTriggers();
+    } catch {
+      // The writer below must still retire.
+    }
     // The graceful shutdown handlers are registered only after startup succeeds. A rejection
     // before that boundary must still retire the writer it started; otherwise queued appends can
     // outlive the failed boot and race the next startup (or test teardown) through DKG_HOME.
@@ -1872,11 +1883,11 @@ async function runDaemonInnerWithStartupOwnership(
     syncGlobalQueueLimit: config.syncGlobalQueueLimit,
     syncAdmission: config.syncAdmission,
     syncResponderSnapshotLimits: config.syncResponderSnapshotLimits,
+    preparedContentCache: config.preparedContentCache,
     syncContextGraphPriorities: config.syncContextGraphPriorities,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
-    // #1836 — forward the operator retry budget to the agent so its own
-    // publishAsync enqueue (EPCIS / Kafka) stamps publisher.maxRetries too.
+    // Forward the operator retry budget to publishAsync producers (#1836).
     publisherMaxRetries: config.publisher?.maxRetries,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
     queryAccess: config.queryAccess,
@@ -2638,56 +2649,9 @@ async function runDaemonInnerWithStartupOwnership(
     // then dedupes local layer graphs. It intentionally includes private CG graphs
     // that are backed by local subscription/declaration state.
     // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
-    getTotalTriples: async () => {
-      const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL, {
-        source: "daemon.metrics.totalTriples",
-      });
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    // RFC ka-metadata-trim (Phase 2 ⊕ / Phase 3 P3.1): the KC/KA counters are
-    // predicate-based, not rdf:type-based — `generateKCMetadata` no longer
-    // emits `rdf:type dkg:KnowledgeCollection` / `dkg:KnowledgeAsset` rows.
-    //   - KC ≙ a subject carrying `dkg:status` (every KC row, old shape or
-    //     new, has exactly one tentative/confirmed status quad).
-    //   - KA ≙ read-both: a legacy `<ual>/<n>` token row carrying
-    //     `dkg:partOf`, OR (collapsed shape, P3.1) a UAL subject carrying
-    //     `dkg:status` + the entity pair with NO token row pointing at it
-    //     (the NOT-EXISTS guard prevents double-counting old-shape rows,
-    //     whose aggregate UAL node also carries `dkg:rootEntity`).
-    getTotalKCs: async () => {
-      const r = await agent.query(
-        "SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?s } }",
-        { source: "daemon.metrics.totalKCs" },
-      );
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getTotalKAs: async () => {
-      const r = await agent.query(
-        `SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g {
-          { ?ka <http://dkg.io/ontology/partOf> ?kc }
-          UNION
-          { ?ka <http://dkg.io/ontology/status> ?st .
-            ?ka <http://dkg.io/ontology/rootEntity> ?re .
-            FILTER NOT EXISTS { ?tok <http://dkg.io/ontology/partOf> ?ka } }
-        } }`,
-        { source: "daemon.metrics.totalKAs" },
-      );
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getConfirmedKCs: async () => {
-      const r = await agent.query(
-        'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }',
-        { source: "daemon.metrics.confirmedKCs" },
-      );
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getTentativeKCs: async () => {
-      const r = await agent.query(
-        'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }',
-        { source: "daemon.metrics.tentativeKCs" },
-      );
-      return parseRdfInt(r?.bindings?.[0]?.c);
-    },
+    // Unscoped reads: after a core-cache snapshot job they count the content
+    // outside the core-cache-marked graphs.
+    ...createStoreCountMetrics((sparql, options) => agent.query(sparql, options)),
     getStoreBytes: async () => {
       // External SPARQL backends own no local file; `null` is the
       // correct signal here (returning 0 misleads operators into
@@ -3320,6 +3284,7 @@ async function runDaemonInnerWithStartupOwnership(
 
   // --- Vector Store (optional, for tri-modal memory) ---
   const vectorStore = new VectorStore(dkgDir());
+  const entitySearch = createEntitySearch(dkgDir(), config.entitySearch);
   let embeddingProvider: EmbeddingProvider | null = null;
   if (config.llm?.apiKey) {
     embeddingProvider = new OpenAIEmbeddingProvider({
@@ -3401,6 +3366,17 @@ async function runDaemonInnerWithStartupOwnership(
 
   let corsAllowed: CorsAllowlist = "*";
   daemonState.catchupRunner = createCatchupRunner(agent);
+  // A persisted subscription the agent restores unsynced (at start, or later
+  // when its authority recovers) gets the subscribe route's catch-up job.
+  const stopActivationCatchups = startActivationCatchups({ agent, store: dashDb, catchupTracker, log });
+  // A write that finds its graph unsynced waits while a catch-up job or a
+  // readiness repeat catches the graph up (context-graph-write-readiness.ts).
+  const stopCatchupProgress = startContextGraphCatchupProgress();
+  stopCatchupTriggers = () => {
+    stopActivationCatchups();
+    stopCatchupProgress();
+    cancelContextGraphReadinessRepeats();
+  };
 
   const server = createServer(async (req, res) => {
     try {
@@ -3590,7 +3566,7 @@ async function runDaemonInnerWithStartupOwnership(
         extractionStatus,
         assertionImportLocks,
         vectorStore,
-        embeddingProvider,
+        embeddingProvider, entitySearch,
         validTokens,
         apiHost,
         apiPortRef,
@@ -3690,7 +3666,14 @@ async function runDaemonInnerWithStartupOwnership(
     // must land before the first suspension point. Extracted so a test can
     // suspend inside `removeApiPort` and prove a subscribe crossing that
     // window is already refused — which is not observable from here.
-    await beginGracefulShutdown({ state: daemonState, removeApiPort, log });
+    await beginGracefulShutdown({
+      state: daemonState,
+      removeApiPort,
+      log,
+      endShareAdmissionWaits: () => agent.endLegacySwmShareAdmissionWaits(),
+      endWriteReadinessWaits: endContextGraphWriteReadinessWaits,
+      stopCatchupTriggers,
+    });
     const cleanupStateFiles = async () => {
       await removeOwnedDaemonRuntimeState().catch((err: any) =>
         log(`Runtime state cleanup error: ${err?.message ?? String(err)}`),
@@ -3730,6 +3713,7 @@ async function runDaemonInnerWithStartupOwnership(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             closeHttpServer: () => closeDaemonHttpServer(server, detachedHttpResponses),
+            closeEntitySearch: async () => { entitySearch?.close(); },
             closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,
