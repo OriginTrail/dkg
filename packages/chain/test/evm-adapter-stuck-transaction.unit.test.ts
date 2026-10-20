@@ -99,6 +99,29 @@ describe('transaction fee pricing at preparation', () => {
     expect(prepared).toMatchObject({ gasLimit: 50_000n, maxFeePerGas: cap, maxPriorityFeePerGas: cap });
   });
 
+  // otReviewAgent on #3393: a cap below the base fee must stay the typed FEE_CAP_BELOW_BASE_FEE
+  // the publisher retries on, not an RPC estimation error.
+  it('rejects a fee cap below the base fee before estimating gas, with the typed error', async () => {
+    const adapter: any = new EVMChainAdapter(config({ staticNetwork: false, maxFeePerGasWei: 100n }));
+    let estimates = 0;
+    const wallet = new ethers.Wallet(PRIVATE_KEY).connect({
+      getNetwork: async () => ({ chainId: 100n, name: 'stub' }),
+      estimateGas: async () => {
+        estimates += 1;
+        throw new Error('max fee per gas less than block base fee');
+      },
+      getTransactionCount: async () => 6722,
+      getBlock: async () => ({ baseFeePerGas: 101n }),
+      send: async () => '0x64',
+      resolveName: async (name: string) => name,
+      _isProvider: true,
+    } as never);
+
+    await expect(adapter.prepareSignerTransaction(wallet, request))
+      .rejects.toMatchObject({ code: 'FEE_CAP_BELOW_BASE_FEE' });
+    expect(estimates).toBe(0);
+  });
+
   it('keeps the operator fee cap above the floor', async () => {
     const cap = 1_500_000_000n;
     const adapter: any = new EVMChainAdapter(config({ staticNetwork: false, maxFeePerGasWei: cap }));

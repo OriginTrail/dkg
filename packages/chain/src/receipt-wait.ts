@@ -12,12 +12,13 @@ export interface ReceiptWaitTimeoutContext {
 export interface WaitForReceiptWithDeadlineOptions<TReceipt> {
   txHash: string;
   /**
-   * Every hash that may carry this operation's receipt, polled in order on each
-   * tick; read again on every tick, so it may grow while the wait runs (a stuck
-   * transaction's same-nonce replacements join the original). The first one
+   * Every hash that may carry this operation's receipt, looked up together on
+   * each tick, so a slow lookup for one cannot starve the others; read again on
+   * every tick, so it may grow while the wait runs (a stuck transaction's
+   * same-nonce replacements join the original). The first one, in this order,
    * with an eligible receipt decides the outcome: an ineligible one (not yet
-   * final, or no longer canonical) does not stop the others being looked up.
-   * Defaults to `[txHash]`.
+   * final, or no longer canonical) does not hide the others. Defaults to
+   * `[txHash]`.
    */
   txHashes?: () => readonly string[];
   /** The hash the timeout names; defaults to the last of `txHashes`. */
@@ -68,11 +69,15 @@ export async function waitForReceiptWithDeadline<TReceipt>(
 
   for (;;) {
     while (Date.now() < deadlineMs) {
-      for (const txHash of txHashes()) {
+      const lookups = await Promise.allSettled(
+        txHashes().map((txHash) => options.getReceipt(txHash, { deadlineMs })),
+      );
+      for (const lookup of lookups) {
         let receipt: TReceipt | null = null;
-        try {
-          receipt = await options.getReceipt(txHash, { deadlineMs });
-        } catch (err) {
+        if (lookup.status === 'fulfilled') {
+          receipt = lookup.value;
+        } else {
+          const err = lookup.reason;
           // A transport-class failure inside this budgeted wait consumes budget, never the
           // operation: an exhausted endpoint pass (RPC_RECEIPT_LOOKUP_FAILED — classified
           // non-retryable so ONE-SHOT lookups fail fast) or any other chain-namespaced
@@ -87,7 +92,7 @@ export async function waitForReceiptWithDeadline<TReceipt>(
           continue;
         }
 
-        // Receipt validation is deliberately OUTSIDE the transport-retry catch.
+        // Receipt validation is deliberately OUTSIDE the transport-retry handling.
         // A deterministic mined revert must remain CALL_EXCEPTION even when the
         // lookup completes at or just after the operation deadline.
         if (!receipt) continue;

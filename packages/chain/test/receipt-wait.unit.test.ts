@@ -42,6 +42,31 @@ describe('receipt deadline orchestration', () => {
     });
   });
 
+  // otReviewAgent on #3393: a superseded original whose fallback endpoint stalls must not use up
+  // the shared deadline before the already-mined replacement is looked up at all.
+  it('looks every hash up together, so a stalled lookup cannot starve a mined one', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const outcome = waitForReceiptWithDeadline({
+      txHash: '0xoriginal',
+      txHashes: () => ['0xoriginal', '0xreplacement'],
+      receiptTimeoutMs: 1_000,
+      pollIntervalMs: 100,
+      getReceipt: (hash, { deadlineMs }) => {
+        // Like RpcFailoverClient: no endpoint attempt once the deadline has passed.
+        if (Date.now() >= deadlineMs) return Promise.resolve(null);
+        if (hash === '0xreplacement') return Promise.resolve({ hash, status: 1 });
+        return new Promise((resolve) => setTimeout(() => resolve(null), deadlineMs - Date.now()));
+      },
+      assertSuccessfulReceipt: () => {},
+      formatTimeoutMessage: () => 'timed out',
+    }).then(
+      (receipt) => ({ status: 'fulfilled' as const, receipt }),
+      (reason) => ({ status: 'rejected' as const, reason }),
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(outcome).resolves.toMatchObject({ status: 'fulfilled', receipt: { hash: '0xreplacement' } });
+  });
+
   it('owns the combined validation/lookup attempt budget in RpcFailoverClient', async () => {
     vi.useFakeTimers({ now: 0 });
     const lookup = vi.fn(async () => null);
