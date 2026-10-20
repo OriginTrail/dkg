@@ -6,7 +6,7 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { readFirstProviderWithTransientRetry } from './rpc-provider-fallback.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
 import { readEvmPublicGraphSnapshot } from './evm-adapter-public-graph-snapshot.js';
-import { OPERATIONAL_KEY_PURPOSE } from './evm-adapter-constants.js';
+import { verifyEvmRegisteredIdentity } from './evm-registered-identity.js';
 import { numericChainIdOf } from './configured-chain-id.js';
 import type { CoreChainCacheRegistry } from './core-chain-cache-registry.js';
 
@@ -45,14 +45,12 @@ export function createEvmCoreChainCacheRegistry(config: {
           signal.throwIfAborted();
           return value;
         };
-        const identity = new Contract(await address('IdentityStorage'), loadAbi('IdentityStorage'), provider);
-        const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [signer]));
-        if (!await identity.keyHasPurpose(identityId, keyHash, OPERATIONAL_KEY_PURPOSE)) return false;
-        signal.throwIfAborted();
-        const table = new Contract(await address('ShardingTableStorage'), loadAbi('ShardingTableStorage'), provider);
-        const active: boolean = await table.nodeExists(identityId);
-        signal.throwIfAborted();
-        return active;
+        const result = await verifyEvmRegisteredIdentity({
+          resolve: async name => new Contract(await address(name), loadAbi(name), provider),
+          keyHasPurpose: (contract, id, key, purpose) => contract.keyHasPurpose(id, key, purpose),
+          nodeExists: (contract, id) => contract.nodeExists(id),
+        }, signer, identityId, signal);
+        return result.valid;
       }, { signal: options.signal, retryDelayMs: 250, isRetryable: isContractViewRetryable, awaitPhysicalSettlement: true });
       options.signal?.throwIfAborted();
       return valid === true;

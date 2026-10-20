@@ -9,6 +9,7 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
+import { verifyEvmRegisteredIdentity } from './evm-registered-identity.js';
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { ChainReadOptions, VerifyACKIdentityResult } from './chain-adapter.js';
@@ -88,28 +89,13 @@ export class AckSignMethods extends EVMChainAdapterBase {
         activeRpcRequestAbortSignal()?.throwIfAborted();
         await this.init();
         activeRpcRequestAbortSignal()?.throwIfAborted();
-        const identityStorage = await this.resolveContract('IdentityStorage');
-        activeRpcRequestAbortSignal()?.throwIfAborted();
-        if (!identityStorage) return { valid: false, reason: 'rpc-error' };
-
-        const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
-        const hasPurpose: boolean = await this.readContract(
-          identityStorage, 'identityStorage.keyHasPurpose',
-          'keyHasPurpose', claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE,
-        );
-        activeRpcRequestAbortSignal()?.throwIfAborted();
-        if (!hasPurpose) return { valid: false, reason: 'key-not-registered' };
-
-        const shardingTableStorage = await this.resolveContract('ShardingTableStorage');
-        activeRpcRequestAbortSignal()?.throwIfAborted();
-        if (!shardingTableStorage) return { valid: false, reason: 'rpc-error' };
-        const inST: boolean = Boolean(await this.readContract(
-          shardingTableStorage, 'shardingTableStorage.nodeExists',
-          'nodeExists', claimedIdentityId,
-        ));
-        activeRpcRequestAbortSignal()?.throwIfAborted();
-        if (!inST) return { valid: false, reason: 'not-in-sharding-table' };
-        return { valid: true };
+        return await verifyEvmRegisteredIdentity({
+          resolve: name => this.resolveContract(name),
+          keyHasPurpose: (contract, id, key, purpose) => this.readContract(
+            contract, 'identityStorage.keyHasPurpose', 'keyHasPurpose', id, key, purpose),
+          nodeExists: async (contract, id) => Boolean(await this.readContract(
+            contract, 'shardingTableStorage.nodeExists', 'nodeExists', id)),
+        }, recoveredAddress, claimedIdentityId, activeRpcRequestAbortSignal());
       } catch {
         activeRpcRequestAbortSignal()?.throwIfAborted();
         // Any chain-side throw (filter expired, RPC rate-limit, contract

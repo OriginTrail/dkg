@@ -4,7 +4,7 @@ import { createUalOnlyExactAssetSelection } from './sync/exact-assets.js';
 import { exactAssetFetchSessionPolicy } from './sync/requester/exact-durable-fetch.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
-import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
+import { snapshotPeerBatches, type PublicSnapshotRecoveryOptions, type PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 import { PublicSnapshotRecoveryPacing } from './public-snapshot-exact-pacing.js';
 
 export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecoveryOptions {
@@ -25,7 +25,7 @@ type ExactTransport = 'stream-preferred' | 'legacy';
  * the job. Assets already stored as the snapshot pins them are not fetched.
  */
 export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, options: PublicSnapshotExactRecoveryOptions): Promise<PublicSnapshotRecoveryResult> {
-  const { contextGraphId, peers, uals, evidence, signal, assertCurrent, deadline } = options;
+  const { contextGraphId, uals, evidence, signal, assertCurrent, deadline } = options;
   const committed = new Set<string>();
   let alreadyPresent = 0;
   const ctx = createOperationContext('sync');
@@ -60,7 +60,7 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
   };
   // Ask the peers for one selection until it is stored, every peer has
   // answered for it, or the job ends.
-  const recover = async (batch: readonly string[], transport: ExactTransport) => {
+  const recover = async (batch: readonly string[], transport: ExactTransport, peers: readonly string[]) => {
     const answered = new Set<string>();
     for (;;) {
       let wait: 'admission' | 'peer' | undefined;
@@ -90,10 +90,13 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
   for (let offset = 0; offset < uals.length; offset += 10) {
     const batch = uals.slice(offset, offset + 10);
     await skipHeld(batch);
-    await recover(batch, "stream-preferred");
-    // The stream profile excludes private commitments. Only missing assets
-    // use the bounded singleton transport, with identical authentication.
-    for (const ual of batch) if (!committed.has(ual)) await recover([ual], "legacy");
+    for await (const peers of snapshotPeerBatches(options)) {
+      await recover(batch, "stream-preferred", peers);
+      // The stream profile excludes private commitments. Only missing assets
+      // use the bounded singleton transport, with identical authentication.
+      for (const ual of batch) if (!committed.has(ual)) await recover([ual], "legacy", peers);
+      if (batch.every(ual => committed.has(ual))) break;
+    }
     if (batch.some(ual => !committed.has(ual))) throw incomplete();
   }
   return { committed, alreadyPresent };

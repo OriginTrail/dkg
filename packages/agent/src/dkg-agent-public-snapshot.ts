@@ -1,6 +1,6 @@
 import { DKG_CORE_CHAIN_CACHE } from './core-chain-cache-config.js';
 import { registerCoreChainCacheHandlers } from './core-chain-cache-handler.js';
-import { coreChainCacheSeeds, connectCoreChainCacheSeed, selectCoreChainCacheContentPeers } from './core-chain-cache-peers.js';
+import { coreChainCacheSeeds, connectCoreChainCacheSeed, createCoreChainCacheContentPeers } from './core-chain-cache-peers.js';
 import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
@@ -28,6 +28,8 @@ const encoder = new TextEncoder();
 const jobs = new WeakSet<DKGAgent>();
 import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { registerSnapshotSourceHandler } from './public-snapshot-source-handler.js';
+import { bindSnapshotSourcePolicy } from './public-snapshot-policy.js';
+import { ensurePeerConnected as connectSnapshotPeer } from './p2p/peer-connect.js';
 import { selectSnapshotSources } from './public-snapshot-sources.js';
 export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export class PublicSnapshotMethods extends DKGAgentBase {
@@ -56,7 +58,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
       },
     });
     const runtime = cache?.runtime ?? new PublicSnapshotServingRuntime(
-      (id, onChainId, signal) => this.chain.readPublicGraphSnapshot!(id, onChainId, { signal }),
+      ({ contextGraphId, onChainId }, signal) => this.chain.readPublicGraphSnapshot!(contextGraphId, onChainId, { signal }),
       this.workLifetime,
     );
     this.router.register(
@@ -73,8 +75,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           const lifetime = this.workLifetime.generation;
           const snapshot = await runtime.get(
             peer.toString(),
-            cache ? JSON.stringify([this.chain.deploymentId, request.contextGraphId]) : request.contextGraphId,
-            request.onChainId,
+            { deploymentId: this.chain.deploymentId!, contextGraphId: request.contextGraphId, onChainId: request.onChainId },
             request.refresh,
           );
           if (lifetime !== this.workLifetime.generation
@@ -138,9 +139,10 @@ export class PublicSnapshotMethods extends DKGAgentBase {
         operation: async control => {
           const assertCurrent = control.assertCurrent;
           const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
+          const policy = bindSnapshotSourcePolicy({ sourcePolicy: normalized.sourcePolicy, chain: this.chain,
+            selfPeerId: this.peerId, networks, send: this.router.send.bind(this.router), scope: { contextGraphId, onChainId } });
           const peers = normalized.sourcePolicy ? await selectSnapshotSources({
-            chain: this.chain, selfPeerId: this.peerId,
-            ...(chainCache ? { cacheNetworks: networks } : {}),
+            ...policy, selfPeerId: this.peerId,
             candidates: async signal => {
               const connected = this.node.libp2p.getConnections().map(c => c.remotePeer.toString());
               const hints = await this.discovery.findSnapshotCorePeerIds(signal).catch(error => {
@@ -151,11 +153,14 @@ export class PublicSnapshotMethods extends DKGAgentBase {
               dataCandidates.push(...connected, ...hints);
               return [...connected, ...hints, ...seeds.keys()];
             },
-            connect: (peer, signal) => seeds.get(peer)
-              ? connectCoreChainCacheSeed(this.node.libp2p, seeds.get(peer)!, signal)
-              : this.ensurePeerConnected(peer, { signal }),
-            send: this.router.send.bind(this.router),
-          }, { contextGraphId, onChainId }, signal) : Object.freeze([...normalized.trustedCorePeerIds]);
+            connect: async (peer, signal) => {
+              if (!chainCache) return this.ensurePeerConnected(peer, { signal });
+              if (seeds.has(peer)) await connectCoreChainCacheSeed(this.node.libp2p, seeds.get(peer)!, signal);
+              else await connectSnapshotPeer(this.peerResolver, peer, { signal });
+              if (!await this.networkAdmissionCoordinator.ensureCacheAdmitted(peer, createOperationContext('connect'), { signal }))
+                throw new Error('Peer is not admitted for chain-cache authentication');
+            },
+          }, signal) : Object.freeze([...normalized.trustedCorePeerIds]);
           assertCurrent();
           const expected = {
             chainId: this.chain.chainId,
@@ -163,7 +168,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
             contextGraphId,
             onChainId,
           };
-          const read = createPublicSnapshotReader({ mode, chainCache, chain:this.chain, router:this.router,
+          const read = createPublicSnapshotReader({ mode, chain:this.chain, request: policy.request,
             peers, signal, expected, assertCurrent });
           const initial = await read();
           const snapshot = initial.snapshot;
@@ -182,16 +187,17 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
           // Cache suppliers can be foreign-network peers. Content remains on the data network
           // and is verified against the authenticated inventory before it is committed.
-          const contentPeers: readonly string[] = chainCache
-            ? await selectCoreChainCacheContentPeers({ candidates: dataCandidates, self: this.peerId,
+          const contentPool = chainCache
+            ? createCoreChainCacheContentPeers({ candidates: dataCandidates, self: this.peerId,
               connect: (peer, requestSignal) => dataSeeds.get(peer)
                 ? connectCoreChainCacheSeed(this.node.libp2p, dataSeeds.get(peer)!, requestSignal)
                 : this.ensurePeerConnected(peer, { signal: requestSignal }),
               admit: (peer, requestSignal) => this.networkAdmissionCoordinator.ensureAdmitted(peer, createOperationContext('sync'), { signal: requestSignal }),
             }, signal)
-            : peers;
-          if (uals.length && !contentPeers.length) throw new Error('No data-network peers available for snapshot content');
-          const recovery = { contextGraphId, peers: contentPeers, uals, evidence, signal, assertCurrent };
+            : undefined;
+          const contentPeers = contentPool?.selected ?? peers;
+          if (uals.length && !contentPool && !contentPeers.length) throw new Error('No data-network peers available for snapshot content');
+          const recovery = { contextGraphId, peers: contentPeers, peerBatches: contentPool?.batches, uals, evidence, signal, assertCurrent };
           let recovered: PublicSnapshotRecoveryResult;
           if (transport === 'bulk') {
             const { verification, reconcile } = DKGAgentBase.createDurableRecoveryCapabilities(this);

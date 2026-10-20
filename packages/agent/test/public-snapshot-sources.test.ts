@@ -13,7 +13,16 @@ import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 import { MockChainAdapter, sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { registerSnapshotSourceHandler } from '../src/public-snapshot-source-handler.js';
-import { selectSnapshotSources } from '../src/public-snapshot-sources.js';
+import { selectSnapshotSources as selectBoundedSources, type SnapshotSourcePorts } from '../src/public-snapshot-sources.js';
+import { bindSnapshotSourcePolicy } from '../src/public-snapshot-policy.js';
+
+// Exercise legacy wire behavior through the same policy boundary as the agent.
+async function selectSnapshotSources(ports: Pick<SnapshotSourcePorts, 'selfPeerId' | 'candidates' | 'connect'> &
+  Pick<Parameters<typeof bindSnapshotSourcePolicy>[0], 'chain' | 'send'>,
+  scope: { contextGraphId: string; onChainId: string }, signal: AbortSignal) {
+  return selectBoundedSources({ ...ports, ...bindSnapshotSourcePolicy({ ...ports, scope,
+    sourcePolicy: 'base-mainnet-registered-cores', networks: [] }) }, signal);
+}
 import { normalizePublicSnapshotSyncOptions } from '../src/public-snapshot-options.js';
 import {
   BASE_MAINNET_SOURCE_POLICY, PUBLIC_SNAPSHOT_SOURCE_PROTOCOL,

@@ -46,11 +46,10 @@ export function registerCoreChainCacheHandlers(agent: {
   }, { maxReadBytes: CACHE_PROOF_MAX_BYTES });
 
   // One runtime across deployments retains the existing global two-builder/eight-entry bounds.
-  const runtime = new PublicSnapshotServingRuntime(async (key, onChainId, signal) => {
-    const [deploymentId, graph] = JSON.parse(key) as [string, string];
+  const runtime = new PublicSnapshotServingRuntime(async ({ deploymentId, contextGraphId, onChainId }, signal) => {
     const registry = agent.networks.find(n => n.registry.deploymentId === deploymentId)!.registry;
     // The reader checks public access, graph name, finality, all roots and the pinned block.
-    return registry.readPublicGraphSnapshot(graph, onChainId, { signal });
+    return registry.readPublicGraphSnapshot(contextGraphId, onChainId, { signal });
   }, agent.workLifetime);
   agent.router.register(CORE_CHAIN_CACHE_SNAPSHOT_PROTOCOL, async (bytes, remote) => {
     try {
@@ -61,7 +60,7 @@ export function registerCoreChainCacheHandlers(agent: {
         throw new Error('Unavailable');
       encodePublicGraphSnapshotRequest({ version: r.version, contextGraphId: r.contextGraphId,
         onChainId: r.onChainId, refresh: r.refresh });
-      const snapshot = await runtime.get(remote.toString(), JSON.stringify([r.deploymentId, r.contextGraphId]), r.onChainId, r.refresh);
+      const snapshot = await runtime.get(remote.toString(), { deploymentId: r.deploymentId, contextGraphId: r.contextGraphId, onChainId: r.onChainId }, r.refresh);
       agent.workLifetime.signal.throwIfAborted();
       const result = encode(snapshot);
       if (result.length > PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES) throw new Error('Unavailable');

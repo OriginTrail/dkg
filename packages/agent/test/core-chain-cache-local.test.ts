@@ -4,6 +4,7 @@ import { createEvmCoreChainCacheRegistry, EVMChainAdapter } from '@origintrail-o
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { makeAdapterConfig, HARDHAT_KEYS, takeSnapshot, revertSnapshot } from '../../chain/test/evm-test-context.js';
 import { graph, publicSnapshotFixture } from './helpers/public-snapshot-local-fixture.js';
+import { buildAgentProfile } from '../src/profile.js';
 import type { CoreChainCacheNetwork } from '../src/core-chain-cache-config.js';
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
@@ -28,7 +29,10 @@ it('keeps the explicit-peer protocol compatible when the serving core enables ch
   } finally { await f.dispose(); registry.destroy(); await revertSnapshot(before); }
 });
 
-it.each(['exact', 'bulk'] as const)('authenticates a foreign core, retrieves verified content on the data network and measures physical RPC (%s)', async transport => {
+it.each([
+  { transport: 'exact', topology: 'seed' }, { transport: 'bulk', topology: 'seed' },
+  { transport: 'exact', topology: 'phonebook-and-empty-relays' }, { transport: 'bulk', topology: 'phonebook-and-empty-relays' },
+] as const)('authenticates a foreign core and recovers content ($transport / $topology)', async ({ transport, topology }) => {
   vi.stubEnv("DKG_PUBLIC_SNAPSHOT_BULK", transport === "bulk" ? "1" : "0");
   const before = await takeSnapshot();
   const f = await publicSnapshotFixture(transport);
@@ -49,11 +53,27 @@ it.each(['exact', 'bulk'] as const)('authenticates a foreign core, retrieves ver
     const content = await f.make('DataContentCore', 'core', f.adapter, f.source);
     const receiverChain = new EVMChainAdapter(makeAdapterConfig(f.rpcUrl, f.hubAddress, HARDHAT_KEYS.REC1_OP));
     const edgeNetworks = networks();
-    (edgeNetworks[1].relays as string[]).push(foreign.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    if (topology === 'seed') {
+      (edgeNetworks[1].relays as string[]).push(foreign.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    } else {
+      for (let i = 0; i < 4; i++) {
+        const empty = await f.make(`EmptyRelay${i}`, 'core', new EVMChainAdapter(
+          makeAdapterConfig(f.rpcUrl, f.hubAddress, HARDHAT_KEYS.DEPLOYER)), new OxigraphStore());
+        (edgeNetworks[0].relays as string[]).push(empty.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+      }
+    }
     const target = new OxigraphStore();
     const edge = await f.make('CacheEdge', 'edge', receiverChain, target, {
       DKG_Core_chain_cache: true, coreChainCacheNetworks: edgeNetworks,
     });
+    if (topology !== 'seed') {
+      await edge.store.insert(buildAgentProfile({ peerId: foreign.peerId, name: 'Discovered foreign cache',
+        nodeRole: 'core', skills: [], agentAddress: '0x' + '1'.repeat(40),
+        multiaddrs: foreign.multiaddrs.filter(a => a.includes('/tcp/') && !a.includes('/p2p-circuit')),
+      }).quads);
+      expect(edgeNetworks.every(n => !n.relays.some(a => a.includes(foreign.peerId)))).toBe(true);
+      expect(edge.connectedPeerIds()).not.toContain(foreign.peerId);
+    }
     await edge.connectTo(content.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
     await edge.awaitInitialChainPoll();
     edge.subscribeToContextGraph(graph, { onChainId: f.onChainId, syncMode: 'on-demand', trackSyncScope: false, deferSharedMemoryGossipSubscribe: true });

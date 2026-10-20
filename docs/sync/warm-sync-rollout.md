@@ -43,8 +43,9 @@ original network admission. The core validates public graph access, name,
 finality and block consistency before supplying a snapshot.
 
 The inventory supplier need not host the RDF content. Content is fetched from
-up to four separately admitted data-network peers and each asset retains its
-identity/root verification. Start and final inventory comparisons, the job
+up to sixteen data-network hints, admitted four at a time as recovery needs
+more suppliers. Empty relays cannot exclude a later content host. Each asset
+retains its identity/root verification. Start and final inventory comparisons, the job
 lifetime, transfer deadlines and retries remain unchanged. Content export
 caches and chain-inventory caches are distinct: the former improve repeated
 content transfers; the latter reduce Edge RPC work.
@@ -66,7 +67,7 @@ cross-chain routing and verification; it is not a live multi-chain benchmark.
 
 The two inventory observations took 22 direct RPC requests. Delegating them
 left five Edge requests for operational-key and active-registration checks.
-Including ordinary graph-authority work, the measured jobs used 14–16 Edge
+Including ordinary graph-authority work, the latest measured jobs used 15–18 Edge
 requests, versus 42 for independent recovery. Ordinary authority work varies
 with runtime state; these counts do not predict a whole-session bill or a
 production latency. The core still pays for inventory cache misses/refreshes.

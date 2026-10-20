@@ -14,31 +14,42 @@ export function coreChainCacheSeeds(networks: readonly CoreChainCacheNetwork[]) 
   return seeds;
 }
 
-/** Content peers pass ordinary data-network admission; cache-only admission never qualifies. */
-export async function selectCoreChainCacheContentPeers(ports: {
+/** At most sixteen hints, admitted four at a time. Recovery advances only when a
+ * batch cannot supply the requested content; empty relays cannot consume all slots. */
+export function createCoreChainCacheContentPeers(ports: {
   candidates: readonly string[]; self: string;
   connect(peer: string, signal: AbortSignal): Promise<void>;
   admit(peer: string, signal: AbortSignal): Promise<boolean>;
-}, signal: AbortSignal): Promise<readonly string[]> {
+}, signal: AbortSignal): { batches(): AsyncIterable<readonly string[]>; selected: readonly string[] } {
   const peers = [...new Set(ports.candidates)].filter(p => p !== ports.self).slice(0, 16);
-  const accepted: string[] = [];
-  for (let offset = 0; offset < peers.length && accepted.length < 4; offset += 4) {
-    signal.throwIfAborted();
-    const batch = await mapWithConcurrencyDrained(peers.slice(offset, offset + 4), 4, async peer => {
-      const lifetime = startRequestAbortLifecycle(10_000, [signal]);
-      try {
-        await ports.connect(peer, lifetime.signal);
-        lifetime.signal.throwIfAborted();
-        const admitted = await ports.admit(peer, lifetime.signal);
-        lifetime.signal.throwIfAborted();
-        return admitted ? peer : null;
-      } catch { signal.throwIfAborted(); return null; }
-      finally { lifetime.release(); }
-    });
-    accepted.push(...batch.filter((p): p is string => p !== null).slice(0, 4 - accepted.length));
-  }
-  signal.throwIfAborted();
-  return Object.freeze(accepted);
+  const selected: string[] = [], batches: string[][] = [];
+  let offset = 0;
+  return {
+    selected,
+    async *batches() {
+      let index = 0;
+      for (;;) {
+        signal.throwIfAborted();
+        if (index < batches.length) { yield batches[index++]; continue; }
+        if (offset >= peers.length) return;
+        const candidates = peers.slice(offset, offset + 4); offset += candidates.length;
+        const batch = await mapWithConcurrencyDrained(candidates, 4, async peer => {
+          const lifetime = startRequestAbortLifecycle(10_000, [signal]);
+          try {
+            await ports.connect(peer, lifetime.signal);
+            lifetime.signal.throwIfAborted();
+            const admitted = await ports.admit(peer, lifetime.signal);
+            lifetime.signal.throwIfAborted();
+            return admitted ? peer : null;
+          } catch { signal.throwIfAborted(); return null; }
+          finally { lifetime.release(); }
+        });
+        signal.throwIfAborted();
+        const accepted = batch.filter((p): p is string => p !== null);
+        if (accepted.length) { batches.push(accepted); selected.push(...accepted); }
+      }
+    },
+  };
 }
 export async function connectCoreChainCacheSeed(
   libp2p: Parameters<typeof connectLibp2pCandidate>[0],

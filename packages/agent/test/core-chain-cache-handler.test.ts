@@ -51,7 +51,7 @@ it('retains the shared two-build limit and physical ownership after cancellation
   const b = f.send(snapshot, { ...request, contextGraphId: 'second' }, 'b');
   expect(await f.send(snapshot, { ...request, contextGraphId: 'third' }, 'c')).toEqual({ unavailable: true });
   // Legacy requests use this same runtime; neither protocol gets extra builder slots.
-  await expect(f.serving.runtime.get('legacy', JSON.stringify([scope.deploymentId, 'legacy']), '1')).rejects.toThrow('busy');
+  await expect(f.serving.runtime.get('legacy', { deploymentId: scope.deploymentId, contextGraphId: 'legacy', onChainId: '1' })).rejects.toThrow('busy');
   expect(signals).toHaveLength(2);
   f.workLifetime.close();
   expect(signals.every(s => s.aborted)).toBe(true);

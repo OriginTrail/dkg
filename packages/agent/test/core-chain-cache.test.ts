@@ -50,8 +50,9 @@ describe('cross-network chain cache admission', () => {
     const foreign = { networkId: `${environment}-b`, genesisId: `${environment}-b`, chainId: 'gnosis:2' };
     const close = vi.fn();
     let claimed = foreign;
+    let now = Date.now();
     const coordinator = new NetworkAdmissionCoordinator({
-      admission: new NetworkAdmissionService({ networkId: own.networkId, selfPeerId: self }), identity: own,
+      admission: new NetworkAdmissionService({ networkId: own.networkId, selfPeerId: self, now: () => now }), identity: own,
       cacheIdentities: [own, foreign], selfPeerId: self, sign: async () => new Uint8Array(),
       sendIdentityProbe: async (_peer, data) => encode(await signNetworkIdentityResponse({
         request: JSON.parse(new TextDecoder().decode(data)), identity: claimed, responderPeerId: remote,
@@ -68,7 +69,7 @@ describe('cross-network chain cache admission', () => {
     expect(coordinator.verifiedSameNetworkPeerIds().has(remote)).toBe(false);
     expect(close).not.toHaveBeenCalled();
     // Re-probing after cache expiry must reject a switch to a different environment.
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
+    now += 31_000;
     try {
       claimed = { ...foreign, networkId: `other-${environment}`, genesisId: `other-${environment}` };
       expect(await coordinator.ensureCacheAdmitted(remote, createOperationContext('connect'))).toBe(false);

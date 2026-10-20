@@ -4,6 +4,12 @@ import type { PublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
 import { PublicSnapshotAdmission } from './public-snapshot-admission.js';
 
+export interface PublicSnapshotScope {
+  readonly deploymentId: string;
+  readonly contextGraphId: string;
+  readonly onChainId: string;
+}
+
 /** Agent-owned serving: cache, physical build admission and one disposable node-bound deadline.
  * The node drains the tracked physical promise on shutdown, even when a reader ignores abort.
  * Failures never replace the last good snapshot or extend its age. */
@@ -12,8 +18,7 @@ export class PublicSnapshotServingRuntime {
   private readonly pending = new Map<string, { promise: Promise<PublicGraphSnapshot>; sequence: number }>();
   constructor(
     private readonly read: (
-      id: string,
-      onChainId: string,
+      scope: PublicSnapshotScope,
       signal: AbortSignal,
     ) => Promise<PublicGraphSnapshot>,
     private readonly lifetime: AgentWorkLifetime,
@@ -22,8 +27,8 @@ export class PublicSnapshotServingRuntime {
   private readonly signal: AbortSignal;
   private readonly admission: PublicSnapshotAdmission;
   private sequence = 0;
-  async get(peer: string, id: string, onChainId: string, refresh = false): Promise<PublicGraphSnapshot> {
-    const key = JSON.stringify([id, onChainId]);
+  async get(peer: string, scope: PublicSnapshotScope, refresh = false): Promise<PublicGraphSnapshot> {
+    const key = JSON.stringify([scope.deploymentId, scope.contextGraphId, scope.onChainId]);
     // A forced observation must begin after THIS request, in the supplier's
     // own ordering domain. Never compare clocks belonging to different nodes.
     const minimum = refresh ? this.sequence + 1 : 0;
@@ -43,7 +48,7 @@ export class PublicSnapshotServingRuntime {
       const lifecycle = startRequestAbortLifecycle(110_000, [this.signal]);
       const sequence = ++this.sequence;
       let read: Promise<PublicGraphSnapshot>;
-      try { read = this.read(id, onChainId, lifecycle.signal); }
+      try { read = this.read(scope, lifecycle.signal); }
       catch (error) { lifecycle.release(); release(); throw error; }
       const operation = read.then(snapshot => {
         lifecycle.signal.throwIfAborted();

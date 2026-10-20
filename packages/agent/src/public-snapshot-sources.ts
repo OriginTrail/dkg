@@ -1,34 +1,23 @@
-import { verifyCacheProof } from './core-chain-cache-proof.js';
-import { CORE_CHAIN_CACHE_SOURCE_PROTOCOL, type CoreChainCacheNetwork } from './core-chain-cache-config.js';
 // SPDX-License-Identifier: Apache-2.0
 import { createHash, randomBytes } from 'node:crypto';
-import { startRequestAbortLifecycle, type ProtocolRouter } from '@origintrail-official/dkg-core';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
 import { mapWithConcurrencyDrained } from './map-with-concurrency.js';
-import {
-  PUBLIC_SNAPSHOT_SOURCE_PROTOCOL, PUBLIC_SNAPSHOT_SOURCE_MAX_BYTES,
-  verifySourceProof, type SnapshotSourceChallenge,
-} from './public-snapshot-source-proof.js';
+import type { SnapshotSourcePolicy } from './public-snapshot-policy.js';
 
-export interface SnapshotSourcePorts {
-  chain: Pick<ChainAdapter, 'chainId' | 'deploymentId' | 'verifyACKIdentity'>;
+export interface SnapshotSourcePorts extends Pick<SnapshotSourcePolicy, 'probe' | 'unavailableMessage'> {
   selfPeerId: string;
-  cacheNetworks?: readonly CoreChainCacheNetwork[];
   /** Bounded phonebook/connected candidates are hints, never trust evidence. */
   candidates(signal: AbortSignal): Promise<readonly string[]>;
   connect(peer: string, signal: AbortSignal): Promise<void>;
-  send: ProtocolRouter['send'];
 }
 
-/** Every registered Base core may qualify; one job probes at most 16 hints,
+/** Every source accepted by the bound policy may qualify; one job probes at most 16 hints,
  * four at a time, and pins at most four proven sources. Random order avoids a
  * fixed preferred core. Nothing changes the caller's one-hour job lifetime. */
 export async function selectSnapshotSources(
   ports: SnapshotSourcePorts,
-  scope: { contextGraphId: string; onChainId: string },
   signal: AbortSignal,
 ): Promise<readonly string[]> {
-  if (!ports.chain.deploymentId || (!ports.cacheNetworks && (ports.chain.chainId !== 'base:8453' || !ports.chain.verifyACKIdentity))) throw new Error('Registered Base mainnet source verification unavailable');
   signal.throwIfAborted();
   const nonce = randomBytes(32).toString('hex');
   const rank = (peer: string) => createHash('sha256').update(nonce).update(peer).digest('hex');
@@ -46,16 +35,8 @@ export async function selectSnapshotSources(
       try {
         await ports.connect(peer, lifetime.signal);
         lifetime.signal.throwIfAborted();
-        const challenge: SnapshotSourceChallenge = {
-          version: 1, nonce, requesterPeerId: ports.selfPeerId, responderPeerId: peer,
-          chainId: ports.chain.chainId, deploymentId: ports.chain.deploymentId!, ...scope,
-        };
-        const bytes = await ports.send(peer, ports.cacheNetworks ? CORE_CHAIN_CACHE_SOURCE_PROTOCOL : PUBLIC_SNAPSHOT_SOURCE_PROTOCOL,
-          new TextEncoder().encode(JSON.stringify(challenge)),
-          { signal: lifetime.signal, timeoutMs: 5_000, maxReadBytes: PUBLIC_SNAPSHOT_SOURCE_MAX_BYTES });
-        const valid = ports.cacheNetworks
-          ? await verifyCacheProof(bytes, challenge, ports.cacheNetworks, lifetime.signal)
-          : await verifySourceProof(bytes, challenge, ports.chain.verifyACKIdentity!.bind(ports.chain), lifetime.signal);
+        const valid = await ports.probe(peer, nonce, lifetime.signal);
+        lifetime.signal.throwIfAborted();
         return valid ? peer : null;
       } catch {
         signal.throwIfAborted();
@@ -65,6 +46,6 @@ export async function selectSnapshotSources(
     selected.push(...proven.filter((p): p is string => p !== null).slice(0, 4 - selected.length));
   }
   signal.throwIfAborted();
-  if (!selected.length) throw new Error(ports.cacheNetworks ? 'No registered DKG core proved chain-cache identity' : 'No registered Base mainnet core proved snapshot availability');
+  if (!selected.length) throw new Error(ports.unavailableMessage);
   return Object.freeze(selected);
 }
