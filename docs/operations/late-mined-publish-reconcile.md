@@ -25,17 +25,17 @@ The node verifies the mint before recording anything:
 - The receipt's Merkle root, context graph and author must equal the seal's.
 - The receipt must hold the node's configured `chain.finalityConfirmations` depth, with its block hash still at its height. At the default of 1 this proves the block canonical, not deeply final.
 
-It then records the original transaction, block, publisher and TRAC cost through the normal confirmed-publish path and broadcasts the usual finalization message. It sends no transaction, ACK request or member ciphertext, and needs no funded publish wallet. Success returns `status: "adopted"` with the UAL, KA id, transaction hash and block. Repeating the command returns `status: "already-published"`.
+It then records the original transaction, block, publisher and TRAC cost through the normal confirmed-publish path and broadcasts the usual finalization message. If the node already holds a confirmed record of exactly this content and transaction, it keeps that record instead of writing a second one. That covers a record written by the failed run that minted the asset, or by the node's chain reconcile. A record of other content refuses with `existing-record-conflict` before anything is written. It sends no transaction, ACK request or member ciphertext, and needs no funded publish wallet. Success returns `status: "adopted"` with the UAL, KA id, transaction hash and block. Repeating the command returns `status: "already-published"`.
 
 | Response | Meaning |
 |---|---|
 | 409 `KA_MINT_ADOPTION_REFUSED`, `reason: "not-minted"` | The reserved id is not minted at the finality-depth block. Publish the asset normally with `dkg ka publish`. |
-| 409 `KA_MINT_ADOPTION_REFUSED`, `root-mismatch`, `context-graph-mismatch`, `author-mismatch` or `mint-receipt-invalid` | The id was minted by something this seal did not produce. Keep the evidence and investigate; do not force it. |
+| 409 `KA_MINT_ADOPTION_REFUSED`, `root-mismatch`, `context-graph-mismatch`, `author-mismatch`, `mint-receipt-invalid` or `existing-record-conflict` | The id was minted by something this seal did not produce. Keep the evidence and investigate; do not force it. |
 | 503 `KA_MINT_ADOPTION_REFUSED`, `retryable: true` (`mint-not-final` or `mint-receipt-missing`) | The mint is too recent, or its creation log was not found. Retry later, or pass `--tx-hash`. |
 | 503 `KA_MINT_RECONCILE_INCOMPLETE` | The mint was verified, but the lifecycle did not reach `vm-confirmed`. Retry. |
 | 409 `VM_PUBLISH_PRECONDITION` or `PUBLISH_NOT_FULL_SHARE` | The asset is not a finalized, fully shared asset, or its shared-memory content is gone. |
 
-Any other failure, such as a store error, leaves the lifecycle at `swm-shared`. A retry rewrites whatever was already recorded identically, and the command sends nothing, so it is safe to retry. On a large node, a 500 with "Triple-store response exceeds byte limit" can come from a concurrent query sharing the store's graph listing during the shared-memory cleanup. Retry it while the node serves no other queries.
+Any other failure, such as a store error, leaves the lifecycle at `swm-shared`. A retry keeps the matching record an earlier attempt left and completes the remaining steps. The command sends nothing, so it is safe to retry. On a large node, a 500 with "Triple-store response exceeds byte limit" can come from a concurrent query sharing the store's graph listing during the shared-memory cleanup. Retry it while the node serves no other queries.
 
 A plain `dkg ka publish` retry also adopts the asset's own mint when the contract reports the reserved id already minted. That retry still collects core ACKs first, and under the per-publish approval policy it can send a TRAC approval before gas estimation reverts. Prefer `reconcile`.
 
