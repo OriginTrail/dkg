@@ -15,10 +15,9 @@ export interface WaitForReceiptWithDeadlineOptions<TReceipt> {
    * Every hash that may carry this operation's receipt, looked up together on
    * each tick, so a slow lookup for one cannot starve the others; read again on
    * every tick, so it may grow while the wait runs (a stuck transaction's
-   * same-nonce replacements join the original). The first one, in this order,
-   * with an eligible receipt decides the outcome: an ineligible one (not yet
-   * final, or no longer canonical) does not hide the others. Defaults to
-   * `[txHash]`.
+   * same-nonce replacements join the original). The first eligible receipt to
+   * come back decides the outcome: an ineligible one (not yet final, or no
+   * longer canonical) does not hide the others. Defaults to `[txHash]`.
    */
   txHashes?: () => readonly string[];
   /** The hash the timeout names; defaults to the last of `txHashes`. */
@@ -69,15 +68,14 @@ export async function waitForReceiptWithDeadline<TReceipt>(
 
   for (;;) {
     while (Date.now() < deadlineMs) {
-      const lookups = await Promise.allSettled(
-        txHashes().map((txHash) => options.getReceipt(txHash, { deadlineMs })),
-      );
-      for (const lookup of lookups) {
-        let receipt: TReceipt | null = null;
-        if (lookup.status === 'fulfilled') {
-          receipt = lookup.value;
-        } else {
-          const err = lookup.reason;
+      // Each hash is looked up and, once its receipt returns, checked for
+      // eligibility on its own, so a slow lookup for one hash delays neither
+      // the lookup nor the (deadline-bound) finality check of another.
+      const receipt = await firstEligibleReceipt(txHashes().map(async (txHash) => {
+        let found: TReceipt | null;
+        try {
+          found = await options.getReceipt(txHash, { deadlineMs });
+        } catch (err) {
           // A transport-class failure inside this budgeted wait consumes budget, never the
           // operation: an exhausted endpoint pass (RPC_RECEIPT_LOOKUP_FAILED — classified
           // non-retryable so ONE-SHOT lookups fail fast) or any other chain-namespaced
@@ -89,24 +87,23 @@ export async function waitForReceiptWithDeadline<TReceipt>(
           // transport sets (deterministic classifications) still aborts immediately.
           if (!isRetryableRpcError(err) && !isChainRpcTransportError(err)) throw err;
           lastError = err;
-          continue;
+          return null;
         }
-
-        // Receipt validation is deliberately OUTSIDE the transport-retry handling.
-        // A deterministic mined revert must remain CALL_EXCEPTION even when the
-        // lookup completes at or just after the operation deadline.
-        if (!receipt) continue;
-        let eligible = false;
+        if (!found) return null;
         try {
-          eligible = await options.isReceiptEligible?.(receipt, { deadlineMs }) ?? true;
+          return (await options.isReceiptEligible?.(found, { deadlineMs }) ?? true) ? found : null;
         } catch (err) {
           if (!isRetryableRpcError(err)) throw err;
           lastError = err;
+          return null;
         }
-        if (eligible) {
-          options.assertSuccessfulReceipt(receipt);
-          return receipt;
-        }
+      }));
+      // Receipt validation is deliberately OUTSIDE the transport-retry handling.
+      // A deterministic mined revert must remain CALL_EXCEPTION even when the
+      // lookup completes at or just after the operation deadline.
+      if (receipt) {
+        options.assertSuccessfulReceipt(receipt);
+        return receipt;
       }
       if (Date.now() >= deadlineMs) break;
 
@@ -132,4 +129,22 @@ export async function waitForReceiptWithDeadline<TReceipt>(
     }),
     { cause: lastError, txHash },
   );
+}
+
+/**
+ * The first receipt any of `checks` settles with, without waiting for the
+ * others; null once all of them settled with none. A check that throws ends
+ * the wait at once, as a deterministic lookup failure always has.
+ */
+function firstEligibleReceipt<TReceipt>(checks: Array<Promise<TReceipt | null>>): Promise<TReceipt | null> {
+  return new Promise((resolve, reject) => {
+    let pending = checks.length;
+    if (pending === 0) resolve(null);
+    for (const check of checks) {
+      check.then((receipt) => {
+        if (receipt) resolve(receipt);
+        else if (--pending === 0) resolve(null);
+      }, reject);
+    }
+  });
 }

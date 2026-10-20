@@ -6,6 +6,7 @@ import {
 import { waitForTransactionReceiptWithFailover } from '../src/transaction-receipt-failover.js';
 import { ChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { waitForReceiptWithDeadline } from '../src/receipt-wait.js';
+import { EvmReceiptFinalityReader } from '../src/evm-adapter-receipt-finality.js';
 
 describe('receipt deadline orchestration', () => {
   afterEach(() => {
@@ -43,9 +44,22 @@ describe('receipt deadline orchestration', () => {
   });
 
   // otReviewAgent on #3393: a superseded original whose fallback endpoint stalls must not use up
-  // the shared deadline before the already-mined replacement is looked up at all.
-  it('looks every hash up together, so a stalled lookup cannot starve a mined one', async () => {
+  // the shared deadline before the already-mined replacement is looked up AND passes the
+  // deadline-bound finality check every adapter wait runs.
+  it('looks every hash up together, so a stalled lookup cannot starve a mined one or its finality check', async () => {
     vi.useFakeTimers({ now: 0 });
+    const CANONICAL = `0x${'cb'.repeat(32)}`;
+    // The adapter's real finality gate, over an endpoint that refuses a read once its deadline has
+    // passed, as RpcFailoverClient does.
+    const finality = new EvmReceiptFinalityReader(1, async (_label, read, opts) => {
+      if (opts?.deadlineMs !== undefined && Date.now() >= opts.deadlineMs) {
+        throw Object.assign(new Error('receipt finality read past its deadline'), { code: 'RPC_TIMEOUT' });
+      }
+      return read({
+        getBlock: async (blockNumber: number) => ({ number: blockNumber, hash: CANONICAL }),
+        getBlockNumber: async () => 100,
+      } as never);
+    });
     const outcome = waitForReceiptWithDeadline({
       txHash: '0xoriginal',
       txHashes: () => ['0xoriginal', '0xreplacement'],
@@ -54,9 +68,13 @@ describe('receipt deadline orchestration', () => {
       getReceipt: (hash, { deadlineMs }) => {
         // Like RpcFailoverClient: no endpoint attempt once the deadline has passed.
         if (Date.now() >= deadlineMs) return Promise.resolve(null);
-        if (hash === '0xreplacement') return Promise.resolve({ hash, status: 1 });
+        if (hash === '0xreplacement') {
+          return Promise.resolve({ hash, status: 1, blockNumber: 100, blockHash: CANONICAL });
+        }
         return new Promise((resolve) => setTimeout(() => resolve(null), deadlineMs - Date.now()));
       },
+      isReceiptEligible: async (receipt, { deadlineMs }) =>
+        (await finality.read(receipt, { deadlineMs })) !== null,
       assertSuccessfulReceipt: () => {},
       formatTimeoutMessage: () => 'timed out',
     }).then(
