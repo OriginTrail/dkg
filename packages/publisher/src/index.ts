@@ -12,6 +12,14 @@ export {
 export { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject, isWorkspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export * from './publisher.js';
 export * from './publication-pricing.js';
+export {
+  MINT_ADOPTION_REFUSED_CODE,
+  MintAdoptionRefusedError,
+  adoptExistingMint,
+  mintOrAdoptKnowledgeAssets,
+  type MintAdoptionExpectation,
+  type MintAdoptionRefusalReason,
+} from './adopt-existing-mint.js';
 export * from './publication-payload-measurement.js';
 export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
 export type { LiftJobTailStep, LiftJobTailStepObserver } from './lift-job-tail-steps.js';

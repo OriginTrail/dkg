@@ -5875,6 +5875,7 @@ export class PublishMethods extends DKGAgentBase {
       pricingPolicy?: PublishOptions['pricingPolicy'];
       clearSharedMemoryAfter?: boolean;
       publisherOverride?: DKGPublisher;
+      adoptExistingMint?: PublishOptions['adoptExistingMint'];
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
@@ -6261,6 +6262,7 @@ export class PublishMethods extends DKGAgentBase {
             reservedKaId: recoveredReservedKaId ?? 0n,
           },
           publisherOverride: publisher,
+          adoptExistingMint: opts?.adoptExistingMint,
         },
       );
 
@@ -6748,6 +6750,8 @@ export class PublishMethods extends DKGAgentBase {
       /** Author scheme version override (defaults to AUTHOR_SCHEME_VERSION_V1). */
       schemeVersion?: number;
       publisherOverride?: DKGPublisher;
+      /** Record the seal's existing mint instead of minting (see `PublishOptions.adoptExistingMint`). */
+      adoptExistingMint?: PublishOptions['adoptExistingMint'];
     },
   ): Promise<PublishResult> {
    return withSpan('agent.publish_from_swm', async (span) => {
@@ -6884,6 +6888,7 @@ export class PublishMethods extends DKGAgentBase {
       privateTripleCount: options?.privateTripleCount,
       encryptInlinePayload,
       encryptInlineChunked,
+      adoptExistingMint: options?.adoptExistingMint,
     });
 
     if (

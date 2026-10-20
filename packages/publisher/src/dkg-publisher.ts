@@ -156,9 +156,11 @@ import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
 import {
   PublisherPlanner,
   coercePublisherAddress,
+  type FinalizedPublisherPlan,
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
+import { mintOrAdoptKnowledgeAssets } from './adopt-existing-mint.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -2162,6 +2164,7 @@ export class DKGPublisher implements Publisher {
       privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
       privateTripleCount?: PublishOptions['privateTripleCount'];
       pricingPolicy?: PublishOptions['pricingPolicy'];
+      adoptExistingMint?: PublishOptions['adoptExistingMint'];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -2343,6 +2346,7 @@ export class DKGPublisher implements Publisher {
       privateMerkleRoot: options?.privateMerkleRoot,
       privateTripleCount: options?.privateTripleCount,
       pricingPolicy: options?.pricingPolicy,
+      adoptExistingMint: options?.adoptExistingMint,
       [INTERNAL_ORIGIN_TOKEN]: true,
       [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline-small-swm',
       ...(hasTrustedCatalogTriples ? { [TRUSTED_CATALOG_ORIGIN_TOKEN]: true } : {}),
@@ -2696,6 +2700,10 @@ export class DKGPublisher implements Publisher {
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
     const graphPublish = resolveGraphScopedPublishDescriptor({ kind: 'initial', options });
+    // Reconcile records the seal's existing mint: no funding plan, member
+    // ciphertext, ACK round or transaction.
+    const adoptOnly = options.adoptExistingMint;
+    if (adoptOnly && !graphPublish) throw new Error('adoptExistingMint requires a sealed graph-scoped publish');
     assertPublicationPricingPolicyApplicable(pricingPolicy, {
       kind: 'initial',
       graphScoped: graphPublish !== undefined,
@@ -3147,11 +3155,13 @@ export class DKGPublisher implements Publisher {
       networkVisibleByteSize,
       fullContentByteSize: payloadMeasurement.fullContentByteSize,
     });
-    const finalizedPublisherPlan = await publisherPlanning.finalize({
-      explicitPublishEpochs,
-      billableByteSize: publicationPricing.billableByteSize,
-      ctx,
-    });
+    const finalizedPublisherPlan: FinalizedPublisherPlan = adoptOnly
+      ? { kind: 'local', publisherAddress: this.localTentativePublisherAddress(), publishEpochs: 0, tokenAmount: 0n }
+      : await publisherPlanning.finalize({
+        explicitPublishEpochs,
+        billableByteSize: publicationPricing.billableByteSize,
+        ctx,
+      });
     const publisherSigner = finalizedPublisherPlan.kind === 'on-chain'
       ? finalizedPublisherPlan.signer
       : undefined;
@@ -3160,7 +3170,7 @@ export class DKGPublisher implements Publisher {
     const precomputedTokenAmount = finalizedPublisherPlan.tokenAmount;
 
     let stagingQuads: Uint8Array | undefined;
-    if (useEncryptedInline) {
+    if (useEncryptedInline && !adoptOnly) {
       // MEMBER-SIDE ENCRYPTION STAYS. The private (non-catalog) data is still
       // AEAD-encrypted and distributed to CG members — via the chunked SWM
       // fan-out when wired (preferred), else the single-blob hook. This is
@@ -3326,7 +3336,8 @@ export class DKGPublisher implements Publisher {
     const v10ACKProvider = options.v10ACKProvider;
     const shouldCollectV10ACKs =
       v10ACKProvider !== undefined &&
-      canAttemptOnChainPublish;
+      canAttemptOnChainPublish &&
+      !adoptOnly;
     let v10ACKs: V10CoreNodeACK[] | undefined;
     if (shouldCollectV10ACKs) {
       onPhase?.('collect_v10_acks', 'start');
@@ -3811,19 +3822,21 @@ export class DKGPublisher implements Publisher {
       try {
         onPhase?.('chain:sign', 'start');
         signStarted = true;
-        if (!publisherSigner) throw new PublisherWalletRequiredError('publish');
-        this.log.info(
-          ctx,
-          `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
-        );
+        if (!publisherSigner && !adoptOnly) throw new PublisherWalletRequiredError('publish');
+        if (publisherSigner) {
+          this.log.info(
+            ctx,
+            `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
+          );
+        }
 
         onPhase?.('chain:sign', 'end');
         signStarted = false;
         onPhase?.('chain:submit', 'start');
         submitStarted = true;
-        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, networkVisibleByteSize=${publicationPricing.networkVisibleByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, billableByteSize=${publicationPricing.billableByteSize}, pricingPolicy=${publicationPricing.policy}, tokenAmount=${tokenAmount})`);
+        this.log.info(ctx, adoptOnly ? 'Recording the existing mint of the sealed reservation (no transaction)' : `Submitting V10 on-chain publish tx (${kaCount} KAs, networkVisibleByteSize=${publicationPricing.networkVisibleByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, billableByteSize=${publicationPricing.billableByteSize}, pricingPolicy=${publicationPricing.policy}, tokenAmount=${tokenAmount})`);
 
-        if (!v10ACKs || v10ACKs.length === 0) {
+        if (!adoptOnly && (!v10ACKs || v10ACKs.length === 0)) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
         }
         if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) {
@@ -3951,6 +3964,7 @@ export class DKGPublisher implements Publisher {
             },
           });
         }
+        let adoptedMint = false;
         try {
           // OT-RFC-49 / WS-D — handshake hardening. When the publisher ran the
           // curated catalog path, the chain submit MUST carry the same
@@ -3985,14 +3999,14 @@ export class DKGPublisher implements Publisher {
               billableByteSize: publicationPricing.billableByteSize.toString(),
               pricingPolicy: publicationPricing.policy,
               tokenAmount: tokenAmount.toString(),
-              ackCount: v10ACKs.length,
+              ackCount: v10ACKs?.length ?? 0,
               merkleLeafCount: kcMerkleLeafCount,
             },
           });
-          onChainResult = await this.chain.createKnowledgeAssets!({
+          const minted = await mintOrAdoptKnowledgeAssets(this.chain, {
             publishOperationId,
             contextGraphId: v10CgId,
-            publisherAddress: publisherSigner.address,
+            publisherAddress: publisherSigner?.address,
             reservedKaId,
             merkleRoot: kcMerkleRoot,
             knowledgeAssetsAmount: kaCount,
@@ -4021,7 +4035,7 @@ export class DKGPublisher implements Publisher {
               },
               schemeVersion: effectiveSchemeVersion,
             },
-            ackSignatures: v10ACKs.map(ack => ({
+            ackSignatures: (v10ACKs ?? []).map(ack => ({
               identityId: ack.nodeIdentityId,
               r: ack.signatureR,
               vs: ack.signatureVS,
@@ -4029,7 +4043,14 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
             onBroadcastAccepted: (signal) =>
               onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
+          }, {
+            expected: graphPublish && reservedKaId !== undefined
+              ? { kaId: reservedKaId, merkleRoot: kcMerkleRoot, contextGraphId: v10CgId, authorAddress: effectiveAuthorAddress }
+              : undefined,
+            existingOnly: adoptOnly,
           });
+          onChainResult = minted.result;
+          adoptedMint = minted.adopted;
         } finally {
           if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
         }
@@ -4042,7 +4063,12 @@ export class DKGPublisher implements Publisher {
           bestEffortNotify(onPublishConfirmed, { txHash: onChainResult.txHash });
         }
 
-        onChainResult.tokenAmount = tokenAmount;
+        // An adopted mint keeps what its original transaction paid.
+        if (adoptedMint) {
+          this.log.info(ctx, `Adopted the existing mint of ${onChainResult.kaId}: tx=${onChainResult.txHash} block=${onChainResult.blockNumber}`);
+        } else {
+          onChainResult.tokenAmount = tokenAmount;
+        }
 
         const kaId = onChainResult.kaId ?? onChainResult.batchId;
         if (reservedKaId !== undefined && kaId !== reservedKaId) {
