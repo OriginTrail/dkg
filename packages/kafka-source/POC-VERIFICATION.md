@@ -5,7 +5,37 @@ The consumer is a generic DKG Source Worker handler loaded through
 on `codex/kafka-source-poc`, based on fresh `testnet-canary`
 `693be6317ba8d6db6aefc6b6ff3c77f52ef535cd`.
 
-## Verified
+## Review fixes
+
+The follow-up corrects durable initial offset selection, bounded partition
+fairness, preparation retry ownership, definite pre-write rejection recovery
+and canonical RDF readback. It keeps private sealing and verification before
+Kafka acknowledgement.
+
+- **40 focused tests** pass on Node 22.23.1 and 24.11.1, with **96.93% line coverage**
+  (94% floor), including 29 native Source Worker
+  scenarios and 11 controlled Kafka transport scenarios. New regressions cover
+  empty tail polls, first write/commit failure across journal reopen, a hot
+  partition beside a waiting partition, 429 recovery and Retry-After waits,
+  ambiguous HTTP failures, equivalent RDF escapes versus changed values,
+  invalid descriptors, per-source preparation failure and a partial poison
+  batch through manual review.
+- Real localhost Redpanda and the native DKG **10.0.25** daemon (built from the
+  canary above) verify 5 records/2 partitions, zero additional creates on replay,
+  plus two new-tail recovery cases and bounded progress of the second partition.
+  The daemon uses native Oxigraph and a **mock chain**, not a public deployment.
+  Control characters in mapped values round-trip through real sealed readback.
+- The new-tail cases each begin with an empty poll at offset 1 and no broker
+  commit. A failed first write or first commit is followed by another record
+  and a rebuilt handler. Both offsets 1 and 2 recover: exactly two sealed KAs,
+  committed next offset 3, with one KA reused in the failed-commit case.
+- In the fairness case partition 0 stays backlogged while partition 1 is
+  waiting. In two polls both commit next offset 1; no later offset is committed.
+- Sanitized follow-up evidence is in
+  [`test/evidence/review-recovery-20261020.json`](test/evidence/review-recovery-20261020.json).
+  The earlier evidence below is retained as a dated validation record.
+
+## Initial verification (before review fixes)
 
 - **19 passing tests**, including 13 through the actual canary
   `runSourceWorkerOnce` and six Kafka transport-contract tests. The suite covers
@@ -47,7 +77,6 @@ KAs in total.
 ## Not claimed
 
 No IDENER broker connection or current test-credential validity was verified.
-Nothing was deployed to JPB, merged, published to npm or released. No full DKG
-CI run, production-load benchmark, SASL/TLS integration test, Sources UI or
+Nothing was deployed to JPB, merged, published to npm or released. No production-load benchmark, SASL/TLS integration test, Sources UI or
 Graph Computer execution receipt is claimed. This PoC reuses DKG Sources; its
 host-side Kafka reads are not pure Graph Computer Program execution.

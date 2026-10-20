@@ -1,4 +1,4 @@
-import { readFile, open, unlink } from 'node:fs/promises';
+import { readFile, open, unlink, mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { Journal } from './journal.mjs';
 import { buildAsset, assetIdentity, hash } from './asset.mjs';
@@ -37,12 +37,13 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             return previous.fingerprint;
           const prefix = resolve(dirname(config.stateFile), `kafka-${hash(source.id).slice(0, 16)}`);
           // Reject concurrent writers; stale locks need explicit operator review.
-          const journal = new Journal(prefix + '.sqlite', hash(source));
-          let lock, delivery;
+          let journal, lock, delivery;
           try {
+            await mkdir(dirname(prefix), { recursive: true, mode: 0o700 });
             lock = await open(prefix + '.lock', 'wx', 0o600);
             await lock.writeFile(String(process.pid));
-            delivery = await read(source);
+            journal = new Journal(prefix + '.sqlite', hash(source));
+            delivery = await read(source, journal);
             const records = delivery.records.map(envelope => {
               const { fetchedAt: _fetchedAt, ...original } = envelope;
               return journal.stage(envelope, hash(original), `kafka-record-${assetIdentity(source, envelope)}`);
@@ -52,15 +53,25 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             return fingerprint;
           } catch (error) {
             await delivery?.close().catch(() => {});
-            journal.close();
+            journal?.close();
             if (lock) { await lock.close(); await unlink(prefix + '.lock'); }
-            throw error;
+            // Fingerprinting runs outside the native worker processing catch.
+            // Defer the sanitized failure to processSource so native retries,
+            // manual review and continuation to other sources still apply.
+            const failure = new Error(/^KAFKA_[A-Z_]+$/.test(error.message) ? error.message : 'KAFKA_PREPARATION_FAILED');
+            const fingerprint = hash([source.id, 'preparation-failed']);
+            deliveries.set(source.id, { failure, fingerprint });
+            return fingerprint;
           }
         },
         async processSource(ref, fingerprint, _state) {
           const source = sourceFor(ref);
           const current = deliveries.get(source.id);
           if (!current || fingerprint !== current.fingerprint) throw new Error('KAFKA_DELIVERY_REQUIRED');
+          if (current.failure) {
+            deliveries.delete(source.id);
+            throw current.failure;
+          }
           const { records, journal, delivery, lock, prefix } = current;
           let created = 0, reused = 0;
           const receipts = [];
@@ -84,6 +95,11 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
                 lastStatus: records.length ? 'completed' : 'no-matching-rows',
                 lastError: undefined, manualReviewRequired: false,
                 kafka: { processed: records.length, created, reused, receipts } } };
+          } catch (error) {
+            if (error.message !== 'DKG_RETRY_LATER') throw error;
+            return { sourceId: source.id, skipped: true, reason: 'retry-after',
+              nextState: { ..._state, fingerprint, lastRunAt: new Date().toISOString(),
+                lastStatus: 'retry-wait', retryAt: error.retryAt } };
           } finally {
             deliveries.delete(source.id);
             await delivery.close().catch(() => {});

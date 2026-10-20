@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import { canonicalizeRdfObjectTerm, formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+
+const literalTerm = value => formatCanonicalRdfLiteralTerm({ kind: 'plain', value: String(value) });
 
 export const NS = 'https://ontology.dkg.io/streams#';
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -9,7 +12,7 @@ export function buildAsset(source, record) {
   const identity = assetIdentity(source, record);
   const subject = `urn:dkg:kafka:record:${identity}`;
   const quads = [];
-  const literal = (key, value) => quads.push({ subject, predicate: NS + key, object: JSON.stringify(String(value)), graph: '' });
+  const literal = (key, value) => quads.push({ subject, predicate: NS + key, object: literalTerm(value), graph: '' });
   quads.push({ subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: NS + 'KafkaSourceRecord', graph: '' });
   literal('sourceId', source.id);
   literal('sourceSystem', source.clusterId);
@@ -28,15 +31,15 @@ export function buildAsset(source, record) {
     for (const { field, predicate } of source.mapping) {
       if (value?.[field] !== undefined && value[field] !== null) {
         if (!['string', 'number', 'boolean'].includes(typeof value[field])) throw new Error('KAFKA_MAPPING_SCALAR_REQUIRED');
-        quads.push({ subject, predicate, object: JSON.stringify(String(value[field])), graph: '' });
+        quads.push({ subject, predicate, object: literalTerm(value[field]), graph: '' });
       }
     }
   }
   return { name: `kafka-record-${identity}`, subject, quads };
 }
 
-// Compare RDF sets, ignoring backend graph columns and explicit xsd:string.
+// Compare RDF values with the same canonical term boundary as native storage.
 export function content(quads) {
   return [...new Set(quads.map(q => JSON.stringify([q.subject, q.predicate,
-    q.object.replace(/\^\^<http:\/\/www.w3.org\/2001\/XMLSchema#string>$/, '')])))].sort();
+    canonicalizeRdfObjectTerm(q.object)])))].sort();
 }

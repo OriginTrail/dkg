@@ -12,7 +12,8 @@
     "test:broker": "node --experimental-strip-types test/broker.integration.mjs"
   },
   "dependencies": {
-    "kafkajs": "2.2.4"
+    "kafkajs": "2.2.4",
+    "@origintrail-official/dkg-rdf-utils": "workspace:*"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",

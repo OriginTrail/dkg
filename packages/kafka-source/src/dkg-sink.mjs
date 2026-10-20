@@ -10,7 +10,18 @@ export function createDkgSink(config, requestFetch = fetch) {
       signal: AbortSignal.timeout(config.requestTimeoutMs ?? 20000), redirect: 'error',
       ...(body ? { body: JSON.stringify(body) } : {}) });
     if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`DKG_HTTP_${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`DKG_HTTP_${response.status}`);
+      error.status = response.status;
+      // Only this exact daemon ingress rejection is known to precede mutation.
+      // A generic 4xx/5xx or transport exception is still an uncertain write.
+      const data = await response.json().catch(() => null);
+      error.preMutation = response.status === 429 && data?.error === 'Too many requests';
+      const after = response.headers.get('Retry-After');
+      const delay = after === null ? 1000 : (/^\d+$/.test(after) ? Number(after) * 1000 : Date.parse(after) - Date.now());
+      error.retryAt = Date.now() + Math.max(0, Number.isFinite(delay) ? delay : 1000);
+      throw error;
+    }
     return response.json();
   }
   return {
@@ -48,16 +59,29 @@ export function createDkgSink(config, requestFetch = fetch) {
       // A previous request may still be executing. Never retry an ambiguous
       // create merely because the asset is not visible yet.
       if (record.intent) throw new Error('DKG_WRITE_OUTCOME_UNKNOWN');
+      const rejection = journal.rejection(record.position);
+      if (rejection?.retryAt > Date.now()) {
+        const error = new Error('DKG_RETRY_LATER');
+        error.retryAt = rejection.retryAt;
+        throw error;
+      }
       journal.intent(record.position);
-      let failed = false;
+      let failure;
       try {
         await request('POST', '/api/knowledge-assets', {
           contextGraphId: source.contextGraphId, name: asset.name, quads: asset.quads,
           finalize: true, alsoShareSwm: false, alsoPublishVm: false,
         });
-      } catch { failed = true; }
+      } catch (error) {
+        journal.writeFailed(record.position, error);
+        if (error.preMutation) {
+          journal.rejected(record.position, error.message, error.retryAt);
+          throw error;
+        }
+        failure = error;
+      }
       receipt = await read();
-      if (!receipt) throw new Error(failed ? 'DKG_WRITE_OUTCOME_UNKNOWN' : 'DKG_SEALED_READBACK_MISSING');
+      if (!receipt) throw new Error(failure ? 'DKG_WRITE_OUTCOME_UNKNOWN' : 'DKG_SEALED_READBACK_MISSING', { cause: failure });
       return { ...receipt, reused: false };
     },
   };

@@ -1,4 +1,5 @@
-import { test } from 'vitest';
+import { test, vi, onTestFinished } from 'vitest';
+import { canonicalizeRdfObjectTerm } from '@origintrail-official/dkg-rdf-utils';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -20,19 +21,30 @@ const message = (offset = '0') => ({ topic: source.topic, partition: 0, offset, 
 // HTTP lifecycle contract double, deliberately NOT claimed as a live DKG node.
 function daemon() {
   const assets = new Map(); let writes = 0; let loseResponse = false; let corrupt = false; let invisible = false;
+  let rejection, descriptor = {}, normalize = false, changedLiteral = false, posts = 0;
   const fetch = async (url, options) => {
     const path = new URL(url).pathname;
     if (path === '/api/context-graph/list') return Response.json({contextGraphs: [{id: source.contextGraphId, accessPolicy: 'private'}]});
     if (path === '/api/query') {
       const graph = JSON.parse(options.body).sparql.match(/GRAPH <([^>]+)>/)[1];
       const asset = [...assets.values()].find(a => graph.endsWith('/' + hash(a)));
-      return Response.json({ result: { type: 'quads', quads: corrupt ? [] : asset?.quads ?? [] } });
+      let quads = corrupt ? [] : asset?.quads ?? [];
+      if (changedLiteral) quads = quads.map(quad => quad.predicate === source.mapping[0].predicate ?
+        { ...quad, object: '"different value"' } : quad);
+      if (normalize) quads = quads.map(quad => ({ ...quad,
+        object: canonicalizeRdfObjectTerm(quad.object).replace(/\\u000B/g, '\\u000b') }));
+      return Response.json({ result: { type: 'quads', quads } });
     }
     if (options.method === 'POST') {
       const body = JSON.parse(options.body);
       assert.equal(body.finalize, true);
       assert.equal(body.alsoShareSwm, false);
       assert.equal(body.alsoPublishVm, false);
+      posts++;
+      if (rejection) {
+        const response = rejection; rejection = undefined;
+        return Response.json(response.body, { status: response.status, headers: response.headers });
+      }
       writes++; assets.set(body.name, body);
       if (loseResponse) throw new Error('simulated lost response');
       return Response.json({ status: 'wm-sealed' }, { status: 201 });
@@ -43,27 +55,34 @@ function daemon() {
     if (path.endsWith('/quads')) return Response.json({ quads: corrupt ? [] : asset.quads });
     return Response.json({ name, contextGraphId: source.contextGraphId, agentAddress: owner,
       status: 'wm-sealed', wmCurrentAssertion: hash(asset),
-      assertionGraph: `did:dkg:context-graph:${source.contextGraphId}/_working_memory/${owner}/${hash(asset)}` });
+      assertionGraph: `did:dkg:context-graph:${source.contextGraphId}/_working_memory/${owner}/${hash(asset)}`, ...descriptor });
   };
   return { fetch, assets, get writes() { return writes; }, lose() { loseResponse = true; },
-    corrupt() { corrupt = true; }, invisible() { invisible = true; } };
+    corrupt() { corrupt = true; }, invisible() { invisible = true; },
+    rejectNext(status = 429, body = { error: 'Too many requests' }, headers = { 'Retry-After': '0' }) {
+      rejection = { status, body, headers };
+    },
+    get posts() { return posts; }, descriptor(value) { descriptor = value; }, normalize() { normalize = true; }, changeLiteral() { changedLiteral = true; } };
 }
 
-async function fixture(t) {
+async function fixture(t = { onTestFinished }, sources = [source]) {
   const dir = await mkdtemp(join(tmpdir(), 'dkg-kafka-source-test-'));
   t.onTestFinished(() => rm(dir, { recursive: true, force: true }));
-  const config = { sources: [source], stateFile: join(dir, 'source-state.json'), daemonUrl: 'http://localhost:9200', daemonToken: 'test' };
+  const config = { sources, stateFile: join(dir, 'source-state.json'), daemonUrl: 'http://localhost:9200', daemonToken: 'test' };
   const api = daemon();
-  let queue = [message()], commits = [], closed = 0, rejectCommit = false;
-  const read = async () => ({ records: queue, async commit(record) {
+  let queue = [message()], commits = [], closed = 0, rejectCommit = false, readError, drain = false;
+  const read = async ref => {
+    if (readError && ref.id === source.id) throw new Error(readError);
+    return { records: [...queue], async commit(record) {
     if (rejectCommit) throw new Error('KAFKA_COMMIT_FAILED');
     commits.push(record.offset);
-  }, async close() { closed++; } });
+    if (drain) queue = queue.filter(item => item.offset !== record.offset);
+  }, async close() { closed++; } }; };
   const hooks = await createHandler({ read, sinkFactory: () => createDkgSink(config, api.fetch) })
     .createSourceWorkerDeps({ config });
-  const run = () => runSourceWorkerOnce([source], config.stateFile,
+  const run = () => runSourceWorkerOnce(config.sources, config.stateFile,
     { ...hooks, now: () => new Date().toISOString(), getJobStatus() { throw new Error('No chain publisher permitted'); } });
-  return { config, api, run, setQueue(records) { queue = records; },
+  return { config, api, run, readFailure(value) { readError = value; }, drain() { drain = true; }, setQueue(records) { queue = records; },
     failCommit(value) { rejectCommit = value; }, get commits() { return commits; }, get closed() { return closed; } };
 }
 
@@ -130,7 +149,7 @@ test('empty topic and a Kafka tombstone remain distinct', async t => {
 test('same Kafka position with changed payload is rejected before DKG write', async t => {
   const f = await fixture(t); await f.run();
   f.setQueue([{ ...message(), valueBase64: Buffer.from('different').toString('base64') }]);
-  await assert.rejects(f.run(), /KAFKA_RECORD_CHANGED/);
+  assert.equal((await f.run()).sources[source.id].lastError, 'KAFKA_RECORD_CHANGED');
   assert.equal(f.api.writes, 1);
 });
 
@@ -172,4 +191,90 @@ test('mapping errors report a code without exposing source bytes or acknowledgin
   const state = await f.run();
   assert.equal(state.sources[source.id].lastError, 'KAFKA_MAPPING_JSON_REQUIRED');
   assert.deepEqual(f.commits, []); assert.equal(f.api.writes, 0);
+});
+
+
+test('a definite pre-mutation 429 retries to exactly one sealed KA and acknowledgement', async t => {
+  const f = await fixture(t); f.api.rejectNext();
+  assert.equal((await f.run()).sources[source.id].lastError, 'DKG_HTTP_429');
+  assert.equal(f.api.writes, 0); assert.deepEqual(f.commits, []);
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
+  assert.equal(f.api.posts, 2); assert.equal(f.api.writes, 1); assert.deepEqual(f.commits, ['0']);
+});
+
+test('Retry-After waits survive polls without exhausting the source retry budget', async t => {
+  let now = Date.now(); const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  t.onTestFinished(() => clock.mockRestore());
+  const f = await fixture(t); f.api.rejectNext(429, { error: 'Too many requests' }, { 'Retry-After': '60' });
+  await f.run();
+  for (let i = 0; i < 5; i++) {
+    const result = (await f.run()).sources[source.id];
+    assert.equal(result.lastStatus, 'retry-wait'); assert.equal(result.attemptCount, 1);
+  }
+  assert.equal(f.api.posts, 1); assert.deepEqual(f.commits, []);
+  now += 60001;
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
+  assert.equal(f.api.writes, 1); assert.deepEqual(f.commits, ['0']);
+});
+
+test.each([500, 429])('unclassified HTTP %s remains ambiguous and cannot issue another create', async (status, t) => {
+  const f = await fixture(t); f.api.rejectNext(status, { error: 'unspecified failure' });
+  for (let i = 0; i < 2; i++) assert.equal((await f.run()).sources[source.id].lastError, 'DKG_WRITE_OUTCOME_UNKNOWN');
+  assert.equal(f.api.posts, 1); assert.equal(f.api.writes, 0); assert.deepEqual(f.commits, []);
+});
+
+test('equivalent independent RDF escape normalization passes sealed readback', async t => {
+  const f = await fixture(t); f.api.normalize();
+  f.setQueue([{ ...message(), valueBase64: Buffer.from(JSON.stringify({ orderNo: 'control\u000b\u001b\n"\\😀' })).toString('base64') }]);
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
+  assert.deepEqual(f.commits, ['0']);
+});
+
+test.each([
+  { status: 'wm-draft' }, { swmCurrentAssertion: 'shared' }, { vmCurrentAssertion: 'published' },
+  { agentAddress: '0x' + 'b'.repeat(40) }, { contextGraphId: owner + '/other' },
+  { wmCurrentAssertion: null }, { assertionGraph: 'urn:wrong-graph' },
+])('invalid private sealed descriptor %j never acknowledges', async (override, t) => {
+  const f = await fixture(t); f.api.descriptor(override);
+  const result = (await f.run()).sources[source.id];
+  assert.match(result.lastError, /DKG_PRIVATE_SEAL_REQUIRED|DKG_ASSERTION_GRAPH_MISMATCH/);
+  assert.deepEqual(f.commits, []);
+});
+
+test('preparation outage persists per-source failure, continues unrelated sources and later recovers', async t => {
+  const other = { ...source, id: 'unrelated' };
+  const f = await fixture(t, [source, other]); f.readFailure('KAFKA_READ_FAILED');
+  const first = await f.run();
+  assert.equal(first.sources[source.id].lastError, 'KAFKA_READ_FAILED');
+  assert.equal(first.sources[source.id].attemptCount, 1);
+  assert.equal(first.sources[other.id].lastStatus, 'completed');
+  f.readFailure(undefined);
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
+  assert.equal(f.api.writes, 2);
+});
+
+test('oversize preparation failure reaches manual review without aborting other sources', async t => {
+  const other = { ...source, id: 'healthy' };
+  const f = await fixture(t, [source, other]); f.readFailure('KAFKA_RECORD_TOO_LARGE');
+  let result;
+  for (let i = 0; i < 4; i++) result = await f.run();
+  assert.equal(result.sources[source.id].manualReviewRequired, true);
+  assert.equal(result.sources[other.id].lastStatus, 'completed');
+  assert.equal(f.api.writes, 1);
+});
+
+test('partial poison batch acknowledges only its valid prefix through retry exhaustion', async t => {
+  const f = await fixture(t); f.drain();
+  f.setQueue([message('0'), { ...message('1'), valueBase64: Buffer.from('invalid JSON').toString('base64') }, message('2')]);
+  let state;
+  for (let i = 0; i < 6; i++) state = await f.run();
+  assert.equal(state.sources[source.id].manualReviewRequired, true);
+  assert.deepEqual(f.commits, ['0']); assert.equal(f.api.writes, 1);
+});
+
+
+test('a genuinely changed RDF literal still prevents acknowledgement', async t => {
+  const f = await fixture(t); f.api.normalize(); f.api.changeLiteral();
+  assert.equal((await f.run()).sources[source.id].lastError, 'DKG_READBACK_MISMATCH');
+  assert.deepEqual(f.commits, []);
 });

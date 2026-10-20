@@ -49,7 +49,12 @@ configuration requires a new state location and deliberate offset selection.
 
 ## Recovery and privacy
 
-1. The DKG worker asks the handler for a bounded delivery fingerprint.
+1. The DKG worker asks the handler for a bounded delivery fingerprint. Before
+   its first poll the handler durably records each partition's starting offset,
+   using an existing broker commit, the earliest retained offset, or the initial
+   tail according to configuration. Empty polls do not choose a new tail.
+   Each poll selects one assigned partition in persisted round-robin order;
+   successful and empty deliveries advance that cursor, failed ones resume.
 2. The handler stages up to ten records (configurable, at most 100) in a local
    SQLite journal, with a 24 KB envelope budget per delivery.
 3. It verifies that the configured Context Graph is private, writes each KA
@@ -58,7 +63,9 @@ configuration requires a new state location and deliberate offset selection.
    graph annotations are separate from the source entity.
 4. Only then does it explicitly commit Kafka `offset + 1`. Native DKG Source
    Worker status and receipts persist in its usual source state file. Per-
-   partition checkpoints and uncertain write intents persist in SQLite.
+   partition checkpoints and uncertain write intents persist in SQLite. Native
+   sealed readback compares canonical RDF values, so equivalent escape spelling
+   does not fail verification. Original Kafka envelope bytes/digests stay raw.
 
 `autoCommit` and `eachBatchAutoResolve` are disabled. A DKG failure never
 acknowledges the affected offset. A failed offset commit replays the same KA.
@@ -66,7 +73,16 @@ A lost write response is recovered through named sealed readback. If a prior
 write might still be running and no sealed KA is visible, the handler stops
 with `DKG_WRITE_OUTCOME_UNKNOWN`; it does not blindly issue another create.
 An existing partial draft needs operator recovery. The Source Worker retry
-limit leads to manual review rather than dropping a poison message.
+limit leads to manual review rather than dropping a poison message. Preparation
+failures are deferred into the native worker's processing catch so their retry
+state persists and unrelated sources continue. The adapter still uses the
+existing fingerprint/processing hooks; no general worker API refactor is added.
+
+The daemon ingress's specific `429 / Too many requests` rejection clears write
+intent transactionally and persists `Retry-After`. Waiting polls do not consume
+additional retry attempts. Other HTTP errors and transport failures retain
+uncertain-write protection, with sanitized status codes stored in the journal;
+there is no blanket retry of arbitrary 4xx/5xx responses.
 
 The handler never shares to SWM, submits VM publication, creates Context Graphs,
 grants permissions or changes broker ACLs. The operator must provision the
@@ -78,7 +94,13 @@ after a crash: confirm the old worker is dead before removing its lock.
 
 Kafka group IDs must be authorized by the broker owner. `fromBeginning: false`
 means a **new** group starts at the latest offset; an existing group's committed
-position takes precedence. Use a dedicated test group for replay experiments.
+position supplies a new journal's initial position. Later polls resume the
+journal's durable position even if no broker offset has ever been committed.
+An explicit backward broker offset reset can replay existing KAs; use a
+dedicated test group for replay experiments. A saved position outside broker
+retention fails closed instead of silently accepting Kafka's reset policy.
+The configured identity needs topic offset/metadata and group offset-read
+permissions in addition to its consume/commit permissions.
 
 ## Validation
 
