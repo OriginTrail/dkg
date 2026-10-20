@@ -28,7 +28,8 @@ export async function handlePublicSnapshotJob({
     jsonResponse(res, status, body);
   };
   if (req.method === "GET") {
-    reply(200, jobs.get(agent) ?? { state: "idle" });
+    reply(200, { ...(jobs.get(agent) ?? { state: "idle" }),
+      capabilities: { sourcePolicies: ['base-mainnet-registered-cores'] } });
     return;
   }
   if (req.method !== "POST") {
@@ -53,6 +54,7 @@ export async function handlePublicSnapshotJob({
             "trustedCorePeerIds",
             "mode",
             "transport",
+            "sourcePolicy",
           ].includes(k),
       )
     )
@@ -74,6 +76,7 @@ export async function handlePublicSnapshotJob({
       mode: input.mode,
       transport: input.transport,
       trustedCorePeerIds: [...input.trustedCorePeerIds],
+      ...(input.sourcePolicy ? { sourcePolicy: input.sourcePolicy } : {}),
     },
     id: randomUUID(),
     state: "running",

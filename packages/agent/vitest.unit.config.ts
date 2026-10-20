@@ -22,6 +22,7 @@ export default defineConfig({
       "test/sync-exact-export-admission.test.ts",
       "test/prepared-content-cache.test.ts",
       "test/prepared-cache-defaults.test.ts",
+      "test/public-snapshot-sources.test.ts",
       "test/sync-prepared-content-export.test.ts",
       "test/public-snapshot-evidence.test.ts",
       "test/public-snapshot-unscoped-query.test.ts",

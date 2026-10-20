@@ -10,6 +10,19 @@ The core reads a complete ordered inventory and each asset's root, assertion ver
 
 `rpc-only` constructs the same coherent snapshot using this receiver's configured RPC. Peers supply content, which is checked against that independently obtained inventory. Unsupported or unavailable snapshot providers fail explicitly.
 
+An operator can instead authorize `sourcePolicy: "base-mainnet-registered-cores"`
+with `trustedCorePeerIds: []`. This policy accepts any reachable registered
+Base mainnet core that proves its current operational-key identity and hosts
+the requested public graph. A fresh signed challenge binds the requester,
+responder, nonce, graph and chain/Hub deployment. Phonebook advertisements are
+routing hints only. Selection probes at most 16 peers, four concurrently, and
+pins at most four sources inside the existing job lifetime. The result records
+`selectedCorePeerIds`; transfer and final coverage use only that pinned set.
+Unknown policies, mixed explicit peers/policy, unsupported chains, missing
+registration verification and no eligible source fail closed. GET advertises
+support in `capabilities.sourcePolicies`. This remains core-cache trust when
+`mode` is core-cache; registration is not an independent asset-state proof.
+
 Both modes use the existing exact-batch transport, content-root verification, graph/asset identity checks, atomic replacement, lifecycle fencing and stale-version protection. Private graph authorization is unchanged. The new snapshot server answers only for locally subscribed graphs proven public at its snapshot anchor; private, missing and unavailable cases share a refusal.
 
 Wire snapshots are versioned, size-bounded and scoped to the chain, Hub deployment, graph name commitment and registered graph id. Integer strings are canonical; duplicate assets and digest mismatches fail. New evidence must be observed within 120 seconds; a recovery job pins its accepted snapshot while transferring. A final comparison requires a newly observed snapshot after transfer, not reuse of the initial cached answer. `completeAsOfSnapshot` and `current` are separate facts: a changed inventory does not become a full-current PASS.

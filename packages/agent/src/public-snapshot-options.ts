@@ -1,11 +1,14 @@
 import { isPublicGraphSnapshotScope } from '@origintrail-official/dkg-chain';
 import { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
+import { BASE_MAINNET_SOURCE_POLICY } from './public-snapshot-source-proof.js';
 
 export interface PublicSnapshotSyncOptions {
   contextGraphId: string;
   onChainId: string;
   /** Operator-configured peer identities, never populated from advertised roles. */
   trustedCorePeerIds: readonly string[];
+  /** Explicit policy authorizing independently authenticated registered cores. */
+  sourcePolicy?: typeof BASE_MAINNET_SOURCE_POLICY;
   mode?: PublicSnapshotMode;
   transport?: "exact" | "bulk";
   signal?: AbortSignal;
@@ -20,11 +23,15 @@ export function normalizePublicSnapshotSyncOptions(input: unknown): PublicSnapsh
   if (!isPublicGraphSnapshotScope(value)
     || !isPublicSnapshotMode(mode)
     || (transport !== 'exact' && transport !== 'bulk')
+    || (value.sourcePolicy !== undefined && value.sourcePolicy !== BASE_MAINNET_SOURCE_POLICY)
     || !Array.isArray(value.trustedCorePeerIds)
     || value.trustedCorePeerIds.some(peer => typeof peer !== 'string' || !peer.length || peer.length > 256)
     || (value.signal !== undefined && !(value.signal instanceof AbortSignal))) throw new Error('Invalid snapshot job');
   const peers = [...new Set(value.trustedCorePeerIds as string[])];
-  if (!peers.length || peers.length > 4) throw new Error('Configure one to four trusted core peer identities');
+  if (value.sourcePolicy ? peers.length !== 0 : (!peers.length || peers.length > 4))
+    throw new Error('Configure one to four trusted cores or the registered-core policy, never both');
   return { contextGraphId: value.contextGraphId, onChainId: value.onChainId,
-    trustedCorePeerIds: peers, mode, transport, ...(value.signal ? { signal: value.signal as AbortSignal } : {}) };
+    trustedCorePeerIds: peers, mode, transport,
+    ...(value.sourcePolicy ? { sourcePolicy: BASE_MAINNET_SOURCE_POLICY } : {}),
+    ...(value.signal ? { signal: value.signal as AbortSignal } : {}) };
 }

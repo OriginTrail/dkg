@@ -12,11 +12,32 @@ exports, including after the core restarts. Each response still checks current
 authority and metadata; each receiver still verifies identity and the payload
 root before committing. Cached content never supplies permission.
 
-The Blackbox managed-node profile already enables exact-batch streaming and
-retains its local DKG store. It needs a serving core with the capability and
-cache enabled, rather than a new Blackbox transport setting. A returning
-client can also reuse its own verified assets; that differs from a fresh
-client downloading from a warm core.
+The companion Blackbox change gives fresh default Base profiles direct DKG
+queries and registered-core snapshot recovery. Existing explicit profiles
+remain unchanged. A returning client can also reuse its own verified assets;
+that differs from a fresh client downloading from a warm core.
+
+Every registered Base mainnet core is eligible, without a hardcoded serving
+peer. Connected peers and a bounded phonebook page provide routing hints.
+Before selection the peer signs a fresh challenge naming both peers, the
+graph, registration ID and exact chain/Hub deployment. The receiver verifies
+the signature's operational key and active ShardingTable membership on its
+configured chain. An unsigned phonebook role or copied wallet address cannot
+establish eligibility.
+
+One job probes at most 16 candidates, four concurrently, and pins at most four
+verified sources. Candidate order varies by job to avoid a permanent first
+core. Selection occurs inside the existing job deadline; new peers are not
+added during transfer. The source protocol is available only on upgraded
+Base cores hosting the public graph. Registration does not convert core-cache
+chain statements into independently verified asset RPC evidence.
+
+The Blackbox automatic profile requires this new local daemon capability.
+DKG 10.0.25 supports explicit-core snapshot jobs but not this source policy;
+older daemons fail with an upgrade requirement before transfer. Publish a
+compatible DKG patch and update Blackbox's pinned package/integrity before
+releasing the automatic onboarding default. Do not merge the companion
+Blackbox draft against its current 10.0.25 installer pin.
 
 ## Rollout and validation
 

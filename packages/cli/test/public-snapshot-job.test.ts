@@ -39,6 +39,20 @@ const body = JSON.stringify({
   trustedCorePeerIds: ["configured-core"],
 });
 describe("public snapshot administrator API", () => {
+  it("advertises registered-core capability and pins the chosen policy without silently inserting peers", async () => {
+    const sync = vi.fn(async () => ({ current: true }));
+    const url = await serve(true, sync);
+    expect(await (await fetch(url)).json()).toMatchObject({
+      capabilities: { sourcePolicies: ['base-mainnet-registered-cores'] },
+    });
+    const request = { ...JSON.parse(body), trustedCorePeerIds: [], sourcePolicy: 'base-mainnet-registered-cores' };
+    const response = await fetch(url, { method: 'POST', body: JSON.stringify(request) });
+    expect(response.status).toBe(202);
+    expect((await response.json()).request).toEqual({ ...request, mode: 'core-cache', transport: 'exact' });
+    await vi.waitFor(async () => expect((await (await fetch(url)).json()).state).toBe('complete'));
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...request, trustedCorePeerIds: ['core'] }) })).status).toBe(400);
+    expect(sync).toHaveBeenCalledTimes(1);
+  });
   it("records an explicit bulk transport and rejects unknown transport values", async () => {
     const sync = vi.fn(async () => ({ current: true }));
     const url = await serve(true, sync);

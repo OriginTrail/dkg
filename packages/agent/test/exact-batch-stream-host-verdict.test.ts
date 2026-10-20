@@ -595,8 +595,10 @@ describe('experimental exact batch actual host completion verdict', () => {
     } finally { exchange.mockRestore(); }
   });
 
-  it.each([undefined, '0'])('keeps requester on legacy transport when opt-in is %s', async flag => {
-    const f = fixture(); vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', flag);
+  it.each(['current', 'legacy'])('keeps requester on legacy transport when %s switch explicitly disables it', async name => {
+    const f = fixture();
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', name === 'current' ? '0' : undefined);
+    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '0');
     await f.run();
     expect(runDurableSyncDetailed).toHaveBeenCalledOnce();
     expect(exchangeExperimentalExactBatch).not.toHaveBeenCalled();

@@ -24,11 +24,26 @@ export { PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from "./public-snapshot-reader.js";
 const encoder = new TextEncoder();
 const jobs = new WeakSet<DKGAgent>();
 import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
+import { registerSnapshotSourceHandler } from './public-snapshot-source-handler.js';
+import { selectSnapshotSources } from './public-snapshot-sources.js';
 export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export class PublicSnapshotMethods extends DKGAgentBase {
   startPublicGraphSnapshots(this: DKGAgent): void {
     if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
       return;
+    registerSnapshotSourceHandler({
+      nodeRole: this.config.nodeRole, chain: this.chain, router: this.router,
+      peerId: this.peerId, workLifetime: this.workLifetime,
+      isPrivateContextGraph: (id, options) => this.isPrivateContextGraph(id, options),
+      captureHosted: (id, onChainId) => {
+        const generation = this.contextGraphBindingState.capture(id);
+        return () => {
+          const sub = this.subscribedContextGraphs.get(id);
+          if (!(sub?.subscribed || sub?.coreHosted) || sub.onChainId !== onChainId
+            || !this.contextGraphBindingState.isGenerationCurrent(id, generation)) throw new Error('Unavailable');
+        };
+      },
+    });
     const runtime = new PublicSnapshotServingRuntime(
       (id, onChainId, signal) => this.chain.readPublicGraphSnapshot!(id, onChainId, { signal }),
       this.workLifetime,
@@ -73,7 +88,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     options: PublicSnapshotSyncOptions,
   ) {
     const normalized = normalizePublicSnapshotSyncOptions(options);
-    const { contextGraphId, onChainId, mode, transport, trustedCorePeerIds: peers } = normalized;
+    const { contextGraphId, onChainId, mode, transport } = normalized;
     if (jobs.has(this)) throw new Error("A snapshot job is already running");
     if (!this.started || this.workLifetime.closed) throw new Error("Node is stopping");
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
@@ -103,6 +118,21 @@ export class PublicSnapshotMethods extends DKGAgentBase {
         operation: async control => {
           const assertCurrent = control.assertCurrent;
           const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
+          const peers = normalized.sourcePolicy ? await selectSnapshotSources({
+            chain: this.chain, selfPeerId: this.peerId,
+            candidates: async signal => {
+              const connected = this.node.libp2p.getConnections().map(c => c.remotePeer.toString());
+              const hints = await this.discovery.findSnapshotCorePeerIds(signal).catch(error => {
+                signal.throwIfAborted();
+                if (!connected.length) throw error;
+                return [];
+              });
+              return [...connected, ...hints];
+            },
+            connect: (peer, signal) => this.ensurePeerConnected(peer, { signal }),
+            send: this.router.send.bind(this.router),
+          }, { contextGraphId, onChainId }, signal) : Object.freeze([...normalized.trustedCorePeerIds]);
+          assertCurrent();
           const expected = {
             chainId: this.chain.chainId,
             deploymentId: this.chain.deploymentId!,
@@ -159,6 +189,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
             BigInt(fresh.snapshot.blockNumber) >= BigInt(snapshot.blockNumber);
           return {
             mode, transport, bulkChunks,
+            ...(normalized.sourcePolicy ? { sourcePolicy: normalized.sourcePolicy, selectedCorePeerIds: peers } : {}),
             sourceCore: initial.sourceCore,
             coverageSourceCore: fresh.sourceCore,
             snapshotDigest: snapshot.snapshotDigest,
