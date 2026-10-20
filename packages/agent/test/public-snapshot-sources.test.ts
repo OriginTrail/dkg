@@ -1,10 +1,13 @@
 import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { MemoryLayer, PROTOCOL_NETWORK_IDENTITY, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import type { ChainReadOptions } from '@origintrail-official/dkg-chain';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
+import { DiscoveryClient } from '../src/discovery.js';
+import { buildAgentProfile } from '../src/profile.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 import { MockChainAdapter, sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
@@ -235,6 +238,29 @@ describe('registered Base mainnet snapshot sources', () => {
     expect(calls).toBe(16);
   });
 
+  it('reads bounded distinct core hints from stored registry profiles only', async () => {
+    const store = new OxigraphStore(), controller = new AbortController();
+    try {
+      const profiles = Array.from({ length: 130 }, (_, i) => buildAgentProfile({
+        peerId: `core-${String(i).padStart(3, '0')}`, name: 'Registry core', nodeRole: 'core',
+        agentAddress: ethers.toBeHex(BigInt(i + 1), 20), skills: [],
+      }));
+      const duplicate = buildAgentProfile({ peerId: 'core-000', name: 'Other binding',
+        nodeRole: 'core', agentAddress: ethers.toBeHex(131n, 20), skills: [] });
+      const edge = buildAgentProfile({ peerId: 'edge', name: 'Registry edge', nodeRole: 'edge', skills: [] });
+      const outside = buildAgentProfile({ peerId: 'outside', name: 'Outside registry', nodeRole: 'core', skills: [] });
+      await store.insert([...profiles.flatMap(p => p.quads), ...duplicate.quads, ...edge.quads,
+        ...outside.quads.map(quad => ({ ...quad, graph: 'urn:other-registry' }))]);
+      const engine = new DKGQueryEngine(store), query = vi.spyOn(engine, 'query');
+      const discovery = new DiscoveryClient(engine);
+      expect(await discovery.findSnapshotCorePeerIds(controller.signal))
+        .toEqual(Array.from({ length: 128 }, (_, i) => `core-${String(i).padStart(3, '0')}`));
+      expect(query).toHaveBeenCalledWith(expect.any(String), { contextGraphId: 'agents', signal: controller.signal });
+      controller.abort(new Error('registry read cancelled'));
+      await expect(discovery.findSnapshotCorePeerIds(controller.signal)).rejects.toThrow('registry read cancelled');
+    } finally { await store.close(); }
+  });
+
   it('requires either explicit peers or the policy and rejects mixed/unknown trust', () => {
     const input = { ...scope, trustedCorePeerIds: [], sourcePolicy: BASE_MAINNET_SOURCE_POLICY };
     expect(normalizePublicSnapshotSyncOptions(input)).toMatchObject(input);
@@ -340,7 +366,7 @@ it('retains the snapshot slot and physical ownership until all cancelled probes 
   } finally { parent.abort(); releases.forEach(release => release()); await outcome; await lifetime.drain(); }
 });
 
-it('commits a verified asset through an automatically selected loopback core and never fetches from a rejected core', async () => {
+it.each(['connected', 'registry-only'] as const)('commits a verified asset through a %s core and never fetches from a rejected core', async source => {
   const wallet = ethers.Wallet.createRandom();
   const chain = new MockChainAdapter('base:8453', wallet.address, { initialContextGraphId: 14n });
   Object.defineProperty(chain, 'deploymentId', { get: () => deploymentId });
@@ -381,8 +407,23 @@ it('commits a verified asset through an automatically selected loopback core and
     await core.store.insert([...data, ...metadata]);
     core.subscribeToContextGraph(scope.contextGraphId, { onChainId: scope.onChainId,
       syncMode: 'on-demand', trackSyncScope: false });
-    await edge.connectTo(core.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
-    await edge.connectTo(rejected.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    if (source === 'connected') {
+      await edge.connectTo(core.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+      await edge.connectTo(rejected.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    } else {
+      expect(edge.connectedPeerIds()).toEqual([]);
+      await edge.store.insert([core, rejected].flatMap((agent, i) => buildAgentProfile({
+        peerId: agent.peerId, name: `Registry-only core ${i}`, nodeRole: 'core', skills: [],
+        agentAddress: ethers.toBeHex(BigInt(i + 1), 20),
+        // Loopback is intentional for this isolated network; profile publication filters it in production.
+        multiaddrs: agent.multiaddrs.filter(a => a.includes('/tcp/') && !a.includes('/p2p-circuit')),
+      }).quads));
+      const discover = vi.spyOn(edge.discovery, 'findSnapshotCorePeerIds').mockResolvedValueOnce([]);
+      await expect(edge.syncPublicGraphSnapshot({ ...scope, trustedCorePeerIds: [],
+        sourcePolicy: BASE_MAINNET_SOURCE_POLICY })).rejects.toThrow('No registered');
+      expect(edge.connectedPeerIds()).toEqual([]);
+      expect(discover).toHaveBeenCalledTimes(1);
+    }
     const sends = vi.spyOn(edge.router, 'send');
     const streams = vi.spyOn(edge.router, 'withDuplexStream');
     const result = await edge.syncPublicGraphSnapshot({ ...scope, trustedCorePeerIds: [],
@@ -393,7 +434,9 @@ it('commits a verified asset through an automatically selected loopback core and
     expect(await edge.store.query(`SELECT ?value WHERE { GRAPH <${assertionGraph}> { <urn:verified-asset> <urn:value> ?value } }`))
       .toMatchObject({ type: 'bindings', bindings: [{ value: '"selected core payload"' }] });
     expect(sends.mock.calls.filter(([peer]) => peer === rejected.peerId).map(([, protocol]) => protocol))
-      .toEqual([PUBLIC_SNAPSHOT_SOURCE_PROTOCOL]);
+      .toEqual(source === 'registry-only'
+        ? [PROTOCOL_NETWORK_IDENTITY, PUBLIC_SNAPSHOT_SOURCE_PROTOCOL]
+        : [PUBLIC_SNAPSHOT_SOURCE_PROTOCOL]);
     expect(streams.mock.calls.some(([peer]) => peer === rejected.peerId)).toBe(false);
     expect(signing.chain.verifyACKIdentity).toHaveBeenCalledWith(signing.wallet.address, 7n, { signal: expect.any(AbortSignal) });
   } finally { for (const agent of agents.reverse()) await agent.stop(); }
