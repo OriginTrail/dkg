@@ -7,10 +7,20 @@ on `codex/kafka-source-poc`, based on fresh `testnet-canary`
 
 ## Verified
 
-- **13 passing tests** through the actual canary `runSourceWorkerOnce`, including
+- **19 passing tests**, including 13 through the actual canary
+  `runSourceWorkerOnce` and six Kafka transport-contract tests. The suite covers
   readback errors, private-graph enforcement, binary data, tombstones, replay,
   exact large offsets, changed bytes and uncertain-write recovery. The failure
   tests explicitly use an HTTP contract double, not a claimed live node.
+- The suite uses the standard Vitest supporting CI lane, JUnit receipts and
+  full production-source coverage ratchet. On Node 22.23.1, measured line
+  coverage is **95.62%**; the checked-in line floor is 94%.
+- CI integration checks: **764 repository script tests** pass; all 26 Node
+  package builds pass with EVM compilation explicitly skipped; lint and frozen
+  offline dependency installation pass. Test inventory verifies 2,689 files
+  across 24 Vitest packages and assigns both Kafka suites to the required
+  `kosava-supporting` lane. The standard CI JUnit runner also executes all
+  19 tests and produces its coverage receipt locally.
 - **Real local broker:** Redpanda `v24.3.18`, Kafka protocol, bound to localhost.
   Disposable test runtime; it is not a production broker deployment.
 - **Real local DKG HTTP lifecycle:** a separate DKG `10.0.6` daemon, private

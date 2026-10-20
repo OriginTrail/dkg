@@ -1,16 +1,14 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+import { runSourceWorkerOnce } from '../../agent/src/source-worker.ts';
 import { createHandler } from '../src/handler.mjs';
 import { createDkgSink } from '../src/dkg-sink.mjs';
 import { Journal } from '../src/journal.mjs';
 import { hash, buildAsset } from '../src/asset.mjs';
 
-const native = process.env.DKG_SOURCE_WORKER_MODULE ?? resolve('../agent/src/source-worker.ts');
-const { runSourceWorkerOnce } = await import(pathToFileURL(native));
 const owner = '0x' + 'a'.repeat(40);
 const source = { id: 'kafka-test', kind: 'kafka', clusterId: 'local-poc', brokers: ['localhost:19092'],
   groupId: 'dkg-kafka-poc', topic: 'dkg-source-test', ssl: false, agentAddress: owner,
@@ -53,7 +51,7 @@ function daemon() {
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'dkg-kafka-source-test-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.onTestFinished(() => rm(dir, { recursive: true, force: true }));
   const config = { sources: [source], stateFile: join(dir, 'source-state.json'), daemonUrl: 'http://localhost:9200', daemonToken: 'test' };
   const api = daemon();
   let queue = [message()], commits = [], closed = 0, rejectCommit = false;
@@ -143,7 +141,7 @@ test('large Kafka offsets retain exact decimal identity', () => {
 
 test('changed source scope cannot reuse an existing journal', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'dkg-kafka-scope-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.onTestFinished(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'journal.sqlite');
   new Journal(path, 'original').close();
   assert.throws(() => new Journal(path, 'different'), /KAFKA_JOURNAL_SCOPE_CHANGED/);

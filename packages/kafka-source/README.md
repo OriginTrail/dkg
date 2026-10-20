@@ -95,8 +95,8 @@ and real DKG HTTP lifecycle endpoints. The operator-provided integration JSON
 contains `brokers`, `daemonUrl`, `daemonToken`, `agentAddress`, `contextGraphId`.
 It writes only synthetic examples into the specified pre-provisioned graph.
 It creates its own broker topic/group and resets **that test group's** offsets
-to prove replay. `DKG_SOURCE_WORKER_MODULE` can pin an alternative native worker
-module; otherwise the workspace `packages/agent/src/source-worker.ts` is used.
+to prove replay. Both suites import the workspace's native
+`packages/agent/src/source-worker.ts` directly, so CI can track the dependency.
 
 Tested scenarios include lost responses, readback mismatch, offset-commit
 failure, empty polls, tombstones, changed bytes at the same position, and

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { runSourceWorkerOnce } from '../../agent/src/source-worker.ts';
 import { Kafka, logLevel } from 'kafkajs';
 import { createHandler } from '../src/handler.mjs';
 import { createDkgSink } from '../src/dkg-sink.mjs';
@@ -13,8 +13,7 @@ import { readKafka } from '../src/kafka.mjs';
 
 if (!process.env.DKG_KAFKA_TEST_CONFIG) throw new Error('DKG_KAFKA_TEST_CONFIG required');
 const config = JSON.parse(await readFile(process.env.DKG_KAFKA_TEST_CONFIG, 'utf8'));
-const native = process.env.DKG_SOURCE_WORKER_MODULE ?? resolve('../agent/src/source-worker.ts');
-const { runSourceWorkerOnce } = await import(pathToFileURL(native));
+const native = resolve('../agent/src/source-worker.ts');
 const directory = await mkdtemp(join(tmpdir(), 'dkg-kafka-integration-'));
 const runId = Date.now().toString(36);
 const source = { id: 'kafka-integration', kind: 'kafka', clusterId: 'local-kafka-poc',
