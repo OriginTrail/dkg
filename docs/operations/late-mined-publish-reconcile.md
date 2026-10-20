@@ -35,6 +35,8 @@ It then records the original transaction, block, publisher and TRAC cost through
 | 503 `KA_MINT_RECONCILE_INCOMPLETE` | The mint was verified, but the lifecycle did not reach `vm-confirmed`. Retry. |
 | 409 `VM_PUBLISH_PRECONDITION` or `PUBLISH_NOT_FULL_SHARE` | The asset is not a finalized, fully shared asset, or its shared-memory content is gone. |
 
+Any other failure, such as a store error, leaves the lifecycle at `swm-shared`. A retry rewrites whatever was already recorded identically, and the command sends nothing, so it is safe to retry. On a large node, a 500 with "Triple-store response exceeds byte limit" can come from a concurrent query sharing the store's graph listing during the shared-memory cleanup. Retry it while the node serves no other queries.
+
 A plain `dkg ka publish` retry also adopts the asset's own mint when the contract reports the reserved id already minted. That retry still collects core ACKs first, and under the per-publish approval policy it can send a TRAC approval before gas estimation reverts. Prefer `reconcile`.
 
 Agent-scoped credentials cannot invoke this endpoint. Keep the successful response as operational evidence.
