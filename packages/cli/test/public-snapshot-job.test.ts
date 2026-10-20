@@ -8,6 +8,7 @@ afterEach(async () => {
 });
 async function serve(admin: boolean, sync: () => Promise<unknown>, prebuffer = false) {
   const agent = {
+    getPublicSnapshotSourcePolicies: () => ['base-mainnet-registered-cores'],
     syncPublicGraphSnapshot: sync,
     getDefaultAgentAddress: () => undefined,
     resolveAgentByToken: () => undefined,

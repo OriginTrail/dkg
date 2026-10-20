@@ -17,20 +17,59 @@ queries and registered-core snapshot recovery. Existing explicit profiles
 remain unchanged. A returning client can also reuse its own verified assets;
 that differs from a fresh client downloading from a warm core.
 
-Every registered Base mainnet core is eligible, without a hardcoded serving
-peer. Connected peers and a bounded phonebook page provide routing hints.
-Before selection the peer signs a fresh challenge naming both peers, the
-graph, registration ID and exact chain/Hub deployment. The receiver verifies
-the signature's operational key and active ShardingTable membership on its
-configured chain. An unsigned phonebook role or copied wallet address cannot
-establish eligibility.
+Enable **Lower RPC usage by using the DKG Core chain cache** with
+`"DKG_Core_chain_cache": true` in the Edge's `config.json`. Upgraded cores
+on an official deployment serve the cache by default; `false` disables it.
+Mainnet accepts cores registered on any locally bundled official mainnet
+chain; testnet uses the same code with only official testnet registries.
+Neither environment accepts the other or an arbitrary private deployment.
+Pre-deployment placeholders remain unavailable until their official configuration is ready.
+The data graph keeps its own chain, Hub and numeric registration ID.
 
-One job probes at most 16 candidates, four concurrently, and pins at most four
-verified sources. Candidate order varies by job to avoid a permanent first
-core. Selection occurs inside the existing job deadline; new peers are not
-added during transfer. The source protocol is available only on upgraded
-Base cores hosting the public graph. Registration does not convert core-cache
-chain statements into independently verified asset RPC evidence.
+The peer signs a fresh challenge binding requester, responder, nonce, graph,
+data chain/Hub and its separate registration chain/Hub. The Edge verifies the
+operational key and active ShardingTable membership on that locally configured
+registration deployment. A peer never nominates an RPC endpoint or contract.
+Registration checks stay on the Edge; public inventory, version and root
+reads are delegated to the cache core. Those are DKG records stored on-chain,
+not arbitrary blockchain history, and transaction/publishing RPC is unchanged.
+
+One job probes at most 16 hints, four concurrently, and pins at most four
+verified cache sources. Official relay addresses, connected peers and bounded
+phonebook results supply hints, not trust. Other cores are eligible if found
+and reachable. Cache-only foreign peers may use only the two public cache
+protocols. Normal networking, private graphs and publishing retain their
+original network admission. The core validates public graph access, name,
+finality and block consistency before supplying a snapshot.
+
+The inventory supplier need not host the RDF content. Content is fetched from
+up to four separately admitted data-network peers and each asset retains its
+identity/root verification. Start and final inventory comparisons, the job
+lifetime, transfer deadlines and retries remain unchanged. Content export
+caches and chain-inventory caches are distinct: the former improve repeated
+content transfers; the latter reduce Edge RPC work.
+
+The source policy in the authenticated snapshot job is `DKG_Core_chain_cache`.
+The API advertises it only when the local node has it configured. The old
+`base-mainnet-registered-cores` policy and explicit peer jobs remain compatible;
+existing profiles are not silently widened. Completed jobs report physical
+registry RPC counts in `chainCacheRpcUsage`, excluding unrelated node RPC.
+The daemon's ordinary RPC telemetry includes those registry requests too.
+
+## Local RPC measurement
+
+A controlled 12-asset fixture uses real libp2p nodes, Oxigraph and deployed
+local EVM contracts, with separate data and registration chain namespaces.
+Both exact and opt-in bulk recovery committed all 12 public assets, excluded
+private content and matched independent recovery's inventory. This exercises
+cross-chain routing and verification; it is not a live multi-chain benchmark.
+
+The two inventory observations took 22 direct RPC requests. Delegating them
+left five Edge requests for operational-key and active-registration checks.
+Including ordinary graph-authority work, the measured jobs used 14–16 Edge
+requests, versus 42 for independent recovery. Ordinary authority work varies
+with runtime state; these counts do not predict a whole-session bill or a
+production latency. The core still pays for inventory cache misses/refreshes.
 
 The Blackbox automatic profile requires this new local daemon capability.
 DKG 10.0.25 supports explicit-core snapshot jobs but not this source policy;
@@ -65,6 +104,7 @@ dataset growth still affect completion time. It is not a latency guarantee.
 
 ## Rollback
 
+- Set `DKG_Core_chain_cache` to `false` to disable this automatic cache capability.
 - Set `preparedContentCache.enabled` to `false` to stop retaining disk copies.
 - Set `DKG_EXACT_BATCH_STREAM_ENABLED=0` to disable the accelerated stream.
   The older `DKG_EXPERIMENTAL_EXACT_BATCH_STREAM=0` spelling is also honored

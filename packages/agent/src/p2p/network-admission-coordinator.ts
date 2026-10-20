@@ -25,6 +25,7 @@ export interface NetworkAdmissionConnection {
 export interface NetworkAdmissionCoordinatorOptions {
   admission: NetworkAdmissionService;
   identity?: DkgNetworkIdentity;
+  cacheIdentities?: readonly DkgNetworkIdentity[];
   selfPeerId: string;
   sign: (payload: Uint8Array) => Promise<Uint8Array>;
   sendIdentityProbe: (
@@ -194,6 +195,8 @@ export class NetworkAdmissionInvalidPeerIdError extends Error {
 export class NetworkAdmissionCoordinator {
   private readonly admission: NetworkAdmissionService;
   private readonly identity?: DkgNetworkIdentity;
+  private readonly cacheIdentities: readonly DkgNetworkIdentity[];
+  private readonly cachePeers = new Map<string, number>();
   private readonly selfPeerId: string;
   private readonly sign: (payload: Uint8Array) => Promise<Uint8Array>;
   private readonly sendIdentityProbe: NetworkAdmissionCoordinatorOptions['sendIdentityProbe'];
@@ -210,6 +213,7 @@ export class NetworkAdmissionCoordinator {
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
     this.identity = options.identity;
+    this.cacheIdentities = Object.freeze((options.cacheIdentities ?? []).slice(0, 16).map(i => Object.freeze({ ...i })));
     this.selfPeerId = options.identity?.networkId
       ? canonicalAdmissionPeerId(options.selfPeerId)
       : options.selfPeerId.trim();
@@ -283,6 +287,21 @@ export class NetworkAdmissionCoordinator {
       AUTOMATIC_ADMISSION_POLICY,
       options,
     );
+  }
+
+  /** This verdict permits only the public chain-cache protocols, never normal admission. */
+  async ensureCacheAdmitted(remotePeer: string, ctx: OperationContext, options: NetworkAdmissionAttemptOptions = {}): Promise<boolean> {
+    if (!this.enabled || !this.cacheIdentities.length) return false;
+    const normal = await this.ensureAdmitted(remotePeer, ctx, options);
+    options.signal?.throwIfAborted();
+    return normal || this.isCachePeer(canonicalAdmissionPeerId(remotePeer));
+  }
+
+  private isCachePeer(peer: string): boolean {
+    const expires = this.cachePeers.get(peer);
+    if (expires !== undefined && expires > Date.now()) return true;
+    this.cachePeers.delete(peer);
+    return false;
   }
 
   async ensureExplicitConnectAdmitted(
@@ -365,6 +384,7 @@ export class NetworkAdmissionCoordinator {
     if (!this.enabled) return true;
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
     if (this.admission.isAcceptedPeer(remotePeerId)) return true;
+    if (this.isCachePeer(remotePeerId)) return false;
     if (this.admission.isRejectedPeer(remotePeerId)) return false;
     if (options.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal.reason));
 
@@ -500,6 +520,17 @@ export class NetworkAdmissionCoordinator {
       this.admission.markVerifiedSameNetwork(remotePeer);
       notifyBestEffort(() => this.onPeerVerified?.(remotePeer));
       return true;
+    }
+    for (const cacheIdentity of this.cacheIdentities) {
+      const cacheVerdict = await verifyNetworkIdentityResponse({ response: claimed, remotePeerId: remotePeer,
+        localIdentity: cacheIdentity, nonce, requesterPeerId: this.selfPeerId });
+      signal.throwIfAborted();
+      if (cacheVerdict.ok) {
+        if (this.cachePeers.size >= 256) this.cachePeers.delete(this.cachePeers.keys().next().value!);
+        this.cachePeers.set(remotePeer, Date.now() + 30_000);
+        // Do not mark same-network, call onPeerVerified, or populate normal peer selection.
+        return false;
+      }
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
     return false;

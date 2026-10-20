@@ -18,12 +18,13 @@ export function registerSnapshotSourceHandler(agent: {
   router: Pick<ProtocolRouter, 'register'>;
   peerId: string;
   workLifetime: AgentWorkLifetime;
+  sourceAdmission?: PublicSnapshotAdmission;
   captureHosted(id: string, onChainId: string): () => void;
   isPrivateContextGraph(id: string, options: { signal: AbortSignal }): Promise<boolean>;
 }): void {
   if (agent.nodeRole !== 'core' || agent.chain.chainId !== 'base:8453'
     || !agent.chain.signMessage) return;
-  const admission = new PublicSnapshotAdmission();
+  const admission = agent.sourceAdmission ?? new PublicSnapshotAdmission();
   let active = 0;
   const encode = (v: unknown) => new TextEncoder().encode(JSON.stringify(v));
   agent.router.register(PUBLIC_SNAPSHOT_SOURCE_PROTOCOL, async (bytes, remote) => {

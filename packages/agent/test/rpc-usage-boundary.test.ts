@@ -16,6 +16,16 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 const drain = DKGAgentBase.prototype.drainRpcUsage;
 
 describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', () => {
+  it('includes foreign registration RPC in daemon billing telemetry and drains it once', () => {
+    let pending = true;
+    const cache = { drainRpcUsage: () => { const count = pending ? 5 : 0; pending = false;
+      return { byMethod: { eth_call: count }, lifetimeTotal: 5 }; } };
+    const owner = { chain: { drainRpcUsage: () => ({ byMethod: { eth_getLogs: 2 }, lifetimeTotal: 2 }) },
+      config: { coreChainCacheNetworks: [{ registry: cache }] } };
+    expect(drain.call(owner as never)).toMatchObject({ byMethod: { eth_getLogs: 2, eth_call: 5 }, lifetimeTotal: 7 });
+    expect(drain.call(owner as never)).toMatchObject({ byMethod: { eth_getLogs: 2 }, lifetimeTotal: 7 });
+    expect(drain.call(owner as never).byMethod.eth_call ?? 0).toBe(0);
+  });
   it('delegates to the adapter and passes the window through VERBATIM', () => {
     const window = {
       byMethod: { eth_call: 42, eth_getLogs: 7 },

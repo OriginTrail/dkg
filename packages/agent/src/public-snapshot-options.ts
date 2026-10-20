@@ -1,3 +1,4 @@
+import { DKG_CORE_CHAIN_CACHE } from './core-chain-cache-config.js';
 import { isPublicGraphSnapshotScope } from '@origintrail-official/dkg-chain';
 import { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 import { BASE_MAINNET_SOURCE_POLICY } from './public-snapshot-source-proof.js';
@@ -19,7 +20,7 @@ export type PublicSnapshotSyncOptions = PublicSnapshotSyncBase & (
   | {
       /** Independently authenticated registered cores; no explicit peers. */
       trustedCorePeerIds: readonly [];
-      sourcePolicy: typeof BASE_MAINNET_SOURCE_POLICY;
+      sourcePolicy: typeof BASE_MAINNET_SOURCE_POLICY | typeof DKG_CORE_CHAIN_CACHE;
     }
 );
 
@@ -32,7 +33,7 @@ export function normalizePublicSnapshotSyncOptions(input: unknown): PublicSnapsh
   if (!isPublicGraphSnapshotScope(value)
     || !isPublicSnapshotMode(mode)
     || (transport !== 'exact' && transport !== 'bulk')
-    || (value.sourcePolicy !== undefined && value.sourcePolicy !== BASE_MAINNET_SOURCE_POLICY)
+    || (value.sourcePolicy !== undefined && value.sourcePolicy !== BASE_MAINNET_SOURCE_POLICY && value.sourcePolicy !== DKG_CORE_CHAIN_CACHE)
     || !Array.isArray(value.trustedCorePeerIds)
     || value.trustedCorePeerIds.some(peer => typeof peer !== 'string' || !peer.length || peer.length > 256)
     || (value.signal !== undefined && !(value.signal instanceof AbortSignal))) throw new Error('Invalid snapshot job');
@@ -44,6 +45,6 @@ export function normalizePublicSnapshotSyncOptions(input: unknown): PublicSnapsh
     ...(value.signal ? { signal: value.signal as AbortSignal } : {}),
   };
   return value.sourcePolicy
-    ? { ...common, trustedCorePeerIds: [], sourcePolicy: BASE_MAINNET_SOURCE_POLICY }
+    ? { ...common, trustedCorePeerIds: [], sourcePolicy: value.sourcePolicy as typeof BASE_MAINNET_SOURCE_POLICY | typeof DKG_CORE_CHAIN_CACHE }
     : { ...common, trustedCorePeerIds: peers };
 }

@@ -1,3 +1,6 @@
+import { DKG_CORE_CHAIN_CACHE } from './core-chain-cache-config.js';
+import { registerCoreChainCacheHandlers } from './core-chain-cache-handler.js';
+import { coreChainCacheSeeds, connectCoreChainCacheSeed, selectCoreChainCacheContentPeers } from './core-chain-cache-peers.js';
 import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
@@ -28,12 +31,20 @@ import { registerSnapshotSourceHandler } from './public-snapshot-source-handler.
 import { selectSnapshotSources } from './public-snapshot-sources.js';
 export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export class PublicSnapshotMethods extends DKGAgentBase {
+  getPublicSnapshotSourcePolicies(this: DKGAgent): readonly string[] {
+    return [...(this.chain.chainId === 'base:8453' ? ['base-mainnet-registered-cores'] : []), ...(this.config.DKG_Core_chain_cache && this.config.coreChainCacheNetworks?.length ? [DKG_CORE_CHAIN_CACHE] : [])];
+  }
   startPublicGraphSnapshots(this: DKGAgent): void {
+    const cache = this.config.DKG_Core_chain_cache ? registerCoreChainCacheHandlers({
+      nodeRole: this.config.nodeRole ?? "edge", chain: this.chain, peerId: this.peerId, router: this.router,
+      workLifetime: this.workLifetime, networks: this.config.coreChainCacheNetworks ?? [],
+    }) : undefined;
     if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
       return;
     registerSnapshotSourceHandler({
       nodeRole: this.config.nodeRole, chain: this.chain, router: this.router,
       peerId: this.peerId, workLifetime: this.workLifetime,
+      sourceAdmission: cache?.sourceAdmission,
       isPrivateContextGraph: (id, options) => this.isPrivateContextGraph(id, options),
       captureHosted: (id, onChainId) => {
         const generation = this.contextGraphBindingState.capture(id);
@@ -44,7 +55,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
         };
       },
     });
-    const runtime = new PublicSnapshotServingRuntime(
+    const runtime = cache?.runtime ?? new PublicSnapshotServingRuntime(
       (id, onChainId, signal) => this.chain.readPublicGraphSnapshot!(id, onChainId, { signal }),
       this.workLifetime,
     );
@@ -62,7 +73,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           const lifetime = this.workLifetime.generation;
           const snapshot = await runtime.get(
             peer.toString(),
-            request.contextGraphId,
+            cache ? JSON.stringify([this.chain.deploymentId, request.contextGraphId]) : request.contextGraphId,
             request.onChainId,
             request.refresh,
           );
@@ -89,6 +100,15 @@ export class PublicSnapshotMethods extends DKGAgentBase {
   ) {
     const normalized = normalizePublicSnapshotSyncOptions(options);
     const { contextGraphId, onChainId, mode, transport } = normalized;
+    const chainCache = normalized.sourcePolicy === DKG_CORE_CHAIN_CACHE;
+    const networks = chainCache ? this.config.coreChainCacheNetworks ?? [] : [];
+    if (chainCache && (!this.config.DKG_Core_chain_cache || !networks.some(n =>
+      n.registry.chainId === this.chain.chainId && n.registry.deploymentId === this.chain.deploymentId)))
+      throw new Error('DKG_Core_chain_cache is unavailable for this deployment');
+    const seeds = coreChainCacheSeeds(networks);
+    const dataSeeds = coreChainCacheSeeds(networks.filter(n => n.registry.deploymentId === this.chain.deploymentId));
+    let dataCandidates: string[] = [...dataSeeds.keys()];
+    const rpcBefore = networks.map(n => n.registry.rpcUsage());
     if (jobs.has(this)) throw new Error("A snapshot job is already running");
     if (!this.started || this.workLifetime.closed) throw new Error("Node is stopping");
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
@@ -120,16 +140,20 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
           const peers = normalized.sourcePolicy ? await selectSnapshotSources({
             chain: this.chain, selfPeerId: this.peerId,
+            ...(chainCache ? { cacheNetworks: networks } : {}),
             candidates: async signal => {
               const connected = this.node.libp2p.getConnections().map(c => c.remotePeer.toString());
               const hints = await this.discovery.findSnapshotCorePeerIds(signal).catch(error => {
                 signal.throwIfAborted();
-                if (!connected.length) throw error;
+                if (!connected.length && !seeds.size) throw error;
                 return [];
               });
-              return [...connected, ...hints];
+              dataCandidates.push(...connected, ...hints);
+              return [...connected, ...hints, ...seeds.keys()];
             },
-            connect: (peer, signal) => this.ensurePeerConnected(peer, { signal }),
+            connect: (peer, signal) => seeds.get(peer)
+              ? connectCoreChainCacheSeed(this.node.libp2p, seeds.get(peer)!, signal)
+              : this.ensurePeerConnected(peer, { signal }),
             send: this.router.send.bind(this.router),
           }, { contextGraphId, onChainId }, signal) : Object.freeze([...normalized.trustedCorePeerIds]);
           assertCurrent();
@@ -139,7 +163,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
             contextGraphId,
             onChainId,
           };
-          const read = createPublicSnapshotReader({ mode, chain:this.chain, router:this.router,
+          const read = createPublicSnapshotReader({ mode, chainCache, chain:this.chain, router:this.router,
             peers, signal, expected, assertCurrent });
           const initial = await read();
           const snapshot = initial.snapshot;
@@ -156,7 +180,18 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
           assertCurrent();
           const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
-          const recovery = { contextGraphId, peers, uals, evidence, signal, assertCurrent };
+          // Cache suppliers can be foreign-network peers. Content remains on the data network
+          // and is verified against the authenticated inventory before it is committed.
+          const contentPeers: readonly string[] = chainCache
+            ? await selectCoreChainCacheContentPeers({ candidates: dataCandidates, self: this.peerId,
+              connect: (peer, requestSignal) => dataSeeds.get(peer)
+                ? connectCoreChainCacheSeed(this.node.libp2p, dataSeeds.get(peer)!, requestSignal)
+                : this.ensurePeerConnected(peer, { signal: requestSignal }),
+              admit: (peer, requestSignal) => this.networkAdmissionCoordinator.ensureAdmitted(peer, createOperationContext('sync'), { signal: requestSignal }),
+            }, signal)
+            : peers;
+          if (uals.length && !contentPeers.length) throw new Error('No data-network peers available for snapshot content');
+          const recovery = { contextGraphId, peers: contentPeers, uals, evidence, signal, assertCurrent };
           let recovered: PublicSnapshotRecoveryResult;
           if (transport === 'bulk') {
             const { verification, reconcile } = DKGAgentBase.createDurableRecoveryCapabilities(this);
@@ -190,6 +225,10 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           return {
             mode, transport, bulkChunks,
             ...(normalized.sourcePolicy ? { sourcePolicy: normalized.sourcePolicy, selectedCorePeerIds: peers } : {}),
+            ...(chainCache ? { contentPeerIds: contentPeers, chainCacheRpcUsage: networks.map((n, i) => ({
+              chainId: n.registry.chainId, methods: Object.fromEntries(Object.entries(n.registry.rpcUsage())
+                .map(([method, count]) => [method, count - (rpcBefore[i][method] ?? 0)])),
+            })) } : {}),
             sourceCore: initial.sourceCore,
             coverageSourceCore: fresh.sourceCore,
             snapshotDigest: snapshot.snapshotDigest,

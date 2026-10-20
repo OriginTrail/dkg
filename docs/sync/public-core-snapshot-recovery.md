@@ -1,5 +1,13 @@
 # Public Context Graph snapshot recovery
 
+For automatic selection across official chains, enable `DKG_Core_chain_cache`
+in the node config and send `"sourcePolicy":"DKG_Core_chain_cache"` with an
+empty `trustedCorePeerIds` array. The source-policy capability must be present
+in the authenticated GET response. Mainnet and testnet use the same mechanism
+but disjoint registries. A cache source may be registered on a different chain
+from the requested graph; ordinary content peers remain on the data network.
+See [chain-cache configuration and rollout](warm-sync-rollout.md).
+
 An explicit recovery job can obtain chain statements from operator-configured core peers instead of repeating asset RPC reads on every receiver. The default for this **new job API** is `core-cache`; existing background reconciliation keeps its existing policy.
 
 The core reads a complete ordered inventory and each asset's root, assertion version and graph binding at one confirmation-depth block. It resolves storage contracts through the Hub at that same block, checks the actual RPC chain id and rechecks the block hash after collection. Where canonical Multicall3 bytecode is present, bounded aggregates amortize RPC calls; development chains without it use bounded concurrent calls at the same anchor. Cache hits do no chain work. Cold readers coalesce; the cache bounds concurrent builds, retained graphs, inventory size and response size.

@@ -32,26 +32,41 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
     onChainId: string,
     options: ChainReadOptions = {},
   ): Promise<PublicGraphSnapshot> {
+    if (!isPublicGraphSnapshotScope({ contextGraphId, onChainId })) throw new Error("Invalid snapshot scope");
+    const signal = options.signal ?? AbortSignal.timeout(110_000);
+    signal.throwIfAborted();
+    await this.init();
+    return readEvmPublicGraphSnapshot({
+      chainId: this.chainId, deploymentId: this.deploymentId, hubAddress: this.hubAddress,
+      providers: this.providers, finalityConfirmations: this.finalityConfirmations,
+    }, contextGraphId, onChainId, { ...options, signal });
+  }
+}
+
+/** Shared read-only snapshot reader; the chain-cache service needs no wallet or background index. */
+export async function readEvmPublicGraphSnapshot(ports: {
+  chainId: string; deploymentId: string; hubAddress: string;
+  providers: readonly JsonRpcProvider[]; finalityConfirmations: number;
+}, contextGraphId: string, onChainId: string, options: ChainReadOptions = {}): Promise<PublicGraphSnapshot> {
     if (!isPublicGraphSnapshotScope({ contextGraphId, onChainId }))
       throw new Error("Invalid snapshot scope");
     const signal = options.signal ?? AbortSignal.timeout(110_000);
     signal.throwIfAborted();
-    await this.init();
-    const expected = numericChainIdOf(this.chainId);
+    const expected = numericChainIdOf(ports.chainId);
     if (expected === undefined) throw new Error("Invalid snapshot configured chain ID");
     const readOne = async (provider: JsonRpcProvider, signal: AbortSignal) => {
       if (BigInt(await provider.send("eth_chainId", [])) !== expected)
         throw new Error("Snapshot RPC chain mismatch");
       const observedAt = Date.now();
       const anchor = await resolveEvmFinalityAnchorBlockV1({
-        finalityConfirmations: this.finalityConfirmations,
+        finalityConfirmations: ports.finalityConfirmations,
         readHead: () => provider.getBlock("latest"),
         readBlockAt: number => provider.getBlock(number),
         unavailable: detail => new Error(`Snapshot anchor unavailable: ${detail}`),
       });
       const number = anchor.number;
       const at = { blockTag: number };
-      const hub = new Contract(this.hubAddress, loadAbi("Hub"), provider);
+      const hub = new Contract(ports.hubAddress, loadAbi("Hub"), provider);
       const [cgAddress, kaAddress] = await readRpcTuple([
         () => hub.getAssetStorageAddress("ContextGraphStorage", at),
         () => hub.getAssetStorageAddress("DKGKnowledgeAssets", at),
@@ -114,8 +129,8 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
         throw new Error("Snapshot anchor changed");
       const snapshot = sealPublicGraphSnapshot({
         version: 1,
-        chainId: this.chainId,
-        deploymentId: this.deploymentId,
+        chainId: ports.chainId,
+        deploymentId: ports.deploymentId,
         contextGraphId,
         onChainId,
         nameHash: nameHash.toLowerCase(),
@@ -123,25 +138,24 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
         assetStorage: kaAddress.toLowerCase(),
         blockNumber: String(number),
         blockHash: anchor.hash.toLowerCase(),
-        finalityConfirmations: this.finalityConfirmations,
+        finalityConfirmations: ports.finalityConfirmations,
         observedAt,
         expiresAt: observedAt + PUBLIC_GRAPH_SNAPSHOT_MAX_AGE_MS,
         accessPolicy: 0,
         assets,
       });
       return normalizePublicGraphSnapshot(snapshot, {
-        chainId: this.chainId,
-        deploymentId: this.deploymentId,
+        chainId: ports.chainId,
+        deploymentId: ports.deploymentId,
         contextGraphId,
         onChainId,
       });
     };
-    const result = await readFirstProviderWithTransientRetry(this.providers, readOne, {
+    const result = await readFirstProviderWithTransientRetry(ports.providers, readOne, {
       signal, retryDelayMs: 250, isRetryable: isContractViewRetryable, awaitPhysicalSettlement: true,
     });
     if (!result) throw new Error("Public snapshot unavailable");
     return result;
-  }
 }
 
 interface SnapshotCall {

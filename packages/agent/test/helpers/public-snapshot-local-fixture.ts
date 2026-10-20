@@ -8,6 +8,7 @@ import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../../src/dkg-agent.js';
+import type { DKGAgentConfig } from '../../src/dkg-agent-types.js';
 import { getSharedContext, createProvider, makeAdapterConfig, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
 
 export const graph = 'public-snapshot-local';
@@ -127,6 +128,7 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
       nodeRole: "core" | "edge",
       chainAdapter: EVMChainAdapter,
       store: OxigraphStore,
+      overrides: Partial<DKGAgentConfig> = {},
     ) => {
       const dataDir = await mkdtemp(join(tmpdir(), "snapshot-local-")); directories.push(dataDir);
       const a = await DKGAgent.create({
@@ -142,6 +144,7 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
         syncOnConnectEnabled: false,
         syncReconcilerEnabled: false,
         vmReconcilerEnabled: false,
+        ...overrides,
       });
       agents.push(a);
       await a.start();

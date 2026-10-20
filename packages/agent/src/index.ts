@@ -660,3 +660,5 @@ export {
 // exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
 // internal; only the in-agent lifecycle (at its env boundary) + tests use it.
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
+
+export type { CoreChainCacheNetwork } from './core-chain-cache-config.js';

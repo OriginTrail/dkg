@@ -1,3 +1,5 @@
+import { verifyCacheProof } from './core-chain-cache-proof.js';
+import { CORE_CHAIN_CACHE_SOURCE_PROTOCOL, type CoreChainCacheNetwork } from './core-chain-cache-config.js';
 // SPDX-License-Identifier: Apache-2.0
 import { createHash, randomBytes } from 'node:crypto';
 import { startRequestAbortLifecycle, type ProtocolRouter } from '@origintrail-official/dkg-core';
@@ -11,6 +13,7 @@ import {
 export interface SnapshotSourcePorts {
   chain: Pick<ChainAdapter, 'chainId' | 'deploymentId' | 'verifyACKIdentity'>;
   selfPeerId: string;
+  cacheNetworks?: readonly CoreChainCacheNetwork[];
   /** Bounded phonebook/connected candidates are hints, never trust evidence. */
   candidates(signal: AbortSignal): Promise<readonly string[]>;
   connect(peer: string, signal: AbortSignal): Promise<void>;
@@ -25,8 +28,7 @@ export async function selectSnapshotSources(
   scope: { contextGraphId: string; onChainId: string },
   signal: AbortSignal,
 ): Promise<readonly string[]> {
-  if (ports.chain.chainId !== 'base:8453' || !ports.chain.deploymentId
-    || !ports.chain.verifyACKIdentity) throw new Error('Registered Base mainnet source verification unavailable');
+  if (!ports.chain.deploymentId || (!ports.cacheNetworks && (ports.chain.chainId !== 'base:8453' || !ports.chain.verifyACKIdentity))) throw new Error('Registered Base mainnet source verification unavailable');
   signal.throwIfAborted();
   const nonce = randomBytes(32).toString('hex');
   const rank = (peer: string) => createHash('sha256').update(nonce).update(peer).digest('hex');
@@ -48,11 +50,13 @@ export async function selectSnapshotSources(
           version: 1, nonce, requesterPeerId: ports.selfPeerId, responderPeerId: peer,
           chainId: ports.chain.chainId, deploymentId: ports.chain.deploymentId!, ...scope,
         };
-        const bytes = await ports.send(peer, PUBLIC_SNAPSHOT_SOURCE_PROTOCOL,
+        const bytes = await ports.send(peer, ports.cacheNetworks ? CORE_CHAIN_CACHE_SOURCE_PROTOCOL : PUBLIC_SNAPSHOT_SOURCE_PROTOCOL,
           new TextEncoder().encode(JSON.stringify(challenge)),
           { signal: lifetime.signal, timeoutMs: 5_000, maxReadBytes: PUBLIC_SNAPSHOT_SOURCE_MAX_BYTES });
-        return await verifySourceProof(bytes, challenge, ports.chain.verifyACKIdentity!.bind(ports.chain), lifetime.signal)
-          ? peer : null;
+        const valid = ports.cacheNetworks
+          ? await verifyCacheProof(bytes, challenge, ports.cacheNetworks, lifetime.signal)
+          : await verifySourceProof(bytes, challenge, ports.chain.verifyACKIdentity!.bind(ports.chain), lifetime.signal);
+        return valid ? peer : null;
       } catch {
         signal.throwIfAborted();
         return null;
@@ -61,6 +65,6 @@ export async function selectSnapshotSources(
     selected.push(...proven.filter((p): p is string => p !== null).slice(0, 4 - selected.length));
   }
   signal.throwIfAborted();
-  if (!selected.length) throw new Error('No registered Base mainnet core proved snapshot availability');
+  if (!selected.length) throw new Error(ports.cacheNetworks ? 'No registered DKG core proved chain-cache identity' : 'No registered Base mainnet core proved snapshot availability');
   return Object.freeze(selected);
 }

@@ -30,7 +30,7 @@ export async function handlePublicSnapshotJob({
   };
   if (req.method === "GET") {
     reply(200, { ...(jobs.get(agent) ?? { state: "idle" }),
-      capabilities: { sourcePolicies: ['base-mainnet-registered-cores'] } });
+      capabilities: { sourcePolicies: agent.getPublicSnapshotSourcePolicies() } });
     return;
   }
   if (req.method !== "POST") {

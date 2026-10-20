@@ -1,3 +1,4 @@
+import { CORE_CHAIN_CACHE_SNAPSHOT_PROTOCOL } from './core-chain-cache-config.js';
 // SPDX-License-Identifier: Apache-2.0
 import { decodePublicGraphSnapshot, normalizePublicGraphSnapshot, PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES } from '@origintrail-official/dkg-chain';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -8,6 +9,7 @@ export const PUBLIC_GRAPH_SNAPSHOT_PROTOCOL = '/dkg/10.0.0/public-graph-snapshot
 import { encodePublicGraphSnapshotRequest } from './public-snapshot-wire.js';
 export function createPublicSnapshotReader(options: {
   mode: PublicSnapshotMode;
+  chainCache?: boolean;
   chain: Pick<ChainAdapter, 'readPublicGraphSnapshot'>; router: Pick<ProtocolRouter, 'send'>;
   peers: readonly string[]; signal: AbortSignal; assertCurrent(): void;
   expected: Parameters<typeof decodePublicGraphSnapshot>[1];
@@ -26,8 +28,9 @@ export function createPublicSnapshotReader(options: {
     for (const peer of options.peers) {
       assertCurrent();
       try {
-        const bytes=await router.send(peer,PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
-          encodePublicGraphSnapshotRequest({version:1,contextGraphId:expected.contextGraphId,onChainId:expected.onChainId,refresh}),
+        const bytes=await router.send(peer,options.chainCache ? CORE_CHAIN_CACHE_SNAPSHOT_PROTOCOL : PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
+          options.chainCache ? new TextEncoder().encode(JSON.stringify({version:1,...expected,refresh}))
+            : encodePublicGraphSnapshotRequest({version:1,contextGraphId:expected.contextGraphId,onChainId:expected.onChainId,refresh}),
           {timeoutMs:115_000,signal,maxReadBytes:PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES});
         const snapshot=decodePublicGraphSnapshot(bytes,expected);
         assertCurrent();
