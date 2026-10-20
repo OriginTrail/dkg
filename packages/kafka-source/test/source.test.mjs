@@ -51,7 +51,7 @@ function daemon() {
     corrupt() { corrupt = true; }, invisible() { invisible = true; } };
 }
 
-async function fixture(t, options = {}) {
+async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'dkg-kafka-source-test-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const config = { sources: [source], stateFile: join(dir, 'source-state.json'), daemonUrl: 'http://localhost:9200', daemonToken: 'test' };

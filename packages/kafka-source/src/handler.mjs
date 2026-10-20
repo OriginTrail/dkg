@@ -44,7 +44,7 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             await lock.writeFile(String(process.pid));
             delivery = await read(source);
             const records = delivery.records.map(envelope => {
-              const { fetchedAt, ...original } = envelope;
+              const { fetchedAt: _fetchedAt, ...original } = envelope;
               return journal.stage(envelope, hash(original), `kafka-record-${assetIdentity(source, envelope)}`);
             });
             const fingerprint = hash(records.map(record => [record.position, record.digest]));
@@ -57,7 +57,7 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             throw error;
           }
         },
-        async processSource(ref, fingerprint, state) {
+        async processSource(ref, fingerprint, _state) {
           const source = sourceFor(ref);
           const current = deliveries.get(source.id);
           if (!current || fingerprint !== current.fingerprint) throw new Error('KAFKA_DELIVERY_REQUIRED');
@@ -73,7 +73,8 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
               await delivery.commit(record.envelope);
               journal.checkpoint(record.envelope.topic, record.envelope.partition,
                 (BigInt(record.envelope.offset) + 1n).toString());
-              receipt.reused ? reused++ : created++;
+              if (receipt.reused) reused++;
+              else created++;
               receipts.push(receipt);
             }
             return { sourceId: source.id, skipped: !records.length,
