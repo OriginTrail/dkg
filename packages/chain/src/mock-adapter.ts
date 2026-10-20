@@ -275,7 +275,8 @@ export class MockChainAdapter implements ChainAdapter {
     this.nextContextGraphId = initialContextGraphId;
   }
 
-  async getIdentityId(): Promise<bigint> {
+  async getIdentityId(options: ChainReadOptions = {}): Promise<bigint> {
+    options.signal?.throwIfAborted();
     const existing = this.identities.get(this.signerAddress);
     return existing ?? 0n;
   }
@@ -1430,9 +1431,11 @@ export class MockChainAdapter implements ChainAdapter {
    * the historical zero-byte stub so we don't accidentally bind a
    * signer identity that test setup didn't ask for.
    */
-  async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+  async signMessage(messageHash: Uint8Array, options: ChainReadOptions = {}): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    options.signal?.throwIfAborted();
     if (this.mockACKSigner) {
       const sig = ethers.Signature.from(await this.mockACKSigner.signMessage(messageHash));
+      options.signal?.throwIfAborted();
       return {
         r: ethers.getBytes(sig.r),
         vs: ethers.getBytes(sig.yParityAndS),

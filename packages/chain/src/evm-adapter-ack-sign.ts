@@ -171,14 +171,16 @@ export class AckSignMethods extends EVMChainAdapterBase {
     return localPrivateKeyOf(this.signer);
   }
 
-  async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
-    const sig = ethers.Signature.from(
-      await this.signer.signMessage(messageHash),
-    );
-    return {
-      r: ethers.getBytes(sig.r),
-      vs: ethers.getBytes(sig.yParityAndS),
-    };
+  async signMessage(messageHash: Uint8Array, options: ChainReadOptions = {}): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    return withRpcRequestContext(options, async () => {
+      const signal = activeRpcRequestAbortSignal();
+      signal?.throwIfAborted();
+      // Ethers RPC signers inherit the context. Other signers may not support
+      // cancellation: await their physical completion before retiring the work.
+      const sig = ethers.Signature.from(await this.signer.signMessage(messageHash));
+      signal?.throwIfAborted();
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    });
   }
 
   async signMessageAs(address: string, messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {

@@ -2,17 +2,26 @@ import { isPublicGraphSnapshotScope } from '@origintrail-official/dkg-chain';
 import { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 import { BASE_MAINNET_SOURCE_POLICY } from './public-snapshot-source-proof.js';
 
-export interface PublicSnapshotSyncOptions {
+interface PublicSnapshotSyncBase {
   contextGraphId: string;
   onChainId: string;
-  /** Operator-configured peer identities, never populated from advertised roles. */
-  trustedCorePeerIds: readonly string[];
-  /** Explicit policy authorizing independently authenticated registered cores. */
-  sourcePolicy?: typeof BASE_MAINNET_SOURCE_POLICY;
   mode?: PublicSnapshotMode;
   transport?: "exact" | "bulk";
   signal?: AbortSignal;
 }
+
+export type PublicSnapshotSyncOptions = PublicSnapshotSyncBase & (
+  | {
+      /** Operator-configured identities, never advertised roles. */
+      trustedCorePeerIds: readonly string[];
+      sourcePolicy?: never;
+    }
+  | {
+      /** Independently authenticated registered cores; no explicit peers. */
+      trustedCorePeerIds: readonly [];
+      sourcePolicy: typeof BASE_MAINNET_SOURCE_POLICY;
+    }
+);
 
 /** The agent and HTTP boundary share domain validation; HTTP owns wire-size/field limits. */
 export function normalizePublicSnapshotSyncOptions(input: unknown): PublicSnapshotSyncOptions & { mode: PublicSnapshotMode; transport: "exact" | "bulk" } {
@@ -30,8 +39,11 @@ export function normalizePublicSnapshotSyncOptions(input: unknown): PublicSnapsh
   const peers = [...new Set(value.trustedCorePeerIds as string[])];
   if (value.sourcePolicy ? peers.length !== 0 : (!peers.length || peers.length > 4))
     throw new Error('Configure one to four trusted cores or the registered-core policy, never both');
-  return { contextGraphId: value.contextGraphId, onChainId: value.onChainId,
-    trustedCorePeerIds: peers, mode, transport,
-    ...(value.sourcePolicy ? { sourcePolicy: BASE_MAINNET_SOURCE_POLICY } : {}),
-    ...(value.signal ? { signal: value.signal as AbortSignal } : {}) };
+  const common: PublicSnapshotSyncBase & { mode: PublicSnapshotMode; transport: "exact" | "bulk" } = {
+    contextGraphId: value.contextGraphId, onChainId: value.onChainId, mode, transport,
+    ...(value.signal ? { signal: value.signal as AbortSignal } : {}),
+  };
+  return value.sourcePolicy
+    ? { ...common, trustedCorePeerIds: [], sourcePolicy: BASE_MAINNET_SOURCE_POLICY }
+    : { ...common, trustedCorePeerIds: peers };
 }

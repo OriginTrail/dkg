@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import type { ChainReadOptions } from '@origintrail-official/dkg-chain';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
@@ -32,8 +33,8 @@ async function fixture() {
   let handler!: (data: Uint8Array, peer: { toString(): string }) => Promise<Uint8Array>;
   const lifetime = new AgentWorkLifetime();
   const chain = {
-    chainId: 'base:8453', deploymentId, getIdentityId: async () => 7n,
-    signMessage: vi.fn(async (bytes: Uint8Array) => {
+    chainId: 'base:8453', deploymentId, getIdentityId: vi.fn(async (_options?: ChainReadOptions) => 7n),
+    signMessage: vi.fn(async (bytes: Uint8Array, _options?: ChainReadOptions) => {
       const signature = ethers.Signature.from(await wallet.signMessage(bytes));
       return { r: ethers.getBytes(signature.r), vs: ethers.getBytes(signature.yParityAndS) };
     }),
@@ -120,6 +121,92 @@ describe('registered Base mainnet snapshot sources', () => {
     expect(JSON.parse(new TextDecoder().decode(await f.handler(encode(challenge), { toString: () => 'requester' }))))
       .toEqual({ unavailable: true });
     expect(f.chain.signMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(['deadline', 'stop'] as const)('cancels responder identity lookup on %s before signing', async trigger => {
+    const f = await fixture(), probes: AbortSignal[] = [];
+    vi.useFakeTimers();
+    f.chain.getIdentityId.mockImplementation(async options => {
+      const probe = options?.signal;
+      if (!probe) throw new Error('missing responder signal');
+      probes.push(probe);
+      return new Promise<bigint>((_resolve, reject) => {
+        probe.addEventListener('abort', () => reject(probe.reason), { once: true });
+      });
+    });
+    const requests = Array.from({ length: 4 }, (_, i) => f.handler(
+      encode({ ...challenge, requesterPeerId: `caller-${i}` }), { toString: () => `caller-${i}` },
+    ));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(probes).toHaveLength(4);
+    expect(f.lifetime.physicalRuns.size).toBe(4);
+    if (trigger === 'deadline') {
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(probes.every(probe => !probe.aborted)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+    } else f.lifetime.close(new Error('node stopping'));
+    for (const result of await Promise.all(requests))
+      expect(JSON.parse(new TextDecoder().decode(result))).toEqual({ unavailable: true });
+    expect(probes.every(probe => probe.aborted)).toBe(true);
+    expect(f.chain.signMessage).not.toHaveBeenCalled();
+    await f.lifetime.drain();
+    expect(f.lifetime.physicalRuns.size).toBe(0);
+    expect(getEventListeners(f.lifetime.signal, 'abort')).toHaveLength(0);
+    // Released lifecycles detach the parent but retain their original deadline.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    ['identity', 'deadline'], ['identity', 'stop'], ['identity', 'unhost'],
+    ['sign', 'deadline'], ['sign', 'stop'], ['sign', 'unhost'],
+  ] as const)('retains all responder slots during late %s completion after %s', async (stage, trigger) => {
+    const f = await fixture(), releases: Array<() => void> = [], probes: AbortSignal[] = [];
+    const sign = f.chain.signMessage.getMockImplementation()!;
+    const hold = async (options?: ChainReadOptions) => {
+      if (options?.signal) probes.push(options.signal);
+      await new Promise<void>(resolve => { releases.push(resolve); });
+    };
+    f.chain.getIdentityId.mockImplementation(async options => { if (stage === 'identity') await hold(options); return 7n; });
+    f.chain.signMessage.mockImplementation(async (bytes, options) => { await hold(options); return sign(bytes, options); });
+    vi.useFakeTimers();
+    let settled = 0, drained = false;
+    const requests = Array.from({ length: 4 }, (_, i) => f.handler(
+      encode({ ...challenge, requesterPeerId: `caller-${i}` }), { toString: () => `caller-${i}` },
+    ).finally(() => { settled++; }));
+    await vi.advanceTimersByTimeAsync(0);
+    try {
+      expect(releases).toHaveLength(4);
+      const drain = f.lifetime.drain().then(() => { drained = true; });
+      if (trigger === 'deadline') await vi.advanceTimersByTimeAsync(10_000);
+      else if (trigger === 'stop') f.lifetime.close(new Error('node stopping'));
+      else f.unhost();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(0); expect(drained).toBe(false);
+      expect(f.lifetime.physicalRuns.size).toBe(4);
+      const fifth = await f.handler(encode(challenge), { toString: () => 'requester' });
+      expect(JSON.parse(new TextDecoder().decode(fifth))).toEqual({ unavailable: true });
+      expect(f.chain.getIdentityId).toHaveBeenCalledTimes(4);
+      expect(probes).toHaveLength(4);
+      expect(probes.every(probe => probe.aborted === (trigger !== 'unhost'))).toBe(true);
+      releases.forEach(release => release());
+      for (const result of await Promise.all(requests))
+        expect(JSON.parse(new TextDecoder().decode(result))).toEqual({ unavailable: true });
+      if (stage === 'identity') expect(f.chain.signMessage).not.toHaveBeenCalled();
+      else expect(f.chain.signMessage).toHaveBeenCalledTimes(4);
+      await drain;
+      expect(f.lifetime.physicalRuns.size).toBe(0);
+      expect(getEventListeners(f.lifetime.signal, 'abort')).toHaveLength(0);
+      // Released lifecycles detach the parent but retain their original deadline.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      // Also settle any mistakenly started signing work when the regression fails.
+      f.lifetime.close(); releases.forEach(release => release());
+      await vi.advanceTimersByTimeAsync(0);
+      releases.forEach(release => release());
+      await Promise.all(requests);
+    }
   });
 
   it('bounds probes, concurrent work and selected sources while preserving cancellation', async () => {

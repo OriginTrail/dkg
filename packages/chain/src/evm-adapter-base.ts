@@ -63,6 +63,7 @@ import {
   activeRpcRequestContext,
   withDetachedRpcRequestContext,
   withOwnedRpcRequestContext,
+  withRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
@@ -1265,7 +1266,9 @@ export class EVMChainAdapterBase {
   protected async readIdentityIdFromStorage(address: string): Promise<bigint> {
     if (!ethers.isAddress(address)) return 0n;
     const checksum = ethers.getAddress(address);
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     await this.init();
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const previousIdentityStorage = this.contracts.identityStorage;
     // #1583 — keep the `{ refresh: true }` re-resolve. Pre-#1583 this re-hit the
     // Hub on every getIdentityId miss (a major RPC amplifier during publish
@@ -1281,7 +1284,9 @@ export class EVMChainAdapterBase {
     // stays fresh/uncached; `identityStorageChanged` flushes the identity caches
     // when the re-resolve lands on a new address.
     const identityStorage = await this.getIdentityStorage({ refresh: true });
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const identityStorageChanged = await this.identityStorageAddressChanged(previousIdentityStorage, identityStorage);
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     if (identityStorageChanged) {
       this.identityIdCache.invalidateAll();
       this.resolvedContractAddressCache.invalidateAll();
@@ -3307,8 +3312,18 @@ export class EVMChainAdapterBase {
   // Identity
   // =====================================================================
 
-  async getIdentityId(): Promise<bigint> {
-    return this.readIdentityIdForAddress(this.signer.address);
+  async getIdentityId(options: ChainReadOptions = {}): Promise<bigint> {
+    return withRpcRequestContext(options, async () => {
+      const signal = activeRpcRequestAbortSignal();
+      signal?.throwIfAborted();
+      // A bounded request owns its read; never join an unrelated cached flight
+      // or let this caller's cancellation abort a shared identity-cache load.
+      const identityId = await (signal
+        ? this.readIdentityIdFromStorage(this.signer.address)
+        : this.readIdentityIdForAddress(this.signer.address));
+      signal?.throwIfAborted();
+      return identityId;
+    });
   }
 
   // =====================================================================

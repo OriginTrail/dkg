@@ -44,8 +44,10 @@ export function registerSnapshotSourceHandler(agent: {
       const operation = (async () => {
         if (await agent.isPrivateContextGraph(challenge.contextGraphId, { signal: lifetime.signal }))
           throw new Error('Unavailable');
-        const identityId = (await agent.chain.getIdentityId()).toString();
-        const signature = await agent.chain.signMessage!(sourceProofPayload(challenge, identityId));
+        assertHosted();
+        const identityId = (await agent.chain.getIdentityId({ signal: lifetime.signal })).toString();
+        assertHosted();
+        const signature = await agent.chain.signMessage!(sourceProofPayload(challenge, identityId), { signal: lifetime.signal });
         assertHosted();
         return encode({ identityId, signature: ethers.Signature.from({
           r: ethers.hexlify(signature.r), yParityAndS: ethers.hexlify(signature.vs),

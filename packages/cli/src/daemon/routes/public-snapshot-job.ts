@@ -7,9 +7,10 @@ import type {
 } from "@origintrail-official/dkg-agent";
 import type { RequestContext } from "./context.js";
 
+type WithoutSignal<T> = T extends unknown ? Omit<T, 'signal'> : never;
 interface JobBase {
   id: string;
-  request: Omit<ReturnType<typeof normalizePublicSnapshotSyncOptions>, 'signal'>;
+  request: WithoutSignal<ReturnType<typeof normalizePublicSnapshotSyncOptions>>;
   startedAt: number;
 }
 type Job = JobBase & (
@@ -75,8 +76,9 @@ export async function handlePublicSnapshotJob({
       onChainId: input.onChainId,
       mode: input.mode,
       transport: input.transport,
-      trustedCorePeerIds: [...input.trustedCorePeerIds],
-      ...(input.sourcePolicy ? { sourcePolicy: input.sourcePolicy } : {}),
+      ...(input.sourcePolicy
+        ? { sourcePolicy: input.sourcePolicy, trustedCorePeerIds: [] as const }
+        : { trustedCorePeerIds: [...input.trustedCorePeerIds] }),
     },
     id: randomUUID(),
     state: "running",

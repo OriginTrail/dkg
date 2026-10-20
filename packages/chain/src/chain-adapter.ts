@@ -1557,7 +1557,7 @@ export interface ChainAdapter {
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
-  getIdentityId(): Promise<bigint>;
+  getIdentityId(options?: ChainReadOptions): Promise<bigint>;
   /**
    * OT-RFC-39 — resolve an arbitrary operational EOA to its on-chain
    * identityId. Returns 0n for addresses that are not registered
@@ -1918,7 +1918,7 @@ export interface ChainAdapter {
    * Sign an arbitrary message hash using the node's primary operational key.
    * Used for self-signing as receiver or context graph participant.
    */
-  signMessage?(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }>;
+  signMessage?(messageHash: Uint8Array, options?: ChainReadOptions): Promise<{ r: Uint8Array; vs: Uint8Array }>;
 
   /**
    * Sign EIP-712 typed data with the adapter's primary signer. Used by
