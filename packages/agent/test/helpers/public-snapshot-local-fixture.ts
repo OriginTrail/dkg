@@ -13,7 +13,7 @@ import { getSharedContext, createProvider, makeAdapterConfig, HARDHAT_KEYS } fro
 
 export const graph = 'public-snapshot-local';
 const abi = (name: string) => JSON.parse(readFileSync(new URL(`../../../chain/abi/${name}.json`, import.meta.url), 'utf8'));
-export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
+export async function publicSnapshotFixture(transport: 'exact' | 'bulk', assetCount = 12) {
   const agents: DKGAgent[] = [], directories: string[] = [];
   const dispose = async () => {
     for (const agent of agents.splice(0).reverse()) await agent.stop();
@@ -55,7 +55,7 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
       MULTICALL3_RUNTIME_CODE,
     ]);
     const source = new OxigraphStore();
-    for (let n = 1; n <= 12; n++) {
+    for (let n = 1; n <= assetCount; n++) {
       const id = (BigInt(signer.address) << 96n) | BigInt(n);
       const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
       const subGraphName = n === 3 ? 'code' : undefined;

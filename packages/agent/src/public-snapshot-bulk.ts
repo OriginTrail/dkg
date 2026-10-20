@@ -4,7 +4,7 @@ import { BULK_GRAPH_PROTOCOL, BULK_GRAPH_MAX_ASSETS, bulkGraphTransportOptions, 
   } from '@origintrail-official/dkg-core';
 import type { ProtocolRouter } from '@origintrail-official/dkg-core';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
-import { snapshotPeerBatches, type PublicSnapshotRecoveryOptions, type PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
+import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 import { type BulkGraphRequest } from './sync/bulk-graph-contract.js';
 import { exchangeBulkGraphVerified, type BulkGraphMetrics } from './sync/requester/bulk-graph-stream.js';
 import { materializeVerifiedGraphScopedGroup } from './sync/requester/graph-scoped-group.js';
@@ -23,8 +23,10 @@ export async function recoverPublicSnapshotBulk(agent: PublicSnapshotBulkHost, o
 }): Promise<PublicSnapshotRecoveryResult> {
   const { contextGraphId, signal, assertCurrent } = options;
   if (!options.dataDir) throw new Error('Bulk snapshot requires an isolated persistent data directory');
+  signal.throwIfAborted(); assertCurrent();
+  if (!options.uals.length) return { committed: new Set(), bulkChunks: [] };
   async function* suppliers() {
-    for await (const peers of snapshotPeerBatches(options)) for (const peer of peers) {
+    for await (const peers of options.peerBatches()) for (const peer of peers) {
       signal.throwIfAborted(); assertCurrent();
       try {
         await agent.ensurePeerConnected(peer, { signal });

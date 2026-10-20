@@ -1,3 +1,5 @@
+import { PublicSnapshotProofRuntime } from '../src/public-snapshot-proof-runtime.js';
+import { PublicSnapshotAdmission } from '../src/public-snapshot-admission.js';
 import { expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { ChainAdapter, PublicGraphSnapshot } from '@origintrail-official/dkg-chain';
@@ -19,7 +21,7 @@ function fixture(read: (...args: any[]) => Promise<PublicGraphSnapshot>) {
   const networks: CoreChainCacheNetwork[] = [{ identity, relays: [], registry: { ...scope,
     readPublicGraphSnapshot: read, verifyACKIdentity: async () => true, rpcUsage: () => ({}), destroy() {} } }];
   const chain = { ...scope, getIdentityId: async () => 7n, signMessage: vi.fn() } as unknown as ChainAdapter;
-  const agent = { nodeRole: 'core', chain, peerId: 'core', workLifetime, networks,
+  const agent = { nodeRole: 'core', chain, peerId: 'core', workLifetime, networks, proofRuntime: new PublicSnapshotProofRuntime(chain, workLifetime),
     router: { register: (p: string, h: Handler, o: { maxReadBytes: number }) => { handlers.set(p, h); limits.set(p, o.maxReadBytes); } } };
   const serving = registerCoreChainCacheHandlers(agent as never)!;
   const send = async (protocol: string, value: unknown, peer = 'edge') => decode(await handlers.get(protocol)!(encode(value), { toString: () => peer }));
@@ -62,14 +64,14 @@ it('retains the shared two-build limit and physical ownership after cancellation
   expect(f.workLifetime.physicalRuns.size).toBe(0);
 });
 
-it('shares proof admission between legacy and cache protocols', () => {
-  const f = fixture(async () => { throw new Error('unused'); });
-  const releases = ['one', 'two', 'three', 'four'].map(p => f.serving.sourceAdmission.acquire(p));
-  expect(() => f.serving.sourceAdmission.acquire('fifth')).toThrow('busy');
+it('retains a shared global proof admission limit and idempotent leases', () => {
+  const admission = new PublicSnapshotAdmission(Date.now, 4);
+  const releases = ['one', 'two', 'three', 'four'].map(p => admission.acquire(p));
+  expect(() => admission.acquire('fifth')).toThrow('busy');
   releases[0](); releases[0]();
-  const fifth = f.serving.sourceAdmission.acquire('one');
+  const fifth = admission.acquire('one');
   releases[0](); // A stale release cannot retire this peer's newer lease.
-  expect(() => f.serving.sourceAdmission.acquire('sixth')).toThrow('busy');
+  expect(() => admission.acquire('sixth')).toThrow('busy');
   fifth(); releases.slice(1).forEach(r => r());
 });
 

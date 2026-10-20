@@ -7,7 +7,7 @@ import { DKG_CORE_CHAIN_CACHE, CORE_CHAIN_CACHE_SOURCE_PROTOCOL, CORE_CHAIN_CACH
 import { verifyCacheProof } from './core-chain-cache-proof.js';
 import { PUBLIC_SNAPSHOT_SOURCE_PROTOCOL, PUBLIC_SNAPSHOT_SOURCE_MAX_BYTES,
   verifySourceProof, type SnapshotSourceChallenge } from './public-snapshot-source-proof.js';
-import { encodePublicGraphSnapshotRequest } from './public-snapshot-wire.js';
+import { encodeCoreChainCacheSnapshotRequest, encodePublicGraphSnapshotRequest } from './public-snapshot-wire.js';
 import { PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from './public-snapshot-reader.js';
 
 export interface SnapshotSourcePolicy {
@@ -34,7 +34,7 @@ export function bindSnapshotSourcePolicy(options: {
     ? (bytes: Uint8Array, challenge: SnapshotSourceChallenge, signal: AbortSignal) => verifyCacheProof(bytes, challenge, options.networks, signal)
     : (bytes: Uint8Array, challenge: SnapshotSourceChallenge, signal: AbortSignal) => verifySourceProof(bytes, challenge, chain.verifyACKIdentity!.bind(chain), signal);
   const encodeRequest = cache
-    ? (refresh: boolean) => new TextEncoder().encode(JSON.stringify({ version: 1, ...expected, refresh }))
+    ? (refresh: boolean) => encodeCoreChainCacheSnapshotRequest({ version: 1, ...expected, refresh })
     : (refresh: boolean) => encodePublicGraphSnapshotRequest({ version: 1, ...scope, refresh });
   const snapshotProtocol = cache ? CORE_CHAIN_CACHE_SNAPSHOT_PROTOCOL : PUBLIC_GRAPH_SNAPSHOT_PROTOCOL;
   return {

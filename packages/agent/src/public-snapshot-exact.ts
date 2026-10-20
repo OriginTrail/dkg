@@ -4,7 +4,7 @@ import { createUalOnlyExactAssetSelection } from './sync/exact-assets.js';
 import { exactAssetFetchSessionPolicy } from './sync/requester/exact-durable-fetch.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
-import { snapshotPeerBatches, type PublicSnapshotRecoveryOptions, type PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
+import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 import { PublicSnapshotRecoveryPacing } from './public-snapshot-exact-pacing.js';
 
 export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecoveryOptions {
@@ -90,7 +90,7 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
   for (let offset = 0; offset < uals.length; offset += 10) {
     const batch = uals.slice(offset, offset + 10);
     await skipHeld(batch);
-    for await (const peers of snapshotPeerBatches(options)) {
+    for await (const peers of options.peerBatches()) {
       await recover(batch, "stream-preferred", peers);
       // The stream profile excludes private commitments. Only missing assets
       // use the bounded singleton transport, with identical authentication.

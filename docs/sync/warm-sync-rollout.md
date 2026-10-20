@@ -67,7 +67,7 @@ cross-chain routing and verification; it is not a live multi-chain benchmark.
 
 The two inventory observations took 22 direct RPC requests. Delegating them
 left five Edge requests for operational-key and active-registration checks.
-Including ordinary graph-authority work, the latest measured jobs used 15–18 Edge
+Including ordinary graph-authority work, the latest measured jobs used 16–19 Edge
 requests, versus 42 for independent recovery. Ordinary authority work varies
 with runtime state; these counts do not predict a whole-session bill or a
 production latency. The core still pays for inventory cache misses/refreshes.

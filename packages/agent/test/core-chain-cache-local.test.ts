@@ -1,3 +1,4 @@
+import { AsyncResource } from 'node:async_hooks';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DEFAULT_GENESIS_ID, computeNetworkId } from '@origintrail-official/dkg-core';
 import { createEvmCoreChainCacheRegistry, EVMChainAdapter } from '@origintrail-official/dkg-chain';
@@ -123,6 +124,64 @@ it.each([
     } finally { independent.destroy(); }
   } finally {
     await f.dispose();
+    for (const n of owned) n.registry.destroy();
+    await revertSnapshot(before);
+  }
+});
+
+it('finishes an empty bulk graph with fresh coverage and excludes concurrent cache serving from job RPC counts', async () => {
+  vi.stubEnv('DKG_PUBLIC_SNAPSHOT_BULK', '1');
+  const before = await takeSnapshot();
+  const f = await publicSnapshotFixture('bulk', 0);
+  const owned: CoreChainCacheNetwork[] = [];
+  const incoming = new AsyncResource('independent-cache-request');
+  try {
+    const networkId = await computeNetworkId(DEFAULT_GENESIS_ID);
+    const networks = (): CoreChainCacheNetwork[] => ['evm:31337', 'gnosis:31337'].map(chainId => {
+      const n = { identity: { networkId, genesisId: DEFAULT_GENESIS_ID, chainId }, relays: [] as string[],
+        registry: createEvmCoreChainCacheRegistry({ chainId, hubAddress: f.hubAddress, rpcUrls: [f.rpcUrl], finalityConfirmations: 1 }) };
+      owned.push(n); return n;
+    });
+    const coreNetworks = networks();
+    const reads = vi.spyOn(coreNetworks[0].registry, 'readPublicGraphSnapshot');
+    const foreign = await f.make('EmptyForeignCore', 'core', new EVMChainAdapter({
+      ...makeAdapterConfig(f.rpcUrl, f.hubAddress, HARDHAT_KEYS.CORE_OP), chainId: 'gnosis:31337',
+    }), new OxigraphStore(), { DKG_Core_chain_cache: true, coreChainCacheNetworks: coreNetworks });
+    const edgeNetworks = networks();
+    (edgeNetworks[1].relays as string[]).push(foreign.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    const registry = edgeNetworks[1].registry;
+    const verify = registry.verifyACKIdentity.bind(registry);
+    let served = 0;
+    // An incoming cache request shares the exact registry/provider with this outgoing job.
+    // Its async root is independent, as with a real router request.
+    vi.spyOn(registry, 'verifyACKIdentity').mockImplementation(async (...args) => {
+      const serving = incoming.runInAsyncScope(() => registry.readPublicGraphSnapshot(graph, f.onChainId, {
+        signal: new AbortController().signal,
+      }));
+      const [valid, snapshot] = await Promise.all([verify(...args), serving]);
+      expect(snapshot.assets).toEqual([]); served++;
+      return valid;
+    });
+    const edge = await f.make('EmptyEdge', 'edge', new EVMChainAdapter(
+      makeAdapterConfig(f.rpcUrl, f.hubAddress, HARDHAT_KEYS.REC1_OP)), new OxigraphStore(),
+      { DKG_Core_chain_cache: true, coreChainCacheNetworks: edgeNetworks });
+    const contentAdmission = vi.spyOn(edge.networkAdmissionCoordinator, 'ensureAdmitted');
+    const result = await edge.syncPublicGraphSnapshot({ contextGraphId: graph, onChainId: f.onChainId,
+      sourcePolicy: 'DKG_Core_chain_cache', trustedCorePeerIds: [], transport: 'bulk' });
+    expect(result).toMatchObject({ assets: 0, committed: 0, current: true, completeAsOfSnapshot: true,
+      bulkChunks: [], contentPeerIds: [], coverageSourceCore: foreign.peerId });
+    expect(reads).toHaveBeenCalledTimes(2); // Initial snapshot plus forced final comparison.
+    expect(contentAdmission.mock.calls.filter(([, context]) => context.operationName === 'sync')).toHaveLength(0);
+    expect(served).toBe(1);
+    expect(result.chainCacheRpcUsage).toEqual([
+      { chainId: 'evm:31337', methods: {} }, { chainId: 'gnosis:31337', methods: { eth_chainId: 1, eth_call: 4 } },
+    ]);
+    const total = registry.rpcUsage();
+    expect(total.eth_chainId).toBe(2);
+    expect(total.eth_call).toBeGreaterThan(4);
+    expect(registry.drainRpcUsage!().byMethod).toEqual(total);
+  } finally {
+    incoming.emitDestroy(); await f.dispose();
     for (const n of owned) n.registry.destroy();
     await revertSnapshot(before);
   }

@@ -1,3 +1,4 @@
+import { PublicSnapshotProofRuntime } from './public-snapshot-proof-runtime.js';
 import { DKG_CORE_CHAIN_CACHE } from './core-chain-cache-config.js';
 import { registerCoreChainCacheHandlers } from './core-chain-cache-handler.js';
 import { coreChainCacheSeeds, connectCoreChainCacheSeed, createCoreChainCacheContentPeers } from './core-chain-cache-peers.js';
@@ -12,7 +13,7 @@ import { PublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.
 import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
-  PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
+  PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES, RpcUsageScope,
 } from "@origintrail-official/dkg-chain";
 import { startRequestAbortLifecycle, buildKnowledgeAssetUalFromOnChainIdV1 } from "@origintrail-official/dkg-core";
 import { runGraphScopedPhysicalOperation } from "./sync/requester/graph-scoped-operation-fence.js";
@@ -37,16 +38,16 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     return [...(this.chain.chainId === 'base:8453' ? ['base-mainnet-registered-cores'] : []), ...(this.config.DKG_Core_chain_cache && this.config.coreChainCacheNetworks?.length ? [DKG_CORE_CHAIN_CACHE] : [])];
   }
   startPublicGraphSnapshots(this: DKGAgent): void {
+    const proofRuntime = new PublicSnapshotProofRuntime(this.chain, this.workLifetime);
     const cache = this.config.DKG_Core_chain_cache ? registerCoreChainCacheHandlers({
       nodeRole: this.config.nodeRole ?? "edge", chain: this.chain, peerId: this.peerId, router: this.router,
-      workLifetime: this.workLifetime, networks: this.config.coreChainCacheNetworks ?? [],
+      proofRuntime, workLifetime: this.workLifetime, networks: this.config.coreChainCacheNetworks ?? [],
     }) : undefined;
     if (this.config.nodeRole !== "core" || !this.chain.readPublicGraphSnapshot)
       return;
     registerSnapshotSourceHandler({
       nodeRole: this.config.nodeRole, chain: this.chain, router: this.router,
-      peerId: this.peerId, workLifetime: this.workLifetime,
-      sourceAdmission: cache?.sourceAdmission,
+      peerId: this.peerId, proofRuntime,
       isPrivateContextGraph: (id, options) => this.isPrivateContextGraph(id, options),
       captureHosted: (id, onChainId) => {
         const generation = this.contextGraphBindingState.capture(id);
@@ -109,7 +110,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     const seeds = coreChainCacheSeeds(networks);
     const dataSeeds = coreChainCacheSeeds(networks.filter(n => n.registry.deploymentId === this.chain.deploymentId));
     let dataCandidates: string[] = [...dataSeeds.keys()];
-    const rpcBefore = networks.map(n => n.registry.rpcUsage());
+    const rpcScope = new RpcUsageScope();
     if (jobs.has(this)) throw new Error("A snapshot job is already running");
     if (!this.started || this.workLifetime.closed) throw new Error("Node is stopping");
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
@@ -125,7 +126,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     ]);
     const { signal } = lifecycle;
     try {
-      return await runGraphScopedPhysicalOperation({
+      return await rpcScope.run(() => runGraphScopedPhysicalOperation({
         contextGraphId, signal,
         isClosed: () => !this.started || this.workLifetime.closed,
         captureSubscription: () => this.subscribedContextGraphs.get(contextGraphId),
@@ -195,9 +196,9 @@ export class PublicSnapshotMethods extends DKGAgentBase {
               admit: (peer, requestSignal) => this.networkAdmissionCoordinator.ensureAdmitted(peer, createOperationContext('sync'), { signal: requestSignal }),
             }, signal)
             : undefined;
-          const contentPeers = contentPool?.selected ?? peers;
-          if (uals.length && !contentPool && !contentPeers.length) throw new Error('No data-network peers available for snapshot content');
-          const recovery = { contextGraphId, peers: contentPeers, peerBatches: contentPool?.batches, uals, evidence, signal, assertCurrent };
+          if (uals.length && !contentPool && !peers.length) throw new Error('No data-network peers available for snapshot content');
+          const peerBatches = contentPool?.batches ?? (async function* () { yield peers; });
+          const recovery = { contextGraphId, peerBatches, uals, evidence, signal, assertCurrent };
           let recovered: PublicSnapshotRecoveryResult;
           if (transport === 'bulk') {
             const { verification, reconcile } = DKGAgentBase.createDurableRecoveryCapabilities(this);
@@ -231,9 +232,8 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           return {
             mode, transport, bulkChunks,
             ...(normalized.sourcePolicy ? { sourcePolicy: normalized.sourcePolicy, selectedCorePeerIds: peers } : {}),
-            ...(chainCache ? { contentPeerIds: contentPeers, chainCacheRpcUsage: networks.map((n, i) => ({
-              chainId: n.registry.chainId, methods: Object.fromEntries(Object.entries(n.registry.rpcUsage())
-                .map(([method, count]) => [method, count - (rpcBefore[i][method] ?? 0)])),
+            ...(chainCache ? { contentPeerIds: [...(contentPool?.selected ?? peers)], chainCacheRpcUsage: networks.map(n => ({
+              chainId: n.registry.chainId, methods: n.registry.rpcUsage(rpcScope),
             })) } : {}),
             sourceCore: initial.sourceCore,
             coverageSourceCore: fresh.sourceCore,
@@ -251,7 +251,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
             elapsedMs: Date.now() - startedAt,
           };
         },
-      });
+      }));
     } finally {
       lifecycle.release();
       jobs.delete(this);

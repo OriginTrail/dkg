@@ -3,9 +3,9 @@ import type { PublicSnapshotEvidence } from './public-snapshot-evidence.js';
 import type { BulkGraphMetrics } from './sync/requester/bulk-graph-stream.js';
 
 export interface PublicSnapshotRecoveryOptions {
-  contextGraphId: string; peers: readonly string[]; uals: readonly string[];
+  contextGraphId: string; uals: readonly string[];
   /** Bounded fallback batches, memoized by the caller for later asset groups. */
-  peerBatches?: () => AsyncIterable<readonly string[]>;
+  peerBatches: () => AsyncIterable<readonly string[]>;
   evidence: PublicSnapshotEvidence; signal: AbortSignal; assertCurrent: () => void;
 }
 export interface PublicSnapshotRecoveryResult {
@@ -13,9 +13,4 @@ export interface PublicSnapshotRecoveryResult {
   /** Assets found already stored as the snapshot pins them, counted in `committed` without a transfer. */
   alreadyPresent?: number;
   bulkChunks?: BulkGraphMetrics[];
-}
-
-export async function* snapshotPeerBatches(options: PublicSnapshotRecoveryOptions): AsyncIterable<readonly string[]> {
-  if (options.peerBatches) yield* options.peerBatches();
-  else yield options.peers;
 }

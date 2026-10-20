@@ -209,6 +209,7 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
   it.each(['caller', 'binding'] as const)('keeps physical ownership and fences later assets after %s cancellation', async change => {
     vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const f = createExactBatchHostFixture(transportCleanups), a = f.host;
+    a.router.send = vi.fn(async () => { throw new Error('RPC-only jobs must not request a core snapshot'); });
     a.started = true;
     a.subscribedContextGraphs.set(CG, { subscribed: true, onChainId: '14', onChainHash: ethers.id(CG) });
     a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;
@@ -268,6 +269,7 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
       expect(writes).toHaveBeenCalledTimes(1);
       expect(recover).toHaveBeenCalledTimes(1);
       expect(a.chain.readPublicGraphSnapshot).toHaveBeenCalledTimes(1);
+      expect(a.router.send).not.toHaveBeenCalled();
       expect(a.workLifetime.physicalRuns.size).toBe(0);
       expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
     } finally { release(); await outcome; }

@@ -2,6 +2,7 @@ export * from './public-graph-snapshot.js';
 export type { CoreChainCacheRegistry } from './core-chain-cache-registry.js';
 export { createEvmCoreChainCacheRegistry } from './evm-core-chain-cache.js';
 export * from './chain-adapter.js';
+export { RpcUsageScope } from './rpc-usage-scope.js';
 export {
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS,

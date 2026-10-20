@@ -1,3 +1,4 @@
+import { PublicSnapshotProofRuntime } from '../src/public-snapshot-proof-runtime.js';
 import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -54,7 +55,7 @@ async function fixture() {
   };
   const register = vi.fn((_protocol, fn) => { handler = fn; });
   registerSnapshotSourceHandler({
-    nodeRole: 'core', chain, peerId: 'core', workLifetime: lifetime, router: { register },
+    nodeRole: 'core', chain, peerId: 'core', proofRuntime: new PublicSnapshotProofRuntime(chain, lifetime), router: { register },
     captureHosted: () => () => { if (!hosted) throw new Error('inactive'); },
     isPrivateContextGraph: async () => privateGraph,
   });

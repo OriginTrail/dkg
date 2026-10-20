@@ -23,7 +23,7 @@ function recover(options: { deadline?: number; signal?: AbortSignal; peers?: str
   holds?: (ual: string) => Promise<boolean>; owned?: () => boolean } = {}) {
   const signal = options.signal ?? new AbortController().signal;
   return recoverPublicSnapshotExact(host, {
-    contextGraphId: graph, peers: options.peers ?? ['core-a'], uals, evidence, signal,
+    contextGraphId: graph, peerBatches: async function* () { yield options.peers ?? ['core-a']; }, uals, evidence, signal,
     assertCurrent: () => {
       if (signal.aborted) throw new Error('job cancelled');
       if (options.owned && !options.owned()) throw new Error('Snapshot job ownership changed');
