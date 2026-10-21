@@ -1,13 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { join, resolve } from 'node:path';
+import { DurableDirectory } from '@origintrail-official/dkg-storage';
+import { dirname, join, resolve } from 'node:path';
 import { createManagedOxigraphPersistenceBarrierV1 } from '../src/daemon/oxigraph-persistence.js';
 
-const DIRECTORY = resolve('/owned');
+const DIRECTORY = resolve('/owned/new/db');
 const wal = (name = '000001.log') => join(DIRECTORY, name);
 const io = vi.hoisted(() => ({ names: [['000001.log']] as string[][], events: [] as string[],
-  failure: null as { path: string; code: string } | null,
+  failure: null as { path: string; code: string; operation?: 'open' | 'sync' } | null,
+  absent: new Set<string>(),
   onRead: null as (() => void) | null }));
 vi.mock('node:fs/promises', () => ({
+  stat: async (path: string) => { if (io.absent.has(path)) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return {}; },
+  mkdir: async () => { io.absent.clear(); },
   readdir: async () => {
     io.onRead?.();
     const names = io.names.length > 1 ? io.names.shift()! : io.names[0]!;
@@ -15,17 +19,17 @@ vi.mock('node:fs/promises', () => ({
   },
   open: async (path: string, mode: string) => {
     io.events.push(`open:${path}:${mode}`);
-    if (io.failure?.path === path) throw Object.assign(new Error('I/O failure'), { code: io.failure.code });
-    return { sync: async () => { io.events.push(`sync:${path}`); },
+    if (io.failure?.path === path && io.failure.operation !== 'sync') throw Object.assign(new Error('I/O failure'), { code: io.failure.code });
+    return { sync: async () => { io.events.push(`sync:${path}`); if (io.failure?.path === path && io.failure.operation === 'sync') throw Object.assign(new Error('sync failure'), { code: io.failure.code }); },
       close: async () => { io.events.push(`close:${path}`); } };
   },
 }));
-beforeEach(() => { io.names = [['000001.log']]; io.events = []; io.failure = null; io.onRead = null; });
+beforeEach(() => { io.names = [['000001.log']]; io.events = []; io.failure = null; io.onRead = null; io.absent.clear(); });
 
 describe('managed Oxigraph post-acknowledgement persistence', () => {
   it('syncs existing WALs before the POSIX directory', async () => {
     io.names = [['000002.log', '000001.log', 'CURRENT', 'LOG']];
-    await createManagedOxigraphPersistenceBarrierV1(DIRECTORY, '0.5.8', 'linux')!();
+    await createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8', 'linux')!();
     expect(io.events).toEqual([
       `open:${wal()}:r+`, `sync:${wal()}`, `close:${wal()}`,
       `open:${wal('000002.log')}:r+`, `sync:${wal('000002.log')}`, `close:${wal('000002.log')}`,
@@ -33,43 +37,67 @@ describe('managed Oxigraph post-acknowledgement persistence', () => {
     ]);
   });
   it('uses pinned RocksDB Windows file-sync policy without opening a directory', async () => {
-    await createManagedOxigraphPersistenceBarrierV1(DIRECTORY, '0.5.8', 'win32')!();
+    await createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8', 'win32')!();
     expect(io.events).toEqual([`open:${wal()}:r+`, `sync:${wal()}`, `close:${wal()}`]);
   });
   it('retries a complete round after log rotation', async () => {
     io.names = [['000001.log'], ['000002.log'], ['000002.log'], ['000002.log']];
-    await createManagedOxigraphPersistenceBarrierV1(DIRECTORY, '0.5.8', 'linux')!();
+    await createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8', 'linux')!();
     expect(io.events.filter(event => event.startsWith('sync:')))
       .toEqual([`sync:${wal()}`, `sync:${DIRECTORY}`, `sync:${wal('000002.log')}`, `sync:${DIRECTORY}`]);
   });
   it('retries an old log removed between listing and opening', async () => {
     io.names = [['000001.log'], ['000002.log']]; io.failure = { path: wal(), code: 'ENOENT' };
-    await createManagedOxigraphPersistenceBarrierV1(DIRECTORY, '0.5.8', 'linux')!();
+    await createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8', 'linux')!();
     expect(io.events).toContain(`sync:${wal('000002.log')}`);
   });
   it('bounds a continuously rotating WAL instead of certifying completion', async () => {
     io.names = Array.from({ length: 6 }, (_, i) => [`00000${i + 1}.log`]);
-    await expect(createManagedOxigraphPersistenceBarrierV1(DIRECTORY, '0.5.8', 'linux')!())
+    await expect(createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8', 'linux')!())
       .rejects.toThrow('retain repair evidence');
     expect(io.events.filter(event => event === `sync:${DIRECTORY}`)).toHaveLength(3);
   });
-  it.each([wal(), DIRECTORY])('propagates persistence failure for %s', async path => {
+  it.each([wal(), DIRECTORY])('propagates open failure for %s', async path => {
     io.failure = { path, code: 'EIO' };
-    await expect(createManagedOxigraphPersistenceBarrierV1(DIRECTORY, '0.5.8', 'linux')!())
+    await expect(createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8', 'linux')!())
       .rejects.toMatchObject({ code: 'EIO' });
+  });
+  it.each([wal(), DIRECTORY])('propagates sync failure and closes the handle for %s', async path => {
+    io.failure = { path, code: 'EIO', operation: 'sync' };
+    await expect(createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8', 'linux')!())
+      .rejects.toMatchObject({ code: 'EIO' });
+    expect(io.events.slice(-2)).toEqual([`sync:${path}`, `close:${path}`]);
+  });
+  it('retains fresh database ancestry across failed certificates', async () => {
+    const parent = dirname(DIRECTORY), existing = dirname(parent);
+    io.absent = new Set([DIRECTORY, parent]);
+    const owner = new DurableDirectory(DIRECTORY, { platform: 'linux' });
+    await owner.create();
+    const barrier = createManagedOxigraphPersistenceBarrierV1(owner, '0.5.8', 'linux')!;
+    io.failure = { path: existing, code: 'EIO', operation: 'sync' };
+    await expect(barrier()).rejects.toMatchObject({ code: 'EIO' });
+    await owner.create(); // Already-created directories must not erase the retained obligation.
+    await expect(barrier()).rejects.toMatchObject({ code: 'EIO' });
+    io.failure = null; io.events = [];
+    await barrier();
+    expect(io.events.filter(event => event.startsWith('sync:'))).toEqual([
+      `sync:${wal()}`, `sync:${DIRECTORY}`, `sync:${parent}`, `sync:${existing}`,
+    ]);
+    io.events = []; await barrier();
+    expect(io.events.filter(event => event.startsWith('sync:'))).toEqual([`sync:${wal()}`, `sync:${DIRECTORY}`]);
   });
   it('refuses a location with no active WAL', async () => {
     io.names = [[]];
-    await expect(createManagedOxigraphPersistenceBarrierV1(DIRECTORY, '0.5.8', 'linux')!()).rejects.toThrow('active WAL');
+    await expect(createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8', 'linux')!()).rejects.toThrow('active WAL');
     expect(io.events).toEqual([]);
   });
   it('does not certify unreviewed engine versions', () => {
-    expect(createManagedOxigraphPersistenceBarrierV1(DIRECTORY, '0.5.9')).toBeUndefined();
+    expect(createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.9')).toBeUndefined();
   });
   it('honors cancellation during the final enumeration', async () => {
     const controller = new AbortController(), reason = new Error('cancel persistence');
     let calls = 0; io.onRead = () => { if (++calls === 2) controller.abort(reason); };
-    await expect(createManagedOxigraphPersistenceBarrierV1(DIRECTORY, '0.5.8', 'linux')!({ signal: controller.signal }))
+    await expect(createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8', 'linux')!({ signal: controller.signal }))
       .rejects.toBe(reason);
   });
 });

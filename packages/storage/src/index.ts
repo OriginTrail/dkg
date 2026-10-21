@@ -332,4 +332,4 @@ export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSE
 
 export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';
 
-export { DurableReplaceableFile, replaceDurableFile, type DurableFileReplacePermissions } from './durable-file-replace.js';
+export { DurableReplaceableFile, type DurableFileReplacePermissions } from './durable-file-replace.js';

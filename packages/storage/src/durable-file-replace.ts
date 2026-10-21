@@ -46,8 +46,3 @@ export class DurableReplaceableFile {
     }
   }
 }
-
-/** One-shot replacement; it persists the ancestry this call creates. */
-export async function replaceDurableFile(path: string, contents: string, permissions: DurableFileReplacePermissions): Promise<void> {
-  await new DurableReplaceableFile(path, permissions).replace(contents);
-}

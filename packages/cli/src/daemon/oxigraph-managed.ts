@@ -1,3 +1,4 @@
+import { DurableDirectory } from '@origintrail-official/dkg-storage';
 /**
  * Managed local Oxigraph server orchestration (Release 2 opt-in path).
  *
@@ -449,6 +450,9 @@ export async function startManagedOxigraph(
     io: opts.binaryIo,
   });
 
+  // Keep the creation ancestry until the first successful durability certificate.
+  const directoryOwner = new DurableDirectory(plan.location, { platform: opts.platform });
+  await directoryOwner.create();
   const handle = await startOxigraphServer({
     binaryPath: binary.path,
     location: plan.location,
@@ -473,7 +477,7 @@ export async function startManagedOxigraph(
       ...plan.storeConfigTemplate.options,
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
-      managedPersistence: createManagedOxigraphPersistenceBarrierV1(plan.location, binary.version, opts.platform),
+      managedPersistence: createManagedOxigraphPersistenceBarrierV1(directoryOwner, binary.version, opts.platform),
     },
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
