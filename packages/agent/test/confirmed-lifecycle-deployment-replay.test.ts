@@ -63,14 +63,14 @@ describe('confirmed lifecycle deployment-bound replay', () => {
     f.ready(); await owner.runDue();
     expect([...await f.journal()].map(([, entry]) => entry.input.publicationDeployment)).toEqual([other.publicationDeployment]);
   });
-  it('retains historical unbound evidence without reading a configured deployment snapshot', async () => {
+  it.each(['publicationDeployment', 'packedKaId'] as const)('retains historical evidence missing %s without executing it', async field => {
     const f = await fixture(), owner = f.create();
-    const { publicationDeployment: _deployment, ...unbound } = f.input;
+    const unbound = { ...f.input, [field]: undefined };
     await expect(owner.submit(unbound as typeof f.input)).rejects.toThrow('Invalid confirmed');
     await owner.stop();
     const journalPath = join(dirs.at(-1)!, 'named-ka-vm-lifecycle-repairs.json');
     await writeFile(journalPath, JSON.stringify({ version: 2, entries: [[lifecycleRepairKey(unbound), {
-      input: { ...unbound, packedKaId: unbound.packedKaId.toString() }, attempts: 3, nextAttemptAt: 1000,
+      input: { ...unbound, packedKaId: unbound.packedKaId?.toString() }, attempts: 3, nextAttemptAt: 1000,
     }]] }));
     f.snapshot.mockClear(); f.apply.mockClear(); f.ready(); await f.create().runDue();
     expect(f.snapshot).not.toHaveBeenCalled(); expect(f.apply).not.toHaveBeenCalled();

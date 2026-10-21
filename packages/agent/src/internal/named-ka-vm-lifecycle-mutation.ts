@@ -20,7 +20,7 @@ export interface NamedKaVmLifecycleFields {
 }
 /** Each entry point retains its operation contract at the projection boundary. */
 export interface PublishedNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
-  readonly packedKaId?: bigint;
+  readonly packedKaId: bigint;
   readonly assertionVersion: string;
   readonly tentative?: never;
 }
@@ -104,9 +104,11 @@ export function buildNamedKaVmLifecycleMutation(
     replace(lifecycleUri, STATE_PRED, '"published"');
   }
   replace(lifecycleUri, PUBLISHED_UAL_PRED, JSON.stringify(input.publishedUal));
-  if (input.kind !== 'tentative' && input.packedKaId !== undefined && !preserveWorkspace) {
-    const author = `0x${(input.packedKaId >> 96n).toString(16).padStart(40, '0')}`;
-    const number = input.packedKaId & ((1n << 96n) - 1n);
+  // Only descriptor compatibility can omit graph coordinates; confirmed commands require them.
+  const packedKaId = input.packedKaId;
+  if (packedKaId !== undefined && !preserveWorkspace) {
+    const author = `0x${(packedKaId >> 96n).toString(16).padStart(40, '0')}`;
+    const number = packedKaId & ((1n << 96n) - 1n);
     replace(lifecycleUri, ASSERTION_GRAPH_PRED, contextGraphLayerUri(input.contextGraphId, MemoryLayer.VerifiableMemory, author, number, input.subGraphName));
     // Promote moves the graph marker to SWM. Complete that move to the actual
     // VM graph; resurrecting a WM marker leaves stale SWM metadata behind.

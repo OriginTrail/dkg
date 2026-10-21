@@ -15,23 +15,12 @@ describe('confirmed lifecycle evidence ownership', () => {
       assertionVersion: '2', publicationDeployment: { chainId: '31337', lifecycleAddress: publication.seal.kav10Address } });
     expect(Object.isFrozen(derived)).toBe(true); expect(Object.isFrozen(derived.publicationDeployment)).toBe(true);
   });
-  it.each([
-    ['resolved identity', 7n, 3n, 7n],
-    ['chain receipt', undefined, 3n, 3n],
-    ['publication result', undefined, undefined, 1n],
-  ] as const)('preserves the %s packed-ID selection', (_label, override, receipt, expected) => {
+  it('keeps the caller-resolved identity when seal and receipt identities differ', () => {
     const { input, publication } = confirmedLifecycleRecoveryFixture();
-    const derived = confirmedNamedKaVmLifecycleInput({ ...publication, seal: { ...publication.seal, reservedKaId: 11n },
-      onChainResult: { ...publication.onChainResult!, kaId: receipt } }, { contextGraphId: input.contextGraphId,
-      name: input.name, agentAddress: input.agentAddress, ...(override === undefined ? {} : { packedKaId: override }) });
-    expect(derived.packedKaId).toBe(expected);
-  });
-  it('uses a queued seal reservation only when selected as the already resolved identity', () => {
-    const { input, publication } = confirmedLifecycleRecoveryFixture();
-    const reserved = { ...publication, seal: { ...publication.seal, reservedKaId: 11n } };
-    const coordinates = { contextGraphId: input.contextGraphId, agentAddress: input.agentAddress, name: input.name };
-    expect(confirmedNamedKaVmLifecycleInput(reserved, coordinates).packedKaId).toBe(publication.kaId);
-    expect(confirmedNamedKaVmLifecycleInput(reserved, { ...coordinates, packedKaId: reserved.seal.reservedKaId }).packedKaId).toBe(11n);
+    const derived = confirmedNamedKaVmLifecycleInput({ ...publication,
+      seal: { ...publication.seal, reservedKaId: 11n },
+      onChainResult: { ...publication.onChainResult!, kaId: 3n } }, { ...input, packedKaId: 7n });
+    expect(derived.packedKaId).toBe(7n);
   });
   it.each(['kaUal', 'assertionVersion'] as const)('refuses a missing validated seal %s before repair admission', field => {
     const { input, publication } = confirmedLifecycleRecoveryFixture();

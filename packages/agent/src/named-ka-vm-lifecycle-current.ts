@@ -16,26 +16,19 @@ export async function isConfirmedNamedKaVmLifecycleCurrent(
   // also retires non-cooperative adapter promises without holding the KA lock.
   return runBoundedOperation(signal => withRpcRequestContext({ signal }, async () => {
     const deployment = input.publicationDeployment;
-    if (deployment === undefined) {
-      if ((input.packedKaId !== undefined && chain.readKnowledgeAssetVersionSnapshot)
-        || typeof chain.getEvmChainId === 'function') {
-        throw new Error('Named KA lifecycle repair awaits original publication deployment evidence');
-      }
-    } else {
-      if (typeof chain.getEvmChainId !== 'function' || typeof chain.getKnowledgeAssetsLifecycleAddress !== 'function') {
-        throw new Error('Named KA lifecycle repair awaits configured deployment evidence');
-      }
-      const [chainId, address] = await Promise.all([chain.getEvmChainId({ signal }), chain.getKnowledgeAssetsLifecycleAddress({ signal })]);
-      signal.throwIfAborted();
-      if (chainId !== BigInt(deployment.chainId) || address.toLowerCase() !== deployment.lifecycleAddress.toLowerCase()) {
-        throw Object.assign(new Error('Named KA lifecycle repair awaits its original chain deployment'), {
-          code: 'KA_VM_LIFECYCLE_REPAIR_DEPLOYMENT_MISMATCH',
-        });
-      }
+    if (typeof chain.getEvmChainId !== 'function' || typeof chain.getKnowledgeAssetsLifecycleAddress !== 'function') {
+      throw new Error('Named KA lifecycle repair awaits configured deployment evidence');
     }
-    if (input.packedKaId === undefined || !chain.readKnowledgeAssetVersionSnapshot) {
+    const [chainId, address] = await Promise.all([chain.getEvmChainId({ signal }), chain.getKnowledgeAssetsLifecycleAddress({ signal })]);
+    signal.throwIfAborted();
+    if (chainId !== BigInt(deployment.chainId) || address.toLowerCase() !== deployment.lifecycleAddress.toLowerCase()) {
+      throw Object.assign(new Error('Named KA lifecycle repair awaits its original chain deployment'), {
+        code: 'KA_VM_LIFECYCLE_REPAIR_DEPLOYMENT_MISMATCH',
+      });
+    }
+    if (!chain.readKnowledgeAssetVersionSnapshot) {
       // Standalone/no-chain hosts cannot independently observe a later chain version.
-      if (durableHost && typeof chain.getEvmChainId === 'function') {
+      if (durableHost) {
         throw new Error('Named KA lifecycle repair awaits coherent chain-version support');
       }
       return true;

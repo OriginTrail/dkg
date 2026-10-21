@@ -5210,7 +5210,7 @@ export class PublishMethods extends DKGAgentBase {
   /** Queue recovery owns its claim lock: defer rather than waiting behind a lifecycle writer. */
   async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
     this: DKGAgent, request: KnowledgeAssetVmPublishRequest, publishedUal: string,
-    packedKaId?: bigint, merkleRoot: string = request.sealMerkleRoot, signal?: AbortSignal,
+    packedKaId: bigint, merkleRoot: string = request.sealMerkleRoot, signal?: AbortSignal,
   ): Promise<boolean> {
     const input: ConfirmedNamedKaVmLifecycleInput = {
       contextGraphId: request.contextGraphId, name: request.name,

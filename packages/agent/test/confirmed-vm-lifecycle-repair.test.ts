@@ -833,7 +833,7 @@ describe('review regression boundaries', () => {
     expect(decodeLifecycleRepairJournal(wire)).toEqual(entries);
     expect(entries.get(key)!.input.packedKaId).toBe(packedKaId);
   });
-  it.each([-1n, 1n << 256n, '1', 1])('refuses a non-confirmed packed coordinate %s before scheduling', packedKaId => {
+  it.each([undefined, -1n, 1n << 256n, '1', 1])('refuses a non-confirmed packed coordinate %s before scheduling', packedKaId => {
     expect(() => normalizeLifecycleRepairInput({ ...input, packedKaId })).toThrow(NamedKaVmLifecycleIntegrityError);
   });
   it('round-trips canonical version-2 journal entries and retry state', () => {

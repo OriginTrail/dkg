@@ -2,8 +2,9 @@
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { createHash } from 'node:crypto';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
-export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment'> & {
-  readonly publicationDeployment?: never;
+export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId'> & {
+  readonly publicationDeployment?: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'];
+  readonly packedKaId?: bigint;
 };
 type JournalInput = ConfirmedKaInput | HistoricalUnboundLifecycleRepairInput;
 type ConfirmedKaInput = ConfirmedNamedKaVmLifecycleInput;
@@ -36,7 +37,7 @@ function root(value: unknown): string {
 }
 export function normalizeLifecycleRepairInput(value: unknown): ConfirmedNamedKaVmLifecycleInput {
   const input = normalizeJournalInput(value);
-  if (input.publicationDeployment === undefined) return invalid();
+  if (input.publicationDeployment === undefined || input.packedKaId === undefined) return invalid();
   return input as ConfirmedNamedKaVmLifecycleInput;
 }
 function normalizeJournalInput(value: unknown): JournalInput {
@@ -117,7 +118,7 @@ export function decodeLifecycleRepairJournal(value: unknown): Map<string, Lifecy
       || (entry['lastError'] !== undefined && typeof entry['lastError'] !== 'string')
       || (entry['rejected'] !== undefined && typeof entry['rejected'] !== 'boolean')) return invalid();
     storedKeys.add(storedKey);
-    const evidence = input.publicationDeployment === undefined
+    const evidence = input.publicationDeployment === undefined || input.packedKaId === undefined
       ? { input: input as HistoricalUnboundLifecycleRepairInput, retention: 'historical-unbound' as const }
       : { input: input as ConfirmedKaInput };
     entries.set(key, { ...evidence, attempts, nextAttemptAt,

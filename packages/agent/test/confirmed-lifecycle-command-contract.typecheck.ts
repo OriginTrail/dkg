@@ -77,3 +77,10 @@ const replacedPublication: ConfirmedNamedKaVmLifecycleAdmission = { ...admitted,
 // @ts-expect-error Admission cannot change the checked root independently.
 const replacedRoot: ConfirmedNamedKaVmLifecycleAdmission = { ...admitted, merkleRoot: '00' };
 void replacedPublication; void replacedRoot;
+
+const { packedKaId: resolvedIdentity, ...withoutIdentity } = confirmed;
+// @ts-expect-error Newly executable confirmed commands require the resolved KA identity.
+const missingIdentity: ConfirmedNamedKaVmLifecycleInput = withoutIdentity;
+// @ts-expect-error Receipts cannot supply a fallback for missing caller-resolved coordinates.
+void confirmedNamedKaVmLifecycleInput(publication, withoutIdentity);
+void resolvedIdentity; void missingIdentity;

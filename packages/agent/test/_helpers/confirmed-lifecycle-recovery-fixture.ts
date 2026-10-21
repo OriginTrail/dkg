@@ -4,7 +4,7 @@ import type { ConfirmedNamedKaVmLifecycleInput } from '../../src/named-ka-vm-lif
 export function confirmedLifecycleRecoveryFixture(): { publication: ConfirmedNamedKaVmPublication; input: ConfirmedNamedKaVmLifecycleInput } {
   const root = new Uint8Array(32).fill(0x12), author = '0x' + '11'.repeat(20), ual = `did:dkg:mock:31337/${author}/1`;
   const input: ConfirmedNamedKaVmLifecycleInput = { contextGraphId: 'contract-cg', agentAddress: author, name: 'contract-ka',
-    publishedUal: ual, merkleRoot: '0x' + '12'.repeat(32), assertionVersion: '1', publicationDeployment: { chainId: '31337', lifecycleAddress: '0x' + '22'.repeat(20) } };
+    packedKaId: (BigInt(author) << 96n) | 1n, publishedUal: ual, merkleRoot: '0x' + '12'.repeat(32), assertionVersion: '1', publicationDeployment: { chainId: '31337', lifecycleAddress: '0x' + '22'.repeat(20) } };
   return { input, publication: { status: 'confirmed', kaId: 1n, ual, merkleRoot: root, kaManifest: [], assertionUri: 'urn:assertion:contract',
     seal: { merkleRoot: root, authorAddress: author, authorAttestationR: root, authorAttestationVS: root, authorSchemeVersion: 1,
       chainId: 31337n, kav10Address: '0x' + '22'.repeat(20), finalizedAtIso: '2026-01-01T00:00:00.000Z', contentScopeVersion: 2,
