@@ -56,6 +56,7 @@ import {
   isRetryableRpcError,
   resolveRpcUrls,
   explainOutOfGasRevert,
+  retryBroadcastEndpointSet,
   sleep,
 } from './evm-adapter-rpc.js';
 import {
@@ -128,7 +129,7 @@ import type {
   RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
+import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
@@ -2083,18 +2084,9 @@ export class EVMChainAdapterBase {
     txHash: string,
     label: string,
   ): Promise<void> {
-    for (let pass = 0; ; pass += 1) {
-      try {
-        await this.broadcastSignedTransactionWithFailover(signedTx, txHash, label);
-        return;
-      } catch (err) {
-        if (errorCode(err) === 'RPC_ENDPOINTS_EXHAUSTED' && pass < RPC_ENDPOINT_SET_RETRIES) {
-          await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
-          continue;
-        }
-        throw err;
-      }
-    }
+    return retryBroadcastEndpointSet(
+      () => this.broadcastSignedTransactionWithFailover(signedTx, txHash, label),
+    );
   }
 
   /**
