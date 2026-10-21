@@ -395,6 +395,7 @@ export {
   type AsyncLiftDetailedRetrier,
   type AsyncLiftRetryFilter,
   type AsyncLiftPublisher,
+  type AsyncLiftClaimControl,
   type ClaimSessionAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
   type AsyncLiftRetryOutcome,

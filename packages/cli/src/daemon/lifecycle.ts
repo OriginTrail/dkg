@@ -3670,7 +3670,7 @@ async function runDaemonInnerWithStartupOwnership(
     // suspend inside `removeApiPort` and prove a subscribe crossing that
     // window is already refused — which is not observable from here.
     await beginGracefulShutdown({
-      state: daemonState,
+      state: daemonState, publisherControl: publisherState.runtime?.control,
       removeApiPort,
       log,
       endShareAdmissionWaits: () => agent.endLegacySwmShareAdmissionWaits(),

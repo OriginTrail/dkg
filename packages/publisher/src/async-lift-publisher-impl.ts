@@ -1,3 +1,5 @@
+import { completeClaimedKnowledgeAssetExecution } from './async-lift-knowledge-asset-completion.js';
+import { createAsyncLiftClaimControl } from './async-lift-claim-gate.js';
 import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
 import { completionTrace } from './async-lift-completion-trace.js';
@@ -116,8 +118,8 @@ import { persistLiftJobRecord } from './job-record-atomic-write.js';
 import {
   isDefinitivePreAcceptanceSendFailure,
   mapPublishExceptionToLiftJobFailure,
-  mapPublishResultToLiftJobSuccess,
-  mapKnowledgeAssetVmPublishResultToLiftJobSuccess,
+  mapClaimedPublishResultToLiftJobSuccess,
+  InvalidLiftPublishResultError,
   type AsyncLiftPublishSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
@@ -246,11 +248,6 @@ export function chainCheckOutcomeOf(resolution: AsyncLiftChainProofResolution): 
 type BusinessOperationResult<T> =
   | { readonly kind: 'succeeded'; readonly value: T }
   | { readonly kind: 'failed'; readonly error: unknown };
-
-/** A publish result is business-invalid; persistence and ownership failures remain unwrapped. */
-class InvalidLiftPublishResultError extends Error {
-  override readonly name = 'InvalidLiftPublishResultError';
-}
 
 /**
  * GH#2270 — why a failed job is being reaccepted, stated by the caller rather than inferred.
@@ -615,7 +612,9 @@ export class TripleStoreAsyncLiftPublisher
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
   private readonly claimCoordinator: AsyncLiftClaimCoordinator;
-  private paused = false;
+  readonly claimControl = createAsyncLiftClaimControl(commit =>
+    this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimTransaction(owner,
+      async () => { commit?.(); })), () => this.notifyWorkAvailable());
   private graphEnsured = false;
 
   private readonly rawLiftJobHandler: AsyncLiftJobHandler = {
@@ -728,7 +727,7 @@ export class TripleStoreAsyncLiftPublisher
       {
         journalCompletion: this.journalCompletion,
         ensureGraph: async () => await this.ensureGraph(),
-        isPaused: () => this.paused,
+        isPaused: () => this.claimControl.state !== 'running',
         readStatus: async (jobId) => await this.readJobPayload(jobId),
         nextClaimCandidate: async (section, now) => await this.readNextClaimCandidate(section, now),
         toClaimed: (current, walletId) =>
@@ -1417,47 +1416,20 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  /** Complete only the original claim and transaction, including after proof releases its wallet. */
   private async recordKnowledgeAssetExecutionResult(
     claim: ActiveLiftJobClaim, result: AsyncKnowledgeAssetVmPublishExecutionResult, options: { publicByteSize?: number },
   ): Promise<boolean> {
-    const resultTxHash = result.onChainResult?.txHash;
-    // Keep canonical claim -> job lock order through terminal persistence and wallet deletion.
-    // Otherwise a claimant can replace the wallet lock between its guarded read and deletion.
-    // This short transaction does no lifecycle repair: the executor certified that work already.
-    return this.journalCompletion.runPublicOperation((owner) => this.claimCoordinator.runClaimJobTransaction(owner, claim.jobId, async (transaction) => {
+    // Keep canonical claim -> job lock order through persistence and wallet deletion.
+    return this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimJobTransaction(owner, claim.jobId, async transaction => {
       if (transaction.kind !== 'present') return false;
-      const { current, scope } = transaction;
-      if (current.status !== 'validated' && current.status !== 'broadcast' && current.status !== 'included') return false;
-      if (current.claim?.claimToken !== claim.claim.claimToken
-        || current.claim?.walletId !== claim.claim.walletId) return false;
-      if (current.broadcast && current.broadcast.txHash !== resultTxHash) return false;
-      const certified = result.status === 'confirmed' && result.localFinalizationComplete === true;
-      if (!certified && current.status !== 'validated') return false;
-      // Legacy handlers may send without the pre-send hook. Preserve the usable
-      // hash before interpreting the rest of their receipt: mapping can reject
-      // missing fields, but lease expiry must never turn an accepted send into work.
-      let recorded: LiftJob = current;
-      if (current.status === 'validated' && typeof resultTxHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(resultTxHash)) {
-        const next = this.buildTransitionJob(current, 'broadcast', { broadcast: {
-          txHash: resultTxHash as LiftJobHex, walletId: current.claim.walletId,
-          publicByteSize: options.publicByteSize,
-        } });
-        this.assertJobMatchesStatus(next);
-        recorded = await scope.commit(next, 'broadcast');
-        // Unlike pre-send write-ahead, a failed flush cannot roll back this hash:
-        // the transaction has already escaped. Propagate persistence faults.
-        await this.store.flush?.();
-      }
-      let mapped: AsyncLiftPublishSuccess;
-      try {
-        mapped = mapKnowledgeAssetVmPublishResultToLiftJobSuccess({ publishResult: result,
-          walletId: current.claim.walletId, ...options });
-      } catch (error) {
-        throw new InvalidLiftPublishResultError(error instanceof Error ? error.message : String(error));
-      }
-      const completed = await this.applyMappedPublishResultTransition(recorded, scope, mapped);
-      return completed.status === 'finalized';
+      return completeClaimedKnowledgeAssetExecution({ ...transaction, claim, result, ...options }, {
+        buildBroadcast: (job, broadcast) => {
+          const next = this.buildTransitionJob(job, 'broadcast', { broadcast });
+          this.assertJobMatchesStatus(next); return next;
+        },
+        flush: () => this.store.flush?.() ?? Promise.resolve(),
+        applyMapped: (job, mapped) => this.applyMappedPublishResultTransition(job, transaction.scope, mapped),
+      });
     }));
   }
 
@@ -2089,21 +2061,7 @@ export class TripleStoreAsyncLiftPublisher
     publishResult: PublishResult,
     options: { publicByteSize?: number },
   ): Promise<LiftJob> {
-    const jobId = current.jobId;
-    if (!current.claim || !current.validation) {
-      throw new Error(`LiftJob ${jobId} must be claimed and validated before recording publish results`);
-    }
-
-    let mappedResult: ReturnType<typeof mapPublishResultToLiftJobSuccess>;
-    try {
-      mappedResult = mapPublishResultToLiftJobSuccess({
-        publishResult,
-        walletId: current.claim.walletId,
-        publicByteSize: options.publicByteSize,
-      });
-    } catch (error) {
-      throw new InvalidLiftPublishResultError(error instanceof Error ? error.message : String(error));
-    }
+    const mappedResult = mapClaimedPublishResultToLiftJobSuccess(current, publishResult, options);
     return this.applyMappedPublishResultTransition(current, scope, mappedResult);
   }
 
@@ -2495,7 +2453,7 @@ export class TripleStoreAsyncLiftPublisher
     // must not do either. The interrupted half above deliberately keeps running while paused: it
     // repairs jobs this node has ALREADY broadcast, where stopping would leave a live transaction
     // unreconciled — the phantom the pre-send write-ahead exists to make visible.
-    if (this.paused) return 0;
+    if (this.claimControl.state !== 'running') return 0;
     const resolver = this.chainProofResolver;
     if (!resolver) return 0;
 
@@ -2796,12 +2754,11 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async pause(): Promise<void> {
-    this.paused = true;
+    await this.claimControl.hold();
   }
 
   async resume(): Promise<void> {
-    this.paused = false;
-    this.notifyWorkAvailable();
+    await this.claimControl.release();
   }
 
   async cancel(jobId: string): Promise<void> {

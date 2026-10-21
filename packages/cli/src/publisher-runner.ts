@@ -1,3 +1,6 @@
+import { createPublisherLiveControl } from './publisher-live-control.js';
+import type { PublisherRuntime, PublisherRuntimeWallet } from './publisher-runtime-types.js';
+export type { PublisherRuntime, PublisherRuntimeWallet } from './publisher-runtime-types.js';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
@@ -12,7 +15,6 @@ import {
   type ChainAdapter,
   type ChainEventLogBindingSource,
   type OnChainPublishResult,
-  type RpcUsageWindow,
 } from '@origintrail-official/dkg-chain';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -96,30 +98,6 @@ export function createPublisherWalletChain(
       chainEventLogBindingSource,
     }))
     : new NoChainAdapter();
-}
-
-export interface PublisherRuntime {
-  readonly runner: AsyncLiftRunner;
-  readonly publisher: AsyncLiftPublisher;
-  readonly walletIds: string[];
-  readonly wallets: readonly PublisherRuntimeWallet[];
-  readonly stop: () => Promise<void>;
-  /** RpcUsageDrainable: merged window across every per-wallet chain adapter. */
-  readonly drainRpcUsage: () => RpcUsageWindow;
-  /**
-   * GH#2270 follow-up (🔴 3822987482) — can THIS runtime settle a held job signed by this
-   * wallet, for this operation kind? The daemon's ADMISSION instance is a separate, deliberately
-   * resolver-less publisher (it runs no scheduler), so asking it whether an automatic exit exists
-   * always answered "no" — every pending-chain-proof rejection claimed there was no automatic
-   * recovery even on a node where recovery was configured and running. Admission now asks the
-   * live runtime through this probe instead of inferring from its own wiring.
-   */
-  readonly canSettleHeldJob: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
-}
-
-export interface PublisherRuntimeWallet {
-  readonly address: string;
-  readonly identityId: bigint;
 }
 
 export type AsyncPublisherUnavailableReason =
@@ -769,15 +747,14 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       walletIds: validWalletIds,
       // The boundary-resolved scheduling options land here INTACT — no per-field relay to forget.
       ...args.runnerOptions,
-      // Operator-only maintenance seam. Recovery still reconciles signed transactions, but wallet
-      // loops cannot claim released jobs while a closed run is being removed from the queue.
-      startPaused: args.startPaused ?? false,
       hasIncludedRecoveryResolver: hasChainRecovery,
     });
 
+    const control = await createPublisherLiveControl(runner.claimControl, validWalletIds, args.dataDir, args.startPaused);
     startup.assertActive();
     return {
       runner,
+      control,
       publisher: asyncPublisher,
       walletIds: validWalletIds,
       wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
@@ -789,6 +766,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       canSettleHeldJob,
       stop: async () => {
         try {
+          await control.close();
           await runner.stop();
         } finally {
           // Wallet adapters borrow the agent's binding but own their own Hub

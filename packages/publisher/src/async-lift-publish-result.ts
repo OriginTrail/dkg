@@ -10,12 +10,18 @@ import { isQuorumUnmetError } from './ack-errors.js';
 import {
   createLiftJobFailureMetadata,
   isTimeoutLiftJobFailure,
+  type LiftJob,
   type LiftJobBroadcastMetadata,
   type LiftJobFailureMetadata,
   type LiftJobFinalizationMetadata,
   type LiftJobInclusionMetadata,
   type LiftJobTimeoutMetadata,
 } from './lift-job.js';
+
+/** A publish result is business-invalid; persistence and ownership failures remain unwrapped. */
+export class InvalidLiftPublishResultError extends Error {
+  override readonly name = 'InvalidLiftPublishResultError';
+}
 
 export type AsyncLiftPublishSuccess =
   | {
@@ -45,6 +51,24 @@ export interface AsyncLiftPublishFailureInput {
   readonly rpcResponseRef?: string;
   readonly revertReasonRef?: string;
   readonly timeout?: LiftJobTimeoutMetadata;
+}
+
+/** Validate the claimed result without disguising later persistence failures as receipt errors. */
+export function mapClaimedPublishResultToLiftJobSuccess(
+  current: LiftJob,
+  publishResult: PublishResult,
+  options: { publicByteSize?: number },
+): AsyncLiftPublishSuccess {
+  if (!current.claim || !current.validation) {
+    throw new Error(`LiftJob ${current.jobId} must be claimed and validated before recording publish results`);
+  }
+  try {
+    return mapPublishResultToLiftJobSuccess({
+      publishResult, walletId: current.claim.walletId, publicByteSize: options.publicByteSize,
+    });
+  } catch (error) {
+    throw new InvalidLiftPublishResultError(error instanceof Error ? error.message : String(error));
+  }
 }
 
 export function mapPublishResultToLiftJobSuccess(params: {
