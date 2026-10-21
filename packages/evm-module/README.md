@@ -115,3 +115,7 @@ pnpm lint:sol:fix             # solhint --fix
 ## Internal Dependencies
 
 None — standalone Solidity/Hardhat project. Consumed by `@origintrail-official/dkg-chain`.
+
+## AskStorage events
+
+AskStorage 10.0.3 publishes the new state from all eight pricing-state mutators. See [event regression and local devnet validation](scripts/ASK_STORAGE_EVENT_VALIDATION.md) for receipt-based tests and rollout limits.
