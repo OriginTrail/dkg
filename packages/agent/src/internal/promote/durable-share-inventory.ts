@@ -1,9 +1,10 @@
-import { throwInventoryRecoveryFailure } from './inventory-recovery-failure.js';
+import { inventoryHandoffPendingFailure, inventoryHandoffPendingReason, throwInventoryRecoveryFailure } from './inventory-recovery-failure.js';
+import { rfc64SwmInventorySettlementCanConvergeV1 } from '../../rfc64/swm-inventory-settlement-outlook-v1.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
 import { rfc64SwmInventoryShadowRuntimeV1 } from '../../rfc64/swm-inventory-shadow-runtime-v1.js';
 import { type SwmInventoryWriteOutcome } from '../swm-inventory-write.js';
 import type { ContextGraphIdV1, EvmAddressV1 } from '@origintrail-official/dkg-core';
-import { createPromoteRetryableFailure, runPromoteCommittedFinalization } from '@origintrail-official/dkg-publisher';
+import { runPromoteCommittedFinalization } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AfterDurableSwmPromotionParamsV1, BoundDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1 } from '../../dkg-agent-rfc64-catalog-auto-publish.js';
 
@@ -11,11 +12,33 @@ import type { AfterDurableSwmPromotionParamsV1, BoundDurableSwmPromotionParamsV1
 export async function commitDurableShareInventory(agent: DKGAgent, params: BoundDurableSwmPromotionParamsV1): Promise<void> {
   // The strict seal resolver enforces coordinate author == seal/UAL author.
   // Use the same asset and author-lane boundary as confirmed VM removal.
-  const result = await rfc64SwmInventoryShadowRuntimeV1(agent).runInventoryWriteExclusive({
+  const commit = () => rfc64SwmInventoryShadowRuntimeV1(agent).runInventoryWriteExclusive({
     contextGraphId: params.contextGraphId, subGraphName: params.subGraphName,
     authorAddress: params.lifecycleAgentAddress, assertionCoordinate: params.assertionCoordinate,
   }, () => commitInventoryUnderAssetLock(agent, params));
+  let result: Awaited<ReturnType<typeof commit>>;
+  try { result = await commit(); } catch (error) {
+    // The second commit rechecks the lane under the asset lock, so a lane that is still
+    // closed writes nothing and keeps the obligation pending.
+    if (!await reopenedLaneAfterAdmission(agent, params.contextGraphId, error)) throw error;
+    result = await commit();
+  }
   if (result === 'vm-confirmed') await commitConfirmedDurableShareInventory(agent, params);
+}
+
+/**
+ * A lane accepted at admission can close before the commit while responsibility or
+ * authority is still settling. Outside the asset lock, one responsibility pass (the
+ * detached observer's, without its delay ladder) says whether one more commit can apply.
+ */
+async function reopenedLaneAfterAdmission(agent: DKGAgent, contextGraphId: string, failure: unknown): Promise<boolean> {
+  const reason = inventoryHandoffPendingReason(failure);
+  if (reason !== 'inactive-lane' && reason !== 'authority-transition') return false;
+  try {
+    if (!rfc64SwmInventorySettlementCanConvergeV1(agent.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId))) return false;
+    const selection = await agent.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
+    return selection.active && selection.mode !== 'legacy';
+  } catch { return false; }
 }
 
 async function commitInventoryUnderAssetLock(agent: DKGAgent, params: BoundDurableSwmPromotionParamsV1): Promise<'vm-confirmed' | undefined> {
@@ -32,7 +55,7 @@ async function commitInventoryUnderAssetLock(agent: DKGAgent, params: BoundDurab
       case 'vm-confirmed': return 'vm-confirmed';
       case 'inactive-lane':
       case 'authority-transition':
-        throw createPromoteRetryableFailure(new Error(`Durable share inventory remains pending: ${reason}`));
+        throw inventoryHandoffPendingFailure(reason, `Durable share inventory remains pending: ${reason}`);
       default: { const unreachable: never = reason; throw new Error(`Unknown inventory outcome: ${unreachable}`); }
     }
   }
@@ -43,7 +66,7 @@ async function commitInventoryUnderAssetLock(agent: DKGAgent, params: BoundDurab
       authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
       ctx: params.ctx,
     });
-    if (!accepted) throw createPromoteRetryableFailure(new Error('Durable share catalog projection admission remains pending'));
+    if (!accepted) throw inventoryHandoffPendingFailure('projection-admission', 'Durable share catalog projection admission remains pending');
   } catch (error) { return throwInventoryRecoveryFailure(error); }
 }
 

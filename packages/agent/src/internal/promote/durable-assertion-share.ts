@@ -2,6 +2,7 @@ import { assertShareInventorySigningCapability } from './share-inventory-signing
 import { normalizeAssertionPromoteExecution } from './assertion-promote-input.js';
 import { SwmCatalogAuthorityNotReady } from '../swm-inventory-write.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
+import { attachCommittedShare } from './inventory-recovery-failure.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { createPromoteRetryableFailure, UnfinishedBoundShareError } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
@@ -72,7 +73,10 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
     contextGraphId, publisherPeerId: agent.node.peerId.toString(), options: opts,
   });
   let inventoryRequired: boolean;
-  try { inventoryRequired = agent.requiresRfc64ShareInventoryV1(contextGraphId, opts?.subGraphName); }
+  // Owe the handoff only where the commit-time authoring lane can be active; otherwise the
+  // committed share would wait on a lane that only an authority refresh or a responsibility
+  // change can open.
+  try { inventoryRequired = agent.requiresRfc64ShareInventoryHandoffV1(contextGraphId, opts?.subGraphName); }
   catch (cause) { if (cause instanceof SwmCatalogAuthorityNotReady) throw createPromoteRetryableFailure(cause); throw cause; }
   const recoveryBinding = await agent.publisher.prepareAssertionPromoteRecovery(
     contextGraphId, name, storageLane, publisherOptions, inventoryRequired,
@@ -107,6 +111,7 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
     gossipPayload,
     promotedAllRoots,
     shareOperationId,
+    shareEvidence,
   } = await agent.publisher.assertionPromote(
     contextGraphId,
     name,
@@ -158,8 +163,17 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
       });
     }
   };
-  if (execution.kind === 'bound' && execution.authority) await execution.authority.run(finish);
-  else await finish();
+  try {
+    if (execution.kind === 'bound' && execution.authority) await execution.authority.run(finish);
+    else await finish();
+  } catch (error) {
+    // The bound job keeps the obligation, so the failure is still thrown; it carries the
+    // committed share only for the one-shot answer of a pending catalog handoff.
+    if (execution.kind === 'bound' && promotedAllRoots && shareOperationId) {
+      attachCommittedShare(error, { promotedCount, sealed: true, publishReady: true, shareOperationId });
+    }
+    throw error;
+  }
   // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
   // assertionPromote (co-located with the member-row REPLACE, gated on the
   // same isFullCompletePromote), so it stays in lockstep with the rows for
@@ -169,7 +183,8 @@ export async function promoteAssertion(agent: DKGAgent, contextGraphId: string, 
   // shareOperationId. It is just as publish-ready as the first response;
   // a VM no-op has no share operation id and remains false here.
   const publishReady = sealed && promotedAllRoots && !!shareOperationId;
-  return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
+  return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}),
+    ...(shareEvidence ? { shareEvidence } : {}) };
 }
 
 /** Agent bindings keep admission and mutation fencing in the publisher's lifecycle domain. */

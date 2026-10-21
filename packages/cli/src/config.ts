@@ -635,6 +635,8 @@ export interface LoggingConfig {
 }
 
 export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
+  /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
+  DKG_Core_chain_cache?: boolean;
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -2000,7 +2002,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
+export function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
   if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
 
   _bundledNetworkRegistry = loadNetworkRegistryFromRoots(runtimeAssetRoots());

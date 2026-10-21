@@ -1,3 +1,4 @@
+import { classifyPromoteAdmissionError } from './promote-admission-response.js';
 import type { AssertionFailureResponse } from './assertion-failure-response.js';
 import { classifyPromoteRecoveryError, type PromoteRecoveryContext } from './promote-recovery-response.js';
 export { respondPromoteRecoveryError } from './promote-recovery-response.js';
@@ -78,6 +79,7 @@ export function respondPublicationPricingPolicyError(res: RequestContext["res"],
 const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
   ['KA_ASSERTION_ALREADY_FINALIZED', 409],
   ['KA_PROMOTE_ACK_REQUIREMENT_CONFLICT', 409],
+  ['KA_SHARE_AUTHOR_MISMATCH', 409],
   ['KA_SHARE_INVENTORY_SIGNER_UNAVAILABLE', 422],
   ['KA_SLOT_ALREADY_CLAIMED', 409],
   ['KA_RESERVED_ID_MISMATCH', 409],
@@ -101,6 +103,8 @@ export function respondAssertionCodeError(res: RequestContext["res"], e: any): b
  * VM publishing keeps its own mapping so chain failures remain server errors.
  */
 export function classifyAssertionError(e: any, context?: PromoteRecoveryContext): AssertionFailureResponse {
+  const admission = classifyPromoteAdmissionError(e);
+  if (admission) return admission;
   const promote = classifyPromoteRecoveryError(e, context);
   if (promote) return promote;
   if (e?.code === "OVERSIZED_RDF_LITERAL") return { status: 400, body: oversizedRdfLiteralResponseBody(e) };
