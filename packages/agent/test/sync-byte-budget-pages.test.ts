@@ -514,6 +514,8 @@ describe('byte-budget sync pagination', () => {
     expect(observedProgress).toEqual([{
       resumedFromOffset: 0,
       nextOffset: SYNC_PAGE_SIZE,
+      acceptedQuads: 0,
+      acceptedHeapBytesEstimate: 0,
     }]);
     expect(result).toMatchObject({
       nextOffset: SYNC_PAGE_SIZE,

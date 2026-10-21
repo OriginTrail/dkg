@@ -212,6 +212,8 @@ export type SyncPageResult = SyncPageResultFields & SharedMemoryCompletionFields
 export interface SyncPageProgress {
   readonly resumedFromOffset: number;
   readonly nextOffset: number;
+  readonly acceptedQuads: number;
+  readonly acceptedHeapBytesEstimate: number;
 }
 
 function acceptedIncompletePrefixResult(
@@ -438,9 +440,9 @@ export interface SyncPageFetchOptions {
   readonly maxAcceptedQuads?: number;
   readonly maxAcceptedHeapBytesEstimate?: number;
   /**
-   * Soft owner boundary evaluated only after a page made forward progress.
-   * Returning true yields an incomplete prefix without classifying the peer as
-   * timed out; callers must still verify and checkpoint a safe graph boundary.
+   * Soft owner boundary after a page made forward progress, given the rows and
+   * estimated heap retained so far. True yields an incomplete prefix without
+   * classifying the peer as timed out; callers still verify and checkpoint.
    */
   readonly shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
 }
@@ -764,12 +766,12 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     checkpoint,
     usesPageSession,
     savedResponderSessionOffset: savedResponderSession?.responderSessionOffset,
-    manifestRebindNeedsPriming: manifestCheckpointDecision.kind === 'rebind-and-prime',
+    manifestCheckpointDecision,
   });
   if (responderResumeDecision.kind === 'reset-unmappable') {
-    // A verified manifest coordinate is not necessarily a raw responder
-    // coordinate. Once the immutable token is gone, restart instead of
-    // guessing that both coordinate spaces match.
+    // Without its token, only a prefix proven for this manifest is primed
+    // (resolveManifestCheckpointDecision); restart any other offset instead of
+    // guessing that its verified and raw coordinates match.
     deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
     checkpoint = undefined;
   }
@@ -1115,7 +1117,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       // probes upward only after sustained success, at most doubling each time.
       adaptivePageSizer.onPageSuccess();
 
-      if (shouldStopAfterPage?.({ resumedFromOffset, nextOffset: offset })) {
+      if (shouldStopAfterPage?.({ resumedFromOffset, nextOffset: offset, acceptedQuads: allQuads.length, acceptedHeapBytesEstimate })) {
         yielded = true;
         break;
       }
@@ -1394,9 +1396,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
 
   return {
     quads: allQuads,
-    ...(hasCompleteQuadRawOffsetMapping
-      ? { quadRawOffsets: allQuadRawOffsets }
-      : {}),
+    ...(hasCompleteQuadRawOffsetMapping ? { quadRawOffsets: allQuadRawOffsets } : {}),
     bytesReceived,
     decodedBytesReceived,
     resumedFromOffset,
