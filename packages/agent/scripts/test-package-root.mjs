@@ -48,7 +48,8 @@ const expectedRfc64PublicCatalogReconciliationOutcomes = [
 ];
 
 if (
-  typeof root.DKGAgent !== 'function'
+  typeof root.resolveWorkingMemoryIdentityAliases !== 'function'
+  || typeof root.DKGAgent !== 'function'
   || typeof legacyAgent.DKGAgent !== 'function'
   || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
   || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'
@@ -274,11 +275,13 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'catalog-projection-discovery-v1.js',
   'catalog-repair-diagnostics-v1.js',
   'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'manual-catalog-authority-scope-v1.js',
   'catalog-authority-refresh-binding-v1.js',
   'catalog-authority-refresh-loop-v1.js',
   'catalog-authority-revision-projection-v1.js',
@@ -297,12 +300,14 @@ const blockedRfc64Modules = [
   'applied-catalog-authority-transition-v1.js',
   'catalog-semantic-authority-transition-v1.js',
   'public-catalog-native-errors-v1.js',
+  'projection-store-read-back-v1.js',
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',
   'catalog-head-lineage-v1.js',
   'catalog-limits-v1.js',
   'catalog-peers-v1.js',
+  'catalog-policy-decision-probe-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
   'control-envelope-signer-v1.js',
@@ -313,6 +318,8 @@ const blockedRfc64Modules = [
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
   'inventory-v1/exact-record.js',
+  'inventory-persistence-failure.js',
+  'inventory-v1/open-error.js',
   'inventory-v1/swm-author-inventory-auth-v1.js',
   'inventory-v1/swm-author-inventory-commit-plan.js',
   'inventory-v1/swm-author-inventory-contracts.js',
@@ -347,6 +354,8 @@ const blockedRfc64Modules = [
   'public-catalog-receiver-task-lifecycle-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
+  'public-catalog-head-delivery-v1.js',
+  'public-catalog-head-fanout-v1.js',
   'public-catalog-issuer-delegation-v1.js',
   'public-catalog-successor-asset-v1.js',
   'public-catalog-successor-producer-v1.js',
@@ -359,6 +368,7 @@ const blockedRfc64Modules = [
   'swm-inventory-catalog-reconciler-v1.js',
   'swm-catalog-durable-asset-resolver-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
+  'swm-inventory-observation-retry-v1.js',
   'swm-inventory-settlement-outlook-v1.js',
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',

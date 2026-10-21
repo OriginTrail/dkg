@@ -67,3 +67,27 @@ export async function waitForPeerProtocol(
 
   return false;
 }
+
+/** A stale Identify record is not proof that a connected peer lacks a late-registered handler. */
+export async function waitForAdvertisedOrLiveProtocol(options: {
+  peerStore: { get(peer: unknown): Promise<{ protocols: string[] }> };
+  peer: { toString(): string };
+  protocols: readonly string[];
+  attempts: number;
+  delayMs: number;
+  signal?: AbortSignal;
+  isConnected(peerId: string): boolean;
+  probe(peerId: string, protocol: string, signal?: AbortSignal): Promise<'supported' | 'unsupported' | 'unavailable'>;
+}): Promise<boolean> {
+  const { peerStore, peer, protocols, attempts, delayMs, signal } = options;
+  if (await waitForPeerProtocol(peerStore, peer, protocols, attempts, delayMs, signal)) return true;
+  throwIfProtocolReadinessAborted(signal);
+  const peerId = toLibp2pPeerId(peer)?.toString();
+  if (peerId === undefined || !options.isConnected(peerId)) return false;
+  for (const protocol of protocols) {
+    const outcome = await options.probe(peerId, protocol, signal);
+    throwIfProtocolReadinessAborted(signal);
+    if (outcome === 'supported') return true;
+  }
+  return false;
+}

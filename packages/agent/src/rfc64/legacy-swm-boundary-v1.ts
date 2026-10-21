@@ -35,13 +35,18 @@ import {
   type Rfc64LegacySwmBoundaryCaptureV1,
   type Rfc64LateLegacySwmBoundaryEntryV1,
 } from './legacy-swm-boundary-codec-v1.js';
-export { describeRfc64LegacySwmFenceEventV1 } from './legacy-swm-boundary-fence-v1.js';
+export {
+  describeRfc64LegacySwmFenceEventV1,
+  rfc64LegacySwmFenceEventLoggerV1,
+} from './legacy-swm-boundary-fence-v1.js';
 import {
   assertRfc64LegacySwmPreparationAdmittedV1,
   beginRfc64LegacySwmPreparationV1,
   createRfc64LegacySwmFenceCoordinatorV1,
+  endRfc64LegacySwmAdmissionWaitsV1,
   runRfc64LegacySwmRetirementV1,
   waitForRfc64LegacySwmPreparationAdmissionV1,
+  waitForRfc64LegacySwmPromoteAdmissionV1,
   type Rfc64LegacySwmFenceCoordinatorV1,
   type Rfc64LegacySwmFenceOptionsV1,
 } from './legacy-swm-boundary-fence-v1.js';
@@ -467,10 +472,10 @@ export const RFC64_LEGACY_SWM_PREPARATION_ADMISSION_WAIT_MS = 2_000;
 
 /**
  * Wait, within a short bound, for the fences that would refuse this root write
- * to drop. The promote and the Core's StorageACK call it right before they
- * prepare the companion: a fence is normally up for milliseconds, and without
- * the wait each of those costs a refused share attempt (retried about a minute
- * later) or a declined acknowledgement.
+ * to drop. The Core's StorageACK calls it right before it prepares the
+ * companion: a fence is normally up for milliseconds, and without the wait
+ * each of those costs a declined acknowledgement. The promote has its own,
+ * longer wait ({@link awaitRfc64LegacySwmPromoteAdmissionV1}).
  */
 export async function awaitRfc64LateLegacySwmBoundaryAdmissionV1(
   owner: object,
@@ -478,15 +483,90 @@ export async function awaitRfc64LateLegacySwmBoundaryAdmissionV1(
   kaUalInput: string,
   limitMs: number = RFC64_LEGACY_SWM_PREPARATION_ADMISSION_WAIT_MS,
 ): Promise<void> {
+  const admission = resolveRfc64LegacySwmAdmissionV1(owner, kaUalInput);
+  if (admission === undefined) return;
+  await waitForRfc64LegacySwmPreparationAdmissionV1(admission.fence, contextGraphId, admission.kaUal, limitMs);
+}
+
+/**
+ * How long a promote waits for the fences in front of its root write to drop,
+ * and how long a fence may have been up without a break before a promote no
+ * longer waits for it (GH#3052).
+ */
+export const RFC64_LEGACY_SWM_PROMOTE_ADMISSION_WAIT_MS = 60_000;
+
+/**
+ * How many promotes may wait the full time for a fence at once on the node.
+ * One more gets the two-second wait of the other seams, so a client that sends
+ * many shares into a fenced graph at once cannot hold that many requests for a
+ * minute.
+ */
+export const RFC64_LEGACY_SWM_PROMOTE_ADMISSION_WAITERS = 16;
+
+/**
+ * The promote's admission wait (GH#3052). It ends as soon as neither the graph
+ * nor the asset is fenced, and the promote then prepares at once. A receiver
+ * lease or a republish retirement holds a graph's fence for seconds to tens of
+ * seconds, often several back to back; with a wait of two seconds such a share
+ * was refused and retried by the promote queue about a minute later, then
+ * after two, four and eight minutes, so one refusal made a share take a minute
+ * or more and a share refused at each attempt failed after a quarter of an
+ * hour although the fence dropped many times in between.
+ *
+ * The wait is bounded. It lasts at most
+ * {@link RFC64_LEGACY_SWM_PROMOTE_ADMISSION_WAIT_MS}, about the first retry of
+ * the promote queue that it replaces (48 to 72 s), because the promote holds
+ * its assertion's lifecycle lock and a worker slot or an HTTP request while it
+ * waits. It does not wait for a fence that has been up that long without a
+ * break, held by one holder or handed on between several: such a fence is
+ * stuck or saturated rather than busy, and promotes waiting behind it would
+ * hold worker slots for nothing. At most
+ * {@link RFC64_LEGACY_SWM_PROMOTE_ADMISSION_WAITERS} promotes wait the full
+ * time at once.
+ * The waits end when the node begins to stop
+ * ({@link endRfc64LegacySwmBoundaryAdmissionWaitsV1}). A promote that stops
+ * waiting is refused as before, and a queued share is retried by the queue.
+ * The wait reserves nothing, so a fence raised between its end and the prepare
+ * refuses the prepare the same way.
+ */
+export async function awaitRfc64LegacySwmPromoteAdmissionV1(
+  owner: object,
+  contextGraphId: string,
+  kaUalInput: string,
+): Promise<void> {
+  const admission = resolveRfc64LegacySwmAdmissionV1(owner, kaUalInput);
+  if (admission === undefined) return;
+  await waitForRfc64LegacySwmPromoteAdmissionV1(admission.fence, contextGraphId, admission.kaUal, {
+    waitLimitMs: RFC64_LEGACY_SWM_PROMOTE_ADMISSION_WAIT_MS,
+    maxFenceAgeMs: RFC64_LEGACY_SWM_PROMOTE_ADMISSION_WAIT_MS,
+    maxWaiters: RFC64_LEGACY_SWM_PROMOTE_ADMISSION_WAITERS,
+    overflowWaitLimitMs: RFC64_LEGACY_SWM_PREPARATION_ADMISSION_WAIT_MS,
+  });
+}
+
+/**
+ * The node begins to stop: end every admission wait of this boundary now and
+ * for the rest of the run, so a root write held back by a fence is refused at
+ * once (and retried after the restart) instead of being cut off by the
+ * shutdown deadline. A no-op for an owner without a boundary.
+ */
+export function endRfc64LegacySwmBoundaryAdmissionWaitsV1(owner: object): void {
   const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
-  if (state === undefined) return;
-  let kaUal: string;
+  if (state !== undefined) endRfc64LegacySwmAdmissionWaitsV1(state.fence);
+}
+
+/** The fences an admission wait watches, or nothing to wait for (no boundary, or a UAL the prepare refuses). */
+function resolveRfc64LegacySwmAdmissionV1(
+  owner: object,
+  kaUalInput: string,
+): { fence: Rfc64LegacySwmFenceCoordinatorV1; kaUal: string } | undefined {
+  const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
+  if (state === undefined) return undefined;
   try {
-    kaUal = assertCanonicalDeterministicUalV1(kaUalInput).ual;
+    return { fence: state.fence, kaUal: assertCanonicalDeterministicUalV1(kaUalInput).ual };
   } catch {
-    return; // The prepare reports an invalid UAL.
+    return undefined; // The prepare reports an invalid UAL.
   }
-  await waitForRfc64LegacySwmPreparationAdmissionV1(state.fence, contextGraphId, kaUal, limitMs);
 }
 
 /**
@@ -563,6 +643,17 @@ export async function markRfc64LegacySwmRepublishedV1(
 }
 
 /**
+ * What became of one retirement after a finalized VM twin:
+ * - `retired`: the asset's markers up to the given version are gone;
+ * - `kept`: nothing was retired, and nothing is left to do for this request.
+ *   No marker of the asset is outstanding, or its shared copy is there again
+ *   and owns the marker;
+ * - `not-run`: the retirement did not get its turn within the fence's bound.
+ *   The marker stays, and only a later retirement removes it.
+ */
+export type Rfc64LegacySwmFinalizedVmRetirementV1 = 'retired' | 'kept' | 'not-run';
+
+/**
  * A verified, finalized VM twin can supersede an exact legacy SWM root even
  * when that root never entered the author catalog. The caller must first
  * prove byte-identical VM/SWM content and finish SWM cleanup. Recheck the
@@ -572,6 +663,11 @@ export async function markRfc64LegacySwmRepublishedV1(
  * and the drain are the ASSET's: this reads and deletes only that asset's
  * graph, head and markers, so shares of other assets of the graph are
  * neither refused nor waited for.
+ *
+ * The answer says what became of it, so that a caller can come back for a
+ * retirement that did not get its turn. The call runs up to the raised fence
+ * before it first waits. `signal` is the caller's lifetime: an abort ends a
+ * retirement that is still waiting for its turn, with `not-run`.
  */
 export async function retireRfc64LegacySwmAfterFinalizedVmV1(
   owner: object,
@@ -579,18 +675,24 @@ export async function retireRfc64LegacySwmAfterFinalizedVmV1(
   kaUalInput: string,
   assertionVersionInput: string,
   subGraphName?: string,
-): Promise<boolean> {
-  if (subGraphName !== undefined) return false;
+  signal?: AbortSignal,
+): Promise<Rfc64LegacySwmFinalizedVmRetirementV1> {
+  if (subGraphName !== undefined) return 'kept';
   const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
-  if (state === undefined) return false;
+  if (state === undefined) return 'kept';
   assertContextGraphIdV1(contextGraphId, 'RFC-64 finalized VM legacy boundary contextGraphId');
   const kaUal = assertCanonicalDeterministicUalV1(kaUalInput).ual;
   const assertionVersion = assertPositiveDecimalU64V1(assertionVersionInput);
+  // No marker of this asset is outstanding, so there is nothing to retire and
+  // nothing to fence. A share that starts later brings a marker of its own,
+  // which is not this request's to retire. Markers are tracked from the
+  // moment a share prepares one, so one that is in flight is seen here.
+  if (state.entriesByContextGraph.get(contextGraphId)?.has(kaUal) !== true) return 'kept';
   // Not retired within the fence's bound: the marker stays, which is the
-  // conservative state, until a later pass or a catalog replay retires it.
+  // conservative state, until a later retirement removes it.
   const outcome = await runRfc64LegacySwmRetirementV1(
     state.fence,
-    { source: 'finalized-vm-retirement', contextGraphId, kaUal },
+    { source: 'finalized-vm-retirement', contextGraphId, kaUal, ...(signal === undefined ? {} : { signal }) },
     async () => {
       if (state.entriesByContextGraph.get(contextGraphId)?.has(kaUal) !== true) return false;
       const scope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
@@ -620,7 +722,8 @@ export async function retireRfc64LegacySwmAfterFinalizedVmV1(
       return true;
     },
   );
-  return outcome.ran && outcome.value;
+  if (!outcome.ran) return 'not-run';
+  return outcome.value ? 'retired' : 'kept';
 }
 
 async function retireRfc64LegacySwmAssetsV1(

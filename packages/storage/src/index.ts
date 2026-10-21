@@ -1,4 +1,6 @@
 export { DurableDirectory, persistFileAndParent, persistDirectoryRange, type DirectorySyncPolicy, type DurableDirectoryOptions } from './file-durability.js';
+export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
+export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
@@ -16,6 +18,8 @@ export {
   type Quad,
   type TripleStore,
   type TripleStoreDecorator,
+  type LogicalStoreMutationCapability,
+  runLogicalStoreMutation,
   type BoundedQueryResponseCapability,
   type QueryResult,
   type QueryOptions,
@@ -57,6 +61,11 @@ export {
 } from './atomic-graph-replace.js';
 export type { TripleStorePersistenceBarrier, TripleStoreCommitDurability, TripleStoreCommitCapability } from './persistence.js';
 export { composeTripleStoreCommitment } from './persistence.js';
+export {
+  assertSubjectAndInsertPayload,
+  buildAtomicSubjectAndInsertUpdate,
+  tryReplaceSubjectAndInsertAtomically,
+} from './atomic-subject-insert.js';
 /**
  * Stable caller contract for one bounded RFC-64 author commit. Compilation,
  * receipt execution, normalization, and decorator mapping stay module-internal.
@@ -227,6 +236,12 @@ export {
 } from './rfc64-author-seal-read-gateway.js';
 export {
   createManagedOxigraphRuntimeStoreConfigV1,
+  withManagedOxigraphRuntimeStoreConfigV1,
+  type ManagedOxigraphRuntimeActivityLeaseV1,
+  type ManagedOxigraphRecoveryHandleV1,
+  type ManagedOxigraphRecoveryPhaseV1,
+  type ManagedOxigraphRuntimeHooksV1,
+  type ManagedOxigraphRuntimeStateV1,
   type ManagedOxigraphRuntimeStoreConfigV1,
 } from './managed-oxigraph-runtime-store.js';
 export {
@@ -312,3 +327,9 @@ import './adapters/oxigraph.js';
 import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
+
+export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, type AtomicAssetReplacement } from './atomic-asset-group.js';
+
+export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';
+
+export { DurableReplaceableFile, replaceDurableFile, type DurableFileReplacePermissions } from './durable-file-replace.js';

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Logger, type CanonicalLogRecord } from '@origintrail-official/dkg-core';
+import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
@@ -556,7 +557,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
   });
 
   it('logs a bounded unavailable reason without exposing arbitrary decision text', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const records: CanonicalLogRecord[] = [];
+    Logger.setSink(record => { records.push(record); });
     try {
       const result = await subscribe({
         hasConfirmedMeta: false,
@@ -566,12 +568,11 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         },
       });
       expect(result.responseStatus).toBe(503);
-      expect(warn).toHaveBeenCalledWith(
-        '[context-graph-subscribe] authority unavailable: reason=other dependency=undefined',
-      );
-      expect(JSON.stringify(warn.mock.calls)).not.toContain('private diagnostic text');
+      expect(records).toHaveLength(1);
+      expect(records[0]!.message).toContain('source=registered-chain reason=unknown dependency=unknown');
+      expect(JSON.stringify(records)).not.toContain('private diagnostic text');
     } finally {
-      warn.mockRestore();
+      Logger.setSink(null);
     }
   });
 
@@ -579,7 +580,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     ['replica-proof-timeout', 'replica-proof-timeout'],
     ['graph "private-name" timed out', 'unknown'],
   ])('ends the unavailable log line with the detail code as a token (%s)', async (detailCode, logged) => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const records: CanonicalLogRecord[] = [];
+    Logger.setSink(record => { records.push(record); });
     try {
       const result = await subscribe({
         hasConfirmedMeta: false,
@@ -590,13 +592,12 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         },
       });
       expect(result.responseStatus).toBe(503);
-      expect(warn).toHaveBeenCalledWith(
-        '[context-graph-subscribe] authority unavailable: reason=finalized-name-absence-unaccepted'
-        + ` dependency=unknown detail=${logged}`,
-      );
-      expect(JSON.stringify(warn.mock.calls)).not.toContain('private-name');
+      expect(records).toHaveLength(1);
+      expect(records[0]!.message).toContain('reason=finalized-name-absence-unaccepted'
+        + ` dependency=unknown detail=${logged}`);
+      expect(JSON.stringify(records)).not.toContain('private-name');
     } finally {
-      warn.mockRestore();
+      Logger.setSink(null);
     }
   });
 

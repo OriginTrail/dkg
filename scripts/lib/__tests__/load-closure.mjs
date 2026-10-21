@@ -12,6 +12,8 @@ import { traceLaneLoads } from './load-graph.mjs';
 // load-closure guard cannot follow, each with the reason it needs no route of
 // its own.
 export const UNFOLLOWED_LOADS = new Map([
+  ['scripts/test-mcp-wsl-launch.mjs: execute = execFileSync',
+    'injected test seam defaults to node:child_process; calls only system /usr/bin/wslpath and /usr/bin/env, while the repository Windows driver is a literal URL also loaded directly by the smoke test'],
   ['scripts/ci/run-chain-rpc-node26.mjs: vitest',
     'the Vitest CLI resolved from packages/chain node_modules, run with the verified process.execPath; not a repository file'],
   ['packages/agent/test/sync-native-export-hostile.test.ts: pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href',
@@ -60,6 +62,7 @@ export const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/src/migration.ts: cmd',
     'the pnpm install and runtime build commands it runs in an update slot, a checkout outside the repository\'s files'],
   ['packages/cli/test/auto-update-versioned-e2e.test.ts: cmd', 'the git commands its git() helper runs in temporary repositories'],
+  ["packages/cli/test/auto-update-versioned-e2e.test.ts: join(releasesDirPath, 'current/packages/cli/dist/cli.js')", 'the generated CLI in a temporary activated slot; its real identity reader is bundled from the repository manifest source'],
   ["packages/cli/test/blazegraph-image-metadata.test.ts: join(cleanCliDir, 'blazegraph-image-metadata.cjs')",
     "a copy of packages/cli/blazegraph-image-metadata.cjs in a temporary checkout; the file itself routes by the CLI rule"],
   ['packages/cli/test/blue-green-integration.test.ts: cmd', 'the git commands its git() helper runs in temporary repositories'],
@@ -107,7 +110,7 @@ export const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/test/oxigraph-orphan-lifecycle.test.ts: ...args', 'what the Oxigraph lifecycle spawns, passed through a counting wrapper: the Oxigraph binary or its standin'],
   ['packages/cli/test/oxigraph-orphan-native.test.ts: lockingStandin.binaryPath', 'an Oxigraph standin binary the test builds in a temporary directory'],
   ['packages/cli/test/oxigraph-parent-watchdog.test.ts: cmd', 'what the watchdog spawns, passed through its injected spawnChild: the Oxigraph binary or its standin'],
-  ['packages/cli/test/oxigraph-server.test.ts: binaryPath', 'the Oxigraph binary or its standin, checked with --version'],
+  ['packages/cli/test/oxigraph-server-native.test.ts: binaryPath', 'the pinned installed Oxigraph binary, checked with --version; it is outside the repository'],
   ['packages/cli/test/oxigraph-server.test.ts: command', 'what the server spawns, passed through an injected spawnProcess: the Oxigraph binary or its standin'],
   ['packages/cli/test/oxigraph-server.test.ts: standin', 'an Oxigraph standin binary fixture'],
   ['packages/core/src/daemon-lifecycle.ts: node',

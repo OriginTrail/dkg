@@ -1,3 +1,5 @@
+import { shareJobsPath, shareReconciliationPath } from './share-job-client-paths.js';
+import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -7,6 +9,7 @@ import type {
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
 import type {
+  ShareReconciliationInput, ShareReconciliationResult,
   AsyncLiftRetryOutcome,
   AsyncPreparedPublishPayload,
   JournalReadResult,
@@ -14,10 +17,7 @@ import type {
   PersistedLiftJob,
   PublicationPricingPolicy,
 } from '@origintrail-official/dkg-publisher';
-import {
-  isSafeJobId,
-  SAFE_JOB_ID_ERROR,
-} from '@origintrail-official/dkg-publisher';
+import { isSafeJobId, SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
 import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import type { ContextGraphJoinResult } from './context-graph-join-result.js';
@@ -204,7 +204,7 @@ export interface KnowledgeAssetCreateResponse {
   status?: string;
   written?: number;
   merkleRoot?: string;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: KnowledgeAssetShareResponse['catalogHandoff'];
   swmShared?: boolean;
   promotedCount?: number;
   publishReady?: boolean;
@@ -223,7 +223,7 @@ export interface KnowledgeAssetShareResponse {
   promotedCount: number;
   sealed?: boolean;
   publishReady?: boolean;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: { state: 'pending'; reason: string; recoveryJobId: string; recoveryStatusUrl: string };
   errors?: KnowledgeAssetLifecycleError[];
 }
 
@@ -1054,14 +1054,12 @@ export class ApiClient {
     state?: KnowledgeAssetShareJobState | KnowledgeAssetShareJobState[];
     limit?: number;
   }): Promise<{ jobs: KnowledgeAssetShareJobView[] }> {
-    const params = new URLSearchParams();
-    if (options?.contextGraphId) params.set('contextGraphId', options.contextGraphId);
-    if (options?.state) {
-      params.set('state', Array.isArray(options.state) ? options.state.join(',') : options.state);
-    }
-    if (options?.limit !== undefined) params.set('limit', String(options.limit));
-    const qs = params.toString();
-    return this.get(`/api/knowledge-assets/swm/share-jobs${qs ? `?${qs}` : ''}`);
+    return this.get(shareJobsPath(options));
+  }
+
+  /** Read retained execution evidence; never infer retry permission from an unproven result. */
+  async knowledgeAssetReconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult> {
+    return this.get(shareReconciliationPath(input));
   }
 
   async knowledgeAssetShareJob(jobId: string): Promise<KnowledgeAssetShareJobView> {
@@ -1517,9 +1515,11 @@ export class ApiClient {
     return this.get(`/api/agent/${encodeURIComponent(address)}/encryption-keys`);
   }
 
-  async publisherJobs(status?: string): Promise<{ jobs: any[] }> {
-    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
-    return this.get(`/api/publisher/jobs${qs}`);
+  async publisherJobs(status?: string, contextGraphId?: string): Promise<{ jobs: any[] }> {
+    const qs = new URLSearchParams();
+    if (status) qs.set('status', status);
+    if (contextGraphId) qs.set('contextGraphId', contextGraphId);
+    return this.get(`/api/publisher/jobs${qs.size ? `?${qs}` : ''}`);
   }
 
   // GH#2270 — `retryState` is the daemon's DERIVED answer to "will this node retry this
@@ -2463,6 +2463,8 @@ export class ApiClient {
   private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> {
     return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() });
   }
+
+  readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
 
   private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
     return this.send<T>(path, {

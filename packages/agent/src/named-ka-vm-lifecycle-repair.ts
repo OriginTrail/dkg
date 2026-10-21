@@ -15,8 +15,8 @@ export interface ConfirmedNamedKaVmPublicationDeployment {
 }
 export interface ConfirmedNamedKaVmLifecycleInput extends PublishedNamedKaVmLifecycleInput {
   readonly assertionVersion: string;
-  /** Bound by the admitted publication seal; absent only on historical/unbound or no-chain inputs. */
-  readonly publicationDeployment?: ConfirmedNamedKaVmPublicationDeployment;
+  /** Bound by the admitted publication seal for every new confirmed command. */
+  readonly publicationDeployment: ConfirmedNamedKaVmPublicationDeployment;
   readonly priorMerkleRoot?: string;
 }
 export type NamedKaVmLifecycleRepairOutcome = 'repaired' | 'pending' | 'superseded' | 'rejected';
@@ -101,6 +101,7 @@ export class NamedKaVmLifecycleRepair {
   }
 
   private execute(key: string, entry: RepairEntry): Promise<NamedKaVmLifecycleRepairOutcome> {
+    if (entry.retention === 'historical-unbound') return Promise.resolve('pending');
     const input = entry.input;
     const execution = withKeyedLocks(this.options.writeLocks, [
       assertionLifecycleWriteLockKey(input.contextGraphId, input.name, input.agentAddress, input.subGraphName),
@@ -120,6 +121,7 @@ export class NamedKaVmLifecycleRepair {
     return execution;
   }
   private async attempt(key: string, entry: RepairEntry): Promise<NamedKaVmLifecycleRepairOutcome> {
+    if (entry.retention === 'historical-unbound') return 'pending';
     const input = entry.input;
     let outcome: NamedKaVmLifecycleRepairOutcome;
     let failure: unknown;
@@ -148,7 +150,15 @@ export class NamedKaVmLifecycleRepair {
         this.options.warn(`Confirmed named KA ${input.name} lifecycle repair ${outcome}${pressure ? ' under store pressure' : ''}: ${entry.lastError}`);
       }
       try { await this.persist(); }
-      catch (error) { this.entries.set(key, entry); throw error; }
+      catch (error) {
+        // Admission already succeeded. Keep the original obligation even if the
+        // replacement became visible before its durability barrier failed.
+        this.entries.set(key, entry);
+        entry.attempts += 1;
+        entry.nextAttemptAt = this.now() + Math.min(300_000, 5_000 * 2 ** Math.min(entry.attempts - 1, 6));
+        this.options.warn(`Confirmed lifecycle repair settlement remains pending: ${String(error)}`);
+        return 'pending';
+      }
       return outcome;
     });
   }
@@ -162,13 +172,18 @@ export class NamedKaVmLifecycleRepair {
     const due = await this.serial(async () => {
       if (this.stopped) return [];
       await this.load();
-      return [...this.entries].filter(([, entry]) => !entry.rejected && entry.nextAttemptAt <= this.now())
+      return [...this.entries].filter(([, entry]) => entry.retention !== 'historical-unbound' && !entry.rejected && entry.nextAttemptAt <= this.now())
         .sort((a, b) => a[1].nextAttemptAt - b[1].nextAttemptAt).slice(0, 10);
     });
-    for (const [key, entry] of due) {
-      if (this.stopped || signal?.aborted) break;
-      await this.execute(key, entry);
-    }
+    // A held KA must not stall independent assets. The journal and shared KA
+    // locks remain the only serialization boundaries; each pass admits at most ten.
+    const pending = due.values();
+    await Promise.all(Array.from({ length: Math.min(4, due.length) }, async () => {
+      for (const [key, entry] of pending) {
+        if (this.stopped || signal?.aborted) break;
+        await this.execute(key, entry);
+      }
+    }));
   }
   start(): void {
     if (this.worker !== undefined || this.stopping !== undefined) return;

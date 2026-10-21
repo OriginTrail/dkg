@@ -36,8 +36,8 @@ const result = await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
 ## Oxigraph persistence contract
 
 Confirmed named KA lifecycle repair keeps its fsynced journal until the metadata
-store certifies persistence through its explicit `persist` callable. Snapshot
-adapters expose that callable only with a persistence path and complete `flush()` before the
+store certifies persistence through `commitment.commit()` with a `restart-durable`
+guarantee. Snapshot adapters with a persistence path complete `flush()` before the
 journal entry is retired. A SPARQL endpoint that durably commits before returning
 successful mutation responses may opt in with
 `options.writesDurableOnAcknowledgement: true`; this promise is independent of
@@ -60,12 +60,13 @@ path (`oxigraph-persistent`) and to `oxigraph-worker` when that worker is given
 a persistence path. Plain `oxigraph`, and a worker without a persistence path,
 are in-memory stores and provide no restart durability.
 
-Standalone SDK agents without a data directory use the separate explicit
-`commitEphemeral` capability of those memory adapters. Decorators compose it
-through the same queue-draining boundary. This permits confirmed metadata to
-finish within the current process; it cannot retire a durable repair journal.
-Durable hosts require `persist`, and uncertified remote endpoints expose neither
-capability. A standalone agent backed by a durable store still uses `persist`.
+Standalone SDK agents without a data directory may use a `process-local`
+commitment. Decorators compose the same `commitment.commit()` boundary and retain
+its declared durability while draining queued mutations. A process-local commit
+finishes metadata within the current process; it cannot retire a durable repair
+journal. Durable hosts require a `restart-durable` commitment, while uncertified
+remote endpoints expose no commitment. Standalone agents also use the stronger
+guarantee when their backing store supplies it.
 
 ### Mutation and flush semantics
 
@@ -85,6 +86,15 @@ capability. A standalone agent backed by a durable store still uses `persist`.
 - Background flush failures are logged. Explicit `flush()` and `close()` calls
   reject on write, sync, or rename failures so their callers can report that
   recent in-memory changes may not be durable.
+- Serialization writes N-Quads in chunks, and hydration feeds file chunks into
+  one parser. A snapshot can exceed V8's approximately 512 MiB single-string
+  limit. Existing `store.nq` files keep the same format, including blank-node
+  links across chunks. Individual RDF terms must still fit in memory.
+- This remains an in-memory backend with full snapshots. Capturing a consistent
+  snapshot allocates a native quad array proportional to the number of quads;
+  streaming its text does not bound total memory or eliminate full-store disk
+  writes. For large continuously growing graphs, use `oxigraph-server` or
+  Blazegraph and provision memory and disk for the workload.
 
 ### Hydration and corruption
 
@@ -109,7 +119,16 @@ capability. A standalone agent backed by a durable store still uses `persist`.
   from a torn overwrite; it cannot make unflushed memory durable.
 
 The executable regression contract is in
-[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts). The
+[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts) and
+[`test/oxigraph-large-persistence.test.ts`](test/oxigraph-large-persistence.test.ts).
+After building the storage dependency closure, run
+`node scripts/repro/oxigraph-large-snapshot.mjs` from the repository root for
+the larger native-worker check. It writes about 558 MB, verifies every value,
+kills the child process after `flush()`, and checks a fresh worker can reopen
+the data. Allow space for the snapshot and its temporary replacement, and run
+it separately from other memory-intensive devnet workloads. It uses long
+literals to cross the string ceiling; it is not a high-cardinality benchmark.
+The
 [archived WM persistence incident report](../../docs/archive/internal/bugs/wm-persistence-regression.md)
 retains the original diagnosis, reproduction evidence, and fix history.
 
@@ -164,7 +183,7 @@ replace failed before mutation.
 
 | Environment variable | Default | Purpose |
 |---|---:|---|
-| `DKG_STORE_MAX_CONCURRENT` | `8` | Maximum external-store operations in flight. |
+| `DKG_STORE_MAX_CONCURRENT` | `4` | Maximum external-store operations in flight, capped to available CPUs while preserving the default ACK reserve on single-CPU hosts. |
 | `DKG_STORE_ACK_RESERVED_SLOTS` | `1` | In-flight capacity reserved for ACK work. |
 | `DKG_STORE_NORMAL_RESERVED_SLOTS` | `1` | Non-ACK capacity kept available for normal work while background operations are in flight. |
 | `DKG_STORE_BACKGROUND_RESERVED_SLOTS` | `1` | Non-ACK capacity reserved for background progress. |
@@ -179,6 +198,15 @@ Normal and background reserves are normalized against the available non-ACK
 capacity. At least one background slot remains available, and the background
 progress floor is capped to its admission ceiling so conflicting custom values
 cannot leave usable capacity idle.
+
+When only one ordinary slot remains after ACK and health reservations, a
+positive background reservation instead guarantees dispatch opportunities:
+at most eight normal operations start while background work waits before one
+background operation gets its turn. A fresh backlog starts with normal work;
+ACK and health retain priority. This does not bound elapsed waiting time,
+because admitted operations are not preempted. Setting
+`DKG_STORE_BACKGROUND_RESERVED_SLOTS=0` retains strict normal-before-background
+ordering. Schedulers with multiple ordinary slots retain their capacity reserves.
 
 Blazegraph's deadline can also be set per store, which takes precedence over
 the environment default:
@@ -196,3 +224,20 @@ the environment default:
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-core` — configuration types, logging, constants
+
+## Atomic subject replacement with additive rows
+
+`replaceSubjectAndInsert(graphUri, subject, replacementQuads, insertQuads, options)`
+replaces exactly one subject and adds companion rows for other subjects in the
+same named graph in one backend transaction. Both groups must be blank-node free;
+validation runs before mutation or external literal storage. Companion subjects
+are never deleted, so missing immutable request rows can be reasserted while
+preserving existing extra rows. The existing `replaceSubject` remains strictly
+single-subject.
+
+The optional `tryReplaceSubjectAndInsertAtomically` returns `false` only when the
+capability is absent or gives its matching typed preflight refusal. Generic
+SPARQL endpoints need a certified `atomic-update` consistency profile. Execution,
+timeout and postcommit decorator failures propagate: callers must not replay
+through a compatibility fallback after these errors. One HTTP request alone is
+not evidence that an arbitrary endpoint is transactional.

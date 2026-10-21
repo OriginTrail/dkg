@@ -40,6 +40,7 @@ export function confirmedPublishResult() {
     merkleRoot: new Uint8Array([0xde, 0xf0]),
     kaManifest: [],
     status: 'confirmed' as const,
+    localFinalizationComplete: true as const,
     onChainResult: {
       batchId: 11n,
       startKAId: 11n,

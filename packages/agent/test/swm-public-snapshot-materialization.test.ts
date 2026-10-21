@@ -245,6 +245,11 @@ function harness(overrides: HarnessOverrides = {}) {
           events.push('version-read');
           return overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
         },
+        // A newer stored head here is gossip's, written with its content.
+        isNewerStoredHeadMaterialized: async () => {
+          events.push('newer-head-content-checked');
+          return true;
+        },
         replaceGraph: async (graphUri, quads) => {
           events.push('replaced');
           if (overrides.replaceImpl) return overrides.replaceImpl(graphUri, quads);

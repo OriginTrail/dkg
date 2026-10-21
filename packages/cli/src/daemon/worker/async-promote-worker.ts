@@ -1,9 +1,10 @@
+import { createPromoteExecutionAuthority } from './promote-execution-authority.js';
+import { executePromoteRequest } from './execute-promote-request.js';
 /**
  * Async-promote queue worker supervisor.
  *
  * PR #3 of the async-promote-queue series. PR #1 shipped the queue
- * library; PR #2 exposed it to the agent + HTTP routes. This module
- * drains the queue: an in-process queue signal wakes N worker slots,
+ * library and HTTP routes. This module drains the queue: an in-process queue signal wakes N worker slots,
  * with periodic polling retained for durable cross-process writes and
  * retry deadlines. A claimed slot calls `agent.assertion.promote(...)`,
  * then records success or classified failure back into the queue.
@@ -31,7 +32,7 @@
  * Shutdown semantics: RFC §6.2 says do NOT mark `running → queued`
  * on shutdown. We stop polling, let in-flight jobs complete (or
  * timeout), and rely on `recoverOnStartup()` at the next boot to
- * decide what to do with any leases the old worker held.
+ * reclaim immutable bound shares; ambiguous legacy attempts remain parked.
  */
 
 import type {
@@ -46,7 +47,7 @@ import {
   type AsyncPromoteQueue,
   type PromoteAttemptError,
   type PromoteJob,
-  type PromoteRequest,
+  type PromoteRequest, type PromoteExecutionAuthority,
 } from '@origintrail-official/dkg-publisher';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
 import { logPromoteAttemptFailure } from './async-promote-attempt-diagnostics.js';
@@ -180,35 +181,36 @@ class PromoteWorkerShutdownError extends Error {
   }
 }
 
-type FailureBookkeepingStage = 'record_failure' | 'read_failure_outcome';
-
 /** Queue uncertainty is not an operation verdict or permission to replay it. */
-class PromoteFailureBookkeepingUncertainError extends Error {
-  readonly errorName: string = 'unknown';
-  readonly errorCode: string = 'unknown';
-
-  constructor(readonly stage: FailureBookkeepingStage, error?: unknown) {
-    super(`Promote failure bookkeeping is uncertain (${stage})`);
-    this.name = 'PromoteFailureBookkeepingUncertainError';
-    // Capture closed identities only; never retain an arbitrary cause/message.
-    try {
-      if (error instanceof StoreSchedulerBusyError) {
-        this.errorName = 'StoreSchedulerBusyError';
-        this.errorCode = 'STORE_SCHEDULER_BUSY';
-      } else if (isStoreOperationTimeoutError(error)) {
-        this.errorName = 'TimeoutError';
-        this.errorCode = 'STORE_OPERATION_TIMEOUT';
-      } else if (error instanceof PromoteJobLeaseError) {
-        this.errorName = 'PromoteJobLeaseError';
-      } else {
-        this.errorName = safePromoteErrorIdentity(error, 'name') ?? 'unknown';
-        this.errorCode = safePromoteErrorIdentity(error, 'code') ?? 'unknown';
-      }
-    } catch {
-      // Even hostile diagnostic getters cannot turn uncertainty into fatality.
+function failureBookkeepingUncertainty(error: unknown): { errorName: string; errorCode: string } {
+  let errorName = 'unknown';
+  let errorCode = 'unknown';
+  // Capture closed identities only; never retain an arbitrary cause/message.
+  try {
+    if (error instanceof StoreSchedulerBusyError) {
+      errorName = 'StoreSchedulerBusyError';
+      errorCode = 'STORE_SCHEDULER_BUSY';
+    } else if (isStoreOperationTimeoutError(error)) {
+      errorName = 'TimeoutError';
+      errorCode = 'STORE_OPERATION_TIMEOUT';
+    } else if (error instanceof PromoteJobLeaseError) {
+      errorName = 'PromoteJobLeaseError';
+    } else {
+      errorName = safePromoteErrorIdentity(error, 'name') ?? 'unknown';
+      errorCode = safePromoteErrorIdentity(error, 'code') ?? 'unknown';
     }
+  } catch {
+    // Even hostile diagnostic getters cannot turn uncertainty into fatality.
   }
+  return { errorName, errorCode };
 }
+
+export type PromoteJobRunResult<T extends { promotedCount: number }> =
+  | { outcome: 'succeeded'; result: T }
+  | { outcome: 'failed_retrying' | 'failed_terminal'; cause: unknown; error: ClassifiedPromoteError; retiredNoEffect?: true }
+  | { outcome: 'partial_promote_ambiguity'; result: T; cause: unknown; error: ClassifiedPromoteError }
+  | { outcome: 'failure_bookkeeping_uncertain'; cause: unknown; bookkeepingCause: unknown;
+      diagnostic: { errorName: string; errorCode: string } };
 
 export interface PromoteWorkerCounters {
   succeeded: number;
@@ -252,15 +254,12 @@ function isRetryableQueueBookkeepingError(error: unknown): boolean {
  * in-flight heartbeat after that point throws a `PromoteJobLeaseError`,
  * which the heartbeat catcher logs and ignores.
  */
-export async function runPromoteJob(
+export async function runPromoteJob<T extends { promotedCount: number; shareEvidence?: import('@origintrail-official/dkg-publisher').ShareCompletionEvidence }>(
   args: {
     job: PromoteJob;
     queue: AsyncPromoteQueue;
     workerId: string;
-    runPromote: (
-      request: PromoteRequest,
-      markPromoteStarted: () => Promise<void>,
-    ) => Promise<{ promotedCount: number }>;
+    runPromote: (request: PromoteRequest, authority?: PromoteExecutionAuthority) => Promise<T>;
     now: () => number;
     heartbeatIntervalMs: number;
     bookkeepingRetryIntervalMs?: number;
@@ -270,14 +269,7 @@ export async function runPromoteJob(
     log: PromoteWorkerLogger;
     emitMemoryGraphChanged?: (event: PromoteMemoryGraphChangedEvent) => void;
   },
-): Promise<{
-  outcome:
-    | 'succeeded'
-    | 'failed_retrying'
-    | 'failed_terminal'
-    | 'partial_promote_ambiguity';
-  error?: ClassifiedPromoteError;
-}> {
+): Promise<PromoteJobRunResult<T>> {
   const {
     job,
     queue,
@@ -375,70 +367,67 @@ export async function runPromoteJob(
     }
   }
 
-  try {
-    let result: { promotedCount: number };
-    let promoteStartedMarked = false;
-    const markPromoteStarted = async (): Promise<void> => {
-      if (promoteStartedMarked) return;
-      throwIfShutdownInterrupted();
-      await queue.recordCommitMarker(job.jobId, claimToken, 'promoteStarted');
-      promoteStartedMarked = true;
+  async function recordPromotionFailure(err: unknown, promoteStarted: boolean): Promise<PromoteJobRunResult<T>> {
+    throwIfShutdownInterrupted();
+    const classified = classifyPromoteError(err, { boundRecovery: job.request.recoveryBinding !== undefined });
+    const message = err instanceof Error ? err.message : String(err);
+    logPromoteAttemptFailure({
+      job,
+      err,
+      message,
+      classified,
+      promoteStarted,
+      log,
+    });
+    // Persist the producer-owned diagnostic code (closed set) so the
+    // post-commit recovery sweep can key on it without parsing prose.
+    const attemptError: PromoteAttemptError = {
+      message,
+      retryable: classified.retryable,
+      classification: classified.classification,
+      recordedAt: now(),
+      ...(classified.diagnostic ? { diagnosticCode: classified.diagnostic.code } : {}),
+      ...('noEffectProof' in classified ? {noEffectProof: classified.noEffectProof} : {}),
     };
     try {
-      result = await runPromote(job.request, markPromoteStarted);
+      const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
+      const transition = await persistWithRecovery(
+        'record failure',
+        bookkeepingDeadlineAt,
+        () => queue.fail(job.jobId, claimToken, attemptError),
+      );
+      throwIfShutdownInterrupted();
+      return { outcome: transition.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal', cause: err, error: classified,
+        ...(transition.state === 'failed' && transition.retiredNoEffect ? {retiredNoEffect: true as const} : {}) };
+    } catch (failErr: unknown) {
+      if (failErr instanceof PromoteWorkerShutdownError) throw failErr;
+      // The write may have committed without an acknowledgement. A lost lease
+      // also forbids attributing another worker's outcome to this attempt.
+      return { outcome: 'failure_bookkeeping_uncertain', cause: err, bookkeepingCause: failErr, diagnostic: failureBookkeepingUncertainty(failErr) };
+    }
+  }
+
+  try {
+    // Queue ownership is established before the executor can mutate the asset.
+    // A failed marker write has its own boundary, separate from promotion failures.
+    try {
+      await persistWithRecovery('record promoteStarted', now() + Math.max(0, bookkeepingRetryBudgetMs),
+        () => queue.recordCommitMarker(job.jobId, claimToken, 'promoteStarted'));
+    } catch (cause) {
+      throwIfShutdownInterrupted();
+      if (job.request.recoveryBinding) {
+        // An uncertain fenced write retains its owner for ordinary lease recovery.
+        return { outcome: 'failure_bookkeeping_uncertain', cause, bookkeepingCause: cause,
+          diagnostic: failureBookkeepingUncertainty(cause) };
+      }
+      return await recordPromotionFailure(cause, false);
+    }
+    let result: T;
+    try {
+      result = await runPromote(job.request, job.request.recoveryBinding
+        ? createPromoteExecutionAuthority(queue, job.jobId, claimToken, now, throwIfShutdownInterrupted) : undefined);
     } catch (err: unknown) {
-      throwIfShutdownInterrupted();
-      const classified = classifyPromoteError(err);
-      const message = err instanceof Error ? err.message : String(err);
-      logPromoteAttemptFailure({
-        job,
-        err,
-        message,
-        classified,
-        promoteStarted: promoteStartedMarked,
-        log,
-      });
-      // Persist the producer-owned diagnostic code (closed set) so the
-      // post-commit recovery sweep can key on it without parsing prose.
-      const attemptError: PromoteAttemptError = {
-        message,
-        retryable: classified.retryable,
-        classification: classified.classification,
-        recordedAt: now(),
-        ...(classified.diagnostic ? { diagnosticCode: classified.diagnostic.code } : {}),
-      };
-      try {
-        const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
-        await persistWithRecovery(
-          'record failure',
-          bookkeepingDeadlineAt,
-          () => queue.fail(job.jobId, claimToken, attemptError),
-        );
-      } catch (failErr: unknown) {
-        if (failErr instanceof PromoteWorkerShutdownError) throw failErr;
-        // The write may have committed without an acknowledgement. A lost lease
-        // also forbids attributing another worker's outcome to this attempt.
-        throw new PromoteFailureBookkeepingUncertainError('record_failure', failErr);
-      }
-      // Determine final outcome by re-reading state — the queue decides retrying vs terminal.
-      throwIfShutdownInterrupted();
-      let updated: PromoteJob | null;
-      try {
-        updated = await queue.getStatus(job.jobId);
-      } catch (readErr: unknown) {
-        throwIfShutdownInterrupted();
-        if (readErr instanceof PromoteWorkerShutdownError) throw readErr;
-        throw new PromoteFailureBookkeepingUncertainError('read_failure_outcome', readErr);
-      }
-      if (
-        !updated
-        || updated.attempt.count !== job.attempt.count
-        || (updated.state !== 'failed_retrying' && updated.state !== 'failed')
-      ) {
-        throw new PromoteFailureBookkeepingUncertainError('read_failure_outcome');
-      }
-      const outcome = updated.state === 'failed_retrying' ? 'failed_retrying' : 'failed_terminal';
-      return { outcome, error: classified };
+      return await recordPromotionFailure(err, true);
     }
 
     // Plan §7 recommendation (b): single OUTER commit-marker after
@@ -470,6 +459,7 @@ export async function runPromoteJob(
         queue.succeed(job.jobId, claimToken, {
           promotedCount: result.promotedCount,
           succeededAt: now(),
+          ...(job.request.agentAddress && result.shareEvidence ? { shareEvidence: result.shareEvidence } : {}),
         }),
       );
     } catch (bookkeepingErr: unknown) {
@@ -487,7 +477,7 @@ export async function runPromoteJob(
           `Operator action: inspect SWM/VM for the assertion before any /recover.`,
       );
       return {
-        outcome: 'partial_promote_ambiguity',
+        outcome: 'partial_promote_ambiguity', result, cause: bookkeepingErr,
         error: {
           retryable: false,
           classification: 'fatal',
@@ -513,7 +503,7 @@ export async function runPromoteJob(
       }
     }
 
-    return { outcome: 'succeeded' };
+    return { outcome: 'succeeded', result };
   } finally {
     shutdownSignal?.removeEventListener('abort', stopHeartbeats);
     stopHeartbeats();
@@ -672,21 +662,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           job: claimed,
           queue: config.agent.promoteQueue,
           workerId: slot.workerId,
-          runPromote: async (request, markPromoteStarted) => {
-            const entities: 'all' | string[] | undefined =
-              request.entities === undefined
-                ? undefined
-                : request.entities === 'all'
-                ? 'all'
-                : [...request.entities];
-            await markPromoteStarted();
-            return config.agent.assertion.promote(request.contextGraphId, request.assertionName, {
-              entities,
-              subGraphName: request.subGraphName,
-              ...(request.agentAddress ? { agentAddress: request.agentAddress } : {}),
-              ...(request.authorAgentAddress ? { authorAgentAddress: request.authorAgentAddress } : {}),
-            });
-          },
+          runPromote: (request, executionAuthority) => executePromoteRequest(config.agent, request, { executionAuthority }),
           now,
           heartbeatIntervalMs,
           bookkeepingRetryIntervalMs: config.bookkeepingRetryIntervalMs,
@@ -706,6 +682,16 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           case 'failed_terminal':
             counters.failedTerminal += 1;
             break;
+          case 'failure_bookkeeping_uncertain':
+            log(`[async-promote-worker] ${JSON.stringify({
+              event: 'async_promote_failure_bookkeeping_uncertain', schemaVersion: 1,
+              jobId: claimed.jobId, attempt: claimed.attempt.count,
+              maxAttempts: claimed.attempt.maxRetries, stage: 'record_failure',
+              ...outcome.diagnostic,
+            })}`);
+            // The runner stopped heartbeats. Trust a committed outcome, or let
+            // existing lease reconciliation hold an ambiguous started promote.
+            break;
           case 'partial_promote_ambiguity':
             counters.partialPromoteAmbiguity += 1;
             break;
@@ -716,21 +702,6 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           log(
             `Worker ${slot.workerId} stopped bookkeeping for ${claimed.jobId} after shutdown timeout`,
           );
-          return;
-        }
-        if (err instanceof PromoteFailureBookkeepingUncertainError) {
-          log(`[async-promote-worker] ${JSON.stringify({
-            event: 'async_promote_failure_bookkeeping_uncertain',
-            schemaVersion: 1,
-            jobId: claimed.jobId,
-            attempt: claimed.attempt.count,
-            maxAttempts: claimed.attempt.maxRetries,
-            stage: err.stage,
-            errorName: err.errorName,
-            errorCode: err.errorCode,
-          })}`);
-          // The runner stopped heartbeats. Trust a committed outcome, or let
-          // existing lease reconciliation hold an ambiguous started promote.
           return;
         }
         log(`Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${message}`);

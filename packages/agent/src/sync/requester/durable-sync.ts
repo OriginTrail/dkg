@@ -1,3 +1,4 @@
+import type { DetailedDurableSyncResult } from './durable-sync-result.js';
 import { randomUUID } from 'node:crypto';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
@@ -45,7 +46,7 @@ import {
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import {
   normalizeDurableSyncContext,
-  type LegacyDurableSyncContext,
+  type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
 } from './durable-sync-compat.js';
 import {
   classifyExactDurableFetch,
@@ -54,6 +55,7 @@ import {
   filterExactAssetDurablePayload,
   mergeExactAssetResponderCapability,
   mergeExactDurableFetchDisposition,
+  type ExactAssetFetchSessionPolicy,
   type ExactAssetResponderCapability,
   type ExactDurableFetchDisposition,
 } from './exact-durable-fetch.js';
@@ -111,13 +113,7 @@ function normalizeDurableSyncAbortReason(reason: unknown): Error {
   return error;
 }
 
-export interface DetailedDurableSyncResult {
-  readonly result: InitializedDurableSyncResult;
-  /** Present only when this physical run used an exact-asset filter. */
-  readonly exactFetchDisposition?: ExactDurableFetchDisposition;
-  /** Present when a clean legacy response proved the exact filter was ignored. */
-  readonly exactResponderCapability?: ExactAssetResponderCapability;
-}
+export type { DetailedDurableSyncResult } from './durable-sync-result.js';
 
 /** Invocation-local proof material returned by the non-durable exact fetch. */
 export interface ChallengeExactAssetFetchResult {
@@ -337,6 +333,7 @@ export interface DurableSyncContext {
   exactAssetSelectionFor?: (
     contextGraphId: string,
   ) => UalOnlyExactAssetSelection | undefined;
+  exactAssetFetchPolicyFor?: (contextGraphId: string) => Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }> | undefined;
   /** Present only for the graph-owned bounded recovery runner. */
   durableMetaContinuation?: DurableMetaContinuation;
   stopOnBackoffWorthyFailure?: boolean;
@@ -366,6 +363,8 @@ export interface DurableSyncContext {
     dataRejectedMissingMeta: number;
   }>;
   storeInsert: (request: DurableSyncStoreInsertRequest) => Promise<void>;
+  /** The recovery policy admits the entire verified page before its first commit. */
+  admitVerifiedPage?: (page: ReturnType<typeof partitionVerifiedGraphScopedAssets>) => void;
   /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
   storeGraphScopedAsset?: (
     request: DurableSyncGraphScopedStoreRequest,
@@ -386,7 +385,7 @@ export interface DurableSyncContext {
  */
 export interface ChallengeExactAssetFetchContext extends Omit<
   DurableSyncContext,
-  'exactAssetSelectionFor' | 'storeGraphScopedAsset' | 'deleteCheckpoint' | 'setCheckpoint'
+  'exactAssetSelectionFor' | 'exactAssetFetchPolicyFor' | 'storeGraphScopedAsset' | 'deleteCheckpoint' | 'setCheckpoint'
 > {
   challengeSelectionFor: (
     contextGraphId: string,
@@ -397,10 +396,10 @@ export interface ChallengeExactAssetFetchContext extends Omit<
 }
 
 interface InternalDurableSyncContext extends Omit<
-  DurableSyncContext,
-  'exactAssetSelectionFor'
+  NormalizedDurableSyncContext,
+  'exactAssetFetchPolicyFor'
 > {
-  exactAssetSelectionFor?: (contextGraphId: string) => ExactAssetSelection | undefined;
+  exactAssetFetchPolicyFor?: (contextGraphId: string) => ExactAssetFetchSessionPolicy | undefined;
   authenticateChallengePinnedAsset?: (
     request: DurableSyncChallengePinnedAuthenticationRequest,
   ) => Promise<ChallengePinnedGraphScopedAsset>;
@@ -566,6 +565,7 @@ export async function runDurableSyncDetailed(
   const detailed = await runDurableSyncWithBudget(normalizeDurableSyncContext(context));
   return {
     result: detailed.result,
+    ...(detailed.committedExactAssetUals === undefined ? {} : { committedExactAssetUals: detailed.committedExactAssetUals }),
     ...(detailed.exactFetchDisposition === undefined
       ? {}
       : { exactFetchDisposition: detailed.exactFetchDisposition }),
@@ -585,7 +585,7 @@ export async function runChallengeExactAssetFetch(
   } = context;
   const detailed = await runDurableSyncWithBudget({
     ...sharedContext,
-    exactAssetSelectionFor: challengeSelectionFor,
+    exactAssetFetchPolicyFor: (contextGraphId) => exactAssetFetchSessionPolicy(challengeSelectionFor(contextGraphId)),
     authenticateChallengePinnedAsset,
     // Proof bytes are invocation-local. The proof-only entry point cannot
     // observe or mutate durable checkpoints, and the executor forces fresh
@@ -617,7 +617,7 @@ async function runDurableSyncWithBudget(
     signal,
     fetchSyncPages,
     sinceBatchIdFor,
-    exactAssetSelectionFor,
+    exactAssetFetchPolicyFor,
     durableMetaContinuation,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
@@ -647,6 +647,7 @@ async function runDurableSyncWithBudget(
   const exactFetchDispositions: ExactDurableFetchDisposition[] = [];
   const exactResponderCapabilities: (ExactAssetResponderCapability | undefined)[] = [];
   const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
+  const committedExactAssetUals: string[] = [];
 
   const recordPhaseOutcome = (
     result: SyncPageResult,
@@ -792,10 +793,8 @@ async function runDurableSyncWithBudget(
         ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
         : deadline;
       const sinceBatchId = sinceBatchIdFor?.(pid);
-      const exactAssetSelection = exactAssetSelectionFor?.(pid);
-      const exactFetchPolicy = exactAssetSelection === undefined
-        ? undefined
-        : exactAssetFetchSessionPolicy(exactAssetSelection);
+      const exactFetchPolicy = exactAssetFetchPolicyFor?.(pid);
+      const exactAssetSelection = exactFetchPolicy?.selection;
       const isProofOnlyChallengeFetch = exactFetchPolicy?.kind === 'ephemeral-challenge';
       if (isProofOnlyChallengeFetch && !proofOnlyChallengeFetch) {
         throw new Error('Challenge-pinned exact retrieval requires the proof-only entry point');
@@ -1338,26 +1337,13 @@ async function runDurableSyncWithBudget(
         processed.verifiedMeta,
         processed.verifiedGraphScopedDataGraphs ?? [],
       );
-      if (
-        partitioned.assets.length > 0
-        && exactAssetSelection?.kind !== 'challenge-pinned'
-        && !storeGraphScopedAsset
-      ) {
-        throw Object.assign(
-          new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
-          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
-        );
-      }
-      if (
-        partitioned.assets.length > 0
-        && exactAssetSelection?.kind === 'challenge-pinned'
-        && !authenticateChallengePinnedAsset
-      ) {
-        throw Object.assign(
-          new Error('Challenge-pinned durable sync requires a proof-only authentication path'),
-          { code: 'VM_CHALLENGE_AUTHENTICATION_UNSUPPORTED' },
-        );
-      }
+      context.admitVerifiedPage?.(partitioned);
+      if (partitioned.assets.length && exactAssetSelection?.kind !== 'challenge-pinned' && !storeGraphScopedAsset)
+        throw Object.assign(new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
+          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
+      if (partitioned.assets.length && exactAssetSelection?.kind === 'challenge-pinned' && !authenticateChallengePinnedAsset)
+        throw Object.assign(new Error('Challenge-pinned durable sync requires a proof-only authentication path'),
+          { code: 'VM_CHALLENGE_AUTHENTICATION_UNSUPPORTED' });
       // A rootless manifest contains only exact graph assets in the DATA
       // ordering. When there are no deferred legacy rows, each authenticated
       // atomic materialization is therefore a durable continuation boundary.
@@ -1417,6 +1403,7 @@ async function runDurableSyncWithBudget(
             signal,
           });
           if (outcome === 'applied') {
+            if (exactAssetSelection !== undefined) committedExactAssetUals.push(asset.ual);
             // Materialization is atomic per asset, not per fetched page. Account
             // for each committed asset immediately so a later asset failure does
             // not erase truthful progress from the returned summary.
@@ -1570,7 +1557,7 @@ async function runDurableSyncWithBudget(
 
   return {
     result,
-    ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
+    ...(exactFetchDisposition ? { exactFetchDisposition, committedExactAssetUals: Object.freeze([...committedExactAssetUals]) } : {}),
     ...(exactResponderCapability ? { exactResponderCapability } : {}),
     ...(authenticatedExactAssets.length === 0
       ? {}

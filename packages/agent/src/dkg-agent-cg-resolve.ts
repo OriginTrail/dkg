@@ -212,6 +212,7 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
+import { claimedAgentSyncRequestSigner } from './sync/auth/request-signing.js';
 import { normalizeExactSyncResponseEncoding } from './sync/wire-compression.js';
 import {
   normalizeExactAssetUals,
@@ -1544,7 +1545,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       getIdentityId: () => this.chain.getIdentityId(),
       signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
       claimedAgentAddress: claimedAgentAddress,
-      claimedAgentPrivateKey: claimedAgent?.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(this.config?.authorSigners, claimedAgentAddress, claimedAgent),
     });
   }
 
@@ -1682,8 +1683,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical authority for a registered context graph.
-   *
+   * Canonical registered-graph authority.
    * All security-sensitive consumers use this discriminant so an authority
    * outage cannot be confused with an unregistered graph and fall through to
    * local/RFC-64 policy. Mutation, encryption rosters, subscription admission,
@@ -1746,6 +1746,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       {
         signal: options.signal,
         registrationTimeoutMs: options.registrationTimeoutMs,
+        retainFinalizedSnapshot: options.authorityReadMode === 'finalized-index',
         ...(options.durableSubscriptionBinding === undefined
           ? {}
           : { durableSubscriptionBinding: options.durableSubscriptionBinding }),
@@ -1773,6 +1774,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       const finalized = await resolveFinalizedOnChainAccessPolicyState(
         {
           indexReader: this.chain.contextGraphAuthorityIndexRevisionReader,
+          registrationSnapshot: registration.finalizedSnapshot,
           authorityReads: this.rfc64AuthorityReadCoordinatorV1,
           readSnapshot: (id, readOptions) => this.readFinalizedContextGraphAuthoritySnapshotV1(id, readOptions),
           requestTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,

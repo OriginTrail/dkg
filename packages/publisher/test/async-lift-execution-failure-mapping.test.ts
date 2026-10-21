@@ -23,11 +23,15 @@ import {
   type ExecutionFailureEvidence,
   type LiftJobFailureCode,
   type LiftJobState,
+  type TripleStoreAsyncLiftPublisher,
 } from '../src/index.js';
 import { isKnowledgeAssetPublishPreconditionFailure, mapExecutionFailure } from '../src/async-lift-execution-failure.js';
+import { CONTROL_STATUS } from '../src/async-lift-control-plane.js';
+import { isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 import {
   TX_HASH,
   corruptHeadError,
+  confirmedPublishResult,
   createAsyncLift2270Harness,
   expectFailed,
 } from './_helpers/async-lift-2270-harness.js';
@@ -87,6 +91,11 @@ const withCode = (message: string, fields: Record<string, unknown>) => Object.as
 const authorityUnavailable = (reason?: string) => withCode('registered-CG authority gate refused', {
   code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE', ...(reason === undefined ? {} : { reason }),
 });
+// Proposed publisher-local contract; no production export is needed to author the regression.
+const catalogProofUnavailable = (site = 'finalized-proof', cause: unknown = exhaustedWithoutKeywords()) =>
+  withCode('Catalog floor verification could not complete', {
+    code: 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE', site, cause,
+  });
 const txHashBearingKeywordless = () => new RpcEndpointsExhaustedError(
   'publish transaction preparation failed on all configured RPC endpoints: 429 Too Many Requests',
   { rpcUrls: [], txHash: TX_HASH },
@@ -326,6 +335,174 @@ describe('GH#2945 recordExecutionFailure: the failure decision, characterized th
     await expect(session.recordExecutionFailure('claimed', nullPrototypeThrow())).rejects.toThrow();
 
     expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+  });
+});
+
+describe('catalog proof availability at the real queued execution boundary', () => {
+  function expectCatalogFailure(job: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['processNext']>>) {
+    if (job?.status !== 'failed') throw new Error(`expected failed, got ${job?.status ?? 'null'}`);
+    return job;
+  }
+  async function expectHeldWalletExcludesEligibleSibling(publisher: TripleStoreAsyncLiftPublisher) {
+    const siblingId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      contextGraphId: 'catalog-guard-independent-sibling',
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    }));
+    expect(await publisher.getStatus(siblingId)).toMatchObject({ status: 'accepted' });
+    // Same queue and eligible job: only the proof-bound wallet must be excluded.
+    expect(await publisher.claimNext('wallet-1')).toBeNull();
+    expect(await publisher.claimNext('wallet-2')).toMatchObject({
+      jobId: siblingId, status: 'claimed', claim: { walletId: 'wallet-2' },
+    });
+  }
+
+  it('retries a typed unavailable proof only before dispatch, retaining the same job', async () => {
+    const h = createAsyncLift2270Harness();
+    const { stage } = createStoreRejectionFixtures(h);
+    const attempts = { n: 0 };
+    let writeAhead = 0;
+    let sends = 0;
+    const publisher = h.createPublisher({
+      ...RETRY_LANE,
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          attempts.n += 1;
+          if (attempts.n === 1) throw catalogProofUnavailable();
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 7, operationKind: 'create' });
+          writeAhead += 1;
+          sends += 1; // Deterministic adapter send seam; no network or signing.
+          const confirmed = confirmedPublishResult();
+          return { ...confirmed, localFinalizationComplete: true, onChainResult: { ...confirmed.onChainResult, txHash: TX_HASH } };
+        },
+      },
+    });
+    await stage();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = expectCatalogFailure(await publisher.processNext('wallet-1'));
+    expect(failed.failure).toMatchObject({ code: 'authority_unavailable', failedFromState: 'validated' });
+    expect(failed.timestamps.nextRetryAt).toEqual(expect.any(Number));
+    expect(failed.broadcast).toBeUndefined();
+    expect({ writeAhead, sends }).toEqual({ writeAhead: 0, sends: 0 });
+    h.advance(10_000);
+    expect(await publisher.processNext('wallet-1')).toMatchObject({ jobId, status: 'finalized' });
+    expect(attempts.n).toBe(2);
+    expect({ writeAhead, sends }).toEqual({ writeAhead: 1, sends: 1 });
+  });
+
+  it.each(['broadcast', 'included'] as const)(
+    'keeps real %s transaction evidence despite a later typed unavailable proof', async (state) => {
+      const h = createAsyncLift2270Harness();
+      const { stage } = createStoreRejectionFixtures(h);
+      let attempts = 0;
+      let include: (() => Promise<void>) | undefined;
+      const publisher = h.createPublisher({
+        ...RETRY_LANE,
+        knowledgeAssetVmPublishHandler: {
+          execute: async (input) => {
+            attempts += 1;
+            await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 7, operationKind: 'create' });
+            await include?.();
+            throw catalogProofUnavailable();
+          },
+        },
+      });
+      await stage();
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+      if (state === 'included') include = () => publisher.update(jobId, 'included', {
+        broadcast: { txHash: TX_HASH, walletId: 'wallet-1' },
+        inclusion: { txHash: TX_HASH, blockNumber: 42 },
+      });
+      const processed = await publisher.processNext('wallet-1');
+      expect(processed).toMatchObject({ jobId, status: state, broadcast: { txHash: TX_HASH, walletId: 'wallet-1' } });
+      if (state === 'included') expect(processed).toHaveProperty('inclusion.txHash', TX_HASH);
+      expect(processed?.timestamps.nextRetryAt).toBeUndefined();
+      expect(await publisher.recover()).toBe(0);
+      h.advance(10_000);
+      expect(await publisher.processNext('wallet-2')).toBeNull();
+      await expectHeldWalletExcludesEligibleSibling(publisher);
+      expect(await publisher.getStatus(jobId)).toMatchObject({ status: state, broadcast: { txHash: TX_HASH, walletId: 'wallet-1' } });
+      expect(attempts).toBe(1);
+    },
+  );
+
+  it.each([
+    ['unknown site', () => catalogProofUnavailable('unregistered-proof-site')],
+    ['permanent cause', () => catalogProofUnavailable('finalized-proof', new Error('unsupported implementation'))],
+    ['missing site', () => withCode('Catalog proof refused', { code: 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE', cause: exhaustedWithoutKeywords() })],
+    ['missing code', () => withCode('Catalog proof refused', { site: 'finalized-proof', cause: exhaustedWithoutKeywords() })],
+    ['missing cause', () => withCode('Catalog proof refused', { code: 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE', site: 'finalized-proof' })],
+    ['transaction-bearing cause', () => catalogProofUnavailable('finalized-proof', txHashBearingKeywordless())],
+    ['rewrapped cause', () => catalogProofUnavailable('finalized-proof', new Error('wrapped', { cause: exhaustedWithoutKeywords() }))],
+    ...(['txHash', 'transactionHash', 'receipt'] as const).map((key) => [
+      `outer ${key} evidence`, () => Object.assign(catalogProofUnavailable(), { [key]: TX_HASH }),
+    ] as const),
+    ...(['code', 'site', 'cause', 'txHash', 'transactionHash', 'receipt'] as const).map((key) => [
+      `throwing ${key} accessor`,
+      () => Object.defineProperty(catalogProofUnavailable(), key, { get() { throw new Error('hostile accessor'); } }),
+    ] as const),
+  ] as const)('does not automatically retry a marker with %s', async (_label, error) => {
+    const h = createAsyncLift2270Harness();
+    const { stage, failsOnceThenPublishes } = createStoreRejectionFixtures(h);
+    const attempts = { n: 0 };
+    const publisher = h.createPublisher({
+      ...RETRY_LANE,
+      knowledgeAssetVmPublishHandler: failsOnceThenPublishes(error, attempts),
+    });
+    await stage();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = expectCatalogFailure(await publisher.processNext('wallet-1'));
+    expect(failed.timestamps.nextRetryAt).toBeUndefined();
+    expect(failed.failure.code).not.toBe('authority_unavailable');
+    h.advance(10_000);
+    expect(await publisher.processNext('wallet-2')).toBeNull();
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    expect(attempts.n).toBe(1);
+  });
+
+  it('does not let a typed unavailable proof bypass a failed write-ahead rollback', async () => {
+    const h = createAsyncLift2270Harness();
+    const { stage } = createStoreRejectionFixtures(h);
+    const write = h.store.replaceSubjectAndInsert.bind(h.store);
+    let armed = false;
+    let rejectedRollback = false;
+    let attempts = 0;
+    h.store.flush = async () => { armed = true; throw schedulerBusy(); };
+    h.store.replaceSubjectAndInsert = async (...args) => {
+      if (armed && !rejectedRollback) {
+        expect(args[2].find((quad) => quad.predicate === CONTROL_STATUS)?.object).toBe('"validated"');
+        rejectedRollback = true;
+        throw schedulerBusy();
+      }
+      return await write(...args);
+    };
+    const publisher = h.createPublisher({
+      ...RETRY_LANE,
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          attempts += 1;
+          try {
+            await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 7, operationKind: 'create' });
+          } catch {
+            // Even a recognized error cannot override the remaining canonical tx carrier.
+            throw catalogProofUnavailable();
+          }
+          throw new Error('unexpected successful write-ahead');
+        },
+      },
+    });
+    await stage();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = expectCatalogFailure(await publisher.processNext('wallet-1'));
+    expect(rejectedRollback).toBe(true);
+    expect(failed.failure.failedFromState).toBe('broadcast');
+    expect(failed.broadcast?.txHash).toBe(TX_HASH);
+    expect(isHeldForChainProof(failed)).toBe(true);
+    expect(failed.timestamps.nextRetryAt).toBeUndefined();
+    h.advance(10_000);
+    expect(await publisher.processNext('wallet-2')).toBeNull();
+    await expectHeldWalletExcludesEligibleSibling(publisher);
+    expect(await publisher.getStatus(jobId)).toMatchObject({ status: 'failed', broadcast: { txHash: TX_HASH, walletId: 'wallet-1' } });
+    expect(attempts).toBe(1);
   });
 });
 

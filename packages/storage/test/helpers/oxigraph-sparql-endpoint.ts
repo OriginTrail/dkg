@@ -74,7 +74,7 @@ export interface OxigraphSparqlEndpoint {
 }
 
 export async function startOxigraphSparqlEndpoint(options: {
-  /** Persist the complete store before acknowledging any successful mutation. */
+  maxRequestBytes?: number;
   persistBeforeAcknowledgement?: (store: InstanceType<typeof oxigraph.Store>) => Promise<void>;
 } = {}): Promise<OxigraphSparqlEndpoint> {
   const store = new oxigraph.Store();
@@ -88,9 +88,16 @@ export async function startOxigraphSparqlEndpoint(options: {
     return result;
   };
   const server: Server = createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => { body += c; });
+    let body = '', bytes = 0, rejected = false;
+    req.on('data', (c: Buffer) => {
+      if (rejected) return;
+      bytes += c.length;
+      if (bytes > (options.maxRequestBytes ?? Infinity)) {
+        rejected = true; body = ''; res.writeHead(413); res.end('SPARQL request too large');
+      } else body += c;
+    });
     req.on('end', async () => {
+      if (rejected) return;
       try {
         const contentType = String(req.headers['content-type'] ?? '');
         // Daemon reset/ownership requests use SPARQL Protocol form encoding;

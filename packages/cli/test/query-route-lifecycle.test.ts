@@ -79,13 +79,13 @@ function queryRouteContext(
   return {
     req,
     res,
-    agent,
+    agent: { resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'fixture-node', metadataBootstrap: 'eligible' }), ...agent },
     tracker,
     validTokens: new Set<string>(),
     url: new URL('http://127.0.0.1/api/query'),
     path: '/api/query',
     requestAgentAddress: '',
-    authentication: requestAuthentication({ kind: 'anonymous' }),
+    authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
   } as unknown as RequestContext;
 }
 
@@ -338,6 +338,17 @@ describe('/api/query request lifecycle', () => {
       },
     )).toBeNull();
     expect(res.writableEnded).toBe(false);
+  });
+
+  it.each([undefined, 'core-cache', 'rpc-only', 'auto', null, 1])('validates query evidence mode %s before execution', async chainEvidenceMode => {
+    const res = new ResponseStub();
+    const agent = { query: vi.fn(async (_sparql: string, _options: unknown) => ({ type: 'bindings', bindings: [] })) };
+    const tracker = { start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(), complete: vi.fn(), fail: vi.fn(), cancel: vi.fn() };
+    await handleQueryRoutes(queryRouteContext(new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', chainEvidenceMode }), res, agent, tracker));
+    const valid = chainEvidenceMode === undefined || chainEvidenceMode === 'core-cache' || chainEvidenceMode === 'rpc-only';
+    expect(res.statusCode).toBe(valid ? 200 : 400);
+    expect(agent.query).toHaveBeenCalledTimes(valid ? 1 : 0);
+    if (valid) expect(agent.query.mock.calls[0]?.[1]).toMatchObject({ chainEvidenceMode });
   });
 
   it('passes the lifecycle admission options through the actual route handoff', async () => {

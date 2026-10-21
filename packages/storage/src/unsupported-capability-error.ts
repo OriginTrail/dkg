@@ -11,8 +11,10 @@ export type TripleStoreCapability =
   | 'update'
   | 'atomicUpdate'
   | 'replaceGraph'
+  | 'replaceAssetGroup'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'replaceSubjectAndInsert'
   | 'rfc64AuthorCommitCasV1';
 
 /**

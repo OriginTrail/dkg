@@ -38,6 +38,19 @@ export async function withKeyedLocks<T>(
   }
 }
 
+/** Acquire all keys immediately or leave the map untouched; never queue a callback.
+ * Availability inspection and the canonical helper's gate installation are synchronous.
+ */
+export async function tryWithKeyedLocks<T>(
+  lockMap: Map<string, Promise<void>>,
+  keys: string[],
+  fn: () => Promise<T>,
+): Promise<{ acquired: true; value: T } | { acquired: false }> {
+  if (keys.some(key => lockMap.has(key))) return { acquired: false };
+  const value = await withKeyedLocks(lockMap, keys, fn);
+  return { acquired: true, value };
+}
+
 /**
  * The per-KA SWM write-lock key.
  *
@@ -69,16 +82,4 @@ export function swmKaWriteLockKey(
     ? `${contextGraphId}\0${subGraphName}`
     : contextGraphId;
   return `${lockNamespace}\0ka\0${kaUal.toLowerCase()}`;
-}
-
-/** Every mutation of a named KA's lifecycle descriptor shares this exact lock domain. */
-export function assertionLifecycleWriteLockKey(
-  contextGraphId: string,
-  name: string,
-  agentAddress: string,
-  subGraphName?: string,
-): string {
-  const normalizedAgentAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
-    ? agentAddress.toLowerCase() : agentAddress;
-  return `assertion-lifecycle:${JSON.stringify([contextGraphId, subGraphName ?? '', normalizedAgentAddress, name])}`;
 }

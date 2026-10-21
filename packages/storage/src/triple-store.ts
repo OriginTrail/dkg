@@ -19,6 +19,7 @@ import {
   type ChangelogStoreOptions,
 } from './changelog-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import type { StoreOperation } from './store-operation-outcome.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
@@ -35,6 +36,8 @@ import type {
 import {
   getManagedOxigraphRuntimeConstructionAuthorityV1,
 } from './managed-oxigraph-runtime-store.js';
+
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 
 export interface Quad {
   subject: string;
@@ -115,9 +118,29 @@ export interface QueryOptions {
    * and reject above this bound before JSON/N-Quads materialization.
    */
   maxResponseBytes?: number;
+  /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
+  maxLiteralHydrationBytes?: number;
+  /**
+   * Named graphs the query must not read: each IRI and every graph below it. The
+   * query runs over the default graph and every other named graph, replacing any
+   * dataset it names; a store that cannot restrict its dataset refuses it.
+   */
+  withheldGraphRoots?: readonly string[];
 }
 
 export type TripleStoreQueryOptions = QueryOptions;
+
+/** Optional backend-owned admission spanning a mutation and decorator bookkeeping.
+ * Each backend request retains its own scheduler slot. Query options remain
+ * telemetry/cancellation values and never confer continuation authority.
+ */
+export interface LogicalStoreMutationCapability {
+  runLogicalMutation<T>(
+    operation: StoreOperation,
+    options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>,
+  ): Promise<T>;
+}
 
 /**
  * Enforces query maxResponseBytes while reading the response body, before
@@ -142,20 +165,21 @@ export interface Rfc64SharedProjectionStreamCapabilityOptionsV1 {
  * on `listGraphs`/`query` reads where it is meaningless.
  */
 export interface UpdateOptions extends QueryOptions {
-  /**
-   * The named graphs whose membership (existence) this UPDATE may change — the graphs
-   * it creates, or empties/drops. When supplied, a graph-set index can maintain itself
-   * INCREMENTALLY (a bounded `hasGraph` per graph) instead of marking the whole index
-   * dirty and forcing a full `SELECT DISTINCT ?g` rebuild on the next read. Omit it for
-   * opaque updates whose affected graphs are not derivable at the call site (those fall
-   * back to a lazy full rebuild).
-   */
+  /** Graphs this UPDATE may create or empty. Enables bounded per-graph index refresh;
+   * omit for opaque updates, which require a lazy full index rebuild. */
   touchedGraphs?: readonly string[];
 }
 
 export interface TripleStore {
   /** Explicit commit boundary and durability guarantee, composed through every decorator. */
   readonly commitment?: TripleStoreCommitCapability;
+  /** Execute a fresh read plan in one admission, at the supplied priority and
+   * original deadline. Reads still go through this store's decorators; no
+   * authorization or results may be cached by this capability. Implementations
+   * serialize underlying reads and retain ownership through cancellation.
+   */
+  withQueryReadAdmission?<T>(work: () => Promise<T>, options?: QueryOptions): Promise<T>;
+  readonly runLogicalMutation?: LogicalStoreMutationCapability['runLogicalMutation'];
   /** Present only when query response limits are enforced before decoding. */
   readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
 
@@ -223,6 +247,9 @@ export interface TripleStore {
    * and fail closed when it is unavailable.
    */
   replaceGraph?(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void>;
+  /** One transaction for distinct assertion/metadata pairs. Refusal must precede mutation. */
+  replaceAssetGroup?(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void>;
+
   /**
    * Atomically replace one complete named graph and every row for one subject
    * in a second named graph. Implementations MUST guarantee one commit boundary
@@ -259,6 +286,19 @@ export interface TripleStore {
     options?: QueryOptions,
   ): Promise<void>;
   /**
+   * Replace one subject and add disjoint companion subjects in the same graph
+   * in ONE transaction. Companion rows are additive, never replaced. Both groups
+   * must be blank-node free and validated before mutation. Unsupported backends
+   * refuse before dispatch; execution failures propagate without fallback.
+   */
+  replaceSubjectAndInsert?(
+    graphUri: string,
+    subject: string,
+    replacementQuads: Quad[],
+    insertQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
+  /**
    * RFC-64 `SYNC_AUTHOR_COMMIT_CAS_V1`: atomically replace one complete shared
    * projection, its author-seal subject, the guarded author current-head
    * pointer, and bounded mutation/applied-set subjects.
@@ -271,6 +311,13 @@ export interface TripleStore {
     input: Rfc64AuthorCommitCasInputV1,
     options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1>;
+  /** Optional projection of a freshly queried nonempty graph inventory into
+   * this store's enumeration visibility. Every decorator must compose its own
+   * rules and its inner store's predicate; never unwrap to discover this capability.
+   * Absence requires normal filtered enumeration. Visibility changes must obey
+   * the same all-writers revision contract as enumeration when revisions exist.
+   */
+  readonly graphEnumerationVisibility?: (graph: string) => boolean;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -338,6 +385,17 @@ export function findTripleStoreCapability<T>(
     candidate = (candidate as { innerStore?: unknown }).innerStore;
   }
   return null;
+}
+
+/** Keep the outer decorator path, discovering only the backend's lifetime owner. */
+export function runLogicalStoreMutation<T>(
+  store: unknown, operation: StoreOperation, options: QueryOptions | undefined,
+  work: (options: QueryOptions | undefined) => Promise<T>,
+): Promise<T> {
+  const owner = findTripleStoreCapability(store, (candidate): candidate is LogicalStoreMutationCapability =>
+    typeof candidate === 'object' && candidate !== null
+      && typeof (candidate as Partial<LogicalStoreMutationCapability>).runLogicalMutation === 'function');
+  return owner ? owner.runLogicalMutation(operation, options, work) : work(options);
 }
 
 /** Discover response-limit enforcement without bypassing the outer query path. */

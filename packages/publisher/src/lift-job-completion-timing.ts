@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { LIFT_JOB_TAIL_STEPS, type LiftJobTailStep } from './lift-job-tail-steps.js';
 
 /**
  * GH#3081 — where an async publish job spends the time between the node observing its chain
@@ -20,6 +21,11 @@ import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
  * next segment starts where the last printed one ended, so the printed segments sum to `totalMs`
  * (up to rounding). An inline publish has no settle, turn or handler mark, so its whole total is
  * `tailMs`: the executor's own post-receipt work and the result writes.
+ *
+ * `tailMs` is split again, by the same rule, at the steps the executor reports as it ends them
+ * ({@link LIFT_JOB_TAIL_STEPS}): one `tail<Step>Ms` field per step and `tailRestMs` for what
+ * follows the last report. A step prints `-` when the executor did not run it, did not report
+ * it, or ended it before the anchor; the printed parts sum to `tailMs` (up to rounding).
  */
 
 /** A total at or above this logs at info; shorter totals log at debug. */
@@ -63,6 +69,8 @@ interface LiftJobTimeline {
   handlerEndAt?: number;
   handlerRuns: number;
   heldFailed: boolean;
+  /** When the executor reported the end of each tail step; at most one mark per step. */
+  tailStepAt?: Partial<Record<LiftJobTailStep, number>>;
 }
 
 /** One bounded timeline per job, dropped when the job's terminal record is written. */
@@ -93,6 +101,18 @@ export class LiftJobCompletionTiming {
   executorSettled(jobId: string): void {
     this.#observe(() => {
       this.#timeline(jobId).settledAt = this.sources.clock();
+    });
+  }
+
+  /**
+   * The executor of `jobId` reports that `step` of its work after the confirmation just ended.
+   * A step reported again, by a retried execution, keeps its last report; a name outside
+   * {@link LIFT_JOB_TAIL_STEPS} is dropped, so a job never holds more marks than there are steps.
+   */
+  tailStep(jobId: string, step: LiftJobTailStep): void {
+    this.#observe(() => {
+      if (!LIFT_JOB_TAIL_STEPS.includes(step)) return;
+      (this.#timeline(jobId).tailStepAt ??= {})[step] = this.sources.clock();
     });
   }
 
@@ -206,11 +226,13 @@ function describeLiftJobPostFinality(
     `totalMs=${formatMs(totalMs)}`,
   ];
   let cursor = anchorAt;
+  let tail: { readonly from: number; readonly to: number } | undefined;
   for (const [name, closedAt] of segments) {
     if (closedAt === undefined || closedAt < cursor) {
       fields.push(`${name}=-`);
       continue;
     }
+    if (name === 'tailMs') tail = { from: cursor, to: closedAt };
     fields.push(`${name}=${formatMs(closedAt - cursor)}`);
     cursor = closedAt;
   }
@@ -220,6 +242,31 @@ function describeLiftJobPostFinality(
     `recoveryAttempts=${timeline.handlerRuns}`,
     `receiptToFinalityMs=${receiptAt !== undefined && finalityAt !== undefined && finalityAt >= receiptAt
       ? formatMs(finalityAt - receiptAt) : '-'}`,
+    ...describeTailSteps(timeline.tailStepAt, tail),
   );
   return { line: `async_publish_post_finality ${fields.join(' ')}`, totalMs };
+}
+
+/**
+ * The split of the printed tail segment at the steps the executor reported, in step order, and
+ * `tailRestMs` for what follows the last one. Every field prints `-` when no tail was printed.
+ */
+function describeTailSteps(
+  marks: LiftJobTimeline['tailStepAt'],
+  tail: { readonly from: number; readonly to: number } | undefined,
+): string[] {
+  const fields: string[] = [];
+  let cursor = tail?.from;
+  for (const step of LIFT_JOB_TAIL_STEPS) {
+    const name = `tail${step[0]!.toUpperCase()}${step.slice(1)}Ms`;
+    const at = marks?.[step];
+    if (tail === undefined || cursor === undefined || at === undefined || at < cursor || at > tail.to) {
+      fields.push(`${name}=-`);
+      continue;
+    }
+    fields.push(`${name}=${formatMs(at - cursor)}`);
+    cursor = at;
+  }
+  fields.push(`tailRestMs=${tail === undefined || cursor === undefined ? '-' : formatMs(tail.to - cursor)}`);
+  return fields;
 }

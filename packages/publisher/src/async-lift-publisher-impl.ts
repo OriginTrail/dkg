@@ -1,3 +1,9 @@
+import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
+import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
+import { completionTrace } from './async-lift-completion-trace.js';
+import { traceProcessNext } from './async-lift-claim-trace.js';
+import { LiftJobStoreSelectors } from './lift-job-store-selectors.js';
+import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
 import { LiftJobChainObservations } from './lift-job-chain-observations.js';
 import { committedLiftJob, type CommittedLiftJob } from './lift-job-committed.js';
 import type { PreBroadcastRecord } from './publisher.js';
@@ -44,6 +50,7 @@ import {
 } from './lift-job.js';
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
+  AsyncKnowledgeAssetVmPublishExecutionResult,
   ActiveLiftJobClaim,
   ActiveLiftJobClaimSession,
   AsyncLiftAdministrativeMutations,
@@ -105,7 +112,7 @@ import {
   type TerminalJobClearOutcome,
 } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
-import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
+import { persistLiftJobRecord } from './job-record-atomic-write.js';
 import {
   isDefinitivePreAcceptanceSendFailure,
   mapPublishExceptionToLiftJobFailure,
@@ -122,18 +129,14 @@ import {
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   DEFAULT_GRAPH_URI,
   DEFAULT_JOURNAL_GRAPH_URI,
-  JOURNAL_SEQ,
   JOURNAL_LIFECYCLE_KEY,
   JOURNAL_JOB_ID,
   PAYLOAD_PREDICATE,
-  STATUS_PREDICATE,
-  ACCEPTED_AT_PREDICATE,
   CONTROL_LIFECYCLE_KEY,
   knowledgeAssetVmPublishLifecycleKey,
-  serializeJournalEntry,
   parseJournalEntry,
+  summarizeJournal,
   serializeVmPublishIntentIndex,
-  compareAcceptedJobs,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
@@ -152,9 +155,7 @@ import {
   rawLiftRequestFromJobRequest,
   jobSubject,
   literal,
-  parseIntegerLiteral,
   requestSubject,
-  serializeJobRecord,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
 import {
@@ -384,7 +385,7 @@ function liveChainRecoveryOrigin(job: LiftJobBroadcast | LiftJobIncluded): Chain
 
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: PersistedLiftJob) => Promise<AsyncPreparedPublishPayload | null>;
-  readonly process: (session: ActiveLiftJobClaimSession) => Promise<LiftJob>;
+  readonly process: (session: WorkerLiftJobClaimSession) => Promise<LiftJob>;
   readonly recoverInterrupted: (
     job: LiftJob,
     scope: LiftJobTransitionScope,
@@ -499,10 +500,6 @@ function resolveKnowledgeAssetVmPublishHandler(
 
 export class TripleStoreAsyncLiftPublisher
   implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer, AsyncLiftDetailedRetrier, AsyncLiftRetryStateReader {
-  // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from the coordinator's claim
-  // queue, so the read-modify-write seq allocation is atomic without touching the claim lock (lock
-  // order is always claim→journal; appendJournal never calls writeJob → no reentrancy).
-  private static readonly journalQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
   // Backoff/jitter defaults live in async-lift-retry-tuning.ts (the shared,
@@ -520,6 +517,7 @@ export class TripleStoreAsyncLiftPublisher
   private readonly graphUri: string;
   private readonly journalGraphUri: string;
   private readonly journalWrites: boolean;
+  private readonly journalCompletion: AsyncLiftJournalCompletion;
   private readonly maxRetries: number;
   private readonly retryBackoffBaseMs: number;
   private readonly retryBackoffMaxMs: number;
@@ -580,6 +578,7 @@ export class TripleStoreAsyncLiftPublisher
    * consumption, invalidation (hash mismatch / terminal disposition), or eviction.
    */
   private readonly chainObservations: LiftJobChainObservations;
+  private readonly jobSelectors: LiftJobStoreSelectors;
   private readonly executorProofHints = new Map<string, {
     readonly txHash: string;
     proof?: {
@@ -596,12 +595,7 @@ export class TripleStoreAsyncLiftPublisher
   /** r15 (3878098525) — which lane leads the next pass; alternates so an overrun in one lane
    * cannot repeatedly consume the other lane's opportunity. Hints lead first for latency. */
   private hintLaneLeads = true;
-  /** Poked when a tx-bearing job stops being executor-owned; see setReconciliationDemandListener. */
-  /** The one atomically-attached scheduling owner; see attachScheduler. */
-  private schedulerListener?: {
-    onReconciliationDemand(): void;
-    onWalletRelease(walletId: string): void;
-  };
+  private readonly queueScheduler: AsyncLiftQueueScheduler;
   /**
    * Rotates the live-lane iteration start across passes. The pass deadline may truncate the walk,
    * and `list()` order is stable, so without rotation the same head jobs would be re-asked every
@@ -676,7 +670,9 @@ export class TripleStoreAsyncLiftPublisher
     config: AsyncLiftPublisherConfig = {},
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
+    this.queueScheduler = new AsyncLiftQueueScheduler(store, this.graphUri);
     this.chainObservations = LiftJobChainObservations.shared(store, this.graphUri);
+    this.jobSelectors = new LiftJobStoreSelectors(store, this.graphUri, (job) => this.chainObservations.project(job));
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
     this.journalWrites = config.journalWrites ?? false;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
@@ -692,6 +688,7 @@ export class TripleStoreAsyncLiftPublisher
     this.retryJitterRatio = retryTuning.retryJitterRatio;
     this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.now = config.now ?? (() => Date.now());
+    this.journalCompletion = new AsyncLiftJournalCompletion(store, this.graphUri, () => this.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.rand = config.rand ?? (() => Math.random());
     assertNoLegacyChainRecoveryResolver(config);
@@ -700,7 +697,7 @@ export class TripleStoreAsyncLiftPublisher
     this.chainProofDispatchBatchSize = config.chainProofDispatchBatchSize ?? 25;
     this.chainProofDispatchTimeBudgetMs = config.chainProofDispatchTimeBudgetMs ?? 15_000;
     this.reconciliationSnapshotCoordinator = new ReconciliationSnapshotCoordinator({
-      readInventory: () => this.list(),
+      readInventory: () => this.jobSelectors.reconciliationInventory(),
       beginScope: () => this.chainProofRetrySchedule.beginPass(this.now()),
       leaseMs: config.reconciliationAcquisitionLeaseMs ?? 30_000,
     });
@@ -727,14 +724,14 @@ export class TripleStoreAsyncLiftPublisher
         claimTokenGenerator: config.claimTokenGenerator ?? (() => crypto.randomUUID()),
       },
       {
+        journalCompletion: this.journalCompletion,
         ensureGraph: async () => await this.ensureGraph(),
         isPaused: () => this.paused,
         readStatus: async (jobId) => await this.readJobPayload(jobId),
-        nextAccepted: async () => await this.readNextAcceptedJob(),
-        reacceptDueFailedJobs: async (now) => await this.reacceptDueFailedJobs(now),
+        nextClaimCandidate: async (section, now) => await this.readNextClaimCandidate(section, now),
         toClaimed: (current, walletId) =>
           this.buildTransitionJob(current, 'claimed', { claim: { walletId } }),
-        writeJob: async (job, kind) => await this.writeJob(job, kind),
+        writeJob: async (section, job, kind) => await this.writeJob(section, job, kind),
         deleteJob: async (jobId) => await this.deleteJob(jobId),
         assertJobMatchesStatus: (job) => this.assertJobMatchesStatus(job),
         resetInterruptedClaim: (job) => {
@@ -764,7 +761,7 @@ export class TripleStoreAsyncLiftPublisher
     request: KnowledgeAssetVmPublishRequest,
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string> {
-    return this.claimCoordinator.runClaimTransaction(async () => {
+    return this.journalCompletion.runPublicOperation((owner) => this.claimCoordinator.runClaimTransaction(owner, async (section) => {
       await this.ensureGraph();
       if (!request.shareOperationId.trim()) {
         throw new Error('Knowledge asset VM publish requires a shareOperationId');
@@ -772,8 +769,11 @@ export class TripleStoreAsyncLiftPublisher
       assertGraphScopedLiftSnapshot(request);
       const existing = await this.findActiveKnowledgeAssetVmPublishJob(request);
       if (existing?.compatible) {
+        section.joinJob(existing.job.jobId, () => {
+          if (existing.job.status === 'accepted') this.notifyWorkAvailable();
+        });
         if (isFailedJob(existing.job)) {
-          const reaccepted = await this.reacceptRetryableFailedKnowledgeAssetVmPublishJob(existing.job);
+          const reaccepted = await this.reacceptRetryableFailedKnowledgeAssetVmPublishJob(section, existing.job);
           return reaccepted.jobId;
         }
         return existing.job.jobId;
@@ -797,9 +797,9 @@ export class TripleStoreAsyncLiftPublisher
         retries: { retryCount: 0, maxRetries: this.maxRetries },
         controlPlane: { jobRef: jobSubject(jobId) },
       };
-      await this.writeJob(job, 'admission');
+      await this.writeJob(section, job, 'admission');
       return jobId;
-    });
+    }, 'admission'));
   }
 
 
@@ -809,12 +809,12 @@ export class TripleStoreAsyncLiftPublisher
 
   readonly administrative: AsyncLiftAdministrativeMutations = {
     updateById: async (jobId, status, data = {}) => {
-      await this.transitionJob(jobId, status, data);
+      await this.journalCompletion.runPublicOperation((owner) => this.transitionJob(owner, jobId, status, data));
     },
     recordPublishResultById: async (jobId, publishResult, options = {}) =>
-      await this.recordPublishResultById(jobId, publishResult, options),
+      await this.journalCompletion.runPublicOperation((owner) => this.recordPublishResultById(owner, jobId, publishResult, options)),
     recordPublishFailureById: async (jobId, failure) =>
-      await this.recordPublishFailureById(jobId, failure),
+      await this.journalCompletion.runPublicOperation((owner) => this.recordPublishFailureById(owner, jobId, failure)),
   };
 
   openClaimSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession {
@@ -840,12 +840,13 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async transitionJob(
+    owner: JournalOperation,
     jobId: string,
     status: LiftJobState,
     data: Partial<LiftJob>,
   ): Promise<void> {
     await this.ensureGraph();
-    await this.claimCoordinator.transitionAdministrative(jobId, async (current, scope) => {
+    await this.claimCoordinator.transitionAdministrative(owner, jobId, async (current, scope) => {
       const next = buildCanonicalLiftJobAdministrativeTransition(current, status, data, this.now());
       this.assertJobMatchesStatus(next);
       if (next.status === 'finalized') {
@@ -946,37 +947,18 @@ export class TripleStoreAsyncLiftPublisher
     return missing.length;
   }
 
-  async list(filter: { status?: LiftJobState } = {}): Promise<PersistedLiftJob[]> {
+  async list(filter: { status?: LiftJobState; contextGraphId?: string } = {}): Promise<PersistedLiftJob[]> {
     await this.ensureGraph();
-    const statusFilter = filter.status ? `FILTER (?status = ${literal(filter.status)})` : '';
-    const result = await this.store.query(
-      `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ?status ; <${PAYLOAD_PREDICATE}> ?payload . ${statusFilter} } }`,
-      { source: 'publisher.asyncLift.list' },
-    );
-    return expectBindings(result)
-      .map((row) => this.parseJobPayloadForScan(row['payload']))
-      .filter((job): job is PersistedLiftJob => job !== null)
-      .map((job) => this.chainObservations.project(job))
-      .sort(compareAcceptedJobs);
+    return this.jobSelectors.list(filter);
   }
 
-  /**
-   * Persistence-owned claim selector. The status triple bounds the read to the
-   * actionable queue, while decoding remains best-effort so one corrupt legacy
-   * row cannot block valid work behind it. Ordering is explicit over the
-   * decoded durable values: acceptedAt first, then jobId for deterministic ties.
-   */
-  private async readNextAcceptedJob(): Promise<LiftJobAccepted | undefined> {
-    await this.ensureGraph();
-    const result = await this.store.query(
-      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ${literal('accepted')} ; <${ACCEPTED_AT_PREDICATE}> ?acceptedAt ; <${PAYLOAD_PREDICATE}> ?payload } }`,
-      { source: 'publisher.asyncLift.nextAccepted' },
-    );
-    return expectBindings(result)
-      .map((row) => this.parseJobPayloadForScan(row['payload']))
-      .filter((job): job is LiftJobAccepted => job?.status === 'accepted')
-      .sort(compareAcceptedJobs)
-      .at(0);
+  private async readNextClaimCandidate(section: JournalSection, now: number): Promise<LiftJobAccepted | undefined> {
+    if (!this.autoRetryEnabled) return this.jobSelectors.nextAccepted();
+    const candidates = await this.jobSelectors.claimCandidates(now);
+    if (candidates.dueRetries.length === 0) return candidates.nextAccepted;
+    await this.reacceptDueFailedJobs(section, now, candidates.dueRetries);
+    // Any decoded due candidate may have changed while its exact job lock was acquired.
+    return this.jobSelectors.nextAccepted();
   }
 
   async inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null> {
@@ -1028,12 +1010,14 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async processNext(walletId: string): Promise<PersistedLiftJob | null> {
-    const outcome = await this.claimCoordinator.processClaim(
-      walletId,
-      async (session) => await this.jobHandlerFor(session.claim.request).process(session),
-      (release) => this.onClaimProcessingReleased(release),
-    );
-    return outcome.kind === 'idle' ? null : outcome.job;
+    return traceProcessNext(walletId, async () => {
+      const outcome = await this.claimCoordinator.processClaim(
+        walletId,
+        async (session) => await this.jobHandlerFor(session.claim.request).process(session),
+        (release) => this.onClaimProcessingReleased(release),
+      );
+      return outcome.kind === 'idle' ? null : outcome.job;
+    });
   }
 
   private onClaimProcessingReleased(release: AsyncLiftClaimProcessingRelease): void {
@@ -1063,7 +1047,7 @@ export class TripleStoreAsyncLiftPublisher
     }
   }
 
-  private async processRawLift(session: ActiveLiftJobClaimSession): Promise<LiftJob> {
+  private async processRawLift(session: WorkerLiftJobClaimSession): Promise<LiftJob> {
     const claim = session.claim;
     const claimed = claim;
     const walletId = claim.claim.walletId;
@@ -1120,12 +1104,12 @@ export class TripleStoreAsyncLiftPublisher
       return await session.recordExecutionFailure('validated', preparationAttempt.error);
     }
     const prepared = preparationAttempt.value;
-    if (!prepared) return await this.finalizeNoopPublish(claim);
+    if (!prepared) return await this.finalizeNoopPublish(session);
 
     const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
     // GH#2270 — the same pre-send write-ahead KA VM publish has taken since #1864. The
     // executor's typed pre-send hook records the signed hash durably before it goes on the wire.
-    const broadcastRecorder = this.createPreSendBroadcastRecorder({ claim, publicByteSize });
+    const broadcastRecorder = this.createPreSendBroadcastRecorder(session, { publicByteSize });
     const publishAttempt = await this.runBusinessOperation(() => this.publishExecutor!({
       walletId,
       publishOptions: {
@@ -1143,7 +1127,7 @@ export class TripleStoreAsyncLiftPublisher
     return await this.recordWorkerPublishResult(session, publishAttempt.value, { publicByteSize });
   }
 
-  private async processKnowledgeAssetVmPublish(session: ActiveLiftJobClaimSession): Promise<LiftJob> {
+  private async processKnowledgeAssetVmPublish(session: WorkerLiftJobClaimSession): Promise<LiftJob> {
     const claim = session.claim;
     const claimed = claim;
     const walletId = claim.claim.walletId;
@@ -1164,7 +1148,7 @@ export class TripleStoreAsyncLiftPublisher
       return await session.recordExecutionFailure('claimed', initialPreflight.error);
     }
     if (initialPreflight.value?.action === 'noop') {
-      return await this.finalizeKnowledgeAssetVmPublishNoop(claim, snapshot, snapshotMetadata);
+      return await this.finalizeKnowledgeAssetVmPublishNoop(session, snapshot, snapshotMetadata);
     }
 
     const validationAttempt = await this.runBusinessOperation(async () => {
@@ -1202,8 +1186,7 @@ export class TripleStoreAsyncLiftPublisher
     const prepared = preparationAttempt.value;
 
     const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
-    const broadcastRecorder = this.createPreSendBroadcastRecorder({
-      claim,
+    const broadcastRecorder = this.createPreSendBroadcastRecorder(session, {
       merkleRoot: request.sealMerkleRoot,
       publicByteSize,
     });
@@ -1212,7 +1195,7 @@ export class TripleStoreAsyncLiftPublisher
       return await this.failKnowledgeAssetVmPublishExecution(session, finalPreflight.error, broadcastRecorder);
     }
     if (finalPreflight.value?.action === 'noop') {
-      return await this.finalizeKnowledgeAssetVmPublishNoop(claim, snapshot, snapshotMetadata);
+      return await this.finalizeKnowledgeAssetVmPublishNoop(session, snapshot, snapshotMetadata);
     }
 
     const executionAttempt = await this.runBusinessOperation(async () => {
@@ -1255,7 +1238,7 @@ export class TripleStoreAsyncLiftPublisher
           // wallet lock deliberately remains owned by this tx-bearing job:
           // only chain proof may release it for another nonce.
           onBroadcastAccepted: async (record: PreBroadcastRecord) => {
-            await this.recordRpcAccepted(claim, record);
+            await this.recordRpcAccepted(session, record);
             try {
               await inheritedBroadcastAccepted?.(record);
             } finally {
@@ -1277,18 +1260,16 @@ export class TripleStoreAsyncLiftPublisher
           },
         },
       };
-      const execution = handler.execute(executionInput);
+      const execution = handler.execute({ ...executionInput, onPostConfirmationStep: this.chainObservations.tailObserver(claimed.jobId) });
       const outcome = await Promise.race([
         execution.then((result) => ({ kind: 'settled' as const, result })),
         broadcastAccepted.then(() => ({ kind: 'accepted' as const })),
       ]);
       if (outcome.kind === 'accepted' && canDetachReceiptReconciliation) {
-        // Receipt success, revert, timeout, or temporary lookup failure is now
-        // owned solely by chain-proof recovery. The execution continues so the
-        // normal publisher can finish any local post-receipt work, but its
-        // return value is intentionally not allowed to rewrite queue truth in
-        // parallel with recovery.
-        this.trackDetachedExecution(claimed.jobId, execution);
+        // The executor keeps ownership through its local tail. A certified successful result
+        // can finish this exact claim; every other outcome remains owned by chain recovery.
+        // Tracking includes terminal persistence so recovery cannot run a competing repair.
+        this.trackDetachedExecution(claim, execution, { publicByteSize });
         return { kind: 'detached' as const, job: await this.getRequiredJob(claimed.jobId) };
       }
       const publishResult = outcome.kind === 'settled' ? outcome.result : await execution;
@@ -1326,14 +1307,17 @@ export class TripleStoreAsyncLiftPublisher
     if (executionAttempt.value.kind === 'detached') {
       return executionAttempt.value.job;
     }
-    // Queue mutations deliberately sit outside business catches. Ownership loss is control flow
-    // for processNext(), while a local persistence fault must escape to recovery rather than be
-    // reclassified as a publish failure.
-    return await this.recordWorkerPublishResult(
-      session,
-      executionAttempt.value.publishResult,
-      { publicByteSize },
-    );
+    // Named-KA completion has the same certificate and original-transaction fence
+    // whether execution detached or finished inline. An incomplete local tail leaves
+    // the durable broadcast on the recovery track; it never authorizes another send.
+    const result = executionAttempt.value.publishResult;
+    try {
+      await this.recordKnowledgeAssetExecutionResult(claim, result, { publicByteSize });
+    } catch (error) {
+      if (!(error instanceof InvalidLiftPublishResultError)) throw error;
+      // Invalid executor evidence cannot erase the original transaction's repair obligation.
+    }
+    return await this.getRequiredJob(claimed.jobId);
   }
 
   private async recordWorkerPublishResult(
@@ -1373,10 +1357,11 @@ export class TripleStoreAsyncLiftPublisher
    * a crash remains ambiguous and therefore keeps the wallet reserved.
    */
   private async recordRpcAccepted(
-    claim: ActiveLiftJobClaim,
+    session: WorkerLiftJobClaimSession,
     record: PreBroadcastRecord,
   ): Promise<void> {
-    await this.claimCoordinator.runOwnedCheckpointTransaction(claim, async (checkpoint) => {
+    const claim = session.claim;
+    await session.checkpoint(async (checkpoint) => {
       const jobId = claim.jobId;
       if (checkpoint.kind === 'advanced') {
         // Independent reconciliation may have already advanced the exact transaction. This
@@ -1427,20 +1412,59 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  private trackDetachedExecution(jobId: string, execution: Promise<unknown>): void {
+  /** Complete only the original claim and transaction, including after proof releases its wallet. */
+  private async recordKnowledgeAssetExecutionResult(
+    claim: ActiveLiftJobClaim, result: AsyncKnowledgeAssetVmPublishExecutionResult, options: { publicByteSize?: number },
+  ): Promise<boolean> {
+    if (result.status !== 'confirmed' || !result.onChainResult) return false;
+    const resultTxHash = result.onChainResult.txHash;
+    // Keep canonical claim -> job lock order through terminal persistence and wallet deletion.
+    // Otherwise a claimant can replace the wallet lock between its guarded read and deletion.
+    // This short transaction does no lifecycle repair: the executor certified that work already.
+    return this.journalCompletion.runPublicOperation((owner) => this.claimCoordinator.runClaimJobTransaction(owner, claim.jobId, async (transaction) => {
+      if (transaction.kind !== 'present') return false;
+      const { current, scope } = transaction;
+      if (current.status !== 'validated' && current.status !== 'broadcast' && current.status !== 'included') return false;
+      if (current.claim?.claimToken !== claim.claim.claimToken
+        || current.claim?.walletId !== claim.claim.walletId) return false;
+      if (current.broadcast && current.broadcast.txHash !== resultTxHash) return false;
+      const certified = result.localFinalizationComplete === true;
+      if (!certified && current.status !== 'validated') return false;
+      // Older inline handlers may omit the pre-send hook. Retain their receipt as
+      // tx-bearing recovery work even without a certificate; never reset and resend.
+      const completed = await this.applyPublishResultTransition(current, scope, result, {
+        ...options, deferFinalization: !certified,
+      });
+      return completed.status === 'finalized';
+    }));
+  }
+
+  private trackDetachedExecution(
+    claim: ActiveLiftJobClaim,
+    execution: Promise<AsyncKnowledgeAssetVmPublishExecutionResult>,
+    options: { publicByteSize?: number },
+  ): void {
+    const jobId = claim.jobId;
+    let completed = false;
     let tracked!: Promise<void>;
     tracked = execution.then(
-      () => undefined,
-      () => undefined,
-    ).finally(() => {
-      this.chainObservations.completion.executorSettled(jobId);
+      async (result) => {
+        this.chainObservations.completion.executorSettled(jobId);
+        if (result?.localFinalizationComplete !== true) return;
+        completed = await this.recordKnowledgeAssetExecutionResult(claim, result, options);
+        if (completed) this.executorProofHints.delete(jobId);
+      },
+      () => { this.chainObservations.completion.executorSettled(jobId); },
+    ).catch(() => {
+      // A rejected/malformed result or a local persistence fault leaves the durable transaction
+      // on the recovery track. Never manufacture a terminal failure after an accepted send.
+    }).finally(() => {
       if (this.detachedExecutions.get(jobId) === tracked) {
         this.detachedExecutions.delete(jobId);
       }
-      // The job just stopped being executor-owned (line-of-ownership: reconciliation skips jobs
-      // in this map). Whatever the execution's outcome, only chain proof can settle the record
-      // now, so invite the reconcile pass instead of leaving the job to the idle sweep.
-      this.notifyReconciliationDemand();
+      // Only after executor completion/persistence releases ownership may recovery repair an
+      // uncertified result or a failed terminal write. Successful completion needs no scan.
+      if (!completed) this.notifyReconciliationDemand();
     });
     this.detachedExecutions.set(jobId, tracked);
   }
@@ -1482,6 +1506,7 @@ export class TripleStoreAsyncLiftPublisher
    * outcome can hold the active cadence for them.
    */
   private async releaseWalletsOnExecutorProofHints(
+    owner: JournalOperation,
     inventory: readonly PersistedLiftJob[],
     signal?: AbortSignal,
   ): Promise<number> {
@@ -1522,7 +1547,7 @@ export class TripleStoreAsyncLiftPublisher
         this.executorProofHints.delete(snapshot.jobId);
         continue;
       }
-      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
+      await this.claimCoordinator.runJobTransaction(owner, snapshot.jobId, async (transaction) => {
           if (transaction.kind !== 'present') return;
           const { current, scope } = transaction;
           // 'included' is accepted deliberately (r2 3877540018): a prior attempt may have
@@ -1612,32 +1637,26 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async drainDetachedExecutions(): Promise<void> {
-    while (this.detachedExecutions.size > 0) {
+    do {
       await Promise.all([...this.detachedExecutions.values()]);
-    }
+      await this.journalCompletion.drain();
+    } while (this.detachedExecutions.size > 0);
   }
 
   readonly reconciliationScheduling = {
     // Exclusive, ATOMIC attachment: scheduling has exactly one owner (the runner); attaching
-    // takes over BOTH callbacks together, so ownership can never be split between runner
+    // takes over every callback together, so ownership can never be split between runner
     // incarnations. See the interface doc for the ownership/handover contract.
     attachScheduler: (scheduler: {
       onReconciliationDemand(): void;
       onWalletRelease(walletId: string): void;
-    }): (() => void) => {
-      this.schedulerListener = scheduler;
-      return () => {
-        // Detaches only THIS attachment — a stale detach from a superseded owner is a no-op.
-        if (this.schedulerListener === scheduler) {
-          this.schedulerListener = undefined;
-        }
-      };
-    },
+      onWorkAvailable?(): void;
+    }): (() => void) => this.queueScheduler.attach(scheduler),
     // The scheduling caller's per-tick operation: one pass, one atomic answer.
-    reconcile: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runReconciliationPass(),
+    reconcile: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.journalCompletion.runPublicOperation((owner) => this.runReconciliationPass(owner)),
     // Startup recovery with the outcome kept: the caller seeds its cadence from the pass it
     // already ran instead of paying a second boot-time inventory.
-    recover: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.runRecovery(),
+    recover: (): Promise<{ reconciled: number; pendingWork: boolean }> => this.journalCompletion.runPublicOperation((owner) => this.runRecovery(owner)),
   };
 
   /**
@@ -1680,11 +1699,7 @@ export class TripleStoreAsyncLiftPublisher
    * of what is actionable.
    */
   private notifyReconciliationDemand(): void {
-    try {
-      this.schedulerListener?.onReconciliationDemand();
-    } catch {
-      // The listener belongs to the caller's scheduler; its failure must not touch job state.
-    }
+    this.queueScheduler.reconciliationDemand();
   }
 
   private async recoverRawLiftInterrupted(
@@ -1987,21 +2002,8 @@ export class TripleStoreAsyncLiftPublisher
     // since a sibling is not chain proof), so the selector groups the queue by lifecycle key and
     // admission reads its own group. The first entry is the record admission must answer for: a
     // held job before anything else, then the lifecycle's newest.
-    //
-    // Decode indexed candidates STRICTLY before the tolerant inventory scan. A corrupt row for
-    // another lifecycle never enters this object-bound query and cannot poison this admission;
-    // a corrupt row indexed to this lifecycle fails closed before a duplicate can be admitted.
-    const indexed = await this.store.query(
-      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(requestKey)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
-      { source: 'publisher.asyncLift.findActiveVmPublish' },
-    );
-    for (const row of expectBindings(indexed)) {
-      const candidate = this.parseJobPayload(row['payload']);
-      if (candidate !== null && lifecycleKeyOfJob(candidate) !== requestKey) {
-        throw new Error(`Malformed persisted LiftJob payload: lifecycle index does not match ${requestKey}`);
-      }
-    }
-    const job = selectLifecycleBindingJobs(await this.list(), lifecycleKeyOfJob).get(requestKey)?.at(0);
+    const candidates = await this.jobSelectors.vmPublishAdmissionCandidates(requestKey, lifecycleKeyOfJob);
+    const job = selectLifecycleBindingJobs(candidates, lifecycleKeyOfJob).get(requestKey)?.at(0);
     if (!job || !isKnowledgeAssetVmPublishJobRequest(job.request)) return null;
     return {
       job,
@@ -2021,7 +2023,7 @@ export class TripleStoreAsyncLiftPublisher
    * An evidence-bearing job is refused by `reacceptFailedJob` with
    * {@link LiftJobPendingChainProofError} — a transient, retryable condition, not a conflict.
    */
-  private async reacceptRetryableFailedKnowledgeAssetVmPublishJob(job: PersistedFailedJob): Promise<LiftJobAccepted> {
+  private async reacceptRetryableFailedKnowledgeAssetVmPublishJob(section: JournalSection, job: PersistedFailedJob): Promise<LiftJobAccepted> {
     if (!isKnowledgeAssetVmPublishJobRequest(job.request)) {
       throw new Error(`LiftJob ${job.jobId} is not a knowledge asset VM publish job`);
     }
@@ -2034,7 +2036,7 @@ export class TripleStoreAsyncLiftPublisher
     // A client re-submit spends the budget like any retry until the budget is gone; only THEN is
     // it a fresh mandate, which re-arms exactly one attempt on the same jobId rather than letting
     // a replacement job be minted for the subject.
-    return this.reacceptFailedJob(job, job.retries.retryCount >= job.retries.maxRetries
+    return this.reacceptFailedJob(section, job, job.retries.retryCount >= job.retries.maxRetries
       ? { kind: 'freshClientMandate' }
       : { kind: 'retry' });
   }
@@ -2048,12 +2050,13 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async recordPublishResultById(
+    owner: JournalOperation,
     jobId: string,
     publishResult: PublishResult,
     options: { publicByteSize?: number } = {},
   ): Promise<LiftJob> {
     await this.ensureGraph();
-    return await this.claimCoordinator.transitionAdministrative(jobId, async (current, scope) => {
+    return await this.claimCoordinator.transitionAdministrative(owner, jobId, async (current, scope) => {
       return await this.applyPublishResultTransition(current, scope, publishResult, options);
     });
   }
@@ -2062,7 +2065,7 @@ export class TripleStoreAsyncLiftPublisher
     current: LiftJob,
     scope: LiftJobTransitionScope,
     publishResult: PublishResult,
-    options: { publicByteSize?: number },
+    options: { publicByteSize?: number; deferFinalization?: boolean },
   ): Promise<LiftJob> {
     const jobId = current.jobId;
     if (!current.claim || !current.validation) {
@@ -2130,7 +2133,7 @@ export class TripleStoreAsyncLiftPublisher
       next = await scope.commit(next, 'broadcast');
     }
 
-    if (mapped.status === 'included') {
+    if (mapped.status === 'included' || options.deferFinalization) {
       next = this.buildTransitionJob(next, 'included', {
         broadcast: mapped.broadcast,
         inclusion: mapped.inclusion,
@@ -2163,11 +2166,12 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async recordPublishFailureById(
+    owner: JournalOperation,
     jobId: string,
     failure: AsyncLiftPublishFailureInput,
   ): Promise<LiftJob> {
     await this.ensureGraph();
-    return await this.claimCoordinator.transitionAdministrative(jobId, async (current, scope) => {
+    return await this.claimCoordinator.transitionAdministrative(owner, jobId, async (current, scope) => {
       return await this.applyPublishFailureTransition(current, scope, failure);
     });
   }
@@ -2192,20 +2196,20 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async recover(): Promise<number> {
-    return (await this.runRecovery()).reconciled;
+    return (await this.journalCompletion.runPublicOperation((owner) => this.runRecovery(owner))).reconciled;
   }
 
-  private async runRecovery(): Promise<{ reconciled: number; pendingWork: boolean }> {
+  private async runRecovery(owner: JournalOperation): Promise<{ reconciled: number; pendingWork: boolean }> {
     await this.ensureGraph();
     // Inventory is intentionally outside the global claim mutex. Each candidate takes the
     // global-claim -> job-transition locks only for its own re-read/delete turn, so a slow scan
     // cannot stop unrelated queue admission while replacement ownership stays protected.
     await this.claimCoordinator.sweepStaleOwnership();
-    return await this.runReconciliationPass();
+    return await this.runReconciliationPass(owner);
   }
 
   async reconcileTransactions(): Promise<number> {
-    return (await this.runReconciliationPass()).reconciled;
+    return (await this.journalCompletion.runPublicOperation((owner) => this.runReconciliationPass(owner))).reconciled;
   }
 
   /**
@@ -2216,7 +2220,7 @@ export class TripleStoreAsyncLiftPublisher
    * pass and strand a served demand on the idle cadence. `reconcileTransactions`/`recover`
    * remain the wire-stable numeric surface over the same pass.
    */
-  private async runReconciliationPass(): Promise<{ reconciled: number; pendingWork: boolean }> {
+  private async runReconciliationPass(owner: JournalOperation): Promise<{ reconciled: number; pendingWork: boolean }> {
     await this.ensureGraph();
     // The ONE acquisition seam for a pass's shared state: inventory and chain-proof scope,
     // taken together (scope BEFORE read, acquisitions lease-ordered) by the coordinator, which
@@ -2226,7 +2230,7 @@ export class TripleStoreAsyncLiftPublisher
     // lock before acting, so the shared snapshot only selects candidates and staleness cannot
     // change a disposition.
     const { inventory, scope: chainProofPass } = await this.reconciliationSnapshotCoordinator.acquire();
-    let reconciled = await this.recoverInterruptedPreBroadcastJobs(inventory);
+    let reconciled = await this.recoverInterruptedPreBroadcastJobs(owner, inventory);
     // Same actionability rule the scheduling outlook answers with: executor-owned jobs are
     // skipped up front rather than each burning a transition-lock turn to be skipped deeper in.
     const txBearing = inventory.filter((job) => this.isReconciliationActionable(job));
@@ -2275,7 +2279,7 @@ export class TripleStoreAsyncLiftPublisher
     const runHintLane = async (leading: boolean): Promise<void> => {
       const bounded = leading ? leadSignal() : undefined;
       try {
-        hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(
+        hintedUnresolved = await this.releaseWalletsOnExecutorProofHints(owner,
           inventory,
           bounded?.signal ?? passDeadline.signal,
         );
@@ -2293,7 +2297,7 @@ export class TripleStoreAsyncLiftPublisher
             break;
           }
           const snapshot = rotatedTxBearing[i];
-          await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
+          await this.claimCoordinator.runJobTransaction(owner, snapshot.jobId, async (transaction) => {
             if (transaction.kind === 'missing') return;
             if (transaction.kind === 'compatibility') {
               if (await this.recoverCompatibilityRecord(transaction.current, transaction.scope)) {
@@ -2360,7 +2364,7 @@ export class TripleStoreAsyncLiftPublisher
         .map((job) => (refreshed.has(job.jobId) ? refreshed.get(job.jobId) ?? null : job))
         .filter((job): job is PersistedLiftJob => job !== null);
     }
-    reconciled += await this.dispatchFailedJobsOnChainProof(dispatcherInventory, chainProofPass);
+    reconciled += await this.dispatchFailedJobsOnChainProof(owner, dispatcherInventory, chainProofPass);
     return { reconciled, pendingWork: remainingLive > 0 || hintedUnresolved > 0 };
   }
 
@@ -2378,7 +2382,7 @@ export class TripleStoreAsyncLiftPublisher
     );
   }
 
-  private async recoverInterruptedPreBroadcastJobs(inventory: readonly PersistedLiftJob[]): Promise<number> {
+  private async recoverInterruptedPreBroadcastJobs(owner: JournalOperation, inventory: readonly PersistedLiftJob[]): Promise<number> {
     // Candidates come from the pass's shared inventory snapshot; each is re-read under its
     // transition lock below before anything acts on it.
     const interrupted = inventory.filter(
@@ -2386,7 +2390,7 @@ export class TripleStoreAsyncLiftPublisher
     );
     let recovered = 0;
     for (const snapshot of interrupted) {
-      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
+      await this.claimCoordinator.runJobTransaction(owner, snapshot.jobId, async (transaction) => {
         if (transaction.kind === 'missing') return;
         const { current, scope } = transaction;
         if (current.status !== 'claimed' && current.status !== 'validated') return;
@@ -2453,6 +2457,7 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async dispatchFailedJobsOnChainProof(
+    owner: JournalOperation,
     inventory: readonly PersistedLiftJob[],
     chainProofPass: ChainProofSchedulePass,
   ): Promise<number> {
@@ -2532,7 +2537,7 @@ export class TripleStoreAsyncLiftPublisher
           // the identity re-read; r7 3882283830 — the helper reports only what this loop
           // consumes: the settled count. Stale and deferred turns are 0 by construction, and
           // their scheduling is the helper's/schedule's own business).
-          dispatched += await this.dispatchOneHeldJob(job, lookup, turn, resolver, deadline);
+          dispatched += await this.dispatchOneHeldJob(owner, job, lookup, turn, resolver, deadline);
         } catch {
           // An exception establishes nothing, exactly like an inconclusive verdict, so it earns the
           // same backoff — otherwise a job whose resolver reliably throws would consume a batch slot
@@ -2568,6 +2573,7 @@ export class TripleStoreAsyncLiftPublisher
 
   /** One held job's turn: ask the chain, then execute the disposition the policy module decides. */
   private async dispatchOneHeldJob(
+    owner: JournalOperation,
     job: PersistedFailedJob,
     lookup: AsyncLiftChainProofLookup,
     turn: ChainProofScheduleTurn,
@@ -2602,7 +2608,7 @@ export class TripleStoreAsyncLiftPublisher
     // transitions serialize on, against a RE-READ of the record, and only when it is still the
     // identical held job the chain was asked about — same failure identity, same transaction
     // evidence. Anything else drops the verdict; the next tick asks about whatever now exists.
-    return this.claimCoordinator.runClaimJobTransaction(job.jobId, async (transaction) => {
+    return this.claimCoordinator.runClaimJobTransaction(owner, job.jobId, async (transaction) => {
       // A verdict rejected at the identity boundary is discarded WHOLE — no disposition, no
       // deferral cadence, not even the attempt count: its cadence metadata belongs to the same
       // stale answer. r5 (3882010299) — the schedule mutation happens HERE, inside the same claim
@@ -2766,18 +2772,21 @@ export class TripleStoreAsyncLiftPublisher
 
   async resume(): Promise<void> {
     this.paused = false;
+    this.notifyWorkAvailable();
   }
 
   async cancel(jobId: string): Promise<void> {
-    await this.ensureGraph();
-    await this.claimCoordinator.runJobTransaction(jobId, async (transaction) => {
-      if (transaction.kind === 'missing') throw new Error(`LiftJob not found: ${jobId}`);
-      if (transaction.current.status !== 'accepted') {
-        throw new Error(
-          `Only accepted LiftJobs can be cancelled. Current status: ${transaction.current.status}`,
-        );
-      }
-      await transaction.scope.commitRemoval();
+    return this.journalCompletion.runPublicOperation(async (owner) => {
+      await this.ensureGraph();
+      await this.claimCoordinator.runJobTransaction(owner, jobId, async (transaction) => {
+        if (transaction.kind === 'missing') throw new Error(`LiftJob not found: ${jobId}`);
+        if (transaction.current.status !== 'accepted') {
+          throw new Error(
+            `Only accepted LiftJobs can be cancelled. Current status: ${transaction.current.status}`,
+          );
+        }
+        await transaction.scope.commitRemoval();
+      });
     });
   }
 
@@ -2799,6 +2808,10 @@ export class TripleStoreAsyncLiftPublisher
    * the reason shown per job are ONE partition rather than two orderings kept in step by hand.
    */
   async retryDetailed(filter: AsyncLiftRetryFilter = {}): Promise<AsyncLiftRetryOutcome> {
+    return this.journalCompletion.runPublicOperation((owner) => this.retryFailedJobs(owner, filter));
+  }
+
+  private async retryFailedJobs(owner: JournalOperation, filter: AsyncLiftRetryFilter): Promise<AsyncLiftRetryOutcome> {
     if (filter.status && filter.status !== 'failed') {
       return { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
     }
@@ -2812,7 +2825,7 @@ export class TripleStoreAsyncLiftPublisher
     await this.ensureGraph();
 
     if (filter.jobId !== undefined) {
-      return this.claimCoordinator.runClaimJobTransaction(filter.jobId, async (transaction) => {
+      return this.claimCoordinator.runClaimJobTransaction(owner, filter.jobId, async (transaction) => {
         const counts = { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
         if (transaction.kind === 'missing' || !isFailedJob(transaction.current)) return counts;
         const action = classifyRetryAction(transaction.current);
@@ -2833,7 +2846,7 @@ export class TripleStoreAsyncLiftPublisher
     // withClaimLock) so a by-id clear that read a job as clearable-failed cannot be swept
     // after retry() flips it active. Without this lock the "a transitioning job cannot be
     // swept" guarantee does not hold.
-    return this.claimCoordinator.runClaimTransaction(async () => {
+    return this.claimCoordinator.runClaimTransaction(owner, async (section) => {
       const counts = { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
       for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
         // The WRITE decision, taken over the job alone — the operator's kill-switch is not an
@@ -2842,7 +2855,7 @@ export class TripleStoreAsyncLiftPublisher
         // Reaccept is opted INTO explicitly; the count it lands in comes from the mapping declared
         // beside the action union, so a future action fails the BUILD until its bucket is chosen
         // rather than inheriting one from the shape of this loop.
-        if (action === 'reaccept') await this.reacceptFailedJob(job, { kind: 'retry' });
+        if (action === 'reaccept') await this.reacceptFailedJob(section, job, { kind: 'retry' });
         counts[FAILED_JOB_RETRY_ACTION_COUNT[action]] += 1;
       }
       return counts;
@@ -2856,22 +2869,24 @@ export class TripleStoreAsyncLiftPublisher
    * for the same KA. `clearTerminalJob(jobId)` remains the deliberate targeted override.
    */
   async clear(status: 'finalized' | 'failed'): Promise<number> {
-    await this.ensureGraph();
-    const jobs = await this.list({ status });
-    let cleared = 0;
-    for (const snapshot of jobs) {
-      await this.claimCoordinator.runJobTransaction(snapshot.jobId, async (transaction) => {
-        if (transaction.kind === 'missing') return;
-        const { current: job, scope } = transaction;
-        // #1837 — the shared terminal-clear authority (skips retry_recovery-failed jobs, whose
-        // pending tx recovery may still finalize), narrowed for the bulk lane by GH#2270's
-        // evidence guard. `clearTerminalJob` keeps the unnarrowed predicate on purpose.
-        if (!isBulkClearableTerminalLiftJob(job)) return;
-        await scope.commitRemoval();
-        cleared += 1;
-      });
-    }
-    return cleared;
+    return this.journalCompletion.runPublicOperation(async (owner) => {
+      await this.ensureGraph();
+      const jobs = await this.list({ status });
+      let cleared = 0;
+      for (const snapshot of jobs) {
+        await this.claimCoordinator.runJobTransaction(owner, snapshot.jobId, async (transaction) => {
+          if (transaction.kind === 'missing') return;
+          const { current: job, scope } = transaction;
+          // #1837 — the shared terminal-clear authority (skips retry_recovery-failed jobs, whose
+          // pending tx recovery may still finalize), narrowed for the bulk lane by GH#2270's
+          // evidence guard. `clearTerminalJob` keeps the unnarrowed predicate on purpose.
+          if (!isBulkClearableTerminalLiftJob(job)) return;
+          await scope.commitRemoval();
+          cleared += 1;
+        });
+      }
+      return cleared;
+    });
   }
 
   /**
@@ -2886,40 +2901,42 @@ export class TripleStoreAsyncLiftPublisher
     jobId: string,
     options: TargetedLiftJobClearOptions = {},
   ): Promise<TerminalJobClearOutcome> {
-    // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
-    // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
-    // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
-    // instead of the bounded outcome.
-    if (!isSafeJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
-    // Lock order is global claim, then job transition. Claim/reaccept/clear use the
-    // first lock; worker/recovery state changes use the second. Keeping this order
-    // lets claim persist its job+wallet-lock ownership as one critical section
-    // without deadlocking a concurrent targeted clear.
-    return await this.claimCoordinator.runClassifiedClearTransaction(jobId, async (transaction) => {
-      if (transaction.kind === 'missing') return { outcome: 'already_absent' };
-      if (transaction.kind === 'malformed') {
-        return { outcome: 'rejected', reason: 'malformed' };
-      }
-      if (transaction.kind === 'unknown') return { outcome: 'rejected', reason: 'unknown' };
-      const { current: job, scope } = transaction;
-      // GH#2270 follow-up (🔴 3824098476, 🟡 3824098494) — authorization against the job is
-      // resolved HERE, not at the route. Doing it at the route meant an unsafe jobId reached a
-      // `getStatus` query before this method's `isSafeJobId` guard ran, and the ownership read
-      // happened outside the claim lock the clear itself takes — a TOCTOU on the record the
-      // decision is about. The route only authenticates which principal tier made the request.
-      //
-      // Inside, the job has already been validated and read under that lock, so the check is on
-      // the same record that is about to be deleted. An agent that cannot be matched to the job's
-      // admission lane gets no override; an authenticated node operator has explicit queue-wide
-      // authority. The ordinary terminal clear is untouched.
-      // 3825162663 — ONE decision: the policy takes the override as the caller made it and
-      // settles authority and state eligibility together, so a call site cannot read the
-      // canonical predicate while forgetting the ownership half.
-      if (!isTargetedClearableLiftJob(job, options)) {
-        return { outcome: 'rejected', reason: 'nonterminal' };
-      }
-      await scope.commitRemoval();
-      return { outcome: 'cleared' };
+    return this.journalCompletion.runPublicOperation(async (owner) => {
+      // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
+      // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
+      // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
+      // instead of the bounded outcome.
+      if (!isSafeJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
+      // Lock order is global claim, then job transition. Claim/reaccept/clear use the
+      // first lock; worker/recovery state changes use the second. Keeping this order
+      // lets claim persist its job+wallet-lock ownership as one critical section
+      // without deadlocking a concurrent targeted clear.
+      return await this.claimCoordinator.runClassifiedClearTransaction(owner, jobId, async (transaction) => {
+        if (transaction.kind === 'missing') return { outcome: 'already_absent' };
+        if (transaction.kind === 'malformed') {
+          return { outcome: 'rejected', reason: 'malformed' };
+        }
+        if (transaction.kind === 'unknown') return { outcome: 'rejected', reason: 'unknown' };
+        const { current: job, scope } = transaction;
+        // GH#2270 follow-up (🔴 3824098476, 🟡 3824098494) — authorization against the job is
+        // resolved HERE, not at the route. Doing it at the route meant an unsafe jobId reached a
+        // `getStatus` query before this method's `isSafeJobId` guard ran, and the ownership read
+        // happened outside the claim lock the clear itself takes — a TOCTOU on the record the
+        // decision is about. The route only authenticates which principal tier made the request.
+        //
+        // Inside, the job has already been validated and read under that lock, so the check is on
+        // the same record that is about to be deleted. An agent that cannot be matched to the job's
+        // admission lane gets no override; an authenticated node operator has explicit queue-wide
+        // authority. The ordinary terminal clear is untouched.
+        // 3825162663 — ONE decision: the policy takes the override as the caller made it and
+        // settles authority and state eligibility together, so a call site cannot read the
+        // canonical predicate while forgetting the ownership half.
+        if (!isTargetedClearableLiftJob(job, options)) {
+          return { outcome: 'rejected', reason: 'nonterminal' };
+        }
+        await scope.commitRemoval();
+        return { outcome: 'cleared' };
+      });
     });
   }
 
@@ -2931,7 +2948,8 @@ export class TripleStoreAsyncLiftPublisher
     this.graphEnsured = true;
   }
 
-  private async writeJob<T extends LiftJob>(job: T, kind: JournalKind): Promise<CommittedLiftJob<T>> {
+  private async writeJob<T extends LiftJob>(section: JournalSection, job: T, kind: JournalKind): Promise<CommittedLiftJob<T>> {
+    section.assertOpen();
     // Validate before the first store mutation. Public Partial<LiftJob> update calls can be forged
     // at runtime; a successful API call must never persist a row the restart decoder will reject.
     const validated = assertCanonicalLiftJobPayload(job);
@@ -2940,63 +2958,32 @@ export class TripleStoreAsyncLiftPublisher
     if (validated.status === 'included') this.chainObservations.receipt(job.jobId, validated.broadcast.txHash, validated.timestamps.includedAt ?? this.now());
     const canonical = committedLiftJob(this.chainObservations.project(validated), job);
     await this.persistJobRecord(canonical);
-    await this.appendJournal(canonical, kind);
-    if (canonical.status === 'finalized') this.chainObservations.completion.terminal(job.jobId);
+    const { status, jobId } = canonical;
+    if (status === 'accepted') completionTrace.acceptedPrimaryCommitted(jobId);
+    if (status === 'finalized') {
+      completionTrace.terminalPrimaryCommitted(jobId);
+    }
+    this.registerJournalAppend(section, canonical, kind, () => {
+      if (status === 'accepted') this.notifyWorkAvailable();
+      if (status === 'finalized') this.chainObservations.completion.terminal(jobId);
+    });
+    if (status === 'finalized' && completionTrace.enabled) {
+      section.afterSuccessfulJobSettlement(jobId, () => completionTrace.terminalOperationSettled(jobId));
+    }
     return canonical;
   }
 
   /**
-   * #1863 — persist the job record as a single-subject atomic replace so a
-   * lock-free reader racing a transition never observes the job subject
-   * transiently empty. Every row for `jobSubject` — the payload, the status, and
-   * the `CONTROL_LIFECYCLE_KEY` intent-index row (emitted inside `serializeJob`
-   * via `serializeVmPublishIntentIndex`) — is replaced in ONE commit, so the
-   * false `kind:'none'` intent-lookup miss / dedup gap that hinges on that index
-   * row disappearing mid-write cannot occur.
-   *
-   * Routed through the shared writer `replaceSubjectAtomicallyOrFallback` (#1938),
-   * which uses the storage capability `tryReplaceSubjectAtomically` (a
-   * sibling of `replaceGraph` / `replaceGraphAndSubject`) rather than a raw
-   * `update()` string: the storage layer owns the transaction boundary, literal
-   * externalization, graph-set-index and changelog bookkeeping, and — crucially —
-   * the reserved-plane guard applies to the TARGET GRAPH structurally instead of
-   * scanning a serialized SPARQL string (a raw update would false-reject a job
-   * whose quads merely reference a reserved IRI). `replaceSubject` is a STRICT
-   * single-subject primitive (it rejects co-located subjects), so the two
-   * subjects `serializeJob` emits — the mutable job subject and the immutable
-   * request subject — are persisted separately:
-   *
-   *   1. INSERT the request rows FIRST (idempotent — the request is immutable,
-   *      so this is a no-op re-assert on every transition after creation, and the
-   *      defensive re-assert legacy/partial re-persist relies on).
-   *   2. THEN atomically replace the job subject.
-   *
-   * The ordering is load-bearing: the request must be present before the job
-   * subject becomes observable, or a lock-free reader at CREATION could see a job
-   * referencing an absent request (dangling requestRef). The job-replace must
-   * never land first. A store that cannot guarantee one commit boundary (no
-   * `replaceSubject`, or a non-transactional SPARQL endpoint that refuses it)
-   * takes the BOUNDED pre-#1863 delete-then-insert fallback (job subject only —
-   * the request stays present): it still has the transient job window, but
-   * admission's claim-locked `findActiveKnowledgeAssetVmPublishJob` remains the
-   * authoritative dedup guard there. Durability (#1851 fsync) stays scoped to
-   * `recordDurableBroadcastBeforeSend`, not here.
+   * Atomically reassert immutable request rows and replace the mutable job subject, preserving
+   * the payload/status/lifecycle-index boundary (#1863). Request rows remain additive so legacy
+   * partial records are repaired and unknown request facts survive. Unsupported stores keep the
+   * request-first, strict-subject fallback; execution failures never trigger a replay. A rejected
+   * atomic commit preserves the prior request too, rather than leaving request-only repair rows.
+   * Storage owns validation, literal externalization, graph index and changelog bookkeeping.
+   * Broadcast fsync durability remains scoped to recordDurableBroadcastBeforeSend (#1851).
    */
   private async persistJobRecord(job: LiftJob): Promise<void> {
-    // The serializer owns the split (and guards that a job record is exactly the
-    // job + request subjects) — no ad-hoc subject filters on the write path.
-    const { jobRef, jobQuads, requestQuads } = serializeJobRecord(job, this.graphUri);
-    // (1) Request present BEFORE the job subject is observable — ordering matters.
-    await this.store.insert(requestQuads);
-    // (2) Atomically replace the mutable job subject via the shared writer (#1938),
-    //     which owns the atomic-capable-vs-bounded-fallback policy for both queues.
-    await replaceSubjectAtomicallyOrFallback(
-      this.store,
-      this.graphUri,
-      jobRef,
-      jobQuads,
-      'publisher.asyncLift.writeJob',
-    );
+    await persistLiftJobRecord(this.store, this.graphUri, job);
   }
 
   /**
@@ -3016,40 +3003,20 @@ export class TripleStoreAsyncLiftPublisher
    *    the authoritative write. A swallowed append is an invisible gap: "complete"
    *    means "no seq gap", not "every transition present".
    */
-  private async appendJournal(job: LiftJob, kind: JournalKind): Promise<void> {
-    if (!this.journalWrites) return;
-    if (kind === 'rollback-noop') return;
-    if (job.request.jobType !== 'knowledge-asset-vm-publish') return;
-    let lineageKey: string;
-    try {
-      lineageKey = knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
-    } catch {
-      return; // legacy delimiter-bearing job — skip, never propagate
+  private registerJournalAppend(section: JournalSection, job: LiftJob, kind: JournalKind, completed: () => void): void {
+    if (!this.journalWrites || kind === 'rollback-noop' || job.request.jobType !== 'knowledge-asset-vm-publish') {
+      completed();
+      return;
     }
+    let facts: Omit<AdmissionJournalEntry, 'seq' | 'at'>;
     try {
-      await this.withJournalLock(lineageKey, async () => {
-        const seq = await this.allocateJournalSeq(lineageKey);
-        const entry = this.buildJournalEntry(job, kind, lineageKey, seq);
-        await this.store.insert(serializeJournalEntry(entry, this.journalGraphUri));
-      });
-    } catch {
-      // Auxiliary log — must never abort the authoritative state write.
-    }
+      const lineageKey = knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
+      facts = this.captureJournalFacts(job, kind, lineageKey);
+    } catch { completed(); return; } // Legacy delimiter-bearing facts remain auxiliary.
+    section.append(facts, completed);
   }
 
-  /** #1829 — next per-lineageKey seq: numeric MAX+1 over the journal graph, first = 0. */
-  private async allocateJournalSeq(lineageKey: string): Promise<number> {
-    const result = await this.store.query(
-      `SELECT (MAX(?seq) AS ?m) WHERE { GRAPH <${this.journalGraphUri}> { ?e <${JOURNAL_LIFECYCLE_KEY}> ${literal(lineageKey)} ; <${JOURNAL_SEQ}> ?seq } }`,
-      { source: 'publisher.asyncLift.allocateJournalSeq' },
-    );
-    const rows = expectBindings(result);
-    const raw = rows.length === 0 ? undefined : rows[0]?.['m'];
-    if (raw === undefined) return 0;
-    return parseIntegerLiteral(raw) + 1;
-  }
-
-  private buildJournalEntry(job: LiftJob, kind: JournalKind, lineageKey: string, seq: number): AdmissionJournalEntry {
+  private captureJournalFacts(job: LiftJob, kind: JournalKind, lineageKey: string): Omit<AdmissionJournalEntry, 'seq' | 'at'> {
     const publish = (job.request as { knowledgeAssetVmPublish: { intentKey?: string } }).knowledgeAssetVmPublish;
     const txHash = 'broadcast' in job ? job.broadcast?.txHash : undefined;
     const blockNumber = 'inclusion' in job ? job.inclusion?.blockNumber : undefined;
@@ -3060,8 +3027,6 @@ export class TripleStoreAsyncLiftPublisher
       ? (job.recovery as { recoveredFromStatus?: string } | undefined)?.recoveredFromStatus
       : undefined;
     return {
-      seq,
-      at: this.now(),
       kind: kind as Exclude<JournalKind, 'rollback-noop'>,
       jobId: job.jobId,
       lineageKey,
@@ -3094,7 +3059,7 @@ export class TripleStoreAsyncLiftPublisher
       : lineage.filter((e) => e.intentKey === facts.intentKey);
     // maxSeq/complete describe the whole LINEAGE (the contiguity reference); entries and
     // txHashes describe the queried subset (an intentKey filter is one version within it).
-    return this.summarizeJournal(entries, lineage);
+    return summarizeJournal(entries, lineage);
   }
 
   /** #1829 — all journal entries bearing this jobId. Read-only. */
@@ -3106,7 +3071,7 @@ export class TripleStoreAsyncLiftPublisher
     // is a property of the LINEAGE, not this job's slice. Resolve the lineage from any
     // entry (all of a job's entries share one lineageKey) and compute maxSeq/complete over it.
     const lineage = await this.readJournalEntriesBy(JOURNAL_LIFECYCLE_KEY, jobEntries[0]!.lineageKey);
-    return this.summarizeJournal(jobEntries, lineage);
+    return summarizeJournal(jobEntries, lineage);
   }
 
   // Object-bound read of every entry whose `predicate` equals `value`, grouped by
@@ -3132,45 +3097,6 @@ export class TripleStoreAsyncLiftPublisher
       .sort((a, b) => a.seq - b.seq);
   }
 
-  // `entries` is the queried subset returned to the caller; `lineage` is the full
-  // per-lineageKey set the completeness check is computed over (defaults to `entries`
-  // for a full-lineage read). maxSeq/complete describe the LINEAGE (no seq gap); a
-  // subset read never spuriously reports incomplete. On oxigraph `complete` is
-  // authoritative; on external SPARQL backends (no fsync) the highest-seq entry can be
-  // lost on crash without a visible gap — documented on JournalReadResult as best-effort.
-  private summarizeJournal(entries: AdmissionJournalEntry[], lineage: AdmissionJournalEntry[] = entries): JournalReadResult {
-    const maxSeq = lineage.reduce((max, e) => Math.max(max, e.seq), -1);
-    const complete = lineage.length === maxSeq + 1;
-    const txHashes = [...new Set(entries.map((e) => e.txHash).filter((h): h is string => h !== undefined))];
-    return { entries, maxSeq, complete, txHashes };
-  }
-
-  /**
-   * #1829 — per-lineageKey mutex for the journal read-modify-write (seq allocation +
-   * insert). Distinct lineages append in parallel; the same lineage serializes. Never
-   * acquired while holding — or acquiring — the claim lock, so no reentrancy/deadlock.
-   */
-  private async withJournalLock<T>(lineageKey: string, fn: () => Promise<T>): Promise<T> {
-    // journalGraphUri is a fixed constant, so the lineageKey alone keys the bucket.
-    const key = lineageKey;
-    const previous = TripleStoreAsyncLiftPublisher.journalQueues.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    TripleStoreAsyncLiftPublisher.journalQueues.set(key, next);
-
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (TripleStoreAsyncLiftPublisher.journalQueues.get(key) === next) {
-        TripleStoreAsyncLiftPublisher.journalQueues.delete(key);
-      }
-    }
-  }
-
   private async deleteJob(jobId: string): Promise<void> {
     await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri });
     await deleteByPatternWithoutCount(this.store, { subject: requestSubject(jobId), graph: this.graphUri });
@@ -3180,11 +3106,12 @@ export class TripleStoreAsyncLiftPublisher
   // the release path: the listener belongs to the caller's scheduler, and its failure must not
   // touch lock state.
   private notifyWalletRelease(walletId: string): void {
-    try {
-      this.schedulerListener?.onWalletRelease(walletId);
-    } catch {
-      // See above: scheduler failures stay the scheduler's problem.
-    }
+    this.queueScheduler.walletRelease(walletId);
+  }
+
+  /** Scheduling hint only; a failed observer cannot undo durable accepted work. */
+  private notifyWorkAvailable(): void {
+    this.queueScheduler.workAvailable();
   }
 
   private async getRequiredJob(jobId: string): Promise<LiftJob> {
@@ -3236,8 +3163,7 @@ export class TripleStoreAsyncLiftPublisher
    * merges it in. `LiftJobBroadcastMetadata.merkleRoot` is optional for exactly this reason —
    * the txHash is the evidence that matters here.
    */
-  private createPreSendBroadcastRecorder(params: {
-    claim: ActiveLiftJobClaim;
+  private createPreSendBroadcastRecorder(session: WorkerLiftJobClaimSession, params: {
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
   }): PreSendBroadcastRecorder {
@@ -3259,8 +3185,7 @@ export class TripleStoreAsyncLiftPublisher
     // publish transaction left this node".
     let writeAhead: Promise<void> | undefined;
     const onBeforeBroadcast = (record: PreBroadcastRecord): Promise<void> => {
-      writeAhead ??= this.recordBroadcastProgressBeforeSend({
-        claim: params.claim,
+      writeAhead ??= this.recordBroadcastProgressBeforeSend(session, {
         txHash: record.txHash as LiftJobHex,
         nonce: record.nonce,
         // r3 — the branch that signed, persisted with the hash it signed (see
@@ -3290,25 +3215,24 @@ export class TripleStoreAsyncLiftPublisher
     };
   }
 
-  private async recordBroadcastProgressBeforeSend(params: {
-    claim: ActiveLiftJobClaim;
+  private async recordBroadcastProgressBeforeSend(session: WorkerLiftJobClaimSession, params: {
     txHash: LiftJobHex;
     nonce?: number;
     operationKind?: 'create' | 'update';
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
   }): Promise<void> {
-    await this.claimCoordinator.transitionOwned(params.claim, async (current, scope) => {
-      const jobId = params.claim.jobId;
+    await session.preSend(async (current, scope, restoreValidated) => {
+      const jobId = session.claim.jobId;
       if (current.status === 'broadcast') return;
       if (current.status !== 'validated') {
         throw new Error(
           `Cannot record pre-send broadcast for job ${jobId} from status ${current.status}`,
         );
       }
-      await this.recordDurableBroadcastBeforeSend(current, scope, {
+      await this.recordDurableBroadcastBeforeSend(current, scope, restoreValidated, {
         txHash: params.txHash,
-        walletId: params.claim.claim.walletId,
+        walletId: session.claim.claim.walletId,
         nonce: params.nonce,
         operationKind: params.operationKind,
         merkleRoot: params.merkleRoot,
@@ -3341,6 +3265,7 @@ export class TripleStoreAsyncLiftPublisher
   private async recordDurableBroadcastBeforeSend(
     current: LiftJob,
     scope: LiftJobTransitionScope,
+    restoreValidated: () => Promise<void>,
     broadcast: LiftJobBroadcastMetadata,
   ): Promise<void> {
     try {
@@ -3353,21 +3278,13 @@ export class TripleStoreAsyncLiftPublisher
       // duplicate journal entry (the original 'validated' entry already exists, and the
       // pre-flush 'broadcast' entry already recorded the attempt). The subsequent
       // failure transition emits the terminal entry.
-      await this.writeJob(current, 'rollback-noop');
+      await restoreValidated();
       throw error;
     }
   }
 
   private parseJobPayload(binding?: string): PersistedLiftJob | null {
     return decodedLiftJobOrThrow(decodeLiftJobPayload(binding));
-  }
-
-  /** Queue inventories are best-effort selectors; exact reads and indexed admissions stay strict. */
-  private parseJobPayloadForScan(binding?: string): PersistedLiftJob | null {
-    const decoded = decodeLiftJobPayload(binding);
-    return decoded.kind === 'canonical' || decoded.kind === 'compatibility'
-      ? decoded.job
-      : null;
   }
 
   // Target-state constructors select only metadata legal for the destination. No transition can
@@ -3442,13 +3359,13 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  private async reacceptDueFailedJobs(now: number): Promise<number> {
+  private async reacceptDueFailedJobs(section: JournalSection, now: number, candidates: PersistedLiftJob[]): Promise<number> {
     let retried = 0;
-    for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+    for (const job of candidates.filter(isFailedJob)) {
       if (retried >= TripleStoreAsyncLiftPublisher.MAX_REACCEPTS_PER_SWEEP) break;
       if (job.timestamps.nextRetryAt === undefined || job.timestamps.nextRetryAt > now) continue;
       if (!this.isAutomaticallyRetryable(job)) continue;
-      await this.reacceptFailedJob(job, { kind: 'retry' });
+      await this.reacceptFailedJob(section, job, { kind: 'retry' });
       retried += 1;
     }
     return retried;
@@ -3505,10 +3422,11 @@ export class TripleStoreAsyncLiftPublisher
    * think about it would silently take whichever one this signature happened to prefer.
    */
   private async reacceptFailedJob(
+    section: JournalSection,
     job: PersistedFailedJob,
     intent: ReacceptIntent,
   ): Promise<LiftJobAccepted> {
-    return await this.claimCoordinator.runJobTransaction(job.jobId, async (transaction) => {
+    return await this.claimCoordinator.runNestedJobTransaction(section, job.jobId, async (transaction) => {
       if (transaction.kind === 'missing') throw new Error(`LiftJob not found: ${job.jobId}`);
       const { current, scope } = transaction;
       if (!isFailedJob(current)) {
@@ -3706,8 +3624,8 @@ export class TripleStoreAsyncLiftPublisher
     return this.buildTransitionJob(job, 'failed', { failure });
   }
 
-  private async finalizeNoopPublish(claim: ActiveLiftJobClaim): Promise<LiftJob> {
-    return await this.claimCoordinator.transitionOwned(claim, async (current, scope) => {
+  private async finalizeNoopPublish(session: WorkerLiftJobClaimSession): Promise<LiftJob> {
+    return await session.transition(async (current, scope) => {
       const finalized = this.buildTransitionJob(current, 'finalized', {
         finalization: {
           mode: 'noop',
@@ -3720,11 +3638,11 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async finalizeKnowledgeAssetVmPublishNoop(
-    claim: ActiveLiftJobClaim,
+    session: WorkerLiftJobClaimSession,
     request: LiftPublishSnapshotRequest,
     metadata: LiftPublishRequestMetadata,
   ): Promise<LiftJob> {
-    return await this.claimCoordinator.transitionOwned(claim, async (current, scope) => {
+    return await session.transition(async (current, scope) => {
       let next = current;
       if (!next.validation) {
         next = this.buildTransitionJob(next, 'validated', {

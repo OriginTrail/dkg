@@ -1,3 +1,7 @@
+import { classifyReconcileUnavailable } from './reconcile-unavailable.js';
+export { classifyReconcileUnavailable } from './reconcile-unavailable.js';
+import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
+export { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 // HTTP request/response utilities extracted from the legacy monolithic
 // `daemon.ts`. Body parsing, JSON validators, CORS resolution, the
 // loopback rate-limiter, plus small helpers used across route handlers.
@@ -12,6 +16,8 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   messageIndicatesNoFundedPublisherWallet,
   Logger,
@@ -35,7 +41,7 @@ import {
   type ContextGraphReadAuthorityAttribution,
 } from './read-authority-diagnostics.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
-
+import { knownNotWritableAnswer, resolveAwaitingWriteReadiness, type ContextGraphSubscriptionReader, type KnownNotWritable, type WriteReadinessOutcome } from './context-graph-write-readiness.js';
 import type { CorsAllowlist } from './state.js';
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
@@ -150,6 +156,7 @@ export function respondContextGraphReadAuthorityUnavailable(
   res: ServerResponse,
   attribution: ContextGraphReadAuthorityAttribution,
   ctx: OperationContext = createOperationContext('query'),
+  code: typeof CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE | 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' = CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
 ): void {
   readAuthorityDiagnostics.record(ctx, attribution);
   jsonResponse(
@@ -157,7 +164,7 @@ export function respondContextGraphReadAuthorityUnavailable(
     503,
     {
       error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      code,
       retryable: true,
     },
     undefined,
@@ -221,11 +228,11 @@ export function noFundedPublisherWalletBody(message: string): { code: string; er
  * Use a fixed message: the underlying RPC error may contain private endpoint
  * details and its transport code is intentionally not the public error code. */
 export function respondIfPcaFundingUnknown(res: ServerResponse, err: unknown): boolean {
-  if ((err as { code?: unknown } | null)?.code !== 'PCA_FUNDING_UNKNOWN') return false;
+  if ((err as { code?: unknown } | null)?.code !== PCA_FUNDING_UNKNOWN_CODE) return false;
   res.setHeader('Retry-After', '1');
   jsonResponse(res, 503, {
-    code: 'PCA_FUNDING_UNKNOWN',
-    error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
+    code: PCA_FUNDING_UNKNOWN_CODE,
+    error: PCA_FUNDING_UNKNOWN_MESSAGE,
     retryable: true,
   });
   return true;
@@ -335,40 +342,10 @@ export function validateWritableQuadLiteralSizes(
   }
 }
 
-/**
- * KA-number-floor reconcile resilience (follow-up to the "KA create 500-on-429"
- * fix). If `e` is a **transient** reconcile failure — the chain RPC couldn't serve
- * the one-time-per-author floor read (e.g. a 429 after the bounded retry in
- * `allocator.ts` is exhausted) — send a retryable **503** and return true;
- * otherwise return false so the caller falls through to its normal mapping.
- *
- * The transient-vs-deterministic verdict comes from `retryable` (derived from
- * `isTransientChainError`): the typed `KaFloorReconcileError` carries it, and the
- * finalize/selection re-wrap sites in `dkg-agent-publish.ts` tag the same marker.
- * A deterministic failure (`retryable === false`, e.g. a revert) is NOT a 503 —
- * advertising a retry would be pointless — so it falls through. The legacy
- * message-text match is honored ONLY when the error explicitly marks itself
- * retryable, so a bare re-wrapped message can never force a deterministic error
- * into a retryable 503 (PR #1319 review). Used by every route that can trigger the
- * reconcile (named create, one-shot publish, shared-memory publish, and the
- * WM-verb routes via `respondAssertionError`) so they answer consistently.
- */
 export function respondIfReconcileUnavailable(res: ServerResponse, e: any): boolean {
-  const msg = e?.message ?? String(e);
-  const isTyped = e?.code === "KA_FLOOR_RECONCILE_UNAVAILABLE";
-  // Message-text fallback (for errors re-wrapped on the way up) is accepted only
-  // when the error explicitly carries a retryable marker — never for a bare
-  // message, which might be hiding a deterministic revert.
-  const isMarkedLegacyTransient =
-    e?.retryable === true && /failed to reconcile KA-number floor/i.test(msg);
-  if ((!isTyped && !isMarkedLegacyTransient) || e?.retryable === false) {
-    return false;
-  }
-  jsonResponse(res, 503, {
-    error: msg,
-    code: "KA_FLOOR_RECONCILE_UNAVAILABLE",
-    retryable: true,
-  });
+  const body = classifyReconcileUnavailable(e);
+  if (!body) return false;
+  jsonResponse(res, 503, body);
   return true;
 }
 
@@ -577,10 +554,11 @@ export function jsonResponse(
   corsOrigin?: string | null,
   extraHeaders?: Record<string, string>,
 ): void {
-  const origin =
-    corsOrigin !== undefined
-      ? corsOrigin
-      : (((res as any).__corsOrigin as string | null) ?? null);
+  sendSerializedJsonResponse(res, status, serializeJsonResponse(status, data), corsOrigin, extraHeaders);
+}
+
+/** The body {@link jsonResponse} sends, for a route that must finish its answer before it decides to send it. */
+export function serializeJsonResponse(status: number, data: unknown): string {
   const scrubbed = scrubResponseBody(data);
   const rawBody = JSON.stringify(scrubbed, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,
@@ -659,7 +637,7 @@ export function jsonResponse(
   // the CodeQL silence on the flagged sink while making
   // success-path payload corruption impossible.
   const isErrorResponse = status >= 400;
-  const body = isErrorResponse
+  return isErrorResponse
     ? rawBody
         .replace(/\\n\s+at [^"\n]+/g, "")
         .replace(
@@ -668,6 +646,17 @@ export function jsonResponse(
         )
         .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "")
     : rawBody;
+}
+
+/** Sends a body {@link serializeJsonResponse} made. */
+export function sendSerializedJsonResponse(
+  res: ServerResponse,
+  status: number,
+  body: string,
+  corsOrigin?: string | null,
+  extraHeaders?: Record<string, string>,
+): void {
+  const origin = corsOrigin !== undefined ? corsOrigin : (((res as any).__corsOrigin as string | null) ?? null);
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),
@@ -750,13 +739,6 @@ export function validateRequiredContextGraphId(
   return true;
 }
 
-const CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:";
-
-export function normalizeContextGraphIdOrUri(contextGraphId: string): string {
-  return contextGraphId.startsWith(CONTEXT_GRAPH_URI_PREFIX)
-    ? contextGraphId.slice(CONTEXT_GRAPH_URI_PREFIX.length)
-    : contextGraphId;
-}
 
 type ExistingContextGraphRow = {
   id?: unknown;
@@ -826,16 +808,9 @@ async function contextGraphRowIsWritable(
   return false;
 }
 
-function rejectKnownNonWritableContextGraph(
-  res: ServerResponse,
-  raw: string,
-): null {
-  jsonResponse(res, 400, {
-    code: "CONTEXT_GRAPH_NOT_WRITABLE",
-    error:
-      `Context graph "${raw}" is known but is not locally synced for writes. ` +
-      `Subscribe/sync the context graph first, then retry the write.`,
-  });
+function rejectKnownNonWritableContextGraph(res: ServerResponse, raw: string, outcome: WriteReadinessOutcome): null {
+  const answer = knownNotWritableAnswer(raw, outcome);
+  jsonResponse(res, answer.status, answer.body, undefined, answer.headers);
   return null;
 }
 
@@ -1149,8 +1124,17 @@ async function evaluateExactWritePreflight(
  * The storage layer auto-materializes named graphs on first insert, so syntax
  * validation is not enough for mutation routes. This helper fail-closes before
  * callers reach agent/publisher/storage code that would create a shadow CG.
+ * A known graph that this node is still catching up is waited for, bounded,
+ * and resolved once more (`context-graph-write-readiness.ts`).
  */
-export async function resolveRequiredWriteContextGraphId(
+export function resolveRequiredWriteContextGraphId(...args: Parameters<typeof resolveWriteContextGraphIdOnce>): Promise<string | null> {
+  const [agent, , res] = args;
+  return resolveAwaitingWriteReadiness(agent, () => resolveWriteContextGraphIdOnce(...args),
+    (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome), res);
+}
+
+/** One pass of {@link resolveRequiredWriteContextGraphId}: a known graph that is not writable here is returned, not answered. */
+async function resolveWriteContextGraphIdOnce(
   agent: {
     listContextGraphs(opts?: {
       callerAgentAddress?: string | null;
@@ -1168,6 +1152,8 @@ export async function resolveRequiredWriteContextGraphId(
      * locally.
      */
     validateWriteTargetDuringStoreOutage?: (contextGraphId: string) => Promise<boolean>;
+    /** Live subscription rows: a write waits on them while this node catches its graph up. */
+    getSubscribedContextGraphs?: ContextGraphSubscriptionReader['getSubscribedContextGraphs'];
   },
   contextGraphId: unknown,
   res: ServerResponse,
@@ -1188,7 +1174,7 @@ export async function resolveRequiredWriteContextGraphId(
      */
     chainRescueTimeoutMs?: number;
   } = {},
-): Promise<string | null> {
+): Promise<string | KnownNotWritable | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
 
   const raw = (contextGraphId as string).trim();
@@ -1220,7 +1206,7 @@ export async function resolveRequiredWriteContextGraphId(
     return rejectUnknownContextGraph(res, raw);
   }
   if (exactDecision.kind === "rejectNonWritable") {
-    return rejectKnownNonWritableContextGraph(res, raw);
+    return { notWritable: candidateId, raw };
   }
   if (exactDecision.kind === "validationUnavailable") {
     return contextGraphValidationUnavailable(res, exactDecision.errorMessage);
@@ -1332,7 +1318,7 @@ export async function resolveRequiredWriteContextGraphId(
       !isShadowLikeBareContextGraphRow(exact)
     ) {
       if (requireLocalWritable && !exactWritable) {
-        return rejectKnownNonWritableContextGraph(res, raw);
+        return { notWritable: exact.id, raw };
       }
       return exact.id;
     }
@@ -1362,7 +1348,7 @@ export async function resolveRequiredWriteContextGraphId(
     }
     if (exact?.id && typeof exact.id === "string") {
       if (requireLocalWritable && !exactWritable) {
-        return rejectKnownNonWritableContextGraph(res, raw);
+        return { notWritable: exact.id, raw };
       }
       return exact.id;
     }
@@ -1370,7 +1356,7 @@ export async function resolveRequiredWriteContextGraphId(
 
   if (exact?.id && typeof exact.id === "string") {
     if (requireLocalWritable && !exactWritable) {
-      return rejectKnownNonWritableContextGraph(res, raw);
+      return { notWritable: exact.id, raw };
     }
     return exact.id;
   }

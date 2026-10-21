@@ -8,36 +8,14 @@ export interface ConfirmedNamedKaVmLifecycleRecovery extends ConfirmedNamedKaVmL
   readonly publicationRetrySafe: false;
 }
 
-/** The fields a foreign recovery error certifies for response projection. */
-export interface ConfirmedNamedKaVmPublicationView {
-  readonly status: 'confirmed';
-  readonly kaId: bigint;
-  readonly ual: string;
-  readonly assertionUri: string;
-  readonly merkleRoot: Uint8Array;
-  readonly seal: { readonly authorAddress: string };
-  readonly onChainResult?: {
-    readonly txHash: string;
-    readonly blockNumber: number;
-    /** Passed through as receipt evidence; no richer cost model is certified. */
-    readonly convictionCostCovered?: unknown;
-  };
-  readonly v10ACKs?: readonly { readonly peerId: string }[];
-  readonly lifecycleRepairPending?: boolean;
-  readonly contextGraphError?: string;
-  readonly authorAddress?: string;
-  readonly kas?: readonly unknown[];
-}
-export interface ConfirmedNamedKaVmLifecycleRecoveryView {
-  readonly contextGraphId: string;
-  readonly agentAddress: string;
-  readonly name: string;
-  readonly publishedUal: string;
-  readonly merkleRoot: string;
-  readonly assertionVersion: string;
-  readonly action: 'recover_confirmed_publication';
-  readonly publicationRetrySafe: false;
-}
+/** Domain evidence recognized across independently loaded copies of the package. */
+export type ConfirmedNamedKaVmPublicationView = Pick<ConfirmedNamedKaVmPublication,
+  'status' | 'kaId' | 'ual' | 'assertionUri' | 'merkleRoot'> & {
+  readonly seal: Pick<ConfirmedNamedKaVmPublication['seal'], 'authorAddress'>;
+  readonly onChainResult?: Pick<NonNullable<ConfirmedNamedKaVmPublication['onChainResult']>, 'txHash' | 'blockNumber'>;
+};
+export type ConfirmedNamedKaVmLifecycleRecoveryView = Pick<ConfirmedNamedKaVmLifecycleRecovery,
+  'contextGraphId' | 'agentAddress' | 'name' | 'publishedUal' | 'merkleRoot' | 'assertionVersion' | 'action' | 'publicationRetrySafe'>;
 /** A structural boundary is distinct from the producer's complete receipt and class aliases. */
 export interface ConfirmedNamedKaVmLifecycleRecoveryErrorPayload {
   readonly code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED';
@@ -82,13 +60,7 @@ const publicationFields: ContractValidators<ConfirmedNamedKaVmPublicationView> =
   merkleRoot: (value): value is Uint8Array => value instanceof Uint8Array,
   seal: (value): value is ConfirmedNamedKaVmPublicationView['seal'] => matchesContract(value, { authorAddress: string }),
   onChainResult: optional((value): value is NonNullable<ConfirmedNamedKaVmPublicationView['onChainResult']> =>
-    matchesContract(value, { txHash: string, blockNumber: (block): block is number => typeof block === 'number' && Number.isSafeInteger(block) && block >= 0,
-      convictionCostCovered: (_cost): _cost is unknown => true })),
-  v10ACKs: optional((value): value is NonNullable<ConfirmedNamedKaVmPublicationView['v10ACKs']> =>
-    Array.isArray(value) && value.every(ack => matchesContract(ack, { peerId: string }))),
-  lifecycleRepairPending: optional((value): value is boolean => typeof value === 'boolean'),
-  contextGraphError: optional(string), authorAddress: optional(string),
-  kas: optional((value): value is readonly unknown[] => Array.isArray(value)),
+    matchesContract(value, { txHash: string, blockNumber: (block): block is number => typeof block === 'number' && Number.isSafeInteger(block) && block >= 0 })),
 };
 const recoveryFields: ContractValidators<ConfirmedNamedKaVmLifecycleRecoveryView> = {
   contextGraphId: string, agentAddress: string, name: string, publishedUal: string, merkleRoot: string, assertionVersion: string,

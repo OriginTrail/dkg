@@ -11,6 +11,7 @@ describe('confirmed context-graph metadata source labels', () => {
     const store = { query } as unknown as TripleStore;
     const agent = {
       store,
+      resolveMetadataConfirmation: LifecycleSyncMethods.prototype.resolveMetadataConfirmation,
       localApprovedAgentByCG: new Map(),
       subscribedContextGraphs: new Map(),
       resolveActivePublicContextGraphChainProof: vi.fn(async () => ({

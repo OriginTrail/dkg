@@ -66,7 +66,7 @@ it('completes confirmed lifecycle repair through actual managed configuration on
     barrier.location = location; barrier.entered = entered;
     barrier.release = new Promise<void>(resolve => { release = resolve; });
     const submission = repair.submit({ contextGraphId: cg, agentAddress: author, name, merkleRoot: hash,
-      assertionVersion: '1', packedKaId, publishedUal: `did:dkg:mock:31337/${author}/1` });
+      assertionVersion: '1', publicationDeployment: { chainId: '31337', lifecycleAddress: author }, packedKaId, publishedUal: `did:dkg:mock:31337/${author}/1` });
     let settled = false; void submission.then(() => { settled = true; });
     await syncing;
     expect(settled).toBe(false); expect((await journal()).size).toBe(1);

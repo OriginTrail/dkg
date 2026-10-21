@@ -54,11 +54,11 @@ describe('structural recovery boundary evidence', () => {
     ['KA identity', { kaId: '1' }], ['author seal', { seal: {} }],
     ['transaction receipt', { onChainResult: { txHash: 1, blockNumber: 12 } }],
     ['receipt block', { onChainResult: { txHash: '0x1234', blockNumber: '12' } }],
-    ['ACK container', { v10ACKs: {} }], ['ACK peer', { v10ACKs: [{ peerId: 3 }] }],
-    ['pending flag', { lifecycleRepairPending: 'pending' }], ['graph error', { contextGraphError: 3 }],
-    ['legacy author', { authorAddress: 3 }], ['legacy assets', { kas: {} }],
   ])('refuses malformed exposed %s fields', (_name, changes) => {
     expect(isConfirmedNamedKaVmLifecycleRecoveryError(foreignError(changes))).toBe(false);
+  });
+  it('leaves HTTP compatibility fields to the consumer boundary', () => {
+    expect(isConfirmedNamedKaVmLifecycleRecoveryError(foreignError({ authorAddress: 3, kas: {}, v10ACKs: {} }))).toBe(true);
   });
   it('refuses inaccessible structural fields without throwing from the guard', () => {
     const error = foreignError();

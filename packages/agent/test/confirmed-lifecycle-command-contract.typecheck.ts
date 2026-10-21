@@ -38,8 +38,15 @@ void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name:
 void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name: 'ka', agentAddress: 'agent', assertionVersion: '999' });
 
 declare const entry: LifecycleRepairEntry;
-const workerInput: ConfirmedNamedKaVmLifecycleInput = entry.input;
+const workerInput: ConfirmedNamedKaVmLifecycleInput = entry.retention === 'historical-unbound' ? confirmed : entry.input;
 const workerPackedId: bigint | undefined = entry.input.packedKaId;
 // @ts-expect-error The disk encoding cannot enter scheduling or execution.
 const wireEntry: LifecycleRepairEntry = { input: stored, attempts: 0, nextAttemptAt: 0 };
 void workerInput; void workerPackedId; void wireEntry;
+
+// Newly admitted commands always bind their original chain deployment.
+declare const confirmedCommand: import('../src/named-ka-vm-lifecycle-repair.js').ConfirmedNamedKaVmLifecycleInput;
+const { publicationDeployment: originalDeployment, ...unboundCommand } = confirmedCommand;
+// @ts-expect-error Historical unbound records cannot be submitted as new confirmed commands.
+const incompleteCommand: import('../src/named-ka-vm-lifecycle-repair.js').ConfirmedNamedKaVmLifecycleInput = unboundCommand;
+void originalDeployment; void incompleteCommand;

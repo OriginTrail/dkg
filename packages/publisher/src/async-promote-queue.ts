@@ -6,6 +6,7 @@ export type {
   PromoteCommitMarker,
   PromoteCommitMarkerStep,
   PromoteFailureClassification,
+  PromoteFailureTransition,
   PromoteJob,
   PromoteJobState,
   PromoteLease,
@@ -13,15 +14,20 @@ export type {
   PromotePostCommitRecoveryEvent,
   PromoteRecoverySummary,
   PromoteRequest,
+  BoundPromoteRequest,
+  BoundPromoteJob,
   PromoteResult,
   PromoteStats,
   PromoteTerminalJobClearer,
+  PromoteShareReconciler,
 } from './async-promote-queue-types.js';
 export {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   PROMOTE_COMMIT_MARKER_STEPS,
   PROMOTE_JOB_STATES,
+  PromoteAdmissionUncertainError,
   PromoteJobConflictError,
+  PromoteJobCancellationConflictError,
   PromoteJobLeaseError,
 } from './async-promote-queue-types.js';
 export { TripleStoreAsyncPromoteQueue } from './async-promote-queue-impl.js';

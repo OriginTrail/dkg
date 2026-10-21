@@ -11,7 +11,6 @@ import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
-  SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 // The config loader must stay off the agent package ROOT at runtime: that entry
 // loads the whole agent runtime (libp2p, sync lanes, the process-wide
@@ -56,7 +55,7 @@ import {
   resolveContextGraphAuthorityIndexTickMs,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
-  type ApprovalPolicy,
+  type ApprovalPolicy, type ChainSignerSettings,
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
@@ -356,7 +355,7 @@ export interface ApprovalPolicyConfig {
 
 export type ApprovalPolicyConfigInput = ApprovalPolicyConfig | ApprovalPolicyMode;
 
-export interface ChainConfig {
+export interface ChainConfig extends ChainSignerSettings {
   /** 'evm' for real blockchain, omit or 'mock' for in-memory (testing only) */
   type: 'evm' | 'mock';
   /** JSON-RPC endpoint URL */
@@ -635,7 +634,9 @@ export interface LoggingConfig {
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
+  /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
+  DKG_Core_chain_cache?: boolean;
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -765,16 +766,13 @@ export interface DkgConfig {
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;
   /**
-   * Chain config. Field-merged on top of `network/<env>.json#chain` via
-   * `resolveChainConfig()`, so an operator can override individual fields
-   * (e.g. just `rpcUrl` to point at a private RPC) without having to
-   * restate `hubAddress` and `chainId`. Fields omitted here inherit the
-   * network defaults — including future hub rotations propagated by the
-   * auto-updater pulling a fresh network/<env>.json.
+   * Field-merged over network/<env>.json#chain by resolveChainConfig().
+   * Operators can override one field; omitted fields follow updated defaults.
    */
   chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
@@ -852,8 +850,6 @@ export interface DkgConfig {
   syncGlobalQueueLimit?: number;
   /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
   syncAdmission?: SyncAdmissionConfig;
-  /** Retained sync responder snapshot limits (rows and estimated bytes). */
-  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**
    * Local sync scheduling priority by Context Graph ID. Higher runs first.
    * System Context Graphs default to a deprioritized priority so they run
@@ -2006,7 +2002,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
+export function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
   if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
 
   _bundledNetworkRegistry = loadNetworkRegistryFromRoots(runtimeAssetRoots());

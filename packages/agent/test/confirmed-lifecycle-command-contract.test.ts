@@ -9,7 +9,7 @@ import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from 
 import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 const fields = { contextGraphId: 'command-contract', agentAddress: '0x1111111111111111111111111111111111111111', name: 'asset',
-  publishedUal: 'did:dkg:mock/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1' };
+  publishedUal: 'did:dkg:mock/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1', publicationDeployment: { chainId: '31337', lifecycleAddress: '0x' + '22'.repeat(20) } };
 const dirs: string[] = [], stores: OxigraphStore[] = [], owners: NamedKaVmLifecycleRepair[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const owner of owners.splice(0)) await owner.stop();
   for (const store of stores.splice(0)) await store.close(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });

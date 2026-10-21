@@ -86,7 +86,7 @@ it('retains confirmed repair evidence when snapshot directory sync fails after r
   const store = new OxigraphStore(path); stores.push(store);
   let now = 1_000;
   const input: ConfirmedNamedKaVmLifecycleInput = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR,
-    publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED };
+    publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED, publicationDeployment: { chainId: '31337', lifecycleAddress: AUTHOR } };
   const owner = new NamedKaVmLifecycleRepair({ dataDir: dir, writeLocks: new Map(), now: () => now,
     isCurrent: async () => true, apply: candidate => applyPublishedNamedKaVmLifecycle(store, candidate), warn: () => {} });
   flushBarrier.directoryErrorPath = snapshotDir;
@@ -117,7 +117,8 @@ function agentFor(store: OxigraphStore, dir: string, version: number) {
   agent.createV10ACKProvider = () => undefined;
   agent._resolveInlineEncryption = async () => ({ encryptInlinePayload: undefined, encryptInlineChunked: undefined });
   agent._buildPrecomputedUpdateAttestationForSeal = async () => ({});
-  agent.afterConfirmedGraphScopedVmPublishV1 = async () => undefined;
+  agent.afterConfirmedGraphScopedVmPublishV1 = async () => true;
+  agent.retireLegacySwmAfterVerifiedVmTwin = async () => true;
   agent.gossipSession = new GossipSession();
   agent.gossip = { publish: async () => undefined };
   return agent;
@@ -153,14 +154,16 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
           ...(version === 2 ? [{ subject: LIFECYCLE, predicate: `${DKG}vmCurrentAssertion`, object: JSON.stringify(PRIOR), graph: META }] : []),
         ]);
         const agent = agentFor(store, dir, version);
-        const publish = vi.fn(async () => {
+        const publish = vi.fn(async (...args: any[]) => {
+          const callbacks = args.find(value => value && typeof value.onBeforeBroadcast === 'function');
+          await callbacks?.onBeforeBroadcast({ txHash: `0x${'cd'.repeat(32)}`, operationKind: version === 2 ? 'update' : 'create' });
           store.armed = true; // Confirmation precedes the targeted stamp.
           return { status: 'confirmed', ual: PUBLISHED, kaId: PACKED, merkleRoot: ROOT, kaManifest: [],
             onChainResult: { txHash: `0x${'cd'.repeat(32)}`, blockNumber: 2, txIndex: 0, kaId: PACKED, batchId: PACKED,
               startKAId: PACKED, endKAId: PACKED, publisherAddress: AUTHOR } };
         });
         agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: async () => undefined,
-          clearPublishedKnowledgeAssetSwm: async () => undefined };
+          clearPublishedKnowledgeAssetSwm: async () => true };
         agent.publishFromSharedMemory = publish; agent.update = publish;
         let queue: TripleStoreAsyncLiftPublisher | undefined, result: any;
         if (mode.startsWith('queued')) {
@@ -179,7 +182,7 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
           const jobId = await queue.enqueueKnowledgeAssetVmPublish(request);
           const processed = await queue.processNext('wallet-1');
           if (processed?.status === 'failed') throw new Error(JSON.stringify(processed));
-          expect(processed).toMatchObject({ jobId, status: 'finalized' });
+          expect(processed).toMatchObject({ jobId, status: label === 'successful stamp' ? 'finalized' : 'broadcast' });
         } else result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
         expect(result.status).toBe('confirmed'); expect(result.ual).toBe(PUBLISHED); expect(result.lifecycleRepairPending).toBe(label === 'successful stamp' ? undefined : true); expect(publish).toHaveBeenCalledTimes(1);
         await agent.namedKaVmLifecycleRepair?.runDue(); // No retry before the persisted 5s deadline.
@@ -233,11 +236,12 @@ describe('confirmed publication tail after a lifecycle journal retirement failur
       return { status: 'confirmed', ual: PUBLISHED, kaId: PACKED, merkleRoot: ROOT, kaManifest: [], onChainResult: { txHash, blockNumber: 2,
         txIndex: 0, kaId: PACKED, batchId: PACKED, startKAId: PACKED, endKAId: PACKED, publisherAddress: AUTHOR } };
     });
-    agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: clearMarker, clearPublishedKnowledgeAssetSwm: async () => undefined };
+    agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: clearMarker, clearPublishedKnowledgeAssetSwm: async () => true };
     agent.publishFromSharedMemory = publish;
     // Write-ahead admission and the durable metadata commit succeed; the retirement replacement fails.
     const journal = join(dir, 'named-ka-vm-lifecycle-repairs.json'), replace = DurableReplaceableFile.prototype.replace;
-    let journalWrites = 0, failure: unknown, queue: TripleStoreAsyncLiftPublisher | undefined;
+    let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let journalWrites = 0, result: any, queue: TripleStoreAsyncLiftPublisher | undefined;
     vi.spyOn(DurableReplaceableFile.prototype, 'replace').mockImplementation(async function (this: DurableReplaceableFile, contents: string) {
       if (Reflect.get(this, 'path') === journal && ++journalWrites === 2) throw Object.assign(new Error('journal retirement failed'), { code: 'EIO' });
       return replace.call(this, contents);
@@ -251,13 +255,13 @@ describe('confirmed publication tail after a lifecycle journal retirement failur
         sealChainId: '31337', sealKav10Address: AUTHOR, sealFinalizedAtIso: finalizedAt, sealMerkleRoot: HEX,
         contentScopeVersion: 2, kaUal: UAL, assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0 };
       queue = new TripleStoreAsyncLiftPublisher(store, { knowledgeAssetVmPublishHandler: { execute: async ({ request, publishOptions }) => {
-        try { return await agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions); } catch (error) { failure = error; throw error; }
+        result = await agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions); return result;
       } } });
       const jobId = await queue.enqueueKnowledgeAssetVmPublish({ ...fields, intentKey: createKnowledgeAssetVmPublishIntentKey(fields as any) } as KnowledgeAssetVmPublishRequest);
       // The write-ahead broadcast record keeps the job for chain proof; the queue never resends it.
       expect(await queue.processNext('wallet-1')).toMatchObject({ jobId, status: 'broadcast', broadcast: { txHash } });
-    } else failure = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR }).catch((error: unknown) => error);
-    expect(failure).toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: PUBLISHED, assertionVersion: '1' });
+    } else result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
+    expect(result).toMatchObject({ status: 'confirmed', ual: PUBLISHED, lifecycleRepairPending: true });
     expect(journalWrites).toBe(2);
     expect(await store.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" } }`)).toMatchObject({ value: true });
     expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(journal, 'utf8'))).size).toBe(1);
@@ -268,7 +272,8 @@ describe('confirmed publication tail after a lifecycle journal retirement failur
       assertionUri: ASSERTION, seal: expect.objectContaining({ kaUal: UAL, assertionVersion: '1', authorAddress: AUTHOR }) }));
     if (queue) expect(broadcast).toHaveBeenCalledOnce(); // The queued finalization broadcast also still runs.
     // Storage recovered: the worker completes the retained entry, and nothing publishes or observes again.
-    await agent.namedKaVmLifecycleRepair.runDue();
+    await agent.namedKaVmLifecycleRepair.runDue(); expect(journalWrites).toBe(2);
+    now += 5000; await agent.namedKaVmLifecycleRepair.runDue();
     expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(journal, 'utf8'))).size).toBe(0);
     expect(journalWrites).toBe(3); expect(publish).toHaveBeenCalledOnce(); expect(observed).toHaveBeenCalledOnce();
     if (queue) expect(await queue.processNext('wallet-1')).toBeNull();
@@ -307,23 +312,23 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
       const held = new Promise<void>(resolve => { release = resolve; });
       const apply = vi.fn(async () => { throw new Error('Temporary store outage'); });
       const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
-      for (let i = 0; i < 12; i++) await repair.submit({ ...input, name: `asset-${i}` });
+      for (let i = 0; i < 15; i++) await repair.submit({ ...input, name: `asset-${i}` });
       apply.mockImplementation(async () => { await held; });
       now = 6_000;
       repair.start();
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(apply).toHaveBeenCalledTimes(13);
+      expect(apply).toHaveBeenCalledTimes(19);
       await vi.advanceTimersByTimeAsync(20_000);
-      expect(apply).toHaveBeenCalledTimes(13);
+      expect(apply).toHaveBeenCalledTimes(19);
       release();
       await repair.stop();
       // Stop waits for the physical write but prevents the rest of its batch from starting.
-      expect(apply).toHaveBeenCalledTimes(13);
+      expect(apply).toHaveBeenCalledTimes(19);
       repair.start();
       await repair.runDue();
-      expect(apply).toHaveBeenCalledTimes(23); // Ten remaining entries, leaving one for a later pass.
+      expect(apply).toHaveBeenCalledTimes(29); // Ten remaining entries, leaving one for a later pass.
       await repair.runDue();
-      expect(apply).toHaveBeenCalledTimes(24);
+      expect(apply).toHaveBeenCalledTimes(30);
       await repair.stop();
     } finally { vi.useRealTimers(); }
   });
@@ -916,7 +921,7 @@ describe('tentative normal publication projection', () => {
       ...(version === 2 ? [{ subject: LIFECYCLE, predicate: `${DKG}vmCurrentAssertion`, object: JSON.stringify(PRIOR), graph: META }] : []),
     ]);
     const agent = agentFor(store, dir, version), publish = vi.fn(async () => ({ status: 'tentative', ual: PUBLISHED, kaId: PACKED, merkleRoot: ROOT, kaManifest: [] }));
-    agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: async () => undefined, clearPublishedKnowledgeAssetSwm: async () => undefined };
+    agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: async () => undefined, clearPublishedKnowledgeAssetSwm: async () => true };
     agent.publishFromSharedMemory = publish; agent.update = publish;
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
     expect(result).toMatchObject({ status: 'tentative', ual: PUBLISHED }); expect(result.lifecycleRepairPending).toBeUndefined(); expect(publish).toHaveBeenCalledOnce();

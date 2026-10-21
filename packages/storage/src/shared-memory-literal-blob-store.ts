@@ -1,9 +1,11 @@
 import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
 import { persistFileAndParent } from './file-durability.js';
 import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { LiteralHydrationBudget, readLiteralBlobBounded } from './bounded-literal-hydration.js';
 import type {
   ConstructResult,
   Quad,
@@ -17,6 +19,7 @@ import type {
 } from './triple-store.js';
 import { deleteByPatternWithoutCount } from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
@@ -59,6 +62,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
 
   readonly innerStore: TripleStore;
   readonly commitment?: TripleStoreCommitCapability;
+  readonly graphEnumerationVisibility;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
@@ -75,6 +79,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.inner = inner;
     this.innerStore = inner;
     this.commitment = composeTripleStoreCommitment(inner);
+    this.graphEnumerationVisibility = inner.graphEnumerationVisibility?.bind(inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
     this.blobDirectory = new DurableDirectoryPreparation(this.blobDir);
@@ -85,8 +90,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return this.inner.insert(quads, options);
-    return this.withExternalizedQuads(quads, (externalized) =>
-      this.inner.insert(externalized, options));
+    return this.inner.insert(await this.externalizeQuads(quads), options);
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -132,8 +136,19 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    await this.withExternalizedQuads(quads, (externalized) =>
-      this.inner.replaceGraph!(graphUri, externalized, options));
+    await this.inner.replaceGraph(graphUri, await this.externalizeQuads(quads), options);
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+    const replaced = await Promise.all(assets.map(async asset => {
+      const [graphQuads, metadataQuads] = await Promise.all([
+        this.externalizeQuads(asset.graphQuads),
+        this.externalizeQuads(asset.metadataQuads),
+      ]);
+      return { ...asset, graphQuads, metadataQuads };
+    }));
+    await this.inner.replaceAssetGroup(replaced, options);
   }
 
   async replaceGraphAndSubject(
@@ -150,17 +165,11 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    await this.withExternalizedQuads(
-      [...graphQuads, ...metadataQuads],
-      (externalized) => this.inner.replaceGraphAndSubject!(
-        graphUri,
-        externalized.slice(0, graphQuads.length),
-        metaGraphUri,
-        metadataSubject,
-        externalized.slice(graphQuads.length),
-        options,
-      ),
-    );
+    const [externalizedGraph, externalizedMetadata] = await Promise.all([
+      this.externalizeQuads(graphQuads), this.externalizeQuads(metadataQuads),
+    ]);
+    await this.inner.replaceGraphAndSubject(graphUri, externalizedGraph,
+      metaGraphUri, metadataSubject, externalizedMetadata, options);
   }
 
   async replaceSubject(
@@ -178,8 +187,22 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     // Externalize oversized literals before the replace, exactly like insert() /
     // replaceGraph() — so a large job payload is stored as a blob ref rather than
     // inline, keeping the atomic path byte-consistent with the fallback.
-    await this.withExternalizedQuads(quads, (externalized) =>
-      this.inner.replaceSubject!(graphUri, subject, externalized, options));
+    await this.inner.replaceSubject(graphUri, subject, await this.externalizeQuads(quads), options);
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
+    if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'SharedMemoryLiteralBlobStore');
+    }
+    const externalized = await this.externalizeQuads([...replacementQuads, ...insertQuads]);
+    await this.inner.replaceSubjectAndInsert(
+      graphUri, subject, externalized.slice(0, replacementQuads.length),
+      externalized.slice(replacementQuads.length), options,
+    );
   }
 
   async rfc64AuthorCommitCasV1(
@@ -232,14 +255,14 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
       const result = await this.inner.query(sparql, options);
-      return this.hydrateQueryResult(result);
+      return this.hydrateQueryResult(result, options);
     }
 
     const [original, placeholder] = await Promise.all([
       this.inner.query(sparql, options),
       this.inner.query(rewritten, options),
     ]);
-    return this.hydrateQueryResult(mergeQueryResults(original, placeholder));
+    return this.hydrateQueryResult(mergeQueryResults(original, placeholder), options);
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
@@ -280,14 +303,8 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     return this.inner.close();
   }
 
-  private async withExternalizedQuads<T>(
-    quads: readonly Quad[],
-    work: (externalized: Quad[]) => Promise<T>,
-  ): Promise<T> {
-    const externalized = await Promise.all(
-      quads.map((quad) => this.externalizeInsertQuad(quad)),
-    );
-    return work(externalized);
+  private async externalizeQuads(quads: readonly Quad[]): Promise<Quad[]> {
+    return Promise.all(quads.map((quad) => this.externalizeInsertQuad(quad)));
   }
 
   private async externalizeInsertQuad(
@@ -353,41 +370,38 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     return [pattern, placeholderPattern];
   }
 
-  private async hydrateQueryResult(result: QueryResult): Promise<QueryResult> {
+  private async hydrateQueryResult(result: QueryResult, options?: QueryOptions): Promise<QueryResult> {
     if (result.type === 'boolean') return result;
     const cache = new Map<string, Promise<string>>();
+    const budget = new LiteralHydrationBudget(options?.maxLiteralHydrationBytes ?? options?.maxResponseBytes);
 
+    const map = async <T, R>(values: T[], hydrate: (value: T) => Promise<R>): Promise<R[]> => {
+      if (budget.limit === undefined) return Promise.all(values.map(hydrate));
+      const hydrated: R[] = [];
+      for (const value of values) hydrated.push(await hydrate(value));
+      return hydrated;
+    };
+    const term = (value: string) => this.hydrateTerm(value, cache, budget, options?.signal);
     if (result.type === 'bindings') {
-      const bindings = await Promise.all(
-        result.bindings.map(async (row) => {
-          const hydrated: Record<string, string> = {};
-          for (const [key, value] of Object.entries(row)) {
-            hydrated[key] = await this.hydrateTerm(value, cache);
-          }
-          return hydrated;
-        }),
-      );
+      const bindings = await map(result.bindings, async row => Object.fromEntries(
+        await map(Object.entries(row), async ([key, value]) => [key, await term(value)]),
+      ));
       return { type: 'bindings', bindings } satisfies SelectResult;
     }
-
-    const quads = await Promise.all(
-      result.quads.map(async (quad) => ({
-        ...quad,
-        object: await this.hydrateTerm(quad.object, cache),
-      })),
-    );
+    const quads = await map(result.quads, async quad => ({ ...quad, object: await term(quad.object) }));
     return { type: 'quads', quads } satisfies ConstructResult;
   }
 
-  private async hydrateTerm(term: string, cache: Map<string, Promise<string>>): Promise<string> {
+  private async hydrateTerm(term: string, cache: Map<string, Promise<string>>, budget: LiteralHydrationBudget, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const hash = externalLiteralRefHash(term);
-    if (!hash) return term;
+    if (!hash) return budget.consume(term);
     let pending = cache.get(hash);
     if (!pending) {
-      pending = this.readBlob(hash);
+      pending = this.readBlob(hash, { maxBytes: budget.remaining, signal });
       cache.set(hash, pending);
     }
-    return pending;
+    return budget.consume(await pending);
   }
 
   private rewriteLargeLiteralConstants(sparql: string): string | undefined {
@@ -414,12 +428,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     await persistFileAndParent(path);
   }
 
-  private async readBlob(hash: string): Promise<string> {
+  private async readBlob(hash: string, constraints?: { maxBytes?: number; signal?: AbortSignal }): Promise<string> {
     assertSha256Hex(hash);
     const path = this.blobPath(hash);
     let content: string;
     try {
-      content = await readFile(path, 'utf8');
+      constraints?.signal?.throwIfAborted();
+      content = constraints?.maxBytes === undefined
+        ? await readFile(path, { encoding: 'utf8', signal: constraints?.signal })
+        : await readLiteralBlobBounded(path, constraints.maxBytes, constraints.signal);
+      constraints?.signal?.throwIfAborted();
     } catch (err) {
       if (isNodeError(err, 'ENOENT')) {
         throw new Error(`SWM external literal blob missing for sha256:${hash} at ${path}`);

@@ -894,7 +894,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
       autoUpdate: resolveAutoUpdateEnabled(config),
       // The static summary plus process-wide endpoint observability (see status-chain-rpc.ts).
-      chain: publicChainSummary ? { ...publicChainSummary, ...chainRpcStatusFields() } : null,
+      chain: publicChainSummary ? { ...publicChainSummary, ...chainRpcStatusFields(routeRpcTransport) } : null,
       updateAvailable:
         daemonState.lastUpdateCheck.checkedAt > 0 ? !daemonState.lastUpdateCheck.upToDate : null,
       // True when this node pins an auto-update channel that has no acceptable

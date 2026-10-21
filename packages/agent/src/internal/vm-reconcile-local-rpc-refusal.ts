@@ -116,6 +116,10 @@ export class VmReconcileRefusedSliceReads {
  * reason shows nothing about the node's RPC admission and closes nothing. So
  * a graph whose reads stay refused costs its retries once, not once per
  * sweep.
+ *
+ * The scheduling runtime keeps a pass that was overtaken inside the same
+ * window (`vm-reconcile-overtaken-pass.ts`): it is the one bound on asking a
+ * graph again shortly, whatever the reason.
  */
 export class VmReconcileLocalRpcRefusalWindow {
   /** When each graph's window opened. */

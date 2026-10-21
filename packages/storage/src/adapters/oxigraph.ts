@@ -1,10 +1,11 @@
 import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
-import { existsSync, readFileSync, renameSync } from 'node:fs';
-import { open, rename } from 'node:fs/promises';
-import { dirname } from 'node:path';
-import { DurableDirectory } from '../file-durability.js';
+import { withheldGraphQueryDataset } from './withheld-graph-dataset.js';
+import { existsSync, renameSync } from 'node:fs';
+import { DurableReplaceableFile } from '../durable-file-replace.js';
+import { loadOxigraphSnapshot, OxigraphSnapshotReadError, serializeOxigraphSnapshot } from './oxigraph-snapshot.js';
 import type {
   TripleStore,
   QueryOptions,
@@ -22,6 +23,7 @@ import {
 } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
+import { buildAtomicSubjectAndInsertUpdate } from '../atomic-subject-insert.js';
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
@@ -64,12 +66,13 @@ type OxQuad = oxigraph.Quad;
 export class OxigraphStore implements TripleStore {
   readonly commitment: TripleStoreCommitCapability;
   readonly writeRevisionCoverage = 'all-writers' as const;
+  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
   private store: OxStore;
   private persistPath: string | undefined;
-  private snapshotDirectory?: DurableDirectory;
+  private snapshotFile?: DurableReplaceableFile;
   // #1609: per-graph write generations, bumped on every local mutation (the
   // same choke points the sparql-http adapter pairs with its listGraphs-cache
   // invalidation). Feeds the chain-reconcile negative memo via
@@ -121,18 +124,10 @@ export class OxigraphStore implements TripleStore {
    */
   private hydrateSync(filePath: string): void {
     if (!existsSync(filePath)) return;
-    let data: string;
     try {
-      data = readFileSync(filePath, 'utf-8') as string;
+      loadOxigraphSnapshot(this.store, filePath);
     } catch (err) {
-      throw new Error(
-        `OxigraphStore: failed to read persist file ${filePath}: ${(err as Error).message}`,
-      );
-    }
-    if (!data.trim()) return;
-    try {
-      this.store.load(data, { format: 'application/n-quads' });
-    } catch (err) {
+      if (err instanceof OxigraphSnapshotReadError) throw err;
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       const corruptPath = `${filePath}.corrupt-${ts}`;
       try {
@@ -208,31 +203,15 @@ export class OxigraphStore implements TripleStore {
   private async flushNow(): Promise<void> {
     if (!this.persistPath || this.flushing) return;
     this.flushing = true;
-    const directory = this.snapshotDirectory ??= new DurableDirectory(dirname(this.persistPath));
     const tmpPath = `${this.persistPath}.tmp`;
     try {
-      await directory.create();
-      const nquads = this.store.dump({ format: 'application/n-quads' });
-
-      // 1+2: write to tmp, fsync to commit bytes.
-      const fh = await open(tmpPath, 'w');
-      try {
-        await fh.writeFile(nquads, 'utf-8');
-        await fh.sync();
-      } finally {
-        await fh.close();
-      }
-
-      // 3: atomic rename — POSIX-atomic on the same filesystem.
-      await rename(tmpPath, this.persistPath);
-
-      // 4: the visible file must flush through a writable handle on Windows;
-      // POSIX additionally requires the containing directory's sync, and the
-      // sync of each parent holding a directory entry this store created. A
-      // visible rename is not proof of durability. Certified commitment callers
-      // may erase recovery evidence only after the supported barrier succeeds.
-      // Real file/dir I/O failures propagate; retries can re-dump visible state.
-      await directory.persistFile(this.persistPath);
+      // Capture one generation before any awaited writes. The replacement owner
+      // streams it, syncs bytes and created ancestry, and propagates every barrier failure.
+      const quads = this.store.match();
+      const snapshot = this.snapshotFile ??= new DurableReplaceableFile(this.persistPath, {
+        fileMode: 0o666, directoryMode: 0o777, temporaryPath: tmpPath,
+      });
+      await snapshot.replace(serializeOxigraphSnapshot(quads));
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but
       // re-throw so explicit callers fail loudly. (Background callers
@@ -321,7 +300,10 @@ export class OxigraphStore implements TripleStore {
     // The embedded Oxigraph binding executes synchronously, so a caller abort
     // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
     // HTTP backend when long sync queries need prompt cancellation.
-    const result = this.store.query(sparql);
+    const withheld = options?.withheldGraphRoots;
+    const result = withheld?.length
+      ? this.store.query(sparql, withheldGraphQueryDataset(this.store, withheld, this.graphEnumerationVisibility))
+      : this.store.query(sparql);
     throwIfAborted(options?.signal);
 
     if (typeof result === 'boolean') {
@@ -422,6 +404,15 @@ export class OxigraphStore implements TripleStore {
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
 
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    const plan = buildAtomicAssetGroupUpdate(assets);
+    statements.checkIris.replaceAssetGroup(assets);
+    options?.signal?.throwIfAborted();
+    this.store.update(plan.update);
+    this.scheduleFlush();
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: plan.graphs });
+  }
+
   async replaceGraphAndSubject(
     graphUri: string,
     graphQuads: DKGQuad[],
@@ -478,6 +469,26 @@ export class OxigraphStore implements TripleStore {
     // rolls the whole thing back.
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
     statements.checkIris.replaceSubject(graphUri, subject, quads);
+    this.store.update(update);
+    this.scheduleFlush();
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string, subject: string, replacementQuads: DKGQuad[], insertQuads: DKGQuad[],
+    options?: TripleStoreQueryOptions,
+  ): Promise<void> {
+    throwIfAborted(options?.signal);
+    const quads = [...replacementQuads, ...insertQuads];
+    const guarded = quads.filter(q => !(q.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(q.graph)));
+    if (guarded.length > 0) {
+      assertQuadLiteralsMutf8Safe(guarded, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphStore.replaceSubjectAndInsert',
+      });
+    }
+    const update = buildAtomicSubjectAndInsertUpdate(graphUri, subject, replacementQuads, insertQuads);
+    statements.checkIris.replaceSubjectAndInsert(graphUri, subject, quads);
     this.store.update(update);
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
@@ -545,7 +556,7 @@ export class OxigraphStore implements TripleStore {
         const g = row.get('g');
         return g ? g.value : '';
       })
-      .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+      .filter(this.graphEnumerationVisibility);
   }
 
   async deleteBySubjectPrefix(

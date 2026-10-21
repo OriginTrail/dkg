@@ -39,7 +39,8 @@ describe('foreign recovery HTTP boundary', () => {
     expect(response.onChainResult).toBe(error.confirmedPublication.onChainResult);
     expect(response.recovery).toBe(error.lifecycleRecovery);
   });
-  it.each([{ seal: {} }, { v10ACKs: {} }, { onChainResult: { txHash: [], blockNumber: 'bad' } }])(
+  it.each([{ seal: {} }, { v10ACKs: {} }, { v10ACKs: [{ peerId: 3 }] }, { lifecycleRepairPending: 'pending' },
+    { contextGraphError: 3 }, { authorAddress: 3 }, { kas: {} }, { onChainResult: { txHash: [], blockNumber: 'bad' } }])(
     'refuses malformed consumer fields instead of projecting unsafe assumptions: %j', changes => {
       expect(confirmedVmRecoveryRequiredResponse(foreignError(changes))).toBeUndefined();
     });

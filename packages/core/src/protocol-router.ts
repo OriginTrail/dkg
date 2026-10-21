@@ -11,6 +11,8 @@ import {
   type MessageStreamPoolOptions,
 } from './message-stream-pool.js';
 import { withSpan, getMetrics } from './telemetry-api.js';
+import { boundDuplexStreamBuffers, notifyInboundFailure, notifyInboundOpen,
+  validateDuplexStreamOptions, type InboundDuplexDiagnostics, type InboundDuplexStage } from './duplex-stream-support.js';
 
 type AbortableByteStream = Stream | (AsyncIterable<Uint8Array> & { abort(reason?: unknown): void });
 
@@ -215,7 +217,7 @@ export interface ProtocolRegistrationOptions {
 }
 
 /** Bounded duplex scope; the caller owns its wire protocol and framing. */
-export interface DuplexStreamOptions {
+export interface DuplexStreamOptions extends InboundDuplexDiagnostics {
   timeoutMs: number;
   signal?: AbortSignal;
   maxReadBufferBytes: number;
@@ -234,7 +236,7 @@ interface OutboundStreamOpenOptions {
   excludeConnections?: WeakSet<ReusableConnection>;
   /** Ordinary sends enable this on a later retry after a normal dial failed. */
   allowLimitedWithDirectAddrs?: boolean;
-  /** Duplex scopes can try a final relay route before entering their callback. */
+  /** Duplex scopes and single-use sends use an open relay route once the dial failed. */
   afterDialFailure: 'throw' | 'reuse-limited';
   /** Sends forward an exhausted resolver signal to the dial's error boundary. */
   cancelledResolution: 'throw' | 'dial-with-signal';
@@ -706,8 +708,8 @@ export class ProtocolRouter {
    * multistream negotiation reflects the live handler table. A successful
    * probe opens and immediately aborts the stream before any payload bytes.
    */
-  async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000): Promise<ProtocolProbeOutcome> {
-    const lifecycle = startRequestAbortLifecycle(timeoutMs, [this.node.stopSignal]);
+  async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000, parentSignal?: AbortSignal): Promise<ProtocolProbeOutcome> {
+    const lifecycle = startRequestAbortLifecycle(timeoutMs, [parentSignal, this.node.stopSignal]);
     const signal = lifecycle.signal;
     try {
       await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs });
@@ -724,7 +726,7 @@ export class ProtocolRouter {
       }
       return 'supported';
     } catch (error) {
-      if (this.node.stopSignal?.aborted) throw error;
+      if (parentSignal?.aborted || this.node.stopSignal?.aborted) throw error;
       return isProtocolUnsupportedError(error) ? 'unsupported' : 'unavailable';
     } finally {
       lifecycle.release();
@@ -741,7 +743,7 @@ export class ProtocolRouter {
     options: DuplexStreamOptions,
     exchange: (stream: Stream, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    this.validateDuplexStreamOptions(options);
+    validateDuplexStreamOptions(options, this.maxReadBytes);
     const lifecycle = startRequestAbortLifecycle(options.timeoutMs, [options.signal, this.node.stopSignal]);
     const signal = lifecycle.signal;
     let stream: Stream | undefined;
@@ -754,7 +756,7 @@ export class ProtocolRouter {
         afterDialFailure: 'reuse-limited',
         cancelledResolution: 'throw',
       }));
-      this.boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
+      boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
       const result = await exchange(stream, signal);
       if (signal.aborted) throw asAbortError(signal.reason);
       await this.closeDuplexStream(stream, signal);
@@ -775,7 +777,7 @@ export class ProtocolRouter {
     }) => Promise<void>,
     options: DuplexStreamOptions & { maxRequestBytes: number },
   ): void {
-    this.validateDuplexStreamOptions(options);
+    validateDuplexStreamOptions(options, this.maxReadBytes);
     if (!Number.isSafeInteger(options.maxRequestBytes) || options.maxRequestBytes <= 0
       || options.maxRequestBytes > this.maxReadBytes) throw new RangeError('Invalid duplex request limit');
     this.node.libp2p.handle(protocolId, async (stream, connection) => {
@@ -786,22 +788,29 @@ export class ProtocolRouter {
       const signal = lifecycle.signal;
       const onAbort = () => abortStream(stream, signal.reason);
       let request: DuplexStreamRequest<T> | undefined;
+      let stage: InboundDuplexStage = 'pre-read';
       stream.addEventListener('close', onClose, { once: true });
       signal.addEventListener('abort', onAbort, { once: true });
       try {
+        notifyInboundOpen(options, peerId);
         if (signal.aborted) throw asAbortError(signal.reason);
         this.rejectKnownRejectedInboundPeer(peerId, protocolId);
-        this.boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
+        boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
+        stage = 'read-request';
         request = await readRequest(stream, signal);
         if (request.requestData.byteLength > options.maxRequestBytes) throw new RangeError('Duplex request byte limit exceeded');
+        stage = 'peer-admission';
         await this.requirePeerAccepted(peerId, protocolId, 'inbound', { signal, timeoutMs: options.timeoutMs });
         if (signal.aborted) throw asAbortError(signal.reason);
+        stage = 'handler';
         await handler({ ...request, peerId, stream, signal });
         if (signal.aborted) throw asAbortError(signal.reason);
+        stage = 'close';
         stream.removeEventListener('close', onClose);
         await this.closeDuplexStream(stream, signal);
       } catch (error) {
         // Do not log authenticated request bytes, metadata, URLs or tokens.
+        notifyInboundFailure(options, peerId, stage, error, signal);
         abortStream(stream, error instanceof Error ? error : new Error('duplex stream failed'));
       } finally {
         stream.removeEventListener('close', onClose);
@@ -811,17 +820,6 @@ export class ProtocolRouter {
         lifecycle.release();
       }
     }, { runOnLimitedConnection: true });
-  }
-
-  private validateDuplexStreamOptions(options: DuplexStreamOptions): void {
-    if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0
-      || !Number.isSafeInteger(options.maxReadBufferBytes) || options.maxReadBufferBytes <= 0
-      || options.maxReadBufferBytes > this.maxReadBytes) throw new RangeError('Invalid duplex stream limits');
-  }
-
-  private boundDuplexStreamBuffers(stream: Stream, limit: number): void {
-    stream.maxReadBufferLength = Math.min(stream.maxReadBufferLength || limit, limit);
-    stream.maxWriteBufferLength = Math.min(stream.maxWriteBufferLength || limit, limit);
   }
 
   private async closeDuplexStream(stream: Stream, signal: AbortSignal): Promise<void> {
@@ -924,7 +922,7 @@ export class ProtocolRouter {
         } catch (error) {
           if (options.afterDialFailure === 'throw') throw error;
           if (signal.aborted) throw asAbortError(signal.reason);
-          // No application bytes have been sent. A duplex scope may use an
+          // No application bytes have been sent, so the caller may use an
           // existing relay after the normal dial actually failed.
           reused = await tryReuseExistingConnection(getConnections, protocolId, signal,
             { ...reuseOptions, allowLimitedWithDirectAddrs: true });
@@ -1106,8 +1104,8 @@ export class ProtocolRouter {
     // moment the total budget is exhausted. Codex PR #560 round 4.
     const remainingMs = Math.max(0, timeoutMs - (Date.now() - overallStartedAt));
     if (remainingMs === 0) {
-      throw new Error(
-        `send timeout: pooled fallback exhausted the ${timeoutMs}ms budget before one-shot attempt`,
+      throw new DOMException(
+        `send timeout: pooled fallback exhausted the ${timeoutMs}ms budget before one-shot attempt`, 'TimeoutError',
       );
     }
     const startedAt = overallStartedAt;
@@ -1196,7 +1194,7 @@ export class ProtocolRouter {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const remaining = timeoutMs - (Date.now() - startedAt);
       if (remaining <= 0) {
-        lastErr = new Error('send timeout elapsed');
+        lastErr = new DOMException('send timeout elapsed', 'TimeoutError');
         throw lastErr;
       }
       // The request deadline already ends where this attempt's remaining
@@ -1211,13 +1209,13 @@ export class ProtocolRouter {
       let attemptedNormalDial = false;
       try {
         // Re-prime on each cold retry, while warm reuse skips resolution.
-        // A failed normal dial unlocks limited reuse on the next attempt;
-        // unlike a duplex scope, send() keeps its existing retry/backoff gate.
+        // A failed normal dial unlocks limited reuse on the next attempt. A
+        // single-use payload has no next attempt, so it reuses within this one.
         const opened = await openStream({
           resolverTimeoutMs: remaining,
           allowLimitedWithDirectAddrs: normalDialFailed,
           excludeConnections: triedConnections,
-          afterDialFailure: 'throw',
+          afterDialFailure: singleUsePayload ? 'reuse-limited' : 'throw',
           cancelledResolution: 'dial-with-signal',
           onNormalDial: () => { attemptedNormalDial = true; },
         });
@@ -1289,7 +1287,7 @@ export class ProtocolRouter {
               reject(asAbortError(overallSignal.reason));
               return;
             }
-            reject(new Error(`send timeout: backoff aborted by overall deadline (${timeoutMs}ms)`));
+            reject(new DOMException(`send timeout: backoff aborted by overall deadline (${timeoutMs}ms)`, 'TimeoutError'));
           };
           if (overallSignal.aborted) {
             onAbort();

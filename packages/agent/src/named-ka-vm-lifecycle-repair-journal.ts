@@ -1,16 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { createHash } from 'node:crypto';
-import { assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
-export type StoredLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'packedKaId' | 'tentative'> & { packedKaId?: string };
-export interface LifecycleRepairEntry {
-  input: ConfirmedNamedKaVmLifecycleInput;
+export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment'> & {
+  readonly publicationDeployment?: never;
+};
+type JournalInput = ConfirmedKaInput | HistoricalUnboundLifecycleRepairInput;
+type ConfirmedKaInput = ConfirmedNamedKaVmLifecycleInput;
+export type StoredLifecycleRepairInput = Omit<JournalInput, 'packedKaId' | 'tentative'> & { packedKaId?: string };
+interface RepairRetryState {
   attempts: number;
   nextAttemptAt: number;
   lastError?: string;
   rejected?: boolean;
 }
+export type LifecycleRepairEntry = RepairRetryState & (
+  | { input: ConfirmedKaInput; retention?: never }
+  | { input: HistoricalUnboundLifecycleRepairInput; retention: 'historical-unbound' }
+);
 function invalid(): never {
   throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named KA lifecycle repair evidence');
 }
@@ -28,6 +35,11 @@ function root(value: unknown): string {
   return text.toLowerCase().replace(/^0x/, '');
 }
 export function normalizeLifecycleRepairInput(value: unknown): ConfirmedNamedKaVmLifecycleInput {
+  const input = normalizeJournalInput(value);
+  if (input.publicationDeployment === undefined) return invalid();
+  return input as ConfirmedNamedKaVmLifecycleInput;
+}
+function normalizeJournalInput(value: unknown): JournalInput {
   const input = record(value);
   if ('tentative' in input) return invalid();
   const assertionVersion = string(input['assertionVersion']);
@@ -38,7 +50,7 @@ export function normalizeLifecycleRepairInput(value: unknown): ConfirmedNamedKaV
     if (typeof packed !== 'bigint' || packed < 0n || packed >= 1n << 256n) return invalid();
     packedKaId = packed;
   }
-  let publicationDeployment: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'];
+  let publicationDeployment: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'] | undefined;
   if (input['publicationDeployment'] !== undefined) {
     const deployment = record(input['publicationDeployment']);
     const chainId = string(deployment['chainId']), lifecycleAddress = string(deployment['lifecycleAddress']);
@@ -54,18 +66,22 @@ export function normalizeLifecycleRepairInput(value: unknown): ConfirmedNamedKaV
     ...(publicationDeployment === undefined ? {} : { publicationDeployment }),
   };
 }
-export function lifecycleRepairKey(input: ConfirmedNamedKaVmLifecycleInput): string {
-  const hash = createHash('sha256').update(assertionLifecycleWriteLockKey(
-    input.contextGraphId, input.name, input.agentAddress, input.subGraphName,
-  ));
+export function lifecycleRepairKey(input: JournalInput): string {
+  // Version-2 disk encoding is frozen independently of the in-process lock namespace.
+  // Preserve its original prefix and tuple ordering when changing publisher locks.
+  const author = /^0x[0-9a-f]{40}$/i.test(input.agentAddress)
+    ? input.agentAddress.toLowerCase() : input.agentAddress;
+  const hash = createHash('sha256').update(`assertion-lifecycle:${JSON.stringify([
+    input.contextGraphId, input.subGraphName ?? '', author, input.name,
+  ])}`);
   // Unbound historical entries keep their exact original key. Distinct deployments
   // share the KA write fence but must never overwrite each other's repair evidence.
   if (input.publicationDeployment) hash.update(JSON.stringify([input.publicationDeployment.chainId, input.publicationDeployment.lifecycleAddress.toLowerCase()]));
   return hash.digest('hex');
 }
 // Read-only compatibility with the original journal encoding. New writes use
-// the publisher's identity contract; validate the old key before migrating it.
-function historicalRepairKey(input: ConfirmedNamedKaVmLifecycleInput): string {
+// the version-2 identity encoding; validate the old key before migrating it.
+function historicalRepairKey(input: JournalInput): string {
   return createHash('sha256').update(JSON.stringify([input.contextGraphId, input.agentAddress.toLowerCase(), input.name, input.subGraphName ?? ''])).digest('hex');
 }
 /** Encode only at the JSON file boundary; worker entries retain confirmed bigint coordinates. */
@@ -73,15 +89,16 @@ export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, Lifecy
   version: 2; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInput }]>;
 } {
   return { version: 2, entries: [...entries].map(([key, entry]) => {
-    const normalized = normalizeLifecycleRepairInput(entry.input);
+    const normalized = normalizeJournalInput(entry.input);
     const input: StoredLifecycleRepairInput = { ...normalized, packedKaId: normalized.packedKaId?.toString() };
-    return [key, { ...entry, input }];
+    const { retention: _retention, ...retry } = entry;
+    return [key, { ...retry, input }];
   }) };
 }
-function decodeLifecycleRepairInput(value: unknown): ConfirmedNamedKaVmLifecycleInput {
+function decodeLifecycleRepairInput(value: unknown): JournalInput {
   const input = record(value), packed = input['packedKaId'];
   if (packed !== undefined && !/^[0-9]+$/.test(string(packed))) return invalid();
-  return normalizeLifecycleRepairInput({ ...input,
+  return normalizeJournalInput({ ...input,
     ...(packed === undefined ? {} : { packedKaId: BigInt(string(packed)) }),
   });
 }
@@ -100,7 +117,10 @@ export function decodeLifecycleRepairJournal(value: unknown): Map<string, Lifecy
       || (entry['lastError'] !== undefined && typeof entry['lastError'] !== 'string')
       || (entry['rejected'] !== undefined && typeof entry['rejected'] !== 'boolean')) return invalid();
     storedKeys.add(storedKey);
-    entries.set(key, { input, attempts, nextAttemptAt,
+    const evidence = input.publicationDeployment === undefined
+      ? { input: input as HistoricalUnboundLifecycleRepairInput, retention: 'historical-unbound' as const }
+      : { input: input as ConfirmedKaInput };
+    entries.set(key, { ...evidence, attempts, nextAttemptAt,
       ...(entry['lastError'] === undefined ? {} : { lastError: entry['lastError'] }),
       ...(entry['rejected'] === undefined ? {} : { rejected: entry['rejected'] }),
     });

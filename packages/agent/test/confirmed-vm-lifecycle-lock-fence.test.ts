@@ -143,12 +143,13 @@ describe('confirmed lifecycle lock-time authority fence', () => {
       if (++writes === 2) throw Object.assign(new Error('retirement directory sync failed'), { code: 'EIO' });
       await persist();
     });
-    await expect(f.repair.submit(f.input)).rejects.toThrow('retirement directory sync failed');
+    await expect(f.repair.submit(f.input)).resolves.toBe('pending');
     await withKeyedLocks(f.agent.writeLocks, [f.key], async () => {
       expect((await f.journal()).size).toBe(1);
       expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1) }] });
     });
-    await f.repair.runDue();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 5000);
+    await f.repair.runDue(); clock.mockRestore();
     expect((await f.journal()).size).toBe(0);
     expect(commit).toHaveBeenCalledTimes(2);
     expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1) }] });

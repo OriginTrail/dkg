@@ -4,6 +4,8 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { PersistedLiftJob } from './lift-job.js';
 import { getLiftJobTransactionEvidence } from './async-lift-publisher-utils.js';
 import { LiftJobCompletionTiming } from './lift-job-completion-timing.js';
+import type { LiftJobTailStepObserver } from './lift-job-tail-steps.js';
+import { completionTrace } from './async-lift-completion-trace.js';
 
 const sharedByStore = new WeakMap<TripleStore, Map<string, LiftJobChainObservations>>();
 
@@ -20,6 +22,15 @@ export class LiftJobChainObservations {
    * only, like the observations themselves; replaceable, for example to inject a clock.
    */
   completion = new LiftJobCompletionTiming();
+
+  /**
+   * GH#3081 — the observer a queue hands the executor of `jobId` on its execution input: each
+   * step of the executor's work after the confirmation, reported as it ends, lands on the job's
+   * timeline. Observation only.
+   */
+  tailObserver(jobId: string): LiftJobTailStepObserver {
+    return (step) => this.completion.tailStep(jobId, step);
+  }
 
   /**
    * The observations of one store and control graph in this process. A daemon serves job views
@@ -59,6 +70,7 @@ export class LiftJobChainObservations {
     this.receipt(jobId, txHash, at);
     const entry = this.entries.get(jobId);
     if (entry?.txHash !== txHash.toLowerCase() || !Number.isFinite(at)) return;
+    if (entry.finalityObservedAt === undefined) completionTrace.finalityObserved(jobId, entry.txHash);
     entry.finalityObservedAt ??= at;
     this.completion.finality(jobId);
   }

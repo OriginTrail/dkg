@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -51,7 +52,7 @@ const TARGET: VmRefreshDue = {
   ual: UAL,
   kaId: KA_ID,
   merkleRoot: ROOT_B,
-  blockNumber: 150,
+  eventKind: 'legacy-block', blockNumber: 150,
   failures: 0,
 };
 const LOCAL = { merkleRoot: ROOT_A, assertionVersion: 1n };
@@ -202,7 +203,7 @@ function refreshWorker(liveRoot: string) {
       }) satisfies SnapshotRead,
     },
     vmRefreshQueue: queue,
-    vmReconcilePhysicalRuns: new Set<Promise<unknown>>(),
+    workLifetime: new AgentWorkLifetime(),
     log: {
       debug: () => {},
       info: (_ctx: unknown, line: string) => { lines.info.push(line); },
@@ -215,7 +216,7 @@ function refreshWorker(liveRoot: string) {
     confirmVmRefreshCurrentAtEventBlock: methods.confirmVmRefreshCurrentAtEventBlock,
     runExactAssetFetchForContextGraph: methods.runExactAssetFetchForContextGraph,
   };
-  queue.offer({ localCgId: CG, ual: UAL, kaId: KA_ID, merkleRoot: ROOT_B, blockNumber: 150 });
+  queue.offer({ localCgId: CG, ual: UAL, kaId: KA_ID, merkleRoot: ROOT_B, eventKind: 'legacy-block', blockNumber: 150 });
   const pass = () => methods.runVmRefreshesForCg.call(host as never, CG, CG, () => true);
   return { pass, queue, lines, versionReads };
 }

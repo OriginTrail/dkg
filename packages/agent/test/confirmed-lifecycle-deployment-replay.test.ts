@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -7,7 +7,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { isConfirmedNamedKaVmLifecycleCurrent } from '../src/named-ka-vm-lifecycle-current.js';
-import { decodeLifecycleRepairJournal } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { decodeLifecycleRepairJournal, lifecycleRepairKey } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
 const dirs: string[] = [], stores: OxigraphStore[] = [], owners: NamedKaVmLifecycleRepair[] = [];
 afterEach(async () => {
@@ -66,9 +66,14 @@ describe('confirmed lifecycle deployment-bound replay', () => {
   it('retains historical unbound evidence without reading a configured deployment snapshot', async () => {
     const f = await fixture(), owner = f.create();
     const { publicationDeployment: _deployment, ...unbound } = f.input;
-    expect(await owner.submit(unbound)).toBe('pending'); f.snapshot.mockClear(); f.apply.mockClear();
-    await owner.stop(); f.ready(); await f.create().runDue();
+    await expect(owner.submit(unbound as typeof f.input)).rejects.toThrow('Invalid confirmed');
+    await owner.stop();
+    const journalPath = join(dirs.at(-1)!, 'named-ka-vm-lifecycle-repairs.json');
+    await writeFile(journalPath, JSON.stringify({ version: 2, entries: [[lifecycleRepairKey(unbound), {
+      input: { ...unbound, packedKaId: unbound.packedKaId.toString() }, attempts: 3, nextAttemptAt: 1000,
+    }]] }));
+    f.snapshot.mockClear(); f.apply.mockClear(); f.ready(); await f.create().runDue();
     expect(f.snapshot).not.toHaveBeenCalled(); expect(f.apply).not.toHaveBeenCalled();
-    expect([...await f.journal()][0]![1].input).toMatchObject({ publishedUal: unbound.publishedUal });
+    expect([...await f.journal()][0]![1]).toMatchObject({ retention: 'historical-unbound', attempts: 3, nextAttemptAt: 1000, input: { publishedUal: unbound.publishedUal } });
   });
 });

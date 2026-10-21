@@ -1,0 +1,56 @@
+# PR 3017 lifecycle recovery takeover
+
+## Outcome and scope
+
+Take over https://github.com/OriginTrail/dkg/pull/3017 for issue https://github.com/OriginTrail/dkg/issues/2962, including the 2026-10-21 live reproduction. Resolve conflicts with testnet-canary, close remaining correctness and review gaps with regression tests, obtain completed remote review and green CI, then prove recovery on live testnet without a second publication. Report readiness; do not merge.
+
+Initial PR head: 126b02816304417609bc3aa482ba97e3c324336c. Base fetched at f3b33cffb. Original workspace was clean and detached at the base. Working branch is the existing PR branch codex/fix-issue-2962-20261004. No applicable AGENTS.md found.
+
+## Evidence and selected approach
+
+The issue's latest reproduction shows inline named-KA completion terminalizing an uncertified local result after a scheduler queue timeout, while detached completion checks localFinalizationComplete. Current base extracted the queued tail into queued-publish-finalization.ts; the old PR still modifies the previous inline tail. Preserve that extraction and route required lifecycle projection through the PR's durable confirmed repair owner. Enforce the certificate specifically for named-KA completion, retaining raw-lift compatibility. Recover from original chain/receipt/content evidence through bounded durable job recovery, never replay publication to fix metadata.
+
+Use the existing repair journal and publisher job recovery rather than another queue. Maintain deployment binding, per-KA serialization, persistence commitments, divergent drafts, and canonical provenance. Seven open remote threads cover retirement versus admission errors, historical records versus new commands, HTTP projection ownership, bounded repair concurrency, persistence docs, durable replacement reuse, and structured confirmation tails. Read all 61 threads, including resolved history, before replies. Remote reviewer observed: otReviewAgent; trigger/completion discovery remains required.
+
+## Work and acceptance
+
+1. Integrate base (owner: primary): inspect all 19 conflicting files and preserve both behavior sets; install native pinned dependencies. Build affected packages to detect cross-package changes.
+2. Fix lifecycle completion (primary): add failing-before inline certificate/recovery tests; check detached success, missing/contradictory authority, cleanup failures, bounded backoff and restart. Assert exact descriptor roots/state/UAL and one original transaction.
+3. Address seven outstanding findings (primary): verify each against integrated code, add meaningful regressions, simplify contracts without weakening durability or compatibility. Self-review concurrency, error precedence, and regression coverage in distinct passes; remote reviewer supplies independent review.
+4. Validate and submit (primary): focused cohorts, package/type boundaries, lint/source caps/scalability and necessary integration. Inspect ignored paths and change-set size. Update coherent PR description and push normally; no force push. Reply with evidence and resolve addressed findings after checking new replies.
+5. Remote convergence: up to 10 response rounds, two-minute sweeps and 30-minute observation window per substantive revision. Record head, deadline and round state here. Inspect all review/comment/check collections, including replies on resolved threads. No readiness claim for unconfirmed review or pending CI.
+6. Live testnet (primary): native macOS Node 22/pnpm, configured DKG_TESTNET_POOL, isolated home, claimed batch after native build/SQLite verification. Inject required lifecycle writes failing after confirmed mint/update; restore and verify convergence without another publication, including restart. Cover normal sync/queued paths, divergent drafts and reads. Verify chain deployment, original receipt and version counts. Reconcile pending activity, stop owned writers, release claim; keep sanitized evidence/report.
+
+## Flow
+
+```mermaid
+flowchart TD
+  A[Confirmed named KA publication] --> B[Durably retain repair evidence]
+  B --> C[Required local finalization]
+  C --> D{Certificate complete?}
+  D -->|yes| E[Finalize original job]
+  D -->|no| F[Bounded recovery of original transaction]
+  F --> C
+```
+
+## Risks and review
+
+A journal-retirement failure must retain automatic recovery instead of claiming admission failed. New commands require deployment proof; historical unbound entries remain retained without mutation. Concurrent independent repairs must retain same-KA fences and shutdown drain. Never substitute a second chain transaction for reconciliation. Live tests use only a claimed prepared wallet batch; no funding or production deployment is authorized. Durable storage certification remains strict for filesystem hosts. Rollback of source cannot undo a confirmed chain transaction; retain original evidence until reconciliation is proved.
+
+Planning review: self-reviewed diagnosis, compatibility, durability and operational boundaries. Independent plan review not performed. Source inspection and targeted pre-fix tests will refine the exact implementation before edits.
+
+## State and resources
+
+- Discovery: issue and latest reproduction read; complete remote thread data downloaded (61 threads, no paginated replies); seven open threads enumerated. Historical threads reviewed, including new findings in resolved threads.
+- Merge: 19 conflicts resolved; integrated with current base, preparing submission.
+- Response rounds: 0/10 for this takeover; no active remote observation window.
+- Checks: native runtime build passed; agent lifecycle cohort 180 passed; queued tail 61 passed; storage 51 passed; full publisher unit run 2295 passed/22 failed on obsolete fake certificates, followed by all 329 affected tests passing after compatibility fixes. CLI 62 passed plus managed WAL crash test passed on rerun. Graph marker producer regression failed before fix and all 90 affected lifecycle tests now pass. Lint and file-size guard pass. Further CI and live validation pending.
+- New gaps closed: inline certificate enforcement, legacy handler receipts retained as tx-bearing work, journal retirement backoff, bounded 4-KA concurrency, explicit historical unbound records, domain/HTTP separation, shared durable replacement, stable journal encoding independent of lock namespace, real promote graph-marker destinations.
+- Live setup: batch-2 claimed by lifecycle-recovery-3017-20261021; isolated .tmp/pr-3017-live; ownership .tmp/pr-3017-takeover/live/batch-claim.json. Base Sepolia 84532, authenticated 401/200, Hub/token verified, 7 checked signers funded with equal latest/pending nonces. Setup daemon stopped before exact revision validation. No test transactions submitted yet.
+
+| Resource | Owner | Purpose | Cleanup condition |
+| --- | --- | --- | --- |
+| Current attached workspace | this task | PR integration | Retain for review/continuation |
+| .tmp/pr-3017-takeover | this task | GitHub evidence and test logs | Retain compact diagnostic evidence through completion |
+| Native dependencies | this task | builds/tests | Retain while workspace needed |
+| .tmp/pr-3017-live + batch-2 claim | this task | live validation | Reconcile transactions and stop owned activity before release/removal |
