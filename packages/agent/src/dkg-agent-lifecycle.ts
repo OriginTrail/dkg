@@ -185,6 +185,7 @@ import {
 } from './sync/checkpoint/state.js';
 import {
   DurableRecoveryRunner,
+  exactMissingAssetRequest,
   type DurableRecoveryExecution,
 } from './sync/durable-recovery-runner.js';
 export type {
@@ -6588,6 +6589,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             durableMetaContinuation,
           },
         ),
+        executeExactSlice: exactMissingAssetRequest(this, contextGraphId, DURABLE_RECOVERY_HARD_TIMEOUT_MS),
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),
         logWarn: (message) => this.log.warn(ctx, message),

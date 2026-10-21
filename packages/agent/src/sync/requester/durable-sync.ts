@@ -45,6 +45,8 @@ import {
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import { createDurableDataRoundBoundary } from './durable-data-round.js';
+import { describeDurableHoldingsPlan, planDurableDataFromLocalHoldings, settleHeldDurableData,
+  type DurableHoldingsChannel, type HeldGraphScopedAssetsRequest } from './durable-data-holdings.js';
 import {
   normalizeDurableSyncContext,
   type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
@@ -178,7 +180,7 @@ export interface DurableMetaContinuationState {
 }
 
 /** One graph-owner-private retained META prefix across bounded recovery slices. */
-export interface DurableMetaContinuation {
+export interface DurableMetaContinuation extends DurableHoldingsChannel {
   readonly requesterScope: SyncCheckpointScope;
   state?: DurableMetaContinuationState;
 }
@@ -337,6 +339,8 @@ export interface DurableSyncContext {
   exactAssetFetchPolicyFor?: (contextGraphId: string) => Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }> | undefined;
   /** Present only for the graph-owned bounded recovery runner. */
   durableMetaContinuation?: DurableMetaContinuation;
+  /** Which assets of a verified generation this node holds; plans that runner's DATA phase. */
+  readHeldGraphScopedAssets?: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
     dataQuads: Quad[],
@@ -606,6 +610,7 @@ async function runDurableSyncWithBudget(
     sinceBatchIdFor,
     exactAssetFetchPolicyFor,
     durableMetaContinuation,
+    readHeldGraphScopedAssets,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
@@ -969,6 +974,24 @@ async function runDurableSyncWithBudget(
         );
       }
       const graphScopedManifest = preparedMeta.manifestPlan;
+      // A graph-owned round fetches only the rows of the verified generation that this node lacks.
+      const holdings = graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
+        && durableMetaContinuation && readHeldGraphScopedAssets
+        ? await planDurableDataFromLocalHoldings({ contextGraphId: pid, manifest: graphScopedManifest,
+            channel: durableMetaContinuation, readHeld: readHeldGraphScopedAssets, signal,
+            logWarn: (message) => logWarn(ctx, message) })
+        : undefined;
+      if (graphScopedManifest && holdings && holdings.kind !== 'full') {
+        recordPhaseOutcome(metaResult, { updateCheckpoint: true });
+        recordDurableSyncDiagnostics(accumulator, { bytesReceived: metaResult.bytesReceived,
+          fetchedMetaTriples: metaResult.quads.length });
+        if (holdings.kind === 'held') settleHeldDurableData({ remotePeerId, contextGraphId: pid,
+          manifest: graphScopedManifest, accumulator, deleteCheckpoint, setCheckpoint });
+        markDurableTerminalBoundary(accumulator, holdings.kind === 'held');
+        logInfo(ctx, describeDurableHoldingsPlan(pid, graphScopedManifest, holdings));
+        endPhase();
+        continue;
+      }
       const rawDataResult = await fetchPhase(
         'data',
         dataGraph,

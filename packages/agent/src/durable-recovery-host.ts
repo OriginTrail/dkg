@@ -52,6 +52,8 @@ export interface DurableRecoveryHost {
     readonly debug: DurableSyncContext['logDebug'];
   };
   readonly storeInsert: DurableSyncContext['storeInsert'];
+  /** Which assets of a verified generation the store holds; a graph-owned round skips their DATA. */
+  readonly readHeldGraphScopedAssets?: DurableSyncContext['readHeldGraphScopedAssets'];
   materialization(scope: RecoveryMaterializationScope): RecoveryMaterialization;
   resolveOrdinaryAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;
 }

@@ -23,12 +23,14 @@ import {
 } from './durable-recovery-coordinator.js';
 import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
+import type { ExactDurableFetchDisposition } from './requester/exact-durable-fetch.js';
 import {
   preferVerifiedDurableBoundary,
   seedVerifiedDurableBoundary,
   verifiedDurableBoundaryOf,
   type VerifiedDurableBoundary,
 } from './durable-recovery-boundary-seed.js';
+import type { MissingDurableAsset } from './requester/durable-data-holdings.js';
 
 export interface DurableRecoveryExecution {
   readonly outcome: DurableRecoveryContinuationOutcome;
@@ -70,9 +72,46 @@ export interface DurableRecoveryRunnerDependencies {
     peerId: string,
     metaContinuation: DurableMetaContinuation,
   ): Promise<DurableSyncResult>;
+  /**
+   * Fetch assets this node lacks with one exact request; `complete` when every
+   * one was found, verified and stored. Without it, rounds pull the full graph.
+   */
+  executeExactSlice?(
+    peerId: string,
+    assetUals: readonly string[],
+  ): Promise<{ readonly result: DurableSyncResult; readonly complete: boolean }>;
   logDebug(message: string): void;
   logInfo(message: string): void;
   logWarn(message: string): void;
+}
+
+/** What the owner's exact requests need from the agent. */
+export interface ExactMissingAssetSource {
+  readonly node: { readonly stopSignal?: AbortSignal };
+  syncExactKnowledgeAssetsFromPeerDetailed(
+    remotePeerId: string,
+    contextGraphId: string,
+    assetUals: readonly string[],
+    options: { signal?: AbortSignal; totalTimeoutMs?: number },
+  ): Promise<{ readonly result: DurableSyncResult; readonly disposition: ExactDurableFetchDisposition }>;
+}
+
+/**
+ * The owner's exact request for assets a held generation lacks. It is complete
+ * when the fetch found every requested asset and stored it.
+ */
+export function exactMissingAssetRequest(
+  source: ExactMissingAssetSource,
+  contextGraphId: string,
+  totalTimeoutMs: number,
+): NonNullable<DurableRecoveryRunnerDependencies['executeExactSlice']> {
+  return async (peerId, assetUals) => {
+    const exact = await source.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
+      signal: source.node.stopSignal,
+      totalTimeoutMs,
+    });
+    return { result: exact.result, complete: exact.disposition === 'found' && exact.result.complete === true };
+  };
 }
 
 type MutableDurableRecoveryPeerHealth = {
@@ -183,6 +222,10 @@ export class DurableRecoveryRunner {
     const incompatiblePeers = new Set<string>();
     // Set once a seeded peer discarded the boundary; the rest of this run uses each peer's own checkpoint.
     let seedingRefused = false;
+    // Set once this run advanced a full-graph round, as a first recovery does, or an exact request
+    // left assets missing: the rest of the run pulls full-graph rounds.
+    let pullsFullGraph = false;
+    const fetchedExactly = new Set<string>();
     let slices = 0;
     let lastPeerId: string | undefined;
     let lastResult: DurableSyncResult = createIncompleteDurableSyncResult();
@@ -347,6 +390,8 @@ export class DurableRecoveryRunner {
           metaContinuation = this.createMetaContinuation();
           metaContinuations.set(candidate.peerId, metaContinuation);
         }
+        metaContinuation.ownerFetchesMissingAssets = deps.executeExactSlice !== undefined && !pullsFullGraph;
+        metaContinuation.missingAssetBatches = undefined;
         lastResult = await deps.executeSlice(candidate.peerId, metaContinuation);
       } catch (error) {
         lastResult = createFailedPeerDurableSyncResult();
@@ -372,6 +417,56 @@ export class DurableRecoveryRunner {
         safeOffset = checkpointOffset;
       } else {
         safeOffset = Math.max(safeOffset, checkpointOffset);
+      }
+
+      // The round found this node holding the rest of the generation and left these assets to us.
+      const continuation = metaContinuations.get(candidate.peerId);
+      const missingAssetBatches = continuation?.missingAssetBatches;
+      if (continuation && missingAssetBatches && deps.executeExactSlice) {
+        continuation.missingAssetBatches = undefined;
+        health.successfulSlices += 1;
+        health.lastSuccessfulTransportAtMs = Date.now();
+        const versionOf = (asset: MissingDurableAsset) => `${asset.ual}\0${asset.assertionVersion}`;
+        const missingAssets = missingAssetBatches.flat();
+        const stillMissing = missingAssets.filter((asset) => fetchedExactly.has(versionOf(asset))).length;
+        if (stillMissing > 0) {
+          // Stored by an exact request, yet not held at that version: do not ask for it again.
+          pullsFullGraph = true;
+          deps.logWarn(
+            `Durable recovery for "${contextGraphId}" still lacks ${stillMissing} asset version(s) it fetched with exact requests; continuing with full-graph rounds`,
+          );
+        } else {
+          deps.logInfo(
+            `Durable recovery for "${contextGraphId}" fetches ${missingAssets.length} missing asset(s) from ${candidate.peerId.slice(-8)} in ${missingAssetBatches.length} exact request(s)`,
+          );
+          for (const batch of missingAssetBatches) {
+            if (!deps.isRunning()) return finish('no-progress');
+            for (const asset of batch) fetchedExactly.add(versionOf(asset));
+            slices += 1;
+            let exact: { readonly result: DurableSyncResult; readonly complete: boolean };
+            try {
+              exact = await deps.executeExactSlice(candidate.peerId, batch.map((asset) => asset.ual));
+            } catch (error) {
+              exact = { result: createFailedPeerDurableSyncResult(), complete: false };
+              deps.logWarn(
+                `Durable recovery exact request for "${contextGraphId}" from ${candidate.peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            accumulateProgress(progressTotals, exact.result);
+            recordPeerSlice(candidate.peerId, exact.result);
+            if (!exact.complete) {
+              pullsFullGraph = true;
+              deps.logWarn(
+                `Durable recovery for "${contextGraphId}" did not store ${batch.length} missing asset(s) from ${candidate.peerId.slice(-8)} with an exact request; continuing with full-graph rounds`,
+              );
+              break;
+            }
+          }
+          if (!pullsFullGraph) attemptedWithoutProgress.clear();
+        }
+        // The next round confirms the generation is held, or pulls what is still missing.
+        await owner.scheduleContinuation();
+        continue;
       }
 
       const checkpointAdvanced = (after?.offset ?? 0) > (before?.offset ?? 0);
@@ -413,6 +508,7 @@ export class DurableRecoveryRunner {
         );
       }
       if (outcome === 'partial-progress') {
+        if (checkpointAdvanced || manifestRebound) pullsFullGraph = true;
         health.successfulSlices += 1;
         health.lastSuccessfulTransportAtMs = Date.now();
         if ((lastResult.timedOutPhases ?? 0) > 0) health.recentTimeouts += 1;

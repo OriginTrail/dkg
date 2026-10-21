@@ -4,6 +4,7 @@ import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-re
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
+import { heldGraphScopedAssetsReader } from './sync/requester/durable-data-holdings.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
@@ -651,6 +652,7 @@ export class DKGAgentBase {
       storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
         priority: 'background', source: 'agent.durableSync.storeInsert', signal,
       }),
+      readHeldGraphScopedAssets: heldGraphScopedAssetsReader(agent.store),
       materialization: scope => materialization.forOperation(scope),
       checkpoints: {
         deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),

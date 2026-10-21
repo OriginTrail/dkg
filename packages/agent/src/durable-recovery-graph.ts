@@ -93,6 +93,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       ? () => exactAssetFetchPolicy
       : undefined,
     durableMetaContinuation,
+    readHeldGraphScopedAssets: host.readHeldGraphScopedAssets,
     stopOnBackoffWorthyFailure,
     admitVerifiedPage: page => authority.admitVerifiedPage(page),
     processDurableBatchInWorker: host.verification.processBatch,
