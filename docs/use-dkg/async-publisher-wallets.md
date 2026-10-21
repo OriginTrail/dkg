@@ -17,6 +17,24 @@ dkg publisher enable
 dkg publisher publish-async <context-graph-id> <name>
 ```
 
+## Pause and resume the running publisher
+
+Node administrators can pause all new claims, including jobs already accepted in the queue:
+
+```bash
+curl -H "Authorization: Bearer $DKG_API_TOKEN" -X POST -d '{}' http://127.0.0.1:9200/api/publisher/pause
+curl -H "Authorization: Bearer $DKG_API_TOKEN" http://127.0.0.1:9200/api/publisher/control
+curl -H "Authorization: Bearer $DKG_API_TOKEN" -X POST -d '{}' http://127.0.0.1:9200/api/publisher/resume
+```
+
+Use the daemon's configured API port. Agent-scoped tokens cannot call these node-wide controls. Responses contain `desiredState`, `effectiveState`, `generation`, `acknowledgedGeneration`, `updatedAt`, and each wallet's claim gate and generation. A successful pause waits for claims already inside the claim transaction to finish and fences every wallet before acknowledging. A job claimed before that boundary may continue execution, broadcasting, receipt handling, and finalization. Recovery remains active while paused; pause does not cancel or clear job evidence, and admission can continue accepting jobs.
+
+The live runtime persists desired state in `publisher-control.json` in its data directory, and restores it before startup recovery or wallet loops begin. Repeating the current desired state is idempotent; successful transitions increment the durable generation. Resume persists intent before opening gates. Shutdown closes gates before draining a concurrent control request, so a persisted resume may take effect on the next startup while the closing runtime remains fenced. `DKG_PUBLISHER_START_PAUSED=1` overrides persisted running intent at startup; a subsequent live resume can reopen the runtime.
+
+A missing runtime returns HTTP 503. A persistence/control failure also returns 503, fences the runtime, and requires restart to reload durable intent; a failed request has no acknowledgement. A status read during a transition may show the previous acknowledged desired state alongside gates already closing. File contents are synced before atomic rename, and the parent directory is synced on supported POSIX hosts. Windows preserves process-restart state without claiming the same directory-fsync power-loss guarantee.
+
+The isolated native restart campaign runs actual two-wallet runtime composition, authenticated loopback HTTP routes, persistent Oxigraph queue evidence and SIGKILL/restart. After building publisher and CLI, run `node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.mts`. It uses a disposable data directory and `NoChainAdapter`; it verifies queue/control behavior rather than on-chain execution.
+
 ## Receipt, finality, and local completion
 
 A job enters `broadcast` when its signed transaction is durably recorded before send. Receipt confirmation can trigger reconciliation while the executor finishes local work. The reconciler independently checks the transaction at the configured confirmation depth and binds canonical publish evidence to that job before writing `included` and releasing its wallet. `finalized` also requires the executor to settle, local lifecycle repair/private staging to complete, and the final job record to be persisted. An `included` job can therefore have already reached chain finality while local work remains.

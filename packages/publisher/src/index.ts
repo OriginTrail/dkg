@@ -395,6 +395,7 @@ export {
   type AsyncLiftDetailedRetrier,
   type AsyncLiftRetryFilter,
   type AsyncLiftPublisher,
+  type AsyncLiftClaimControl,
   type ClaimSessionAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
   type AsyncLiftRetryOutcome,
@@ -534,7 +535,8 @@ export { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, type OnContextGraphCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
-export { AccessClient, type AccessResult } from './access-client.js';
+export { accessError, isAccessError, ACCESS_ERROR_CODES, type AccessError, type AccessErrorCode } from './access-errors.js';
+export { AccessClient, RequestOwnedAccessClient, type AccessResult, type RequestOwnedAccessResult, type AccessClientRequestOptions, type RequestOwnedAccessSendSurface } from './access-client.js';
 export * from './share-batching.js';
 export { withKeyedLocks, tryWithKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 
@@ -556,6 +558,7 @@ export { withMaterializationLocks } from './materialization-lock-group.js';
 export { readCurrentAssertionVersion } from './materialization-assertion-version.js';
 
 export { classifyQueuedSharePreparation } from './bind-promote-recovery.js';
+export type { ACKDiagnosticSummary } from './ack-diagnostics.js';
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
 
 export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';

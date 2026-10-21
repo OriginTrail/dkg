@@ -1547,7 +1547,7 @@ describe('ProtocolRouter', () => {
         .resolves.toEqual(new Uint8Array([1, 2, 3, 4, 5]));
       // A per-call cap tightens the read for this send only.
       await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 4 }))
-        .rejects.toThrow('Read limit exceeded (4 bytes)');
+        .rejects.toMatchObject({ name: 'ProtocolReadLimitError', code: 'PROTOCOL_READ_LIMIT_EXCEEDED', maxBytes: 4, message: 'Read limit exceeded (4 bytes)' });
       await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 5 }))
         .resolves.toEqual(new Uint8Array([1, 2, 3, 4, 5]));
       // A per-call cap can never exceed the router-wide limit.
