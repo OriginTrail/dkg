@@ -80,6 +80,33 @@ describe('async shares acquire durable replay authority before promotion', () =>
     await expect(f.queue.bindRecovery(first.jobId, first.lease.claimToken, originalBinding)).rejects.toBeInstanceOf(PromoteJobLeaseError);
   });
 
+  it('repairs a crash after the internal SWM insert before WM cleanup', async () => {
+    const f = await setup();
+    const first = await f.claim();
+    const abort = new AbortController();
+    const replace = f.store.replaceGraph.bind(f.store);
+    let injected = false;
+    const fault = vi.spyOn(f.store, 'replaceGraph').mockImplementation(async (...args) => {
+      await replace(...args);
+      if (!injected && args[0] === f.finalized.sharedGraphUri) {
+        injected = true; abort.abort(); throw new Error('process exits after SWM insert');
+      }
+    });
+    await expect(f.run(first, { shutdownSignal: abort.signal })).rejects.toThrow('shutdown');
+    fault.mockRestore();
+    expect(injected).toBe(true);
+    expect(await f.store.countQuads(f.finalized.graphUri)).toBeGreaterThan(0);
+    expect(await f.store.countQuads(f.finalized.sharedGraphUri)).toBe(1);
+    const bound = (await f.queue.getStatus(f.jobId)).request.recoveryBinding;
+    f.expire();
+    expect(await f.queue.recoverOnStartup()).toEqual({ reclaimed: 1, abandoned: 0 });
+    expect((await f.run(await f.claim())).outcome).toBe('succeeded');
+    expect((await f.queue.getStatus(f.jobId)).request.recoveryBinding).toEqual(bound);
+    expect(await f.store.countQuads(f.finalized.graphUri)).toBe(0);
+    const content = await f.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${f.finalized.sharedGraphUri}> { ?s ?p ?o } }`);
+    expect(content.type === 'quads' && content.quads.map(q => q.object)).toEqual(['"original"']);
+  });
+
   it('recovers after binding and promoteStarted but before content mutation', async () => {
     const f = await setup();
     const first = await f.claim();
