@@ -121,6 +121,31 @@ describe('ChainEventPoller collection updates across an expired scan lease', () 
     expect(saved).toEqual([100]);
   });
 
+  it('delivers an update again when it returns to a block a failed attempt read as empty', async () => {
+    const original = update(50);
+    const events = [original, update(51)];
+    const chain = indexedChain(events);
+    const seen: number[] = [];
+    let now = 0;
+    const { poll, saved } = collectionUpdatesPoller(chain.adapter, () => now, async ({ blockNumber }) => {
+      seen.push(blockNumber);
+      if (seen.length <= 2) chain.commit();
+    });
+
+    await poll();
+    events.splice(0, 1);
+    now = CADENCE_MS;
+    await poll();
+    expect(seen).toEqual([50, 51]);
+    expect(saved).toEqual([]);
+    events.unshift(original);
+    now = 2 * CADENCE_MS;
+    await poll();
+
+    expect(seen).toEqual([50, 51, 50]);
+    expect(saved).toEqual([100]);
+  });
+
   it('keeps what it delivered beyond the block where a later attempt stopped', async () => {
     const events = [update(50), update(51), update(52)];
     const chain = indexedChain(events);
