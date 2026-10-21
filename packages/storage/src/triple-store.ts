@@ -5,6 +5,7 @@
  */
 
 import { dirname, join } from 'node:path';
+import type { TripleStoreCommitCapability } from './persistence.js';
 import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
   SharedMemoryLiteralBlobStore,
@@ -164,18 +165,14 @@ export interface Rfc64SharedProjectionStreamCapabilityOptionsV1 {
  * on `listGraphs`/`query` reads where it is meaningless.
  */
 export interface UpdateOptions extends QueryOptions {
-  /**
-   * The named graphs whose membership (existence) this UPDATE may change — the graphs
-   * it creates, or empties/drops. When supplied, a graph-set index can maintain itself
-   * INCREMENTALLY (a bounded `hasGraph` per graph) instead of marking the whole index
-   * dirty and forcing a full `SELECT DISTINCT ?g` rebuild on the next read. Omit it for
-   * opaque updates whose affected graphs are not derivable at the call site (those fall
-   * back to a lazy full rebuild).
-   */
+  /** Graphs this UPDATE may create or empty. Enables bounded per-graph index refresh;
+   * omit for opaque updates, which require a lazy full index rebuild. */
   touchedGraphs?: readonly string[];
 }
 
 export interface TripleStore {
+  /** Explicit commit boundary and durability guarantee, composed through every decorator. */
+  readonly commitment?: TripleStoreCommitCapability;
   /** Execute a fresh read plan in one admission, at the supplied priority and
    * original deadline. Reads still go through this store's decorators; no
    * authorization or results may be cached by this capability. Implementations
@@ -339,6 +336,14 @@ export interface TripleStore {
    * fall back to `insert(quads)` for already-stored terms.
    */
   update?(sparql: string, options?: UpdateOptions): Promise<void>;
+
+  /**
+   * Explicit whole-request transaction capability: every UPDATE statement commits
+   * together, or none becomes visible. Generic update() does not certify this.
+   * Unsupported implementations must refuse before execution with the typed
+   * capability error; execution failures must propagate without fallback.
+   */
+  atomicUpdate?(sparql: string, options?: UpdateOptions): Promise<void>;
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 

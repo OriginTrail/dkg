@@ -1,3 +1,6 @@
+import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
+import type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
+export type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
 import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
@@ -46,23 +49,6 @@ const MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS = 1_000;
 // the mutation generation, before falling back to one O(store) rebuild.
 const MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4;
 
-export interface GraphSetIndexStoreOptions {
-  enabled?: boolean;
-  /** Revalidate after this interval. Use 0 to revalidate on every read. */
-  revalidateMs?: number;
-  /**
-   * Initial retry delay after a failed warm periodic revalidation.
-   * Ignored when revalidateMs is 0.
-   */
-  revalidateFailureBackoffMs?: number;
-  /**
-   * Maximum exponential retry delay after failed warm periodic revalidations.
-   * Ignored when revalidateMs is 0.
-   */
-  revalidateFailureMaxBackoffMs?: number;
-  now?: () => number;
-  onMutation?: (event: GraphSetMutationEvent) => void;
-}
 
 /** Immutable graph catalog maintained in Unicode code-point order. */
 export interface SortedGraphSetSource {
@@ -112,6 +98,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
+  readonly commitment?: TripleStoreCommitCapability;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;
@@ -136,6 +123,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.commitment = composeTripleStoreCommitment(inner);
     this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isAtomicGraphReplaceStagingGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
@@ -243,16 +231,24 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
+    return this.runUpdate(sparql, options, 'update');
+  }
+
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    return this.runUpdate(sparql, options, 'atomicUpdate');
+  }
+
+  private async runUpdate(sparql: string, options: UpdateOptions | undefined, capability: 'update' | 'atomicUpdate'): Promise<void> {
     return runLogicalStoreMutation(this.inner, 'update', options, async scoped => {
       const scopedUpdateOptions: UpdateOptions = { ...options, ...scoped };
-      if (typeof this.inner.update !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
+      if (typeof this.inner[capability] !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError(capability, 'GraphSetIndexStore');
       }
       if (!this.enabled) {
-        await this.inner.update(sparql, scopedUpdateOptions);
+        await this.inner[capability]!(sparql, scopedUpdateOptions);
         return;
       }
-      await this.inner.update(sparql, scopedUpdateOptions);
+      await this.inner[capability]!(sparql, scopedUpdateOptions);
       // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create or
       // drop named graphs the index must learn about. When the caller declares the
       // touched graphs (#1549: RS-heal + agents-meta prune write statically-known

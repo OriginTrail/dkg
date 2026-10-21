@@ -6,6 +6,7 @@ import {
   WAL_REPLAY_FLOOR_BYTES_PER_MS,
   formatWalBytes,
   measureRetainedWalBytes,
+  readRetainedWalSegmentNames,
   resolveWalAwareReadyTimeoutMs,
 } from '../src/daemon/oxigraph-wal.ts';
 
@@ -23,7 +24,7 @@ afterEach(() => {
 });
 
 describe('measureRetainedWalBytes (GH#1400)', () => {
-  it('sums only RocksDB WAL segments, ignoring every neighbouring file', () => {
+  it('sums only RocksDB WAL segments, ignoring every neighbouring file', async () => {
     const loc = tempLocation();
     // WAL segments — the only things replayed.
     writeFileSync(join(loc, '000004.log'), Buffer.alloc(43));
@@ -39,6 +40,7 @@ describe('measureRetainedWalBytes (GH#1400)', () => {
     mkdirSync(join(loc, '000005.log'));
 
     expect(measureRetainedWalBytes(loc)).toBe(1067);
+    expect(await readRetainedWalSegmentNames(loc)).toEqual(['000004.log', '000008.log']);
   });
 
   it('returns 0 for a directory with no WAL segments', () => {
@@ -47,10 +49,14 @@ describe('measureRetainedWalBytes (GH#1400)', () => {
     expect(measureRetainedWalBytes(loc)).toBe(0);
   });
 
-  it('returns 0 rather than throwing for a missing location', () => {
+  it('returns 0 rather than throwing for a missing location', async () => {
     // Runs on the boot path — a scan failure must degrade to today's
     // behaviour, never fail the boot.
-    expect(measureRetainedWalBytes(join(tempLocation(), 'does-not-exist'))).toBe(0);
+    const missing = join(tempLocation(), 'does-not-exist');
+    expect(measureRetainedWalBytes(missing)).toBe(0);
+    // Persistence discovery must retain the I/O failure instead of certifying a
+    // missing database, while startup sizing deliberately degrades to zero.
+    await expect(readRetainedWalSegmentNames(missing)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('counts a large sparse segment by its apparent size', () => {

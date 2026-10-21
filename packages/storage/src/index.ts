@@ -1,3 +1,4 @@
+export { DurableDirectory, persistFileAndParent, persistDirectoryRange, type DirectorySyncPolicy, type DurableDirectoryOptions } from './file-durability.js';
 export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
@@ -58,6 +59,8 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+export type { TripleStorePersistenceBarrier, TripleStoreCommitDurability, TripleStoreCommitCapability } from './persistence.js';
+export { composeTripleStoreCommitment } from './persistence.js';
 export {
   assertSubjectAndInsertPayload,
   buildAtomicSubjectAndInsertUpdate,
@@ -328,3 +331,5 @@ import './adapters/sparql-http.js';
 export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, type AtomicAssetReplacement } from './atomic-asset-group.js';
 
 export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';
+
+export { DurableReplaceableFile, replaceDurableFile, type DurableFileReplacePermissions } from './durable-file-replace.js';

@@ -1,14 +1,14 @@
-import type { QueryOptions } from '../triple-store.js';
+import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { withheldGraphQueryDataset } from './withheld-graph-dataset.js';
 import { existsSync, renameSync } from 'node:fs';
-import { mkdir, open, rename } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { DurableReplaceableFile } from '../durable-file-replace.js';
 import { loadOxigraphSnapshot, OxigraphSnapshotReadError, serializeOxigraphSnapshot } from './oxigraph-snapshot.js';
 import type {
   TripleStore,
+  QueryOptions,
   Quad as DKGQuad,
   QueryResult,
   SelectResult,
@@ -64,6 +64,7 @@ type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
+  readonly commitment: TripleStoreCommitCapability;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'pre-dispatch' as const;
@@ -71,6 +72,7 @@ export class OxigraphStore implements TripleStore {
   readonly rfc64SemanticReadCertifiedV1 = true as const;
   private store: OxStore;
   private persistPath: string | undefined;
+  private snapshotFile?: DurableReplaceableFile;
   // #1609: per-graph write generations, bumped on every local mutation (the
   // same choke points the sparql-http adapter pairs with its listGraphs-cache
   // invalidation). Feeds the chain-reconcile negative memo via
@@ -86,6 +88,9 @@ export class OxigraphStore implements TripleStore {
   constructor(persistPath?: string) {
     this.store = new oxigraph.Store();
     this.persistPath = persistPath;
+    this.commitment = certifiedTripleStoreCommitment(
+      persistPath ? 'restart-durable' : 'process-local', options => this.flush(options),
+    );
     if (persistPath) {
       this.hydrateSync(persistPath);
     }
@@ -176,7 +181,10 @@ export class OxigraphStore implements TripleStore {
    *   2. fsync the tmp file so the bytes are on stable storage.
    *   3. Atomic rename(tmp -> persistPath) — POSIX guarantees atomicity, so
    *      a crash mid-step leaves the old persistPath intact.
-   *   4. fsync the containing directory so the rename itself is durable.
+   *   4. fsync the renamed file through a writable handle (Windows
+   *      FlushFileBuffers), and fsync its containing directory on POSIX,
+   *      plus every directory a flush created, through the first parent
+   *      that already existed.
    *
    * Previously a single `writeFile(persistPath, dump)` left the store
    * vulnerable to torn writes on SIGKILL (the file would be partially
@@ -195,45 +203,15 @@ export class OxigraphStore implements TripleStore {
   private async flushNow(): Promise<void> {
     if (!this.persistPath || this.flushing) return;
     this.flushing = true;
-    const dir = dirname(this.persistPath);
     const tmpPath = `${this.persistPath}.tmp`;
     try {
-      await mkdir(dir, { recursive: true });
-      // Capture once before any awaited writes: concurrent mutations cannot mix
-      // two graph/seal generations in this snapshot. The native API returns an
-      // array; it avoids a complete-store string but still uses memory per quad.
+      // Capture one generation before any awaited writes. The replacement owner
+      // streams it, syncs bytes and created ancestry, and propagates every barrier failure.
       const quads = this.store.match();
-
-      // 1+2: write to tmp, fsync to commit bytes.
-      const fh = await open(tmpPath, 'w');
-      try {
-        for (const chunk of serializeOxigraphSnapshot(quads)) {
-          await fh.writeFile(chunk, 'utf-8');
-        }
-        await fh.sync();
-      } finally {
-        await fh.close();
-      }
-
-      // 3: atomic rename — POSIX-atomic on the same filesystem.
-      await rename(tmpPath, this.persistPath);
-
-      // 4: fsync the directory so the rename itself survives a power loss.
-      // Best-effort: some filesystems / Node versions don't expose dir-fd
-      // sync; swallow ENOENT/EPERM since the rename itself already
-      // succeeded and the cache will eventually flush. The rename itself
-      // landed bytes on disk; only the directory entry's durability
-      // depends on this step.
-      try {
-        const dirFh = await open(dir, 'r');
-        try {
-          await dirFh.sync();
-        } finally {
-          await dirFh.close();
-        }
-      } catch {
-        // Best-effort dir fsync — see comment above.
-      }
+      const snapshot = this.snapshotFile ??= new DurableReplaceableFile(this.persistPath, {
+        fileMode: 0o666, directoryMode: 0o777, temporaryPath: tmpPath,
+      });
+      await snapshot.replace(serializeOxigraphSnapshot(quads));
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but
       // re-throw so explicit callers fail loudly. (Background callers
@@ -600,6 +578,11 @@ export class OxigraphStore implements TripleStore {
    * termToString→parseTerm round-trip). See {@link TripleStore.update}.
    */
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  /** Oxigraph commits the entire request as one transaction. */
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    await this.update(sparql, options);
+  }
+
   async update(sparql: string, _options?: UpdateOptions): Promise<void> {
     // In-process oxigraph is never wrapped by a graph-set index, so the
     // `touchedGraphs` hint is inapplicable here — accepted for a uniform
@@ -638,7 +621,7 @@ export class OxigraphStore implements TripleStore {
    * rejection as a hard error — previous behaviour swallowed these and
    * returned success even when the data never landed.
    */
-  async flush(): Promise<void> {
+  async flush(_options?: QueryOptions): Promise<void> {
     if (!this.persistPath) return;
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
