@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { OxigraphStore, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { PromoteJobLeaseError } from '@origintrail-official/dkg-publisher';
@@ -11,7 +12,8 @@ import { createPromoteWorkerSupervisor, runPromoteJob } from '../src/daemon/work
 import { createPromoteExecutionAuthority } from '../src/daemon/worker/promote-execution-authority.js';
 import { executePromoteRequest } from '../src/daemon/worker/execute-promote-request.js';
 
-const CG = 'async-recovery', NAME = 'asset', AUTHOR = `0x${'11'.repeat(20)}`;
+const SIGNER = ethers.Wallet.createRandom();
+const CG = 'async-recovery', NAME = 'asset', AUTHOR = SIGNER.address;
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(stores.splice(0).map(s => s.close())); });
 async function setup(subGraphName?: string, oversized = false, mutable = false) {
@@ -50,6 +52,49 @@ describe('async shares acquire durable replay authority before promotion', () =>
       expect((await f.queue.getStatus(f.jobId)).request.recoveryBinding).toBeDefined();
       // assertion is a fresh facade getter; persisted binding is the integration assertion.
     } finally { await supervisor.stop(); }
+  });
+
+  it('finalizes an ordinary draft in the supervisor and recovers its original binding', async () => {
+    const f = await setup(undefined, false, true);
+    delete f.agent.prepareAtomicAssertionShare;
+    const signer = SIGNER;
+    f.agent.chain = { chainId: 'mock:31337', getEvmChainId: async () => 31337n,
+      getKnowledgeAssetsLifecycleAddress: async () => AUTHOR, hasContractCode: async () => false };
+    f.agent.kaNumberAllocator = makeTestKaNumberAllocator();
+    f.agent.reconciledKaAuthors = new Set();
+    vi.spyOn(f.publisher, 'publisherFallbackAuthorAddress').mockResolvedValue(signer.address);
+    vi.spyOn(f.publisher, 'signAuthorAttestationAsPublisher').mockImplementation(async typed => {
+      const sig = ethers.Signature.from(await signer.signTypedData(typed.domain, typed.types, typed.message));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    });
+    expect((await readAssertionPromoteEvidence(f.store, CG, NAME, AUTHOR)).seal).toBeUndefined();
+    let bound: unknown;
+    const interruption = vi.spyOn(f.publisher, 'assertionPromote').mockImplementationOnce(async () => {
+      const job = await f.queue.getStatus(f.jobId);
+      bound = job.request.recoveryBinding;
+      expect(bound).toBeDefined();
+      expect((await readAssertionPromoteEvidence(f.store, CG, NAME, AUTHOR)).seal).toBeDefined();
+      // Interrupt the actual supervisor at this boundary, before SWM mutation.
+      await supervisor.stop();
+      throw new Error('simulated process exit before SWM');
+    });
+    const supervisor = createPromoteWorkerSupervisor({ agent: f.agent, workerConcurrency: 1, shutdownTimeoutMs: 1,
+      heartbeatIntervalMs: 0, bookkeepingRetryBudgetMs: 100, pollIntervalMs: 1000, postCommitRecoveryIntervalMs: 0, log: () => {} });
+    try {
+      await supervisor.start(); await supervisor.tickOnce();
+      await expect.poll(async () => { const job = await f.queue.getStatus(f.jobId); return bound ?? (job.state !== 'running' && job.state !== 'queued' ? job : undefined); }, { timeout: 5000 }).toBeDefined();
+      expect(bound, JSON.stringify(await f.queue.getStatus(f.jobId))).toBeDefined();
+    } finally { await supervisor.stop(); interruption.mockRestore(); }
+    expect((await f.queue.getStatus(f.jobId)).state).toBe('running');
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+    f.expire();
+    expect(await f.queue.recoverOnStartup()).toEqual({ reclaimed: 1, abandoned: 0 });
+    const replacement = await f.claim();
+    expect(replacement.jobId).toBe(f.jobId);
+    expect(replacement.request.recoveryBinding).toEqual(bound);
+    expect((await f.run(replacement)).outcome).toBe('succeeded');
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    expect(await f.queue.list({})).toHaveLength(1);
   });
 
   it.each([undefined, 'subgraph'])('recovers the original job after commit with unchanged payload (%s)', async subGraphName => {

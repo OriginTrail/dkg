@@ -72,3 +72,7 @@ Round-1 verification: 113 focused CLI tests and 152 publisher tests passed. Inde
 The reviewer identified mutable preparation before the first lease-checked queue write. Preparation now receives the same execution authority as promotion, serializes by job, checks it inside the lifecycle fence, and rechecks before canonical materialization, seal/lifecycle writes and draft cleanup. Publisher preparation/admission cleanup callbacks are also guarded. This preserves publisher-to-queue lock order and refuses expired/reassigned/cancelled claims and shutdown even after lock waits. Real mutable-draft tests hold the lifecycle fence, then expire/reassign/cancel or shut down before releasing it; neither seal nor source removal is permitted. The eligibility gate uses the shared format constant.
 
 Initial live candidate succeeded: original job recovered after the real 900,000 ms lease on attempt 2; all 17 shares and five publications finalized successfully with verified canonical payload/root/receipt. The node is stopped, wallet batch and owned store retained for a second run on the reviewed runtime.
+
+## Review round 3
+
+Added an initially unfinalized draft through the real supervisor and finalizer, with a real ephemeral test signer. Interruption before SWM mutation retains the original bound job; recovery completes it under the identical binding. All 19 recovery tests pass. The revised live runtime is `21b3a3338`; this response adds test/plan coverage only and does not rebuild or alter that running runtime.
