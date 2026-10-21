@@ -49,6 +49,10 @@ export interface WorkspaceLifecycleValues {
   readonly layer?: string;
 }
 
+type LifecycleWrite =
+  | { readonly kind: 'replace'; readonly target: Pick<Quad, 'subject' | 'predicate' | 'graph'>; readonly quads: Quad[] }
+  | { readonly kind: 'remove'; readonly target: Pick<Quad, 'subject' | 'predicate' | 'graph'> };
+
 function sameAssertionVersion(sealed: string | undefined, confirmed: string): boolean {
   const digits = /^[0-9]+$/;
   return sealed !== undefined && digits.test(sealed) && digits.test(confirmed) && BigInt(sealed) === BigInt(confirmed);
@@ -78,20 +82,21 @@ export function buildNamedKaVmLifecycleMutation(
     && (input.kind === 'tentative' || (input.kind === 'confirmed' && sameAssertionVersion(workspace.activeSealVersion, input.assertionVersion)));
   const preserveWorkspace = reopenedDraft || (activeSeal !== undefined && !ownsActiveSeal)
     || (wm !== undefined && wm !== root && !consumedTentativePrior) || (swm !== undefined && swm !== root);
-  const deletes: Pick<Quad, 'subject' | 'predicate'>[] = [], inserts: Omit<Quad, 'graph'>[] = [];
+  const writes: LifecycleWrite[] = [], additions: Quad[] = [];
+  const remove = (subject: string, predicate: string) => writes.push({ kind: 'remove', target: { subject, predicate, graph: metaGraph } });
   const replace = (subject: string, predicate: string, object: string) => {
-    deletes.push({ subject, predicate });
-    inserts.push({ subject, predicate, object });
+    writes.push({ kind: 'replace', target: { subject, predicate, graph: metaGraph },
+      quads: [{ subject, predicate, object, graph: metaGraph }] });
   };
   if (!preserveVerifiedVmProof) replace(lifecycleUri, VM_CURRENT_ASSERTION_PRED, JSON.stringify(root));
   if (!preserveWorkspace && (wm === root || consumedTentativePrior)) {
-    deletes.push({ subject: lifecycleUri, predicate: WM_CURRENT_ASSERTION_PRED });
+    remove(lifecycleUri, WM_CURRENT_ASSERTION_PRED);
   }
   if (prior !== undefined) {
     const priorUri = `${lifecycleUri}#assertion-${prior}`;
-    inserts.push(
-      { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri },
-      { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: JSON.stringify(prior) },
+    additions.push(
+      { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
+      { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: JSON.stringify(prior), graph: metaGraph },
     );
   }
   if (!preserveWorkspace) {
@@ -106,18 +111,18 @@ export function buildNamedKaVmLifecycleMutation(
     // Promote moves the graph marker to SWM. Complete that move to the actual
     // VM graph; resurrecting a WM marker leaves stale SWM metadata behind.
     for (const layer of [MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory]) {
-      deletes.push({ subject: contextGraphLayerUri(input.contextGraphId, layer, author, number, input.subGraphName), predicate: MEMORY_LAYER_PRED });
+      remove(contextGraphLayerUri(input.contextGraphId, layer, author, number, input.subGraphName), MEMORY_LAYER_PRED);
     }
     replace(contextGraphLayerUri(input.contextGraphId, MemoryLayer.VerifiableMemory, author, number, input.subGraphName), MEMORY_LAYER_PRED, JSON.stringify(MemoryLayer.VerifiableMemory));
   }
   const term = (value: string, position: 'subject' | 'predicate' | 'object' | 'graph') => formatSparqlTerm(value, { position });
   const graph = term(metaGraph, 'graph');
-  const removals = deletes.map(target => ({ ...target, graph: metaGraph }));
-  const quads = inserts.map(triple => ({ ...triple, graph: metaGraph }));
+  const removals = writes.map(write => write.target);
+  const quads = [...writes.flatMap(write => write.kind === 'replace' ? write.quads : []), ...additions];
   // Validate all terms before any path writes. Both dispatches use this exact projection.
   const deleteStatements = removals.map(q => `DELETE WHERE { GRAPH ${graph} { ${term(q.subject, 'subject')} ${term(q.predicate, 'predicate')} ?o } }`);
   const insertStatements = quads.map(q => `${term(q.subject, 'subject')} ${term(q.predicate, 'predicate')} ${term(q.object, 'object')} .`).join('\n');
-  return { graph: metaGraph, mutation: { removals, quads },
+  return { graph: metaGraph, writes, additions, mutation: { removals, quads },
     sparql: [...deleteStatements, `INSERT DATA { GRAPH ${graph} { ${insertStatements} } }`].join(';\n') };
 
 }
@@ -125,11 +130,9 @@ export function buildNamedKaVmLifecycleMutation(
 
 /** Shared idempotent fallback, with independently verified retry proof excluded by the plan. */
 export async function applyLifecycleMutationFallback(store: TripleStore, plan: ReturnType<typeof buildNamedKaVmLifecycleMutation>): Promise<void> {
-  for (const target of plan.mutation.removals) {
-    await deleteByPatternWithoutCount(store, target);
-    const replacements = plan.mutation.quads.filter(q => q.subject === target.subject && q.predicate === target.predicate);
-    if (replacements.length) await store.insert(replacements);
+  for (const write of plan.writes) {
+    await deleteByPatternWithoutCount(store, write.target);
+    if (write.kind === 'replace') await store.insert(write.quads);
   }
-  const additions = plan.mutation.quads.filter(q => !plan.mutation.removals.some(target => target.subject === q.subject && target.predicate === q.predicate));
-  if (additions.length) await store.insert(additions);
+  if (plan.additions.length) await store.insert(plan.additions);
 }

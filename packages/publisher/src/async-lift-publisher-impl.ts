@@ -117,6 +117,8 @@ import {
   isDefinitivePreAcceptanceSendFailure,
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
+  mapKnowledgeAssetVmPublishResultToLiftJobSuccess,
+  type AsyncLiftPublishSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
 import { isKnowledgeAssetPublishPreconditionFailure, mapExecutionFailure } from './async-lift-execution-failure.js';
@@ -1447,9 +1449,14 @@ export class TripleStoreAsyncLiftPublisher
         // the transaction has already escaped. Propagate persistence faults.
         await this.store.flush?.();
       }
-      const completed = await this.applyPublishResultTransition(recorded, scope, result, {
-        ...options, deferFinalization: !certified,
-      });
+      let mapped: AsyncLiftPublishSuccess;
+      try {
+        mapped = mapKnowledgeAssetVmPublishResultToLiftJobSuccess({ publishResult: result,
+          walletId: current.claim.walletId, ...options });
+      } catch (error) {
+        throw new InvalidLiftPublishResultError(error instanceof Error ? error.message : String(error));
+      }
+      const completed = await this.applyMappedPublishResultTransition(recorded, scope, mapped);
       return completed.status === 'finalized';
     }));
   }
@@ -2080,7 +2087,7 @@ export class TripleStoreAsyncLiftPublisher
     current: LiftJob,
     scope: LiftJobTransitionScope,
     publishResult: PublishResult,
-    options: { publicByteSize?: number; deferFinalization?: boolean },
+    options: { publicByteSize?: number },
   ): Promise<LiftJob> {
     const jobId = current.jobId;
     if (!current.claim || !current.validation) {
@@ -2097,6 +2104,13 @@ export class TripleStoreAsyncLiftPublisher
     } catch (error) {
       throw new InvalidLiftPublishResultError(error instanceof Error ? error.message : String(error));
     }
+    return this.applyMappedPublishResultTransition(current, scope, mappedResult);
+  }
+
+  private async applyMappedPublishResultTransition(
+    current: LiftJob, scope: LiftJobTransitionScope, mappedResult: AsyncLiftPublishSuccess,
+  ): Promise<LiftJob> {
+    const jobId = current.jobId;
     // GH#2270 PR-3 r2 — the publish RESULT has no nonce to report; only the pre-send write-ahead
     // ever knew it. Every transition below replaces `broadcast` wholesale, so without this the
     // nonce recorded before the send is silently dropped the moment the executor returns — and a
@@ -2148,7 +2162,7 @@ export class TripleStoreAsyncLiftPublisher
       next = await scope.commit(next, 'broadcast');
     }
 
-    if (mapped.status === 'included' || options.deferFinalization) {
+    if (mapped.status === 'included') {
       next = this.buildTransitionJob(next, 'included', {
         broadcast: mapped.broadcast,
         inclusion: mapped.inclusion,

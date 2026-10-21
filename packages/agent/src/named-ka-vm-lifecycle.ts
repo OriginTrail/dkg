@@ -78,7 +78,7 @@ async function applyNamedKaVmLifecycle(
   const capability = store.commitment;
   const barrier = capability !== undefined
     && (capability.durability === 'restart-durable' || persistenceMode === 'process-local')
-    ? capability.commit.bind(capability) : undefined;
+    ? capability.capture?.() ?? capability.commit.bind(capability) : undefined;
   if (!tentative && barrier === undefined) {
     throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), {
       code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE',

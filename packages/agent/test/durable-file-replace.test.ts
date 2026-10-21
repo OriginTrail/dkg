@@ -99,7 +99,7 @@ it('journal admission propagates directory EPERM before applying confirmed state
     expect(JSON.parse(await readFile(join(parent, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries[0][1].input).toEqual(input);
     failure.phase = '';
     expect(await owner.submit(input)).toBe('repaired');
-    expect(apply).toHaveBeenCalledExactlyOnceWith(input);
+    expect(apply).toHaveBeenCalledExactlyOnceWith(input, false);
     expect(JSON.parse(await readFile(join(parent, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries).toEqual([]);
   } finally { failure.phase = ''; await owner.stop(); }
 });

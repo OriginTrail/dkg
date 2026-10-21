@@ -68,6 +68,16 @@ journal. Durable hosts require a `restart-durable` commitment, while uncertified
 remote endpoints expose no commitment. Standalone agents also use the stronger
 guarantee when their backing store supplies it.
 
+A replaceable worker also exposes `commitment.capture()`. Capture its barrier
+before the attempt's reads and writes, then invoke that barrier after mutations
+finish. Decorators capture before their own awaited drains. A worker replacement
+invalidates every barrier captured from the old worker, so a successful flush
+of its replacement cannot certify lost writes. Recovery captures a fresh barrier
+and reapplies its metadata before retiring the journal. The worker's unscoped
+`commit()` remains bound to its original worker and refuses certification after
+replacement; ordinary `flush()` remains available but cannot prove that lost
+mutations were reapplied.
+
 ### Mutation and flush semantics
 
 - Mutations update the in-memory store immediately and schedule a full N-Quads

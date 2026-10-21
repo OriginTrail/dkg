@@ -39,7 +39,7 @@ describe('bounded independent lifecycle dispatch', () => {
     const pass = owner.runDue();
     try {
       await vi.waitFor(() => expect(apply).toHaveBeenCalledOnce(), { timeout: 500 });
-      expect(apply.mock.calls[0]).toEqual([{ ...input, name: 'independent-B', merkleRoot: input.merkleRoot.slice(2) }]);
+      expect(apply.mock.calls[0]).toEqual([{ ...input, name: 'independent-B', merkleRoot: input.merkleRoot.slice(2) }, false]);
       let stopped = false;
       const stop = owner.stop().then(() => { stopped = true; });
       await Promise.resolve(); expect(stopped).toBe(false);

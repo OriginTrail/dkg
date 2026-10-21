@@ -1,4 +1,5 @@
-import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
+import type { TripleStoreCommitCapability } from '../persistence.js';
+import { oxigraphWorkerCommitment } from './oxigraph-worker-commitment.js';
 import { sleep, normalizeNonNegativeInt } from './oxigraph-worker-timing.js';
 import { runTrackedStoreWrite } from '../tracked-store-write.js';
 import { assertSubjectAndInsertPayload } from '../atomic-subject-insert.js';
@@ -311,10 +312,9 @@ export class OxigraphWorkerStore implements TripleStore {
     }
     this.workerPath = workerPath;
     this.persistPath = persistPath;
-    this.commitment = certifiedTripleStoreCommitment(
-      persistPath ? 'restart-durable' : 'process-local', options => this.flush(options),
-    );
     this.spawnWorker();
+    this.commitment = oxigraphWorkerCommitment(persistPath ? 'restart-durable' : 'process-local',
+      () => this.workerExited ? undefined : this.worker, options => this.flush(options));
   }
 
   /**

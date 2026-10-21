@@ -5,6 +5,7 @@ import {
   messageIndicatesPublishAuthorNotCustodial,
 } from '@origintrail-official/dkg-core';
 import type { PublishResult } from './publisher.js';
+import type { AsyncKnowledgeAssetVmPublishExecutionResult } from './async-lift-publisher-types.js';
 import { isQuorumUnmetError } from './ack-errors.js';
 import {
   createLiftJobFailureMetadata,
@@ -123,6 +124,20 @@ export function mapPublishResultToLiftJobSuccess(params: {
     default:
       throw new Error(`Async lift publish result cannot map unsupported canonical publish status: ${publishResult.status}`);
   }
+}
+
+/** Named-KA receipts are included until their required local tail is certified. */
+export function mapKnowledgeAssetVmPublishResultToLiftJobSuccess(params: {
+  publishResult: AsyncKnowledgeAssetVmPublishExecutionResult;
+  walletId: string;
+  publicByteSize?: number;
+}): AsyncLiftPublishSuccess {
+  const mapped = mapPublishResultToLiftJobSuccess(params);
+  if (mapped.status === 'finalized' && mapped.broadcast !== undefined
+    && params.publishResult.localFinalizationComplete !== true) {
+    return { status: 'included', broadcast: mapped.broadcast, inclusion: mapped.inclusion };
+  }
+  return mapped;
 }
 
 /** Throw-safe facts read off an arbitrary thrown publish error. Both the failure-code mapper
