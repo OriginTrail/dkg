@@ -89,6 +89,7 @@ export default defineConfig({
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
+      "test/queued-share-scoped-recovery.test.ts",
       'test/durable-share-inventory.test.ts',
       'test/committed-share-handoff.test.ts',
       'test/promote-lifecycle-partial-commit.test.ts',
