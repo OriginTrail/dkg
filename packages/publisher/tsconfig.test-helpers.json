@@ -15,6 +15,7 @@
     "test/chain-event-lane-scheduler.test.ts",
     "test/chain-event-lane-cursor-persistence.test.ts",
     "test/chain-event-lane-head-bound.test.ts",
+    "test/chain-event-lane-lease-retry.test.ts",
     "../../scripts/testing/ka-vm-publish.ts",
     "test/_helpers/legacy-raw-lift.ts",
     "test/_helpers/publisher-inventory.ts",
