@@ -43,6 +43,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   TripleStoreAsyncLiftPublisher,
+  computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
   generateAssertionCreatedMetadata,
   generateAssertionPromotedMetadata,
   type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
@@ -77,6 +79,7 @@ import {
   AUTHOR_WALLET,
   CONTEXT_GRAPH_ID,
   NETWORK_ID,
+  NATIVE_DEPLOYMENT,
   PROJECTION_QUADS,
   catalogScopeDigestV1,
   seedInventoryAssetV1,
@@ -318,6 +321,7 @@ export async function startPlacementAgentV1(
   };
   const agent = await startRepairAgentV1({
     name: options.name,
+    durableStore: true,
     ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
     ...(options.storePath === undefined ? {} : { storePath: options.storePath }),
     autoPublish: {
@@ -326,6 +330,9 @@ export async function startPlacementAgentV1(
     },
     beforeStart: async (starting) => {
       const internals = internalsOf(starting);
+      vi.spyOn(starting.chain, 'getEvmChainId').mockResolvedValue(BigInt(NATIVE_DEPLOYMENT.assertedAtChainId));
+      vi.spyOn(starting.chain, 'getKnowledgeAssetsLifecycleAddress').mockResolvedValue(NATIVE_DEPLOYMENT.assertedAtKav10Address);
+      starting.chain.readKnowledgeAssetVersionSnapshot = vi.fn(async () => ({ rootCount: 1n, latestRoot: '0x' + Buffer.from(computeFlatKCRootV10([...PROJECTION_QUADS], [])).toString('hex') }));
       vi.spyOn(starting, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
       vi.spyOn(starting, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
       const realLane = internals.resolveRfc64CatalogAuthoringLaneV1.bind(starting);
@@ -412,6 +419,9 @@ export async function startPlacementAgentV1(
   const markerStore = persistence.finalizedPrivatePlacementRepairs;
   const watchedMarkerStore: Rfc64FinalizedPrivatePlacementRepairStoreV1 = Object.freeze({
     list: () => markerStore.list(),
+    readFailure: repair => markerStore.readFailure(repair),
+    writeFailure: (repair, state) => markerStore.writeFailure(repair, state),
+    writeFailures: entries => markerStore.writeFailures(entries),
     put: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
       if (hooks.failMarkerWrite !== undefined) throw hooks.failMarkerWrite;
       await markerStore.put(repair);
@@ -468,7 +478,8 @@ export async function seedPlacementAssetV1(
   kaNumber: bigint,
 ): Promise<PlacementAssetV1> {
   const { seal } = await seedInventoryAssetV1(agent, suffix, kaNumber);
-  await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+  // Later assets may be seeded while an earlier private placement is deliberately parked.
+  // Inventory admission is awaited above; draining the global supervisor here deadlocks that burst.
   return Object.freeze({
     suffix,
     kaNumber,
@@ -707,7 +718,18 @@ export function createPublicationPathV1(
   vi.spyOn(agent, 'getContextGraphOnChainId').mockResolvedValue('1');
   // Recovery asks the agent's own finalization handler whether the VM content is there; only that
   // answer is staged.
-  vi.spyOn(agent.getOrCreateFinalizationHandler(), 'handleChainReconciledKC').mockImplementation(async () => {
+  vi.spyOn(agent.getOrCreateFinalizationHandler(), 'handleChainReconciledKC').mockImplementation(async (input) => {
+    if (path.materialization === 'promoted' || path.materialization === 'already-confirmed') {
+      const scope = createGraphKnowledgeAssetScope(input.ual, input.trustedAssertionEvidence!.assertionVersion);
+      const graph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory, scope);
+      await agent.store.insert([...PROJECTION_QUADS.map(q => ({ ...q, graph })), ...generateGraphKnowledgeAssetMetadata({
+        ual: scope.ual, contextGraphId: CONTEXT_GRAPH_ID, merkleRoot: input.merkleRoot, assertionVersion: scope.assertionVersion,
+        assertionGraph: graph, publicTripleCount: PROJECTION_QUADS.length, privateTripleCount: 0,
+        publisherPeerId: agent.peerId, accessPolicy: 'ownerOnly', timestamp: new Date(), authorAddress: AUTHOR,
+      }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
+        batchId: input.kaId, materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
+      } } })]);
+    }
     fixture.record(`vm-materialization:${path.materialization}`);
     return path.materialization;
   });
@@ -820,60 +842,27 @@ export function createPublicationPathV1(
   });
 }
 
-/**
- * Run the publisher's reconciliation pass after pass, as its runner does while jobs are live, and
- * let one parked placement go per `placementMs` of fixture time whenever nothing else can move.
- * Returns once every job is terminal. The placements still parked then stay parked.
- */
+/** Prove terminal completion while placements remain parked; real fsync time never advances the fixture clock. */
 export async function drivePublicationsV1(input: {
   readonly fixture: PlacementAgentV1;
   readonly path: PublicationPathV1;
   readonly parked: GateV1;
   readonly jobIds: readonly string[];
-  readonly placementMs: number;
 }): Promise<void> {
-  const { fixture, path, parked, jobIds, placementMs } = input;
-  const finalized = async (): Promise<boolean> => {
-    for (const jobId of jobIds) {
-      if ((await path.job(jobId))?.status !== 'finalized') return false;
-    }
-    return true;
-  };
-  let stop = false;
-  let passStartedAt: number | undefined;
-  let idlePasses = 0;
-  const reconciling = (async () => {
-    while (!stop) {
-      passStartedAt = performance.now();
-      const reconciled = await path.publisher.recover();
-      passStartedAt = undefined;
-      idlePasses = reconciled === 0 ? idlePasses + 1 : 0;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-  })();
+  const { path, parked, jobIds } = input;
+  await fulfilledWithinV1(path.publisher.drainDetachedExecutions(), 'detached confirmation tails');
+  let pass: Promise<number> | undefined;
   try {
-    while (!(await finalized())) {
-      // Nothing moves any more: a pass is stuck behind a placement, or passes settle nothing.
-      await untilV1(
-        () => idlePasses >= 3 || (passStartedAt !== undefined && performance.now() - passStartedAt > 250),
-        'the reconciliation loop stalls or idles',
-      );
-      if (await finalized()) break;
-      if (parked.parked() === 0) {
-        // The next placement has not reached the point where it parks yet. Give it real turns: a
-        // loop of store reads alone settles in microtasks and would starve the timers it needs.
-        idlePasses = 0;
-        await new Promise<void>((resolve) => setTimeout(resolve, 5));
-        continue;
-      }
-      fixture.clock.now += placementMs;
-      parked.releaseNext();
-      idlePasses = 0;
+    for (let attempts = 0; attempts < 3; attempts += 1) {
+      pass = path.publisher.recover();
+      await fulfilledWithinV1(pass, 'reconciliation with placements held');
+      const jobs = await Promise.all(jobIds.map(id => path.job(id)));
+      if (jobs.every(job => job?.status === 'finalized')) return;
     }
+    throw new Error('Publications did not finalize while catalog placements were held');
   } finally {
-    stop = true;
-    // A row that gave up leaves no pass stuck behind a placement nobody will let go.
-    if (!(await finalized().catch(() => false))) parked.release();
-    await reconciling;
+    // Drain an implementation that incorrectly waited for placement after reporting the failure.
+    if (pass && (await settledWithinV1(pass, 0)).status === 'pending') parked.release();
+    await pass;
   }
 }

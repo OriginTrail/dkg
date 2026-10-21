@@ -25,6 +25,7 @@ import { ethers } from 'ethers';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { assertionLifecycleUri, buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri,
   parseAssertionSealQuads } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { BlazegraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { decodeLifecycleRepairJournal } from '../src/named-ka-vm-lifecycle-repair-journal.js';
@@ -35,7 +36,9 @@ const AUTHOR = '0x1111111111111111111111111111111111111111';
 const CG = `confirmed-lifecycle-restart-${randomUUID()}`, NAME = 'restart-asset';
 const UAL = `did:dkg:mock:31337/${AUTHOR}/1`, PACKED = (BigInt(AUTHOR) << 96n) | 1n;
 const PUBLISHED = 'did:dkg:mock:31337/0x2222222222222222222222222222222222222222/1';
-const DKG = 'http://dkg.io/ontology/', ROOT = `0x${'cd'.repeat(32)}`, PRIOR = 'ab'.repeat(32);
+const PAYLOAD = [{ subject: 'urn:blazegraph:payload', predicate: 'urn:value', object: '"durable content"', graph: '' }];
+const VM = `did:dkg:context-graph:${CG}/_verifiable_memory/${AUTHOR}/1`;
+const DKG = 'http://dkg.io/ontology/', ROOT = ethers.hexlify(computeFlatKCRootV10(PAYLOAD, [])), PRIOR = 'ab'.repeat(32);
 const META = contextGraphMetaUri(CG), LIFECYCLE = assertionLifecycleUri(CG, AUTHOR, NAME);
 const ASSERTION = contextGraphAssertionUri(CG, AUTHOR, NAME);
 /** The shared SWM state a confirmed publication left before its lifecycle stamp. */
@@ -136,7 +139,7 @@ describe('confirmed lifecycle repair across an abrupt Blazegraph restart (live)'
     if (killed && ENDPOINT && 'container' in control) await ensureServing(control, ENDPOINT);
     if (seeded && ENDPOINT) {
       const store = new BlazegraphStore(ENDPOINT);
-      try { await store.dropGraph(META); } finally { await store.close(); }
+      try { await store.dropGraph(META); await store.dropGraph(VM); } finally { await store.close(); }
     }
     if (dataDir) await rm(dataDir, { recursive: true, force: true });
   }, READY_TIMEOUT_MS + 30_000);
@@ -156,7 +159,8 @@ describe('confirmed lifecycle repair across an abrupt Blazegraph restart (live)'
       const agent = repairHost(store, dataDir, warnings);
       try {
         const pending = await agent._repairConfirmedNamedKaVmLifecycle(
-          { contextGraphId: CG, agentAddress: AUTHOR, name: NAME, packedKaId: PACKED }, confirmedPublication());
+          { contextGraphId: CG, agentAddress: AUTHOR, name: NAME, packedKaId: PACKED }, confirmedPublication(), { publicQuads: PAYLOAD,
+            publisherPeerId: 'blazegraph-restart-test', accessPolicy: 'ownerOnly', allowedPeers: [] });
         expect(pending, warnings.join('\n')).toBe(false);
       } finally { await agent.getOrCreateNamedKaVmLifecycleRepair().stop(); }
       const journal = JSON.parse(await readFile(join(dataDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
@@ -174,6 +178,7 @@ describe('confirmed lifecycle repair across an abrupt Blazegraph restart (live)'
       killed = false;
     }
     const restarted = new BlazegraphStore(endpoint);
-    try { expect(await restarted.query(DESCRIPTOR)).toMatchObject({ value: true }); } finally { await restarted.close(); }
+    try { expect(await restarted.query(DESCRIPTOR)).toMatchObject({ value: true });
+      expect(await restarted.countQuads(VM)).toBe(1); } finally { await restarted.close(); }
   }, 2 * READY_TIMEOUT_MS + 60_000);
 });

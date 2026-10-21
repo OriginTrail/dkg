@@ -50,6 +50,8 @@ interface QueuedPublishFinalizationContext {
   readonly operationPlan: ReturnType<typeof planKnowledgeAssetVmPublication>;
   /** Captured before execution; lifecycle ownership can differ from the UAL author. */
   readonly effectiveAuthor: string;
+  readonly publisherPeerId: string;
+  readonly snapshotQuads: readonly import('@origintrail-official/dkg-storage').Quad[];
   readonly snapshotPrivateRoot?: Uint8Array;
   readonly queuedOnChainContextGraphId?: string;
   readonly onChainCapable: boolean;
@@ -100,7 +102,8 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
         packedKaId: (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber),
         ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
       }, { ...result, status: 'confirmed', seal,
-        assertionUri: contextGraphAssertionUri(request.contextGraphId, effectiveAuthor, request.name, request.subGraphName) });
+        assertionUri: contextGraphAssertionUri(request.contextGraphId, effectiveAuthor, request.name, request.subGraphName) }, { publicQuads: context.snapshotQuads, publisherPeerId: context.publisherPeerId,
+          accessPolicy: request.accessPolicy ?? 'ownerOnly', allowedPeers: [...(request.allowedPeers ?? [])] });
     }
   } finally {
     try { services.onPostConfirmationStep?.('lifecycleStamp'); } catch { /* observation only */ }

@@ -3,7 +3,9 @@ import { assertionLifecycleWriteLockKey, tryWithKeyedLocks, withKeyedLocks } fro
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
-import { applyPublishedNamedKaVmLifecycle, confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
+import { confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
+
+import { applyMaterializedConfirmedLifecycle } from './named-ka-vm-lifecycle-materialization.js';
 
 type Coordinates = Pick<ConfirmedNamedKaVmLifecycleInput, 'contextGraphId' | 'name' | 'agentAddress' | 'subGraphName'>;
 export interface ConfirmedNamedKaVmLifecycleAdmission {
@@ -27,7 +29,7 @@ export function confirmedLifecycleExecutionCapabilities(host: {
   return {
     writeLocks: host.writeLocks,
     isCurrent: input => isConfirmedNamedKaVmLifecycleCurrent(host.chain, input, host.readTimeoutMs, Boolean(host.dataDir)),
-    apply: (input, preserveVerifiedVmProof = false) => applyPublishedNamedKaVmLifecycle(host.store, input, {
+    apply: (input, preserveVerifiedVmProof = false) => applyMaterializedConfirmedLifecycle(host.store, input, {
       ...confirmedNamedKaVmLifecycleApplyOptions(host.dataDir), preserveVerifiedVmProof,
     }),
   };

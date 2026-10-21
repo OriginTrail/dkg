@@ -10,6 +10,8 @@
   },
   "include": [
     "test/**/*.typecheck.ts",
+    "test/confirmed-lifecycle-materialization.test.ts",
+    "test/confirmed-lifecycle-process-local.test.ts",
     "test/durable-file-replace.test.ts",
     "test/confirmed-lifecycle-command-contract.test.ts",
     "test/write-preflight-attribution.test.ts",

@@ -21,8 +21,8 @@ import { confirmedNamedKaVmLifecycleInput, type ConfirmedNamedKaVmCoordinates } 
 import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
 import { createContextGraphAuthorityError } from './internal/context-graph-authority/context-graph-authority.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
-import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
-export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, type GraphScopedKnowledgeAssetVmPublishRequest, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, type GraphScopedKnowledgeAssetVmPublishRequest, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
@@ -5190,9 +5190,11 @@ export class PublishMethods extends DKGAgentBase {
   async _repairConfirmedNamedKaVmLifecycle(
     this: DKGAgent, coordinates: ConfirmedNamedKaVmCoordinates,
     confirmedPublication: ConfirmedNamedKaVmPublication,
+    snapshot?: import('./named-ka-vm-lifecycle-materialization.js').ConfirmedLifecyclePublicSnapshot,
   ): Promise<boolean> {
-    const input = confirmedNamedKaVmLifecycleInput(confirmedPublication, coordinates);
+    let input = confirmedNamedKaVmLifecycleInput(confirmedPublication, coordinates);
     try {
+      if (snapshot) input = confirmedNamedKaVmLifecycleInput(confirmedPublication, coordinates, snapshot);
       const outcome = await this.getOrCreateNamedKaVmLifecycleRepair().submit(input);
       return outcome === 'pending' || outcome === 'rejected';
     } catch (error) {
@@ -5209,14 +5211,14 @@ export class PublishMethods extends DKGAgentBase {
 
   /** Queue recovery owns its claim lock: defer rather than waiting behind a lifecycle writer. */
   async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
-    this: DKGAgent, request: KnowledgeAssetVmPublishRequest, publishedUal: string,
+    this: DKGAgent, request: GraphScopedKnowledgeAssetVmPublishRequest, publishedUal: string,
     packedKaId: bigint, merkleRoot: string = request.sealMerkleRoot, signal?: AbortSignal,
   ): Promise<boolean> {
     const input: ConfirmedNamedKaVmLifecycleInput = {
       contextGraphId: request.contextGraphId, name: request.name,
       agentAddress: request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
       subGraphName: request.subGraphName, publishedUal, packedKaId, merkleRoot,
-      assertionVersion: request.assertionVersion!,
+      assertionVersion: request.assertionVersion,
       publicationDeployment: { chainId: request.sealChainId, lifecycleAddress: request.sealKav10Address },
       ...(request.vmCurrentAssertion ? { priorMerkleRoot: request.vmCurrentAssertion } : {}),
     };
@@ -5914,7 +5916,7 @@ export class PublishMethods extends DKGAgentBase {
 
     const finalized = await finalizeQueuedKnowledgeAssetVmPublish({
       request, seal, result, operationPlan, effectiveAuthor: agentAddress,
-      snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
+      snapshotQuads, publisherPeerId: this.peerId, snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
     }, {
       agent: this, publisher, log: this.log,
       observeConfirmedCatalog: this.afterConfirmedGraphScopedVmPublishV1.bind(this),
@@ -6345,7 +6347,9 @@ export class PublishMethods extends DKGAgentBase {
         lifecycleRepairPending = await this._repairConfirmedNamedKaVmLifecycle({
           contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName, packedKaId,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
-        }, { ...result, status: 'confirmed', assertionUri, seal });
+        }, { ...result, status: 'confirmed', assertionUri, seal }, { publicQuads: canonicalSwmQuads,
+          publisherPeerId: this.peerId, accessPolicy: rfc64WorkspaceHead?.access.accessPolicy ?? 'ownerOnly',
+          allowedPeers: [...(rfc64WorkspaceHead?.access.allowedPeers ?? [])] });
       }
     } finally {
       await this.finishConfirmedNamedKaPublicationTail(result, {

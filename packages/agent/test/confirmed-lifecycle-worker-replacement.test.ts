@@ -25,3 +25,20 @@ it('retains repair evidence when a real worker dies after acknowledging lifecycl
     });
   } finally { await rm(dir, { recursive: true, force: true }); }
 }, 60_000);
+
+it('replays the original payload after actual worker loss, and certifies content plus metadata before close', async () => {
+  const { confirmedMaterializationFixture } = await import('./_helpers/confirmed-materialization-fixture.js');
+  const { input } = confirmedMaterializationFixture(true);
+  const dir = await mkdtemp(join(tmpdir(), 'dkg-lifecycle-payload-loss-'));
+  try {
+    const { stdout } = await promisify(execFile)(process.execPath, [
+      '--import', fileURLToPath(new URL('./fixtures/confirmed-lifecycle-snapshot-fault.mjs', import.meta.url)),
+      fileURLToPath(new URL('./fixtures/confirmed-lifecycle-payload-loss.mjs', import.meta.url)),
+      JSON.stringify({ ...input, packedKaId: input.packedKaId.toString() }),
+    ], { timeout: 60_000, env: { ...process.env, DKG_TEST_SNAPSHOT_PATH: join(dir, 'store.nq'),
+      DKG_TEST_SNAPSHOT_FAULT: join(dir, 'block'), DKG_TEST_REPAIR_DIR: join(dir, 'repair') } });
+    expect(JSON.parse(stdout.split('\n').find(line => line.startsWith('{'))!)).toEqual({
+      recoveredOriginalPayload: true, durableBeforeClose: true, unrelatedPreserved: true,
+    });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}, 60_000);

@@ -212,7 +212,8 @@ describe('the steps a queued executor reports after the confirmation', () => {
     expect(lifecycleWrites.some(input => input.agentAddress === laterAuthor)).toBe(false);
     expect(lifecycle).toHaveBeenCalledWith(expect.objectContaining({ contextGraphId: queued.contextGraphId,
       name: queued.name, agentAddress: effectiveAuthor, subGraphName: 'documents', packedKaId: PACKED_KA_ID }),
-      expect.objectContaining({ status: 'confirmed', ual: UAL, seal: expect.objectContaining({ assertionVersion: '1' }) }));
+      expect.objectContaining({ status: 'confirmed', ual: UAL, seal: expect.objectContaining({ assertionVersion: '1' }) }),
+      expect.objectContaining({ publicQuads: QUADS, publisherPeerId: 'peer-1' }));
     expect(queued).toEqual(originalRequest);
     expect(catalog).toHaveBeenCalledWith(expect.objectContaining({
       contextGraphId: queued.contextGraphId, subGraphName: 'documents', assertionCoordinate: queued.name,

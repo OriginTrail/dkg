@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/access-client-bounds.test.ts',
       'test/assertion-lifecycle-candidates.test.ts',
       'test/wm-lifecycle-integrity.test.ts',
       'test/assertion-write-provenance.test.ts',
@@ -115,6 +116,8 @@ export default defineConfig({
       'test/rootless-access.test.ts',
       'test/agents-meta-bound.test.ts',
       'test/ack-collector.test.ts',
+      'test/ack-collector-diagnostics.test.ts',
+      'test/ack-peer-status-ledger.test.ts',
       'test/publish-lifecycle-logger.test.ts',
       'test/storage-ack-handler.test.ts',
       'test/storage-ack-handler-local-self-ack.test.ts',

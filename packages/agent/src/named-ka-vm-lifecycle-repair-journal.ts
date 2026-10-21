@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
+import { normalizeLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
 import { createHash } from 'node:crypto';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId'> & {
@@ -58,7 +59,7 @@ function normalizeJournalInput(value: unknown): JournalInput {
     if (!/^(0|[1-9][0-9]*)$/.test(chainId) || BigInt(chainId) >= 1n << 256n || !/^0x[0-9a-f]{40}$/i.test(lifecycleAddress)) return invalid();
     publicationDeployment = { chainId, lifecycleAddress: lifecycleAddress.toLowerCase() };
   }
-  return {
+  const normalized = {
     contextGraphId: string(input['contextGraphId']), agentAddress: string(input['agentAddress']), name: string(input['name']),
     publishedUal: string(input['publishedUal']), merkleRoot: root(input['merkleRoot']), assertionVersion,
     ...(input['subGraphName'] === undefined ? {} : { subGraphName: string(input['subGraphName']) }),
@@ -66,6 +67,9 @@ function normalizeJournalInput(value: unknown): JournalInput {
     ...(packedKaId === undefined ? {} : { packedKaId }),
     ...(publicationDeployment === undefined ? {} : { publicationDeployment }),
   };
+  if (input['materialization'] === undefined) return normalized;
+  if (publicationDeployment === undefined || packedKaId === undefined) return invalid();
+  return { ...normalized, materialization: normalizeLifecycleMaterialization(input['materialization'], normalized as ConfirmedKaInput) };
 }
 export function lifecycleRepairKey(input: JournalInput): string {
   // Version-2 disk encoding is frozen independently of the in-process lock namespace.
@@ -82,14 +86,15 @@ export function lifecycleRepairKey(input: JournalInput): string {
 }
 // Read-only compatibility with the original journal encoding. New writes use
 // the version-2 identity encoding; validate the old key before migrating it.
+// Version 3 adds verified materialization: older metadata-only readers must refuse it.
 function historicalRepairKey(input: JournalInput): string {
   return createHash('sha256').update(JSON.stringify([input.contextGraphId, input.agentAddress.toLowerCase(), input.name, input.subGraphName ?? ''])).digest('hex');
 }
 /** Encode only at the JSON file boundary; worker entries retain confirmed bigint coordinates. */
 export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, LifecycleRepairEntry>): {
-  version: 2; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInput }]>;
+  version: 3; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInput }]>;
 } {
-  return { version: 2, entries: [...entries].map(([key, entry]) => {
+  return { version: 3, entries: [...entries].map(([key, entry]) => {
     const normalized = normalizeJournalInput(entry.input);
     const input: StoredLifecycleRepairInput = { ...normalized, packedKaId: normalized.packedKaId?.toString() };
     const { retention: _retention, ...retry } = entry;
@@ -105,7 +110,7 @@ function decodeLifecycleRepairInput(value: unknown): JournalInput {
 }
 export function decodeLifecycleRepairJournal(value: unknown): Map<string, LifecycleRepairEntry> {
   const journal = record(value);
-  if ((journal['version'] !== 1 && journal['version'] !== 2) || !Array.isArray(journal['entries'])) return invalid();
+  if ((journal['version'] !== 1 && journal['version'] !== 2 && journal['version'] !== 3) || !Array.isArray(journal['entries'])) return invalid();
   const entries = new Map<string, LifecycleRepairEntry>();
   const storedKeys = new Set<string>();
   for (const tuple of journal['entries']) {

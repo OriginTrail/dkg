@@ -17,6 +17,7 @@ export interface ConfirmedNamedKaVmLifecycleInput extends PublishedNamedKaVmLife
   readonly assertionVersion: string;
   /** Bound by the admitted publication seal for every new confirmed command. */
   readonly publicationDeployment: ConfirmedNamedKaVmPublicationDeployment;
+  readonly materialization?: import('./named-ka-vm-lifecycle-materialization.js').ConfirmedLifecycleMaterialization;
   readonly priorMerkleRoot?: string;
 }
 export type NamedKaVmLifecycleRepairOutcome = 'repaired' | 'pending' | 'superseded' | 'rejected';
@@ -89,6 +90,7 @@ export class NamedKaVmLifecycleRepair {
       }
       // Fresh complete evidence can bind a legacy record that lacked its KA identity.
       const entry = previous?.retention !== 'historical-unbound' && previous?.input.assertionVersion === stored.assertionVersion
+        && !(previous.input.materialization === undefined && stored.materialization !== undefined)
         ? previous : { input: stored, attempts: 0, nextAttemptAt: this.now() };
       this.entries.set(key, entry);
       // Write-ahead admission contains no external chain or graph-store work.

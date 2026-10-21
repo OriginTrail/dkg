@@ -2,17 +2,19 @@ import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import type { KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
+import type { GraphScopedKnowledgeAssetVmPublishRequest } from '../src/internal/knowledge-asset-vm-publish-request.js';
+import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 const author = '0x1111111111111111111111111111111111111111';
-const root = `0x${'ab'.repeat(32)}` as `0x${string}`;
-const request: KnowledgeAssetVmPublishRequest = {
-  contextGraphId: 'urn:test:lifecycle-construction', agentAddress: author, name: 'asset',
+const { input, graph, publicQuads } = confirmedMaterializationFixture(false, 'scope');
+const root = input.merkleRoot as `0x${string}`;
+const request: GraphScopedKnowledgeAssetVmPublishRequest = {
+  contextGraphId: input.contextGraphId, agentAddress: author, name: 'asset',
   subGraphName: 'scope', shareOperationId: 'share', roots: [],
   contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-  kaUal: 'did:test:queued', assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0,
-  seal: { merkleRoot: root, authorAddress: author, schemeVersion: 1, reservedKaId: '42',
+  kaUal: input.publishedUal, assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0,
+  seal: { merkleRoot: root, authorAddress: author, schemeVersion: 1, reservedKaId: input.packedKaId.toString() as `${bigint}`,
     signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` } },
   sealChainId: '31337', sealKav10Address: author,
   sealFinalizedAtIso: '2026-01-01T00:00:00.000Z', sealMerkleRoot: root,
@@ -26,16 +28,17 @@ describe('agent construction wires the queued lifecycle writer', () => {
     const agent = await DKGAgent.create({ name: 'lifecycle-construction', store,
       chainAdapter: chain, rfc64CatalogActivation: { enabled: false } });
     try {
+      await store.insert([...input.materialization!.metadataQuads, ...publicQuads.map(q => ({ ...q, graph }))]);
       const failure = new Error('lifecycle update rejected');
       const update = vi.spyOn(store, 'atomicUpdate');
       vi.spyOn(chain, 'getKnowledgeAssetsLifecycleAddress').mockResolvedValue(author);
-      vi.spyOn(chain, 'readKnowledgeAssetVersionSnapshot').mockResolvedValue({ latestRoot: `0x${'cd'.repeat(32)}`, rootCount: 1n });
+      vi.spyOn(chain, 'readKnowledgeAssetVersionSnapshot').mockResolvedValue({ latestRoot: root, rootCount: 1n });
       vi.spyOn(agent, '_resolveRecoveredKnowledgeAssetVmLifecycleAuthor').mockResolvedValue({ author, incomplete: false });
       if (fail) update.mockRejectedValueOnce(failure);
       const insert = vi.spyOn(store, 'insert');
       const remove = vi.spyOn(store, 'deleteByPatternWithoutCount');
-      const currentRoot = `0x${'cd'.repeat(32)}`;
-      const operation = agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, 'did:test:published', 42n, currentRoot);
+      const currentRoot = root;
+      const operation = agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, input.publishedUal, input.packedKaId, currentRoot);
       if (fail) await expect(operation).rejects.toBe(failure);
       else await operation;
       expect(update).toHaveBeenCalledOnce();
@@ -46,8 +49,8 @@ describe('agent construction wires the queued lifecycle writer', () => {
         const result = await store.query(`SELECT ?p ?o WHERE { GRAPH <${contextGraphMetaUri(request.contextGraphId)}> { <${lifecycle}> ?p ?o } }`);
         expect(result.type).toBe('bindings');
         if (result.type !== 'bindings') throw new Error('Expected bindings');
-        expect(result.bindings.some(row => row.o === '"did:test:published"')).toBe(true);
-        expect(result.bindings.some(row => row.o === `"${'cd'.repeat(32)}"`)).toBe(true);
+        expect(result.bindings.some(row => row.o === JSON.stringify(input.publishedUal))).toBe(true);
+        expect(result.bindings.some(row => row.o === JSON.stringify(root.slice(2)))).toBe(true);
       }
     } finally { await agent.stop(); }
   });

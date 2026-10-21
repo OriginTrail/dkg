@@ -259,9 +259,9 @@ describe('a confirmed publication and its catalog placement', () => {
       for (let index = 0; index < 6; index += 1) {
         const asset = await seedPlacementAssetV1(agent, `burst-${index}`, BigInt(100 + index));
         jobIds.push(await path.enqueue(asset));
-        await path.broadcast(`wallet-${index}`);
       }
       const seeded = fixture.counts();
+      for (let index = 0; index < jobIds.length; index += 1) await path.broadcast(`wallet-${index}`);
       // The supervisor runs one placement at a time: the first is parked, five are queued behind it.
       await parked.entered();
       clock.now = 1_000;
@@ -283,7 +283,7 @@ describe('a confirmed publication and its catalog placement', () => {
       expect(parked.entries()).toBe(1);
       expect(fixture.queue()).toMatchObject({ pending: 6, oldestPendingAgeMs: 1_000, passRunning: true });
       expect(Object.keys(fixture.queue()!).sort()).toEqual([
-        'cooldownSkips', 'depth', 'lastPassDurationMs', 'oldestPendingAgeMs', 'oldestWaiterAgeMs',
+        'cooldownSkips', 'depth', 'failures', 'lastPassDurationMs', 'oldestPendingAgeMs', 'oldestWaiterAgeMs',
         'passRunning', 'pending', 'waiters',
       ]);
 
@@ -593,7 +593,7 @@ describe('the wait after finality, as the fixture measures it', () => {
       await path.broadcast('wallet-1');
       await parked.entered();
       clock.now = 1_000;
-      await drivePublicationsV1({ fixture, path, parked, jobIds: [jobId], placementMs: 60_000 });
+      await drivePublicationsV1({ fixture, path, parked, jobIds: [jobId] });
       expect(executions(fixture.events())).toEqual(['executor-settled:repair-measured']);
       expect(await path.postFinalityWaitMs(jobId)).toBe(0);
     } finally {
@@ -617,7 +617,7 @@ describe('the wait after finality, as the fixture measures it', () => {
       }
       await parked.entered();
       clock.now = 1_000;
-      await drivePublicationsV1({ fixture, path, parked, jobIds, placementMs: 20_000 });
+      await drivePublicationsV1({ fixture, path, parked, jobIds });
       expect(executions(fixture.events())).toEqual(
         Array.from({ length: 6 }, (_, index) => `executor-settled:repair-measured-${index}`),
       );

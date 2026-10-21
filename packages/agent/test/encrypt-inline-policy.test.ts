@@ -1020,7 +1020,7 @@ function makeQueuedAgentHarness(options: {
 }) {
   const publisherPublish = recorder(async (_opts: any) => ({
     status: options.publishStatus ?? 'tentative',
-    ual: options.ual,
+    ual: options.publishStatus === 'confirmed' ? _opts.kaUal : options.ual,
   }));
   const agentLike: any = {
     peerId: options.peerId,

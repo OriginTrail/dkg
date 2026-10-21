@@ -3,13 +3,18 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { assertionLifecycleWriteLockKey, withKeyedLocks, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
+import { computeFlatKCRootV10, assertionLifecycleWriteLockKey, withKeyedLocks, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
+import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-materialization.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { decodeLifecycleRepairJournal } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
-const ROOT1 = 'ab'.repeat(32), ROOT2 = 'cd'.repeat(32), CG = 'locked-repair', NAME = 'asset';
+const quads = (version: number) => [{ subject: 'urn:lock:payload', predicate: 'urn:value', object: JSON.stringify(`version-${version}`), graph: '' }];
+const root = (version: number) => Buffer.from(computeFlatKCRootV10(quads(version), []) ) .toString('hex');
+const ROOT1 = root(1), ROOT2 = root(2), CG = 'locked-repair', NAME = 'asset';
+const UAL = `did:dkg:mock:31337/${AUTHOR}/1`;
 const PACKED = (BigInt(AUTHOR) << 96n) | 1n;
 const dirs: string[] = [], owners: Array<{ stop(): Promise<void> }> = [], stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const owner of owners.splice(0)) await owner.stop();
@@ -25,9 +30,17 @@ async function fixture(subGraphName?: string, durable = true) {
   agent.chain = { getEvmChainId: vi.fn(async () => 31337n), getKnowledgeAssetsLifecycleAddress: vi.fn(async () => AUTHOR), readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({
     latestRoot: current === 1 ? ROOT1 : ROOT2, rootCount: BigInt(current),
   })) };
-  const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, subGraphName,
-    packedKaId: PACKED, merkleRoot: ROOT1, assertionVersion: '1', publishedUal: 'did:dkg:mock/1', publicationDeployment: { chainId: '31337', lifecycleAddress: AUTHOR } };
-  const newer = { ...input, merkleRoot: ROOT2, assertionVersion: '2', publishedUal: 'did:dkg:mock/2' };
+  const fields = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, subGraphName,
+    packedKaId: PACKED, merkleRoot: ROOT1, assertionVersion: '1', publishedUal: UAL, publicationDeployment: { chainId: '31337', lifecycleAddress: AUTHOR } };
+  const makeInput = (input: typeof fields, version: number) => {
+    const { publication } = confirmedLifecycleRecoveryFixture();
+    const merkleRoot = computeFlatKCRootV10(quads(version), []);
+    return { ...input, materialization: confirmedLifecycleMaterialization(input, { ...publication, ual: UAL, merkleRoot,
+      seal: { ...publication.seal, merkleRoot, assertionVersion: input.assertionVersion, kaUal: UAL } },
+    { publicQuads: quads(version), publisherPeerId: 'locked-repair-peer', accessPolicy: 'ownerOnly', allowedPeers: [] }) };
+  };
+  const input = makeInput(fields, 1);
+  const newer = makeInput({ ...fields, merkleRoot: ROOT2, assertionVersion: '2' }, 2);
   const key = assertionLifecycleWriteLockKey(CG, NAME, AUTHOR, subGraphName);
   const repair = agent.getOrCreateNamedKaVmLifecycleRepair(); owners.push(repair);
   const descriptor = () => store.query(`SELECT ?root ?ual WHERE { GRAPH <${contextGraphMetaUri(CG)}> {
@@ -177,6 +190,8 @@ describe('confirmed lifecycle lock-time authority fence', () => {
       if (scenario === 'conflicting-root') f.agent.chain.readKnowledgeAssetVersionSnapshot.mockResolvedValue({ latestRoot: ROOT2, rootCount: 1n });
       if (scenario === 'chain-error') f.agent.chain.readKnowledgeAssetVersionSnapshot.mockRejectedValue(new Error('chain temporarily unavailable'));
       const request = { ...f.input, sealMerkleRoot: ROOT1, shareOperationId: 'own-operation', sealChainId: '31337', sealKav10Address: AUTHOR } as unknown as KnowledgeAssetVmPublishRequest;
+      const graph = f.input.materialization.metadataQuads.find(q => q.predicate === 'http://dkg.io/ontology/assertionGraph')!.object;
+      await f.store.insert([...f.input.materialization.metadataQuads, ...f.input.materialization.publicQuads.map(q => ({ ...q, graph }))]);
       const commit = vi.spyOn(f.store, 'atomicUpdate');
       const queued = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.input.publishedUal, PACKED);
       if (scenario === 'current') {
