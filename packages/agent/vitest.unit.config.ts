@@ -18,10 +18,6 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
-      'test/private-access-request-owner.test.ts',
-      'test/private-access-client-messenger.test.ts',
-      'test/private-access-request.test.ts',
-
       "test/rfc64-manual-catalog-authority-scope-v1.test.ts",
       "test/sync-exact-export-admission.test.ts",
       "test/prepared-content-cache.test.ts",
@@ -70,6 +66,9 @@ export default defineConfig({
       "test/shared-memory-sync-fresh-round.test.ts",
       "test/dkg-agent-swm-target-executor-composition.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",
+      'test/private-access-request-owner.test.ts',
+      'test/private-access-client-messenger.test.ts',
+      'test/private-access-request.test.ts',
       "test/sync-work-admission.test.ts",
       "test/sync-work-admission-lifecycle.test.ts",
       ...RFC64_UNIT_TESTS,
