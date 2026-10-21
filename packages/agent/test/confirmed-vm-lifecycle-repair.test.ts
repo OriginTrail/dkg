@@ -3,7 +3,7 @@ import { readLifecycleRepairJournalFile } from './_helpers/read-lifecycle-repair
 import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { NamedKaVmLifecycleIntegrityError } from '../src/named-ka-vm-lifecycle-integrity-error.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cp, copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, copyFile, mkdtemp, realpath, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -84,12 +84,12 @@ class FaultStore extends OxigraphStore {
   failure() { return new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: this.operation === 'insert' ? 'insert' : 'deleteByPattern', outcome: 'not_started' }); }
 }
 async function persistentStore(): Promise<OxigraphStore> {
-  const dir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-store-')); dirs.push(dir);
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-confirmed-store-'))); dirs.push(dir);
   const store = new OxigraphStore(join(dir, 'store.nq')); stores.push(store);
   return store;
 }
 it('retains confirmed repair evidence when snapshot directory sync fails after rename, then repairs and reopens', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'dkg-snapshot-dir-sync-')); dirs.push(dir);
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-snapshot-dir-sync-'))); dirs.push(dir);
   const snapshotDir = join(dir, 'snapshots'), path = join(snapshotDir, 'store.nq');
   const store = new OxigraphStore(path); stores.push(store);
   let now = 1_000;
@@ -145,7 +145,7 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
       if (label === 'update provenance' && !mode.includes('update')) continue;
       if (label === 'optional cleanup timeout' && mode.startsWith('queued')) continue;
       it(`re-stamps ${label} after restart without another publication or version`, async () => {
-        const dir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-stamp-')); dirs.push(dir);
+        const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-confirmed-stamp-'))); dirs.push(dir);
         let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
         const version = mode.includes('update') ? 2 : 1, storePath = join(dir, 'store.nq');
         const store = new FaultStore(storePath, predicate, operation), scope = createGraphKnowledgeAssetScope(UAL, version);
@@ -229,7 +229,7 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
 
 describe('confirmed publication tail after a lifecycle journal retirement failure', () => {
   it.each(['sync', 'queued'] as const)('%s publish still clears the SWM marker and admits RFC-64 placement without another publication', async mode => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-retirement-tail-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-retirement-tail-'))); dirs.push(dir);
     const store = new OxigraphStore(join(dir, 'store.nq')), scope = createGraphKnowledgeAssetScope(UAL, 1), finalizedAt = new Date().toISOString();
     await store.insert([
       ...buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT, authorAddress: AUTHOR,
@@ -302,7 +302,7 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
   const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, publishedUal: PUBLISHED,
     merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED, publicationDeployment: { chainId: '31337', lifecycleAddress: AUTHOR } };
   it('persists exponential retry deadlines through restart and never retries rejected evidence', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-stamp-backoff-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-stamp-backoff-'))); dirs.push(dir);
     let now = 1_000;
     const apply = vi.fn(async () => { throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'insert', outcome: 'indeterminate' }); });
     const create = () => new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
@@ -377,7 +377,7 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
     await store.close();
   });
   it('uses coherent chain version evidence to reject a same-version mismatch and retire an older repair', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-stamp-chain-fence-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-stamp-chain-fence-'))); dirs.push(dir);
     const store = await persistentStore(), agent = agentFor(store, dir, 2);
     const repair = agent.getOrCreateNamedKaVmLifecycleRepair();
     expect(await repair.submit(input)).toBe('superseded');
@@ -392,7 +392,7 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
 describe('review regression boundaries', () => {
   const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED, publicationDeployment: { chainId: '31337', lifecycleAddress: AUTHOR } };
   it.each(['raw', 'agent-facade'] as const)('retains %s repair evidence across a failed snapshot and abrupt reopen, then durably retires it', async facade => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-crash-stamp-')), crashDir = await mkdtemp(join(tmpdir(), 'dkg-crash-reopen-'));
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-crash-stamp-'))), crashDir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-crash-reopen-')));
     dirs.push(dir, crashDir);
     let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
     const path = join(dir, 'store.nq'), store = new OxigraphStore(path), agent = agentFor(store, dir, 1);
@@ -433,7 +433,7 @@ describe('review regression boundaries', () => {
     await fresh.namedKaVmLifecycleRepair.stop(); await agent.namedKaVmLifecycleRepair.stop();
   });
   it.each(['raw', 'agent-facade', 'decorated'] as const)('retains the journal when the %s backend cannot certify durable completion', async facade => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-uncertified-stamp-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-uncertified-stamp-'))); dirs.push(dir);
     const store = await persistentStore(), agent = agentFor(store, dir, 1);
     Object.defineProperty(store, 'commitment', { value: undefined, configurable: true });
     const wrapped = facade === 'decorated' ? new ChangelogStore(new GraphSetIndexStore(store)) : store;
@@ -446,7 +446,7 @@ describe('review regression boundaries', () => {
     await agent.namedKaVmLifecycleRepair.stop();
   });
   it.each([false, true])('preserves a reopened unsealed WM draft with matching pointer=%s', async (matchingPointer) => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-open-wm-repair-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-open-wm-repair-'))); dirs.push(dir);
     const store = await persistentStore(); stores.push(store);
     const scope = createGraphKnowledgeAssetScope(UAL, 1), vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope), wmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.WorkingMemory, scope);
     await store.insert([
@@ -484,7 +484,7 @@ describe('review regression boundaries', () => {
     await repair.stop();
   });
   it('preserves a newer unpublished draft that was finalized with the same root as the repaired version', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-same-root-draft-repair-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-same-root-draft-repair-'))); dirs.push(dir);
     const store = await persistentStore(); stores.push(store);
     const scope = createGraphKnowledgeAssetScope(UAL, 1), vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
     const sealAt = (assertionVersion: number) => buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT,
@@ -575,7 +575,7 @@ describe('review regression boundaries', () => {
   const metadataSnapshot = (store: OxigraphStore) => store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
 
   it.each(['raw', 'agent-facade'] as const)('retires the journal after an explicitly durable remote acknowledgement through %s', async facade => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-durable-remote-stamp-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-durable-remote-stamp-'))); dirs.push(dir);
     const path = join(dir, 'remote.nq'), backing = new OxigraphStore(path), agent = agentFor(backing, dir, 1);
     await backing.insert(metadataRows()); await backing.flush();
     const fetch = blazegraphEndpointDouble(backing, true);
@@ -591,7 +591,7 @@ describe('review regression boundaries', () => {
   });
 
   it('does not infer remote persistence from atomicity and readback guarantees', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-uncertified-remote-stamp-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-uncertified-remote-stamp-'))); dirs.push(dir);
     const agent = agentFor(await persistentStore(), dir, 1), fetch = vi.spyOn(globalThis, 'fetch');
     const remote = new SparqlHttpStore({ queryEndpoint: 'http://uncertified-remote.test/sparql', consistencyProfile: 'atomic-readback' });
     agent.store = createListContextGraphsCacheInvalidatingStore(remote, vi.fn(), vi.fn());
@@ -631,7 +631,7 @@ describe('review regression boundaries', () => {
     });
   }
   it.each(['raw', 'agent-facade'] as const)('wires the BlazegraphStore default commitment to journal retirement through %s (endpoint double, no durability claim)', async facade => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-blazegraph-stamp-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-blazegraph-stamp-'))); dirs.push(dir);
     const backing = new OxigraphStore(), agent = agentFor(backing, dir, 1);
     await backing.insert(metadataRows());
     const fetch = blazegraphEndpointDouble(backing), blazegraph = new BlazegraphStore('http://blazegraph.test/bigdata/namespace/dkg/sparql');
@@ -645,7 +645,7 @@ describe('review regression boundaries', () => {
     } finally { await agent.namedKaVmLifecycleRepair?.stop(); await blazegraph.close(); }
   });
   it('keeps the confirmed stamp pending on a Blazegraph journal its operator declares non-durable', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-volatile-blazegraph-stamp-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-volatile-blazegraph-stamp-'))); dirs.push(dir);
     const agent = agentFor(await persistentStore(), dir, 1), fetch = vi.spyOn(globalThis, 'fetch');
     const blazegraph = new BlazegraphStore('http://volatile-blazegraph.test/sparql', { writesDurableOnAcknowledgement: false });
     agent.store = createListContextGraphsCacheInvalidatingStore(blazegraph, vi.fn(), vi.fn());
@@ -659,7 +659,7 @@ describe('review regression boundaries', () => {
   });
 
   it('commits once through the production agent wrapper without separate lifecycle writes', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-wrapped-atomic-repair-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-wrapped-atomic-repair-'))); dirs.push(dir);
     const store = await persistentStore(), agent = agentFor(store, dir, 1);
     const publication = confirmedPublicationFor(input);
     const materialization = confirmedLifecycleMaterialization(input, publication, PUBLIC_SNAPSHOT);
@@ -758,7 +758,7 @@ describe('review regression boundaries', () => {
   });
 
   it('uses the real publisher lifecycle lock while repair is paused after its workspace read', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-overlapping-wm-repair-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-overlapping-wm-repair-'))); dirs.push(dir);
     const store = await persistentStore(), agent = agentFor(store, dir, 1);
     const scope = createGraphKnowledgeAssetScope(UAL, 1), vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
     await store.insert([
@@ -806,7 +806,7 @@ describe('review regression boundaries', () => {
   });
 
   it('admits B durably while unrelated A is held in a repair attempt', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-parallel-admission-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-parallel-admission-'))); dirs.push(dir);
     let release!: () => void, entered!: () => void, bEntered!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; }), bStarted = new Promise<void>(resolve => { bEntered = resolve; });
     const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, isCurrent: async () => true, warn: () => undefined,
@@ -820,7 +820,7 @@ describe('review regression boundaries', () => {
     } finally { if (timeout) clearTimeout(timeout); release(); await Promise.all([a, b]); await repair.stop(); }
   });
   it('persists write-ahead evidence before the first apply callback', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-write-ahead-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-write-ahead-'))); dirs.push(dir);
     const apply = vi.fn(async () => {
       const path = join(dir, 'named-ka-vm-lifecycle-repairs.json'), bytes = await readFile(path, 'utf8');
       const journal = decodeLifecycleRepairJournal(JSON.parse(bytes));
@@ -834,7 +834,7 @@ describe('review regression boundaries', () => {
     expect(await repair.submit(input)).toBe('repaired'); expect(apply).toHaveBeenCalledOnce(); await repair.stop();
   });
   it('does not apply after failed durable admission and preserves confirmed evidence in the agent error', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-failed-admission-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-failed-admission-'))); dirs.push(dir);
     const apply = vi.fn(async () => undefined), repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });
     const persist = vi.spyOn(repair as unknown as { persist: () => Promise<void> }, 'persist').mockRejectedValueOnce(Object.assign(new Error('journal fsync failed'), { code: 'EIO' }));
     const store = await persistentStore(), agent = agentFor(store, dir, 1); agent.namedKaVmLifecycleRepair = repair;
@@ -868,7 +868,7 @@ describe('review regression boundaries', () => {
     expect(decoded.get(key)).toEqual({ input: { ...normalized, merkleRoot: HEX.slice(2), priorMerkleRoot: PRIOR }, attempts: 2, nextAttemptAt: 6_000, rejected: false, lastError: 'timeout' });
   });
   it('keeps peer case identities independent through durable retry and restart', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-peer-identity-repair-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-peer-identity-repair-'))); dirs.push(dir);
     let now = 1_000;
     const fail = vi.fn(async () => { throw new Error('temporary store failure'); });
     const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now, apply: fail, isCurrent: async () => true, warn: () => undefined });
@@ -883,7 +883,7 @@ describe('review regression boundaries', () => {
   });
   it('selects versions across equivalent EVM identities and migrates historical journal keys', async () => {
     const mixed = `0x${'aB'.repeat(20)}`, lower = mixed.toLowerCase();
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-evm-identity-repair-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-evm-identity-repair-'))); dirs.push(dir);
     const apply = vi.fn(async () => { throw new Error('temporary store failure'); });
     const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => 1_000, apply, isCurrent: async () => true, warn: () => undefined });
     await repair.submit({ ...input, agentAddress: mixed });
@@ -930,7 +930,7 @@ describe('review regression boundaries', () => {
 
 describe('tentative normal publication projection', () => {
   it.each([1, 2])('centralizes tentative mint/update version %s without claiming a VM data graph', async (version) => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-tentative-projection-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-tentative-projection-'))); dirs.push(dir);
     const store = await persistentStore(), scope = createGraphKnowledgeAssetScope(UAL, version), swm = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
     await store.insert([
       ...buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT, authorAddress: AUTHOR,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -25,7 +25,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 });
 const directories: string[] = [];
 afterEach(async () => { failure.directory = ''; failure.phase = ''; failure.code = 'EPERM'; synced.splice(0); for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
-async function directory() { const path = await mkdtemp(join(tmpdir(), 'dkg-durable-replace-')); directories.push(path); return path; }
+async function directory() { const path = await realpath(await mkdtemp(join(tmpdir(), 'dkg-durable-replace-'))); directories.push(path); return path; }
 
 const input: ConfirmedNamedKaVmLifecycleInput = { contextGraphId: 'durable-journal', name: 'exact-name', agentAddress: '0x' + '12'.repeat(20),
   packedKaId: (BigInt('0x' + '12'.repeat(20)) << 96n) | 1n,
