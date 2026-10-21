@@ -1,3 +1,4 @@
+import { shareJobsPath, shareReconciliationPath } from './share-job-client-paths.js';
 import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -8,6 +9,7 @@ import type {
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
 import type {
+  ShareReconciliationInput, ShareReconciliationResult,
   AsyncLiftRetryOutcome,
   AsyncPreparedPublishPayload,
   JournalReadResult,
@@ -202,7 +204,7 @@ export interface KnowledgeAssetCreateResponse {
   status?: string;
   written?: number;
   merkleRoot?: string;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: KnowledgeAssetShareResponse['catalogHandoff'];
   swmShared?: boolean;
   promotedCount?: number;
   publishReady?: boolean;
@@ -221,7 +223,7 @@ export interface KnowledgeAssetShareResponse {
   promotedCount: number;
   sealed?: boolean;
   publishReady?: boolean;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: { state: 'pending'; reason: string; recoveryJobId: string; recoveryStatusUrl: string };
   errors?: KnowledgeAssetLifecycleError[];
 }
 
@@ -1052,14 +1054,12 @@ export class ApiClient {
     state?: KnowledgeAssetShareJobState | KnowledgeAssetShareJobState[];
     limit?: number;
   }): Promise<{ jobs: KnowledgeAssetShareJobView[] }> {
-    const params = new URLSearchParams();
-    if (options?.contextGraphId) params.set('contextGraphId', options.contextGraphId);
-    if (options?.state) {
-      params.set('state', Array.isArray(options.state) ? options.state.join(',') : options.state);
-    }
-    if (options?.limit !== undefined) params.set('limit', String(options.limit));
-    const qs = params.toString();
-    return this.get(`/api/knowledge-assets/swm/share-jobs${qs ? `?${qs}` : ''}`);
+    return this.get(shareJobsPath(options));
+  }
+
+  /** Read retained execution evidence; never infer retry permission from an unproven result. */
+  async knowledgeAssetReconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult> {
+    return this.get(shareReconciliationPath(input));
   }
 
   async knowledgeAssetShareJob(jobId: string): Promise<KnowledgeAssetShareJobView> {

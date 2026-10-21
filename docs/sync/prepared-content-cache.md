@@ -7,7 +7,9 @@ content, not cached permission or chain authority.
 
 ## Configuration
 
-The daemon and `DKGAgent.create` accept this opt-in setting:
+Persistent cores enable this cache by default when `dataDir` is configured.
+Edges and ephemeral SDK agents remain opt-in. The daemon and `DKGAgent.create`
+accept these overrides:
 
 ```json
 {
@@ -24,8 +26,10 @@ The default directory is `<dataDir>/prepared-content-v1`. Without `dataDir`, an
 absolute `directory` is required. Use a private local directory dedicated to one
 node and backing store. Do not share it between running daemons or mount it as
 an untrusted upload directory. The feature uses the existing exact-batch stream;
-streaming must already be enabled on a serving core. It does not enable a
-protocol or change graph subscriptions by itself.
+streaming is negotiated by default on capable nodes. An explicit
+`DKG_EXACT_BATCH_STREAM_ENABLED=0` retains the ordinary bounded sync path.
+The cache does not change graph subscriptions. Set
+`preparedContentCache.enabled` to `false` to disable persistence.
 
 ## What is reused
 
