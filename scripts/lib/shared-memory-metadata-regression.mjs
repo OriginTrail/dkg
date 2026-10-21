@@ -62,17 +62,23 @@ export async function runSharedMemoryMetadataRegression({ base, token }) {
   const contentSparql = `SELECT DISTINCT ?subject ?name WHERE { GRAPH ?g {
     ?subject <http://schema.org/name> ?name
   } FILTER(STRSTARTS(STR(?subject), "urn:${contextGraphId}:")) } ORDER BY ?subject LIMIT 20`;
-  const content = async includeSharedMemoryMeta => (await post('/api/query', {
-    sparql: contentSparql, contextGraphId, view: 'shared-working-memory',
+  const content = async (includeSharedMemoryMeta, view) => (await post('/api/query', {
+    sparql: contentSparql, contextGraphId, ...(view ? { view } : {}),
     includeContextGraphPartitions: true, includeSharedMemoryMeta,
   }, owner)).result.bindings;
   const expectedContent = contributors.map((_, index) => ({
     subject: `urn:${contextGraphId}:${index}`, name: JSON.stringify(`Contributor ${index}`),
   }));
-  const contentBefore = await content(false), contentExpanded = await content(true), contentAfter = await content(false);
-  for (const rows of [contentBefore, contentExpanded, contentAfter]) {
-    assert.deepEqual(rows, expectedContent, 'All five root/subgraph content rows, with no child-CG row, must remain visible');
-    assert(rows.every(row => row.subject !== `urn:${contextGraphId}:child`));
+  // No view exercises the scoped partition selector changed by metadata expansion.
+  // The explicit SWM view is a separate compatibility route, not evidence for that selector.
+  for (const view of [undefined, 'shared-working-memory']) {
+    const contentBefore = await content(false, view), contentExpanded = await content(true, view), contentAfter = await content(false, view);
+    for (const rows of [contentBefore, contentExpanded, contentAfter]) {
+      assert.deepEqual(rows, expectedContent,
+        `${view ?? 'scoped'} queries must retain all five root/subgraph content rows and exclude child-CG content`);
+      assert(rows.every(row => row.subject !== `urn:${contextGraphId}:child`));
+    }
   }
-  return { contextGraphId, contributors: 5, childExcluded: true, contentRows: expectedContent.length, contentScopeUnchanged: true };
+  return { contextGraphId, contributors: 5, childExcluded: true, contentRows: expectedContent.length,
+    contentScopeUnchanged: true, sharedWorkingMemoryViewContentUnchanged: true };
 }

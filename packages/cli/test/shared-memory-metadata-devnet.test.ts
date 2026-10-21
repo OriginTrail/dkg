@@ -5,7 +5,8 @@ import { runSharedMemoryMetadataRegression } from '../../../scripts/lib/shared-m
 let daemon: LiveDaemon;
 beforeAll(async () => { daemon = await startLiveDaemon(); }, 120_000);
 afterAll(async () => { await stopLiveDaemon(daemon); });
-it('reads five contributors across registered subgraphs without child-CG attribution', async () => {
+it('preserves content and attribution from five contributors in scoped queries, excluding child-CG content', async () => {
   const proof = await runSharedMemoryMetadataRegression({ base: daemon.base, token: daemon.token });
-  expect(proof).toMatchObject({ contributors: 5, childExcluded: true, contentRows: 5, contentScopeUnchanged: true });
+  expect(proof).toMatchObject({ contributors: 5, childExcluded: true, contentRows: 5,
+    contentScopeUnchanged: true, sharedWorkingMemoryViewContentUnchanged: true });
 }, 240_000);
