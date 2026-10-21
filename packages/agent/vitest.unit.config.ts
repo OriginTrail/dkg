@@ -18,7 +18,6 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
-      "test/rfc64-private-roster-version.test.ts",
       "test/rfc64-manual-catalog-authority-scope-v1.test.ts",
       "test/sync-exact-export-admission.test.ts",
       "test/prepared-content-cache.test.ts",
@@ -70,6 +69,7 @@ export default defineConfig({
       "test/sync-work-admission.test.ts",
       "test/sync-work-admission-lifecycle.test.ts",
       ...RFC64_UNIT_TESTS,
+      "test/rfc64-private-roster-version.test.ts",
       "test/endorse.test.ts",
       "test/bounded-curator-discovery.test.ts",
       "test/discovery-peer-pagination.test.ts",
