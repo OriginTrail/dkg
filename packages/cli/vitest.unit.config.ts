@@ -12,6 +12,7 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
           'test/durable-private-payload-recovery.test.ts',
           'test/durable-gossip-signer-lookup.test.ts',
@@ -45,6 +46,8 @@ export default defineConfig({
           // POST routes (pure handler, no hardhat). Belongs in the fast lane
           // alongside its clear-job sibling above.
           'test/publisher-admin-body-boundary.test.ts',
+          'test/publisher-live-control.test.ts',
+          'test/publisher-live-control-route.test.ts',
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
@@ -98,6 +101,7 @@ export default defineConfig({
           // handlers plus one live daemon on the mock chain; no hardhat.
           'test/node-admin-scope-routes.test.ts',
           'test/daemon-operator-scope-live.test.ts',
+          'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
@@ -105,6 +109,9 @@ export default defineConfig({
           // Private-CG bootstrap readiness: clean-empty responses are only
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
+          'test/approved-member-empty-graph-first-write.test.ts',
+          'test/context-graph-empty-vm-readiness.test.ts',
+          'test/context-graph-subscribe-empty-vm.test.ts',
           // A public graph its subscribe job left unproven gets the job again
           // (#3207). The real catch-up worker behind a fake thread; no hardhat.
           'test/context-graph-readiness-repeat.test.ts',

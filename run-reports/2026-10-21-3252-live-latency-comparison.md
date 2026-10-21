@@ -63,6 +63,10 @@ Finality coverage is shown explicitly. Missing marks are not zero. The existing 
 - This does not reproduce the original Gnosis / PCA / 4-vCPU-8-GiB / 11-peer host or its full 450-asset nine-scenario campaign, 764-row starting catalog/cap crossing, or accumulated job history. This test uses Base Sepolia, no PCA, four connected peers, 180 starting rows, and smaller uniform payloads. The original long normal-lane and post-finality bottlenecks must not be assumed reproduced.
 - The earlier controlled 192→0 unrelated query experiment remains mechanism evidence. It does not establish an end-to-end latency gain. No conclusion here closes issue #3252 or changes #2962 correctness requirements.
 
+## Post-benchmark integration
+
+After measurement, `testnet-canary` advanced to `c1230bc0a46c4ce46ed728badd4f121296b47933`. The PR merges that base, retains both sets of agent imports/tests, and extracts unchanged mutation-writer composition into `internal/agent-mutation-writers.ts` to respect the lowered source-size budget. Runtime build/type checks, lint, size checks, 35 focused agent tests (including real production-agent construction), and 17 CLI runtime/recovery tests passed. These integration checks do not extend the live timing claim beyond the exact tested candidate `d2870b18`.
+
 ## Evidence and cleanup
 
 - Per-job portable samples: [2026-10-21-3252-live-latency-comparison.csv](2026-10-21-3252-live-latency-comparison.csv).

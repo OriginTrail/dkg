@@ -1,15 +1,20 @@
 import type { StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
-import { createStorageAckCopyCleanupWriter } from './internal/storage-ack-copy-cleanup-writer.js';
+import { createAgentMutationWriters } from './internal/agent-mutation-writers.js';
+import { StorageACKAdmission } from './storage-ack-admission.js';
+import { runStorageACKOperation } from './storage-ack-diagnostics.js';
+import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
 import { resolveConfiguredNetworkIdentity } from './configured-network-identity.js';
 import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
 import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
-import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
+import { CatalogRepairConditionErrorV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
+import type { StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 
 import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
+import { PrivateAccessMethods } from './private-access-request.js';
 import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
@@ -464,10 +469,7 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { createMutationObservedStore } from './internal/context-graph-cache-invalidating-store.js';
-import { createObservedStoreMutation } from './internal/observed-store-mutation.js';
-import { createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
-import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
+import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
@@ -1027,12 +1029,8 @@ export class DKGAgent extends DKGAgentBase {
           );
         },
         connectToPeerId: (peerId, options) => this.connectToPeerId(peerId, options),
-        queueRecoveryPlan: (plan, onError, delayMs) => {
-          return this.queueRfc64CatalogRecoveryPlanV1(plan, onError, delayMs);
-        },
-        synchronizeTarget: (params) => (
-          this.synchronizeRfc64CatalogRolloutFromProvidersV1(params)
-        ),
+        queueRecoveryPlan: (plan, onError, delayMs) => this.queueRfc64CatalogRecoveryPlanV1(plan, onError, delayMs),
+        synchronizeTarget: (params) => this.synchronizeRfc64CatalogRolloutFromProvidersV1(params),
         warn: (ctx, message) => this.log.warn(ctx, message),
       }),
     );
@@ -1065,9 +1063,13 @@ export class DKGAgent extends DKGAgentBase {
           };
         },
         listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
-        repairFinalizedPrivatePlacement: async (repair, placement) => {
-          await this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
+        readPrivateFailure: (repair) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.readFailure(repair) ?? null,
+        writePrivateFailures: entries => {
+          if (this.rfc64PersistenceV1 === undefined) throw new CatalogRepairConditionErrorV1('persistence_unavailable', 'Private placement failure persistence is unavailable');
+          this.rfc64PersistenceV1.finalizedPrivatePlacementRepairs.writeFailures(entries);
         },
+        repairFinalizedPrivatePlacement: async (repair, placement) => {
+          await this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement); },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
         readAppliedCatalogHead: (scope, author) => this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(scope, author),
         warn: (ctx, message) => this.log.warn(ctx, message),
@@ -1169,39 +1171,9 @@ export class DKGAgent extends DKGAgentBase {
    * small public core nodes before any chain transaction is submitted. Keep a
    * node-local FIFO gate for ACK rounds. Chain submission remains concurrent.
    */
-  private activeStorageACKCollections = 0;
-  private readonly storageACKCollectionWaiters: Array<() => void> = [];
-
-  private async acquireStorageACKCollectionSlot(): Promise<void> {
-    const limit = this.config.storageAckTiming.maxConcurrentCollections;
-    if (this.activeStorageACKCollections < limit) {
-      this.activeStorageACKCollections += 1;
-      return;
-    }
-    await new Promise<void>((resolve) => {
-      this.storageACKCollectionWaiters.push(resolve);
-    });
-  }
-
-  private releaseStorageACKCollectionSlot(): void {
-    const next = this.storageACKCollectionWaiters.shift();
-    if (next) {
-      // Transfer the active slot directly to the oldest waiter. The active
-      // count stays unchanged, so a new caller cannot take the same slot.
-      next();
-      return;
-    }
-    this.activeStorageACKCollections = Math.max(0, this.activeStorageACKCollections - 1);
-  }
-
-  private async withStorageACKCollectionSlot<T>(work: () => Promise<T>): Promise<T> {
-    await this.acquireStorageACKCollectionSlot();
-    try {
-      return await work();
-    } finally {
-      this.releaseStorageACKCollectionSlot();
-    }
-  }
+  private readonly storageACKAdmission = new StorageACKAdmission(
+    () => this.config.storageAckTiming.maxConcurrentCollections,
+  );
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
     const log = new Logger('DKGAgent');
@@ -1529,19 +1501,9 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    const executeMutation = createObservedStoreMutation(
-      () => {
-        agentRef?.invalidateListContextGraphsCache();
-      },
-      createProjectionMutationObserver(() => agentRef?.contextGraphMetaProjection),
-    );
-    const agentStore = createMutationObservedStore(store, executeMutation);
-    const publishedLifecycleWriter = createPublishedNamedKaVmLifecycleWriter({
-      updateStore: store, fallbackStore: agentStore, executeMutation,
-    });
-
-    const ledgerTimestampWriter = createStorageAckLedgerTimestampWriter(store, executeMutation);
-    const storageAckCopyCleanup = createStorageAckCopyCleanupWriter(store, executeMutation);
+    const { agentStore, publishedLifecycleWriter, ledgerTimestampWriter, storageAckCopyCleanup } =
+      createAgentMutationWriters(store, () => agentRef?.invalidateListContextGraphsCache(),
+        () => agentRef?.contextGraphMetaProjection);
 
     const publicSnapshotStore = config.publicSnapshotStore ?? (config.publicSnapshotStoreFactory
       ? config.publicSnapshotStoreFactory(agentStore)
@@ -3443,33 +3405,10 @@ export class DKGAgent extends DKGAgentBase {
 
     const chain = this.chain;
 
-    return async (params: V10ACKProviderParams) => {
-      // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
-      // a real on-chain context graph and the contract rejects `cgId == 0`
-      // with `ZeroContextGraphId`. Reject `<= 0n` (not `=== 0n`) because
-      // `BigInt("-1")` returns `-1n` without throwing — a naive zero check
-      // would let negative ids through to the evm-adapter pre-tx guard,
-      // where ethers' uint256 encoder would throw a cryptic low-level
-      // error. Matches the same guard in dkg-publisher, storage-ack-handler,
-      // and async publisher-runner so ACK signers, ACK verifiers, and the
-      // chain submitter all agree on the legal domain. `contextGraphId`
-      // here is the TARGET on-chain id — `swmGraphId` (optional) is the
-      // source SWM graph name and is NOT required to be numeric.
-      let cgIdBigInt: bigint;
-      try {
-        cgIdBigInt = BigInt(params.contextGraphId);
-      } catch {
-        throw new Error(
-          `V10 ACK collection requires a numeric on-chain context graph id; ` +
-          `got '${params.contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
-        );
-      }
-      if (cgIdBigInt <= 0n) {
-        throw new Error(
-          `V10 ACK collection requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
-          `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
-        );
-      }
+    return (params: V10ACKProviderParams) => runStorageACKOperation(
+      this.workLifetime, this.storageACKAdmission, 'publish',
+      message => this.log.info(createOperationContext('publish'), message), async admit => {
+      const cgIdBigInt = requireStorageACKContextGraphId(params.contextGraphId, 'publish');
       const allowsEmptyPublicTree = params.ackMode.kind === 'curated-catalog';
       if (
         !Number.isInteger(params.merkleLeafCount)
@@ -3521,8 +3460,9 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await this.withStorageACKCollectionSlot(async () => {
+      const result = await admit(onDiagnostic => {
         return collector.collect({
+          onDiagnostic,
           merkleRoot: params.merkleRoot,
           contextGraphId: cgIdBigInt,
           contextGraphIdStr: params.contextGraphId,
@@ -3553,7 +3493,7 @@ export class DKGAgent extends DKGAgentBase {
         });
       });
       return result.acks;
-    };
+    });
   }
 
   /**
@@ -3636,24 +3576,10 @@ export class DKGAgent extends DKGAgentBase {
       publicTripleCount?: number;
       privateMerkleRoot?: Uint8Array;
       privateTripleCount?: number;
-    }): Promise<V10CoreNodeACK[]> => {
-      // The TARGET cgId for the digest is the on-chain numeric id the
-      // adapter resolved (`params.contextGraphId`). Reject non-numeric /
-      // non-positive ids the same way the publish provider does — the
-      // contract rejects `contextGraphId == 0`.
-      let cgIdBigInt: bigint;
-      try {
-        cgIdBigInt = BigInt(params.contextGraphId);
-      } catch {
-        throw new Error(
-          `V10 UPDATE ACK collection requires a numeric on-chain context graph id; got '${params.contextGraphId}'.`,
-        );
-      }
-      if (cgIdBigInt <= 0n) {
-        throw new Error(
-          `V10 UPDATE ACK collection requires a positive on-chain context graph id; got ${cgIdBigInt}.`,
-        );
-      }
+    }): Promise<V10CoreNodeACK[]> => runStorageACKOperation(
+      this.workLifetime, this.storageACKAdmission, 'update',
+      message => this.log.info(createOperationContext('update'), message), async admit => {
+      const cgIdBigInt = requireStorageACKContextGraphId(params.contextGraphId, 'update');
       const allowsEmptyPublicTree = params.isEncryptedPayload === true;
       if (
         !Number.isInteger(params.newMerkleLeafCount)
@@ -3693,8 +3619,9 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await this.withStorageACKCollectionSlot(async () => {
+      const result = await admit(onDiagnostic => {
         return collector.collectUpdate({
+          onDiagnostic,
           kaId: params.kaId,
           contextGraphId: cgIdBigInt,
           preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
@@ -3725,7 +3652,7 @@ export class DKGAgent extends DKGAgentBase {
         });
       });
       return result.acks;
-    };
+    });
   }
 
   async broadcastPublish(
@@ -4432,5 +4359,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends PublicSnapshotMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods {}
-applyMixins(DKGAgent, [PublicSnapshotMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods]);
+export interface DKGAgent extends PrivateAccessMethods, PublicSnapshotMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods {}
+applyMixins(DKGAgent, [PrivateAccessMethods, PublicSnapshotMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods]);

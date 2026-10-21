@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { CatalogRepairConditionErrorV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
 /** Catalog-owned, serialized exact-set mutations for confirmed public SWM assets. */
 
 import {
@@ -245,7 +246,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           existing.assertionCoordinate !== params.asset.assertionCoordinate
           || requestedVersion <= existingVersion
         ) {
-          throw new Error(
+          throw new CatalogRepairConditionErrorV1('version_conflict',
             `RFC-64 catalog upsert for KA ${params.asset.seal.reservedKaId} is not a newer assertion version on the same coordinate`,
           );
         }
@@ -663,7 +664,7 @@ function assertReplacementHistoryIsContiguousV1(
       currentAsset.assertionCoordinate !== targetAsset.assertionCoordinate
       || targetVersion <= currentVersion
     ) {
-      throw new Error(
+      throw new CatalogRepairConditionErrorV1('version_conflict',
         `RFC-64 exact-set replacement for KA ${targetAsset.seal.reservedKaId} is not a newer assertion version on the same coordinate`,
       );
     }

@@ -27,6 +27,58 @@
     "type": "error"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newStake",
+        "type": "uint96"
+      }
+    ],
+    "name": "PrevTotalActiveStakeUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newSum",
+        "type": "uint256"
+      }
+    ],
+    "name": "PrevWeightedActiveAskSumUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newStake",
+        "type": "uint96"
+      }
+    ],
+    "name": "TotalActiveStakeUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newSum",
+        "type": "uint256"
+      }
+    ],
+    "name": "WeightedActiveAskSumUpdated",
+    "type": "event"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint96",

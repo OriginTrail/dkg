@@ -30,3 +30,9 @@ Workload stop refinement after A1 publication completion, before any candidate s
 Fixture isolation correction during B1: fresh homes reconcile KA allocation against minted chain IDs, which does not preserve unpublished reservations from an earlier home. A1 reserved 11542–11977; B1 overlapped 388 unminted fixture IDs (the two measured publication sets do not reuse already minted IDs). Treat A1/B1 as exploratory and retain all outcomes. Before B2/A2, initialize the native DashboardDB and use SqliteKaNumberStore.reconcileFloor to carry the maximum observed reserved number + 1 into the fresh home. Assert no fixture UAL intersects any prior owned arm before publishing. B2/A2 form the clean reverse-order matched comparison; this is no longer claimed as four equally isolated replications.
 
 Reusable lesson recorded in the installed and canonical dkg-testnet validation reference: retain/carry native allocator watermarks when reusing an author across fresh homes. Preserve unpublished allocations, not only the chain-minted maximum. Existing unrelated skill changes were retained.
+
+## Post-benchmark integration
+
+The target branch advanced to c1230bc0a46c4ce46ed728badd4f121296b47933 during the run. Resolve its three merge conflicts by retaining both agent import/test additions and respecting the lower source-size budgets. Extract the existing shared mutation-writer construction into a small helper without changing stores, observers, lazy projection lookup or writer routing. Validate runtime build, focused agent/CLI integration, lint and size checks, then request review of the integrated head. The live results remain evidence for the exact d2870b18 candidate and abb89dff baseline, not for the later integrated runtime.
+
+Integration validation completed: runtime build/types, lint, file-size guard, 35 agent and 17 CLI tests passed. The original measured code and results remain explicitly identified in the report.

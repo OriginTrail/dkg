@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { QuorumUnmetError } from '../src/ack-errors.js';
 import {
@@ -64,11 +64,14 @@ describe('ACKCollector', () => {
   ];
 
   it('collects 3 valid ACKs from core peers', async () => {
+    const diagnosticEvents: unknown[] = [];
     const gossipCalls: Uint8Array[] = [];
+    const releases = new Map<string, () => void>();
 
     const deps: ACKCollectorDeps = {
       gossipPublish: async (_topic, data) => { gossipCalls.push(data); },
       sendP2P: async (peerId, _protocol, _data) => {
+        await new Promise<void>(resolve => { releases.set(peerId, resolve); });
         const idx = parseInt(peerId.replace('peer-', ''), 10);
         const wallet = coreWallets[idx];
         const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 1, 100n);
@@ -85,7 +88,8 @@ describe('ACKCollector', () => {
     };
 
     const collector = new ACKCollector(deps);
-    const result = await collector.collect({
+    const collection = collector.collect({
+      onDiagnostic: event => { diagnosticEvents.push(event); },
       merkleRoot,
       contextGraphId: testCGId,
       contextGraphIdStr: testCGIdStr,
@@ -100,7 +104,26 @@ describe('ACKCollector', () => {
       ackMode: { kind: 'public' },
     });
 
-    expect(result.acks).toHaveLength(3);
+    // All four real transport calls are pending before three are released.
+    // The fourth must still be outstanding when quorum publishes its summary.
+    await vi.waitFor(() => expect(releases.size).toBe(4));
+    for (const peer of ['peer-0', 'peer-1', 'peer-2']) releases.get(peer)!();
+    const result = await collection;
+    let settledSummary: string;
+    try {
+      expect(result.acks).toHaveLength(3);
+      expect(diagnosticEvents).toEqual([expect.objectContaining({
+        completedPeerAttempts: 3, perRoundPeakPeerRequests: 4,
+        candidates: { total: 4, ack: 3, declined: 0, invalid: 0, unsupported: 0, transport: 0, pending: 1 },
+      })]);
+      expect((diagnosticEvents[0] as { peerAttemptMs: number }).peerAttemptMs).toBeGreaterThan(0);
+      settledSummary = JSON.stringify(diagnosticEvents);
+    } finally {
+      releases.get('peer-3')!();
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    expect(JSON.stringify(diagnosticEvents)).toBe(settledSummary);
+    expect(JSON.stringify(diagnosticEvents)).not.toContain('peer-');
     expect(gossipCalls).toHaveLength(0);
     expect(result.merkleRoot).toBe(merkleRoot);
     expect(result.contextGraphId).toBe(testCGId);
