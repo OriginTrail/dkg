@@ -264,6 +264,8 @@ describe('durable sync lifecycle chain binding', () => {
   });
 
   beforeEach(() => {
+    // This suite isolates legacy lifecycle ownership with a partial host.
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '0');
     mockedRunDurableSync.mockClear();
     mockedRunDurableSyncDetailed.mockClear();
     mockedMaterialize.mockClear();
@@ -277,6 +279,7 @@ describe('durable sync lifecycle chain binding', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it.each(['ordinary-first', 'callback-first', 'two-callbacks'] as const)(

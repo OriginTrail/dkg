@@ -7,6 +7,8 @@ import { SwmCatalogAuthorityNotReady, SwmInventoryWriteFailure } from '../src/in
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { commitDurableShareInventory, finishDurableShare } from '../src/internal/promote/durable-share-inventory.js';
+import { SWM_INVENTORY_HANDOFF_PENDING_CODE } from '../src/internal/promote/inventory-recovery-failure.js';
+import { rfc64SwmInventoryShadowRuntimeV1 } from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
 
 const params = { contextGraphId: 'cg', assertionCoordinate: 'asset', lifecycleAgentAddress: `0x${'11'.repeat(20)}`,
   recoveryBinding: { version: 1 as const, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: true,
@@ -43,9 +45,71 @@ describe('durable inventory handoff', () => {
 
   it.each(['inactive-lane', 'authority-transition'])('retains the obligation while %s', async dormantReason => {
     const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'dormant', dormantReason })),
-      requestRfc64SwmCatalogProjectionV1: vi.fn() };
-    await expect(commitDurableShareInventory(agent as any, params)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+      requestRfc64SwmCatalogProjectionV1: vi.fn(), rfc64CatalogAuthorityRefreshFailureReasonV1: vi.fn(() => null),
+      reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => ({ active: false, mode: 'catalog' })) };
+    const failure = await commitDurableShareInventory(agent as any, params).catch(error => error);
+    expect(failure).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    // A typed, closed-set cause lets the daemon name the waiting step.
+    expect(failure.cause).toMatchObject({ code: SWM_INVENTORY_HANDOFF_PENDING_CODE, reason: dormantReason,
+      message: `Durable share inventory remains pending: ${dormantReason}` });
+    expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledOnce();
+    expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledOnce();
+    expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledWith('cg');
     expect(agent.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
+  });
+  it.each(['inactive-lane', 'authority-transition'])('reopens a lane that closed after admission (%s) with one responsibility pass and commits once', async dormantReason => {
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn()
+      .mockResolvedValueOnce({ status: 'dormant', dormantReason })
+      .mockResolvedValueOnce({ status: 'applied', attempts: 1, headObjectDigest: 'head', kaUal: 'did:dkg:asset' }),
+    requestRfc64SwmCatalogProjectionV1: vi.fn(() => true), rfc64CatalogAuthorityRefreshFailureReasonV1: vi.fn(() => null),
+    reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => ({ active: true, mode: 'catalog' })) };
+    await commitDurableShareInventory(agent as any, params);
+    expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledTimes(2);
+    for (const [call] of agent.commitRfc64SwmAuthorInventoryV1.mock.calls) {
+      expect(call).toMatchObject({ shareOperationId: 'original-operation' });
+    }
+    expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledOnce();
+    expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
+  });
+  it('reports the second attempt when the reopened lane is still closed at commit', async () => {
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn()
+      .mockResolvedValueOnce({ status: 'dormant', dormantReason: 'inactive-lane' })
+      .mockResolvedValueOnce({ status: 'dormant', dormantReason: 'authority-transition' }),
+    requestRfc64SwmCatalogProjectionV1: vi.fn(), rfc64CatalogAuthorityRefreshFailureReasonV1: vi.fn(() => null),
+    reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => ({ active: true, mode: 'shadow' })) };
+    const failure = await commitDurableShareInventory(agent as any, params).catch(error => error);
+    expect(failure.cause).toMatchObject({ code: SWM_INVENTORY_HANDOFF_PENDING_CODE, reason: 'authority-transition' });
+    expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledTimes(2);
+    expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledOnce();
+    expect(agent.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['a refresh failure that outlasts settlement', { refreshFailure: 'registered-authority-unfinalized' }],
+    ['a failed responsibility pass', { reconcileError: new Error('responsibility read interrupted') }],
+    ['a legacy selection', { selection: { active: true, mode: 'legacy' } }],
+    ['an inactive selection', { selection: { active: false, mode: 'catalog' } }],
+  ] as const)('keeps %s pending without a second attempt', async (_label, setup: { refreshFailure?: string; reconcileError?: Error; selection?: object }) => {
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'dormant', dormantReason: 'inactive-lane' })),
+      requestRfc64SwmCatalogProjectionV1: vi.fn(), rfc64CatalogAuthorityRefreshFailureReasonV1: vi.fn(() => setup.refreshFailure ?? null),
+      reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => {
+        if (setup.reconcileError) throw setup.reconcileError;
+        return setup.selection;
+      }) };
+    const failure = await commitDurableShareInventory(agent as any, params).catch(error => error);
+    expect(failure).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    expect(failure.cause).toMatchObject({ code: SWM_INVENTORY_HANDOFF_PENDING_CODE, reason: 'inactive-lane' });
+    expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledOnce();
+    expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledTimes(setup.refreshFailure ? 0 : 1);
+    expect(agent.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
+  });
+  it('does not run a responsibility pass for a pending projection admission', async () => {
+    const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'existing' })),
+      requestRfc64SwmCatalogProjectionV1: vi.fn(() => false), rfc64CatalogAuthorityRefreshFailureReasonV1: vi.fn(() => null),
+      reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => ({ active: true, mode: 'catalog' })) };
+    const failure = await commitDurableShareInventory(agent as any, params).catch(error => error);
+    expect(failure.cause).toMatchObject({ code: SWM_INVENTORY_HANDOFF_PENDING_CODE, reason: 'projection-admission' });
+    expect(agent.reconcileRfc64CatalogResponsibilityV1).not.toHaveBeenCalled();
+    expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledOnce();
   });
   it.each(['service-unavailable', 'policy-not-accepted'] as const)('retries typed readiness %s only', async reason => {
     const cause = new SwmCatalogAuthorityNotReady(reason);
@@ -78,7 +142,9 @@ describe('durable inventory handoff', () => {
   it('retains the original obligation when projection admission returns false', async () => {
     const agent = { commitRfc64SwmAuthorInventoryV1: vi.fn(async () => ({ status: 'existing' })),
       requestRfc64SwmCatalogProjectionV1: vi.fn(() => false) };
-    await expect(commitDurableShareInventory(agent as any, params)).rejects.toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    const failure = await commitDurableShareInventory(agent as any, params).catch(error => error);
+    expect(failure).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    expect(failure.cause).toMatchObject({ code: SWM_INVENTORY_HANDOFF_PENDING_CODE, reason: 'projection-admission' });
     expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledWith(expect.objectContaining({ shareOperationId: 'original-operation' }));
     expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
   });
@@ -103,6 +169,42 @@ describe('durable inventory handoff', () => {
   });
 });
 
+describe('responsibility pass on a started agent', () => {
+  it('runs the real pass once, outside the inventory lock, and keeps a lane that stays closed pending', async () => {
+    const agent = await startRepairAgentV1({ name: 'handoff-responsibility-pass' });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    agent.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+    await agent.whenRfc64CatalogResponsibilitiesIdleV1();
+    const seeded = await seedDurableWorkspaceAssetV1(agent, 'responsibility-pass', 97n);
+    // The lane accepted at admission is closed at commit.
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'catalog', killSwitchActive: false, active: false,
+      authoringAllowed: false, reconciliationLane: 'disabled' }) as any;
+    const pass = agent.reconcileRfc64CatalogResponsibilityV1.bind(agent);
+    const lockedDuringPass: boolean[] = [];
+    const reconcile = vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1').mockImplementation(async contextGraphId => {
+      // An exclusive section starts its callback synchronously, before it is tracked; one macrotask later a pass
+      // running inside the lane lock would see the write.
+      await new Promise(resolve => setImmediate(resolve));
+      lockedDuringPass.push(rfc64SwmInventoryShadowRuntimeV1(agent).hasInventoryWrites({ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR }));
+      return pass(contextGraphId);
+    });
+    const writer = vi.spyOn(agent, 'commitRfc64SwmAuthorInventoryV1');
+    const failure = await commitDurableShareInventory(agent, { ...params, contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: seeded.assertionCoordinate, lifecycleAgentAddress: AUTHOR,
+      recoveryBinding: { ...params.recoveryBinding, intent: { ...params.recoveryBinding.intent, operationId: seeded.shareOperationId } },
+    }).catch(error => error);
+    expect(failure).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE' });
+    expect(failure.cause).toMatchObject({ code: SWM_INVENTORY_HANDOFF_PENDING_CODE, reason: 'inactive-lane' });
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(lockedDuringPass).toEqual([false]);
+    // The handoff turns a failed pass into the pending answer, so check that the pass itself completed.
+    await expect(reconcile.mock.results[0]!.value).resolves.toMatchObject({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(writer.mock.calls.length).toBeGreaterThanOrEqual(1);
+    for (const result of writer.mock.results) {
+      await expect(result.value).resolves.toMatchObject({ status: 'dormant', dormantReason: 'inactive-lane' });
+    }
+  });
+});
 
 describe('throwing confirmed inventory removal and observation', () => {
   it('keeps domain outcomes independent of observer bookkeeping', async () => {

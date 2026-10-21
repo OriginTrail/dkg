@@ -18,9 +18,11 @@ export default defineConfig({
           'test/durable-gossip-signer-lookup.test.ts',
           'test/durable-share-preparation-race.test.ts',
           'test/durable-inventory-worker.test.ts',
+          'test/durable-superseded-vm-ownership.test.ts',
           'test/durable-unregistered-author-process.test.ts',
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',
+          'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
@@ -86,6 +88,7 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
+          'test/promote-admission-route.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
           // The dashboard shell carries the operator token only for trusted
           // local requests (loopback socket and loopback Host). Pure helpers
@@ -203,6 +206,8 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          'test/async-share-evidence-worker.test.ts',
+          'test/share-reconciliation-route.test.ts',
           // #2315 — privacy-bounded diagnostics and hostile logger isolation.
           'test/async-promote-worker-diagnostics.test.ts',
           'test/async-promote-error-classification.test.ts',
@@ -324,6 +329,7 @@ export default defineConfig({
           'test/context-graph-join-request-route.test.ts',
           'test/assertion-cli-smoke.test.ts',
           'test/knowledge-asset-cli-smoke.test.ts',
+          'test/knowledge-asset-share-catalog-handoff.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
           'test/okf-subgraph-roundtrip.test.ts',

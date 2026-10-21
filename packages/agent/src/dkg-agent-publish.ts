@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
+import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
+import { tryWithKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
@@ -92,7 +95,7 @@ import {
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
-  type WorkspaceRecipientEncryptionKey,
+  type WorkspaceRecipientEncryptionKey, type EvmAddressV1,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
   type MessageIdempotencyStore,
@@ -123,7 +126,7 @@ import {
   type Quad,
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, operationalSigningOf, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import { signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { externalAuthorSignerFor, heldAuthorSigner, registeredAgentAuthorSigner } from './author-signer.js';
 import  {
@@ -263,8 +266,15 @@ import {
   type SelectSwmFanoutPeersResult,
 } from './swm/swm-fanout-peer-selection.js';
 import { sharedMemoryFollowersOf, type WorkspaceShareScope } from './swm/shared-memory-followers.js';
-import { graphOwnerPeersOf, routeShareToGraphOwner, type GraphOwnerRoutePorts } from './swm/relay-only-share-routes.js';
+import {
+  chooseHoldingCores, graphOwnerPeersOf, needsHoldingCores, routeShareToGraphOwner, shareHolderRefusalsOf, type GraphOwnerRoutePorts,
+} from './swm/relay-only-share-routes.js';
+import {
+  envelopeSignedAtMs, owedPublicSharesOf, owedShareOutcomeOf, peekOwedPublicShares,
+  type OwedPublicShare, type OwedPublicShares, type OwedShareSendOutcome,
+} from './swm/owed-public-shares.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
+import { ownerTieOffersOf } from './swm/owner-tie-offer.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
   BEACON_REANNOUNCE_INTERVAL_MS,
@@ -903,10 +913,11 @@ export class PublishMethods extends DKGAgentBase {
    * Before a share into a public graph goes out, make the graph's owner one of
    * its followers, connecting to it through a relay when the two nodes are not
    * connected (`swm/relay-only-share-routes.ts`). Resolves with the owner's
-   * peers it routed to. Bounded; never throws.
+   * peers it routed to. `knownPublic`: the caller has just read the graph's
+   * access policy. Bounded; never throws.
    */
-  async routeShareToPublicGraphOwnerV1(this: DKGAgent, contextGraphId: string): Promise<readonly string[]> {
-    if (await this.isPrivateContextGraph(contextGraphId).catch(() => true)) return [];
+  async routeShareToPublicGraphOwnerV1(this: DKGAgent, contextGraphId: string, knownPublic = false): Promise<readonly string[]> {
+    if (!knownPublic && await this.isPrivateContextGraph(contextGraphId).catch(() => true)) return [];
     const routed = await routeShareToGraphOwner(this.graphOwnerRoutePortsV1(), contextGraphId);
     if (routed.length > 0) {
       this.log.debug(
@@ -945,6 +956,187 @@ export class PublishMethods extends DKGAgentBase {
       connectFailed: (peerId) => owners.connectFailed(peerId),
       noteFollower: (contextGraphId, peerId) => sharedMemoryFollowersOf(this).note(contextGraphId, peerId),
     };
+  }
+
+  /**
+   * The connected Cores a share also goes to (route 3 of
+   * `swm/relay-only-share-routes.ts`): for a public graph without a roster,
+   * shared by an Edge, while none of `recipients` and of the graph's
+   * subscribers is a Core. `wanted` says whether the share wanted them, found
+   * or not. Never throws.
+   */
+  async shareHolderCoresV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    subGraphName: string | null,
+    plan: FanOutPlan,
+    publicShare: boolean,
+    recipients: readonly string[],
+  ): Promise<{ readonly wanted: boolean; readonly cores: readonly string[] }> {
+    const wanted = plan.enumerationSource !== 'allowlist' && plan.enumerationSource !== 'agent-roster' && needsHoldingCores({
+      authorRole: this.config.nodeRole,
+      publicShare,
+      recipients: [...plan.enumeratedMembers, ...recipients],
+      isCore: (peerId) => this.peerCapabilityRegistry.supportsCore(peerId),
+    });
+    return { wanted, cores: wanted ? await this.chooseShareHolderCoresV1(contextGraphId, subGraphName, new Set(recipients)) : [] };
+  }
+
+  /** Connected Cores, none of `exclude` nor of the Cores that refused the graph's share lately, for one share. */
+  async chooseShareHolderCoresV1(this: DKGAgent, contextGraphId: string, subGraphName: string | null, exclude: ReadonlySet<string>): Promise<string[]> {
+    const refusals = shareHolderRefusalsOf(this);
+    return chooseHoldingCores({
+      contextGraphId,
+      candidates: await this.connectedSharedMemoryCoresV1(),
+      exclude,
+      refused: (peerId) => refusals.refused(contextGraphId, subGraphName, peerId),
+    });
+  }
+
+  /** Connected, admitted Cores this node can send a share to now; none before start. Never throws. */
+  async connectedSharedMemoryCoresV1(this: DKGAgent): Promise<string[]> {
+    if (!this.started) return [];
+    try {
+      const peers = [...new Set(this.node.libp2p.getConnections().map((connection) => connection.remotePeer.toString()))]
+        .filter((peerId) => this.peerCapabilityRegistry.supportsCore(peerId) && this.networkAdmissionCoordinator.isAcceptedPeer(peerId));
+      const dialable = await Promise.all(peers.map((peerId) => this.isPeerDialable(peerId)));
+      return peers.filter((_peerId, index) => dialable[index]);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * A share into a public graph that reached no peer, or not the graph's
+   * owner on another node, is not left there: it is logged, and kept to be
+   * sent again (`swm/owed-public-shares.ts`) on a running node, when the
+   * caller tracks it by an operation id. Never throws.
+   */
+  oweUnreachedPublicShareV1(this: DKGAgent, ctx: OperationContext, share: {
+    readonly contextGraphId: string;
+    readonly subGraphName: string | null;
+    readonly shareOperationId: string | undefined;
+    readonly message: Uint8Array;
+    readonly wire: Uint8Array;
+    readonly signer: WorkspaceGossipSigner | null | undefined;
+    readonly reachedNobody: boolean;
+    readonly holderWanted: boolean;
+    readonly ownerRouted: boolean;
+    /** It went only to connected Cores, and every one refused it. */
+    readonly refusedByEveryCore?: boolean;
+  }): void {
+    const shareOperationId = this.started ? share.shareOperationId : undefined;
+    if (share.reachedNobody) {
+      this.log.warn(
+        ctx,
+        `SWM share into "${share.contextGraphId}"${share.subGraphName === null ? '' : ` sub-graph "${share.subGraphName}"`} `
+          + `op=${share.shareOperationId ?? 'none'} `
+          + (share.refusedByEveryCore ? 'refused by every connected Core it went to, its only recipients' : 'reached no peer (no subscriber, follower, owner or connected Core)')
+          + (shareOperationId === undefined ? '' : '; kept for 30 min'),
+      );
+    }
+    const ownerWallet = deriveCuratorDidFromCgId(share.contextGraphId)?.slice('did:dkg:agent:'.length).toLowerCase();
+    const owner = !share.ownerRouted && ownerWallet !== undefined
+      && ![...this.localAgents.keys()].some((address) => address.toLowerCase() === ownerWallet);
+    if (shareOperationId === undefined || (!share.reachedNobody && !owner)) return;
+    this.owedPublicSharesV1().owe({
+      shareOperationId,
+      contextGraphId: share.contextGraphId,
+      subGraphName: share.subGraphName,
+      message: share.message,
+      wire: share.wire,
+      signedAt: envelopeSignedAtMs(share.wire, Date.now()),
+      signer: share.signer,
+      holder: share.reachedNobody && share.holderWanted,
+      owner,
+    });
+  }
+
+  /** This agent's owed shares, wired to its peers, its owner route and its signer. */
+  owedPublicSharesV1(this: DKGAgent): OwedPublicShares<WorkspaceGossipSigner | null | undefined> {
+    return owedPublicSharesOf(this, () => ({
+      isPublic: async (contextGraphId) => !(await this.isPrivateContextGraph(contextGraphId)),
+      holderPeers: (contextGraphId, subGraphName, exclude) => this.chooseShareHolderCoresV1(contextGraphId, subGraphName, exclude),
+      ownerPeers: (contextGraphId) => this.routeShareToPublicGraphOwnerV1(contextGraphId, true),
+      resign: (share) => this.encodeWorkspaceGossipMessage(share.contextGraphId, share.message, share.signer),
+      send: (peerId, share) => this.sendOwedPublicShareV1(peerId, share),
+      isOpen: () => this.started,
+      logInfo: (message) => this.log.info(createOperationContext('share'), message),
+      logWarn: (message) => this.log.warn(createOperationContext('share'), message),
+    }));
+  }
+
+  /**
+   * One send of an owed share, drained by `stop()` like a fan-out; counted
+   * like one. It never queues in the durable outbox: the store of owed shares
+   * owns its retries, and an outbox row would replay an envelope that grows
+   * too old for receivers. A send that fails or times out counts as failed.
+   */
+  async sendOwedPublicShareV1(
+    this: DKGAgent,
+    peerId: string,
+    share: OwedPublicShare<WorkspaceGossipSigner | null | undefined>,
+  ): Promise<OwedShareSendOutcome> {
+    const sending = this.messenger.sendRequestOwned(peerId, PROTOCOL_SWM_UPDATE, share.wire, {
+      messageId: `swm-owed-${share.shareOperationId}-${peerId}-${share.attempts}`,
+      timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
+    });
+    const tracked: Promise<void> = sending.then(() => undefined, () => undefined)
+      .finally(() => { this.inFlightSubstrateFanOuts.delete(tracked); });
+    this.inFlightSubstrateFanOuts.add(tracked);
+    const record: FanOutPeerRecord = await sending.then(
+      (result) => classifySendResult(peerId, result),
+      (error: unknown) => ({ peerId, outcome: 'failed', attempts: 1, messageId: '', error: error instanceof Error ? error.message : String(error) }),
+    );
+    this.substrateFanoutBookkeeper().recordOutcome(share.contextGraphId, record);
+    return owedShareOutcomeOf(record.outcome);
+  }
+
+  /**
+   * On a running Edge, offer a registered graph's owner-peer tie to the connected
+   * Cores (`swm/owner-tie-offer.ts`), signed with this node's key of the wallet
+   * the graph id names. Never throws, and does not wait for the offer.
+   */
+  offerOwnerTieV1(this: DKGAgent, contextGraphId: string): void {
+    if ((this.config.nodeRole ?? 'edge') !== 'edge' || !this.started) return;
+    void ownerTieOffersOf(this, () => ({
+      holdsKeyOf: (wallet) => [...this.localAgents.keys(), ...(operationalSigningOf(this.chain)?.payerAddresses ?? [])]
+        .some((address) => address.toLowerCase() === wallet),
+      localOnChainId: (graphId) => this.subscribedContextGraphs.get(graphId)?.onChainId,
+      isPublic: async (graphId) => !(await this.isPrivateContextGraph(graphId).catch(() => true)),
+      cores: () => this.connectedSharedMemoryCoresV1(),
+      sign: (graphId, wallet, request) => {
+        const author = this.createRfc64CatalogAuthorSignerV1(wallet as EvmAddressV1);
+        return this.encodeWorkspaceGossipMessage(graphId, request, { agentAddress: wallet, signMessage: (message) => author.signMessage(message) });
+      },
+      send: (peerId, wire) => this.sendOwnerTieOfferV1(peerId, wire),
+      selfPeerId: () => this.peerId,
+      logDebug: (message) => this.log.debug(createOperationContext('share'), message),
+    })).offer(contextGraphId);
+  }
+
+  /** One send of an owner tie offer, drained by `stop()` like a fan-out; never queued in the outbox. */
+  async sendOwnerTieOfferV1(this: DKGAgent, peerId: string, wire: Uint8Array): Promise<void> {
+    const sending = this.messenger.sendRequestOwned(peerId, PROTOCOL_SWM_UPDATE, wire, {
+      timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
+    });
+    const tracked: Promise<void> = sending.then(() => undefined, () => undefined)
+      .finally(() => { this.inFlightSubstrateFanOuts.delete(tracked); });
+    this.inFlightSubstrateFanOuts.add(tracked);
+    await sending;
+  }
+
+  /**
+   * Shutdown: owed shares are not sent again, and a share made while the agent
+   * stops is not kept. Made here if need be, so that such a share finds it closed.
+   */
+  stopOwedPublicSharesV1(this: DKGAgent): void {
+    this.owedPublicSharesV1().close();
+  }
+
+  /** Start: shares are kept again; a restarted agent owes none. */
+  reopenOwedPublicSharesV1(this: DKGAgent): void {
+    peekOwedPublicShares(this)?.reopen();
   }
 
   publishWorkspaceGossip(this: DKGAgent,
@@ -1000,6 +1192,8 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<void> {
     // A graph written here is in use: keep it pulled from its owner (#3251).
     this.recentSharedMemoryPulls?.noteActivity(contextGraphId);
+    // On the owner's node, the Cores learn which node is the owner's (`swm/owner-tie-offer.ts`).
+    this.offerOwnerTieV1(contextGraphId);
     const payload = normalizeWorkspaceGossipPublishInput(payloadOrMessage);
     const message = payload.message;
     // OT-RFC-38 / LU-6 Phase B — derive the wire-form id ONCE at the
@@ -1056,11 +1250,13 @@ export class PublishMethods extends DKGAgentBase {
     // Followers are never sent a share into a root that the catalog owns (below).
     const sendsToFollowers = shareScope?.subGraphName !== null
       || this.rfc64LegacySwmApplyAllowedForScope(contextGraphId, null);
-    // A relay-only author reaches the graph's owner only as a follower. A
-    // captured fan-out is a private graph's roster, which names its members.
-    const ownerPeers = sendsToFollowers && payload.fanout.kind !== 'captured'
-      ? await this.routeShareToPublicGraphOwnerV1(contextGraphId)
-      : [];
+    // A relay-only author reaches the graph's owner only as a follower, and the
+    // Cores it is connected to as holders (below). A captured fan-out is a
+    // private graph's roster, which names its members; a graph whose access
+    // policy cannot be read counts as private.
+    const publicShare = sendsToFollowers && payload.fanout.kind !== 'captured'
+      && !(await this.isPrivateContextGraph(contextGraphId).catch(() => true));
+    const ownerPeers = publicShare ? await this.routeShareToPublicGraphOwnerV1(contextGraphId, true) : [];
 
     // rc.9 PR-C (SWM reliable fan-out plan, Step 3): tier-switch
     // between substrate fan-out (point-to-point reliable via
@@ -1164,13 +1360,20 @@ export class PublishMethods extends DKGAgentBase {
       ? ownerPeers.filter((peerId) => !plan.substrateMembers.includes(peerId))
       : [];
     const directFollowers = sendsToFollowers ? [...(plan.directFollowers ?? []), ...ownerOffAllowlist] : [];
-    const followerPeers = new Set(directFollowers);
-    const sendMembers = directFollowers.length === 0
+    // While none of the recipients is a Core, the connected Cores hold the
+    // share for the others (`swm/relay-only-share-routes.ts`); they are sent
+    // to as followers are.
+    const subGraphName = shareScope?.subGraphName ?? null;
+    const holders = await this.shareHolderCoresV1(contextGraphId, subGraphName, plan, publicShare, [...substrateMembers, ...directFollowers]);
+    const directPeers = holders.cores.length === 0 ? directFollowers : [...new Set([...directFollowers, ...holders.cores])];
+    const holderCores = new Set(holders.cores);
+    const followerPeers = new Set(directPeers);
+    const sendMembers = directPeers.length === 0
       ? substrateMembers
-      : [...new Set([...substrateMembers, ...directFollowers])];
-    const ackMembers = directFollowers.length === 0
+      : [...new Set([...substrateMembers, ...directPeers])];
+    const ackMembers = directPeers.length === 0
       ? plan.substrateMembers
-      : [...new Set([...plan.substrateMembers, ...directFollowers])];
+      : [...new Set([...plan.substrateMembers, ...directPeers])];
 
     // rc.9 PR-D codex follow-up #D5 (rebased onto PR-G's G2
     // detach): register the SwmAckQuorum tracker BEFORE
@@ -1258,7 +1461,7 @@ export class PublishMethods extends DKGAgentBase {
         shareOperationId,
         cgId: contextGraphId,
         expectedMembers: ackMembers,
-        ...(directFollowers.length > 0 ? { directMembers: directFollowers } : {}),
+        ...(directPeers.length > 0 ? { directMembers: directPeers } : {}),
         preAckedFromSubstrate: [],
         payload: wireMessage,
         enumerationSource: plan.enumerationSource,
@@ -1275,13 +1478,14 @@ export class PublishMethods extends DKGAgentBase {
     //   2. (PR-D #D5) Feed substrate-`delivered` peers into
     //      the quorum via onAck so they count toward the same
     //      quorum target as gossip-side acks.
-    if ((plan.useSubstrate || directFollowers.length > 0) && sendMembers.length > 0) {
+    if ((plan.useSubstrate || directPeers.length > 0) && sendMembers.length > 0) {
       const baseBookkeeper = this.substrateFanoutBookkeeper();
       // PR-J: capture per-peer outcomes for the optional detail
       // line emitted when anything queues/fails/is rejected. Lets
       // operators see WHICH peer is failing rather than just an
       // aggregate "queued=4" with no way to attribute it.
       const perPeerDetail: { peerId: string; outcome: string; error: string }[] = [];
+      const refusedHolders = new Set<string>();
       const substratePromise: Promise<void> = (async () => {
         try {
           const substrateResult = await executeSubstrateFanOut({
@@ -1302,6 +1506,20 @@ export class PublishMethods extends DKGAgentBase {
                   ) {
                     trackedQuorum.dropPeer(shareOperationId, record.peerId);
                   }
+                }
+                // A Core that applied the share hosts the graph's shares of this
+                // scope. A Core that refused it is dropped from this share, and
+                // left out of the graph's next shares of this scope only when it
+                // applied none of them lately: a refusal does not say whether the
+                // Core does not host the graph or refused only this share, an
+                // outdated version for one (`ShareHolderRefusals`).
+                if (record.outcome === 'delivered' && holderCores.has(record.peerId)) {
+                  shareHolderRefusalsOf(this).noteAccepted(contextGraphId, subGraphName, record.peerId);
+                }
+                if (record.outcome === 'rejected' && holderCores.has(record.peerId)) {
+                  if (trackedQuorum && shareOperationId) trackedQuorum.dropPeer(shareOperationId, record.peerId);
+                  shareHolderRefusalsOf(this).noteRefused(contextGraphId, subGraphName, record.peerId);
+                  refusedHolders.add(record.peerId);
                 }
                 // #1227 regression fix: only feed TERMINAL initial-fanout
                 // outcomes (delivered→good, failed/rejected→failed/
@@ -1349,8 +1567,16 @@ export class PublishMethods extends DKGAgentBase {
             + `queued=${substrateResult.queued} `
             + `inFlight=${substrateResult.inFlight} failed=${substrateResult.failed} `
             + `also_gossiped=${plan.useGossip}`
-            + (directFollowers.length > 0 ? ` followers=${directFollowers.length}` : ''),
+            + (directFollowers.length > 0 ? ` followers=${directFollowers.length}` : '')
+            + (holderCores.size > 0 ? ` cores=${holderCores.size}` : ''),
           );
+          // Refused by every Core, its only recipients: it reached nobody after all.
+          if (refusedHolders.size > 0 && refusedHolders.size === sendMembers.length && plan.enumeratedCount === 0) {
+            this.oweUnreachedPublicShareV1(ctx, {
+              contextGraphId, subGraphName, shareOperationId, message, wire: wireMessage, signer: resolvedSigner,
+              reachedNobody: true, holderWanted: true, ownerRouted: ownerPeers.length > 0, refusedByEveryCore: true,
+            });
+          }
           // PR-J per-peer detail. Logged at WARN so it surfaces in
           // operator dashboards that filter by level (the aggregate
           // INFO line is the steady-state observability; this is the
@@ -1387,6 +1613,14 @@ export class PublishMethods extends DKGAgentBase {
 
     if (plan.useGossip) {
       await this.publishViaGossip(contextGraphId, topic, wireMessage, ctx);
+    }
+    if (publicShare) {
+      this.oweUnreachedPublicShareV1(ctx, {
+        contextGraphId, subGraphName, shareOperationId, message, wire: wireMessage, signer: resolvedSigner,
+        reachedNobody: sendMembers.length === 0 && plan.enumeratedCount === 0,
+        holderWanted: holders.wanted,
+        ownerRouted: ownerPeers.length > 0,
+      });
     }
 
     if (!plan.useSubstrate && plan.enumerationSource === 'topic-subscribers' && plan.enumeratedCount > this.swmSubstrateMaxMembers) {
@@ -4933,12 +5167,19 @@ export class PublishMethods extends DKGAgentBase {
     return { action: 'execute' };
   }
 
+  async repairPublishedKnowledgeAssetDescriptor(this: DKGAgent, input: PublishedDescriptorRepairInput) {
+    return repairPublishedDescriptor({ store: this.store, chain: this.chain, writeLocks: this.writeLocks,
+      getContextGraphOnChainId: this.getContextGraphOnChainId.bind(this),
+      stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter }, input);
+  }
+
   async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
     publishedUal: string,
     packedKaId?: bigint,
     merkleRoot: string = request.sealMerkleRoot,
+    preserveVerifiedVmProof = false,
   ): Promise<void> {
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     await this.publishedNamedKaVmLifecycleWriter({
@@ -4949,6 +5190,7 @@ export class PublishMethods extends DKGAgentBase {
       publishedUal,
       merkleRoot,
       packedKaId,
+      ...(preserveVerifiedVmProof ? { preserveVerifiedVmProof: true } : {}),
     });
   }
 
@@ -4976,10 +5218,10 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /** Re-check the named lifecycle independently of the mutable workspace head. */
-  async _canStampRecoveredKnowledgeAssetVmLifecycle(
+  async _resolveRecoveredKnowledgeAssetVmLifecycleAuthor(
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
-  ): Promise<boolean> {
+  ): Promise<{ author: string; incomplete: boolean } | false> {
     const bareRoot = (value?: string | null): string | undefined => {
       const trimmed = value?.trim().toLowerCase();
       if (!trimmed) return undefined;
@@ -4990,7 +5232,10 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress,
       ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     });
-    if (!history) return false;
+    if (!history) return {
+      author: await incompleteNamedKaLifecycleOwner(this.store, request, agentAddress),
+      incomplete: true,
+    };
 
     const queuedSeal = bareRoot(request.sealMerkleRoot);
     const queuedWm = bareRoot(request.wmCurrentAssertion) ?? queuedSeal;
@@ -5023,7 +5268,7 @@ export class PublishMethods extends DKGAgentBase {
     if (history.reservedUal && request.reservedUal && history.reservedUal !== request.reservedUal) {
       return false;
     }
-    return true;
+    return { author: history.agentAddress, incomplete: false };
   }
 
   async finalizeRecoveredQueuedKnowledgeAssetVmPublish(
@@ -5254,21 +5499,32 @@ export class PublishMethods extends DKGAgentBase {
     );
     // `stale-target` means a still-newer local version won the race. Do not
     // regress its pointer; the exact publish receipt is nevertheless repaired.
-    const canStampLifecycle = materialization !== 'stale-target'
-      && await this._canStampRecoveredKnowledgeAssetVmLifecycle(request);
-    if (canStampLifecycle) {
-      await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
-        request,
-        recovered.localUal,
-        recovered.reservedKaId,
-        recovered.materialization.merkleRoot,
+    if (materialization !== 'stale-target') {
+      const author = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+      const lifecycleKey = assertionLifecycleWriteLockKey(
+        request.contextGraphId, request.name, author, request.subGraphName,
       );
-    } else if (materialization !== 'stale-target') {
-      this.log.info(
-        ctx,
-        `Recovered receipt for "${request.name}" without lifecycle stamping because `
-          + 'the current named assertion no longer matches the queued assertion',
-      );
+      throwIfRecoveryDeadlineReached(signal);
+      // This finalizer holds the queue's global claim lock. Never wait behind
+      // a lifecycle writer, which can itself need queue admission.
+      const lifecycleRepair = await tryWithKeyedLocks(this.writeLocks, [lifecycleKey], async () => {
+        throwIfRecoveryDeadlineReached(signal);
+        const lifecycleAuthor = await this._resolveRecoveredKnowledgeAssetVmLifecycleAuthor(request);
+        throwIfRecoveryDeadlineReached(signal);
+        if (lifecycleAuthor) {
+          await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
+            { ...request, agentAddress: lifecycleAuthor.author }, recovered.localUal,
+            recovered.reservedKaId, recovered.materialization.merkleRoot, lifecycleAuthor.incomplete,
+          );
+        } else {
+          this.log.info(ctx, `Recovered receipt for "${request.name}" without lifecycle stamping because `
+            + 'the current named assertion no longer matches the queued assertion');
+        }
+      });
+      if (!lifecycleRepair.acquired) {
+        throw Object.assign(new Error('Named KA lifecycle writer is busy; recovery will retry'),
+          { code: 'KA_VM_RECOVERY_INCONSISTENT' });
+      }
     }
 
     // A recovery-finalized transaction owns the same RFC-64 lifecycle tail as
