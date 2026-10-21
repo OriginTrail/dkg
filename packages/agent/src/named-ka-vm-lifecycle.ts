@@ -68,22 +68,38 @@ async function applyNamedKaVmLifecycle(
   persistenceMode: NamedKaVmLifecycleApplyOptions['persistence'],
   preserveVerifiedVmProof = false,
 ): Promise<void> {
-  const tentative = input.tentative === true;
+  const capability = store.commitment;
+  const barrier = capability !== undefined
+    && (capability.durability === 'restart-durable' || persistenceMode === 'process-local')
+    ? capability.capture() : undefined;
+  if (input.tentative !== true && barrier === undefined) {
+    throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), {
+      code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE',
+    });
+  }
+  await mutateNamedKaVmLifecycle(store, input, preserveVerifiedVmProof);
+  // Graph writes can be visible before the debounced snapshot is on disk. The
+  // repair owner may retire its fsynced journal only after this barrier succeeds.
+  if (barrier !== undefined) await barrier({ source: 'agent.publish.confirmedLifecycleFlush' });
+  else await store.flush?.({ source: 'agent.publish.confirmedLifecycleFlush' });
+}
+
+/** Mutation only: the materialization owner certifies the complete attempt. */
+export async function mutatePublishedNamedKaVmLifecycle(
+  store: TripleStore, input: PublishedNamedKaVmLifecycleInput, preserveVerifiedVmProof = false,
+): Promise<void> {
+  if ('tentative' in input) throw new NamedKaVmLifecycleIntegrityError('Confirmed lifecycle commands cannot carry tentative mode');
+  await mutateNamedKaVmLifecycle(store, input, preserveVerifiedVmProof);
+}
+async function mutateNamedKaVmLifecycle(
+  store: TripleStore, input: NamedKaVmLifecycleCommand, preserveVerifiedVmProof: boolean,
+): Promise<void> {
   const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const lifecycleUri = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const metaGraph = contextGraphMetaUri(input.contextGraphId);
   // Validate inputs before I/O and use the shared RDF serializer at the query boundary.
   checkedRoot(input.merkleRoot);
   if (input.priorMerkleRoot !== undefined) checkedRoot(input.priorMerkleRoot);
-  const capability = store.commitment;
-  const barrier = capability !== undefined
-    && (capability.durability === 'restart-durable' || persistenceMode === 'process-local')
-    ? capability.capture() : undefined;
-  if (!tentative && barrier === undefined) {
-    throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), {
-      code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE',
-    });
-  }
   const iri = (value: string) => formatSparqlTerm(value, { position: 'subject' });
   const rows = await store.query(`SELECT ?wm ?swm ?state ?layer ?activeSeal ?activeSealVersion WHERE { GRAPH ${iri(metaGraph)} {
     OPTIONAL { ${iri(lifecycleUri)} <${WM_CURRENT_ASSERTION_PRED}> ?wm }
@@ -101,10 +117,6 @@ async function applyNamedKaVmLifecycle(
     ? buildNamedKaVmLifecycleMutation({ ...input, kind: 'tentative', workspace, preserveVerifiedVmProof: false })
     : buildNamedKaVmLifecycleMutation({ ...input, kind: 'confirmed', workspace, preserveVerifiedVmProof });
   await commitLifecycleMetadata(store, plan);
-  // Graph writes can be visible before the debounced snapshot is on disk. The
-  // repair owner may retire its fsynced journal only after this barrier succeeds.
-  if (barrier !== undefined) await barrier({ source: 'agent.publish.confirmedLifecycleFlush' });
-  else await store.flush?.({ source: 'agent.publish.confirmedLifecycleFlush' });
 }
 
 /** Compatibility projection for externally verified descriptor repair. */

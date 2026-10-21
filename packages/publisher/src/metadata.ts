@@ -747,6 +747,7 @@ export async function readLocallyTrustedKnowledgeAssetControls(
   ual: string,
   incomingMetadataQuads: readonly Quad[],
   options: QueryOptions = {},
+  anchorMatch: 'current-or-earlier' | 'exact' = 'current-or-earlier',
 ): Promise<Quad[]> {
   assertSafeGraphIriForSparql(metaGraph);
   assertSafeGraphIriForSparql(ual);
@@ -798,7 +799,7 @@ export async function readLocallyTrustedKnowledgeAssetControls(
     const sidecarRoot = normalizeControlRoot(
       readControlAnchor(rows, `${DKG}merkleRoot`, 'sidecar merkleRoot'),
     );
-    if (sidecarVersion > incomingVersion) continue;
+    if (sidecarVersion > incomingVersion || (anchorMatch === 'exact' && sidecarVersion !== incomingVersion)) continue;
     if (sidecarVersion === incomingVersion && sidecarRoot !== incomingRoot) continue;
     candidates.push({ version: sidecarVersion, rows });
   }
@@ -850,6 +851,7 @@ export async function readLocallyTrustedKnowledgeAssetControlEnvelope(
   ual: string,
   incomingMetadataQuads: readonly Quad[],
   options: QueryOptions = {},
+  anchorMatch: 'current-or-earlier' | 'exact' = 'current-or-earlier',
 ): Promise<LocallyTrustedKnowledgeAssetControlEnvelope | undefined> {
   const rows = await readLocallyTrustedKnowledgeAssetControls(
     store,
@@ -857,6 +859,7 @@ export async function readLocallyTrustedKnowledgeAssetControlEnvelope(
     ual,
     incomingMetadataQuads,
     options,
+    anchorMatch,
   );
   if (rows.length === 0) return undefined;
 

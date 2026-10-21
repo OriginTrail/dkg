@@ -841,7 +841,7 @@ describe('createPromoteWorkerSupervisor', () => {
   function makeAgentStub(promote: (req: PromoteRequest) => Promise<{ promotedCount: number }>) {
     return {
       promoteQueue: queue,
-      assertion: {
+      assertion: { prepareQueuedShare: async (job: any) => ({ job }),
         async promote(
           cgId: string,
           name: string,
@@ -967,7 +967,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: firstClaimLeaseless,
-        assertion: { promote: async () => ({ promotedCount: 1 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
@@ -1228,7 +1228,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 4,
       pollIntervalMs: 60_000,
@@ -1254,7 +1254,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 4,
       pollIntervalMs: 60_000,
@@ -1298,7 +1298,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 60_000,
@@ -1334,7 +1334,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 60_000,
@@ -1479,7 +1479,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 1 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
@@ -1528,7 +1528,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: {
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }),
           async promote() {
             promoteStarted.resolve();
             return releasePromote.promise;
@@ -1578,7 +1578,7 @@ describe('createPromoteWorkerSupervisor', () => {
     nowFn += 60_000; // lease expired
 
     const sup = createPromoteWorkerSupervisor({
-      agent: { promoteQueue: recoverableQueue, assertion: { promote: async () => ({ promotedCount: 1 }) } } as any,
+      agent: { promoteQueue: recoverableQueue, assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) } } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
       heartbeatIntervalMs: 0,
@@ -1597,7 +1597,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const shortLeaseQueue = new TripleStoreAsyncPromoteQueue(store, { leaseMs: 1_000 });
     const agent = {
       promoteQueue: shortLeaseQueue,
-      assertion: { promote: async () => ({ promotedCount: 1 }) },
+      assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
     } as any;
 
     expect(() => createPromoteWorkerSupervisor({
@@ -1623,7 +1623,7 @@ describe('createPromoteWorkerSupervisor', () => {
             throw new Error('must not poll after failed recovery');
           },
         },
-        assertion: { promote: async () => ({ promotedCount: 1 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1,

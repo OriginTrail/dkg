@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
+import { getBytes, hexlify } from 'ethers';
+import { TripleStoreAsyncLiftPublisher, computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { assertionLifecycleUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { applyVerifiedNamedKaDescriptor as applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
@@ -20,25 +21,38 @@ async function promptly<T>(work: Promise<T>): Promise<T> {
 describe('confirmed named KA descriptor recovery [#3362]', () => {
   it.each([AUTHOR, '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ'])('repairs an interrupted state replacement for lifecycle owner %s before finalizing the original job', async lifecycleOwner => {
     const store = new OxigraphStore();
-    const agent = await DKGAgent.create({ name: 'descriptor-recovery', store, chainAdapter: seededChain(),
+    const publicQuads = [{ graph: '', subject: 'urn:receipt:document', predicate: 'urn:content', object: '"accepted revision"' }];
+    const merkleRoot = hexlify(computeFlatKCRootV10(publicQuads, [])) as `0x${string}`;
+    const agent = await DKGAgent.create({ name: 'descriptor-recovery', store, chainAdapter: seededChain(merkleRoot),
       rfc64CatalogActivation: { enabled: false } });
     vi.spyOn(agent, 'peerId', 'get').mockReturnValue('12D3KooWRecoveryFixture');
-    const request = { ...baseRequest(), agentAddress: lifecycleOwner };
+    const base = baseRequest();
+    const request = { ...base, agentAddress: lifecycleOwner, sealMerkleRoot: merkleRoot, seal: { ...base.seal, merkleRoot } };
+    const originalEvidence = legacyEvidence();
+    const evidence = { ...originalEvidence, publishProof: { ...originalEvidence.publishProof, merkleRoot } };
     vi.spyOn((agent as any).chain, 'getKnowledgeAssetsLifecycleAddress').mockResolvedValue(request.sealKav10Address);
     const graph = contextGraphMetaUri(request.contextGraphId);
     const subject = assertionLifecycleUri(request.contextGraphId, lifecycleOwner, request.name);
     const vmGraph = contextGraphLayerUri(request.contextGraphId, MemoryLayer.VerifiableMemory, AUTHOR, 402n);
-    const content = [{ graph: vmGraph, subject: 'urn:receipt:document', predicate: 'urn:content', object: '"accepted revision"' }];
+    const content = publicQuads.map(q => ({ ...q, graph: vmGraph }));
     const executor = vi.fn(async () => { throw new Error('must never publish again'); });
     const queue = new TripleStoreAsyncLiftPublisher(store, {
-      chainProofResolver: async () => ({ status: 'recovered', recovery: legacyEvidence() }),
-      knowledgeAssetVmPublishRecoveryResolver: async () => legacyEvidence(),
+      chainProofResolver: async () => ({ status: 'recovered', recovery: evidence }),
+      knowledgeAssetVmPublishRecoveryResolver: async () => evidence,
       knowledgeAssetVmPublishHandler: { execute: executor,
         finalizeRecovered: input => agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(input) },
     });
     try {
       await store.insert([
         ...content,
+        ...generateGraphKnowledgeAssetMetadata({ ual: request.kaUal!, contextGraphId: request.contextGraphId,
+          merkleRoot: getBytes(merkleRoot), assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0,
+          assertionGraph: vmGraph, authorAddress: AUTHOR, publisherPeerId: '12D3KooWRecoveryFixture',
+          accessPolicy: 'public', allowedPeers: [], timestamp: new Date(request.sealFinalizedAtIso),
+        }, { status: 'confirmed', confirmation: { kind: 'transaction', provenance: {
+          txHash: TX_HASH, blockNumber: 77, blockTimestamp: 1_700_000_077, publisherAddress: AUTHOR,
+          batchId: BigInt(request.seal.reservedKaId!), chainId: request.sealChainId,
+        } } }),
         { graph, subject, predicate: DKG + 'assertionGraph', object: vmGraph },
         ...Object.entries({ state: 'promoted', assertionName: request.name, kaId: '402',
           reservedUal: request.kaUal!, shareOperationId: request.shareOperationId,

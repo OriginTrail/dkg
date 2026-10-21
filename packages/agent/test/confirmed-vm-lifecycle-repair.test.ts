@@ -398,7 +398,7 @@ describe('review regression boundaries', () => {
       expect(await store.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" } }`)).toMatchObject({ value: true });
     } finally { release(); }
     expect(await repairing).toBe(true);
-    expect(flush).toHaveBeenCalledWith({ source: 'agent.publish.confirmedLifecycleFlush' });
+    expect(flush).toHaveBeenCalledExactlyOnceWith({ source: 'agent.publish.confirmedLifecycleMaterializationFlush' });
     const journalPath = join(dir, 'named-ka-vm-lifecycle-repairs.json');
     expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(journalPath, 'utf8'))).size).toBe(1);
     // Copy only durable bytes, without closing the store or stopping the agent.

@@ -3,12 +3,12 @@ import { hexlify } from 'ethers';
 import { confirmedLifecycleRecoveryFixture } from './confirmed-lifecycle-recovery-fixture.js';
 import { confirmedNamedKaVmLifecycleInput } from '../../src/named-ka-vm-lifecycle-evidence.js';
 
-export function confirmedMaterializationFixture(privateContent = false, subGraphName?: string) {
+export function confirmedMaterializationFixture(privateContent = false, subGraphName?: string, assertionVersion = '1') {
   const { publication, input: coordinates } = confirmedLifecycleRecoveryFixture();
   const publicQuads = [{ subject: 'urn:payload', predicate: 'urn:value', object: '"original public payload"', graph: '' }];
   const privateMerkleRoot = privateContent ? new Uint8Array(32).fill(0x35) : undefined;
   const merkleRoot = computeFlatKCRootV10(publicQuads, privateMerkleRoot ? [privateMerkleRoot] : []);
-  const confirmed = { ...publication, merkleRoot, seal: { ...publication.seal, merkleRoot,
+  const confirmed = { ...publication, merkleRoot, seal: { ...publication.seal, assertionVersion, merkleRoot,
     privateMerkleRoot, privateTripleCount: privateContent ? 2 : 0 } };
   const input = confirmedNamedKaVmLifecycleInput(confirmed, { ...coordinates, subGraphName }, {
     publicQuads, publisherPeerId: 'test-publisher', accessPolicy: 'allowList', allowedPeers: ['test-reader'],

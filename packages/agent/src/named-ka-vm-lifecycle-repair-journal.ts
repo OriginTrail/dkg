@@ -57,7 +57,7 @@ function normalizeJournalInput(value: unknown): JournalInput {
     const deployment = record(input['publicationDeployment']);
     const chainId = string(deployment['chainId']), lifecycleAddress = string(deployment['lifecycleAddress']);
     if (!/^(0|[1-9][0-9]*)$/.test(chainId) || BigInt(chainId) >= 1n << 256n || !/^0x[0-9a-f]{40}$/i.test(lifecycleAddress)) return invalid();
-    publicationDeployment = { chainId, lifecycleAddress: lifecycleAddress.toLowerCase() };
+    publicationDeployment = Object.freeze({ chainId, lifecycleAddress: lifecycleAddress.toLowerCase() });
   }
   const normalized = {
     contextGraphId: string(input['contextGraphId']), agentAddress: string(input['agentAddress']), name: string(input['name']),
@@ -67,9 +67,9 @@ function normalizeJournalInput(value: unknown): JournalInput {
     ...(packedKaId === undefined ? {} : { packedKaId }),
     ...(publicationDeployment === undefined ? {} : { publicationDeployment }),
   };
-  if (input['materialization'] === undefined) return normalized;
+  if (input['materialization'] === undefined) return Object.freeze(normalized);
   if (publicationDeployment === undefined || packedKaId === undefined) return invalid();
-  return { ...normalized, materialization: normalizeLifecycleMaterialization(input['materialization'], normalized as ConfirmedKaInput) };
+  return Object.freeze({ ...normalized, materialization: normalizeLifecycleMaterialization(input['materialization'], normalized as ConfirmedKaInput) });
 }
 export function lifecycleRepairKey(input: JournalInput): string {
   // Version-2 disk encoding is frozen independently of the in-process lock namespace.
@@ -95,8 +95,8 @@ export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, Lifecy
   version: 3; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInput }]>;
 } {
   return { version: 3, entries: [...entries].map(([key, entry]) => {
-    const normalized = normalizeJournalInput(entry.input);
-    const input: StoredLifecycleRepairInput = { ...normalized, packedKaId: normalized.packedKaId?.toString() };
+    // Admission and decode own validation/copying; retry bookkeeping never rehashes payloads.
+    const input: StoredLifecycleRepairInput = { ...entry.input, packedKaId: entry.input.packedKaId?.toString() };
     const { retention: _retention, ...retry } = entry;
     return [key, { ...retry, input }];
   }) };

@@ -2,11 +2,11 @@
 import { MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, materializedVersionQuad,
   parseConfirmedGraphKnowledgeAssetMetadataEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope,
-  readCurrentAssertionVersion, withMaterializationLock, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControls, type LocallyTrustedKnowledgeAssetControlEnvelope,
+  readCurrentAssertionVersion, withMaterializationLock, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControls, type LocallyTrustedKnowledgeAssetControlEnvelope,
 } from '@origintrail-official/dkg-publisher';
 import { tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { hexlify } from 'ethers';
-import { applyPublishedNamedKaVmLifecycle, type NamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
+import { mutatePublishedNamedKaVmLifecycle, type NamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 import type { ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
@@ -69,7 +69,8 @@ export function normalizeLifecycleMaterialization(value: unknown, input: Confirm
     || rootHex(parsed.envelope.merkleRoot) !== rootHex(input.merkleRoot)
     || parsed.envelope.publicTripleCount !== publicQuads.length
     || rootHex(computeFlatKCRootV10(publicQuads, parsed.envelope.privateMerkleRoot ? [parsed.envelope.privateMerkleRoot] : [])) !== rootHex(input.merkleRoot)) return invalid();
-  return { kaUal: scope.ual, publicQuads, metadataQuads };
+  return Object.freeze({ kaUal: scope.ual, publicQuads: Object.freeze(publicQuads.map(q => Object.freeze(q))),
+    metadataQuads: Object.freeze(metadataQuads.map(q => Object.freeze(q))) });
 }
 
 /** Caller owns the lifecycle lock. Share the publisher's materialization lock and worker fence. */
@@ -100,18 +101,19 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
     if (result.type !== 'quads') throw new Error('Confirmed lifecycle payload read did not return quads');
     const matches = result.quads.length === proof.publicTripleCount
       && rootHex(computeFlatKCRootV10(result.quads, proof.privateMerkleRoot ? [proof.privateMerkleRoot] : [])) === rootHex(input.merkleRoot);
+    const exactControls = snapshot && await readLocallyTrustedKnowledgeAssetControlEnvelope(store, meta, scope.ual, snapshot.metadataQuads, {}, 'exact');
+    if (snapshot && !exactControls) await replaceLocallyTrustedKnowledgeAssetControls(store, scope.ual, snapshot.metadataQuads);
     if (!matches || !exactMetadata) {
       if (!snapshot) throw new Error('Confirmed lifecycle repair awaits its original public payload');
       const payload = snapshot.publicQuads.map(q => ({ ...q, graph }));
+      const recoveredMetadata = !exactMetadata && exactControls
+        ? await overlayLocallyTrustedKnowledgeAssetControls(store, meta, scope.ual, snapshot.metadataQuads) : snapshot.metadataQuads;
       const replaced = exactMetadata
         ? await tryReplaceGraphAtomically(store, graph, payload, { source: 'agent.publish.confirmedLifecyclePayload' })
-        : await tryReplaceGraphAndSubjectAtomically(store, graph, payload, meta, scope.ual, [...snapshot.metadataQuads], { source: 'agent.publish.confirmedLifecycleMaterialization' });
+        : await tryReplaceGraphAndSubjectAtomically(store, graph, payload, meta, scope.ual, [...recoveredMetadata], { source: 'agent.publish.confirmedLifecycleMaterialization' });
       if (!replaced) throw new Error('Confirmed lifecycle recovery requires atomic materialization replacement');
     }
-    if (snapshot && !await readLocallyTrustedKnowledgeAssetControlEnvelope(store, meta, scope.ual, snapshot.metadataQuads)) {
-      await replaceLocallyTrustedKnowledgeAssetControls(store, scope.ual, snapshot.metadataQuads);
-    }
-    await applyPublishedNamedKaVmLifecycle(store, input, options);
+    await mutatePublishedNamedKaVmLifecycle(store, input, options.preserveVerifiedVmProof);
     // This outer barrier owns the payload read/replacement as well as the lifecycle write.
     await barrier({ source: 'agent.publish.confirmedLifecycleMaterializationFlush' });
   });
