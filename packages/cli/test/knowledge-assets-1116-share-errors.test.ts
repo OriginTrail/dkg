@@ -138,7 +138,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
   async function startWith(
     assertion: Record<string, unknown>,
     agentOverrides: Record<string, unknown> = {},
-    routeOverrides: { requestToken?: string; requestAgentAddress?: string } = {},
+    routeOverrides: { requestToken?: string; requestAgentAddress?: string; operator?: boolean } = {},
     publisherControl: Record<string, unknown> = {},
     publisherRuntime: unknown = {
       walletIds: ['0x1111111111111111111111111111111111111111'],
@@ -224,7 +224,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           url,
           path: url.pathname,
           requestAgentAddress: routeOverrides.requestAgentAddress ?? 'did:dkg:agent:test',
-          authentication: routeOverrides.requestToken && agent.resolveAgentByToken(routeOverrides.requestToken)
+          authentication: routeOverrides.operator ? requestAuthentication({ kind: 'nodeOperator' }) : routeOverrides.requestToken && agent.resolveAgentByToken(routeOverrides.requestToken)
             ? requestAuthentication({
                 kind: 'agent',
                 agentAddress: agent.resolveAgentByToken(routeOverrides.requestToken),
@@ -2161,6 +2161,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         }
         return {
           status: 'confirmed' as const,
+          localFinalizationComplete: true,
           kaId: 42n,
           ual: 'did:dkg:test/1/42',
           merkleRoot: ethers.getBytes(request.sealMerkleRoot),
@@ -3063,7 +3064,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         execute: async input => { try { return await handler.execute(input); } catch (error) { captured = error; throw error; } },
       } });
       await startWith({}, { resolveFinalizedAssertionVmPublishIntent: async () => fixture.request,
-        preflightKnowledgeAssetVmPublishSnapshot: async () => undefined }, {}, queue as any,
+        preflightKnowledgeAssetVmPublishSnapshot: async () => undefined }, { operator: true }, queue as any,
         { publisher: queue, walletIds: ['wallet-1'], wallets: [{ address: fixture.author }] });
       const accepted = await post('vm/publish-async', { contextGraphId: CG_ID });
       expect(accepted.status).toBe(202); expect(accepted.body.status).toBe('accepted');

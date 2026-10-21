@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { DurableReplaceableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
-import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import { ConfirmedNamedKaVmLifecycleExecutor } from './named-ka-vm-lifecycle-executor.js';
 import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
@@ -23,6 +23,7 @@ export type NamedKaVmLifecycleRepairOutcome = 'repaired' | 'pending' | 'supersed
 
 /** A confirmed transaction is never submitted again by this owner: it only repairs local evidence. */
 export class NamedKaVmLifecycleRepair {
+  private readonly executor: ConfirmedNamedKaVmLifecycleExecutor;
   private entries = new Map<string, RepairEntry>();
   private loaded = false;
   private journalTail: Promise<unknown> = Promise.resolve();
@@ -44,6 +45,7 @@ export class NamedKaVmLifecycleRepair {
     isCurrent: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<boolean>;
     warn: (message: string) => void;
   }) {
+    this.executor = new ConfirmedNamedKaVmLifecycleExecutor(options);
     if (!(options.writeLocks instanceof Map)) throw Object.assign(new Error('Named KA lifecycle repair requires the shared lifecycle write-lock map'), {
       code: 'KA_VM_LIFECYCLE_REPAIR_LOCKS_REQUIRED',
     });
@@ -103,9 +105,7 @@ export class NamedKaVmLifecycleRepair {
   private execute(key: string, entry: RepairEntry): Promise<NamedKaVmLifecycleRepairOutcome> {
     if (entry.retention === 'historical-unbound') return Promise.resolve('pending');
     const input = entry.input;
-    const execution = withKeyedLocks(this.options.writeLocks, [
-      assertionLifecycleWriteLockKey(input.contextGraphId, input.name, input.agentAddress, input.subGraphName),
-    ], async () => {
+    const execution = this.executor.withLock(input, async () => {
       // The shared lifecycle owner covers readiness, graph commitment and durable
       // journal retirement. Admissions never wait on this lock inside journal serialization.
       const ready = await this.serial(async () => {
@@ -128,12 +128,8 @@ export class NamedKaVmLifecycleRepair {
     try {
       // Readiness already ran after the prior lifecycle writer physically retired.
       // Admission can still supersede this entry during the external currency read.
-      if (!await this.options.isCurrent(input)
-        || !await this.serial(async () => this.entries.get(key) === entry)) outcome = 'superseded';
-      else {
-        await this.options.apply(input);
-        outcome = 'repaired';
-      }
+      outcome = await this.executor.commitIfCurrent(input,
+        () => this.serial(async () => this.entries.get(key) === entry)) ? 'repaired' : 'superseded';
     } catch (error) {
       failure = error;
       outcome = isNamedKaVmLifecycleIntegrityError(error) ? 'rejected' : 'pending';

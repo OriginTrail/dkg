@@ -87,7 +87,8 @@ it('directory compatibility never tolerates a failed file sync or damages the pr
   expect(await readdir(parent)).toEqual(['source.json']);
 });
 const input = { contextGraphId: 'durable-journal', name: 'exact-name', agentAddress: '0x' + '12'.repeat(20),
-  publishedUal: 'did:dkg:31337/0x' + '34'.repeat(20) + '/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1' };
+  publishedUal: 'did:dkg:31337/0x' + '34'.repeat(20) + '/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1',
+  publicationDeployment: { chainId: '31337', lifecycleAddress: '0x' + '56'.repeat(20) } };
 it('journal admission propagates directory EPERM before applying confirmed state, then retries exact evidence', async () => {
   const parent = await directory(), apply = vi.fn(async () => {});
   const owner = new NamedKaVmLifecycleRepair({ dataDir: parent, writeLocks: new Map(), isCurrent: async () => true, apply, warn: () => {} });

@@ -54,4 +54,27 @@ describe('inline named-KA completion certificate', () => {
     expect(repair).toHaveBeenCalledTimes(certified ? 0 : 1);
     expect(execute).toHaveBeenCalledOnce();
   });
+  it.each(['no-chain', 'private-no-acks', 'receipt'] as const)('preserves tentative %s transitions', async mode => {
+    const store = new OxigraphStore(); stores.push(store);
+    const confirmed = result(false);
+    const execute = vi.fn(async () => ({ ...confirmed, status: 'tentative' as const,
+      onChainResult: mode === 'receipt' ? confirmed.onChainResult : undefined,
+      ...(mode !== 'receipt' ? { localChainSkipReason: mode } : {}),
+    }));
+    const publisher = new TripleStoreAsyncLiftPublisher(store, { knowledgeAssetVmPublishHandler: { execute } });
+    await stageKnowledgeAssetShareSnapshot({ store });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const job = await publisher.processNext('wallet-1');
+    expect(job?.status).toBe(mode === 'receipt' ? 'included' : mode === 'no-chain' ? 'finalized' : 'failed');
+    if (mode === 'receipt') {
+      expect(job?.broadcast?.txHash).toBe(KA_VM_EXECUTOR_TX_HASH);
+      expect(job?.finalization).toBeUndefined();
+    }
+    if (mode === 'no-chain') expect(job?.finalization?.mode).toBe('local');
+    await publisher.recover();
+    expect(await publisher.processNext('wallet-1')).toBeNull();
+    expect((await publisher.getStatus(jobId))?.status).toBe(job?.status);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
 });

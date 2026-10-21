@@ -599,7 +599,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         knowledgeAssetVmPublishHandler: {
           execute: async (input) => {
             calls.push(input);
-            return confirmedPublishResult();
+            return { ...confirmedPublishResult(), localFinalizationComplete: true };
           },
         },
       },

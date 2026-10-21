@@ -18,7 +18,7 @@ afterEach(async () => { vi.restoreAllMocks(); for (const owner of owners.splice(
 function agentFor(store: TripleStore, dataDir?: string) {
   const agent = Object.create(DKGAgent.prototype) as DKGAgent;
   const warn = vi.fn(), current = vi.fn(async () => ({ latestRoot: `0x${input.merkleRoot}`, rootCount: 1n }));
-  Object.assign(agent, { config: { dataDir }, store, writeLocks: new Map(), log: { warn }, _canStampRecoveredKnowledgeAssetVmLifecycle: async () => true,
+  Object.assign(agent, { config: { dataDir }, store, writeLocks: new Map(), log: { warn }, _resolveRecoveredKnowledgeAssetVmLifecycleAuthor: async () => ({ author: input.agentAddress, incomplete: false }),
     chain: { readKnowledgeAssetVersionSnapshot: current, getEvmChainId: vi.fn(async () => 31337n),
       getKnowledgeAssetsLifecycleAddress: vi.fn(async () => input.publicationDeployment.lifecycleAddress) } });
   const owner = agent.getOrCreateNamedKaVmLifecycleRepair(); owners.push(owner); return { agent, owner, current, warn };

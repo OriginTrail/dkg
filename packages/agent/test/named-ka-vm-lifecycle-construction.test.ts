@@ -30,7 +30,7 @@ describe('agent construction wires the queued lifecycle writer', () => {
       const update = vi.spyOn(store, 'atomicUpdate');
       vi.spyOn(chain, 'getKnowledgeAssetsLifecycleAddress').mockResolvedValue(author);
       vi.spyOn(chain, 'readKnowledgeAssetVersionSnapshot').mockResolvedValue({ latestRoot: `0x${'cd'.repeat(32)}`, rootCount: 1n });
-      vi.spyOn(agent, '_canStampRecoveredKnowledgeAssetVmLifecycle').mockResolvedValue(true);
+      vi.spyOn(agent, '_resolveRecoveredKnowledgeAssetVmLifecycleAuthor').mockResolvedValue({ author, incomplete: false });
       if (fail) update.mockRejectedValueOnce(failure);
       const insert = vi.spyOn(store, 'insert');
       const remove = vi.spyOn(store, 'deleteByPatternWithoutCount');

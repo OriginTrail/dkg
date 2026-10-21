@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
-import { tryWithKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
@@ -16,7 +15,7 @@ import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLoc
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
+import { ConfirmedNamedKaVmLifecycleExecutor, confirmedLifecycleExecutionCapabilities } from './named-ka-vm-lifecycle-executor.js';
 import { confirmedNamedKaVmLifecycleInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
 
 import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
@@ -343,8 +342,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle, confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
-import { withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import { applyTentativeNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
@@ -5177,13 +5175,16 @@ export class PublishMethods extends DKGAgentBase {
   getOrCreateNamedKaVmLifecycleRepair(this: DKGAgent): NamedKaVmLifecycleRepair {
     return this.namedKaVmLifecycleRepair ??= new NamedKaVmLifecycleRepair({
       dataDir: this.config?.dataDir,
-      writeLocks: this.writeLocks,
-      apply: input => applyPublishedNamedKaVmLifecycle(this.store, input, confirmedNamedKaVmLifecycleApplyOptions(this.config?.dataDir)),
-      isCurrent: input => isConfirmedNamedKaVmLifecycleCurrent(
-        this.chain, input, this.chainAuthorityReadBudgets.requestTimeoutMs, Boolean(this.config?.dataDir),
-      ),
+      ...this._confirmedNamedKaVmLifecycleExecutor().capabilities,
       warn: message => this.log.warn(createOperationContext('publish'), message),
     });
+  }
+
+  private _confirmedNamedKaVmLifecycleExecutor(this: DKGAgent): ConfirmedNamedKaVmLifecycleExecutor {
+    return new ConfirmedNamedKaVmLifecycleExecutor(confirmedLifecycleExecutionCapabilities({
+      store: this.store, chain: this.chain, writeLocks: this.writeLocks, dataDir: this.config?.dataDir,
+      readTimeoutMs: this.chainAuthorityReadBudgets.requestTimeoutMs,
+    }));
   }
 
   async _repairConfirmedNamedKaVmLifecycle(
@@ -5206,20 +5207,10 @@ export class PublishMethods extends DKGAgentBase {
       stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter }, input);
   }
 
+  /** Queue recovery owns its claim lock: defer rather than waiting behind a lifecycle writer. */
   async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
     this: DKGAgent, request: KnowledgeAssetVmPublishRequest, publishedUal: string,
-    packedKaId?: bigint, merkleRoot: string = request.sealMerkleRoot,
-  ): Promise<boolean> {
-    const author = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    return withKeyedLocks(this.writeLocks, [
-      assertionLifecycleWriteLockKey(request.contextGraphId, request.name, author, request.subGraphName),
-    ], () => this._applyQueuedKnowledgeAssetVmPublishedLifecycle(request, publishedUal, packedKaId, merkleRoot));
-  }
-
-  /** The caller owns the shared lifecycle lock, including nonblocking queue recovery. */
-  private async _applyQueuedKnowledgeAssetVmPublishedLifecycle(
-    this: DKGAgent, request: KnowledgeAssetVmPublishRequest, publishedUal: string,
-    packedKaId?: bigint, merkleRoot: string = request.sealMerkleRoot, preserveVerifiedVmProof = false,
+    packedKaId?: bigint, merkleRoot: string = request.sealMerkleRoot, signal?: AbortSignal,
   ): Promise<boolean> {
     const input: ConfirmedNamedKaVmLifecycleInput = {
       contextGraphId: request.contextGraphId, name: request.name,
@@ -5229,11 +5220,16 @@ export class PublishMethods extends DKGAgentBase {
       publicationDeployment: { chainId: request.sealChainId, lifecycleAddress: request.sealKav10Address },
       ...(request.vmCurrentAssertion ? { priorMerkleRoot: request.vmCurrentAssertion } : {}),
     };
-    if (!await isConfirmedNamedKaVmLifecycleCurrent(this.chain, input,
-      this.chainAuthorityReadBudgets.requestTimeoutMs, Boolean(this.config?.dataDir))
-      || !await this._canStampRecoveredKnowledgeAssetVmLifecycle(request)) return false;
-    await applyPublishedNamedKaVmLifecycle(this.store, input, { ...confirmedNamedKaVmLifecycleApplyOptions(this.config?.dataDir), preserveVerifiedVmProof });
-    return true;
+    const executor = this._confirmedNamedKaVmLifecycleExecutor();
+    const result = await executor.tryWithLock(input, () => executor.commitIfCurrent(input, async () => {
+      throwIfRecoveryDeadlineReached(signal);
+      const ownership = await this._resolveRecoveredKnowledgeAssetVmLifecycleAuthor(request);
+      throwIfRecoveryDeadlineReached(signal);
+      return ownership;
+    }));
+    if (!result.acquired) throw Object.assign(new Error('Named KA lifecycle writer is busy; recovery will retry'),
+      { code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    return result.value;
   }
 
   async _writeQueuedKnowledgeAssetVmPublishReceipt(
@@ -5257,10 +5253,6 @@ export class PublishMethods extends DKGAgentBase {
       blockNumber: BigInt(blockNumber),
       kaId: packedKaId,
     }));
-  }
-
-  async _canStampRecoveredKnowledgeAssetVmLifecycle(this: DKGAgent, request: KnowledgeAssetVmPublishRequest): Promise<boolean> {
-    return Boolean(await this._resolveRecoveredKnowledgeAssetVmLifecycleAuthor(request));
   }
 
   /** Re-check the named lifecycle independently of the mutable workspace head. */
@@ -5546,31 +5538,11 @@ export class PublishMethods extends DKGAgentBase {
     // `stale-target` means a still-newer local version won the race. Do not
     // regress its pointer; the exact publish receipt is nevertheless repaired.
     if (materialization !== 'stale-target') {
-      const author = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-      const lifecycleKey = assertionLifecycleWriteLockKey(
-        request.contextGraphId, request.name, author, request.subGraphName,
-      );
       throwIfRecoveryDeadlineReached(signal);
-      // This finalizer holds the queue's global claim lock. Never wait behind
-      // a lifecycle writer, which can itself need queue admission.
-      const lifecycleRepair = await tryWithKeyedLocks(this.writeLocks, [lifecycleKey], async () => {
-        throwIfRecoveryDeadlineReached(signal);
-        const lifecycleAuthor = await this._resolveRecoveredKnowledgeAssetVmLifecycleAuthor(request);
-        throwIfRecoveryDeadlineReached(signal);
-        if (lifecycleAuthor) {
-          await this._applyQueuedKnowledgeAssetVmPublishedLifecycle(
-            { ...request, agentAddress: lifecycleAuthor.author }, recovered.localUal,
-            recovered.reservedKaId, recovered.materialization.merkleRoot, lifecycleAuthor.incomplete,
-          );
-        } else {
-          this.log.info(ctx, `Recovered receipt for "${request.name}" without lifecycle stamping because `
-            + 'the current named assertion no longer matches the queued assertion');
-        }
-      });
-      if (!lifecycleRepair.acquired) {
-        throw Object.assign(new Error('Named KA lifecycle writer is busy; recovery will retry'),
-          { code: 'KA_VM_RECOVERY_INCONSISTENT' });
-      }
+      const stamped = await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, recovered.localUal,
+        recovered.reservedKaId, recovered.materialization.merkleRoot, signal);
+      if (!stamped) this.log.info(ctx, `Recovered receipt for "${request.name}" without lifecycle stamping because `
+        + 'the current named assertion no longer matches the queued assertion');
     }
 
     // A recovery-finalized transaction owns the same RFC-64 lifecycle tail as

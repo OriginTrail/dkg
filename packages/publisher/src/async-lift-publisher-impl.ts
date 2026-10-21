@@ -1315,6 +1315,9 @@ export class TripleStoreAsyncLiftPublisher
       await this.recordKnowledgeAssetExecutionResult(claim, result, { publicByteSize });
     } catch (error) {
       if (!(error instanceof InvalidLiftPublishResultError)) throw error;
+      if (!result.onChainResult && broadcastRecorder.outcome !== 'recorded-durable') {
+        return await this.failKnowledgeAssetVmPublishExecution(session, error, broadcastRecorder);
+      }
       // Invalid executor evidence cannot erase the original transaction's repair obligation.
     }
     return await this.getRequiredJob(claimed.jobId);
@@ -1416,8 +1419,7 @@ export class TripleStoreAsyncLiftPublisher
   private async recordKnowledgeAssetExecutionResult(
     claim: ActiveLiftJobClaim, result: AsyncKnowledgeAssetVmPublishExecutionResult, options: { publicByteSize?: number },
   ): Promise<boolean> {
-    if (result.status !== 'confirmed' || !result.onChainResult) return false;
-    const resultTxHash = result.onChainResult.txHash;
+    const resultTxHash = result.onChainResult?.txHash;
     // Keep canonical claim -> job lock order through terminal persistence and wallet deletion.
     // Otherwise a claimant can replace the wallet lock between its guarded read and deletion.
     // This short transaction does no lifecycle repair: the executor certified that work already.
@@ -1428,7 +1430,7 @@ export class TripleStoreAsyncLiftPublisher
       if (current.claim?.claimToken !== claim.claim.claimToken
         || current.claim?.walletId !== claim.claim.walletId) return false;
       if (current.broadcast && current.broadcast.txHash !== resultTxHash) return false;
-      const certified = result.localFinalizationComplete === true;
+      const certified = result.status === 'confirmed' && result.localFinalizationComplete === true;
       if (!certified && current.status !== 'validated') return false;
       // Older inline handlers may omit the pre-send hook. Retain their receipt as
       // tx-bearing recovery work even without a certificate; never reset and resend.

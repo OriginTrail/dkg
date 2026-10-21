@@ -7,24 +7,12 @@ import { ethers } from 'ethers';
 import { assertionLifecycleUri, buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri,
   createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { DKGPublisher, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { DurableReplaceableFile, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { GossipSession } from '../../../agent/src/gossip-session.js';
 import { createKnowledgeAssetVmPublishIntentKey } from '../../../agent/dist/dkg-agent-publish.js';
 
 const fault = vi.hoisted(() => ({ directory: '', confirmations: 0, admissions: 0 }));
-vi.mock('node:fs/promises', async importOriginal => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
-    if (fault.directory && String(args[0]).startsWith(join(fault.directory, '.named-ka-vm-lifecycle-repairs.json.')) && args[1] === 'wx') {
-      expectConfirmation();
-      fault.admissions++;
-      throw Object.assign(new Error('No space left for lifecycle journal'), { code: 'ENOSPC' });
-    }
-    return actual.open(...args);
-  } };
-  function expectConfirmation() { if (fault.confirmations !== 1) throw new Error('Admission fault must follow confirmation'); }
-});
 const fixtures: Array<{ store: OxigraphStore; agent: any; dir: string }> = [];
 afterEach(async () => {
   fault.directory = ''; fault.confirmations = 0; fault.admissions = 0; vi.restoreAllMocks();
@@ -72,7 +60,20 @@ export async function confirmedVmPublishFixture(contextGraphId: string, name: st
   agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: async () => undefined,
     clearPublishedKnowledgeAssetSwm: async () => undefined };
   agent.publishFromSharedMemory = publish;
-  if (failAdmission) fault.directory = dir;
+  if (failAdmission) {
+    fault.directory = dir;
+    const replace = DurableReplaceableFile.prototype.replace;
+    vi.spyOn(DurableReplaceableFile.prototype, 'replace').mockImplementation(async function (contents) {
+      // Inject at the shared storage owner, including when agent/storage are built package imports.
+      const path = (this as unknown as { path: string }).path;
+      if (path === join(fault.directory, 'named-ka-vm-lifecycle-repairs.json')) {
+        if (fault.confirmations !== 1) throw new Error('Admission fault must follow confirmation');
+        fault.admissions++;
+        throw Object.assign(new Error('No space left for lifecycle journal'), { code: 'ENOSPC' });
+      }
+      return replace.call(this, contents);
+    });
+  }
   fixtures.push({ store, agent, dir });
   const fields = { contextGraphId, name, agentAddress: author, shareOperationId: 'confirmed-http-share', roots: [],
     seal: { merkleRoot: rootHex, authorAddress: author, signature: { r: `0x${'01'.repeat(32)}`, vs: `0x${'02'.repeat(32)}` }, schemeVersion: 1, reservedKaId: packed.toString() },

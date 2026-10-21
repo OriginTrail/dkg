@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent as RealDKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
+import { createChainProofResolver } from '../../cli/src/publisher-chain-proof.js';
 import { replaceDurableFile } from '../src/durable-file-replace.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -836,16 +837,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(vmData.bindings.length).toBeGreaterThan(0);
   }, 30_000);
 
-  it('F4 regression (Codex #898 after publish): WM-graph marker is UPDATED to "VM" and a stale re-promote is a no-op', async () => {
-    // Adversarial review F4: the publish-time SWM→VM flip briefly DELETED the
-    // per-KA `<wmGraph> dkg:memoryLayer` row (RFC ka-metadata-trim "orphan
-    // marker cleanup"). That row is the witness `assertAssertionDataPersisted`
-    // reads to classify a stale re-promote after a successful publish as a
-    // harmless no-op (the Codex #898 case, post-publish variant: the lifecycle
-    // URN's dkg:assertionGraph back-link has been re-pointed at the VM graph by
-    // then, so the URN fallback can no longer vouch for the WM graph). The fix
-    // UPDATES the marker in place to "VM" — keeping the witness and killing the
-    // misleading orphan "SWM" value.
+  it('F4 regression (Codex #898 after publish): only the actual VM graph is marked and a stale re-promote is a no-op', async () => {
     const agent = await createAgent('DoublePromoteBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Double Promote E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -862,8 +854,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(pub.status).toBe('confirmed');
     expect(pub.kaId).toBeDefined();
 
-    // 1. The marker must now read "VM" on the per-KA WM graph URI the flip
-    //    derives from the minted kaId — present (not deleted), not "SWM".
+    // The VM graph owns its layer marker; retired WM has none.
     const DKG = 'http://dkg.io/ontology/';
     const metaGraph = contextGraphMetaUri(CG_ID);
     const kaId = BigInt(pub.kaId!);
@@ -877,12 +868,13 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
       `SELECT ?layer WHERE { GRAPH <${metaGraph}> { <${wmGraphFromKaId}> <${DKG}memoryLayer> ?layer } }`,
     );
     expect(markerRes.type).toBe('bindings');
-    expect(markerRes.bindings.map((b: Record<string, string>) => b['layer'])).toEqual([`"${MemoryLayer.VerifiableMemory}"`]);
+    expect(markerRes.bindings).toEqual([]);
+    const vmGraph = contextGraphLayerUri(CG_ID, MemoryLayer.VerifiableMemory,
+      '0x' + (kaId >> 96n).toString(16).padStart(40, '0'), kaId & ((1n << 96n) - 1n));
+    const vmMarker = await (agent as any).store.query(`SELECT ?layer WHERE { GRAPH <${metaGraph}> { <${vmGraph}> <${DKG}memoryLayer> ?layer } }`);
+    expect(vmMarker.bindings.map((b: Record<string, string>) => b['layer'])).toEqual([`"${MemoryLayer.VerifiableMemory}"`]);
 
-    // 2. Codex #898 post-publish: import-file extraction markers survive
-    //    promote+publish by design. With the WM marker deleted (pre-F4) the
-    //    stale re-promote below misfired AssertionNotPersistedError; the "VM"
-    //    marker short-circuits it to the harmless `{ promotedCount: 0 }` no-op.
+    // Retained import audit markers must not turn a stale promote into a failure.
     const author = agent.defaultAgentAddress ?? agent.peerId;
     const wmGraphPromoteSees = await (agent as any).publisher.wmGraphUri(CG_ID, author, name);
     await (agent as any).store.insert([
@@ -2027,6 +2019,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
   }, 60_000);
 
   it('repairs a confirmed queued lifecycle stamp automatically after a real agent restart', async () => {
+    const CG_ID = 'confirmed-lifecycle-restart';
     const dir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-lifecycle-e2e-'));
     const storePath = join(dir, 'store.nq');
     const store = new OxigraphStore(storePath);
@@ -2071,7 +2064,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
       const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
       const processed = await queue.processNext('wallet-1');
       if (processed?.status === 'failed') throw new Error(JSON.stringify(processed.failure));
-      expect(processed).toMatchObject({ jobId, status: 'finalized' });
+      expect(processed).toMatchObject({ jobId, status: 'broadcast' });
+      expect(processed?.finalization).toBeUndefined();
       expect(submitted).toHaveBeenCalledTimes(1);
       const kaId = BigInt(intent.seal.reservedKaId!);
       const rootCount = await (firstAgent as any).chain.getMerkleRootCount(kaId);
@@ -2088,6 +2082,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
         dataDir: dir, store: new OxigraphStore(storePath), sharedMemoryPublicSnapshotStorage: { enabled: false },
         syncReconcilerEnabled: false, vmReconcilerEnabled: false,
       });
+      // Restore chain-backed context-graph authority as the daemon does before queue recovery.
+      await restartedAgent.discoverContextGraphsFromChain();
       const republish = vi.spyOn((restartedAgent as any).publisher, 'publish');
       let history = await restartedAgent.assertion.history(CG_ID, name);
       const deadline = Date.now() + 20_000;
@@ -2103,7 +2099,29 @@ describe('rootless graph-scoped KA lifecycle', () => {
       expect(published.bindings).toHaveLength(1);
       expect(await (restartedAgent as any).chain.getMerkleRootCount(kaId)).toBe(rootCount);
       expect(republish).not.toHaveBeenCalled();
-      expect(await new TripleStoreAsyncLiftPublisher((restartedAgent as any).store).processNext('wallet-1')).toBeNull();
+      const adapters = new Map([['wallet-1', (restartedAgent as any).chain]]);
+      const resolveProof = createChainProofResolver(adapters);
+      const recoveredQueue = new TripleStoreAsyncLiftPublisher((restartedAgent as any).store, {
+        chainProofResolver: resolveProof,
+        knowledgeAssetVmPublishRecoveryResolver: async (_job, lookup, carried, options) => {
+          const verdict = carried ? { status: 'recovered' as const, recovery: carried } : await resolveProof(lookup, options);
+          if (verdict.status !== 'recovered' || !verdict.recovery.canonicalCreate) return null;
+          const receipt = verdict.recovery.canonicalCreate;
+          return { inclusion: verdict.recovery.inclusion,
+            finalization: { ...verdict.recovery.finalization, ual: intent.kaUal! },
+            publishProof: { merkleRoot: receipt.merkleRoot, authorAddress: receipt.authorAddress, txIndex: receipt.txIndex } };
+        },
+        knowledgeAssetVmPublishHandler: {
+          execute: vi.fn(async () => { throw new Error('Must recover the original transaction'); }),
+          finalizeRecovered: input => restartedAgent!.finalizeRecoveredQueuedKnowledgeAssetVmPublish(input),
+        },
+      });
+      await recoveredQueue.reconcileTransactions();
+      expect(await recoveredQueue.getStatus(jobId)).toMatchObject({ status: 'finalized',
+        finalization: { txHash: processed!.broadcast!.txHash } });
+      expect(await recoveredQueue.processNext('wallet-1')).toBeNull();
+      expect(republish).not.toHaveBeenCalled();
+      expect(await (restartedAgent as any).chain.getMerkleRootCount(kaId)).toBe(rootCount);
     } finally {
       if (restartedAgent) { await restartedAgent.stop(); agents.splice(agents.indexOf(restartedAgent), 1); }
       if (firstAgent && agents.includes(firstAgent)) { await firstAgent.stop(); agents.splice(agents.indexOf(firstAgent), 1); }

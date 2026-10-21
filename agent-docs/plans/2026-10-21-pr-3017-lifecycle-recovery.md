@@ -42,11 +42,11 @@ Planning review: self-reviewed diagnosis, compatibility, durability and operatio
 ## State and resources
 
 - Discovery: issue and latest reproduction read; complete remote thread data downloaded (61 threads, no paginated replies); seven open threads enumerated. Historical threads reviewed, including new findings in resolved threads.
-- Merge: 19 conflicts resolved; integrated with current base, preparing submission.
-- Response rounds: 0/10 for this takeover; no active remote observation window.
+- Merge: 19 conflicts resolved; integrated with current base and pushed 9ac3465f0. GitHub reports mergeable.
+- Response rounds: round 2/10 in progress. Round 1 head 9ac3465f0 observed from 2026-10-21T10:49:24Z to a planned 11:19:24Z deadline; otReviewAgent completed that revision at 10:56:59Z with five actionable findings. Round 2 groups those findings with CI failures; its next observation window begins only after substantive push.
 - Checks: native runtime build passed; agent lifecycle cohort 180 passed; queued tail 61 passed; storage 51 passed; full publisher unit run 2295 passed/22 failed on obsolete fake certificates, followed by all 329 affected tests passing after compatibility fixes. CLI 62 passed plus managed WAL crash test passed on rerun. Graph marker producer regression failed before fix and all 90 affected lifecycle tests now pass. Lint and file-size guard pass. Further CI and live validation pending.
 - New gaps closed: inline certificate enforcement, legacy handler receipts retained as tx-bearing work, journal retirement backoff, bounded 4-KA concurrency, explicit historical unbound records, domain/HTTP separation, shared durable replacement, stable journal encoding independent of lock namespace, real promote graph-marker destinations.
-- Live setup: batch-2 claimed by lifecycle-recovery-3017-20261021; isolated .tmp/pr-3017-live; ownership .tmp/pr-3017-takeover/live/batch-claim.json. Base Sepolia 84532, authenticated 401/200, Hub/token verified, 7 checked signers funded with equal latest/pending nonces. Setup daemon stopped before exact revision validation. No test transactions submitted yet.
+- Live setup: batch-2 claimed by lifecycle-recovery-3017-20261021; isolated .tmp/pr-3017-live; ownership .tmp/pr-3017-takeover/live/batch-claim.json. Base Sepolia 84532, authenticated 401/200, Hub/token verified, 7 checked signers funded with equal latest/pending nonces. Setup daemon stopped before exact revision validation. Detached mint KA 107 recovered across restart and inline mint KA 108 recovered without restart, each with original transaction, one chain root, exact VM payload and no extra publisher nonce. KA 108 update is staged for validation after the next commit. Node is stopped while rebuilding; batch claim remains held.
 
 | Resource | Owner | Purpose | Cleanup condition |
 | --- | --- | --- | --- |
@@ -54,3 +54,13 @@ Planning review: self-reviewed diagnosis, compatibility, durability and operatio
 | .tmp/pr-3017-takeover | this task | GitHub evidence and test logs | Retain compact diagnostic evidence through completion |
 | Native dependencies | this task | builds/tests | Retain while workspace needed |
 | .tmp/pr-3017-live + batch-2 claim | this task | live validation | Reconcile transactions and stop owned activity before release/removal |
+
+## Round 2 and reviewability
+
+Remote review and CI identified a tentative-result compatibility regression, duplicated lifecycle projection, repeated recovery ownership resolution, and stale restart/deployment fixtures. Restore no-chain/private-no-ACK/tentative-receipt transitions while keeping confirmed certificates. Consolidate projection, rendering and fallback into one mutation builder; share lock/current-version/commit policy between journal and queue recovery. Resolve ownership once after currency proof under the nonblocking lock. Strengthen restart testing to recover the original job to finalized.
+
+The user authorized splitting into a stack when useful. Retain this PR: approximately two-thirds of changed lines are regression tests; source changes enforce one durability-to-finalization contract across storage, agent, publisher and CLI, and splitting would scatter the established review history. Keep a review map in the PR description. No separate PR is needed merely to reduce line count.
+
+Owned container `dkg-pr3017-blazegraph`, localhost 57500, validates the real Blazegraph backend on native arm64. Remove it after local integration checks; it is not the testnet node store.
+
+Round 2 executed: full publisher unit suite 126 files/2,322 tests passed; repair journal 89 tests passed; consolidated descriptor/lock/graph/policy cohort 92 tests initially exposed three obsolete mutation-count expectations, corrected and 22 projection tests passed; explicit real-EVM restart finalization, stale-promote, private-no-ACK and identityless-wallet cases passed; CLI route suite 122 passed; Blazegraph 2 passed; builds, lint and source-size guard passed.
