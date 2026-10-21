@@ -52,6 +52,7 @@
     "./dist/rfc64/swm-inventory-catalog-reconciler-v1.js": null,
     "./dist/rfc64/swm-catalog-durable-asset-resolver-v1.js": null,
     "./dist/rfc64/catalog-projection-discovery-v1.js": null,
+    "./dist/rfc64/private-placement-failure-state-v1.js": null,
     "./dist/rfc64/catalog-repair-diagnostics-v1.js": null,
     "./dist/rfc64/catalog-repair-retry-v1.js": null,
     "./dist/rfc64/abort-v1.js": null,
@@ -161,7 +162,9 @@
     "./dist/rfc64/legacy-swm-boundary-codec-v1.js": null,
     "./dist/rfc64/legacy-swm-boundary-fence-v1.js": null,
     "./dist/rfc64/catalog-operational-targets-v1.js": null,
-    "./dist/rfc64/private-read-roster-v1.js": null
+    "./dist/rfc64/private-read-roster-v1.js": null,
+    "./dist/rfc64/inventory-v1/finalized-private-repair-persistence.js": null,
+    "./dist/rfc64/inventory-v1/schema-migrations.js": null
   },
   "scripts": {
     "build": "tsc && pnpm run test:types && pnpm run test:package-root",
