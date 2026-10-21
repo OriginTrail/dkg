@@ -1,12 +1,14 @@
+import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
 import { assertionLifecycleWriteLockKey, writeLocksForStore } from './store-write-locks.js';
 import { assertNoUnfinishedBoundShare, unfinishedBoundShareError } from './bound-share-mutation-guard.js';
 import type { BoundPromoteRequest } from './async-promote-queue-types.js';
 import { readAssertionPromoteEvidence, parsePromoteLifecycleLiteral } from './assertion-promote-evidence.js';
-import { verifyCompletedLegacyPromote } from './completed-legacy-promote.js';
+import { confirmedVmSupersedesSeal, verifyCompletedLegacyPromote } from './completed-legacy-promote.js';
 import { snapshotPublisherPromoteOptions, type PublisherAssertionPromoteOptions, type AssertionPromoteResult } from './assertion-promote-types.js';
 export type { PublisherAssertionPromoteOptions } from './assertion-promote-types.js';
+import { tryCreateShareCompletionEvidence } from './share-completion-evidence.js';
 import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
@@ -117,6 +119,8 @@ import {
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import { verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
+import { resolveAssertionPullSource, type AssertionPromoteState } from './assertion-pull-source.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
 import { ethers } from 'ethers';
@@ -348,66 +352,6 @@ const V10_DEFINITIVE_UPDATE_ERRORS = [
   'ExceededKnowledgeAssetBatchSize',
 ];
 
-async function validateGraphScopedPayloadAgainstSeal(
-  seal: AssertionSeal,
-  publicQuads: readonly Quad[],
-  privateQuads: readonly Quad[],
-  sourceLabel: string,
-): Promise<{
-  normalizedPublicQuads: Quad[];
-  normalizedPrivateQuads: Quad[];
-  privateMerkleRoot: Uint8Array | undefined;
-}> {
-  assertNoKnowledgeAssetPayloadNamedGraphs(publicQuads, privateQuads);
-  const normalizedParts = await skolemizeKnowledgeAssetParts(
-    [...publicQuads],
-    [...privateQuads],
-    { allowCanonicalSkolemTerms: true },
-  );
-  const normalizedPublicQuads = normalizedParts.publicQuads;
-  const normalizedPrivateQuads = normalizedParts.privateQuads;
-  if (normalizedPublicQuads.length !== seal.publicTripleCount) {
-    throw new Error(
-      `Graph-scoped assertion triple-count mismatch: seal=${seal.publicTripleCount}, `
-      + `${sourceLabel}=${normalizedPublicQuads.length}`,
-    );
-  }
-  if (normalizedPrivateQuads.length !== seal.privateTripleCount) {
-    throw new Error(
-      `Graph-scoped assertion private triple-count mismatch: seal=${seal.privateTripleCount}, `
-      + `private-store=${normalizedPrivateQuads.length}`,
-    );
-  }
-  const privateMerkleRoot = computePrivateRoot(normalizedPrivateQuads);
-  const privateRootMatches = seal.privateMerkleRoot === undefined
-    ? privateMerkleRoot === undefined
-    : privateMerkleRoot !== undefined
-      && seal.privateMerkleRoot.length === privateMerkleRoot.length
-      && seal.privateMerkleRoot.every((byte, index) => byte === privateMerkleRoot[index]);
-  if (!privateRootMatches) {
-    throw new Error(
-      `Graph-scoped assertion private Merkle mismatch: seal=${seal.privateMerkleRoot
-        ? ethers.hexlify(seal.privateMerkleRoot)
-        : '(none)'}, private-store=${privateMerkleRoot
-        ? ethers.hexlify(privateMerkleRoot)
-        : '(none)'}`,
-    );
-  }
-  const merkleRoot = computeFlatKCRoot(
-    normalizedPublicQuads,
-    privateMerkleRoot ? [privateMerkleRoot] : [],
-  );
-  if (
-    merkleRoot.length !== seal.merkleRoot.length
-    || !merkleRoot.every((byte, index) => byte === seal.merkleRoot[index])
-  ) {
-    throw new Error(
-      `Graph-scoped assertion Merkle mismatch: seal=${ethers.hexlify(seal.merkleRoot)}, `
-      + `${sourceLabel}=${ethers.hexlify(merkleRoot)}`,
-    );
-  }
-  return { normalizedPublicQuads, normalizedPrivateQuads, privateMerkleRoot };
-}
 
 async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
   const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
@@ -6963,12 +6907,25 @@ export class DKGPublisher implements Publisher {
    * repairing an acknowledgement whose outcome is still ambiguous.
    */
   private async assertNoUnfinishedAssertionPromote(
+    contextGraphId: string, name: string, agentAddress: string, subGraphName?: string,
+  ): Promise<void> {
+    const state = await this.inspectAssertionPromoteState(contextGraphId, name, agentAddress, subGraphName);
+    if (state.kind !== 'mutable') throw state.error;
+  }
+
+  private async inspectAssertionPromoteState(
     contextGraphId: string,
     name: string,
     agentAddress: string,
     subGraphName?: string,
-  ): Promise<void> {
+  ): Promise<AssertionPromoteState> {
     await assertNoUnfinishedBoundShare(this.promoteOwnershipReader, contextGraphId, name, agentAddress, subGraphName);
+    const recoveryError = Object.assign(
+      new Error(
+        `Assertion "${name}" has an unfinished promote; retry assertionPromote before mutating its draft`,
+      ),
+      { code: 'KA_PROMOTE_RECOVERY_REQUIRED' },
+    );
     const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const [operationIdResult, intentResult, layerResult] = await Promise.all([
@@ -6996,8 +6953,8 @@ export class DKGPublisher implements Publisher {
     const layer = layerResult.type === 'bindings' && layerResult.bindings.length === 1
       ? stripOptionalLiteral(layerResult.bindings[0]?.['layer'])
       : undefined;
-    if (layer === MemoryLayer.VerifiableMemory) return;
-    if (!hasOperationId && !hasIntent && layer !== MemoryLayer.SharedWorkingMemory) return;
+    if (layer === MemoryLayer.VerifiableMemory) return { kind: 'mutable' };
+    if (!hasOperationId && !hasIntent && layer !== MemoryLayer.SharedWorkingMemory) return { kind: 'mutable' };
     if (layer === MemoryLayer.SharedWorkingMemory) {
       const rawOperationId = operationIdBindings?.length === 1
         ? operationIdBindings[0]?.['id']
@@ -7022,10 +6979,20 @@ export class DKGPublisher implements Publisher {
           GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(sealSubject)}> ?p ?o }
         }`,
       );
-      const seal = parseAssertionSealQuads(
-        sealResult.type === 'quads' ? sealResult.quads : [],
-        sealSubject,
-      );
+      const unavailableSeal = (error: unknown): AssertionPromoteState =>
+        operationId || (!hasOperationId && !hasIntent)
+          ? { kind: 'swm-seal-unavailable', error, operationId }
+          : { kind: 'blocked', error };
+      let seal: AssertionSeal | undefined;
+      try {
+        seal = parseAssertionSealQuads(
+          sealResult.type === 'quads' ? sealResult.quads : [],
+          sealSubject,
+        );
+      } catch (error) {
+        return unavailableSeal(error);
+      }
+      if (!seal) return unavailableSeal(recoveryError);
       // A completed promote consumes its provisional lifecycle pointer. The
       // monotonic SWM head is then the authoritative recovery pointer. Resolve
       // it only for the clean completed shape; an intent without its matching
@@ -7060,15 +7027,28 @@ export class DKGPublisher implements Publisher {
           subGraphName,
         )
       ) {
-        return;
+        return { kind: 'mutable' };
       }
     }
-    throw Object.assign(
-      new Error(
-        `Assertion "${name}" has an unfinished promote; retry assertionPromote before mutating its draft`,
-      ),
-      { code: 'KA_PROMOTE_RECOVERY_REQUIRED' },
-    );
+    return { kind: 'blocked', error: recoveryError };
+  }
+
+  /** Only pull-from may use this proof; ordinary draft mutations stay frozen. */
+  private async verifyPullRecoverySeal(
+    contextGraphId: string, name: string, agentAddress: string,
+    operationId: string | undefined, subGraphName?: string,
+  ): Promise<ResolvedAssertionSource | undefined> {
+    const subject = this.assertionRecoverySealSubject(contextGraphId, name, agentAddress, subGraphName);
+    const archived = (await this.loadAssertionSeals(contextGraphId, name, agentAddress, subGraphName))
+      .find((candidate) => candidate.subject === subject);
+    return verifyPullRecoverySeal({
+      store: this.store, graphManager: this.graphManager, contextGraphId, name, agentAddress, subGraphName,
+      operationId, archived,
+      activeSubjects: await this.activeAssertionSealSubjects(contextGraphId, name, agentAddress, subGraphName),
+      shareComplete: await this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName),
+      readPublicQuads: (graph) => this.assertionScopedQuads(graph),
+      readPrivateQuads: (scope) => this.privateStore.getKnowledgeAssetPrivateTriples(contextGraphId, scope, subGraphName),
+    });
   }
 
   private async hasDurableAssertionPromoteTail(
@@ -8176,113 +8156,15 @@ export class DKGPublisher implements Publisher {
   }> {
     const subGraphName = opts?.subGraphName;
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
-    await this.assertNoUnfinishedAssertionPromote(
-      contextGraphId,
-      name,
-      agentAddress,
-      subGraphName,
-    );
-    const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-    const loadedSeals = await this.loadAssertionSeals(
-      contextGraphId,
-      name,
-      agentAddress,
-      subGraphName,
-    );
-    if (loadedSeals.length === 0) {
-      throw Object.assign(
-        new Error(
-          `Cannot pull "${name}" from ${sourceLayer.toUpperCase()}: rootless mutation requires a finalized v2 assertion seal`,
-        ),
-        { code: 'UNSEALED_PULL_FROM_BLOCKED' },
-      );
-    }
-
-    let selectedSeal: typeof loadedSeals[number] | undefined;
-    let selectedScope: GraphKnowledgeAssetScope | undefined;
-    let validated: Awaited<ReturnType<typeof validateGraphScopedPayloadAgainstSeal>> | undefined;
-    let candidateError: unknown;
-    let sawLegacySeal = false;
-
-    // Active and recovery seals may legitimately coexist while an edit is
-    // open. Validate candidates against the requested exact source graph in
-    // priority order; a discarded/torn active seal must never shadow the last
-    // complete VM/SWM recovery commitment.
-    for (const loadedSeal of loadedSeals) {
-      const seal = loadedSeal.seal;
-      if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-        sawLegacySeal = true;
-        continue;
-      }
-      if (
-        !seal.kaUal
-        || !seal.assertionVersion
-        || seal.publicTripleCount === undefined
-        || seal.privateTripleCount === undefined
-      ) {
-        candidateError = new Error(`Graph-scoped assertion seal for <${sealSubject}> is incomplete`);
-        continue;
-      }
-
-      try {
-        const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
-        const sourceGraph = knowledgeAssetLayerGraphUri(
-          contextGraphId,
-          sourceLayer === 'swm'
-            ? MemoryLayer.SharedWorkingMemory
-            : MemoryLayer.VerifiableMemory,
-          scope,
-          subGraphName,
-        );
-        const sourcePublicQuads = (await this.assertionScopedQuads(sourceGraph)).filter(
-          (quad) => !isSwmMerkleExcludedQuad(quad),
-        );
-        const sourcePrivateQuads = await this.privateStore.getKnowledgeAssetPrivateTriples(
-          contextGraphId,
-          scope,
-          subGraphName,
-        );
-        if (sourcePublicQuads.length === 0 && sourcePrivateQuads.length === 0) {
-          throw Object.assign(
-            new Error(
-              `No exact ${sourceLayer.toUpperCase()} content found for sealed KA ${scope.ual} assertion ${scope.assertionVersion}; WM draft was not modified.`,
-            ),
-            { code: 'PULL_FROM_EMPTY_SOURCE' },
-          );
-        }
-        const candidatePayload = await validateGraphScopedPayloadAgainstSeal(
-          seal,
-          sourcePublicQuads,
-          sourcePrivateQuads,
-          `${sourceLayer}-memory`,
-        );
-        selectedSeal = loadedSeal;
-        selectedScope = scope;
-        validated = candidatePayload;
-        break;
-      } catch (error) {
-        candidateError = error;
-      }
-    }
-
-    if (!selectedSeal || !selectedScope || !validated) {
-      if (candidateError) throw candidateError;
-      if (sawLegacySeal) throw new LegacyKnowledgeAssetReadOnlyError();
-      throw Object.assign(
-        new Error(
-          `Cannot pull "${name}" from ${sourceLayer.toUpperCase()}: no complete v2 assertion seal matches the exact source graph`,
-        ),
-        { code: 'UNSEALED_PULL_FROM_BLOCKED' },
-      );
-    }
-
-    const scope = selectedScope;
-    const wmGraph = knowledgeAssetLayerGraphUri(
-      contextGraphId,
-      MemoryLayer.WorkingMemory,
-      scope,
-      subGraphName,
-    );
+    const { loadedSeal: selectedSeal, scope, payload: validated } = await resolveAssertionPullSource({
+      contextGraphId, name, agentAddress, subGraphName, sourceLayer,
+      state: await this.inspectAssertionPromoteState(contextGraphId, name, agentAddress, subGraphName),
+      loadSeals: () => this.loadAssertionSeals(contextGraphId, name, agentAddress, subGraphName),
+      verifyRecovery: (operationId) => this.verifyPullRecoverySeal(contextGraphId, name, agentAddress, operationId, subGraphName),
+      readPublicQuads: (graph) => this.assertionScopedQuads(graph),
+      readPrivateQuads: (scope) => this.privateStore.getKnowledgeAssetPrivateTriples(contextGraphId, scope, subGraphName),
+    });
+    const wmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.WorkingMemory, scope, subGraphName);
 
     const publicDraftExists = await this.assertionScopedHasQuads(wmGraph);
     const privateDraft = await this.privateStore.getKnowledgeAssetPrivateDraftTriples(
@@ -8367,7 +8249,7 @@ export class DKGPublisher implements Publisher {
     return this.withAssertionLifecycleWriteLock(request.contextGraphId, request.assertionName,
       request.agentAddress, request.subGraphName, async () => {
         await assertPromoteRecoveryBinding(this.store, request.contextGraphId, request.assertionName,
-          request.agentAddress, { subGraphName: request.subGraphName, recoveryBinding: request.recoveryBinding },
+          request.agentAddress, { subGraphName: request.subGraphName, authorAgentAddress: request.authorAgentAddress, recoveryBinding: request.recoveryBinding },
           () => this.clearSwmShareCompleteUnlocked(request.contextGraphId, request.assertionName, request.agentAddress, request.subGraphName), 'admission');
         return admit();
       });
@@ -8463,23 +8345,7 @@ export class DKGPublisher implements Publisher {
       this.store, contextGraphId, name, agentAddress, opts?.subGraphName,
     );
     const seal = evidence.seal;
-    if (!seal) {
-      throw Object.assign(
-        new Error('Graph-scoped KA sharing requires a finalized v2 assertion seal'),
-        { code: 'UNSEALED_SHARE_BLOCKED' },
-      );
-    }
-    if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
-    if (
-      !seal.kaUal
-      || !seal.assertionVersion
-      || seal.publicTripleCount === undefined
-      || seal.privateTripleCount === undefined
-    ) {
-      throw new Error(`Graph-scoped assertion seal for <${sealSubject}> is incomplete`);
-    }
+    assertPromoteSeal(seal, sealSubject, opts?.authorAgentAddress);
     const contentScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
     const immutablePrivateQuads = await tagPromoteStep(
       'knowledgeAssetPrivateQuads',
@@ -8551,7 +8417,23 @@ export class DKGPublisher implements Publisher {
       // left stale WM behind. Never re-promote that copy or regress VM lifecycle.
       // A sanctioned reopened draft has a new WM lifecycle/seal instead.
       // Validate the exact VM payload before accepting the stale retry as a no-op.
-      const completed = await this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName);
+      let completed: AssertionPromoteResult | null;
+      try { completed = await this.verifyCompletedAssertionPromote(contextGraphId, name, agentAddress, seal, opts?.subGraphName); } catch (error) {
+        // A bound replay accepts only a proven, strictly newer confirmed version of the same VM graph. It writes no VM, WM,
+        // private content or gossip; a failed payload validation has already cleared the share-complete marker, as the VM no-op does.
+        if (!opts?.recoveryBinding || !await confirmedVmSupersedesSeal({ store: this.store, privateStore: this.privateStore,
+          scopedQuads: graph => this.assertionScopedQuads(graph) }, contextGraphId, seal, opts.subGraphName).catch(proofError => {
+          // Keep the mismatch visible when the proof itself fails; the proof's error decides the retry.
+          const mismatch = error instanceof Error ? error.message : String(error);
+          this.log.warn(createOperationContext('share'), `Completed VM check failed and its supersession proof could not complete: ${mismatch}`);
+          throw proofError;
+        })) throw error;
+        // The caught error may be the marker clear itself: accept the newer version only once the marker is gone, so a
+        // failed deletion keeps the replay failing and its bound owner in place.
+        if (await this.hasSwmShareComplete(contextGraphId, name, agentAddress, opts.subGraphName))
+          await this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, opts.subGraphName);
+        return { promotedCount: 0, promotedAllRoots: false };
+      }
       if (!completed) throw new Error('Cannot verify completed VM promotion');
       return { promotedCount: 0, promotedAllRoots: false };
     }
@@ -8754,6 +8636,7 @@ export class DKGPublisher implements Publisher {
       await maintainMarker(false);
       throw error;
     }
+    const shareEvidence = tryCreateShareCompletionEvidence(contextGraphId, name, agentAddress, opts?.subGraphName, seal, operationId);
     const normalizedQuads = validatedPayload.normalizedPublicQuads;
     const normalizedPrivateQuads = validatedPayload.normalizedPrivateQuads;
     const promotedPrivateRoot = validatedPayload.privateMerkleRoot;
@@ -9075,6 +8958,7 @@ export class DKGPublisher implements Publisher {
       gossipMessage: gossipPayload?.message,
       promotedAllRoots: true,
       shareOperationId: operationId,
+      ...(shareEvidence ? { shareEvidence } : {}),
     };
   }
 

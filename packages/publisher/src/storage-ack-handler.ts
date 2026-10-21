@@ -431,6 +431,8 @@ export interface StorageAckVmPromotionRequest {
   /** Informational only: publish and update requests are gated alike. */
   readonly operation?: 'publish' | 'update';
   readonly signal?: AbortSignal;
+  /** The remote peer that asked for the ACK; unset for a local request. */
+  readonly publisherPeerId?: string;
 }
 
 /**
@@ -1959,10 +1961,9 @@ export class StorageACKHandler {
     // Finality gate: sign only once this core has committed to carry the KA
     // into its Verifiable Memory after the publish finalizes.
     const promotionGate = await this.checkVmPromotionOrDecline({
-      contextGraphId: cgId,
-      ...(swmGraphId !== cgId ? { swmGraphId } : {}),
-      operation: 'publish',
-      ...(signal ? { signal } : {}),
+      contextGraphId: cgId, ...(swmGraphId !== cgId ? { swmGraphId } : {}),
+      operation: 'publish', ...(signal ? { signal } : {}),
+      ...(context.kind === 'remote' ? { publisherPeerId: peerId.toString() } : {}),
     });
     if (!promotionGate.ok) return promotionGate.decline;
     let signature: ethers.Signature;
@@ -2506,10 +2507,9 @@ export class StorageACKHandler {
     // guarantee is the catalog commitment verified above and persisted below.
     if (intent.isEncryptedPayload !== true) {
       const updatePromotionGate = await this.checkVmPromotionOrDecline({
-        contextGraphId: cgId,
-        ...(swmGraphId !== cgId ? { swmGraphId } : {}),
-        operation: 'update',
-        ...(signal ? { signal } : {}),
+        contextGraphId: cgId, ...(swmGraphId !== cgId ? { swmGraphId } : {}),
+        operation: 'update', ...(signal ? { signal } : {}),
+        ...(context.kind === 'remote' ? { publisherPeerId: peerId.toString() } : {}),
       });
       if (!updatePromotionGate.ok) return updatePromotionGate.decline;
     }

@@ -55,7 +55,9 @@ function decodeManifest(header: string, key: string | undefined, encodedBytes: n
     encodedBytes: m.encodedBytes, sha256: m.sha256 };
 }
 
-export function resolvePreparedContentCacheConfig(config: PreparedContentCacheConfig | undefined, dataDir?: string) {
+export function resolvePreparedContentCacheConfig(
+  config: PreparedContentCacheConfig | undefined, dataDir?: string,
+) {
   if (config === undefined) return undefined;
   if (!config || typeof config !== 'object' || typeof config.enabled !== 'boolean') {
     throw new TypeError('preparedContentCache.enabled must be boolean');

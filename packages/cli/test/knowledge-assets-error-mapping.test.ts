@@ -5,6 +5,7 @@ import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-asse
 import { respondAssertionCodeError, respondAssertionError } from '../src/daemon/routes/knowledge-assets-error-mapping.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+import { inventoryHandoffPendingFailure } from '../../agent/src/internal/promote/inventory-recovery-failure.js';
 
 import { withDurableShareOwner } from './_helpers/durable-share-owner.js';
 import { daemonState } from '../src/daemon/state.js';
@@ -207,6 +208,21 @@ describe('knowledge-assets mutation error mapping', () => {
       expect(record.body).not.toContain(cause.message);
       expect(record.body).not.toContain('chain-participant-authority-unavailable');
     });
+
+    it.each(['inactive-lane', 'authority-transition', 'projection-admission', 'confirmed-ownership'] as const)(
+      'logs the pending inventory handoff step %s as closed-set tokens', (reason) => {
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        const { record, res } = fakeResponse();
+
+        respondAssertionError(res, inventoryHandoffPendingFailure(reason, `inventory handoff pending: ${reason}`),
+          { contextGraphId: 'cg', name: 'same-asset', phase: 'swm-share' });
+
+        expect(record.status).toBe(503);
+        expect(loggedEvents(stderr)).toEqual([expect.objectContaining({
+          code: 'PROMOTE_RETRYABLE_FAILURE', causeCode: 'SWM_INVENTORY_HANDOFF_PENDING', causeReason: reason,
+        })]);
+        expect(record.body).not.toContain('inventory handoff pending');
+      });
 
     it.each([
       ['no cause', undefined],
