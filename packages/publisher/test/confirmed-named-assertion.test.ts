@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { getBytes } from 'ethers';
-import { canonicalGraphScopedAuthorSealFromAssertionSealV1, assertionLifecycleUri, contextGraphAssertionUri,
+import { canonicalGraphScopedAuthorSealFromAssertionSealV1, canonicalizeCanonicalGraphScopedAuthorSealV1, parseCanonicalGraphScopedAuthorSealV1, assertionLifecycleUri, contextGraphAssertionUri,
   contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { reconcileConfirmedNamedAssertion, assertConfirmedNamedAssertionSeal, confirmedNamedAssertionSealQuads } from '../src/confirmed-named-assertion.js';
@@ -83,4 +83,15 @@ it('does not accept a stored seal from a different root or identity', async () =
   await s.insert(confirmedNamedAssertionSealQuads({ ...seal, assertionMerkleRoot: `0x${'99'.repeat(32)}` } as typeof seal, active, meta));
   await s.insert(confirmedNamedAssertionSealQuads({ ...seal, reservedKaId: (id + 1n).toString() } as typeof seal, archive, archiveGraph));
   await expect(reconcileConfirmedNamedAssertion(s, target, proof)).rejects.toThrow('awaits its authenticated');
+});
+
+it('recognizes the intact original seal independent of canonical model property order while preserving a newer archive', async () => {
+  const s = store();
+  const parsed = parseCanonicalGraphScopedAuthorSealV1(canonicalizeCanonicalGraphScopedAuthorSealV1(seal));
+  expect(JSON.stringify(parsed)).not.toBe(JSON.stringify(seal));
+  await s.insert([...confirmedNamedAssertionSealQuads(seal, active, meta),
+    ...confirmedNamedAssertionSealQuads({ ...seal, assertionVersion: '2' } as typeof seal, archive, archiveGraph)]);
+  const replace = vi.spyOn(s, 'replaceSubject');
+  await expect(reconcileConfirmedNamedAssertion(s, target, proof, parsed)).resolves.toBeUndefined();
+  expect(replace).not.toHaveBeenCalled();
 });

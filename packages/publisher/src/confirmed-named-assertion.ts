@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { buildAssertionSealQuads, parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1,
+import { buildAssertionSealQuads, parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, canonicalizeCanonicalGraphScopedAuthorSealV1,
   assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri, createGraphKnowledgeAssetScope,
   MemoryLayer, knowledgeAssetLayerGraphUri, type CanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
 import { tryReplaceSubjectAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -89,7 +89,8 @@ export async function reconcileConfirmedNamedAssertion(store: TripleStore, targe
   }
   if (!existing.some(q => q.predicate === ontology + 'assertionVersion')) additions.push({ subject: lifecycle, graph: meta,
     predicate: ontology + 'assertionVersion', object: `"${seal.assertionVersion}"^^<http://www.w3.org/2001/XMLSchema#integer>` });
-  const same = (candidate: CanonicalGraphScopedAuthorSealV1 | undefined) => candidate !== undefined && JSON.stringify(candidate) === JSON.stringify(seal);
+  const originalSeal = canonicalizeCanonicalGraphScopedAuthorSealV1(seal);
+  const same = (candidate: CanonicalGraphScopedAuthorSealV1 | undefined) => candidate !== undefined && canonicalizeCanonicalGraphScopedAuthorSealV1(candidate) === originalSeal;
   // Leave active drafts/seals untouched; restore the original only in the publisher's recovery archive.
   if (!same(decode(activeRows, assertion))) {
     const rows = await readArchive(), archived = decode(rows, archive);
