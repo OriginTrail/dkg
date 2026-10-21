@@ -8,7 +8,8 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
 import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
-const fields = { contextGraphId: 'command-contract', agentAddress: '0x1111111111111111111111111111111111111111', name: 'asset',
+const fields: ConfirmedNamedKaVmLifecycleInput = { contextGraphId: 'command-contract', agentAddress: '0x1111111111111111111111111111111111111111', name: 'asset',
+  packedKaId: (BigInt('0x1111111111111111111111111111111111111111') << 96n) | 1n,
   publishedUal: 'did:dkg:mock/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1', publicationDeployment: { chainId: '31337', lifecycleAddress: '0x' + '22'.repeat(20) } };
 const dirs: string[] = [], stores: OxigraphStore[] = [], owners: NamedKaVmLifecycleRepair[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const owner of owners.splice(0)) await owner.stop();
@@ -22,7 +23,7 @@ describe('confirmed lifecycle command contract', () => {
     expect(() => normalizeLifecycleRepairInput({ ...fields, tentative })).toThrowError(expect.objectContaining({ code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' }));
     const valid = normalizeLifecycleRepairInput(fields);
     expect(() => decodeLifecycleRepairJournal({ version: 2, entries: [[lifecycleRepairKey(valid), {
-      input: { ...valid, tentative }, attempts: 0, nextAttemptAt: 0,
+      input: { ...valid, packedKaId: valid.packedKaId.toString(), tentative }, attempts: 0, nextAttemptAt: 0,
     }]] })).toThrowError(expect.objectContaining({ code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' }));
   });
   it('rejects a confirmed projection carrying tentative mode before any graph read or write', async () => {
@@ -51,7 +52,8 @@ describe('confirmed lifecycle command contract', () => {
     const graph = contextGraphMetaUri(fields.contextGraphId), lifecycle = assertionLifecycleUri(fields.contextGraphId, fields.agentAddress, fields.name);
     const prior = 'cd'.repeat(32);
     await store.insert([{ graph, subject: lifecycle, predicate: WM_CURRENT_ASSERTION_PRED, object: JSON.stringify(prior) }]);
-    await applyTentativeNamedKaVmLifecycle(store, { ...fields, tentative: true, priorMerkleRoot: prior });
+    const { packedKaId: _identity, assertionVersion: _version, publicationDeployment: _deployment, ...tentative } = fields;
+    await applyTentativeNamedKaVmLifecycle(store, { ...tentative, tentative: true, priorMerkleRoot: prior });
     expect(await store.query(`ASK { GRAPH <${graph}> { <${lifecycle}> <${WM_CURRENT_ASSERTION_PRED}> ?root } }`)).toMatchObject({ value: false });
     expect(await store.query(`ASK { GRAPH <${graph}> { <${lifecycle}> <http://dkg.io/ontology/vmCurrentAssertion> "${fields.merkleRoot}" } }`)).toMatchObject({ value: true });
   });

@@ -33,9 +33,9 @@ import { confirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-e
 import type { ConfirmedNamedKaVmPublication } from '../src/named-ka-vm-lifecycle-recovery-error.js';
 declare const publication: ConfirmedNamedKaVmPublication;
 // @ts-expect-error Root evidence is owned by the validated publication, not coordinates.
-void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name: 'ka', agentAddress: 'agent', merkleRoot: '00' });
+void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name: 'ka', agentAddress: 'agent', packedKaId: 1n, merkleRoot: '00' });
 // @ts-expect-error Version evidence is owned by the validated publication, not coordinates.
-void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name: 'ka', agentAddress: 'agent', assertionVersion: '999' });
+void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name: 'ka', agentAddress: 'agent', packedKaId: 1n, assertionVersion: '999' });
 
 declare const entry: LifecycleRepairEntry;
 const workerInput: ConfirmedNamedKaVmLifecycleInput = entry.retention === 'historical-unbound' ? confirmed : entry.input;

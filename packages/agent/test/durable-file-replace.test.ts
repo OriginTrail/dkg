@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { replaceDurableFile } from '../src/durable-file-replace.js';
-import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
+import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
 import { saveSourceWorkerState } from '../src/source-worker.js';
 
 const failure = vi.hoisted(() => ({ directory: '', phase: '' as 'sync' | 'close' | 'file' | '', code: 'EPERM' }));
@@ -86,8 +86,9 @@ it('directory compatibility never tolerates a failed file sync or damages the pr
   expect(await readFile(path, 'utf8')).toBe(before);
   expect(await readdir(parent)).toEqual(['source.json']);
 });
-const input = { contextGraphId: 'durable-journal', name: 'exact-name', agentAddress: '0x' + '12'.repeat(20),
-  publishedUal: 'did:dkg:31337/0x' + '34'.repeat(20) + '/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1',
+const input: ConfirmedNamedKaVmLifecycleInput = { contextGraphId: 'durable-journal', name: 'exact-name', agentAddress: '0x' + '12'.repeat(20),
+  packedKaId: (BigInt('0x' + '12'.repeat(20)) << 96n) | 1n,
+  publishedUal: 'did:dkg:31337/0x' + '12'.repeat(20) + '/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1',
   publicationDeployment: { chainId: '31337', lifecycleAddress: '0x' + '56'.repeat(20) } };
 it('journal admission propagates directory EPERM before applying confirmed state, then retries exact evidence', async () => {
   const parent = await directory(), apply = vi.fn(async () => {});
@@ -96,7 +97,7 @@ it('journal admission propagates directory EPERM before applying confirmed state
     failure.directory = parent; failure.phase = 'sync';
     await expect(owner.submit(input)).rejects.toMatchObject({ code: 'EPERM' });
     expect(apply).not.toHaveBeenCalled();
-    expect(JSON.parse(await readFile(join(parent, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries[0][1].input).toEqual(input);
+    expect(JSON.parse(await readFile(join(parent, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries[0][1].input).toEqual({ ...input, packedKaId: input.packedKaId.toString() });
     failure.phase = '';
     expect(await owner.submit(input)).toBe('repaired');
     expect(apply).toHaveBeenCalledExactlyOnceWith(input, false);

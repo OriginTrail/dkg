@@ -10,6 +10,8 @@
   },
   "include": [
     "test/**/*.typecheck.ts",
+    "test/durable-file-replace.test.ts",
+    "test/confirmed-lifecycle-command-contract.test.ts",
     "test/write-preflight-attribution.test.ts",
     "test/bulk-graph-boundaries.test.ts",
     "test/**/*.typechecked.test.ts",
