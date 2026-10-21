@@ -346,6 +346,55 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(verdict).toBe(false);
   });
 
+  it('rejects invalid target chain IDs before ACK preflight with the existing publish/update errors', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const publish = boot.internals.createV10ACKProvider('source-swm-name') as V10ACKProviderObject;
+    const update = boot.internals.createV10UpdateACKProvider('source-swm-name') as V10UpdateACKProvider;
+    const preflight = vi.spyOn(boot.internals.chain, 'getEvmChainId');
+    const root = new Uint8Array(32);
+    for (const [contextGraphId, detail] of [
+      ['not-a-chain-id', "a numeric on-chain context graph id; got 'not-a-chain-id'."],
+      ['1.5', "a numeric on-chain context graph id; got '1.5'."],
+      ['0', 'a positive on-chain context graph id; got 0.'],
+      ['-1', 'a positive on-chain context graph id; got -1.'],
+      ['', 'a positive on-chain context graph id; got 0.'],
+    ]) {
+      await expect(publish({ contextGraphId, merkleRoot: root, kaCount: 1, rootEntities: [],
+        publicByteSize: 1n, merkleLeafCount: 1, ackMode: { kind: 'public' } }))
+        .rejects.toMatchObject({ message: `V10 ACK collection requires ${detail} `
+          + 'Register the CG on-chain via ContextGraphs.createContextGraph first.' });
+      await expect(update({ contextGraphId, kaId: 1n, preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: root, newByteSize: 1n, newTokenAmount: 1n, mintAmount: 0n,
+        burnTokenIds: [], newMerkleLeafCount: 1 }))
+        .rejects.toMatchObject({ message: `V10 UPDATE ACK collection requires ${detail}` });
+    }
+    expect(preflight).not.toHaveBeenCalled();
+    expect(capturedPublishCollectParams).toEqual([]);
+    expect(capturedUpdateCollectParams).toEqual([]);
+  });
+
+  it('keeps native BigInt target parsing and forwards the separate nonnumeric SWM name unchanged', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const publish = boot.internals.createV10ACKProvider('source-swm-name') as V10ACKProviderObject;
+    const update = boot.internals.createV10UpdateACKProvider('source-swm-name') as V10UpdateACKProvider;
+    const root = new Uint8Array(32);
+    const swmGraphId = 'source-swm-name/registered-subgraph';
+    for (const [contextGraphId, expected] of [
+      ['42', 42n], ['0x2a', 42n], [' 42 ', 42n], ['+42', 42n], ['0042', 42n],
+      ['9007199254740993', 9007199254740993n],
+    ] as const) {
+      await expect(publish({ contextGraphId, swmGraphId, merkleRoot: root, kaCount: 1, rootEntities: [],
+        publicByteSize: 1n, merkleLeafCount: 1, ackMode: { kind: 'public' } })).resolves.toEqual([]);
+      await expect(update({ contextGraphId, swmGraphId, kaId: 1n, preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: root, newByteSize: 1n, newTokenAmount: 1n, mintAmount: 0n,
+        burnTokenIds: [], newMerkleLeafCount: 1 })).resolves.toEqual([]);
+      expect(capturedPublishCollectParams.at(-1)).toMatchObject({ contextGraphId: expected, swmGraphId });
+      expect(capturedUpdateCollectParams.at(-1)).toMatchObject({ contextGraphId: expected, swmGraphId });
+    }
+  });
+
   it('allows zero public Merkle leaves only for curated publish and update ACK modes', async () => {
     const boot = await bootProviderAgent();
     agent = boot.agent;

@@ -1,5 +1,6 @@
 import { StorageACKAdmission } from './storage-ack-admission.js';
 import { runStorageACKOperation } from './storage-ack-diagnostics.js';
+import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
 import { resolveConfiguredNetworkIdentity } from './configured-network-identity.js';
 import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
 import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
@@ -3412,32 +3413,7 @@ export class DKGAgent extends DKGAgentBase {
     return (params: V10ACKProviderParams) => runStorageACKOperation(
       this.workLifetime, this.storageACKAdmission, 'publish',
       message => this.log.info(createOperationContext('publish'), message), async admit => {
-      // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
-      // a real on-chain context graph and the contract rejects `cgId == 0`
-      // with `ZeroContextGraphId`. Reject `<= 0n` (not `=== 0n`) because
-      // `BigInt("-1")` returns `-1n` without throwing — a naive zero check
-      // would let negative ids through to the evm-adapter pre-tx guard,
-      // where ethers' uint256 encoder would throw a cryptic low-level
-      // error. Matches the same guard in dkg-publisher, storage-ack-handler,
-      // and async publisher-runner so ACK signers, ACK verifiers, and the
-      // chain submitter all agree on the legal domain. `contextGraphId`
-      // here is the TARGET on-chain id — `swmGraphId` (optional) is the
-      // source SWM graph name and is NOT required to be numeric.
-      let cgIdBigInt: bigint;
-      try {
-        cgIdBigInt = BigInt(params.contextGraphId);
-      } catch {
-        throw new Error(
-          `V10 ACK collection requires a numeric on-chain context graph id; ` +
-          `got '${params.contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
-        );
-      }
-      if (cgIdBigInt <= 0n) {
-        throw new Error(
-          `V10 ACK collection requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
-          `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
-        );
-      }
+      const cgIdBigInt = requireStorageACKContextGraphId(params.contextGraphId, 'publish');
       const allowsEmptyPublicTree = params.ackMode.kind === 'curated-catalog';
       if (
         !Number.isInteger(params.merkleLeafCount)
@@ -3608,23 +3584,7 @@ export class DKGAgent extends DKGAgentBase {
     }): Promise<V10CoreNodeACK[]> => runStorageACKOperation(
       this.workLifetime, this.storageACKAdmission, 'update',
       message => this.log.info(createOperationContext('update'), message), async admit => {
-      // The TARGET cgId for the digest is the on-chain numeric id the
-      // adapter resolved (`params.contextGraphId`). Reject non-numeric /
-      // non-positive ids the same way the publish provider does — the
-      // contract rejects `contextGraphId == 0`.
-      let cgIdBigInt: bigint;
-      try {
-        cgIdBigInt = BigInt(params.contextGraphId);
-      } catch {
-        throw new Error(
-          `V10 UPDATE ACK collection requires a numeric on-chain context graph id; got '${params.contextGraphId}'.`,
-        );
-      }
-      if (cgIdBigInt <= 0n) {
-        throw new Error(
-          `V10 UPDATE ACK collection requires a positive on-chain context graph id; got ${cgIdBigInt}.`,
-        );
-      }
+      const cgIdBigInt = requireStorageACKContextGraphId(params.contextGraphId, 'update');
       const allowsEmptyPublicTree = params.isEncryptedPayload === true;
       if (
         !Number.isInteger(params.newMerkleLeafCount)
