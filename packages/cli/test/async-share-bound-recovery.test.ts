@@ -40,6 +40,20 @@ async function setup(subGraphName?: string, oversized = false, mutable = false) 
   return { agent, publisher, queue, store, finalized, jobId, claim, run, prepare, expire: () => { time += 1001; } };
 }
 
+function useRealFinalizer(f: Awaited<ReturnType<typeof setup>>) {
+    delete f.agent.prepareAtomicAssertionShare;
+    const signer = SIGNER;
+    f.agent.chain = { chainId: 'mock:31337', getEvmChainId: async () => 31337n,
+      getKnowledgeAssetsLifecycleAddress: async () => AUTHOR, hasContractCode: async () => false };
+    f.agent.kaNumberAllocator = makeTestKaNumberAllocator();
+    f.agent.reconciledKaAuthors = new Set();
+    vi.spyOn(f.publisher, 'publisherFallbackAuthorAddress').mockResolvedValue(signer.address);
+    vi.spyOn(f.publisher, 'signAuthorAttestationAsPublisher').mockImplementation(async typed => {
+      const sig = ethers.Signature.from(await signer.signTypedData(typed.domain, typed.types, typed.message));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    });
+}
+
 describe('async shares acquire durable replay authority before promotion', () => {
   it('wires binding into the production supervisor without changing admission', async () => {
     const f = await setup();
@@ -56,17 +70,7 @@ describe('async shares acquire durable replay authority before promotion', () =>
 
   it('finalizes an ordinary draft in the supervisor and recovers its original binding', async () => {
     const f = await setup(undefined, false, true);
-    delete f.agent.prepareAtomicAssertionShare;
-    const signer = SIGNER;
-    f.agent.chain = { chainId: 'mock:31337', getEvmChainId: async () => 31337n,
-      getKnowledgeAssetsLifecycleAddress: async () => AUTHOR, hasContractCode: async () => false };
-    f.agent.kaNumberAllocator = makeTestKaNumberAllocator();
-    f.agent.reconciledKaAuthors = new Set();
-    vi.spyOn(f.publisher, 'publisherFallbackAuthorAddress').mockResolvedValue(signer.address);
-    vi.spyOn(f.publisher, 'signAuthorAttestationAsPublisher').mockImplementation(async typed => {
-      const sig = ethers.Signature.from(await signer.signTypedData(typed.domain, typed.types, typed.message));
-      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-    });
+    useRealFinalizer(f);
     expect((await readAssertionPromoteEvidence(f.store, CG, NAME, AUTHOR)).seal).toBeUndefined();
     let bound: unknown;
     const interruption = vi.spyOn(f.publisher, 'assertionPromote').mockImplementationOnce(async () => {
@@ -264,6 +268,44 @@ describe('async shares acquire durable replay authority before promotion', () =>
     expect(outcome.outcome).toBe('failed_terminal');
     expect(outcome.retiredNoEffect).toBe(true);
     await expect(f.agent.assertion.discard(CG, NAME, { agentAddress: AUTHOR })).resolves.toBeUndefined();
+  });
+
+  it.each([
+    { existing: false, stage: 'materialize' }, { existing: true, stage: 'materialize' },
+    { existing: false, stage: 'lifecycle' }, { existing: true, stage: 'lifecycle' },
+  ])('rechecks authority during $stage (existing seal: $existing)', async ({ existing, stage }) => {
+    const f = await setup(undefined, false, true); useRealFinalizer(f);
+    if (existing) await f.agent.assertion.finalize(CG, NAME, { agentAddress: AUTHOR });
+    const original = await f.publisher.assertionQuery(CG, NAME, AUTHOR);
+    const job = await f.claim();
+    let release!: () => void, entered!: () => void;
+    const blocked = new Promise<void>(r => { release = r; });
+    const reached = new Promise<void>(r => { entered = r; });
+    const target = stage === 'materialize' ? f.publisher : f.agent;
+    const method = stage === 'materialize' ? 'materializeCanonicalWorkingMemory' : '_stampPointerIfDivergedFromVm';
+    const write = target[method].bind(target);
+    const barrier = vi.spyOn(target, method).mockImplementationOnce(async (...args: any[]) => {
+      const result = await write(...args); entered(); await blocked; return result;
+    });
+    const cleanup = vi.spyOn(f.publisher, 'cleanupCanonicalWorkingMemorySources');
+    const running = f.run(job);
+    try {
+      await reached;
+      f.expire(); await f.queue.recoverOnStartup();
+      const replacement = await f.claim();
+      release();
+      expect((await running).outcome).toBe('failure_bookkeeping_uncertain');
+      expect(cleanup).not.toHaveBeenCalled();
+      if (!existing && stage === 'materialize')
+        expect((await readAssertionPromoteEvidence(f.store, CG, NAME, AUTHOR)).seal).toBeUndefined();
+      expect(await f.publisher.assertionQuery(CG, NAME, AUTHOR)).toEqual(original);
+      barrier.mockRestore();
+      expect((await f.run(replacement)).outcome).toBe('succeeded');
+      expect(replacement.jobId).toBe(f.jobId);
+      const content = await f.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s <urn:value> ?o BIND(<urn:value> AS ?p) } }`);
+      expect(content.type === 'quads' && content.quads.map(q => q.object)).toEqual(['"original"']);
+      expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    } finally { release(); await running; }
   });
 
   it.each(['cancel', 'replacement', 'shutdown'])('does not finalize a mutable draft after %s while awaiting the lifecycle fence', async mode => {

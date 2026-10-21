@@ -76,3 +76,7 @@ Initial live candidate succeeded: original job recovered after the real 900,000 
 ## Review round 3
 
 Added an initially unfinalized draft through the real supervisor and finalizer, with a real ephemeral test signer. Interruption before SWM mutation retains the original bound job; recovery completes it under the identical binding. All 19 recovery tests pass. The revised live runtime is `21b3a3338`; this response adds test/plan coverage only and does not rebuild or alter that running runtime.
+
+## Review round 4
+
+Consolidated fresh-seal and existing-seal finalization into one ordered commit routine: canonical materialization, private content, optional fresh seal, lifecycle pointers, public source cleanup and private draft cleanup. The routine checks authority before each step; lifecycle stamping still checks between its individual writes. Four real-finalizer barriers revoke/reassign authority after materialization or lifecycle stamping, for both fresh and existing seals. The stale worker cannot persist a new seal after the first barrier or clean sources after either barrier; the replacement completes the original payload. All 31 focused recovery/domain tests and 21 abandoned-update/version tests pass. Removing the helper's authority checks causes three new cases to fail; restored-source verification follows. Reduced the large agent file's budget to its new measured size. Finish the existing live run before rebuilding; repeat live validation on this final runtime.

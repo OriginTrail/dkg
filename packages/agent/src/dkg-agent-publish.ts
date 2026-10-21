@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { commitAssertionFinalization } from './internal/promote/commit-assertion-finalization.js';
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
 import { tryWithKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
@@ -3327,6 +3328,21 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
+    const commitFinalized = (ual: string, version: string, root: Uint8Array,
+      persistFreshSeal?: () => Promise<void>) => commitAssertionFinalization({
+      authority: opts?.executionAuthority,
+      materialize: () => this.publisher.materializeCanonicalWorkingMemory(
+        contextGraphId, ual, version, normalizedKnowledgeAssetQuads, opts?.subGraphName),
+      writePrivateContent: () => privateStore.replaceKnowledgeAssetPrivateTriples(
+        contextGraphId, createGraphKnowledgeAssetScope(ual, version), normalizedPrivateKnowledgeAssetQuads, opts?.subGraphName),
+      persistFreshSeal,
+      stampLifecycle: () => stampFinalizedLifecycle(version, root),
+      cleanupSources: canonicalGraph => this.publisher.cleanupCanonicalWorkingMemorySources(
+        contextGraphId, name, agentAddress, canonicalGraph, [sourceWmGraphUri], opts?.subGraphName),
+      cleanupPrivateDraft: () => privateStore.deleteKnowledgeAssetPrivateDraft(
+        contextGraphId, agentAddress, name, opts?.subGraphName),
+    });
+
     // 4. Idempotency: if a seal already exists for this assertion,
     //    return it as-is when the merkleRoot matches. Mismatch means
     //    the assertion was mutated since the previous finalize —
@@ -3396,48 +3412,8 @@ export class PublishMethods extends DKGAgentBase {
         reservedKaId: reReservedKaId,
         schemeVersion: existingSeal.authorSchemeVersion,
       });
-      // A prior attempt may have stopped after the target swap, after the seal,
-      // or before source cleanup. Re-materialize and repair in that order so an
-      // idempotent finalize always converges to one exact canonical WM graph.
-      await opts?.executionAuthority?.assertCurrent();
-      const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
-        contextGraphId,
-        existingSeal.kaUal,
-        existingSeal.assertionVersion,
-        normalizedKnowledgeAssetQuads,
-        opts?.subGraphName,
-      );
-      const existingScope = createGraphKnowledgeAssetScope(
-        existingSeal.kaUal,
-        existingSeal.assertionVersion,
-      );
-      await opts?.executionAuthority?.assertCurrent();
-      await privateStore.replaceKnowledgeAssetPrivateTriples(
-        contextGraphId,
-        existingScope,
-        normalizedPrivateKnowledgeAssetQuads,
-        opts?.subGraphName,
-      );
-      await stampFinalizedLifecycle(
-        existingSeal.assertionVersion,
-        existingSeal.merkleRoot,
-      );
-      await opts?.executionAuthority?.assertCurrent();
-      await this.publisher.cleanupCanonicalWorkingMemorySources(
-        contextGraphId,
-        name,
-        agentAddress,
-        canonicalWmGraphUri,
-        [sourceWmGraphUri],
-        opts?.subGraphName,
-      );
-      await opts?.executionAuthority?.assertCurrent();
-      await privateStore.deleteKnowledgeAssetPrivateDraft(
-        contextGraphId,
-        agentAddress,
-        name,
-        opts?.subGraphName,
-      );
+      // Repair an interrupted finalize through the same commit protocol as a fresh seal.
+      await commitFinalized(existingSeal.kaUal, existingSeal.assertionVersion, existingSeal.merkleRoot);
       return {
         assertionUri,
         merkleRoot: existingSeal.merkleRoot,
@@ -3862,47 +3838,8 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
 
-    // Crash-safe commit order:
-    //   1. atomically materialize the complete canonical target;
-    //   2. persist the seal (and a fresh identity, when needed);
-    //   3. repair lifecycle pointers/version;
-    //   4. remove obsolete source graphs.
-    // An interruption retains the source or a recoverable sealed target.
-    await opts?.executionAuthority?.assertCurrent();
-    const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
-      contextGraphId,
-      kaUal,
-      assertionVersion,
-      normalizedKnowledgeAssetQuads,
-      opts?.subGraphName,
-    );
-    const canonicalScope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
-    await opts?.executionAuthority?.assertCurrent();
-    await privateStore.replaceKnowledgeAssetPrivateTriples(
-      contextGraphId,
-      canonicalScope,
-      normalizedPrivateKnowledgeAssetQuads,
-      opts?.subGraphName,
-    );
-    await opts?.executionAuthority?.assertCurrent();
-    await this.store.insert(sealQuads);
-    await stampFinalizedLifecycle(assertionVersion, merkleRoot);
-    await opts?.executionAuthority?.assertCurrent();
-    await this.publisher.cleanupCanonicalWorkingMemorySources(
-      contextGraphId,
-      name,
-      agentAddress,
-      canonicalWmGraphUri,
-      [sourceWmGraphUri],
-      opts?.subGraphName,
-    );
-    await opts?.executionAuthority?.assertCurrent();
-    await privateStore.deleteKnowledgeAssetPrivateDraft(
-      contextGraphId,
-      agentAddress,
-      name,
-      opts?.subGraphName,
-    );
+    await commitFinalized(kaUal, assertionVersion.toString(), merkleRoot,
+      () => this.store.insert(sealQuads));
 
     return {
       assertionUri,
