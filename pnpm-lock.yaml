@@ -32,6 +32,9 @@ overrides:
   ws@>=8.0.0 <8.20.1: 8.20.1
 
 patchedDependencies:
+  kafkajs@2.2.4:
+    hash: d9e175a6f3fb040faee97b6ffb2af1780b75cf4ed113f29a905c11f8fe99fa3e
+    path: patches/kafkajs@2.2.4.patch
   '@libp2p/yamux@8.0.1':
     hash: b38505a7ffe3b88d005da3e1446492a1a679b579080f08937106d809ee9d683e
     path: patches/@libp2p__yamux@8.0.1.patch
@@ -1141,7 +1144,7 @@ importers:
         version: link:../rdf-utils
       kafkajs:
         specifier: 2.2.4
-        version: 2.2.4
+        version: 2.2.4(patch_hash=d9e175a6f3fb040faee97b6ffb2af1780b75cf4ed113f29a905c11f8fe99fa3e)
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.0.18
@@ -12828,7 +12831,7 @@ snapshots:
 
   jsonschema@1.5.0: {}
 
-  kafkajs@2.2.4: {}
+  kafkajs@2.2.4(patch_hash=d9e175a6f3fb040faee97b6ffb2af1780b75cf4ed113f29a905c11f8fe99fa3e): {}
 
   kapsule@1.16.3:
     dependencies:

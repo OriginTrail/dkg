@@ -4,6 +4,27 @@ import { Journal } from '../src/journal.mjs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { runSourceWorkerOnce } from '../../agent/src/source-worker.ts';
+import { createHandler } from '../src/handler.mjs';
+import { hash } from '../src/asset.mjs';
+const require = createRequire(import.meta.url);
+// Exercise the installed KafkaJS recovery path, not a replacement of its reset.
+const ConsumerGroup = require('kafkajs/src/consumer/consumerGroup.js');
+const OffsetManager = require('kafkajs/src/consumer/offsetManager');
+const { KafkaJSOffsetOutOfRange } = require('kafkajs/src/errors');
+async function expireFetch(autoOffsetReset, commits) {
+  const group = Object.create(ConsumerGroup.prototype);
+  Object.assign(group, { autoOffsetReset, preferredReadReplicasPerTopicPartition: {}, logger: { error() {} },
+    offsetManager: new OffsetManager({ autoCommit: false, groupId: 'controlled-expiration',
+      cluster: { defaultOffset: () => '-1', committedOffsets: () => ({ 'test-topic': { 2: '5' } }) },
+      coordinator: { isConnected: () => true, offsetCommit: async request => { commits.push(request); } },
+      memberAssignment: { 'test-topic': [2] }, topicConfigurations: { 'test-topic': { fromBeginning: false } },
+      instrumentationEmitter: { emit() {} },
+    }) });
+  await group.recoverFromFetch(new KafkaJSOffsetOutOfRange({ message: 'expired after admin bounds', type: 'OFFSET_OUT_OF_RANGE', code: 1 },
+    { topic: 'test-topic', partition: 2 }));
+}
 let journal, directory;
 const read = source => readKafka(source, journal);
 
@@ -36,6 +57,7 @@ vi.mock('kafkajs', () => ({
       broker.subscribe = vi.fn(async () => {});
       const starts = new Map(); let paused = [];
       return {
+        autoOffsetReset: broker.missingGuard ? undefined : config.autoOffsetReset,
         events: { CRASH: 'crash', GROUP_JOIN: 'group-join' },
         on: (event, listener) => {
           if (event === 'group-join') broker.join = listener;
@@ -49,7 +71,13 @@ vi.mock('kafkajs', () => ({
         seek: ({ partition, offset }) => starts.set(partition, offset),
         run: async options => {
           broker.runOptions = options;
+          if (broker.joinDelayMs) await new Promise(resolve => setTimeout(resolve, broker.joinDelayMs));
           broker.join({ payload: { memberAssignment: { 'test-topic': broker.partitions } } });
+          if (broker.expireAfterBounds) {
+            try { await expireFetch(config.autoOffsetReset, broker.resetCommits); }
+            catch (error) { broker.crash({ payload: { error } }); }
+            return;
+          }
           for (const partition of broker.partitions) {
             if (paused.includes(partition)) continue;
             const messages = broker.messages.filter(message => (message.partition ?? 2) === partition &&
@@ -75,7 +103,8 @@ const message = (offset = '0') => ({ offset, timestamp: '1700000000000',
 
 beforeEach(async () => {
   Object.assign(broker, { messages: [], stale: false, running: true, error: undefined, batchTask: undefined,
-    partitions: [2], committed: new Map(), high: undefined, failCommit: false });
+    partitions: [2], committed: new Map(), high: undefined, failCommit: false,
+    joinDelayMs: 0, expireAfterBounds: false, resetCommits: [], missingGuard: false });
   directory = await mkdtemp(join(tmpdir(), 'kafka-transport-'));
   journal = new Journal(join(directory, 'journal.sqlite'), 'transport-test');
 });
@@ -208,4 +237,72 @@ test('persisted round-robin advances another partition under continuous first-pa
 test('expired durable positions fail closed instead of accepting Kafka offset reset', async () => {
   journal.checkpoint(source.topic, 2, '100'); broker.high = '50';
   await expect(read(source)).rejects.toThrow('KAFKA_OFFSET_OUT_OF_RANGE');
+});
+
+
+test('installed KafkaJS makes fetch-time expiration non-retriable without a reset commit', async () => {
+  const { Kafka, logLevel } = await vi.importActual('kafkajs');
+  const kafka = new Kafka({ brokers: ['localhost:19092'], logLevel: logLevel.NOTHING });
+  expect(kafka.consumer({ groupId: 'guard-check', autoOffsetReset: false }).autoOffsetReset).toBe(false);
+  expect(kafka.consumer({ groupId: 'legacy-check' }).autoOffsetReset).toBe(true);
+  const commits = [];
+  await expect(expireFetch(false, commits)).rejects.toMatchObject({ message: 'KAFKA_OFFSET_OUT_OF_RANGE', retriable: false });
+  expect(commits).toEqual([]);
+  // Existing consumers retain the default behavior; only explicit opt-in changes.
+  await expireFetch(true, commits);
+  expect(commits).toHaveLength(1);
+  expect(commits[0].topics[0].partitions).toEqual([{ partition: 2, offset: '-1' }]);
+});
+
+test('fetch expiration after accepted bounds persists source failure without resetting or advancing', async () => {
+  broker.expireAfterBounds = true;
+  const owner = '0x' + 'a'.repeat(40);
+  const definition = { ...source, id: 'expiry', kind: 'kafka', clusterId: 'controlled-test',
+    agentAddress: owner, contextGraphId: owner + '/expiry' };
+  const stateFile = join(directory, 'worker.json');
+  let writes = 0;
+  const hooks = await createHandler({ sinkFactory: () => ({ ensure() { writes++; throw new Error('No write expected'); } }) })
+    .createSourceWorkerDeps({ config: { sources: [definition], stateFile } });
+  const state = await runSourceWorkerOnce([definition], stateFile,
+    { ...hooks, now: () => new Date().toISOString(), getJobStatus() { throw new Error('No publisher expected'); } });
+  expect(state.sources.expiry).toMatchObject({ lastStatus: 'failed', lastError: 'KAFKA_OFFSET_OUT_OF_RANGE', attemptCount: 1 });
+  const saved = new Journal(join(directory, `kafka-${hash(definition.id).slice(0, 16)}.sqlite`), hash(definition));
+  try {
+    expect(saved.startPosition(source.topic, 2, '100')).toBe('0');
+    expect(saved.db.prepare('SELECT * FROM scheduling').all()).toEqual([]);
+    expect(saved.db.prepare('SELECT * FROM messages').all()).toEqual([]);
+  } finally { saved.close(); }
+  expect(writes).toBe(0); expect(broker.resetCommits).toEqual([]);
+  expect(broker.commit).not.toHaveBeenCalled();
+  expect(broker.disconnect).toHaveBeenCalledOnce();
+});
+
+test('an unpatched transport is refused before opening its consumer', async () => {
+  broker.missingGuard = true;
+  await expect(read(source)).rejects.toThrow('KAFKA_OFFSET_RESET_GUARD_REQUIRED');
+  expect(broker.subscribe).not.toHaveBeenCalled();
+  expect(broker.commit).not.toHaveBeenCalled();
+});
+
+test('queued records remain deliverable when every group join exceeds the read timeout', async () => {
+  broker.joinDelayMs = 40;
+  broker.messages = [message('0')];
+  for (let i = 0; i < 3; i++) {
+    const delivery = await read({ ...source, readTimeoutMs: 10 });
+    expect(delivery.records.map(record => record.offset)).toEqual(['0']);
+    expect(journal.db.prepare('SELECT * FROM scheduling').all()).toEqual([]);
+    // No acknowledgement: even a completed startup cannot mark this batch done.
+    await delivery.close();
+  }
+  expect(broker.commit).not.toHaveBeenCalled();
+  expect(journal.db.prepare('SELECT * FROM scheduling').all()).toEqual([]);
+});
+
+test('an actually idle assigned partition starts its empty-poll budget after delayed startup', async () => {
+  broker.joinDelayMs = 40;
+  const delivery = await read({ ...source, readTimeoutMs: 10 });
+  expect(delivery.records).toEqual([]);
+  await delivery.close();
+  expect(journal.db.prepare('SELECT lastPartition FROM scheduling').get().lastPartition).toBe(2);
+  expect(broker.commit).not.toHaveBeenCalled();
 });

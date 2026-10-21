@@ -43,12 +43,18 @@ export async function readKafka(source, journal) {
   } catch (error) {
     throw new Error(/^KAFKA_[A-Z_]+$/.test(error.message) ? error.message : 'KAFKA_READ_FAILED');
   } finally { await admin.disconnect().catch(() => {}); }
-  const consumer = kafka.consumer({ groupId: source.groupId, allowAutoTopicCreation: false,
+  const consumer = kafka.consumer({ groupId: source.groupId, allowAutoTopicCreation: false, autoOffsetReset: false,
+    retry: { retries: 0, restartOnFailure: async () => false },
     sessionTimeout: 60000, maxBytesPerPartition: 1024 * 1024 });
+  // An unpatched KafkaJS ignores unknown options. Refuse that transport rather
+  // than silently reverting to the library's reset-and-commit recovery path.
+  if (consumer.autoOffsetReset !== false) throw new Error('KAFKA_OFFSET_RESET_GUARD_REQUIRED');
   let release;
   const held = new Promise(resolve => { release = resolve; });
   let finish, reject, selected = false, active;
   const ready = new Promise((resolve, fail) => { finish = resolve; reject = fail; });
+  // A startup crash can reject before run() returns. It is still awaited below.
+  void ready.catch(() => {});
   let delivered, acknowledged = 0;
   const close = async () => {
     release();
@@ -71,12 +77,15 @@ export async function readKafka(source, journal) {
     consumer.pause([{ topic: source.topic, partitions: assigned.filter(partition => partition !== target) }]);
     for (const partition of assigned) consumer.seek({ topic: source.topic, partition, offset: starts.get(partition) });
   });
-  const off = consumer.on(consumer.events.CRASH, () => reject(new Error('KAFKA_CONSUMER_FAILED')));
+  const off = consumer.on(consumer.events.CRASH, ({ payload }) => {
+    active = undefined;
+    reject(new Error(payload.error?.message === 'KAFKA_OFFSET_OUT_OF_RANGE'
+      ? 'KAFKA_OFFSET_OUT_OF_RANGE' : 'KAFKA_CONSUMER_FAILED'));
+  });
   let timer;
   try {
     await consumer.connect();
     await consumer.subscribe({ topics: [source.topic], fromBeginning: source.fromBeginning ?? false });
-    timer = setTimeout(() => finish([]), source.readTimeoutMs ?? 10000);
     await consumer.run({ autoCommit: false, eachBatchAutoResolve: false, partitionsConsumedConcurrently: 1,
       eachBatch: async ({ batch, heartbeat, resolveOffset, isStale, isRunning }) => {
         if (selected || batch.partition !== target || isStale() || !isRunning()) return;
@@ -101,6 +110,9 @@ export async function readKafka(source, journal) {
         try { await held; } finally { clearInterval(pulse); }
       },
     });
+    // run() completes group join/startup before the idle-fetch budget begins.
+    // A queued batch may already have resolved ready during startup.
+    if (!selected) timer = setTimeout(() => finish([]), source.readTimeoutMs ?? 10000);
     delivered = await ready;
     return {
       records: delivered,

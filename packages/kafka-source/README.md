@@ -99,6 +99,25 @@ journal's durable position even if no broker offset has ever been committed.
 An explicit backward broker offset reset can replay existing KAs; use a
 dedicated test group for replay experiments. A saved position outside broker
 retention fails closed instead of silently accepting Kafka's reset policy.
+`readTimeoutMs` is the idle-fetch budget **after** consumer startup/group join;
+slow startup cannot be reported as a successful empty delivery.
+
+### Fetch-time retention protection
+
+KafkaJS 2.2.4 normally resets an expired offset internally and can commit that
+reset even with `autoCommit: false`. A bounds check alone cannot prevent a
+retention race. This workspace carries an explicit pnpm patch adding the
+opt-in `autoOffsetReset: false` consumer policy. The handler requires that
+policy and checks the capability before connecting that consumer; an unpatched
+installation fails with `KAFKA_OFFSET_RESET_GUARD_REQUIRED`. Other consumers
+retain KafkaJS's default behavior. Install using the workspace frozen lockfile
+so the patch is applied; a bare upstream KafkaJS install is insufficient.
+
+The guard throws a non-retriable `KAFKA_OFFSET_OUT_OF_RANGE` before reset I/O.
+The native worker persists that source failure without acknowledging Kafka,
+advancing checkpoints or marking the partition done. An operator must decide
+how to handle records already lost to retention; ingestion does not guess.
+
 The configured identity needs topic offset/metadata and group offset-read
 permissions in addition to its consume/commit permissions.
 
@@ -108,6 +127,9 @@ permissions in addition to its consume/commit permissions.
 pnpm --filter @origintrail-official/dkg-source-kafka test
 DKG_KAFKA_TEST_CONFIG=/absolute/path/to/integration.private.json \
   pnpm --filter @origintrail-official/dkg-source-kafka test:broker
+# Broker-only polling regressions: no DKG requests/writes or unverified acks.
+DKG_KAFKA_TEST_CONFIG=/absolute/path/to/integration.private.json \
+  pnpm --filter @origintrail-official/dkg-source-kafka test:broker --polling-only
 ```
 
 The unit/contract suite drives the **actual canary Source Worker**, with a

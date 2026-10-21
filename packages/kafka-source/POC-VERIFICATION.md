@@ -1,11 +1,52 @@
-# Local verification — 20 October 2026
+# Kafka Source verification
 
 The consumer is a generic DKG Source Worker handler loaded through
-`handlerModule`. Customer-specific logic is not required. All work is isolated
-on `codex/kafka-source-poc`, based on fresh `testnet-canary`
+`handlerModule`. Customer-specific logic is not required. The initial 20 October implementation used
+`codex/kafka-source-poc` based on `testnet-canary`
 `693be6317ba8d6db6aefc6b6ff3c77f52ef535cd`.
 
-## Review fixes
+## Polling review fixes — 21 October 2026
+
+Updated the validation baseline by merging current `testnet-canary`
+`23ccf2fd37e8c16aca29be7af5ebf96ce898cb27`. The source remains a generic
+private DKG Source Worker handler; no production deployment is performed.
+
+- **45 focused tests pass** on Node 22.23.1 with **96.61% line coverage**
+  against the existing 94% floor. The installed KafkaJS `ConsumerGroup` and
+  `OffsetManager` are exercised with controlled coordinator I/O: explicit
+  `autoOffsetReset: false` throws a non-retriable error without a reset commit;
+  legacy consumers still use their default behavior. An unpatched consumer is
+  rejected before connecting. Native-worker coverage checks persisted source
+  failure, unchanged checkpoints and no completed partition after expiration.
+- Controlled 40ms joins with a 10ms read budget deliver the queued record on
+  three polls without acknowledging or marking it complete. A genuinely idle
+  assigned partition still returns an empty delivery after its read budget.
+- **Real localhost Redpanda/KafkaJS retention race passed:** a saved/broker
+  offset of 0 passes the admin snapshot (low 0); the harness then truncates only
+  that disposable topic to low 1 before fetching. The native worker persists
+  `KAFKA_OFFSET_OUT_OF_RANGE`. Broker offset and journal checkpoint remain 0,
+  no reset sentinel is committed, no partition is marked complete and no KA is
+  created. This is actual broker truncation, not a simulated error response.
+- **Real delayed startup passed:** consumer startup is delayed at least 80ms
+  with a 20ms read budget; the queued record is delivered after startup.
+  Broker offset remains absent because this polling-only check does not
+  manufacture a DKG receipt or acknowledge an unverified record.
+- **772 repository script tests pass** on Node 22.23.1. Runtime package build,
+  lint, frozen offline dependency installation and test inventory (2,730 files,
+  24 Vitest packages) pass. The runtime build excludes Solidity compilation.
+- The latest real-broker run used `test:broker --polling-only`: **no DKG
+  requests or graph writes**. The full Kafka-to-DKG lifecycle suite was not
+  repeated on 21 October; its separately dated earlier evidence follows below.
+- Sanitized evidence and both the five-source-file and KafkaJS patch digests:
+  [`polling-recovery-20261021.json`](test/evidence/polling-recovery-20261021.json).
+  Reproduce with the existing operator-provided integration config and
+  `pnpm --filter @origintrail-official/dkg-source-kafka test:broker --polling-only`.
+
+The patch is explicit and pinned in pnpm, not a prototype change in production.
+It adds an opt-in policy and typed capability; all other KafkaJS consumers keep
+upstream default reset behavior. The handler refuses to run without the guard.
+
+## Review fixes — 20 October 2026
 
 The follow-up corrects durable initial offset selection, bounded partition
 fairness, preparation retry ownership, definite pre-write rejection recovery
