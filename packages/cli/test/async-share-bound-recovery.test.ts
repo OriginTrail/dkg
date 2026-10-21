@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { assertionLifecycleUri, assertionScopedGraphUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { assertionLifecycleUri, assertionScopedGraphUri, contextGraphMetaUri, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { OxigraphStore, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, PrivateContentStore, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { PromoteJobLeaseError } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
@@ -322,6 +322,54 @@ describe('async shares acquire durable replay authority before promotion', () =>
       expect(replacement.jobId).toBe(f.jobId);
       const content = await f.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s <urn:value> ?o BIND(<urn:value> AS ?p) } }`);
       expect(content.type === 'quads' && content.quads.map(q => q.object)).toEqual(['"original"']);
+      expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    } finally { release(); await running; }
+  });
+
+  it.each(['replacement', 'draft deletion'])('fences private %s after authority loss', async stage => {
+    const f = await setup(undefined, false, true); useRealFinalizer(f);
+    const privatePayload = [{ subject: 'urn:asset', predicate: 'urn:secret', object: '"original private"', graph: '' }];
+    await f.publisher.assertionWritePrivate(CG, NAME, AUTHOR, privatePayload);
+    const privateStore = new PrivateContentStore(f.store, new GraphManager(f.store));
+    let scope!: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    let release!: () => void, entered!: () => void;
+    const blocked = new Promise<void>(r => { release = r; });
+    const reached = new Promise<void>(r => { entered = r; });
+    const pause = async () => { entered(); await blocked; };
+    const materialize = f.publisher.materializeCanonicalWorkingMemory.bind(f.publisher);
+    const materialization = vi.spyOn(f.publisher, 'materializeCanonicalWorkingMemory').mockImplementationOnce(async (...args: any[]) => {
+      scope = createGraphKnowledgeAssetScope(args[1], args[2]);
+      const result = await materialize(...args);
+      if (stage === 'replacement') await pause();
+      return result;
+    });
+    const cleanup = f.publisher.cleanupCanonicalWorkingMemorySources.bind(f.publisher);
+    const sourceCleanup = vi.spyOn(f.publisher, 'cleanupCanonicalWorkingMemorySources').mockImplementationOnce(async (...args: any[]) => {
+      await cleanup(...args);
+      if (stage === 'draft deletion') await pause();
+    });
+    const running = f.run(await f.claim());
+    try {
+      await reached;
+      const canonicalBefore = await privateStore.getKnowledgeAssetPrivateTriples(CG, scope);
+      expect(canonicalBefore).toEqual(stage === 'replacement' ? [] : privatePayload);
+      expect(await privateStore.getKnowledgeAssetPrivateDraftTriples(CG, AUTHOR, NAME)).toEqual(privatePayload);
+      f.expire();
+      expect(await f.queue.recoverOnStartup()).toEqual({ reclaimed: 1, abandoned: 0 });
+      const replacement = await f.claim();
+      release();
+      expect((await running).outcome).toBe('failure_bookkeeping_uncertain');
+      expect(await privateStore.getKnowledgeAssetPrivateTriples(CG, scope)).toEqual(canonicalBefore);
+      expect(await privateStore.getKnowledgeAssetPrivateDraftTriples(CG, AUTHOR, NAME)).toEqual(privatePayload);
+      materialization.mockRestore(); sourceCleanup.mockRestore();
+      expect(replacement.jobId).toBe(f.jobId);
+      expect((await f.run(replacement)).outcome).toBe('succeeded');
+      const seal = (await readAssertionPromoteEvidence(f.store, CG, NAME, AUTHOR)).seal!;
+      expect(seal.privateTripleCount).toBe(1);
+      expect(seal.privateMerkleRoot).toBeTruthy();
+      expect(await privateStore.getKnowledgeAssetPrivateTriples(CG,
+        createGraphKnowledgeAssetScope(seal.kaUal!, seal.assertionVersion!))).toEqual(privatePayload);
+      expect(await privateStore.getKnowledgeAssetPrivateDraftTriples(CG, AUTHOR, NAME)).toEqual([]);
       expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
     } finally { release(); await running; }
   });

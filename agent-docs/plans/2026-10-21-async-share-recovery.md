@@ -1,6 +1,6 @@
 # Recover interrupted async shares under their original job
 
-Status: implementation and local regression validation complete; remote review/live validation pending. Owner: primary agent. Base: `testnet-canary` at `a3dfbe53d`, selected by the user. One cohesive PR; anticipated 450–650 authored code/test lines. High risk: crash recovery, immutable content and stale-worker fencing.
+Status: implementation and live validation complete; remote review and CI convergence in progress. Owner: primary agent. Base: `testnet-canary` at `a3dfbe53d`, selected by the user. One cohesive PR; anticipated 450–650 authored code/test lines. High risk: crash recovery, immutable content and stale-worker fencing.
 
 ## Problem and evidence
 
@@ -108,3 +108,8 @@ Carry optional execution authority through the divergence lookup and pointer del
 ## Review round 11 (authorized extension through round 15)
 
 Add a real agent-package preparation/recovery regression with same-name, different-payload drafts in the node default and scoped lanes. The scoped lane has its own registered custodial test author. Prepare and bind that job, persist its start marker, expire the lease, and recover the original ID and binding. Verify canonical shared payload, author/digest, and untouched default draft/seal/completion state. This belongs to the agent package because CI excludes cross-package CLI execution from agent coverage; its changed-line gate exposed ten unmeasured preparation lines even though all test shards passed. Preserve package thresholds. A mutation forcing preparation into the default lane must fail. This response changes tests/config/plan only; the production tree remains the live-tested revision. Also remove a Mermaid message separator from the PR description and verify both diagrams render on GitHub.
+
+
+## Review round 12 — observe private mutations under revoked authority
+
+Add two real-finalizer cases with a nonempty private partition. Pause after canonical public materialization (before private replacement), or after public source cleanup (before private draft deletion). Expire/reassign the claim and resume the stale worker; compare actual canonical private storage and the mutable private draft before/after, then let the replacement finish the original job and verify the private payload and completed share. Remove each corresponding guard separately as a mutation check. No production change or new live deployment is needed.
