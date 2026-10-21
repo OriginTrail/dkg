@@ -46,6 +46,8 @@ export default defineConfig({
           // POST routes (pure handler, no hardhat). Belongs in the fast lane
           // alongside its clear-job sibling above.
           'test/publisher-admin-body-boundary.test.ts',
+          'test/publisher-live-control.test.ts',
+          'test/publisher-live-control-route.test.ts',
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
