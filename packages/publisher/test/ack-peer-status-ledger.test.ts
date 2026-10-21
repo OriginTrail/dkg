@@ -58,13 +58,13 @@ describe('publisher-owned ACK summary', () => {
     const summaries: ACKDiagnosticSummary[] = [];
     const diagnostics = new ACKRoundDiagnostics(summary => summaries.push(summary), () => now);
     let resolve!: () => void; let reject!: (error: Error) => void;
-    const first = diagnostics.measure('attempt', () => new Promise<void>(r => { resolve = r; }));
-    const second = diagnostics.measure('attempt', () => new Promise<void>((_, r) => { reject = r; }))
+    const first = diagnostics.measureAttempt(() => new Promise<void>(r => { resolve = r; }));
+    const second = diagnostics.measureAttempt(() => new Promise<void>((_, r) => { reject = r; }))
       .catch(error => error);
     now = 10; resolve(); await first;
     now = 15; reject(new Error('transport failed')); await second;
-    now = 20; await diagnostics.measure('backoff', async () => { now = 25; }, 'transport');
-    now = 30; await diagnostics.measure('backoff', async () => { now = 37; }, 'transient_decline');
+    now = 20; await diagnostics.measureBackoff('transport', async () => { now = 25; });
+    now = 30; await diagnostics.measureBackoff('transient_decline', async () => { now = 37; });
     expect(summaries).toEqual([]);
     diagnostics.finish(empty());
     diagnostics.finish(empty());
@@ -74,16 +74,17 @@ describe('publisher-owned ACK summary', () => {
   });
 
   it('freezes settlement totals and excludes retiring completions and later work', async () => {
-    let now = 0; let resolve!: () => void;
+    let now = 0; let resolve!: () => void; let resolveBackoff!: () => void;
     const summaries: ACKDiagnosticSummary[] = [];
     const diagnostics = new ACKRoundDiagnostics(summary => summaries.push(summary), () => now);
-    const late = diagnostics.measure('attempt', () => new Promise<void>(r => { resolve = r; }));
+    const late = diagnostics.measureAttempt(() => new Promise<void>(r => { resolve = r; }));
+    const lateBackoff = diagnostics.measureBackoff('transient_decline', () => new Promise<void>(r => { resolveBackoff = r; }));
     const counts = empty();
     now = 10; diagnostics.finish(counts);
     counts.total = 100;
-    now = 100; resolve(); await late;
-    await diagnostics.measure('attempt', async () => 1);
-    await diagnostics.measure('backoff', async () => {});
+    now = 100; resolve(); resolveBackoff(); await Promise.all([late, lateBackoff]);
+    await diagnostics.measureAttempt(async () => 1);
+    await diagnostics.measureBackoff('transport', async () => {});
     diagnostics.finish(counts);
     expect(summaries).toEqual([{ completedPeerAttempts: 0, perRoundPeakPeerRequests: 1,
       peerAttemptMs: 0, backoffs: 0, backoffMs: 0, transportBackoffs: 0,
@@ -92,12 +93,24 @@ describe('publisher-owned ACK summary', () => {
     expect(Object.isFrozen(summaries[0].candidates)).toBe(true);
   });
 
+  it.each(['transport', 'transient_decline'] as const)('preserves a failed %s backoff and records its cause', async reason => {
+    let now = 10;
+    const summaries: ACKDiagnosticSummary[] = [];
+    const diagnostics = new ACKRoundDiagnostics(summary => summaries.push(summary), () => now);
+    const failure = new Error('backoff aborted');
+    await expect(diagnostics.measureBackoff(reason, () => { now = 17; throw failure; })).rejects.toBe(failure);
+    diagnostics.finish(empty());
+    expect(summaries).toEqual([{ completedPeerAttempts: 0, perRoundPeakPeerRequests: 0,
+      peerAttemptMs: 0, backoffs: 1, backoffMs: 7, transportBackoffs: reason === 'transport' ? 1 : 0,
+      transientDeclineBackoffs: reason === 'transient_decline' ? 1 : 0, candidates: empty() }]);
+  });
+
   it('isolates a throwing or reentrant terminal observer', async () => {
     let calls = 0;
     const diagnostics = new ACKRoundDiagnostics(() => {
       calls++; diagnostics.finish(empty()); throw new Error('observer failed');
     });
-    await expect(diagnostics.measure('attempt', async () => 42)).resolves.toBe(42);
+    await expect(diagnostics.measureAttempt(async () => 42)).resolves.toBe(42);
     expect(() => diagnostics.finish(empty())).not.toThrow();
     expect(calls).toBe(1);
   });

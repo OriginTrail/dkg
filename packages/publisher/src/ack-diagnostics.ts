@@ -12,6 +12,8 @@ export interface ACKDiagnosticSummary {
   readonly candidates: Readonly<ACKCandidateCounts>;
 }
 
+export type ACKBackoffReason = 'transport' | 'transient_decline';
+
 export class ACKRoundDiagnostics {
   private closed = false;
   private active = 0;
@@ -25,19 +27,27 @@ export class ACKRoundDiagnostics {
   constructor(private readonly observer?: (summary: ACKDiagnosticSummary) => void,
     private readonly now = () => performance.now()) {}
 
-  async measure<T>(kind: 'attempt' | 'backoff', work: () => Promise<T>, reason: 'transport' | 'transient_decline' = 'transport'): Promise<T> {
+  async measureAttempt<T>(work: () => Promise<T>): Promise<T> {
     const started = this.now();
     const tracked = !this.closed;
-    if (tracked && kind === 'attempt') this.peakPeerRequests = Math.max(this.peakPeerRequests, ++this.active);
+    if (tracked) this.peakPeerRequests = Math.max(this.peakPeerRequests, ++this.active);
     try { return await work(); } finally {
-      if (tracked && kind === 'attempt') this.active--;
+      if (tracked) this.active--;
       if (!this.closed) {
-        const durationMs = Math.max(0, this.now() - started);
-        if (kind === 'attempt') { this.attempts++; this.attemptMs += durationMs; }
-        else {
-          this.backoffs++; this.backoffMs += durationMs;
-          if (reason === 'transport') this.transportBackoffs++; else this.transientDeclineBackoffs++;
-        }
+        this.attempts++;
+        this.attemptMs += Math.max(0, this.now() - started);
+      }
+    }
+  }
+
+  async measureBackoff<T>(reason: ACKBackoffReason, work: () => Promise<T>): Promise<T> {
+    const started = this.now();
+    try { return await work(); } finally {
+      if (!this.closed) {
+        this.backoffs++;
+        this.backoffMs += Math.max(0, this.now() - started);
+        if (reason === 'transport') this.transportBackoffs++;
+        else this.transientDeclineBackoffs++;
       }
     }
   }

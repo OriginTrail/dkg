@@ -28,7 +28,7 @@ import { QuorumUnmetError, assertACKCandidateQuorum, type PeerOutcome } from './
 import type { V10ACKMode } from './publisher.js';
 import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
 import { PeerStatusLedger } from './ack-peer-status-ledger.js';
-import { ACKRoundDiagnostics, type ACKDiagnosticSummary } from './ack-diagnostics.js';
+import { ACKRoundDiagnostics, type ACKBackoffReason, type ACKDiagnosticSummary } from './ack-diagnostics.js';
 
 /**
  * Why an ACK signer pre-flight rejected a recovered signer. Mirrors
@@ -775,8 +775,8 @@ export class ACKCollector {
       const roundIsOver = () => roundSettled || collected.length >= REQUIRED_ACKS;
 
       const sleepImpl = this.deps.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
-      const sleep = (ms: number, reason: 'transport' | 'transient_decline') =>
-        diagnostics.measure('backoff', () => sleepImpl(ms), reason);
+      const sleep = (ms: number, reason: ACKBackoffReason) =>
+        diagnostics.measureBackoff(reason, () => sleepImpl(ms));
 
       const requestACK = async (peerId: string): Promise<CollectedACK | null> => {
         // #887: transient SWM declines and transport errors now have
@@ -797,7 +797,7 @@ export class ACKCollector {
             const ack: StorageACKMsg = await withSpan(
               'publisher.ack_peer_request',
               async (span) => {
-                const response = await diagnostics.measure('attempt', () => this.deps.sendP2P(peerId, ackProtocolId, intentBytes));
+                const response = await diagnostics.measureAttempt(() => this.deps.sendP2P(peerId, ackProtocolId, intentBytes));
                 // A ZERO-LENGTH reply is not a StorageACK — it is what the
                 // requester reads when the responder aborts the stream
                 // mid-handler (protocol-router stream.abort → clean EOF →
