@@ -1,4 +1,3 @@
-import { PrivateAccessMethods } from './private-access-request.js';
 import { resolveConfiguredNetworkIdentity } from './configured-network-identity.js';
 import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
 import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
@@ -9,6 +8,7 @@ import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWr
 
 import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
+import { PrivateAccessMethods } from './private-access-request.js';
 import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
