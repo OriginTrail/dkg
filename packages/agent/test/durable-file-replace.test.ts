@@ -99,7 +99,7 @@ it('journal admission propagates directory EPERM before applying confirmed state
     failure.directory = parent; failure.phase = 'sync';
     await expect(owner.submit(input)).rejects.toMatchObject({ code: 'EPERM' });
     expect(apply).not.toHaveBeenCalled();
-    expect(JSON.parse(await readFile(join(parent, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries[0][1].input).toEqual({ ...input, packedKaId: input.packedKaId.toString() });
+    await expect(readFile(join(parent, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     failure.phase = '';
     expect(await owner.submit(input)).toBe('repaired');
     expect(apply).toHaveBeenCalledExactlyOnceWith(input, false);
@@ -118,8 +118,8 @@ describe('newly created directory ancestry', () => {
     try {
       expect(await owner.submit(input)).toBe('repaired');
       // mkdir created new/ and new/nested/: their entries live in new/ and in the existing root.
-      expect(syncedAtApply).toEqual([[dataDir, created, root]]);
-      expect(synced).toEqual([dataDir, created, root, dataDir]); // Retirement needs only the journal directory.
+      expect(syncedAtApply).toEqual([[join(dataDir, 'named-ka-vm-lifecycle-snapshots'), dataDir, created, root, dataDir]]);
+      expect(synced).toEqual([join(dataDir, 'named-ka-vm-lifecycle-snapshots'), dataDir, created, root, dataDir, dataDir]); // Retirement needs only the journal directory.
     } finally { await owner.stop(); }
   });
   it('keeps the created journal ancestry pending after a failed admission barrier, although mkdir reports nothing on retry', async () => {
@@ -130,7 +130,7 @@ describe('newly created directory ancestry', () => {
       expect(apply).not.toHaveBeenCalled();
       failure.phase = ''; synced.splice(0);
       expect(await owner.submit(input)).toBe('repaired');
-      expect(syncedAtApply).toEqual([[dataDir, created, root]]);
+      expect(syncedAtApply).toEqual([[join(dataDir, 'named-ka-vm-lifecycle-snapshots'), dataDir, created, root, dataDir]]);
     } finally { failure.phase = ''; await owner.stop(); }
   });
   it('source-worker state syncs its created ancestry and keeps its directory compatibility across it', async () => {
@@ -161,5 +161,38 @@ it.each([false, true])('snapshot admission retries pending ancestors for a diffe
     synced.splice(0); failure.phase = '';
     expect(await owner.submit(confirmedMaterializationFixture(different).input)).toBe('repaired');
     expect(apply).toHaveBeenCalledOnce();
+  } finally { failure.phase = ''; await owner.stop(); }
+});
+
+it('snapshot-less admission completes retained snapshot ancestry before apply and persists its pending obligation', async () => {
+  const root = await directory(), created = join(root, 'new'), dataDir = join(created, 'data');
+  const snapshots = join(dataDir, 'named-ka-vm-lifecycle-snapshots');
+  const path = join(dataDir, 'named-ka-vm-lifecycle-repairs.json');
+  const apply = vi.fn(async () => {
+    expect(synced).toEqual(expect.arrayContaining([snapshots, dataDir, created, root]));
+    throw new Error('store still unavailable');
+  });
+  const options = { dataDir, writeLocks: new Map<string, Promise<void>>(), isCurrent: async () => true, warn: () => {} };
+  const owner = new NamedKaVmLifecycleRepair({ ...options, now: () => 0, apply });
+  try {
+    failure.directory = created; failure.phase = 'sync'; failure.code = 'EIO';
+    await expect(owner.submit(confirmedMaterializationFixture().input)).rejects.toMatchObject({ code: 'EIO' });
+    expect(apply).not.toHaveBeenCalled();
+    // A different repair has no snapshot, but shares the still-uncertified ancestry.
+    await expect(owner.submit(input)).rejects.toMatchObject({ code: 'EIO' });
+    expect(apply).not.toHaveBeenCalled();
+    await expect(readFile(path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    failure.phase = ''; synced.splice(0);
+    expect(await owner.submit(input)).toBe('pending');
+    expect(apply).toHaveBeenCalledOnce();
+    expect(JSON.parse(await readFile(path, 'utf8')).entries).toHaveLength(1);
+    await owner.stop();
+    const recovered = vi.fn(async () => {});
+    const reopened = new NamedKaVmLifecycleRepair({ ...options, now: () => 10_000, apply: recovered });
+    try {
+      await reopened.runDue();
+      expect(recovered).toHaveBeenCalledExactlyOnceWith(input, false);
+      expect(JSON.parse(await readFile(path, 'utf8')).entries).toEqual([]);
+    } finally { await reopened.stop(); }
   } finally { failure.phase = ''; await owner.stop(); }
 });

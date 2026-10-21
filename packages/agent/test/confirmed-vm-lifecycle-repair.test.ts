@@ -815,7 +815,8 @@ describe('review regression boundaries', () => {
       const path = join(dir, 'named-ka-vm-lifecycle-repairs.json'), bytes = await readFile(path, 'utf8');
       const journal = decodeLifecycleRepairJournal(JSON.parse(bytes));
       expect(bytes).toBe(JSON.stringify(JSON.parse(bytes)));
-      expect(await readdir(dir)).toEqual(['named-ka-vm-lifecycle-repairs.json']);
+      expect((await readdir(dir)).sort()).toEqual(['named-ka-vm-lifecycle-repairs.json', 'named-ka-vm-lifecycle-snapshots']);
+      expect(await readdir(join(dir, 'named-ka-vm-lifecycle-snapshots'))).toEqual([]);
       if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600 & ~process.umask());
       expect([...journal.values()]).toMatchObject([{ input: { name: NAME, merkleRoot: HEX.slice(2), assertionVersion: '1' }, attempts: 0 }]);
     });

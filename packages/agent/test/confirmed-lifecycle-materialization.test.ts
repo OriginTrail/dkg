@@ -148,7 +148,6 @@ it('restores restricted version 2 over inherited public version 1 through retry 
     { assertionVersion: '1', merkleRoot: getBytes(input.merkleRoot) },
     { publisherPeerId: 'old-publisher', accessPolicy: 'public', allowedPeers: [] });
   expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, meta, input.publishedUal, input.materialization.metadataQuads)).toMatchObject({ accessPolicy: 'public' });
-  expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, meta, input.publishedUal, input.materialization.metadataQuads, {}, 'exact')).toBeUndefined();
   const update = store.atomicUpdate.bind(store);
   vi.spyOn(store, 'atomicUpdate').mockImplementationOnce(async () => { throw new Error('temporary materialization pressure'); }).mockImplementation(update);
   expect(await owner.submit(input)).toBe('pending'); expect(await journal()).toHaveLength(1);

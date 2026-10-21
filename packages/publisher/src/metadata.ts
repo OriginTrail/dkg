@@ -1,3 +1,4 @@
+import { readControlAnchor, parseControlVersion, normalizeControlRoot } from './knowledge-asset-control-anchor.js';
 import { readStoredAssertionVersions } from './materialization-assertion-version.js';
 import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-subjects.js';
 import { nextEventId } from './assertion-lifecycle-events.js';
@@ -694,6 +695,7 @@ export async function selectOrAdmitLocallyTrustedKnowledgeAssetControls(store: T
   anchor?: LocallyTrustedKnowledgeAssetControlAnchor;
 }): Promise<Quad[]> {
   const { metaGraph, ual, metadataQuads, restoreMissing, anchor } = input;
+  assertSafeGraphIriForSparql(metaGraph);
   const sidecarQuads = metadataQuads.filter(
     quad => quad.subject === ual && LOCAL_TRUSTED_KA_SIDECAR_PREDICATES.has(quad.predicate),
   );
@@ -704,11 +706,19 @@ export async function selectOrAdmitLocallyTrustedKnowledgeAssetControls(store: T
     throw new Error('Locally trusted KA control entry does not match its assertion anchor');
   }
   // A curator must not replace or append to a member's authenticated exact-anchor owner.
-  const selected = await readLocallyTrustedKnowledgeAssetControls(store, metaGraph, ual, metadataQuads, {}, 'exact');
+  const entry = `${ual}/_local_controls/${version}/${root}`;
+  const rows = (await readLocallyTrustedControlEntries(store, ual, {}, entry)).get(entry) ?? [];
+  if (rows.length > 0) {
+    validateLocallyTrustedControlRows(rows);
+    if (parseControlVersion(readControlAnchor(rows, `${DKG}assertionVersion`, 'assertionVersion')) !== version
+      || normalizeControlRoot(readControlAnchor(rows, `${DKG}merkleRoot`, 'merkleRoot')) !== root) {
+      throw new Error('Locally trusted KA control entry does not match its assertion anchor');
+    }
+  }
+  const selected = visibleControlRows(rows, ual, metaGraph);
   if (selected.length > 0 || !restoreMissing) return selected;
   await writeLocallyTrustedKnowledgeAssetControlEntry(store, ual, version, root, sidecarQuads);
-  return sidecarQuads.filter(quad => LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate))
-    .map(quad => ({ ...quad, subject: ual, graph: metaGraph }));
+  return visibleControlRows(sidecarQuads, ual, metaGraph);
 }
 
 /** Persist locally authored access controls outside sync-visible metadata. */
@@ -755,28 +765,23 @@ export async function replaceLocallyTrustedKnowledgeAssetControlEnvelope(
   ]);
 }
 
-/** Read trusted local controls and remap them into the visible metadata commit. */
-export async function readLocallyTrustedKnowledgeAssetControls(
-  store: TripleStore,
-  metaGraph: string,
-  ual: string,
-  incomingMetadataQuads: readonly Quad[],
-  options: QueryOptions = {},
-  anchorMatch: 'current-or-earlier' | 'exact' = 'current-or-earlier',
-): Promise<Quad[]> {
-  assertSafeGraphIriForSparql(metaGraph);
+function visibleControlRows(rows: readonly Quad[], ual: string, graph: string): Quad[] {
+  return rows.filter(quad => LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate))
+    .map(quad => ({ ...quad, subject: ual, graph }));
+}
+
+/** Exact recovery bounds the query to its canonical entry; ordinary overlays read history. */
+async function readLocallyTrustedControlEntries(
+  store: TripleStore, ual: string, options: QueryOptions, entry?: string,
+): Promise<Map<string, Quad[]>> {
   assertSafeGraphIriForSparql(ual);
-  const incomingVersion = parseControlVersion(
-    readControlAnchor(incomingMetadataQuads, `${DKG}assertionVersion`, 'assertionVersion'),
-  );
-  const incomingRoot = normalizeControlRoot(
-    readControlAnchor(incomingMetadataQuads, `${DKG}merkleRoot`, 'merkleRoot'),
-  );
+  if (entry !== undefined) assertSafeGraphIriForSparql(entry);
   const predicates = [...LOCAL_TRUSTED_KA_SIDECAR_PREDICATES]
     .map((predicate) => `<${predicate}>`)
     .join('\n');
   const result = await store.query(`
     SELECT ?entry ?predicate ?object WHERE {
+      ${entry === undefined ? '' : `VALUES ?entry { <${entry}> }`}
       GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
         ?entry <${LOCAL_TRUSTED_KA_UAL_PREDICATE}> <${ual}> .
         ?entry ?predicate ?object .
@@ -784,7 +789,7 @@ export async function readLocallyTrustedKnowledgeAssetControls(
       }
     }
   `, options);
-  if (result.type !== 'bindings') return [];
+  if (result.type !== 'bindings') return new Map();
   const rowsByEntry = new Map<string, Quad[]>();
   for (const row of result.bindings) {
     const predicate = row.predicate?.replace(/^<|>$/g, '');
@@ -796,15 +801,36 @@ export async function readLocallyTrustedKnowledgeAssetControls(
     ) {
       continue;
     }
-    const rows = rowsByEntry.get(row.entry) ?? [];
+    const subject = row.entry.replace(/^<|>$/g, '');
+    const rows = rowsByEntry.get(subject) ?? [];
     rows.push({
-      subject: row.entry,
+      subject,
       predicate,
       object: row.object,
       graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
     });
-    rowsByEntry.set(row.entry, rows);
+    rowsByEntry.set(subject, rows);
   }
+  return rowsByEntry;
+}
+
+/** Read trusted local controls and remap them into the visible metadata commit. */
+export async function readLocallyTrustedKnowledgeAssetControls(
+  store: TripleStore,
+  metaGraph: string,
+  ual: string,
+  incomingMetadataQuads: readonly Quad[],
+  options: QueryOptions = {},
+): Promise<Quad[]> {
+  assertSafeGraphIriForSparql(metaGraph);
+  assertSafeGraphIriForSparql(ual);
+  const incomingVersion = parseControlVersion(
+    readControlAnchor(incomingMetadataQuads, `${DKG}assertionVersion`, 'assertionVersion'),
+  );
+  const incomingRoot = normalizeControlRoot(
+    readControlAnchor(incomingMetadataQuads, `${DKG}merkleRoot`, 'merkleRoot'),
+  );
+  const rowsByEntry = await readLocallyTrustedControlEntries(store, ual, options);
   const candidates: Array<{ version: bigint; rows: Quad[] }> = [];
   for (const rows of rowsByEntry.values()) {
     validateLocallyTrustedControlRows(rows);
@@ -814,7 +840,7 @@ export async function readLocallyTrustedKnowledgeAssetControls(
     const sidecarRoot = normalizeControlRoot(
       readControlAnchor(rows, `${DKG}merkleRoot`, 'sidecar merkleRoot'),
     );
-    if (sidecarVersion > incomingVersion || (anchorMatch === 'exact' && sidecarVersion !== incomingVersion)) continue;
+    if (sidecarVersion > incomingVersion) continue;
     if (sidecarVersion === incomingVersion && sidecarRoot !== incomingRoot) continue;
     candidates.push({ version: sidecarVersion, rows });
   }
@@ -825,9 +851,7 @@ export async function readLocallyTrustedKnowledgeAssetControls(
   );
   const highest = candidates.filter((candidate) => candidate.version === highestVersion);
   if (highest.length !== 1) return [];
-  return highest[0]!.rows
-    .filter((quad) => LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate))
-    .map((quad) => ({ ...quad, subject: ual, graph: metaGraph }));
+  return visibleControlRows(highest[0]!.rows, ual, metaGraph);
 }
 
 /** Resolve this KA's trusted sidecar and replace peer-provided control rows in one step. */
@@ -862,7 +886,6 @@ export async function readLocallyTrustedKnowledgeAssetControlEnvelope(
   ual: string,
   incomingMetadataQuads: readonly Quad[],
   options: QueryOptions = {},
-  anchorMatch: 'current-or-earlier' | 'exact' = 'current-or-earlier',
 ): Promise<LocallyTrustedKnowledgeAssetControlEnvelope | undefined> {
   const rows = await readLocallyTrustedKnowledgeAssetControls(
     store,
@@ -870,7 +893,6 @@ export async function readLocallyTrustedKnowledgeAssetControlEnvelope(
     ual,
     incomingMetadataQuads,
     options,
-    anchorMatch,
   );
   if (rows.length === 0) return undefined;
 
@@ -924,32 +946,6 @@ function validateLocallyTrustedControlRows(rows: readonly Quad[]): void {
   }
 }
 
-function readControlAnchor(
-  quads: readonly Quad[],
-  predicate: string,
-  label: string,
-): string {
-  const values = [...new Set(
-    quads.filter((quad) => quad.predicate === predicate).map((quad) => quad.object),
-  )];
-  if (values.length !== 1) {
-    throw new Error(`Locally trusted KA controls require exactly one ${label}`);
-  }
-  return values[0]!;
-}
-
-function parseControlVersion(raw: string): bigint {
-  const lexical = raw.match(/^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^.*|@.*)?$/)?.[1] ?? raw;
-  if (!/^\d+$/.test(lexical)) throw new Error(`Invalid trusted-control assertionVersion: ${raw}`);
-  return BigInt(lexical);
-}
-
-function normalizeControlRoot(raw: string): string {
-  const lexical = raw.match(/^"([^"]*)"(?:\^\^.*|@.*)?$/)?.[1] ?? raw;
-  const root = lexical.replace(/^0x/i, '').toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(root)) throw new Error(`Invalid trusted-control merkleRoot: ${raw}`);
-  return root;
-}
 
 /**
  * GH #936 — explicit, deterministic per-root token map

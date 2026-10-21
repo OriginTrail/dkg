@@ -15,6 +15,7 @@ export class NamedKaVmLifecycleSnapshots {
   private readonly durable = new Set<string>();
   private readonly directory: string;
   private readonly directoryDurability: DurableDirectory;
+  private directoryReady = false;
   constructor(dataDir: string) {
     this.directory = join(dataDir, 'named-ka-vm-lifecycle-snapshots');
     this.directoryDurability = new DurableDirectory(this.directory, { mode: 0o700 });
@@ -40,6 +41,13 @@ export class NamedKaVmLifecycleSnapshots {
   }
 
   async encode(entries: ReadonlyMap<string, LifecycleRepairEntry>): Promise<ReturnType<typeof encodeLifecycleRepairJournal>> {
+    // Every journal admission shares this ancestry, even when it has no snapshot.
+    // A failed preparation stays with this owner until the complete barrier passes.
+    if (!this.directoryReady) {
+      await this.directoryDurability.create();
+      await this.directoryDurability.persist();
+      this.directoryReady = true;
+    }
     for (const entry of entries.values()) {
       const snapshot = entry.input.materialization;
       if (!snapshot) continue;
@@ -47,9 +55,7 @@ export class NamedKaVmLifecycleSnapshots {
       if (cached && this.durable.has(cached)) continue;
       const bytes = JSON.stringify(lifecycleMaterializationWire(snapshot)), ref = cached ?? digest(bytes);
       if (!this.durable.has(ref)) {
-        await this.directoryDurability.create();
         await new DurableReplaceableFile(join(this.directory, `${ref}.json`), { fileMode: 0o600, directoryMode: 0o700 }).replace(bytes);
-        await this.directoryDurability.persist();
         this.durable.add(ref);
       }
       this.references.set(snapshot, ref);

@@ -84,11 +84,11 @@ it('a curator publication preserves the authenticated member controls at the sam
     });
     const curatorMetadata = incomingMetadata().map(q => q.predicate.endsWith('/publisherPeerId') ? { ...q, object: '"curator-publisher"' } : q);
     await replaceLocallyTrustedKnowledgeAssetControls(store, UAL, curatorMetadata);
-    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, curatorMetadata, {}, 'exact'))
+    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, curatorMetadata))
       .toEqual({ publisherPeerId: 'member-owner', accessPolicy: 'ownerOnly', allowedPeers: [] });
     const next = curatorMetadata.map(q => q.predicate.endsWith('/assertionVersion') ? { ...q, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' } : q);
     await replaceLocallyTrustedKnowledgeAssetControls(store, UAL, next);
-    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, next, {}, 'exact'))
+    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, next))
       .toEqual({ publisherPeerId: 'curator-publisher', accessPolicy: 'allowList', allowedPeers: ['untrusted-peer'] });
   } finally { await store.close(); }
 });
@@ -104,7 +104,7 @@ it.each([false, true])('confirmed reconciliation selects exact controls once wit
     const visible = overlaySelectedKnowledgeAssetControls(incoming, selected);
     expect(query.mock.calls.filter(([sparql]) => sparql.includes(LOCAL_TRUSTED_KA_CONTROLS_GRAPH))).toHaveLength(1);
     expect(visible.filter(q => q.predicate === DKG + 'accessPolicy').map(q => q.object)).toEqual([existing ? '"ownerOnly"' : '"allowList"']);
-    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, incoming, {}, 'exact'))
+    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, incoming))
       .toMatchObject({ publisherPeerId: existing ? 'member' : 'untrusted-publisher', accessPolicy: existing ? 'ownerOnly' : 'allowList' });
   } finally { await store.close(); }
 });
@@ -123,14 +123,51 @@ it('recovery without restoration does not admit or inherit missing exact control
       metaGraph: META_GRAPH, ual: UAL, anchor, metadataQuads: incoming, restoreMissing: false,
     })).toEqual([]);
     expect(insert).not.toHaveBeenCalled();
-    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, incoming, {}, 'exact')).toBeUndefined();
     const inherited = await overlayLocallyTrustedKnowledgeAssetControls(store, META_GRAPH, UAL, incoming);
     expect(inherited.filter(q => q.predicate === DKG + 'publisherPeerId').map(q => q.object)).toEqual(['"earlier-owner"']);
     const selected = await reconcileConfirmedKnowledgeAssetControls(store, {
       metaGraph: META_GRAPH, ual: UAL, anchor, metadataQuads: incoming, restoreMissing: true,
     });
     expect(selected.filter(q => q.predicate === DKG + 'publisherPeerId').map(q => q.object)).toEqual(['"untrusted-publisher"']);
-    const exact = await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, incoming, {}, 'exact');
+    const exact = await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, incoming);
     expect(exact?.publisherPeerId).toBe('untrusted-publisher');
+  } finally { await store.close(); }
+});
+
+it('exact recovery ignores malformed unrelated history and preserves the authenticated current owner', async () => {
+  const store = new OxigraphStore(), anchor = { assertionVersion: '1', merkleRoot: ROOT };
+  try {
+    await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, UAL, anchor,
+      { publisherPeerId: 'member', accessPolicy: 'ownerOnly', allowedPeers: [] });
+    const subject = `${UAL}/_local_controls/0/${'ff'.repeat(32)}`, graph = LOCAL_TRUSTED_KA_CONTROLS_GRAPH;
+    await store.insert([
+      { subject, graph, predicate: DKG + 'kaUal', object: UAL },
+      { subject, graph, predicate: DKG + 'accessPolicy', object: '"invalid-policy"' },
+    ]);
+    const insert = vi.spyOn(store, 'insert');
+    const selected = await reconcileConfirmedKnowledgeAssetControls(store, {
+      metaGraph: META_GRAPH, ual: UAL, anchor, metadataQuads: incomingMetadata(), restoreMissing: true,
+    });
+    expect(selected).toEqual(expect.arrayContaining([
+      metadata('accessPolicy', '"ownerOnly"'), metadata('publisherPeerId', '"member"'),
+    ]));
+    expect(insert).not.toHaveBeenCalled();
+  } finally { await store.close(); }
+});
+
+it.each(['accessPolicy', 'assertionVersion', 'merkleRoot'] as const)('exact recovery rejects a corrupt canonical entry %s before admitting replacement controls', async field => {
+  const store = new OxigraphStore(), anchor = { assertionVersion: '1', merkleRoot: ROOT };
+  try {
+    await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, UAL, anchor,
+      { publisherPeerId: 'member', accessPolicy: 'ownerOnly', allowedPeers: [] });
+    const subject = `${UAL}/_local_controls/1/${toHex(ROOT)}`, graph = LOCAL_TRUSTED_KA_CONTROLS_GRAPH, predicate = DKG + field;
+    await store.deleteByPattern({ subject, graph, predicate });
+    await store.insert([{ subject, graph, predicate, object: field === 'accessPolicy' ? '"invalid-policy"'
+      : field === 'assertionVersion' ? '"2"' : `"${'ff'.repeat(32)}"` }]);
+    const insert = vi.spyOn(store, 'insert');
+    await expect(reconcileConfirmedKnowledgeAssetControls(store, {
+      metaGraph: META_GRAPH, ual: UAL, anchor, metadataQuads: incomingMetadata(), restoreMissing: true,
+    })).rejects.toThrow();
+    expect(insert).not.toHaveBeenCalled();
   } finally { await store.close(); }
 });
