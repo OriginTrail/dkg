@@ -1,4 +1,4 @@
-export { reconcileConfirmedKnowledgeAssetControls } from './knowledge-asset-control-recovery.js';
+export { reconcileConfirmedKnowledgeAssetControls } from './knowledge-asset-controls.js';
 export { overlaySelectedKnowledgeAssetControls } from './metadata.js';
 export { journalEntriesContextGraphId } from './async-lift-control-plane.js';
 export {
@@ -573,3 +573,5 @@ export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvi
 export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
 
 export { confirmedGraphKnowledgeAssetProof, sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata, type ConfirmedGraphKnowledgeAssetProof } from './confirmed-metadata-reconciliation.js';
+
+export { assertionRecoverySealGraph, assertionRecoverySealSubject } from './assertion-seal-recovery.js';

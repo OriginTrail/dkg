@@ -1,3 +1,4 @@
+import { historicalLifecycleRepairJournal } from './_helpers/historical-lifecycle-repair-journal.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -28,7 +29,8 @@ it('writes immutable payload once and settling another entry only rewrites compa
   const { dir, input: base, path, snapshots } = await setup();
   const publicQuads = [{ ...base.materialization!.publicQuads[0], object: JSON.stringify('payload-'.repeat(10_000)) }];
   const root = hexlify(computeFlatKCRootV10(publicQuads, []));
-  const input = { ...base, merkleRoot: root, materialization: { ...base.materialization!, publicQuads,
+  const input = { ...base, merkleRoot: root, namedSealQuads: base.namedSealQuads!.map(q => q.predicate === 'http://dkg.io/ontology/assertionMerkleRoot'
+    ? { ...q, object: `"${root.slice(2)}"^^<http://www.w3.org/2001/XMLSchema#hexBinary>` } : q), materialization: { ...base.materialization!, publicQuads,
     metadataQuads: base.materialization!.metadataQuads.map(q => q.predicate === 'http://dkg.io/ontology/merkleRoot' ? { ...q, object: JSON.stringify(root.slice(2)) } : q) } };
   const repair = owner(dir, async value => { if (value.name === input.name) throw new NamedKaVmLifecycleIntegrityError('retained rejected evidence'); });
   expect(await repair.submit(input)).toBe('rejected');
@@ -37,7 +39,7 @@ it('writes immutable payload once and settling another entry only rewrites compa
   const { materialization: _snapshot, ...other } = input;
   expect(await repair.submit({ ...other, name: 'independent' })).toBe('repaired');
   expect(writes).toHaveBeenCalledTimes(2);
-  for (const [chunks] of writes.mock.calls) { const bytes = typeof chunks === 'string' ? chunks : [...chunks].join(''); expect(bytes.length).toBeLessThan(3_000); expect(bytes).not.toContain('payload-payload-'); }
+  for (const [chunks] of writes.mock.calls) { const bytes = typeof chunks === 'string' ? chunks : [...chunks].join(''); expect(bytes.length).toBeLessThan(12_000); expect(bytes).not.toContain('payload-payload-'); }
   const after = await stat(join(snapshots, file), { bigint: true }); expect(after.mtimeNs).toBe(before.mtimeNs); expect(after.ino).toBe(before.ino);
   const journal = JSON.parse(await readFile(path, 'utf8')); expect(journal.version).toBe(4);
   expect(journal.entries[0][1].input).toHaveProperty('materializationRef'); expect(journal.entries[0][1].input).not.toHaveProperty('materialization');
@@ -68,7 +70,7 @@ it.each(['missing', 'tampered'] as const)('fails closed when an admitted snapsho
 });
 it('migrates version-3 inline evidence without losing its payload on another failed attempt', async () => {
   const { dir, input, path, snapshots } = await setup(), normalized = normalizeLifecycleRepairInput(input);
-  await writeFile(path, JSON.stringify(encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(normalized), { input: normalized, attempts: 0, nextAttemptAt: 0 }]]))));
+  await writeFile(path, JSON.stringify(historicalLifecycleRepairJournal(new Map([[lifecycleRepairKey(normalized), { input: normalized, attempts: 0, nextAttemptAt: 0 }]]))));
   const repair = owner(dir, async () => { throw new Error('retry pressure'); }); await repair.runDue();
   expect(JSON.parse(await readFile(path, 'utf8')).version).toBe(4); expect(await readdir(snapshots)).toHaveLength(1);
   expect([...(await readLifecycleRepairJournalFile(path)).values()][0]!.input.materialization).toEqual(normalized.materialization);

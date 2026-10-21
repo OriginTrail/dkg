@@ -1,16 +1,16 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
-import type { LifecycleRepairEntry, StoredLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import type { LifecycleRepairEntry, StoredLifecycleRepairInputV4 } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { applyTentativeNamedKaVmLifecycle, type TentativeNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
 import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 declare const confirmed: ConfirmedNamedKaVmLifecycleInput;
-declare const stored: StoredLifecycleRepairInput;
+declare const stored: StoredLifecycleRepairInputV4;
 declare const store: TripleStore;
 // @ts-expect-error Confirmed repair evidence cannot select tentative consumption or omit durability.
 const ambiguous: ConfirmedNamedKaVmLifecycleInput = { ...confirmed, tentative: true };
 // @ts-expect-error Persisted confirmed evidence cannot contain a tentative flag.
-const ambiguousJournal: StoredLifecycleRepairInput = { ...stored, tentative: false };
+const ambiguousJournal: StoredLifecycleRepairInputV4 = { ...stored, tentative: false };
 // @ts-expect-error The confirmed entry point refuses tentative commands.
 void applyPublishedNamedKaVmLifecycle(store, { ...confirmed, tentative: true });
 // @ts-expect-error Every repair owner must share the publisher lifecycle lock domain.
@@ -98,3 +98,7 @@ executable.assertionVersion = '2';
 // @ts-expect-error Wire/raw evidence cannot replace validated proof even on an internal command.
 const rawSnapshotCommand: ValidatedLifecycleRepairCommand = { ...executable, materialization: confirmed.materialization };
 void rawSnapshotCommand;
+
+// @ts-expect-error Production v4 wire cannot carry an inline payload.
+const inlineV4: StoredLifecycleRepairInputV4 = { ...stored, materialization: confirmed.materialization };
+void inlineV4;

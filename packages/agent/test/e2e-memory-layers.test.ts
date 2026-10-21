@@ -18,7 +18,7 @@ import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent as RealDKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
 import { createChainProofResolver } from '../../cli/src/publisher-chain-proof.js';
-import { replaceDurableFile } from '../src/durable-file-replace.js';
+import { DurableReplaceableFile } from '../src/durable-file-replace.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
@@ -121,9 +121,9 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       ? await mkdtemp(join(tmpdir(), 'dkg-queued-update-reopen-'))
       : undefined;
     const snapshotPath = dataDir ? join(dataDir, 'http-store.nq') : undefined;
+    const durableSnapshot = snapshotPath ? new DurableReplaceableFile(snapshotPath, { fileMode: 0o600, directoryMode: 0o700 }) : undefined;
     const endpoint = snapshotPath ? await startOxigraphSparqlEndpoint({
-      persistBeforeAcknowledgement: store => replaceDurableFile(snapshotPath,
-        store.dump({ format: 'application/n-quads' }), { fileMode: 0o600, directoryMode: 0o700 }),
+      persistBeforeAcknowledgement: store => durableSnapshot!.replace(store.dump({ format: 'application/n-quads' })),
     }) : undefined;
     const ownedAgents: DKGAgent[] = [];
     const openAgent = async () => {

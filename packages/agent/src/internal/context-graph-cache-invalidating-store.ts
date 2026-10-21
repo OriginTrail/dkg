@@ -2,7 +2,6 @@
 
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
-  composeTripleStoreCommitment,
   deleteByPatternWithoutCount,
   describeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
@@ -241,7 +240,7 @@ export function createMutationObservedStore(
         'update',
       )
       : undefined,
-    commitment: composeTripleStoreCommitment(innerStore),
+    commitment: innerStore.commitment,
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
     close() {
       return innerStore.close();

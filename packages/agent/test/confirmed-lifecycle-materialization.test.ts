@@ -1,3 +1,5 @@
+import { encodeLifecycleRepairJournal } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { historicalLifecycleRepairJournal } from './_helpers/historical-lifecycle-repair-journal.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,7 +13,7 @@ import { recoverReceiptBackedGraphScopedEvidence } from '../src/receipt-backed-g
 import { getBytes, hexlify } from 'ethers';
 import * as evidence from '../src/named-ka-vm-lifecycle-evidence.js';
 import * as materialization from '../src/named-ka-vm-lifecycle-materialization.js';
-import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, lifecycleMaterializationWire } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { decodeLifecycleRepairJournal, lifecycleRepairKey, lifecycleMaterializationWire } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { confirmedLifecycleExecutionCapabilities } from '../src/named-ka-vm-lifecycle-executor.js';
@@ -177,7 +179,7 @@ it('freezes admitted and decoded evidence while retry encoding does not revalida
   const source = confirmedMaterializationFixture().input;
   const admitted = normalizeLifecycleRepairInput(source);
   const entries = new Map([[lifecycleRepairKey(admitted), { input: admitted, attempts: 1, nextAttemptAt: 5_000, rejected: true }]]);
-  const decoded = decodeLifecycleRepairJournal(JSON.parse(JSON.stringify(encodeLifecycleRepairJournal(entries))));
+  const decoded = decodeLifecycleRepairJournal(JSON.parse(JSON.stringify(historicalLifecycleRepairJournal(entries))));
   for (const input of [admitted, [...decoded.values()][0]!.input]) {
     expect(Object.isFrozen(input)).toBe(true); expect(Object.isFrozen(input.publicationDeployment)).toBe(true);
     expect(Object.isFrozen(input.materialization)).toBe(true); expect(Object.isFrozen(input.materialization!.publicQuads)).toBe(true);
@@ -189,8 +191,11 @@ it('freezes admitted and decoded evidence while retry encoding does not revalida
   const normalize = vi.spyOn(evidence, 'normalizeLifecycleRepairInput');
   for (let attempt = 3; attempt < 6; attempt += 1) {
     decoded.get(lifecycleRepairKey(unrelated))!.attempts = attempt;
-    const wire = encodeLifecycleRepairJournal(decoded);
-    expect(wire.entries[0]![1].input.materialization!.publicQuads).toBe([...decoded.values()][0]!.input.materialization!.publicQuads);
+    const references = new Map([...decoded.values()].map(entry => [entry.input.materialization!, 'ab'.repeat(32)]));
+    const wire = encodeLifecycleRepairJournal(decoded, references);
+    expect(wire.version).toBe(4);
+    expect(wire.entries[0]![1].input.materializationRef).toBe('ab'.repeat(32));
+    expect(wire.entries[0]![1].input).not.toHaveProperty('materialization');
     JSON.stringify(wire);
   }
   expect(normalize).not.toHaveBeenCalled();
@@ -254,7 +259,7 @@ it('validates admission once and executes the same frozen proof through retries 
   expect(apply).toHaveBeenCalledTimes(2); expect(apply.mock.calls[1]![1].materialization).toBe(model);
   expect(normalize).toHaveBeenCalledOnce();
   const entries = new Map([[lifecycleRepairKey(command), { input: command, attempts: 0, nextAttemptAt: 0 }]]);
-  const decoded = decodeLifecycleRepairJournal(JSON.parse(JSON.stringify(encodeLifecycleRepairJournal(entries))));
+  const decoded = decodeLifecycleRepairJournal(JSON.parse(JSON.stringify(historicalLifecycleRepairJournal(entries))));
   const reopened = [...decoded.values()][0]!.input;
   expect(reopened.materialization).toEqual(model); expect(reopened.materialization).not.toBe(model);
   expect(Object.isFrozen(reopened.materialization)).toBe(true);

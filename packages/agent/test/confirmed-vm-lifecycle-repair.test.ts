@@ -1,3 +1,4 @@
+import { historicalLifecycleRepairJournal } from './_helpers/historical-lifecycle-repair-journal.js';
 import { readLifecycleRepairJournalFile } from './_helpers/read-lifecycle-repair-journal.js';
 import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { NamedKaVmLifecycleIntegrityError } from '../src/named-ka-vm-lifecycle-integrity-error.js';
@@ -20,12 +21,12 @@ import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish
 import { DurableReplaceableFile } from '../src/durable-file-replace.js';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
-import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { decodeLifecycleRepairJournal, lifecycleRepairKey } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 function serializedRepairInput(input: ConfirmedNamedKaVmLifecycleInput) {
-  return encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(input),
+  return historicalLifecycleRepairJournal(new Map([[lifecycleRepairKey(input),
     { input: normalizeLifecycleRepairInput(input), attempts: 0, nextAttemptAt: 0 },
   ]])).entries[0]![1].input;
 }
@@ -660,16 +661,25 @@ describe('review regression boundaries', () => {
   it('commits once through the production agent wrapper without separate lifecycle writes', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-wrapped-atomic-repair-')); dirs.push(dir);
     const store = await persistentStore(), agent = agentFor(store, dir, 1);
-    const materialization = confirmedLifecycleMaterialization(input, confirmedPublicationFor(input), PUBLIC_SNAPSHOT);
+    const publication = confirmedPublicationFor(input);
+    const materialization = confirmedLifecycleMaterialization(input, publication, PUBLIC_SNAPSHOT);
     const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(UAL, 1));
     await store.insert([...metadataRows(), ...materialization.metadataQuads, ...QUADS.map(q => ({ ...q, graph }))]);
     await replaceLocallyTrustedKnowledgeAssetControls(store, UAL, materialization.metadataQuads);
+    // This test isolates the lifecycle commit when all named identity/seal evidence survives.
+    await store.insert([...buildAssertionSealQuads({ ...publication.seal,
+      assertionUri: ASSERTION, metaGraph: META, contentScopeVersion: 2, kaUal: UAL,
+      assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0 }),
+      ...[['kaId', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'], ['reservedUal', JSON.stringify(UAL)],
+        ['contentScopeVersion', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>'], ['assertionName', JSON.stringify(NAME)],
+        ['assertionVersion', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']].map(([predicate, object]) => ({
+        subject: LIFECYCLE, predicate: DKG + predicate, object: object!, graph: META }))]);
     const commit = vi.spyOn(store, 'atomicUpdate'), insert = vi.spyOn(store, 'insert');
     const remove = vi.spyOn(store, 'deleteByPattern'), removeWithoutCount = vi.spyOn(store, 'deleteByPatternWithoutCount');
     const invalidate = vi.fn(), dirty = vi.fn();
     agent.store = createListContextGraphsCacheInvalidatingStore(store, invalidate, dirty);
     try {
-      expect(await agent._repairConfirmedNamedKaVmLifecycle({ ...input, priorMerkleRoot: PRIOR }, confirmedPublicationFor(input), PUBLIC_SNAPSHOT)).toBe(false);
+      expect(await agent._repairConfirmedNamedKaVmLifecycle({ ...input, priorMerkleRoot: PRIOR }, publication, PUBLIC_SNAPSHOT)).toBe(false);
       expect(commit).toHaveBeenCalledTimes(1); expect(insert).not.toHaveBeenCalled();
       expect(remove).not.toHaveBeenCalled(); expect(removeWithoutCount).not.toHaveBeenCalled();
       expect(invalidate).toHaveBeenCalledTimes(1); expect(dirty).toHaveBeenCalledTimes(1);
@@ -842,7 +852,7 @@ describe('review regression boundaries', () => {
     const normalized = normalizeLifecycleRepairInput({ ...input, packedKaId }), key = lifecycleRepairKey(normalized);
     expect(normalized.packedKaId).toBe(packedKaId);
     const entries = new Map([[key, { input: normalized, attempts: 3, nextAttemptAt: 42_000, rejected: true, lastError: 'retained' }]]);
-    const wire = encodeLifecycleRepairJournal(entries);
+    const wire = historicalLifecycleRepairJournal(entries);
     expect(wire.entries[0]![1].input.packedKaId).toBe(packedKaId.toString());
     expect(decodeLifecycleRepairJournal(JSON.parse(JSON.stringify(wire)))).toEqual(entries);
     wire.entries[0]![1].input.packedKaId = `000${packedKaId}`;

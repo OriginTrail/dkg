@@ -11,7 +11,7 @@ export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifec
   readonly packedKaId?: bigint;
 };
 type JournalInput = ValidatedLifecycleRepairCommand | HistoricalUnboundLifecycleRepairInput;
-export type StoredLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput | HistoricalUnboundLifecycleRepairInput, 'packedKaId' | 'tentative'> & { packedKaId?: string; materializationRef?: string };
+export type StoredLifecycleRepairInputV4 = Omit<ConfirmedNamedKaVmLifecycleInput | HistoricalUnboundLifecycleRepairInput, 'packedKaId' | 'tentative' | 'materialization'> & { packedKaId?: string; materializationRef?: string };
 interface RepairRetryState {
   attempts: number;
   nextAttemptAt: number;
@@ -58,20 +58,18 @@ export function lifecycleRepairKey(input: ConfirmedNamedKaVmLifecycleInput | His
 function historicalRepairKey(input: JournalInput): string {
   return createHash('sha256').update(JSON.stringify([input.contextGraphId, input.agentAddress.toLowerCase(), input.name, input.subGraphName ?? ''])).digest('hex');
 }
-/** The no-reference codec is retained only for reading/testing historical inline journals. */
+/** Production emits only compact v4 records; historical compatibility is read-only. */
 export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, LifecycleRepairEntry>,
-  references?: Pick<ReadonlyMap<ConfirmedLifecycleMaterialization, string>, 'get'>,
-): { version: 3 | 4; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInput }]> } {
-  return { version: references ? 4 : 3, entries: [...entries].map(([key, entry]) => {
+  references: Pick<ReadonlyMap<ConfirmedLifecycleMaterialization, string>, 'get'>,
+): { version: 4; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInputV4 }]> } {
+  return { version: 4, entries: [...entries].map(([key, entry]) => {
     // Admission and decode own validation/copying; retry bookkeeping never rehashes payloads.
     const { materialization, ...coordinates } = entry.input;
-    let input: StoredLifecycleRepairInput = { ...coordinates, packedKaId: coordinates.packedKaId?.toString() };
+    const input: StoredLifecycleRepairInputV4 = { ...coordinates, packedKaId: coordinates.packedKaId?.toString() };
     if (materialization) {
-      if (references) {
-        const ref = references.get(materialization);
-        if (!ref || !/^[a-f0-9]{64}$/.test(ref)) return invalid();
-        input.materializationRef = ref;
-      } else input = { ...input, materialization: lifecycleMaterializationWire(materialization) };
+      const ref = references.get(materialization);
+      if (!ref || !/^[a-f0-9]{64}$/.test(ref)) return invalid();
+      input.materializationRef = ref;
     }
     const { retention: _retention, ...retry } = entry;
     return [key, { ...retry, input }];

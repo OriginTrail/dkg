@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { confirmedNamedSealQuads, normalizeConfirmedNamedSeal } from './named-ka-vm-lifecycle-named-evidence.js';
 import { MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, materializedVersionQuad,
   parseConfirmedGraphKnowledgeAssetMetadataEnvelope, confirmedGraphKnowledgeAssetProof,
@@ -21,6 +22,7 @@ export interface ConfirmedNamedKaVmLifecycleInput extends PublishedNamedKaVmLife
   readonly publicationDeployment: ConfirmedNamedKaVmPublicationDeployment;
   readonly materialization?: ConfirmedLifecycleMaterialization;
   readonly priorMerkleRoot?: string;
+  readonly namedSealQuads?: readonly Quad[];
 }
 /** Immutable public recovery material; private plaintext never enters the journal. */
 export interface ConfirmedLifecycleMaterialization {
@@ -68,7 +70,7 @@ export function normalizeLifecyclePublicationDeployment(value: unknown): Confirm
   if (!/^(0|[1-9][0-9]*)$/.test(chainId) || BigInt(chainId) >= 1n << 256n || !/^0x[0-9a-f]{40}$/i.test(lifecycleAddress)) return invalid();
   return Object.freeze({ chainId, lifecycleAddress: lifecycleAddress.toLowerCase() });
 }
-export function normalizeLifecycleCoordinates(value: unknown): Omit<ConfirmedNamedKaVmLifecycleInput, 'materialization' | 'packedKaId' | 'publicationDeployment'> {
+export function normalizeLifecycleCoordinates(value: unknown): Omit<ConfirmedNamedKaVmLifecycleInput, 'materialization' | 'packedKaId' | 'publicationDeployment' | 'namedSealQuads'> {
   const input = record(value);
   if ('tentative' in input) return invalid();
   const assertionVersion = string(input['assertionVersion']);
@@ -87,9 +89,12 @@ export function normalizeLifecycleRepairInput(value: unknown): ValidatedLifecycl
     packedKaId: normalizeLifecyclePackedIdentity(input['packedKaId']),
     publicationDeployment: normalizeLifecyclePublicationDeployment(input['publicationDeployment']),
   };
-  return Object.freeze({ ...coordinates,
-    ...(input['materialization'] === undefined ? {} : {
-      materialization: normalizeLifecycleMaterialization(input['materialization'], coordinates),
+  const materialization = input['materialization'] === undefined ? undefined
+    : normalizeLifecycleMaterialization(input['materialization'], coordinates);
+  const admitted = { ...coordinates, ...(materialization ? { materialization } : {}) };
+  return Object.freeze({ ...admitted,
+    ...(input['namedSealQuads'] === undefined ? {} : {
+      namedSealQuads: normalizeConfirmedNamedSeal(input['namedSealQuads'], admitted, materialization?.proof),
     }),
   }) as ValidatedLifecycleRepairCommand;
 }
@@ -120,6 +125,7 @@ export function confirmedNamedKaVmLifecycleInput(
     ...(coordinates.subGraphName === undefined ? {} : { subGraphName: coordinates.subGraphName }),
     ...(coordinates.priorMerkleRoot === undefined ? {} : { priorMerkleRoot: coordinates.priorMerkleRoot }),
     packedKaId: coordinates.packedKaId,
+    namedSealQuads: confirmedNamedSealQuads(seal, coordinates.packedKaId),
     publishedUal: publication.ual, merkleRoot: hexlify(seal.merkleRoot), assertionVersion: scope.assertionVersion,
     publicationDeployment: Object.freeze({ chainId: seal.chainId.toString(), lifecycleAddress: seal.kav10Address }),
   };

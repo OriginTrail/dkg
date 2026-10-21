@@ -1,3 +1,4 @@
+import { parseAssertionSealQuads } from '@origintrail-official/dkg-core';
 import { describe, expect, it } from 'vitest';
 import { confirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
@@ -11,7 +12,11 @@ describe('confirmed lifecycle evidence ownership', () => {
     // the validated seal's lifecycle evidence or the resolved named coordinates.
     const derived = confirmedNamedKaVmLifecycleInput({ ...publication, merkleRoot: new Uint8Array(32).fill(0x99),
       seal: { ...publication.seal, assertionVersion: '2' } }, { ...input, ...coordinates, assertionVersion: '999', merkleRoot: '00' } as typeof coordinates);
-    expect(derived).toEqual({ ...coordinates, publishedUal: publication.ual, merkleRoot: input.merkleRoot,
+    const { namedSealQuads, ...descriptor } = derived;
+    expect(parseAssertionSealQuads([...namedSealQuads!], namedSealQuads![0]!.subject)).toMatchObject({
+      assertionVersion: '2', merkleRoot: publication.seal.merkleRoot, authorAttestationR: publication.seal.authorAttestationR,
+    });
+    expect(descriptor).toEqual({ ...coordinates, publishedUal: publication.ual, merkleRoot: input.merkleRoot,
       assertionVersion: '2', publicationDeployment: { chainId: '31337', lifecycleAddress: publication.seal.kav10Address } });
     expect(Object.isFrozen(derived)).toBe(true); expect(Object.isFrozen(derived.publicationDeployment)).toBe(true);
   });

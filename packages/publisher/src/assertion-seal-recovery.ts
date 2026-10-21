@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import {
   ASSERTION_SEAL_PREDICATES, GRAPH_KA_CONTENT_SCOPE_VERSION, assertSafeIri,
-  contextGraphMetaUri, createGraphKnowledgeAssetScope, isSwmMerkleExcludedQuad,
+  contextGraphMetaUri, contextGraphAssertionUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri, createGraphKnowledgeAssetScope, isSwmMerkleExcludedQuad,
   type AssertionSeal, type GraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
 import type { GraphManager, Quad, TripleStore } from '@origintrail-official/dkg-storage';
@@ -141,3 +141,26 @@ export async function validateGraphScopedPayloadAgainstSeal(
   }
   return { normalizedPublicQuads, normalizedPrivateQuads, privateMerkleRoot };
 }
+
+export function assertionRecoverySealGraph(
+    contextGraphId: string,
+    subGraphName?: string,
+  ): string {
+    return subGraphName
+      ? contextGraphSubGraphPrivateUri(contextGraphId, subGraphName)
+      : contextGraphPrivateUri(contextGraphId);
+  }
+
+export function assertionRecoverySealSubject(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+  ): string {
+    return `${contextGraphAssertionUri(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    )}/_recovery_seal`;
+  }

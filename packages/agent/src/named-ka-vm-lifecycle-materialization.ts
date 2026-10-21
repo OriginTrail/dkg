@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { restoreConfirmedNamedAssertion } from './named-ka-vm-lifecycle-named-evidence.js';
 import { MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, confirmedGraphKnowledgeAssetProof,
   sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata,
@@ -70,6 +71,7 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
       }
       if (!replaced) throw new Error('Confirmed lifecycle recovery requires atomic materialization replacement');
     }
+    await restoreConfirmedNamedAssertion(store, input, proof);
     await mutatePublishedNamedKaVmLifecycle(store, input, options.preserveVerifiedVmProof);
     // This outer barrier owns the payload read/replacement as well as the lifecycle write.
     await barrier({ source: 'agent.publish.confirmedLifecycleMaterializationFlush' });

@@ -23,7 +23,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import { fallbackAuthorResolver, type FallbackAuthor } from './fallback-author.js';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
@@ -119,7 +119,7 @@ import {
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
-import { verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
+import { assertionRecoverySealGraph, assertionRecoverySealSubject, verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
 import { resolveAssertionPullSource, type AssertionPromoteState } from './assertion-pull-source.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
@@ -6537,8 +6537,8 @@ export class DKGPublisher implements Publisher {
     subGraphName?: string,
   ): Promise<void> {
     await this.clearActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
-    const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
-    const recoverySubject = this.assertionRecoverySealSubject(
+    const recoveryGraph = assertionRecoverySealGraph(contextGraphId, subGraphName);
+    const recoverySubject = assertionRecoverySealSubject(
       contextGraphId,
       name,
       agentAddress,
@@ -6547,29 +6547,6 @@ export class DKGPublisher implements Publisher {
     for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
       await this.deleteStoreByPatternWithoutCount({ graph: recoveryGraph, subject: recoverySubject, predicate });
     }
-  }
-
-  private assertionRecoverySealGraph(
-    contextGraphId: string,
-    subGraphName?: string,
-  ): string {
-    return subGraphName
-      ? contextGraphSubGraphPrivateUri(contextGraphId, subGraphName)
-      : contextGraphPrivateUri(contextGraphId);
-  }
-
-  private assertionRecoverySealSubject(
-    contextGraphId: string,
-    name: string,
-    agentAddress: string,
-    subGraphName?: string,
-  ): string {
-    return `${contextGraphAssertionUri(
-      contextGraphId,
-      agentAddress,
-      name,
-      subGraphName,
-    )}/_recovery_seal`;
   }
 
   private async activeAssertionSealSubjects(
@@ -6658,8 +6635,8 @@ export class DKGPublisher implements Publisher {
     subGraphName?: string,
   ): Promise<Array<{ seal: AssertionSeal; subject: string; quads: Quad[] }>> {
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
-    const recoverySubject = this.assertionRecoverySealSubject(
+    const recoveryGraph = assertionRecoverySealGraph(contextGraphId, subGraphName);
+    const recoverySubject = assertionRecoverySealSubject(
       contextGraphId,
       name,
       agentAddress,
@@ -6702,8 +6679,8 @@ export class DKGPublisher implements Publisher {
     loaded: { seal: AssertionSeal; subject: string; quads: Quad[] },
     subGraphName?: string,
   ): Promise<Quad[]> {
-    const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
-    const recoverySubject = this.assertionRecoverySealSubject(
+    const recoveryGraph = assertionRecoverySealGraph(contextGraphId, subGraphName);
+    const recoverySubject = assertionRecoverySealSubject(
       contextGraphId,
       name,
       agentAddress,
@@ -7038,7 +7015,7 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string, name: string, agentAddress: string,
     operationId: string | undefined, subGraphName?: string,
   ): Promise<ResolvedAssertionSource | undefined> {
-    const subject = this.assertionRecoverySealSubject(contextGraphId, name, agentAddress, subGraphName);
+    const subject = assertionRecoverySealSubject(contextGraphId, name, agentAddress, subGraphName);
     const archived = (await this.loadAssertionSeals(contextGraphId, name, agentAddress, subGraphName))
       .find((candidate) => candidate.subject === subject);
     return verifyPullRecoverySeal({
