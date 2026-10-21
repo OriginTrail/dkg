@@ -1,6 +1,6 @@
 import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
 import { persistFileAndParent } from './file-durability.js';
-import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
+import type { TripleStoreCommitCapability } from './persistence.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -78,7 +78,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
     this.inner = inner;
     this.innerStore = inner;
-    this.commitment = composeTripleStoreCommitment(inner);
+    this.commitment = inner.commitment;
     this.graphEnumerationVisibility = inner.graphEnumerationVisibility?.bind(inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;

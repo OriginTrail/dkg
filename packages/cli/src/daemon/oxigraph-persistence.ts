@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { open } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import type { TripleStorePersistenceBarrier } from '@origintrail-official/dkg-storage';
+import { join } from 'node:path';
+import type { DurableDirectory, TripleStorePersistenceBarrier } from '@origintrail-official/dkg-storage';
 import { readRetainedWalSegmentNames } from './oxigraph-wal.js';
 
 /**
@@ -17,12 +17,11 @@ import { readRetainedWalSegmentNames } from './oxigraph-wal.js';
  * explicitly a no-op there); POSIX requires a successful directory fsync.
  */
 export function createManagedOxigraphPersistenceBarrierV1(
-  location: string,
+  directoryOwner: DurableDirectory,
   version: string,
-  platform: NodeJS.Platform = process.platform,
 ): TripleStorePersistenceBarrier | undefined {
   if (version !== '0.5.8') return undefined;
-  const directory = resolve(location);
+  const directory = directoryOwner.path;
   return async (options) => {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       options?.signal?.throwIfAborted();
@@ -34,10 +33,7 @@ export function createManagedOxigraphPersistenceBarrierV1(
           const file = await open(join(directory, name), 'r+');
           try { await file.sync(); } finally { await file.close(); }
         }
-        if (platform !== 'win32') {
-          const dir = await open(directory, 'r');
-          try { await dir.sync(); } finally { await dir.close(); }
-        }
+        await directoryOwner.persist();
         options?.signal?.throwIfAborted();
         const after = await readRetainedWalSegmentNames(directory);
         options?.signal?.throwIfAborted();

@@ -1,3 +1,4 @@
+import type { TripleStorePersistenceBarrier } from './persistence.js';
 import type { StoreOperation } from './store-operation-outcome.js';
 import type { TripleStoreConfig } from './triple-store.js';
 
@@ -40,6 +41,7 @@ export interface ManagedOxigraphRuntimeActivityLeaseV1 {
 
 /** Runtime control plane supplied only by the daemon-owned construction path. */
 export interface ManagedOxigraphRuntimeHooksV1 {
+  readonly persistence?: TripleStorePersistenceBarrier;
   readonly onClientTimeout?: (operation: StoreOperation) => void;
   /** Bound to the original process; signalling is not confirmed termination. */
   readonly requestRecovery?: (generation: number, operation: StoreOperation) => ManagedOxigraphRecoveryHandleV1 | undefined;

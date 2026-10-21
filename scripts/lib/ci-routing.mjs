@@ -392,6 +392,12 @@ export const INSTALL_HOOK_INPUTS = installHookInputs(INSTALL_HOOK_DEPENDENCIES);
 
 export const PATH_TRIGGERS = Object.freeze([
   {
+    patterns: [/^blazegraph-image\.json$/],
+    lanes: ['tornado_core', 'tornado_blazegraph'],
+    evmScopes: [],
+    reason: 'storage acknowledged-write persistence tests load the pinned Blazegraph image',
+  },
+  {
     patterns: [/^test-policy\/(?:README\.md|test-routes\.json)$/],
     lanes: ['chain_rpc_node26'],
     evmScopes: [],
@@ -584,6 +590,11 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     pattern: /^scripts\/devnet-publish-helpers\.sh$/,
     lanes: ['bura_cli'],
     reason: 'the CLI devnet-publish smoke test runs the publish helpers',
+  },
+  {
+    pattern: /^scripts\/repro\/rfc64-catalog-durable-head\.mts$/,
+    lanes: ['tornado_agent'],
+    reason: 'the required agent sidecar runs the isolated catalog process-death campaign',
   },
   {
     // packages/chain/test/sync-chain-abis.unit.test.ts runs a copy of it against

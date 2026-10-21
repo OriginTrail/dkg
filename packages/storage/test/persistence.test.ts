@@ -33,16 +33,17 @@ describe('storage persistence boundary', () => {
   });
   it('does not accept a persistence callback from generic managed-looking endpoint options', async () => {
     const flush = vi.fn(async () => {});
-    const endpoint = new SparqlHttpStore({ queryEndpoint: 'http://localhost/query',
-      managedByDkg: true, managedOxigraph: true, managedPersistence: flush });
+    const untrustedOptions = { queryEndpoint: 'http://localhost/query',
+      managedByDkg: true, managedOxigraph: true, managedPersistence: flush, persistence: flush };
+    const endpoint = new SparqlHttpStore(untrustedOptions);
     expect(endpoint.flush).toBeUndefined(); expect(endpoint.commitment).toBeUndefined();
     expect(flush).not.toHaveBeenCalled(); await endpoint.close();
   });
   it('accepts the runtime-owned barrier and loses that authority when the runtime brand is omitted', async () => {
     const flush = vi.fn(async () => {}), options = { source: 'owned-persistence' };
     const config = createManagedOxigraphRuntimeStoreConfigV1({ backend: 'sparql-http', options: {
-      queryEndpoint: 'http://127.0.0.1/query', managedByDkg: true, managedPersistence: flush,
-    } });
+      queryEndpoint: 'http://127.0.0.1/query', managedByDkg: true,
+    } }, { persistence: flush });
     const store = await createTripleStore(config), untrusted = await createTripleStore({ ...config });
     try {
       expect(untrusted.commitment).toBeUndefined();
@@ -82,7 +83,7 @@ describe('explicit persistence certification', () => {
     for (const fixture of [{ flush }, { writesDurableOnAcknowledgement: true },
       { flush, writesDurableOnAcknowledgement: true },
       { get innerStore() { throw new Error('topology is not a persistence contract'); } },
-    ]) expect(composeTripleStoreCommitment(fixture as unknown as TripleStore)).toBeUndefined();
+    ]) expect(composeTripleStoreCommitment(fixture as unknown as TripleStore, flush)).toBeUndefined();
     expect(flush).not.toHaveBeenCalled();
   });
   it('does not certify an in-memory adapter whose optional flush cannot survive restart', async () => {

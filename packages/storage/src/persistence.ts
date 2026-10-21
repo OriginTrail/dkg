@@ -25,7 +25,7 @@ export function certifiedTripleStoreCommitment(
 
 /** Decorators preserve the inner guarantee after their own mutation queue drains. */
 export function composeTripleStoreCommitment(
-  inner: TripleStore, drain?: () => Promise<void>,
+  inner: TripleStore, drain: () => Promise<void>,
 ): TripleStoreCommitCapability | undefined {
   const capability = inner.commitment;
   if (capability === undefined) return undefined;
@@ -33,7 +33,7 @@ export function composeTripleStoreCommitment(
     // Capture synchronously, before either the caller's writes or our own drain.
     const commit = capability.capture();
     return certifiedTripleStoreCommitment(capability.durability, async options => {
-      await drain?.();
+      await drain();
       options?.signal?.throwIfAborted();
       await commit(options);
     }).capture();

@@ -1,3 +1,4 @@
+import { verifyBlazegraphAcknowledgedPersistence } from './helpers/blazegraph-persistence-restart.js';
 import { randomUUID } from 'node:crypto';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../src/atomic-asset-group.js';
 import { buildBulkAssetGroupPlan } from '../src/adapters/bulk-asset-group.js';
@@ -78,6 +79,10 @@ function makeQuads(n: number): Quad[] {
 }
 
 describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', () => {
+  // Own a separate pinned-image container; the shared live service is untouched.
+  it('certifies acknowledged UPDATE and N-Quads insertion across an abrupt supported-server restart',
+    verifyBlazegraphAcknowledgedPersistence, 120_000);
+
   let store: BlazegraphStore;
 
   beforeAll(async () => {

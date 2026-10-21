@@ -1,3 +1,4 @@
+import { DurableDirectory } from '@origintrail-official/dkg-storage';
 /**
  * Managed local Oxigraph server orchestration (Release 2 opt-in path).
  *
@@ -314,10 +315,8 @@ export function planManagedOxigraph(
     highMiB: options.memoryHighMiB,
     maxMiB: options.memoryMaxMiB,
   });
-  const location =
-    typeof options.location === 'string' && options.location.trim()
-      ? options.location
-      : join(dataDir, 'oxigraph-data');
+  const location = typeof options.location === 'string' && options.location.trim()
+    ? options.location : join(dataDir, 'oxigraph-data');
   // Honour an operator `cacheDir` override (preserved by the wizard/flag flow)
   // the same way `location` is; fall back to the default binary cache dir.
   const cacheDir = resolveManagedOxigraphCacheDir(options, dataDir);
@@ -424,6 +423,7 @@ export async function startManagedOxigraph(
     binary.version,
   );
   if (plan === null) return null;
+  const directoryOwner = new DurableDirectory(plan.location, { platform: opts.platform });
 
   // The maintenance reopen is opt-in, so say which way this node runs when
   // the operator touched the option: on at which size, or ignored and why.
@@ -473,13 +473,13 @@ export async function startManagedOxigraph(
       ...plan.storeConfigTemplate.options,
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
-      managedPersistence: createManagedOxigraphPersistenceBarrierV1(plan.location, binary.version, opts.platform),
     },
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
     runtimeStoreConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
   }
   const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig, {
+    persistence: createManagedOxigraphPersistenceBarrierV1(directoryOwner, binary.version),
     getRecoveryState: readRecoveryState,
     registerActivity: () => handle.registerStoreActivity(),
     onClientTimeout: recoverTimedOutOperation,

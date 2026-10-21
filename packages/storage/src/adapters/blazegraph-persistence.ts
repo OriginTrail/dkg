@@ -7,7 +7,7 @@ export interface BlazegraphPersistenceOptions {
    * Defaults to `true`. Blazegraph runs each SPARQL UPDATE and N-Quads insert
    * request as its own journal commit and answers 200 only after that commit.
    * With the standard disk journal (`bufferMode=DiskRW`, the setting of the
-   * pinned managed image, and `forceOnCommit` at its default `Force`) the commit
+   * pinned managed image, and `forceOnCommit` at its default `ForceMetadata`) the commit
    * is forced to stable storage, so an acknowledged write survives a restart.
    *
    * Set `false` when the journal is not durable: `bufferMode` `MemStore` or

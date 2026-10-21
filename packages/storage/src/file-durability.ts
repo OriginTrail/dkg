@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { mkdir, open, stat } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-
-/** Only callers maintaining a historical best-effort state file may tolerate these directory refusals. */
-export type DirectorySyncPolicy = 'strict' | 'allow-unsupported';
-const UNSUPPORTED_DIRECTORY_CODES = new Set(['EINVAL', 'ENOTSUP', 'EPERM', 'EISDIR']);
+import { dirname, parse, resolve } from 'node:path';
 
 /** Windows FlushFileBuffers requires GENERIC_WRITE; a read-only handle fails. */
 async function syncFile(path: string): Promise<void> {
@@ -23,8 +19,6 @@ export async function persistFileAndParent(path: string, platform: NodeJS.Platfo
 export interface DurableDirectoryOptions {
   /** Mode of each directory `create()` makes, filtered by the umask; existing directories keep theirs. */
   readonly mode?: number;
-  /** Applies to every directory a barrier syncs. Strict by default. */
-  readonly policy?: DirectorySyncPolicy;
   /** Defaults to `process.platform`, read at each barrier. */
   readonly platform?: NodeJS.Platform;
 }
@@ -35,7 +29,8 @@ export interface DurableDirectoryOptions {
  * created for it, and the first parent that already existed. mkdir reports its
  * first new directory only on success. Capture the existing ancestor before
  * creation so partial mkdir failures and failed barriers retain the full range
- * until one persists it; the owner of a durable path keeps one instance.
+ * until one persists it. A new owner also certifies existing ancestry through
+ * the root, reconstructing obligations lost with its previous worker/process.
  */
 export class DurableDirectory {
   readonly path: string;
@@ -43,6 +38,10 @@ export class DurableDirectory {
 
   constructor(path: string, private readonly options: DurableDirectoryOptions = {}) {
     this.path = resolve(path);
+    // A replacement owner cannot infer successful parent fsync from existence:
+    // the old worker/process may have died after mkdir but before certification.
+    // Adopt the complete ancestry once; only a successful barrier clears it.
+    this.pendingThrough = parse(this.path).root;
   }
 
   async create(): Promise<void> {
@@ -69,7 +68,7 @@ export class DurableDirectory {
   /** Sync this directory, then every directory entry created since the last successful barrier. */
   async persist(): Promise<void> {
     const through = this.pendingThrough;
-    await persistDirectoryRange(this.path, through ?? this.path, this.options.platform ?? process.platform, this.options.policy);
+    await persistDirectoryRange(this.path, through ?? this.path, this.options.platform ?? process.platform);
     if (this.pendingThrough === through) this.pendingThrough = undefined;
   }
 
@@ -82,16 +81,12 @@ export class DurableDirectory {
 
 /** POSIX directory fsync is strict by default; Windows has no supported directory handle through Node's open API. */
 export async function persistDirectoryRange(
-  directory: string, last: string, platform: NodeJS.Platform = process.platform, policy: DirectorySyncPolicy = 'strict',
+  directory: string, last: string, platform: NodeJS.Platform = process.platform,
 ): Promise<void> {
   if (platform === 'win32') return;
   for (;; directory = dirname(directory)) {
-    try {
-      const handle = await open(directory, 'r');
-      try { await handle.sync(); } finally { await handle.close(); }
-    } catch (error) {
-      if (policy !== 'allow-unsupported' || !UNSUPPORTED_DIRECTORY_CODES.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
-    }
+    const handle = await open(directory, 'r');
+    try { await handle.sync(); } finally { await handle.close(); }
     if (directory === last || dirname(directory) === directory) break;
   }
 }

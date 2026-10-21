@@ -1,4 +1,4 @@
-import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
+import type { TripleStoreCommitCapability } from './persistence.js';
 import type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 export type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
@@ -123,7 +123,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
-    this.commitment = composeTripleStoreCommitment(inner);
+    this.commitment = inner.commitment;
     this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isAtomicGraphReplaceStagingGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);

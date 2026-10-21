@@ -1,4 +1,4 @@
-export { DurableDirectory, persistFileAndParent, persistDirectoryRange, type DirectorySyncPolicy, type DurableDirectoryOptions } from './file-durability.js';
+export { DurableDirectory, persistFileAndParent, persistDirectoryRange, type DurableDirectoryOptions } from './file-durability.js';
 export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
@@ -332,4 +332,4 @@ export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSE
 
 export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';
 
-export { DurableReplaceableFile, replaceDurableFile, type DurableFileReplacePermissions } from './durable-file-replace.js';
+export { DurableReplaceableFile, type DurableFileReplacePermissions } from './durable-file-replace.js';

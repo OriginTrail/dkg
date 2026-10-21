@@ -32,33 +32,38 @@ async function absentNested() {
   return { root, created, path: join(created, 'nested') };
 }
 
-it('creates with the requested mode and syncs each created directory through the first existing parent once', async () => {
-  const { root, created, path } = await absentNested(), directory = new DurableDirectory(path, { mode: 0o700, platform: 'linux' });
+function ancestry(path: string): string[] {
+  const paths = [path];
+  while (dirname(path) !== path) { path = dirname(path); paths.push(path); }
+  return paths;
+}
+
+it('creates with the requested mode and certifies its adopted ancestry once', async () => {
+  const { created, path } = await absentNested(), directory = new DurableDirectory(path, { mode: 0o700, platform: 'linux' });
   await directory.create(); await directory.persist();
-  // The entries of new/ and new/nested/ live in the existing root and in new/.
-  expect(io.synced).toEqual([path, created, root]);
+  // A fresh owner must also certify existing parents that another owner may have left unsynced.
+  expect(io.synced).toEqual(ancestry(path));
   io.synced = []; await directory.create(); await directory.persist();
   expect(io.synced).toEqual([path]);
   for (const entry of [created, path]) expect((await stat(entry)).mode & 0o777).toBe(0o700 & ~process.umask());
 });
 
 it('keeps a failed range pending, although mkdir reports nothing on retry', async () => {
-  const { root, created, path } = await absentNested(), directory = new DurableDirectory(path, { platform: 'linux' });
+  const { created, path } = await absentNested(), directory = new DurableDirectory(path, { platform: 'linux' });
   await directory.create(); io.fail = created;
   await expect(directory.persist()).rejects.toMatchObject({ code: 'EIO' });
   io.fail = ''; io.synced = [];
   await directory.create(); await directory.persist();
-  expect(io.synced).toEqual([path, created, root]);
+  expect(io.synced).toEqual(ancestry(path));
 });
 
-it('applies its sync policy to every directory in the range', async () => {
-  const { root, created, path } = await absentNested();
-  const directory = new DurableDirectory(path, { policy: 'allow-unsupported', platform: 'linux' });
-  await directory.create(); io.fail = created;
-  await expect(directory.persist()).rejects.toMatchObject({ code: 'EIO' }); // Real I/O errors are never tolerated.
-  io.code = 'EPERM'; io.synced = [];
-  await directory.persist();
-  expect(io.synced).toEqual([path, root]);
+it.each(['EIO', 'EPERM', 'EINVAL', 'ENOTSUP', 'EISDIR'])('propagates POSIX %s at every directory and retains the failed range', async code => {
+  const { created, path } = await absentNested();
+  const directory = new DurableDirectory(path, { platform: 'linux' });
+  await directory.create(); io.fail = created; io.code = code;
+  await expect(directory.persist()).rejects.toMatchObject({ code });
+  io.fail = ''; io.synced = []; await directory.persist();
+  expect(io.synced).toEqual(ancestry(path));
 });
 
 
@@ -76,7 +81,22 @@ it('retains ancestry when recursive creation makes a parent before failing, and 
   expect(io.synced).toEqual([path, created]);
   io.fail = ''; io.synced = [];
   await preparation.prepare();
-  expect(io.synced).toEqual([path, created, root]);
+  expect(io.synced).toEqual(ancestry(path));
   io.synced = []; await preparation.prepare();
   expect(io.synced).toEqual([]);
+});
+
+it('reconstructs failed ancestor obligations when a new owner adopts the existing directory', async () => {
+  const { root, path } = await absentNested();
+  const original = new DurableDirectory(path, { platform: 'linux' });
+  await original.create(); io.fail = root;
+  await expect(original.persist()).rejects.toMatchObject({ code: 'EIO' });
+  const replacement = new DurableDirectory(path, { platform: 'linux' });
+  await replacement.create();
+  await expect(replacement.persist()).rejects.toMatchObject({ code: 'EIO' });
+  io.fail = ''; io.synced = [];
+  await replacement.persist();
+  expect(io.synced).toContain(root);
+  io.synced = []; await replacement.persist();
+  expect(io.synced).toEqual([path]);
 });
