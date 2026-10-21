@@ -1,5 +1,8 @@
+import { handleShareJobCollection } from './share-job-collection.js';
+import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
+import { promoteConflictResponse } from './promote-admission-response.js';
 import { partialDurableShareFailure, classifySynchronousShareFailure, synchronousShareFailureDecision } from './durable-share-response.js';
-import { durableSynchronousShare, synchronousShareSuccessBody } from './durable-synchronous-share.js';
+import { durableSynchronousShare, shareOperationFields, synchronousShareSuccessBody } from './durable-synchronous-share.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { classifyKaIdentifier, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
@@ -62,14 +65,6 @@ import {
   handleKaExtractionStatus,
 } from "./knowledge-assets-import.js";
 import {
-  handleKaShareJobsList,
-  handleKaShareJobStatus,
-  handleKaShareJobCancel,
-  handleKaShareJobClear,
-  handleKaShareJobRecover,
-} from "./knowledge-assets-async-share.js";
-import {
-  decodePromoteJobId,
   asyncPromoteUnavailable,
   authorizeAgentScopedAuthorClaim,
   buildAutoRegisterFailureBody,
@@ -635,69 +630,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   if (method === "POST" && path === `${PREFIX}/import-artifact/read-markdown`) return handleKaImportArtifactReadMarkdown(ctx);
   if (method === "POST" && path === `${PREFIX}/semantic-enrichment/write`) return handleKaSemanticEnrichmentWrite(ctx);
 
-  // ── Async SWM-share jobs COLLECTION routes (faithful ports of the legacy
-  // `/api/assertion/promote-async*` queue routes) ──
-  //
-  // These start with `swm/share-jobs`, so `segs[0]` would be "swm" — the
-  // generic `:name` parsing below would mis-read it as an assertion name.
-  // Match them EARLY on the raw `path`, before any name logic. The per-name
-  // enqueue route (`:name/swm/share-async`) is NOT here — it has a real name
-  // segment and is handled in the SWM section alongside `swm/share`.
-  //
-  // The `/recover` suffix (#5) must be matched BEFORE the bare-`:jobId`
-  // patterns (#3/#4). jobIds are decoded via `decodePromoteJobId` on the
-  // url-encoded segment, exactly as the legacy routes did inline.
-  const SHARE_JOBS_PREFIX = `${PREFIX}/swm/share-jobs`;
-  if (path === SHARE_JOBS_PREFIX || path.startsWith(`${SHARE_JOBS_PREFIX}/`)) {
-    // GET /api/knowledge-assets/swm/share-jobs — list
-    if (method === "GET" && path === SHARE_JOBS_PREFIX) {
-      return handleKaShareJobsList(ctx);
-    }
-    // POST /api/knowledge-assets/swm/share-jobs/:jobId/recover — recover (#5)
-    if (
-      method === "POST" &&
-      path.startsWith(`${SHARE_JOBS_PREFIX}/`) &&
-      path.endsWith("/recover")
-    ) {
-      const jobId = decodePromoteJobId(
-        path.slice(`${SHARE_JOBS_PREFIX}/`.length, -"/recover".length),
-        res,
-      );
-      if (jobId === null) return;
-      return handleKaShareJobRecover(ctx, jobId);
-    }
-    // POST /api/knowledge-assets/swm/share-jobs/:jobId/clear — #1837 atomic terminal
-    // record removal (idempotent). DISTINCT from the DELETE cancellation below (which
-    // rewrites a queued job to failed+cancelled and RETAINS the row).
-    if (
-      method === "POST" &&
-      path.startsWith(`${SHARE_JOBS_PREFIX}/`) &&
-      path.endsWith("/clear")
-    ) {
-      const jobId = decodePromoteJobId(
-        path.slice(`${SHARE_JOBS_PREFIX}/`.length, -"/clear".length),
-        res,
-      );
-      if (jobId === null) return;
-      return handleKaShareJobClear(ctx, jobId);
-    }
-    // GET /api/knowledge-assets/swm/share-jobs/:jobId — status (#3)
-    if (
-      method === "GET" &&
-      path.startsWith(`${SHARE_JOBS_PREFIX}/`) &&
-      !path.endsWith("/recover")
-    ) {
-      const jobId = decodePromoteJobId(path.slice(`${SHARE_JOBS_PREFIX}/`.length), res);
-      if (jobId === null) return;
-      return handleKaShareJobStatus(ctx, jobId);
-    }
-    // DELETE /api/knowledge-assets/swm/share-jobs/:jobId — cancel (#4)
-    if (method === "DELETE" && path.startsWith(`${SHARE_JOBS_PREFIX}/`)) {
-      const jobId = decodePromoteJobId(path.slice(`${SHARE_JOBS_PREFIX}/`.length), res);
-      if (jobId === null) return;
-      return handleKaShareJobCancel(ctx, jobId);
-    }
-  }
+  if (await handleShareJobCollection(ctx)) return;
 
   // Parity with the legacy assertion routes: resolve/validate the write
   // contextGraphId against the caller's known graphs before any mutation, so a
@@ -1032,7 +965,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.promotedCount = share.promotedCount;
           result.sealed = share.sealed;
           result.publishReady = share.publishReady;
-          if (share.shareOperationId) result.shareOperationId = share.shareOperationId;
+          Object.assign(result, shareOperationFields(share));
           // #1116: the one-shot finalizes BEFORE sharing, so a shared asset is
           // normally sealed ("swm-shared"). The unsealed status is only reachable
           // if a future path shares without sealing.
@@ -1119,6 +1052,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   const layer = segs[1]; // wm | swm | vm | undefined
   const verb = segs[2];
 
+  if (method === 'POST' && layer === 'vm' && verb === 'repair-descriptor') return handlePublishedDescriptorRepair(ctx, name, writePreflightContextGraphOpts);
   // Shared GET preflight: decode/validate the :identifier, require + normalize
   // contextGraphId, validate subGraphName, extract optional agentAddress. For
   // agent-scoped bearer tokens, omitted agentAddress defaults to the token's
@@ -1445,10 +1379,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {
-          return jsonResponse(res, 409, {
-            error: err.message,
-            existingJobId: err.existingJobId,
-          });
+          return jsonResponse(res, 409, promoteConflictResponse(err));
         }
         if (
           err.message?.includes("required") ||

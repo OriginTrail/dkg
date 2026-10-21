@@ -766,6 +766,8 @@ export class DKGNode {
       ? new NetworkPeerDialPolicy({
           selfPeerId: selfPeerIdEarly.toString(),
           configuredRelayPeerIds: activeNetworkRelayPeerIds,
+          staticDialExemptionPeerIds: (this.config.staticDialExemptions ?? [])
+            .map(peerIdFromRelayAddress).filter((peerId): peerId is string => peerId !== undefined),
           otherNetworkRelayPeerIds: (this.config.otherNetworkRelays ?? [])
             .map((address) => peerIdFromRelayAddress(address))
             .filter((peerId): peerId is string => peerId !== undefined),

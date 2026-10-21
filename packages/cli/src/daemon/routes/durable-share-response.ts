@@ -3,14 +3,14 @@ import { classifyAssertionError } from './knowledge-assets-error-mapping.js';
 import { sanitizeRpcMessage } from '../http-utils.js';
 import type { AssertionFailureResponse } from './assertion-failure-response.js';
 import type { PromoteRecoveryContext } from './promote-recovery-response.js';
-import { DurableShareFailure } from './durable-share-failure.js';
+import { DurableShareFailure, shareJobStatusUrl } from './durable-share-failure.js';
 
 /** Only observation metadata is public; never expose the queue claim or binding. */
 function durableRecoveryDetails(error: unknown): Record<string, unknown> {
   if (!(error instanceof DurableShareFailure) || error.observation.state === 'unavailable') return {};
   const { state, jobId } = error.observation;
   return { recoveryJobId: jobId, recoveryState: state,
-    recoveryStatusUrl: `/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`,
+    recoveryStatusUrl: shareJobStatusUrl(jobId),
     ...(state === 'inspection-required' || state === 'completed' ? { retryable: false } : {}) };
 }
 
