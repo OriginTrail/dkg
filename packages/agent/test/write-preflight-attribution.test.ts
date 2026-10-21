@@ -1,4 +1,3 @@
-import { sanitizeWritePreflightFailures } from '../src/write-preflight-attribution.js';
 import { describe, expect, it, vi } from 'vitest';
 import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
@@ -63,16 +62,4 @@ describe('write preflight failure attribution', () => {
       { site: 'subscription', kind: 'store-not-started' },
     ]);
   });
-});
-
-
-it('snapshots diagnostic getters once and bounds malicious input without reflecting it', () => {
-  let reads = 0;
-  const row = { get site() { return ++reads === 1 ? 'existence' : 'https://secret'; }, kind: 'unknown' };
-  expect(sanitizeWritePreflightFailures([row])).toEqual([{ site: 'existence', kind: 'unknown' }]);
-  expect(reads).toBe(1);
-  expect(sanitizeWritePreflightFailures(new Proxy([], { get() { throw new Error('private'); } })))
-    .toEqual([{ site: 'decision', kind: 'unknown' }]);
-  expect(sanitizeWritePreflightFailures(Array(1000).fill({ site: 'secret', kind: 'token' })))
-    .toEqual([{ site: 'decision', kind: 'unknown' }]);
 });

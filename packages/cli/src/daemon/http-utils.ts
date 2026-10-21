@@ -1,5 +1,5 @@
-import { classifyWritePreflightFailure, type WritePreflightFailure } from '@origintrail-official/dkg-agent/write-preflight-attribution';
-import { recordWritePreflightUnavailable, type WritePreflightDiagnostics, type WritePreflightRescueOutcome } from './write-preflight-diagnostics.js';
+import { classifyWritePreflightFailure } from '@origintrail-official/dkg-agent/write-preflight-attribution';
+import { recordWritePreflightUnavailable, type WritePreflightDiagnosticFailure, type WritePreflightDiagnostics, type WritePreflightRescueOutcome } from './write-preflight-diagnostics.js';
 import { evaluateExactWritePreflight, rescueWriteTargetWithoutStore } from './write-context-graph-preflight.js';
 export { WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS } from './write-context-graph-preflight.js';
 import { classifyReconcileUnavailable } from './reconcile-unavailable.js';
@@ -820,7 +820,7 @@ function rejectKnownNonWritableContextGraph(res: ServerResponse, raw: string, ou
 function contextGraphValidationUnavailable(
   res: ServerResponse,
   message: string,
-  attribution: readonly WritePreflightFailure[],
+  attribution: readonly WritePreflightDiagnosticFailure[],
   rescue: WritePreflightRescueOutcome = 'not-attempted',
   observer?: WritePreflightDiagnostics,
 ): null {
@@ -1000,7 +1000,7 @@ async function resolveWriteContextGraphIdOnce(
       ? await rescueWriteTargetWithoutStore(agent, candidateId, message, opts.chainRescueTimeoutMs)
       : 'not-attempted';
     if (rescue === 'accepted') return candidateId;
-    const attribution: WritePreflightFailure[] = [
+    const attribution: WritePreflightDiagnosticFailure[] = [
       ...(exactDecision.kind === 'listUnavailable' ? exactDecision.attribution : []),
       { site: 'list', kind: classifyWritePreflightFailure(err) },
     ];

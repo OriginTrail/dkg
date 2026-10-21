@@ -1,11 +1,12 @@
 import type { ServerResponse } from 'node:http';
 import { Logger, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
-import { sanitizeWritePreflightFailures, type WritePreflightFailure } from '@origintrail-official/dkg-agent/write-preflight-attribution';
+import { sanitizeWritePreflightFailures, type WritePreflightDiagnosticFailure } from './write-preflight-attribution.js';
+export type { WritePreflightDiagnosticFailure } from './write-preflight-attribution.js';
 import { createWarningGate } from './read-authority-diagnostics.js';
 
 export type WritePreflightRescueOutcome = 'not-attempted' | 'unsupported' | 'denied' | 'deadline' | 'failed' | 'accepted';
 export interface WritePreflightDiagnostic {
-  readonly failures: readonly WritePreflightFailure[];
+  readonly failures: readonly WritePreflightDiagnosticFailure[];
   readonly rescue: WritePreflightRescueOutcome;
 }
 export interface WritePreflightDiagnostics {
@@ -35,7 +36,7 @@ const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 /** One safe event per actual response; observer failure must never affect HTTP. */
 export function recordWritePreflightUnavailable(
-  res: ServerResponse, failures: readonly WritePreflightFailure[], rescue: WritePreflightRescueOutcome,
+  res: ServerResponse, failures: readonly WritePreflightDiagnosticFailure[], rescue: WritePreflightRescueOutcome,
   observer: WritePreflightDiagnostics = diagnostics,
 ): string {
   const previous = answered.get(res); if (previous) return previous;

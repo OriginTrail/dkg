@@ -1,7 +1,8 @@
 import type { WritePreflightRescueOutcome } from './write-preflight-diagnostics.js';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
-import { classifyWritePreflightFailure, sanitizeWritePreflightFailures, type WritePreflightFailure } from '@origintrail-official/dkg-agent/write-preflight-attribution';
+import { classifyWritePreflightFailure } from '@origintrail-official/dkg-agent/write-preflight-attribution';
+import { sanitizeWritePreflightFailures, type WritePreflightDiagnosticFailure } from './write-preflight-attribution.js';
 
 function hasActiveSyncedSubscription(probe: ContextGraphWritePreflightProbe): boolean {
   return (
@@ -179,11 +180,11 @@ type ExactPreflightDecision =
   | { kind: "accept" }
   | { kind: "rejectUnknown" }
   | { kind: "rejectNonWritable" }
-  | { kind: "validationUnavailable"; errorMessage: string; attribution: WritePreflightFailure[] }
-  | { kind: "unavailableWithRescue"; errorMessage: string; attribution: WritePreflightFailure[] }
+  | { kind: "validationUnavailable"; errorMessage: string; attribution: WritePreflightDiagnosticFailure[] }
+  | { kind: "unavailableWithRescue"; errorMessage: string; attribution: WritePreflightDiagnosticFailure[] }
   | { kind: "listFallback" }
   | { kind: "listDeferredReject" }
-  | { kind: "listUnavailable"; errorMessage: string; attribution: WritePreflightFailure[] };
+  | { kind: "listUnavailable"; errorMessage: string; attribution: WritePreflightDiagnosticFailure[] };
 
 /**
  * Run the exact write-preflight probe and reduce it to one {@link
@@ -279,7 +280,7 @@ export async function evaluateExactWritePreflight(
     // broke). The ONLY degraded case that makes the both-legs-failed rescue
     // eligible: there is no authoritative local-miss verdict to override.
     const errorMessage = err instanceof Error ? err.message : String(err);
-    const attribution: WritePreflightFailure[] = [{ site: 'exact-probe', kind: classifyWritePreflightFailure(err) }];
+    const attribution: WritePreflightDiagnosticFailure[] = [{ site: 'exact-probe', kind: classifyWritePreflightFailure(err) }];
     return isBareCandidateId
       ? { kind: "listUnavailable", errorMessage, attribution }
       : { kind: "unavailableWithRescue", errorMessage, attribution };
@@ -287,7 +288,7 @@ export async function evaluateExactWritePreflight(
 }
 
 
-function probeAttribution(probe: ContextGraphWritePreflightProbe): WritePreflightFailure[] {
+function probeAttribution(probe: ContextGraphWritePreflightProbe): WritePreflightDiagnosticFailure[] {
   try { return sanitizeWritePreflightFailures(probe.failureAttribution); }
   catch { return [{ site: 'exact-probe', kind: 'unknown' }]; }
 }

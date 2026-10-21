@@ -1,3 +1,5 @@
+import { sanitizeWritePreflightFailures } from '../src/daemon/write-preflight-attribution.js';
+import { WRITE_PREFLIGHT_SITES } from '@origintrail-official/dkg-agent/write-preflight-attribution';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { OxigraphWorkerStore } from '@origintrail-official/dkg-storage';
@@ -23,6 +25,13 @@ function provider(probe: unknown) {
   };
 }
 const opts = (record = vi.fn()) => ({ writePreflightDiagnostics: { record }, chainRescueTimeoutMs: 5 });
+
+it('composes agent and daemon sites while retaining the nine-entry diagnostic limit', () => {
+  expect(WRITE_PREFLIGHT_SITES).toEqual(['existence', 'content', 'subscription', 'declaration', 'caller-access']);
+  const sites = [...WRITE_PREFLIGHT_SITES, 'exact-probe', 'metadata', 'list', 'decision'];
+  const failures = sites.map(site => ({ site, kind: 'unknown' }));
+  expect(sanitizeWritePreflightFailures([...failures, { site: 'decision', kind: 'deadline' }])).toEqual(failures);
+});
 
 describe('write preflight response diagnostics', () => {
   it.each(['existence', 'content', 'subscription', 'declaration', 'caller-access'])('carries %s failure through the exact decision to one correlated 503', async site => {
@@ -168,4 +177,15 @@ it.each([qualified, 'bare-name'])('keeps accepted rescue control flow without an
   expect(agent.listContextGraphs).toHaveBeenCalledTimes(candidate === qualified ? 0 : 1);
   expect(options.writePreflightDiagnostics.record).not.toHaveBeenCalled();
   expect(out.status).toBeUndefined();
+});
+
+it('snapshots diagnostic getters once and bounds malicious input without reflecting it', () => {
+  let reads = 0;
+  const row = { get site() { return ++reads === 1 ? 'existence' : 'https://secret'; }, kind: 'unknown' };
+  expect(sanitizeWritePreflightFailures([row])).toEqual([{ site: 'existence', kind: 'unknown' }]);
+  expect(reads).toBe(1);
+  expect(sanitizeWritePreflightFailures(new Proxy([], { get() { throw new Error('private'); } })))
+    .toEqual([{ site: 'decision', kind: 'unknown' }]);
+  expect(sanitizeWritePreflightFailures(Array(1000).fill({ site: 'secret', kind: 'token' })))
+    .toEqual([{ site: 'decision', kind: 'unknown' }]);
 });
