@@ -66,3 +66,9 @@ Remote review found that preparation-only retries inflated the existing first-ex
 The compatibility exclusions now have independent persisted-worker cases (older format with lane, current format without lane). Merged updated testnet-canary `abb89dff7`; resolved only file-size-budget conflict by keeping the stricter budgets. First live campaign continues on its original compiled runtime; rebuild only after it finishes, then repeat the interruption and lifecycle validation on the revised runtime.
 
 Round-1 verification: 113 focused CLI tests and 152 publisher tests passed. Independent legacy exclusions run persisted jobs through the worker. Safe oversized rejection after two preparation failures releases the asset; a prior bound execution prevents retirement. An expired unstarted claim also permits certified first-execution retirement.
+
+## Review round 2
+
+The reviewer identified mutable preparation before the first lease-checked queue write. Preparation now receives the same execution authority as promotion, serializes by job, checks it inside the lifecycle fence, and rechecks before canonical materialization, seal/lifecycle writes and draft cleanup. Publisher preparation/admission cleanup callbacks are also guarded. This preserves publisher-to-queue lock order and refuses expired/reassigned/cancelled claims and shutdown even after lock waits. Real mutable-draft tests hold the lifecycle fence, then expire/reassign/cancel or shut down before releasing it; neither seal nor source removal is permitted. The eligibility gate uses the shared format constant.
+
+Initial live candidate succeeded: original job recovered after the real 900,000 ms lease on attempt 2; all 17 shares and five publications finalized successfully with verified canonical payload/root/receipt. The node is stopped, wallet batch and owned store retained for a second run on the reviewed runtime.

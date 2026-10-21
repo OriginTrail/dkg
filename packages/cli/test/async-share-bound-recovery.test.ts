@@ -5,14 +5,16 @@ import { PromoteJobLeaseError } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
+import { readAssertionPromoteEvidence } from '../../publisher/src/assertion-promote-evidence.js';
 import { ensureSubGraphRegistration } from '../../publisher/src/sub-graph-registration.js';
 import { createPromoteWorkerSupervisor, runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
+import { createPromoteExecutionAuthority } from '../src/daemon/worker/promote-execution-authority.js';
 import { executePromoteRequest } from '../src/daemon/worker/execute-promote-request.js';
 
 const CG = 'async-recovery', NAME = 'asset', AUTHOR = `0x${'11'.repeat(20)}`;
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(stores.splice(0).map(s => s.close())); });
-async function setup(subGraphName?: string, oversized = false) {
+async function setup(subGraphName?: string, oversized = false, mutable = false) {
   const store = new OxigraphStore(); stores.push(store);
   const { agent, publisher } = await createPromotionAgentForTest(store, {
     agentAddress: AUTHOR, peerId: '12D3KooWRecovery', kaAllocator: makeTestKaNumberAllocator(),
@@ -25,14 +27,15 @@ async function setup(subGraphName?: string, oversized = false) {
   await publisher.assertionWrite(CG, NAME, AUTHOR, oversized
     ? Array.from({ length: 80 }, (_, i) => ({ subject: 'urn:large', predicate: `urn:value:${i}`, object: JSON.stringify('x'.repeat(55_000)) }))
     : [{ subject: 'urn:asset', predicate: 'urn:value', object: '"original"' }], subGraphName);
-  const finalized = await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR, subGraphName });
+  const finalized = mutable ? undefined : await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR, subGraphName });
   const queue = agent.promoteQueue;
   const { jobId } = await agent.assertion.promoteAsync(CG, NAME, { subGraphName, agentAddress: AUTHOR });
   const claim = () => queue.claimNext('worker');
   const run = (job: any, overrides: any = {}) => runPromoteJob({ job, queue, workerId: 'worker', now: () => time,
-    heartbeatIntervalMs: 0, log: () => {}, prepareJob: j => agent.assertion.prepareQueuedShare(j),
+    heartbeatIntervalMs: 0, log: () => {}, prepareJob: (j, authority) => agent.assertion.prepareQueuedShare(j, authority),
     runPromote: (request, executionAuthority) => executePromoteRequest(agent, request, { executionAuthority }), ...overrides });
-  return { agent, publisher, queue, store, finalized, jobId, claim, run, expire: () => { time += 1001; } };
+  const prepare = (job: any) => agent.assertion.prepareQueuedShare(job, createPromoteExecutionAuthority(queue, job.jobId, job.lease.claimToken, () => time, () => {}));
+  return { agent, publisher, queue, store, finalized, jobId, claim, run, prepare, expire: () => { time += 1001; } };
 }
 
 describe('async shares acquire durable replay authority before promotion', () => {
@@ -112,7 +115,7 @@ describe('async shares acquire durable replay authority before promotion', () =>
   it('recovers after binding and promoteStarted but before content mutation', async () => {
     const f = await setup();
     const first = await f.claim();
-    const { job } = await f.agent.assertion.prepareQueuedShare(first);
+    const { job } = await f.prepare(first);
     await f.queue.recordCommitMarker(job.jobId, job.lease.claimToken, 'promoteStarted');
     f.expire();
     expect(await f.queue.recoverOnStartup()).toEqual({ reclaimed: 1, abandoned: 0 });
@@ -159,7 +162,7 @@ describe('async shares acquire durable replay authority before promotion', () =>
     const f = await setup();
     const first = await f.claim();
     await f.queue.recordCommitMarker(first.jobId, first.lease.claimToken, 'promoteStarted');
-    await expect(f.agent.assertion.prepareQueuedShare(first)).rejects.toThrow('unstarted');
+    await expect(f.prepare(first)).rejects.toThrow('unstarted');
     f.expire();
     expect(await f.queue.recoverOnStartup()).toEqual({ reclaimed: 0, abandoned: 1 });
     expect((await f.queue.getStatus(f.jobId)).request.recoveryBinding).toBeUndefined();
@@ -171,7 +174,7 @@ describe('async shares acquire durable replay authority before promotion', () =>
     const legacy = { ...job, formatVersion, request: { ...job.request, agentAddress } };
     await f.queue.writeJob(legacy);
     const seal = vi.spyOn(f.agent, 'prepareAtomicAssertionShare');
-    expect(await f.agent.assertion.prepareQueuedShare(legacy)).toEqual({ job: legacy });
+    expect(await f.prepare(legacy)).toEqual({ job: legacy });
     expect(seal).not.toHaveBeenCalled();
     const runPromote = vi.fn(async () => ({ promotedCount: 1 }));
     expect((await f.run(legacy, { runPromote })).outcome).toBe('succeeded');
@@ -216,6 +219,41 @@ describe('async shares acquire durable replay authority before promotion', () =>
     expect(outcome.outcome).toBe('failed_terminal');
     expect(outcome.retiredNoEffect).toBe(true);
     await expect(f.agent.assertion.discard(CG, NAME, { agentAddress: AUTHOR })).resolves.toBeUndefined();
+  });
+
+  it.each(['cancel', 'replacement', 'shutdown'])('does not finalize a mutable draft after %s while awaiting the lifecycle fence', async mode => {
+    const f = await setup(undefined, false, true);
+    delete f.agent.prepareAtomicAssertionShare;
+    const draft = await f.publisher.wmGraphUri(CG, AUTHOR, NAME);
+    const before = await f.publisher.assertionQuery(CG, NAME, AUTHOR);
+    const job = await f.claim();
+    let release!: () => void, entered!: () => void, queried!: () => void;
+    const blocked = new Promise<void>(r => { release = r; });
+    const locked = new Promise<void>(r => { entered = r; });
+    const queryDone = new Promise<void>(r => { queried = r; });
+    const holder = f.publisher.prepareAssertionShareSeal(CG, NAME, AUTHOR, undefined, async () => { entered(); await blocked; });
+    await locked;
+    const read = f.publisher.assertionQuery.bind(f.publisher);
+    vi.spyOn(f.publisher, 'assertionQuery').mockImplementation(async (...args: any[]) => { const rows = await read(...args); queried(); return rows; });
+    const abort = new AbortController();
+    const running = f.run(job, { shutdownSignal: abort.signal }).then(result => ({ result }), error => ({ error }));
+    try {
+      await queryDone;
+      if (mode === 'shutdown') abort.abort();
+      else {
+        f.expire();
+        await f.queue.recoverOnStartup();
+        if (mode === 'cancel') await f.queue.cancel(job.jobId);
+        else await f.claim();
+      }
+      release(); await holder;
+      const outcome = await running;
+      if (mode === 'shutdown') expect(outcome.error?.message).toContain('shutdown');
+      else expect(outcome.result?.outcome).toBe('failure_bookkeeping_uncertain');
+      expect(await f.publisher.assertionQuery(CG, NAME, AUTHOR)).toEqual(before);
+      expect(await f.store.countQuads(draft)).toBe(before.length);
+      expect((await readAssertionPromoteEvidence(f.store, CG, NAME, AUTHOR)).seal).toBeUndefined();
+    } finally { release(); await holder; await running; }
   });
 
   it('fails preparation before promotion without marking an unsafe start', async () => {

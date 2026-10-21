@@ -229,7 +229,7 @@ export async function runPromoteJob<T extends { promotedCount: number; shareEvid
     job: PromoteJob;
     queue: AsyncPromoteQueue;
     workerId: string;
-    prepareJob?: (job: PromoteJob) => Promise<{ job: PromoteJob; completedResult?: T }>;
+    prepareJob?: (job: PromoteJob, authority: PromoteExecutionAuthority) => Promise<{ job: PromoteJob; completedResult?: T }>;
     runPromote: (request: PromoteRequest, authority?: PromoteExecutionAuthority) => Promise<T>;
     now: () => number;
     heartbeatIntervalMs: number;
@@ -382,7 +382,7 @@ export async function runPromoteJob<T extends { promotedCount: number; shareEvid
     let completedResult: T | undefined;
     if (args.prepareJob) {
       try {
-        const prepared = await args.prepareJob(job);
+        const prepared = await args.prepareJob(job, createPromoteExecutionAuthority(queue, job.jobId, claimToken, now, throwIfShutdownInterrupted));
         job = prepared.job;
         completedResult = prepared.completedResult;
         throwIfShutdownInterrupted();
@@ -631,7 +631,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           job: claimed,
           queue: config.agent.promoteQueue,
           workerId: slot.workerId,
-          prepareJob: job => config.agent.assertion.prepareQueuedShare(job),
+          prepareJob: (job, authority) => config.agent.assertion.prepareQueuedShare(job, authority),
           runPromote: (request, executionAuthority) => executePromoteRequest(config.agent, request, { executionAuthority }),
           now,
           heartbeatIntervalMs,
