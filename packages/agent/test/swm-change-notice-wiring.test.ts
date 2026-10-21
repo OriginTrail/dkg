@@ -9,7 +9,13 @@
  * path over real sync in `e2e-swm-relay-only.test.ts`.
  */
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_SWM_CHANGE_NOTICE, ProtocolRouter, type DKGNode } from '@origintrail-official/dkg-core';
+import {
+  DKG_GOSSIP_MAX_RPC_BYTES,
+  PROTOCOL_SWM_CHANGE_NOTICE,
+  PROTOCOL_SWM_UPDATE_RELAYED,
+  ProtocolRouter,
+  type DKGNode,
+} from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
 import {
@@ -162,6 +168,7 @@ describe('the notice protocol, as the agent registers it', () => {
 
     expect(follower.registrations.map(({ protocolId, options }) => [protocolId, options])).toEqual([
       [PROTOCOL_SWM_CHANGE_NOTICE, { maxReadBytes: SWM_CHANGE_NOTICE_MAX_BYTES }],
+      [PROTOCOL_SWM_UPDATE_RELAYED, { maxReadBytes: DKG_GOSSIP_MAX_RPC_BYTES }],
     ]);
     const answer = await follower.registrations[0]!.handler(noticeBytes(), { toString: () => CURATOR });
     expect(answer).toEqual(new Uint8Array());

@@ -1,6 +1,6 @@
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { expect, it, vi } from 'vitest';
-import { decodePublicGraphSnapshotRequest, encodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from '../src/public-snapshot-wire.js';
+import { decodeCoreChainCacheSnapshotRequest, encodeCoreChainCacheSnapshotRequest, decodePublicGraphSnapshotRequest, encodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from '../src/public-snapshot-wire.js';
 import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 
 const request = { version: 1 as const, contextGraphId: 'snapshot-wire', onChainId: '1', refresh: false };
@@ -20,7 +20,7 @@ it('keeps malformed wire input outside subscription and chain admission with a u
   let handler!: (data: Uint8Array) => Promise<Uint8Array>;
   const chain = { readPublicGraphSnapshot: vi.fn() }, subscriptions = { get: vi.fn() };
   const router = { register: vi.fn((_protocol, read) => { handler = read; }) };
-  PublicSnapshotMethods.prototype.startPublicGraphSnapshots.call({ config: { nodeRole: 'core' }, chain, router,
+  PublicSnapshotMethods.prototype.startPublicGraphSnapshots.call({ config: { nodeRole: 'core', coreChainCacheNetworks: [] }, chain, router,
     subscribedContextGraphs: subscriptions, workLifetime: new AgentWorkLifetime(),   } as never);
   expect(router.register.mock.calls[0]?.[2]).toEqual({ maxReadBytes: PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES });
   for (const wire of invalidRequests) {
@@ -29,4 +29,20 @@ it('keeps malformed wire input outside subscription and chain admission with a u
   }
   expect(subscriptions.get).not.toHaveBeenCalled();
   expect(chain.readPublicGraphSnapshot).not.toHaveBeenCalled();
+});
+
+it('round trips and validates the typed chain-cache wire contract before admission', () => {
+  const scope = { chainId: 'gnosis:100', deploymentId: 'gnosis:100:hub=fixture' };
+  const valid = { ...request, ...scope };
+  expect(decodeCoreChainCacheSnapshotRequest(encodeCoreChainCacheSnapshotRequest(valid))).toEqual(valid);
+  const malformed = [null, [], {}, { ...valid, extra: true }, { ...valid, chainId: 1 },
+    { ...valid, chainId: '' }, { ...valid, deploymentId: 'x'.repeat(257) }, { ...valid, deploymentId: undefined },
+    { ...valid, version: 2 }, { ...valid, refresh: 'false' }, { ...valid, onChainId: '01' },
+    { ...valid, contextGraphId: '../private' }];
+  for (const value of malformed) {
+    expect(() => decodeCoreChainCacheSnapshotRequest(bytes(value))).toThrow();
+    expect(() => encodeCoreChainCacheSnapshotRequest(value as never)).toThrow();
+  }
+  for (const wire of [Uint8Array.of(0xff), bytes('{'), new Uint8Array(1025)])
+    expect(() => decodeCoreChainCacheSnapshotRequest(wire)).toThrow();
 });

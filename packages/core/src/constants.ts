@@ -93,6 +93,11 @@ export const PROTOCOL_SWM_SENDER_KEY = '/dkg/10.0.1/swm-sender-key';
 // or below `DKG_SWM_SUBSTRATE_MAX_MEMBERS`. See RFC-003 §6 for the
 // full transport policy.
 export const PROTOCOL_SWM_UPDATE = '/dkg/10.0.1/swm-update';
+// A Core relays a member's author-signed share of a public graph, the
+// envelope bytes unchanged, to the graph's owner, which needs the author's
+// signed share to keep its seal. One attempt, no outbox; a node without this
+// protocol refuses the stream. See the agent's `swm/owner-share-forward.ts`.
+export const PROTOCOL_SWM_UPDATE_RELAYED = '/dkg/10.0.1/swm-update-relayed';
 // rc.9 PR-D (SWM reliable fan-out plan, Step 1b): NEW protocol — no
 // rc.8 predecessor. Per-recipient acknowledgement that the receiver
 // successfully applied a SWM share via the GOSSIP path. Receivers

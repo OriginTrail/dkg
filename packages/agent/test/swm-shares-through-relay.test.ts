@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { PROTOCOL_SWM_UPDATE, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
-import { DKGAgent } from '../src/index.js';
+import { PROTOCOL_SWM_UPDATE, type OperationContext } from '@origintrail-official/dkg-core';
 import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
 import {
   createCGMemberEnumerator,
@@ -19,24 +17,32 @@ import {
   noteCatalogHeadReplayFollower,
   sharedMemoryFollowersOf,
 } from '../src/swm/shared-memory-followers.js';
-import { FANOUT_RESPONSE_REJECTED, FANOUT_RESPONSE_RETRYABLE, chooseFanOutTier } from '../src/swm/substrate-fanout.js';
+import { chooseFanOutTier } from '../src/swm/substrate-fanout.js';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
+import {
+  DELIVERED,
+  GRAPH,
+  OWNER_WALLET,
+  PEER_A,
+  PEER_B,
+  PEER_C,
+  REFUSED,
+  RETRY_LATER,
+  SELF,
+  SHARE_PROTOCOL,
+  agentWith,
+} from './_helpers/swm-share-fanout-agent.js';
 
 // Two edge nodes that reach each other only through a relay have a connection
 // with an allowance, and GossipSub does not run over it. A share into a public
 // context graph went to the graph's GossipSub subscribers over a direct
 // connection, so it never went to such a peer. These tests cover the pieces
 // that deliver it: who follows the graph, which connection may carry the
-// share, and the recipient list that results.
-
-const SELF = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-const PEER_A = '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a';
-const PEER_B = '12D3KooWFHUALUrdSfrVHSxtCRCJC9xvxS7nYfM6T1sbYVak9HTu';
-const PEER_C = '12D3KooWGRUVh6uXvRkYt8oYp9VvrxgZvKk3eYcZ6oZ3mGJ8sQwT';
-const GRAPH = 'test-cg/shares-through-relay';
-/** The wallet of the owner of a graph whose id names it. */
-const OWNER_WALLET = '0x1111111111111111111111111111111111111111';
+// share, and the recipient list that results. A share that no recipient holds
+// for others goes to the connected Cores (`swm-share-holder-cores.test.ts`),
+// and one that reached nobody, or not the owner, is kept and sent again
+// (`swm-owed-public-share-wiring.test.ts`).
 
 /** What a Core node grants for one circuit today. */
 const CORE_CIRCUIT = { bytes: 256n * 1024n * 1024n, seconds: 30 * 60 };
@@ -379,68 +385,6 @@ describe('the fan-out plan for a public graph with followers', () => {
 });
 
 describe('a share into a public graph that has followers', () => {
-  const SHARE_PROTOCOL = '/dkg/10.0.1/swm-update';
-  const DELIVERED = { delivered: true as const, response: new Uint8Array(), attempts: 1, messageId: 'm' };
-  /** The receiver's answer for a share it will never apply. */
-  const REFUSED = { delivered: true as const, response: FANOUT_RESPONSE_REJECTED, attempts: 1, messageId: 'm' };
-  /** The receiver's answer for a share it cannot apply now. */
-  const RETRY_LATER = { delivered: true as const, response: FANOUT_RESPONSE_RETRYABLE, attempts: 1, messageId: 'm' };
-
-  async function agentWith(options: {
-    subscribers: string[];
-    followers: string[];
-    answer?: (peerId: string) => typeof DELIVERED | typeof REFUSED | typeof RETRY_LATER;
-    graph?: string;
-  }) {
-    const graph = options.graph ?? GRAPH;
-    const agent = await DKGAgent.create({
-      name: `shares-through-relay-${Math.random().toString(36).slice(2)}`,
-      chainAdapter: new MockChainAdapter(),
-    });
-    const host = agent as unknown as {
-      node: object;
-      gossip: unknown;
-      messenger: unknown;
-      isPeerDialable: (peerId: string) => Promise<boolean>;
-      swmSubstrateMaxMembers: number;
-      rfc64LegacySwmApplyAllowedForScope: (contextGraphId: string, subGraphName: string | null) => boolean;
-    };
-    Object.defineProperty(host.node, 'peerId', { value: SELF, configurable: true });
-    host.gossip = {
-      subscribe() {},
-      unsubscribe() {},
-      onMessage() {},
-      async publish() {},
-      getSubscribers: () => [...options.subscribers],
-    };
-    host.isPeerDialable = async () => true;
-    const sent: string[] = [];
-    host.messenger = {
-      sendReliable: async (peerId: string, protocolId: string) => {
-        expect(protocolId).toBe(SHARE_PROTOCOL);
-        sent.push(peerId);
-        return (options.answer ?? (() => DELIVERED))(peerId);
-      },
-    };
-    for (const peerId of options.followers) sharedMemoryFollowersOf(agent).note(graph, peerId);
-    let shares = 0;
-    const share = async (subGraphName: string | null | undefined): Promise<string[]> => {
-      sent.length = 0;
-      shares += 1;
-      await agent.publishWorkspaceGossip(
-        graph,
-        new Uint8Array([1, 2, 3, shares]),
-        createOperationContext('share'),
-        null,
-        `share-${shares}`,
-        subGraphName === undefined ? undefined : { subGraphName },
-      );
-      await agent.awaitInFlightSubstrateFanOuts();
-      return [...sent].sort();
-    };
-    return { agent, host, share };
-  }
-
   it('goes to the follower as well as to the subscriber', async () => {
     const { share } = await agentWith({ subscribers: [PEER_A], followers: [PEER_B] });
     expect(await share('reports')).toEqual([PEER_A, PEER_B].sort());

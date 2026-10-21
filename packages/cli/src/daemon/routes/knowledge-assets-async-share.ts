@@ -1,3 +1,4 @@
+import { classifyPromoteAdmissionError, promoteConflictResponse } from './promote-admission-response.js';
 import { PromoteJobCancellationConflictError } from '@origintrail-official/dkg-publisher';
 import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/knowledge-assets-async-share.ts
@@ -123,11 +124,10 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
       state: "queued",
     });
   } catch (err: any) {
+    const admission = classifyPromoteAdmissionError(err);
+    if (admission) return jsonResponse(res, admission.status, admission.body, undefined, admission.headers);
     if (err instanceof PromoteJobConflictError) {
-      return jsonResponse(res, 409, {
-        error: err.message,
-        existingJobId: err.existingJobId,
-      });
+      return jsonResponse(res, 409, promoteConflictResponse(err));
     }
     if (
       err.message?.includes("required") ||
