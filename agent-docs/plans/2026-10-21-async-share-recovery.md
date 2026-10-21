@@ -92,3 +92,7 @@ Repaired the original stale-preparation fixture to use the real finalizer, signe
 ## Review round 7
 
 Added leased queued-preparation coverage for verified pre-intent VM assets, with current/revoked authority and with/without leftover WM. The stale preparation directly rejects authority loss, preserves WM and completion evidence, and the replacement completes the same job without promotion replay or binding. Removing graph-deletion fencing or marker-removal fencing separately fails the corresponding revoked case. Restoring source passes all 130 recovery/synchronous-share tests (32 recovery cases). This response changes tests and plan only; the live-tested production tree remains exactly the final routine build `1fa0000ff`. Live validation completed with 73 successful share jobs, 20 finalized publications and three original-job recoveries on attempt two; cleanup and final review/CI remain to be recorded in the external report.
+
+## Review round 8
+
+Flattened publisher preparation bodies into explicit authority checks after lifecycle-lock acquisition and before graph deletion. A named concrete completion-marker cleanup method owns its own check and deletion; removed the generic callback-only check wrapper. Lock ordering and mutation order remain unchanged. Rerun the stale-preparation, mid-finalization, completed-legacy and synchronous recovery regressions, then validate the final production revision with a fresh small live lifecycle run.
