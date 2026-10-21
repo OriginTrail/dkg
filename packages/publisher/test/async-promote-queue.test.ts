@@ -852,7 +852,9 @@ describe('TripleStoreAsyncPromoteQueue', () => {
       onWorkAvailable: () => notifications.push('wake'),
     });
 
-    await expect(queue.enqueue(makeRequest())).rejects.toThrow('flush rejected');
+    await expect(queue.enqueue(makeRequest())).rejects.toMatchObject({
+      admissionOutcome: 'indeterminate', cause: new Error('flush rejected'),
+    });
     expect(notifications).toEqual([]);
   });
 

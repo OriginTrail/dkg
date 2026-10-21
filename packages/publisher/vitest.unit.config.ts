@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/assertion-lifecycle-candidates.test.ts',
       'test/wm-lifecycle-integrity.test.ts',
       'test/assertion-write-provenance.test.ts',
       'test/sub-graph-registration-resolver.test.ts',
@@ -74,6 +75,8 @@ export default defineConfig({
       'test/async-lift-chain-check-2945.test.ts',
       'test/lift-job-failure.test.ts',
       'test/async-promote-queue.test.ts',
+      'test/share-reconciliation.test.ts',
+      'test/async-promote-admission.test.ts',
       'test/async-promote-format3-upgrade.test.ts',
       'test/promote-retry-policy.test.ts',
       'test/workspace-agent-recipients.test.ts',
@@ -92,6 +95,7 @@ export default defineConfig({
       'test/promote-step-tag.test.ts',
       'test/promote-replay-safety.test.ts',
       'test/promote-post-commit-recovery.test.ts',
+      'test/completed-vm-supersession.test.ts',
       'test/promote-operation-intent.test.ts',
       'test/ka-graph-skolemization.test.ts',
       'test/ka-graph-workspace-snapshot.test.ts',

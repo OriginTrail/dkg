@@ -465,7 +465,7 @@ export {
   type BoundPromoteJob,
   type PromoteResult,
   type PromoteStats,
-  type PromoteTerminalJobClearer,
+  type PromoteTerminalJobClearer, type PromoteShareReconciler,
 } from './async-promote-queue.js';
 export {
   createPromotePostCommitFailure,
@@ -536,7 +536,7 @@ export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, 
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
-export { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
+export { withKeyedLocks, tryWithKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 
 export { withSnapshotScope, snapshotOperation, WorkspaceSnapshotScope, snapshotReferenceCheck, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
 
@@ -557,3 +557,12 @@ export { readCurrentAssertionVersion } from './materialization-assertion-version
 
 export type { ACKDiagnosticSummary } from './ack-diagnostics.js';
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
+
+export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';
+
+export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
+
+export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } from './assertion-lifecycle-record.js';
+
+export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
+export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';

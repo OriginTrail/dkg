@@ -159,6 +159,15 @@ function publishNextCommand(name: string, contextGraphId: string, opts: ActionOp
   return `dkg ka publish-async ${name} --context-graph-id ${contextGraphId}${subGraphName(opts) ? ` --sub-graph-name ${subGraphName(opts)}` : ''}`;
 }
 
+/** A committed share whose recovery job still owes its catalog handoff: name the job and how to follow it. */
+function printPendingCatalogHandoff(result: Pick<KnowledgeAssetShareResponse, 'catalogHandoff'>): void {
+  const handoff = result.catalogHandoff;
+  if (handoff?.state !== 'pending') return;
+  console.log(`  Catalog:        handoff pending (${handoff.reason})`);
+  console.log(`  Recovery job:   ${handoff.recoveryJobId}`);
+  console.log(`  Follow:         dkg ka share-job ${handoff.recoveryJobId}`);
+}
+
 function assertSharePromotedContent(result: KnowledgeAssetShareResponse, name: string, contextGraphId: string): void {
   assertNoLifecycleErrors(result, `Knowledge asset share completed partially for "${name}" in ${contextGraphId}`);
   if (result.swmShared !== true) {
@@ -267,6 +276,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.assertionUri) console.log(`  Assertion URI:  ${result.assertionUri}`);
       if (result.merkleRoot) console.log(`  Merkle root:    ${result.merkleRoot}`);
       if (result.shareOperationId) console.log(`  Share op:       ${result.shareOperationId}`);
+      printPendingCatalogHandoff(result);
       if (opts.share === true && result.promotedCount === 0) {
         console.log('  Note:           No new triples promoted; the KA may already be shared.');
       }
@@ -384,6 +394,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.sealed !== undefined) console.log(`  Sealed:         ${result.sealed}`);
       if (result.publishReady !== undefined) console.log(`  Publish ready:  ${result.publishReady}`);
       if (result.shareOperationId) console.log(`  Share op:       ${result.shareOperationId}`);
+      printPendingCatalogHandoff(result);
       if (result.publishReady === true) console.log(`  Next:           ${publishNextCommand(name, contextGraphId, opts)}`);
     }));
 

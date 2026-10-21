@@ -23,6 +23,7 @@ type GossipSigner = Awaited<
 type AssertionPromotePreCommitOptions = Pick<
   AssertionPromoteOptions,
   | 'subGraphName'
+  | 'authorAgentAddress'
   | 'awaitCuratorAck'
   | 'curatorAckTimeoutMs'
   | 'accessPolicy'
@@ -196,6 +197,7 @@ export async function prepareAssertionPromote(
           ? { subGraphName: input.options.subGraphName }
           : {}),
         publisherPeerId: input.publisherPeerId,
+        authorAgentAddress: input.options?.authorAgentAddress,
         senderAgentAddress: gossipSigner?.agentAddress,
         confirmBeforeCommit: confirmBeforeCommit === undefined
           ? undefined

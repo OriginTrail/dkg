@@ -1,15 +1,20 @@
 import { executePromoteRequest } from '../worker/execute-promote-request.js';
-import { DurableShareFailure, observeShareRecovery } from './durable-share-failure.js';
+import { DurableShareFailure, observeShareRecovery, shareJobStatusUrl } from './durable-share-failure.js';
 import { randomUUID } from 'node:crypto';
 import { PromoteStaleAdmissionError, PromoteJobConflictError, PromoteAdmissionUncertainError, type PromoteJob } from '@origintrail-official/dkg-publisher';
-import type { DKGAgent, AssertionPromoteOptions } from '@origintrail-official/dkg-agent';
+import { committedSharePendingCatalogHandoff, type DKGAgent, type AssertionPromoteOptions, type CommittedSharePendingCatalogHandoff } from '@origintrail-official/dkg-agent';
 import { runPromoteJob } from '../worker/async-promote-worker.js';
 import { daemonState } from '../state.js';
+
+/** A committed share whose durable job still owes the catalog handoff names that job. */
+export type SynchronousShareResult = Awaited<ReturnType<DKGAgent['assertion']['promote']>> & {
+  catalogHandoff?: Readonly<{ state: 'pending'; reason: CommittedSharePendingCatalogHandoff['reason']; recoveryJobId: string }>;
+};
 
 /** Run the first attempt inline while the ordinary queue owns crash/failure recovery. */
 export async function durableSynchronousShare(
   agent: DKGAgent, contextGraphId: string, name: string, options?: AssertionPromoteOptions,
-): ReturnType<DKGAgent['assertion']['promote']> {
+): Promise<SynchronousShareResult> {
   const queue = agent.promoteQueue;
   if (!queue?.enqueueAndClaim || !daemonState.promoteWorkerAvailable) {
     throw new DurableShareFailure(new Error('Durable sharing requires an available share recovery worker'), { state: 'unavailable' });
@@ -47,6 +52,15 @@ export async function durableSynchronousShare(
       { curatorAckTimeoutMs: options?.curatorAckTimeoutMs, executionAuthority }),
   });
   if (outcome.outcome === 'succeeded') return outcome.result;
+  // The queue durably acknowledged the bound retry, so the share it committed is answered
+  // as shared while that job keeps the catalog handoff obligation and its fence.
+  const committed = outcome.outcome === 'failed_retrying' ? committedSharePendingCatalogHandoff(outcome.cause) : undefined;
+  if (committed) {
+    process.stderr.write(`[DKG-Daemon] ${JSON.stringify({ event: 'knowledge_asset_share_catalog_handoff_pending',
+      code: 'SWM_INVENTORY_HANDOFF_PENDING', causeReason: committed.reason, recoveryJobId: job.jobId, contextGraphId, name,
+      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}) })}\n`);
+    return { ...committed.result, catalogHandoff: { state: 'pending', reason: committed.reason, recoveryJobId: job.jobId } };
+  }
   if (outcome.outcome === 'failed_terminal' && outcome.retiredNoEffect) throw outcome.cause;
   const observation = outcome.outcome === 'failed_terminal'
     ? { state: 'inspection-required' as const, jobId: job.jobId }
@@ -56,11 +70,18 @@ export async function durableSynchronousShare(
   throw new DurableShareFailure(outcome.cause, observation);
 }
 
-export function synchronousShareSuccessBody(share: Awaited<ReturnType<DKGAgent['assertion']['promote']>>) {
+/** The share operation fields both share answers carry, including a pending catalog handoff. */
+export function shareOperationFields(share: SynchronousShareResult) {
+  return { ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
+    ...(share.catalogHandoff ? { catalogHandoff: { ...share.catalogHandoff,
+      recoveryStatusUrl: shareJobStatusUrl(share.catalogHandoff.recoveryJobId) } } : {}) };
+}
+
+export function synchronousShareSuccessBody(share: SynchronousShareResult) {
   const swmShared = share.promotedCount > 0 || Boolean(share.shareOperationId);
   return { swmShared, promotedCount: share.promotedCount,
     ...(share.sealed !== undefined ? { sealed: swmShared && share.sealed } : {}),
     ...(share.publishReady !== undefined ? { publishReady: swmShared && share.publishReady } : {}),
-    ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
+    ...shareOperationFields(share),
   };
 }
