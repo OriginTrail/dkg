@@ -7,7 +7,7 @@ import { startLoopbackRpc } from '../../chain/test/loopback-rpc-harness.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
-import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 import { isConfirmedNamedKaVmLifecycleCurrent } from '../src/named-ka-vm-lifecycle-current.js';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
 

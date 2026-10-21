@@ -1,5 +1,6 @@
+import { readLifecycleRepairJournalFile } from './_helpers/read-lifecycle-repair-journal.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -8,8 +9,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
 import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-materialization.js';
 import { DKGAgent } from '../src/dkg-agent.js';
-import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
-import { decodeLifecycleRepairJournal } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const quads = (version: number) => [{ subject: 'urn:lock:payload', predicate: 'urn:value', object: JSON.stringify(`version-${version}`), graph: '' }];
 const root = (version: number) => Buffer.from(computeFlatKCRootV10(quads(version), []) ) .toString('hex');
@@ -46,7 +46,7 @@ async function fixture(subGraphName?: string, durable = true) {
   const descriptor = () => store.query(`SELECT ?root ?ual WHERE { GRAPH <${contextGraphMetaUri(CG)}> {
     <${assertionLifecycleUri(CG, AUTHOR, NAME, subGraphName)}> <http://dkg.io/ontology/vmCurrentAssertion> ?root ;
       <http://dkg.io/ontology/publishedUal> ?ual } }`);
-  const journal = async () => decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+  const journal = async () => (await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json')));
   return { dir, store, agent, input, newer, key, repair, descriptor, journal, advance: () => { current = 2; } };
 }
 describe('confirmed lifecycle lock-time authority fence', () => {

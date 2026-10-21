@@ -31,7 +31,7 @@ import { GraphManager, OxigraphStore, PrivateContentStore, type Quad } from '@or
 import { DKGPublisher, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/dkg-agent.js';
-import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { stubAgent } from './_helpers/foreign-author-resolution-fixtures.js';
 

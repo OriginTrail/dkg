@@ -1,7 +1,8 @@
+import { readLifecycleRepairJournalFile } from './_helpers/read-lifecycle-repair-journal.js';
 import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-materialization.js';
 import { NamedKaVmLifecycleIntegrityError } from '../src/named-ka-vm-lifecycle-integrity-error.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,8 @@ import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish
 import { DurableReplaceableFile } from '../src/durable-file-replace.js';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
 import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
-import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 function serializedRepairInput(input: ConfirmedNamedKaVmLifecycleInput) {
   return encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(input),
     { input, attempts: 0, nextAttemptAt: 0 },
@@ -267,7 +269,7 @@ describe('confirmed publication tail after a lifecycle journal retirement failur
     expect(result).toMatchObject({ status: 'confirmed', ual: PUBLISHED, lifecycleRepairPending: true });
     expect(journalWrites).toBe(2);
     expect(await store.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" } }`)).toMatchObject({ value: true });
-    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(journal, 'utf8'))).size).toBe(1);
+    expect((await readLifecycleRepairJournalFile(journal)).size).toBe(1);
     // The lifecycle journal error did not skip the confirmation work that is independent of it.
     expect(clearMarker).toHaveBeenCalledOnce(); expect(clearMarker).toHaveBeenCalledWith(CG, NAME, AUTHOR, undefined);
     expect(observed).toHaveBeenCalledOnce();
@@ -277,7 +279,7 @@ describe('confirmed publication tail after a lifecycle journal retirement failur
     // Storage recovered: the worker completes the retained entry, and nothing publishes or observes again.
     await agent.namedKaVmLifecycleRepair.runDue(); expect(journalWrites).toBe(2);
     now += 5000; await agent.namedKaVmLifecycleRepair.runDue();
-    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(journal, 'utf8'))).size).toBe(0);
+    expect((await readLifecycleRepairJournalFile(journal)).size).toBe(0);
     expect(journalWrites).toBe(3); expect(publish).toHaveBeenCalledOnce(); expect(observed).toHaveBeenCalledOnce();
     if (queue) expect(await queue.processNext('wallet-1')).toBeNull();
     await agent.namedKaVmLifecycleRepair.stop();
@@ -400,17 +402,18 @@ describe('review regression boundaries', () => {
     expect(await repairing).toBe(true);
     expect(flush).toHaveBeenCalledExactlyOnceWith({ source: 'agent.publish.confirmedLifecycleMaterializationFlush' });
     const journalPath = join(dir, 'named-ka-vm-lifecycle-repairs.json');
-    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(journalPath, 'utf8'))).size).toBe(1);
+    expect((await readLifecycleRepairJournalFile(journalPath)).size).toBe(1);
     // Copy only durable bytes, without closing the store or stopping the agent.
     const crashPath = join(crashDir, 'store.nq');
     await copyFile(path, crashPath); await copyFile(journalPath, join(crashDir, 'named-ka-vm-lifecycle-repairs.json'));
+    await cp(join(dir, 'named-ka-vm-lifecycle-snapshots'), join(crashDir, 'named-ka-vm-lifecycle-snapshots'), { recursive: true });
     flushBarrier.path = null;
     const reopened = new OxigraphStore(crashPath), fresh = agentFor(reopened, crashDir, 1);
     if (facade === 'agent-facade') fresh.store = createListContextGraphsCacheInvalidatingStore(reopened, vi.fn(), vi.fn());
     fresh.publisher = { publish, writeLocks: fresh.writeLocks };
     expect(await reopened.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" } }`)).toMatchObject({ value: false });
     now += 6_000; await fresh.getOrCreateNamedKaVmLifecycleRepair().runDue();
-    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(crashDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(0);
+    expect((await readLifecycleRepairJournalFile(join(crashDir, 'named-ka-vm-lifecycle-repairs.json'))).size).toBe(0);
     // Reopen again immediately after retirement, still without any graceful flush.
     const durable = new OxigraphStore(crashPath); stores.push(durable);
     expect(await durable.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" ; <${DKG}publishedUal> ${JSON.stringify(PUBLISHED)} } }`)).toMatchObject({ value: true });
@@ -426,7 +429,7 @@ describe('review regression boundaries', () => {
     const commit = vi.spyOn(store, 'atomicUpdate');
     expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input), PUBLIC_SNAPSHOT)).toBe(true);
     expect(commit).not.toHaveBeenCalled();
-    const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+    const journal = (await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json')));
     expect([...journal.values()]).toMatchObject([{ input: { publishedUal: PUBLISHED }, attempts: 1, rejected: false }]);
     await agent.namedKaVmLifecycleRepair.stop();
   });
@@ -508,7 +511,7 @@ describe('review regression boundaries', () => {
     const draft = await workspace(), draftLayers = await layers(), wmGraph = draft[`${DKG}assertionGraph`];
     expect(draft[`${DKG}state`]).toBe('"created"'); expect(draft[`${DKG}memoryLayer`]).toBe('"WM"');
     now = 6_000; await repair.runDue();
-    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(0);
+    expect((await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'))).size).toBe(0);
     const values = await workspace();
     // The version-1 repair restamps its VM descriptor without claiming the version-2 draft.
     expect(values[`${DKG}state`]).toBe('"created"'); expect(values[`${DKG}memoryLayer`]).toBe('"WM"');
@@ -569,7 +572,7 @@ describe('review regression boundaries', () => {
     try {
       expect(agent.store.commitment?.durability).toBe('restart-durable'); expect(agent.store.flush).toBeUndefined();
       expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input), PUBLIC_SNAPSHOT)).toBe(false); expect(fetch).toHaveBeenCalled();
-      expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(0);
+      expect((await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'))).size).toBe(0);
       const reopened = new OxigraphStore(path); stores.push(reopened);
       expect(await reopened.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" } }`)).toMatchObject({ value: true });
     } finally { await agent.namedKaVmLifecycleRepair?.stop(); await remote.close(); }
@@ -583,7 +586,7 @@ describe('review regression boundaries', () => {
     try {
       expect(agent.store.commitment).toBeUndefined();
       expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input), PUBLIC_SNAPSHOT)).toBe(true); expect(fetch).not.toHaveBeenCalled();
-      expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(1);
+      expect((await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'))).size).toBe(1);
     } finally { await agent.namedKaVmLifecycleRepair?.stop(); await remote.close(); }
   });
 
@@ -623,7 +626,7 @@ describe('review regression boundaries', () => {
     agent.store = facade === 'raw' ? blazegraph : createListContextGraphsCacheInvalidatingStore(blazegraph, vi.fn(), vi.fn());
     try {
       const pending = await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input), PUBLIC_SNAPSHOT);
-      expect([...decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).values()]).toEqual([]);
+      expect([...(await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'))).values()]).toEqual([]);
       expect(pending).toBe(false); expect(agent.store.commitment?.durability).toBe('restart-durable'); expect(fetch).toHaveBeenCalled();
       expect(await backing.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}memoryLayer> "VM" ;
         <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" ; <${DKG}publishedUal> ${JSON.stringify(PUBLISHED)} } }`)).toMatchObject({ value: true });
@@ -638,7 +641,7 @@ describe('review regression boundaries', () => {
       expect(agent.store.commitment).toBeUndefined();
       await expect(applyPublishedNamedKaVmLifecycle(agent.store, input)).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE' });
       expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input), PUBLIC_SNAPSHOT)).toBe(true); expect(fetch).not.toHaveBeenCalled();
-      expect([...decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).values()])
+      expect([...(await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'))).values()])
         .toMatchObject([{ attempts: 1, rejected: false, lastError: 'Confirmed lifecycle repair awaits an explicitly certified persistence barrier' }]);
     } finally { await agent.namedKaVmLifecycleRepair?.stop(); await blazegraph.close(); }
   });
@@ -791,7 +794,7 @@ describe('review regression boundaries', () => {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([bStarted, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('B admission blocked by A')), 1_000); })]);
-      const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+      const journal = (await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json')));
       expect(journal.size).toBe(2); expect([...journal.values()].map(entry => entry.input.name)).toContain('independent-B');
     } finally { if (timeout) clearTimeout(timeout); release(); await Promise.all([a, b]); await repair.stop(); }
   });
@@ -849,7 +852,7 @@ describe('review regression boundaries', () => {
     const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now, apply: fail, isCurrent: async () => true, warn: () => undefined });
     for (const agentAddress of ['PeerABC', 'peerabc']) await repair.submit({ ...input, agentAddress });
     const file = join(dir, 'named-ka-vm-lifecycle-repairs.json');
-    const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(file, 'utf8')));
+    const journal = (await readLifecycleRepairJournalFile(file));
     expect(journal.size).toBe(2); expect(new Set([...journal.values()].map(entry => entry.input.agentAddress))).toEqual(new Set(['PeerABC', 'peerabc']));
     await repair.stop(); now = 6_000;
     const apply = vi.fn(async (_input: ConfirmedNamedKaVmLifecycleInput) => undefined), fresh = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
@@ -864,19 +867,19 @@ describe('review regression boundaries', () => {
     await repair.submit({ ...input, agentAddress: mixed });
     await repair.submit({ ...input, agentAddress: lower, assertionVersion: '2' });
     expect(await repair.submit({ ...input, agentAddress: mixed })).toBe('superseded');
-    const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+    const journal = (await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json')));
     expect([...journal.values()]).toMatchObject([{ input: { agentAddress: lower, assertionVersion: '2' } }]);
     await repair.stop();
     const normalized = normalizeLifecycleRepairInput({ ...input, agentAddress: mixed });
     const historical = createHash('sha256').update(JSON.stringify([CG, lower, NAME, ''])).digest('hex');
     await writeFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), JSON.stringify({ version: 1, entries: [[historical, { input: serializedRepairInput(normalized), attempts: 2, nextAttemptAt: 6_000 }]] }));
-    const migrated = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+    const migrated = (await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json')));
     expect(migrated.get(lifecycleRepairKey(normalized))).toMatchObject({ input: normalized, attempts: 2, nextAttemptAt: 6_000 });
     const freshApply = vi.fn(async (_input: ConfirmedNamedKaVmLifecycleInput) => { throw new Error('retry remains pending'); });
     const fresh = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => 6_000, apply: freshApply, isCurrent: async () => true, warn: () => undefined });
     await fresh.runDue(); expect(freshApply).toHaveBeenCalledWith({ ...normalized, packedKaId: PACKED }, false);
     const rewritten = JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
-    expect(rewritten.version).toBe(3); expect(decodeLifecycleRepairJournal(rewritten).get(lifecycleRepairKey(normalized))).toMatchObject({ attempts: 3 });
+    expect(rewritten.version).toBe(4); expect(decodeLifecycleRepairJournal(rewritten).get(lifecycleRepairKey(normalized))).toMatchObject({ attempts: 3 });
     await fresh.stop();
   });
   it.each([1, 2])('rejects mismatched and duplicate version-%s journal identities before migration', version => {

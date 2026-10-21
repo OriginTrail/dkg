@@ -1,13 +1,14 @@
+import { readLifecycleRepairJournalFile } from './_helpers/read-lifecycle-repair-journal.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { isConfirmedNamedKaVmLifecycleCurrent } from '../src/named-ka-vm-lifecycle-current.js';
-import { decodeLifecycleRepairJournal, lifecycleRepairKey } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { lifecycleRepairKey } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
 const dirs: string[] = [], stores: OxigraphStore[] = [], owners: NamedKaVmLifecycleRepair[] = [];
 afterEach(async () => {
@@ -32,7 +33,7 @@ async function fixture() {
     const owner = new NamedKaVmLifecycleRepair({ dataDir: dir, writeLocks: new Map(), now: () => now, warn: vi.fn(), apply,
       isCurrent: candidate => isConfirmedNamedKaVmLifecycleCurrent(chain, candidate, 1000, true) }); owners.push(owner); return owner;
   };
-  const journal = async () => decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+  const journal = async () => (await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json')));
   return { input, store, apply, snapshot, create, journal,
     configure: (id: bigint, contract: string, count: bigint) => { chainId = id; address = contract; rootCount = count; },
     ready: () => { unavailable = false; now += 400_000; } };

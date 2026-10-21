@@ -51,37 +51,13 @@ async function commitLifecycleMetadata(store: TripleStore, plan: ReturnType<type
   await applyLifecycleMutationFallback(store, plan);
 }
 
-/** Caller holds the publisher's same-KA lifecycle lock across admission and commit. */
-export async function applyPublishedNamedKaVmLifecycle(
-  store: TripleStore, input: PublishedNamedKaVmLifecycleInput,
-  options: NamedKaVmLifecycleApplyOptions = { persistence: 'restart-durable' },
-): Promise<void> {
-  if ('tentative' in input) throw new NamedKaVmLifecycleIntegrityError('Confirmed lifecycle commands cannot carry tentative mode');
-  await applyNamedKaVmLifecycle(store, input, options.persistence, options.preserveVerifiedVmProof);
-}
+/** Tentative projection has no confirmed-completion certificate. */
 export async function applyTentativeNamedKaVmLifecycle(store: TripleStore, input: TentativeNamedKaVmLifecycleInput): Promise<void> {
   if (input.tentative !== true || 'packedKaId' in input) throw new NamedKaVmLifecycleIntegrityError('Tentative lifecycle commands require tentative mode without confirmed graph coordinates');
-  await applyNamedKaVmLifecycle(store, input, 'process-local');
-}
-async function applyNamedKaVmLifecycle(
-  store: TripleStore, input: NamedKaVmLifecycleCommand,
-  persistenceMode: NamedKaVmLifecycleApplyOptions['persistence'],
-  preserveVerifiedVmProof = false,
-): Promise<void> {
-  const capability = store.commitment;
-  const barrier = capability !== undefined
-    && (capability.durability === 'restart-durable' || persistenceMode === 'process-local')
-    ? capability.capture() : undefined;
-  if (input.tentative !== true && barrier === undefined) {
-    throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), {
-      code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE',
-    });
-  }
-  await mutateNamedKaVmLifecycle(store, input, preserveVerifiedVmProof);
-  // Graph writes can be visible before the debounced snapshot is on disk. The
-  // repair owner may retire its fsynced journal only after this barrier succeeds.
-  if (barrier !== undefined) await barrier({ source: 'agent.publish.confirmedLifecycleFlush' });
-  else await store.flush?.({ source: 'agent.publish.confirmedLifecycleFlush' });
+  const barrier = store.commitment?.capture();
+  await mutateNamedKaVmLifecycle(store, input, false);
+  if (barrier) await barrier({ source: 'agent.publish.tentativeLifecycleFlush' });
+  else await store.flush?.({ source: 'agent.publish.tentativeLifecycleFlush' });
 }
 
 /** Mutation only: the materialization owner certifies the complete attempt. */

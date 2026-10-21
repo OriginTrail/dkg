@@ -19,6 +19,7 @@ export default defineConfig({
     coverage: coverageForPackage("agent"),
     include: [
       "test/confirmed-lifecycle-materialization.test.ts",
+      "test/confirmed-lifecycle-snapshot-journal.test.ts",
       "test/confirmed-lifecycle-dispatch.test.ts",
       "test/confirmed-lifecycle-graph-markers.test.ts",
       "test/confirmed-lifecycle-process-local.test.ts",

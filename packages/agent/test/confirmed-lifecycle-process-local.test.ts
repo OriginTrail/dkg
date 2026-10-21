@@ -8,7 +8,7 @@ import type { GraphScopedKnowledgeAssetVmPublishRequest } from '../src/internal/
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
-import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 import type { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 
 const { input, graph } = confirmedMaterializationFixture();

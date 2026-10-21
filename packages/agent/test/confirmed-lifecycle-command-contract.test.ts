@@ -7,7 +7,8 @@ import { assertionLifecycleWriteLockKey, withKeyedLocks, WM_CURRENT_ASSERTION_PR
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
 import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
-import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 const fields: ConfirmedNamedKaVmLifecycleInput = { contextGraphId: 'command-contract', agentAddress: '0x1111111111111111111111111111111111111111', name: 'asset',
   packedKaId: (BigInt('0x1111111111111111111111111111111111111111') << 96n) | 1n,
   publishedUal: 'did:dkg:mock/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1', publicationDeployment: { chainId: '31337', lifecycleAddress: '0x' + '22'.repeat(20) } };

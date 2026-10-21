@@ -5867,7 +5867,7 @@ export class PublishMethods extends DKGAgentBase {
 
     const finalized = await finalizeQueuedKnowledgeAssetVmPublish({
       request, seal, result, operationPlan, effectiveAuthor: agentAddress,
-      snapshotQuads, publisherPeerId: this.peerId, snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
+      snapshotQuads, publisherPeerId: publishOptions.publisherPeerId ?? this.peerId, snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
     }, {
       agent: this, publisher, log: this.log,
       observeConfirmedCatalog: this.afterConfirmedGraphScopedVmPublishV1.bind(this),
@@ -6299,7 +6299,7 @@ export class PublishMethods extends DKGAgentBase {
           contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName, packedKaId,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
         }, { ...result, status: 'confirmed', assertionUri, seal }, { publicQuads: canonicalSwmQuads,
-          publisherPeerId: this.peerId, accessPolicy: rfc64WorkspaceHead?.access.accessPolicy ?? 'ownerOnly',
+          publisherPeerId: rfc64WorkspaceHead?.publisherPeerId ?? this.peerId, accessPolicy: rfc64WorkspaceHead?.access.accessPolicy ?? 'ownerOnly',
           allowedPeers: [...(rfc64WorkspaceHead?.access.allowedPeers ?? [])] });
       }
     } finally {

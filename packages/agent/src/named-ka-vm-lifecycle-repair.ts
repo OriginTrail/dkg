@@ -6,7 +6,8 @@ import { DurableReplaceableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
 import { ConfirmedNamedKaVmLifecycleExecutor } from './named-ka-vm-lifecycle-executor.js';
-import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
+import { lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
+import { NamedKaVmLifecycleSnapshots } from './named-ka-vm-lifecycle-snapshots.js';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
 export interface ConfirmedNamedKaVmPublicationDeployment {
@@ -34,6 +35,7 @@ export class NamedKaVmLifecycleRepair {
   private stopped = false;
   /** Keeps a newly created dataDir ancestry pending until a journal barrier persists it. */
   private journalFile?: DurableReplaceableFile;
+  private readonly snapshots?: NamedKaVmLifecycleSnapshots;
 
   constructor(private readonly options: {
     dataDir?: string;
@@ -47,6 +49,7 @@ export class NamedKaVmLifecycleRepair {
     warn: (message: string) => void;
   }) {
     this.executor = new ConfirmedNamedKaVmLifecycleExecutor(options);
+    if (options.dataDir) this.snapshots = new NamedKaVmLifecycleSnapshots(options.dataDir);
     if (!(options.writeLocks instanceof Map)) throw Object.assign(new Error('Named KA lifecycle repair requires the shared lifecycle write-lock map'), {
       code: 'KA_VM_LIFECYCLE_REPAIR_LOCKS_REQUIRED',
     });
@@ -61,12 +64,11 @@ export class NamedKaVmLifecycleRepair {
   private async load(): Promise<void> {
     if (this.loaded) return;
     if (this.options.dataDir) {
-      try {
-        const parsed: unknown = JSON.parse(await readFile(join(this.options.dataDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
-        this.entries = decodeLifecycleRepairJournal(parsed);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      }
+      // Only an absent journal means no obligations; a missing referenced snapshot must fail closed.
+      let bytes: string | undefined;
+      try { bytes = await readFile(join(this.options.dataDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (bytes !== undefined) this.entries = await this.snapshots!.decode(JSON.parse(bytes));
     }
     this.loaded = true;
   }
@@ -74,7 +76,9 @@ export class NamedKaVmLifecycleRepair {
     const dir = this.options.dataDir;
     if (!dir) return;
     this.journalFile ??= new DurableReplaceableFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), { fileMode: 0o600, directoryMode: 0o700 });
-    await this.journalFile.replace(JSON.stringify(encodeLifecycleRepairJournal(this.entries)));
+    await this.journalFile.replace(JSON.stringify(await this.snapshots!.encode(this.entries)));
+    try { await this.snapshots!.retireUnreferenced(this.entries); }
+    catch (error) { this.options.warn(`Lifecycle snapshot cleanup deferred: ${String(error)}`); }
   }
 
   async submit(input: ConfirmedNamedKaVmLifecycleInput): Promise<NamedKaVmLifecycleRepairOutcome> {

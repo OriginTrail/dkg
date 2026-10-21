@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { writeFile, readFile, unlink } from 'node:fs/promises';
 import { OxigraphWorkerStore, GraphSetIndexStore, ChangelogStore } from '../../../storage/dist/index.js';
-import { applyPublishedNamedKaVmLifecycle } from '../../dist/named-ka-vm-lifecycle.js';
+import { mutatePublishedNamedKaVmLifecycle } from '../../dist/named-ka-vm-lifecycle.js';
 import { NamedKaVmLifecycleRepair } from '../../dist/named-ka-vm-lifecycle-repair.js';
 const input = JSON.parse(process.argv[2]); input.packedKaId = BigInt(input.packedKaId);
 const path = process.env.DKG_TEST_SNAPSHOT_PATH;
@@ -18,7 +18,7 @@ const store = new ChangelogStore(new GraphSetIndexStore(worker), { eraGuard: {
 let now = 1000;
 const repair = new NamedKaVmLifecycleRepair({ dataDir: process.env.DKG_TEST_REPAIR_DIR,
   writeLocks: new Map(), now: () => now, isCurrent: async () => true, warn: () => {},
-  apply: value => applyPublishedNamedKaVmLifecycle(store, value),
+  apply: async value => { const barrier = store.commitment.capture(); await mutatePublishedNamedKaVmLifecycle(store, value); await barrier(); },
 });
 const query = 'ASK { GRAPH ?g { ?s <http://dkg.io/ontology/publishedUal> ' + JSON.stringify(input.publishedUal) + ' } }';
 const journal = async () => JSON.parse(await readFile(join(process.env.DKG_TEST_REPAIR_DIR, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries;

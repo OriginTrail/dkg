@@ -2,9 +2,9 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { assertionLifecycleUri, contextGraphMetaUri, TypedEventBus, encodeAccessRequest, decodeAccessResponse } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { readConfirmedGraphKnowledgeAssetMetadataEnvelope, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControlEnvelope, overlayLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
+import { AccessHandler, readConfirmedGraphKnowledgeAssetMetadataEnvelope, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControlEnvelope, overlayLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
 import { getBytes } from 'ethers';
 import * as materialization from '../src/named-ka-vm-lifecycle-materialization.js';
 import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
@@ -154,4 +154,28 @@ it('freezes admitted and decoded evidence while retry encoding does not revalida
     JSON.stringify(wire);
   }
   expect(normalize).not.toHaveBeenCalled();
+});
+
+it('reconciles visible policy for matching v2 content and preserves receipt provenance before durable retirement', async () => {
+  const { owner, input: source, store, path, graph, journal } = await fixture(true, '2');
+  const input = { ...source, materialization: { ...source.materialization!, metadataQuads: source.materialization!.metadataQuads
+    .filter(q => q.predicate !== 'http://dkg.io/ontology/allowedPeer')
+    .map(q => q.predicate === 'http://dkg.io/ontology/accessPolicy' ? { ...q, object: '"ownerOnly"' } : q) } };
+  const meta = contextGraphMetaUri(input.contextGraphId), receipt = '0x' + 'ef'.repeat(32);
+  const inherited = input.materialization.metadataQuads.map(q => q.predicate === 'http://dkg.io/ontology/accessPolicy'
+    ? { ...q, object: '"public"' } : q.predicate === 'http://dkg.io/ontology/transactionHash' ? { ...q, object: JSON.stringify(receipt) } : q);
+  await store.insert([{ subject: `did:dkg:context-graph:${input.contextGraphId}`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://dkg.network/ontology#ContextGraph', graph: meta },
+    ...inherited, ...input.materialization.publicQuads.map(q => ({ ...q, graph })),
+    { subject: input.publishedUal, predicate: 'urn:receipt-note', object: '"preserve"', graph: meta }]);
+  await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, input.publishedUal,
+    { assertionVersion: '1', merkleRoot: getBytes(input.merkleRoot) },
+    { publisherPeerId: 'old-publisher', accessPolicy: 'public', allowedPeers: [] });
+  expect(await owner.submit(input)).toBe('repaired'); expect(await journal()).toHaveLength(0);
+  const reopened = new OxigraphStore(path); cleanups.push(() => reopened.close());
+  expect(await reopened.query(`ASK { GRAPH <${meta}> { <${input.publishedUal}> <http://dkg.io/ontology/accessPolicy> "ownerOnly"; <http://dkg.io/ontology/transactionHash> "${receipt}"; <urn:receipt-note> "preserve" } }`)).toMatchObject({ value: true });
+  const handler = new AccessHandler(reopened, new TypedEventBus());
+  const response = decodeAccessResponse(await handler.handler(encodeAccessRequest({ kaUal: input.publishedUal,
+    requesterPeerId: 'unauthorized-peer', paymentProof: new Uint8Array(), requesterSignature: new Uint8Array() }),
+    { toString: () => 'unauthorized-peer' } as Parameters<typeof handler.handler>[1]));
+  expect(response.granted).toBe(false); expect(response.rejectionReason).toBe('Access denied: owner-only policy');
 });

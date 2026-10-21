@@ -3,6 +3,8 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   overlayLocallyTrustedKnowledgeAssetControls,
   replaceLocallyTrustedKnowledgeAssetControlEnvelope,
+  replaceLocallyTrustedKnowledgeAssetControls,
+  readLocallyTrustedKnowledgeAssetControlEnvelope,
   toHex,
 } from '../src/index.js';
 
@@ -72,4 +74,21 @@ describe('locally trusted KA control overlay', () => {
     ]));
     expect(result.every((quad) => quad.subject === UAL && quad.graph === META_GRAPH)).toBe(true);
   });
+});
+
+it('a curator publication preserves the authenticated member controls at the same version and root', async () => {
+  const store = new OxigraphStore();
+  try {
+    await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, UAL, { assertionVersion: '1', merkleRoot: ROOT }, {
+      publisherPeerId: 'member-owner', accessPolicy: 'ownerOnly', allowedPeers: [],
+    });
+    const curatorMetadata = incomingMetadata().map(q => q.predicate.endsWith('/publisherPeerId') ? { ...q, object: '"curator-publisher"' } : q);
+    await replaceLocallyTrustedKnowledgeAssetControls(store, UAL, curatorMetadata);
+    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, curatorMetadata, {}, 'exact'))
+      .toEqual({ publisherPeerId: 'member-owner', accessPolicy: 'ownerOnly', allowedPeers: [] });
+    const next = curatorMetadata.map(q => q.predicate.endsWith('/assertionVersion') ? { ...q, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' } : q);
+    await replaceLocallyTrustedKnowledgeAssetControls(store, UAL, next);
+    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, next, {}, 'exact'))
+      .toEqual({ publisherPeerId: 'curator-publisher', accessPolicy: 'allowList', allowedPeers: ['untrusted-peer'] });
+  } finally { await store.close(); }
 });

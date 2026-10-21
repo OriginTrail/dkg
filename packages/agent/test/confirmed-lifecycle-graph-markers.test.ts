@@ -6,7 +6,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
-import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 
 it('repairs graph markers produced by real create, finalize and promote without resurrecting WM metadata', async () => {
   const wallet = new ethers.Wallet(`0x${'11'.repeat(32)}`), author = wallet.address;

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, materializedVersionQuad,
-  parseConfirmedGraphKnowledgeAssetMetadataEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  parseConfirmedGraphKnowledgeAssetMetadataEnvelope,
   readCurrentAssertionVersion, withMaterializationLock, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControls, type LocallyTrustedKnowledgeAssetControlEnvelope,
 } from '@origintrail-official/dkg-publisher';
-import { tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically, tryReplaceSubjectAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { hexlify } from 'ethers';
 import { mutatePublishedNamedKaVmLifecycle, type NamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
@@ -90,7 +90,10 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
     if (!barrier) throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), { code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE' });
     const current = await readCurrentAssertionVersion(store, meta, scope.ual);
     if (current !== undefined && current > BigInt(input.assertionVersion)) throw new Error('Confirmed lifecycle repair awaits newer local materialization reconciliation');
-    const existing = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, { contextGraphId: input.contextGraphId, ual: scope.ual });
+    const metadataRead = await store.query(`CONSTRUCT { <${scope.ual}> ?p ?o } WHERE { GRAPH <${meta}> { <${scope.ual}> ?p ?o } }`);
+    if (metadataRead.type !== 'quads') throw new Error('Confirmed lifecycle metadata read did not return quads');
+    const metadata = metadataRead.quads.map(q => ({ ...q, graph: meta }));
+    const existing = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(metadata, { contextGraphId: input.contextGraphId, ual: scope.ual });
     const exactMetadata = existing.state === 'confirmed' && existing.envelope.assertionVersion === input.assertionVersion
       && existing.envelope.assertionGraph === graph && rootHex(existing.envelope.merkleRoot) === rootHex(input.merkleRoot);
     const envelope = snapshot === undefined ? (exactMetadata && existing.state === 'confirmed' ? existing.envelope : undefined)
@@ -101,16 +104,26 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
     if (result.type !== 'quads') throw new Error('Confirmed lifecycle payload read did not return quads');
     const matches = result.quads.length === proof.publicTripleCount
       && rootHex(computeFlatKCRootV10(result.quads, proof.privateMerkleRoot ? [proof.privateMerkleRoot] : [])) === rootHex(input.merkleRoot);
-    const exactControls = snapshot && await readLocallyTrustedKnowledgeAssetControlEnvelope(store, meta, scope.ual, snapshot.metadataQuads, {}, 'exact');
+    const controlEvidence = snapshot?.metadataQuads ?? metadata;
+    const exactControls = await readLocallyTrustedKnowledgeAssetControlEnvelope(store, meta, scope.ual, controlEvidence, {}, 'exact');
     if (snapshot && !exactControls) await replaceLocallyTrustedKnowledgeAssetControls(store, scope.ual, snapshot.metadataQuads);
-    if (!matches || !exactMetadata) {
-      if (!snapshot) throw new Error('Confirmed lifecycle repair awaits its original public payload');
-      const payload = snapshot.publicQuads.map(q => ({ ...q, graph }));
-      const recoveredMetadata = !exactMetadata && exactControls
-        ? await overlayLocallyTrustedKnowledgeAssetControls(store, meta, scope.ual, snapshot.metadataQuads) : snapshot.metadataQuads;
-      const replaced = exactMetadata
-        ? await tryReplaceGraphAtomically(store, graph, payload, { source: 'agent.publish.confirmedLifecyclePayload' })
-        : await tryReplaceGraphAndSubjectAtomically(store, graph, payload, meta, scope.ual, [...recoveredMetadata], { source: 'agent.publish.confirmedLifecycleMaterialization' });
+    if (!exactMetadata && !snapshot) throw new Error('Confirmed lifecycle repair awaits its original public payload');
+    // Keep receipt provenance and all non-control rows when immutable metadata already matches.
+    const recoveredMetadata = snapshot || exactControls
+      ? await overlayLocallyTrustedKnowledgeAssetControls(store, meta, scope.ual, exactMetadata ? metadata : snapshot!.metadataQuads) : metadata;
+    const canonical = (rows: readonly Quad[]) => rows.map(q => JSON.stringify([q.predicate, q.object])).sort().join('\n');
+    const metadataMatches = exactMetadata && canonical(metadata) === canonical(recoveredMetadata);
+    if (!matches || !metadataMatches) {
+      let replaced: boolean;
+      if (matches) {
+        replaced = await tryReplaceSubjectAtomically(store, meta, scope.ual, recoveredMetadata, { source: 'agent.publish.confirmedLifecycleControls' });
+      } else {
+        if (!snapshot) throw new Error('Confirmed lifecycle repair awaits its original public payload');
+        const payload = snapshot.publicQuads.map(q => ({ ...q, graph }));
+        replaced = metadataMatches
+          ? await tryReplaceGraphAtomically(store, graph, payload, { source: 'agent.publish.confirmedLifecyclePayload' })
+          : await tryReplaceGraphAndSubjectAtomically(store, graph, payload, meta, scope.ual, recoveredMetadata, { source: 'agent.publish.confirmedLifecycleMaterialization' });
+      }
       if (!replaced) throw new Error('Confirmed lifecycle recovery requires atomic materialization replacement');
     }
     await mutatePublishedNamedKaVmLifecycle(store, input, options.preserveVerifiedVmProof);

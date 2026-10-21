@@ -1,7 +1,8 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
 import type { LifecycleRepairEntry, StoredLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
-import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle, type TentativeNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
+import { applyTentativeNamedKaVmLifecycle, type TentativeNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 declare const confirmed: ConfirmedNamedKaVmLifecycleInput;
 declare const stored: StoredLifecycleRepairInput;
 declare const store: TripleStore;

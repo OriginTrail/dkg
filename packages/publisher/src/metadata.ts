@@ -702,6 +702,12 @@ export async function replaceLocallyTrustedKnowledgeAssetControls(
   const root = normalizeControlRoot(
     readControlAnchor(sidecarQuads, `${DKG}merkleRoot`, 'merkleRoot'),
   );
+  validateLocallyTrustedControlRows(sidecarQuads);
+  // A curator may publish a member's already-authenticated share. Its local
+  // publisher identity must not append a second owner to the same anchor.
+  if (await readLocallyTrustedKnowledgeAssetControlEnvelope(
+    store, metadataQuads[0]!.graph, ual, metadataQuads, {}, 'exact',
+  )) return;
   await writeLocallyTrustedKnowledgeAssetControlEntry(
     store,
     ual,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
-import { normalizeLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
+import { normalizeLifecycleMaterialization, type ConfirmedLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
 import { createHash } from 'node:crypto';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId'> & {
@@ -9,7 +9,7 @@ export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifec
 };
 type JournalInput = ConfirmedKaInput | HistoricalUnboundLifecycleRepairInput;
 type ConfirmedKaInput = ConfirmedNamedKaVmLifecycleInput;
-export type StoredLifecycleRepairInput = Omit<JournalInput, 'packedKaId' | 'tentative'> & { packedKaId?: string };
+export type StoredLifecycleRepairInput = Omit<JournalInput, 'packedKaId' | 'tentative'> & { packedKaId?: string; materializationRef?: string };
 interface RepairRetryState {
   attempts: number;
   nextAttemptAt: number;
@@ -90,13 +90,21 @@ export function lifecycleRepairKey(input: JournalInput): string {
 function historicalRepairKey(input: JournalInput): string {
   return createHash('sha256').update(JSON.stringify([input.contextGraphId, input.agentAddress.toLowerCase(), input.name, input.subGraphName ?? ''])).digest('hex');
 }
-/** Encode only at the JSON file boundary; worker entries retain confirmed bigint coordinates. */
-export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, LifecycleRepairEntry>): {
-  version: 3; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInput }]>;
-} {
-  return { version: 3, entries: [...entries].map(([key, entry]) => {
+/** The no-reference codec is retained only for reading/testing historical inline journals. */
+export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, LifecycleRepairEntry>,
+  references?: Pick<ReadonlyMap<ConfirmedLifecycleMaterialization, string>, 'get'>,
+): { version: 3 | 4; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInput }]> } {
+  return { version: references ? 4 : 3, entries: [...entries].map(([key, entry]) => {
     // Admission and decode own validation/copying; retry bookkeeping never rehashes payloads.
-    const input: StoredLifecycleRepairInput = { ...entry.input, packedKaId: entry.input.packedKaId?.toString() };
+    const { materialization, ...coordinates } = entry.input;
+    let input: StoredLifecycleRepairInput = { ...coordinates, packedKaId: coordinates.packedKaId?.toString() };
+    if (materialization) {
+      if (references) {
+        const ref = references.get(materialization);
+        if (!ref || !/^[a-f0-9]{64}$/.test(ref)) return invalid();
+        input.materializationRef = ref;
+      } else input = { ...input, materialization };
+    }
     const { retention: _retention, ...retry } = entry;
     return [key, { ...retry, input }];
   }) };
@@ -108,14 +116,18 @@ function decodeLifecycleRepairInput(value: unknown): JournalInput {
     ...(packed === undefined ? {} : { packedKaId: BigInt(string(packed)) }),
   });
 }
-export function decodeLifecycleRepairJournal(value: unknown): Map<string, LifecycleRepairEntry> {
+export function decodeLifecycleRepairJournal(value: unknown, snapshots?: ReadonlyMap<string, unknown>): Map<string, LifecycleRepairEntry> {
   const journal = record(value);
-  if ((journal['version'] !== 1 && journal['version'] !== 2 && journal['version'] !== 3) || !Array.isArray(journal['entries'])) return invalid();
+  if ((journal['version'] !== 1 && journal['version'] !== 2 && journal['version'] !== 3 && journal['version'] !== 4) || !Array.isArray(journal['entries'])) return invalid();
   const entries = new Map<string, LifecycleRepairEntry>();
   const storedKeys = new Set<string>();
   for (const tuple of journal['entries']) {
     if (!Array.isArray(tuple) || tuple.length !== 2 || typeof tuple[0] !== 'string') return invalid();
-    const entry = record(tuple[1]); const input = decodeLifecycleRepairInput(entry['input']);
+    const entry = record(tuple[1]), stored = record(entry['input']);
+    const ref = stored['materializationRef'];
+    if ((journal['version'] !== 4 && ref !== undefined) || (journal['version'] === 4 && stored['materialization'] !== undefined)) return invalid();
+    if (ref !== undefined && (typeof ref !== 'string' || !/^[a-f0-9]{64}$/.test(ref) || !snapshots?.has(ref))) return invalid();
+    const input = decodeLifecycleRepairInput({ ...stored, ...(typeof ref === 'string' ? { materialization: snapshots!.get(ref) } : {}) });
     const key = lifecycleRepairKey(input), attempts = entry['attempts'], nextAttemptAt = entry['nextAttemptAt'];
     const storedKey = journal['version'] === 1 ? historicalRepairKey(input) : key;
     if (tuple[0] !== storedKey || storedKeys.has(storedKey) || entries.has(key) || typeof attempts !== 'number' || !Number.isSafeInteger(attempts) || attempts < 0
