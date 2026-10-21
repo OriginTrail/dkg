@@ -65,7 +65,9 @@ Finality coverage is shown explicitly. Missing marks are not zero. The existing 
 
 ## Post-benchmark integration
 
-After measurement, `testnet-canary` advanced to `c1230bc0a46c4ce46ed728badd4f121296b47933`. The PR merges that base, retains both sets of agent imports/tests, and extracts unchanged mutation-writer composition into `internal/agent-mutation-writers.ts` to respect the lowered source-size budget. Runtime build/type checks, lint, size checks, 35 focused agent tests (including real production-agent construction), and 17 CLI runtime/recovery tests passed. These integration checks do not extend the live timing claim beyond the exact tested candidate `d2870b18`.
+After measurement, `testnet-canary` advanced to `c1230bc0a46c4ce46ed728badd4f121296b47933`. The PR merges that base, retains both sets of agent imports/tests, and extracts unchanged mutation-writer composition into `internal/agent-mutation-writers.ts` to respect the lowered source-size budget. Runtime build/type checks, lint, size checks, 35 focused agent tests (including real production-agent construction), 47 roster/read-admission tests, and 17 CLI runtime/recovery tests passed. These integration checks do not extend the live timing claim beyond the exact tested candidate `d2870b18`.
+
+Reviewer follow-up strengthens the production-construction test to warm an unrelated projection through `agent.getCgMeta`, call the constructed cleanup writer, and assert zero reload queries plus exact remaining RDF. All 12 cleanup tests pass. Deliberately omitting the writer from the super-constructor restores the opaque fallback and fails the new assertion with six reload queries; the mutation was reverted.
 
 ## Evidence and cleanup
 

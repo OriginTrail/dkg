@@ -173,16 +173,26 @@ describe('StorageACK cleanup observation', () => {
   });
 
   it('constructs the production agent with a scoped writer over its configured store', async () => {
-    const { raw } = await stack();
+    const { raw, retained } = await stack();
     const agent = await DKGAgent.create({ name: 'ack-copy-cleanup', store: raw,
       chainAdapter: new NoChainAdapter(), chainConfig: { type: 'none' } });
     try {
       const before = await agent.listContextGraphs();
+      const unrelated = await agent.getCgMeta('production-unrelated');
+      const query = vi.spyOn(raw, 'query');
       const update = vi.spyOn(raw, 'update');
       await agent.storageAckCopyCleanup(INPUT);
       expect(update).toHaveBeenCalledOnce();
       expect(update.mock.calls[0]![1]).toEqual({ source: 'publisher.storageAckCopyCleanup', touchedGraphs: [GRAPH] });
+      expect(await agent.getCgMeta('production-unrelated')).toEqual(unrelated);
+      expect(query.mock.calls.filter(([sparql]) => sparql.includes('production-unrelated'))).toHaveLength(0);
       expect(await agent.listContextGraphs()).toEqual(before);
+      const result = await raw.query(`SELECT ?s ?p ?o WHERE { GRAPH <${GRAPH}> { ?s ?p ?o } }`);
+      expect(result.type).toBe('bindings');
+      if (result.type === 'bindings') {
+        expect(result.bindings).toEqual(expect.arrayContaining(retained.map(q => ({ s: q.subject, p: q.predicate, o: q.object }))));
+        expect(result.bindings).toHaveLength(retained.length);
+      }
     } finally { await agent.stop(); }
   });
 });
