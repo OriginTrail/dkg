@@ -115,6 +115,13 @@
     "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance"
   },
   {
+    "pattern": "packages/storage/test-live/blazegraph-prefix.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Native graph-prefix evaluation conformance is mandatory in the existing Blazegraph CI lane",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
     "pattern": "packages/agent/test-live/**/*.blazegraph.test.ts",
     "lane": "tornado-blazegraph",
     "reason": "Live Blazegraph regressions required in the existing Tornado Blazegraph CI lane",
