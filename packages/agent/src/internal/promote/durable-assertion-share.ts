@@ -196,6 +196,22 @@ export function durableAssertionShareMethods(agent: DKGAgent, agentAddress: stri
       if (!admit) throw new Error('Durable share admission is unavailable');
       return agent.publisher.admitPreparedAssertionShare(request, () => admit(request, workerId));
     },
+    async prepareQueuedShare(job: import('@origintrail-official/dkg-publisher').PromoteJob) {
+      if (job.request.recoveryBinding) return { job };
+      // Old queued records retain their original execution/recovery semantics;
+      // never manufacture replay authority for missing version/lane evidence.
+      if (job.formatVersion !== 4 || !job.request.agentAddress) return { job };
+      const bind = agent.promoteQueue.bindRecovery?.bind(agent.promoteQueue);
+      if (!bind || !job.lease) throw new Error('Durable async share preparation requires a leased recovery queue');
+      const request = job.request;
+      const prepared = await prepareDurableAssertionShare(agent, request.contextGraphId, request.assertionName,
+        agentAddress, request);
+      if (prepared.completedResult) return { job, completedResult: prepared.completedResult };
+      const bound = await agent.publisher.admitPreparedAssertionShare({ ...request, entities: 'all',
+        agentAddress: prepared.agentAddress, recoveryBinding: prepared.recoveryBinding },
+      () => bind(job.jobId, job.lease!.claimToken, prepared.recoveryBinding));
+      return { job: bound };
+    },
     prepareDurableShare: (contextGraphId: string, name: string, opts?: AssertionPromoteOptions) =>
       prepareDurableAssertionShare(agent, contextGraphId, name, agentAddress, opts),
     promote: (contextGraphId: string, name: string, opts?: AssertionPromoteOptions) =>

@@ -1,0 +1,60 @@
+# Recover interrupted async shares under their original job
+
+Status: implementation and local regression validation complete; remote review/live validation pending. Owner: primary agent. Base: `testnet-canary` at `a3dfbe53d`, selected by the user. One cohesive PR; anticipated 450–650 authored code/test lines. High risk: crash recovery, immutable content and stale-worker fencing.
+
+## Problem and evidence
+
+The controlled #3395 live interruption retained an async share with `promoteStarted=true`, `swmInserted=false`, no recovery binding. Its 15-minute lease expired and the queue correctly refused unsafe replay. Read-only inspection found its payload in WM, but that observation cannot authorize arbitrary retries. Synchronous sharing already persists a binding (seal digest, immutable operation intent, inventory obligation) before mutation; `assertion.promoteAsync` only enqueues an ordinary request. The daemon executes it without establishing the same recovery authority. The gap predates #3395. Existing queue/worker tests cover conservative legacy recovery and synchronous bound recovery separately, missing this production async composition.
+
+## Design and alternatives
+
+Keep HTTP admission bounded and unchanged. After claiming an ordinary async job, the daemon prepares its sealed share and atomically binds the existing job under both the publisher lifecycle lock and the current queue lease, before recording promoteStarted or touching SWM. Run through the existing bound executor and recovery policy. This preserves job ID, lane, graph, author, subgraph and immutable operation across retries.
+
+Preparing at HTTP admission would increase latency and bypass the existing admission budget. Relaxing recovery based on coarse outer markers is unsafe because they lag internal writes. Automatically upgrading already ambiguous legacy attempts would invent authority after possible side effects; those records remain inspection-required. No repair of historical failed jobs is included. Older queued records without current version/lane evidence retain their original execution and conservative recovery semantics; only new eligible jobs acquire a binding.
+
+A lease-checked internal queue operation attaches only a binding to a current-format, unstarted, all-entity request with a retained lane. It atomically replaces the row; an uncertain acknowledgement prevents execution and retains the owner for lease recovery. Preparation errors before binding use ordinary failure classification. Already-bound jobs skip preparation; verified completed legacy assets can return their verified no-op result without replaying promotion.
+
+```mermaid
+sequenceDiagram
+ participant API
+ participant Queue
+ participant Worker
+ participant Publisher
+ API->>Queue: enqueue ordinary request (unchanged)
+ Queue->>Worker: claim original job + lease
+ Worker->>Publisher: prepare sealed immutable binding
+ Publisher->>Queue: bind existing job under lifecycle lock + lease
+ Queue-->>Worker: durable bound job
+ Worker->>Publisher: execute with fenced authority
+ Note over Queue,Publisher: On restart, reclaim bound job and replay same operation
+```
+
+## Execution
+
+1. Add narrow queue binding transition with validation, lease checks and atomic persistence. Reject started/legacy/missing-lane/subset records and mismatched authority. Keep old failure policy unchanged.
+2. Add agent preparation/binding method and daemon preparation hook before promoteStarted. Preserve heartbeat, cancellation and uncertain-write semantics. Avoid holding queue lock while acquiring publisher lifecycle lock (publisher → queue order).
+3. Test real agent + store + queue + worker composition: kill-equivalent interruptions before/after internal commit, same job/operation recovery, unchanged payload/root; stale claim, binding-write uncertainty, failed preparation and legacy ambiguity. Keep admission and synchronous regression tests.
+4. Build/typecheck/lint/file-size checks. Open PR into testnet-canary, request established remote reviewer, respond in bounded rounds; require CI and report maintainer approval separately.
+5. Live Base Sepolia run with claimed prepared pool, isolated home and Blazegraph (matches observed backend): ordinary async and synchronous share, publication/update/readback; deliberate whole-worker interruption after durable binding, original job automatic recovery after real lease, no client replay; verify receipts/roots/membership and fresh work. Retain all failures. Reconcile jobs/nonces, stop owned processes/container, release batch, preserve report/evidence.
+
+## Acceptance and safeguards
+
+- Async admission returns existing job shape and does not perform seal/store preparation inline.
+- No SWM mutation until binding acknowledgement; failed/uncertain persistence does not authorize execution.
+- Original job succeeds after interruption, with identical operation/seal and content; no alternate job or blind replay.
+- Expired/stale workers cannot bind or mutate; ambiguous old running/failed jobs stay fenced.
+- Scoped token lanes, subgraphs, author identity and inventory requirements remain effective.
+- Normal share/publication/update/readback pass; no assertion of global regression freedom or exact Gnosis reproduction.
+
+Self-review (design, concurrency, validation): added uncertainty boundary, strict unstarted/version checks and completed-legacy handling. Independent implementation review will be provided by the remote PR reviewer; no independent plan reviewer used. If preparation requires migration or fails to preserve lock ordering, stop dependent work and revise this plan.
+
+## Resource ownership and rollback
+
+Task checkout: `.codex/worktrees/async-share-recovery/dkg`; scratch `.scratch/async-share-recovery`; keep until PR review completes. Live home/container/batch will be recorded in run state before creation and removed/released only after reconciliation. Prior task evidence and unrelated services remain untouched. No schema bump: bound format-4 recovery is already understood by the base. Rollback does not repair already ambiguous old jobs; those need separate evidence-based operational recovery. No deployment or merge authorized.
+
+## Progress
+
+- Confirmed #3395 merged; closed #3394 as requested with explicit unresolved stall attribution.
+- Source diagnosis and preserved prior-run evidence agree on missing async binding.
+- Implemented queue transition, agent preparation and production worker hook. 203 CLI regressions and 152 publisher queue/admission/atomicity regressions passed. Removing the production hook reproduces the missing binding in the new integration test. Runtime builds/type tests, lint, file-size and native SQLite checks passed.
+- Next: open PR, run isolated live interruption and normal lifecycle checks while remote CI/review executes.

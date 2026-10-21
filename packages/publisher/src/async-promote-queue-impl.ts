@@ -1,3 +1,5 @@
+import { bindUnstartedPromoteJob } from './bind-promote-recovery.js';
+import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 import { reconcileRetainedShareUnlocked, validateShareReconciliationInput, type ShareReconciliationInput } from './share-reconciliation.js';
 import { readShareCompletionEvidence } from './share-completion-evidence.js';
 import { promoteSuccessTransition } from './async-promote-success.js';
@@ -8,24 +10,7 @@ import { createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromote
 import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob } from './bound-promote-job.js';
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
-/**
- * `TripleStoreAsyncPromoteQueue` — RDF-backed persistent queue for
- * WM→SWM promotes. Mirrors the structure of
- * `TripleStoreAsyncLiftPublisher` (claim/lease/retry pattern, jobs stored
- * as RDF in a dedicated control graph) but adapted for promote's
- * simpler model:
- *
- *  - **Per-assertion lock** (not per-wallet). One promote per
- *    `(contextGraphId, subGraphName, assertionName)` runs at a time. N
- *    workers total.
- *  - **No chain integration.** Recovery decides "rerun safely" vs
- *    "needs human inspection" via the `commitMarker.promoteStarted` /
- *    `commitMarker.swmInserted` flags plus active-job conflict checks,
- *    not via on-chain lookups.
- *
- * See `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` (RFC) and
- * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md` (plan).
- */
+/** RDF queue: immutable bound replay or conservative legacy recovery; one owner per assertion. */
 
 import {
   deleteByPatternWithoutCount,
@@ -187,6 +172,18 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         throw new PromoteAdmissionUncertainError(jobId, cause);
       }
       return job;
+    });
+  }
+
+  async bindRecovery(jobId: string, claimToken: string, binding: PromoteRecoveryBinding): Promise<BoundPromoteJob> {
+    return this.withMutationLock(async () => {
+      await this.ensureGraph();
+      const job = await this.requireJob(jobId);
+      this.assertLeaseHeld(job, claimToken);
+      const bound = bindUnstartedPromoteJob(job, binding, this.now());
+      try { await this.writeJob(bound); }
+      catch (cause) { throw new PromoteAdmissionUncertainError(jobId, cause); }
+      return bound;
     });
   }
 
@@ -455,14 +452,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
       const promoteStarted = job.commitMarker?.promoteStarted;
       const swmInserted = job.commitMarker?.swmInserted;
-      // Codex PR #665 review id=3302135756: a `running` row from a
-      // pre-v2 daemon (`formatVersion` missing or < 2) can have already
-      // crossed into `assertionPromote()` even though its
-      // `commitMarker.promoteStarted` field never existed — the old
-      // worker simply didn't write it. Reclaiming such a row would
-      // duplicate the SWM insert + gossip. Gate the reclaim path on
-      // an explicit format-version marker; legacy rows fall through
-      // to the manual-recovery path below.
+      // Pre-v2 workers could enter promotion without recording a marker.
+      // Never infer absence of effects from a missing legacy marker.
       const formatVersion = job.formatVersion ?? 0;
       const hasRecoverableCommitMarker = formatVersion >= ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION;
       if (isBoundPromoteJob(job) || (formatVersion <= ASYNC_PROMOTE_QUEUE_FORMAT_VERSION
