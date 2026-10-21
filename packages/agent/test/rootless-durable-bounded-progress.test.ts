@@ -23,6 +23,7 @@ import {
   type DurableSyncStoreInsertRequest,
 } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
+import { DEFAULT_DURABLE_DATA_ROUND_BUDGET } from '../src/sync/requester/durable-data-round.js';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import type {
   DurableBatchVerificationMode,
@@ -547,10 +548,14 @@ describe('bounded rootless durable progress', () => {
           shouldStopAfterPage?.({
             resumedFromOffset: 0,
             nextOffset: data.length - 1,
+            acceptedQuads: data.length - 1,
+            acceptedHeapBytesEstimate: 0,
           }) ?? false,
           shouldStopAfterPage?.({
             resumedFromOffset: 0,
             nextOffset: data.length,
+            acceptedQuads: data.length,
+            acceptedHeapBytesEstimate: 0,
           }) ?? false,
         );
         return pageResult('data', { quads: data, nextOffset: data.length });
@@ -576,7 +581,9 @@ describe('bounded rootless durable progress', () => {
     });
 
     expect(materialized).toEqual([fixture!.ual]);
-    expect(pageYieldDecisions).toEqual([false, true]);
+    // The round never stops at the end of its only graph: an incomplete round
+    // would replay that graph. It reads on to the end of the phase instead.
+    expect(pageYieldDecisions).toEqual([false, false]);
     expect(summary.complete).toBe(true);
     expect(summary.failedPhases).toBe(0);
     expect(checkpoints.at(-1)).toEqual({ offset: data.length, terminal: true });
@@ -612,6 +619,8 @@ describe('bounded rootless durable progress', () => {
         pageYieldDecisions.push(shouldStopAfterPage?.({
           resumedFromOffset: 0,
           nextOffset: data.length,
+          acceptedQuads: data.length,
+          acceptedHeapBytesEstimate: 0,
         }) ?? false);
         return pageResult('data', { quads: data, nextOffset: data.length });
       },
@@ -650,6 +659,73 @@ describe('bounded rootless durable progress', () => {
       terminal: false,
     }]);
     expect(info).toContainEqual(expect.stringContaining('settlement slice expired'));
+  });
+
+  it('bounds a full-graph DATA round without a recovery slice and reports its hard limit', async () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const data = fixtures.flatMap((entry) => entry.payload);
+    const warnings: string[] = [];
+    let boundary: DurableSyncFetchRequest['shouldStopAfterPage'];
+
+    await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-round-limit',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase, shouldStopAfterPage }: DurableSyncFetchRequest) => {
+        if (phase === 'meta') return pageResult('meta', { quads: meta, nextOffset: meta.length });
+        boundary = shouldStopAfterPage;
+        return pageResult('data', { quads: data, nextOffset: data.length });
+      },
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async () => 'applied',
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: (_ctx, message) => { warnings.push(message); },
+      logDebug: () => {},
+    });
+
+    // Every full-graph DATA round gets the boundary, not only recovery slices.
+    expect(boundary).toBeDefined();
+    const { softRows, maxRows } = DEFAULT_DURABLE_DATA_ROUND_BUDGET;
+    const page = (nextOffset: number, acceptedQuads: number) => ({
+      resumedFromOffset: 0, nextOffset, acceptedQuads, acceptedHeapBytesEstimate: 0,
+    });
+    expect(boundary!(page(5, 5))).toBe(false);
+    expect(boundary!(page(5, softRows))).toBe(true);
+    expect(warnings).toEqual([]);
+    // A round that reaches the hard limit inside one graph ends without progress.
+    expect(boundary!(page(3, maxRows))).toBe(true);
+    expect(warnings).toEqual([
+      expect.stringContaining(`reached its hard limit at ${maxRows} rows (offset 0->3)`),
+    ]);
+
+    // A caller that needs one complete snapshot from row 0 keeps a single round.
+    let snapshotBoundary: DurableSyncFetchRequest['shouldStopAfterPage'] = () => true;
+    await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-round-snapshot',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase, shouldStopAfterPage }: DurableSyncFetchRequest) => {
+        if (phase === 'meta') return pageResult('meta', { quads: meta, nextOffset: meta.length });
+        snapshotBoundary = shouldStopAfterPage;
+        return pageResult('data', { quads: data, nextOffset: data.length });
+      },
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async () => 'applied',
+      onVerifiedFullSnapshot: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+    expect(snapshotBoundary).toBeUndefined();
   });
 
   it('waits for adjacent zero-public descriptors before checkpointing their shared offset', async () => {

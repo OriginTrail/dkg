@@ -5,7 +5,12 @@ import type {
 } from '../checkpoint/state.js';
 
 export type ManifestCheckpointDecision =
-  | { readonly kind: 'keep'; readonly prefixUpgrade?: DurableManifestPrefixDigest }
+  | {
+      readonly kind: 'keep';
+      readonly prefixUpgrade?: DurableManifestPrefixDigest;
+      /** The offset is a proven boundary of this generation; a fresh responder session may be primed to it. */
+      readonly primeable?: true;
+    }
   | {
       readonly kind: 'rebind-and-prime';
       readonly prefixDigest: DurableManifestPrefixDigest;
@@ -27,15 +32,20 @@ export function resolveManifestCheckpointDecision(input: {
     && checkpoint.manifestPrefixDigest === prefixDigestAtOffset;
   const offsetHasCurrentBoundaryProof = checkpoint.offset === 0
     || prefixDigestAtOffset !== undefined;
+  // The verified prefix is canonical, so a fresh responder session reaches the
+  // same rows at this offset. A held token proves where its raw coordinate is;
+  // without one (expired, cleared, or a prefix proven against another peer)
+  // the first page after the jump must still start the next manifest graph.
+  const primeableBoundary = !input.hasExactAssetFilter
+    && checkpoint.offset > 0
+    && savedPrefixMatches
+    && (
+      checkpoint.responderSessionOffset === undefined
+      || checkpoint.responderSessionOffset === checkpoint.offset
+    );
 
   if (!fullGenerationMatches) {
-    if (
-      !input.hasExactAssetFilter
-      && checkpoint.offset > 0
-      && savedPrefixMatches
-      && checkpoint.responderSessionOffset === checkpoint.offset
-      && prefixDigestAtOffset !== undefined
-    ) {
+    if (primeableBoundary && prefixDigestAtOffset !== undefined) {
       return { kind: 'rebind-and-prime', prefixDigest: prefixDigestAtOffset };
     }
     return { kind: 'reset' };
@@ -51,7 +61,10 @@ export function resolveManifestCheckpointDecision(input: {
     && prefixDigestAtOffset !== undefined
     && checkpoint.manifestPrefixDigest === undefined
   ) return { kind: 'keep', prefixUpgrade: prefixDigestAtOffset };
-  return { kind: 'keep' };
+  // A terminal offset of this generation has no next graph to resume into.
+  return primeableBoundary && checkpoint.terminal !== true
+    ? { kind: 'keep', primeable: true }
+    : { kind: 'keep' };
 }
 
 export type ResponderResumeDecision =
@@ -65,7 +78,7 @@ export function resolveResponderResumeDecision(input: {
   readonly checkpoint?: SyncCheckpointEntry;
   readonly usesPageSession: boolean;
   readonly savedResponderSessionOffset?: number;
-  readonly manifestRebindNeedsPriming: boolean;
+  readonly manifestCheckpointDecision: ManifestCheckpointDecision;
 }): ResponderResumeDecision {
   const verifiedOffset = input.checkpoint?.offset ?? 0;
   if (
@@ -73,7 +86,8 @@ export function resolveResponderResumeDecision(input: {
     && verifiedOffset > 0
     && input.savedResponderSessionOffset === undefined
   ) {
-    return input.manifestRebindNeedsPriming
+    const decision = input.manifestCheckpointDecision;
+    return decision.kind === 'rebind-and-prime' || (decision.kind === 'keep' && decision.primeable === true)
       ? { kind: 'prime', verifiedOffset, rawOffset: verifiedOffset }
       : { kind: 'reset-unmappable', verifiedOffset: 0, rawOffset: 0 };
   }

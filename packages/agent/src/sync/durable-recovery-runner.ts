@@ -23,6 +23,12 @@ import {
 } from './durable-recovery-coordinator.js';
 import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
+import {
+  preferVerifiedDurableBoundary,
+  seedVerifiedDurableBoundary,
+  verifiedDurableBoundaryOf,
+  type VerifiedDurableBoundary,
+} from './durable-recovery-boundary-seed.js';
 
 export interface DurableRecoveryExecution {
   readonly outcome: DurableRecoveryContinuationOutcome;
@@ -120,6 +126,9 @@ export class DurableRecoveryRunner {
 
   private readonly healthByGraphPeer = new Map<string, MutableDurableRecoveryPeerHealth>();
 
+  /** Per graph, the verified DATA boundary worth continuing, learned from any peer's checkpoint. */
+  private readonly verifiedBoundaryByGraph = new Map<string, VerifiedDurableBoundary>();
+
   private metaScopeSequence = 0;
 
   run(input: {
@@ -172,6 +181,8 @@ export class DurableRecoveryRunner {
     const progressTotals = createProgressTotals();
     const attemptedWithoutProgress = new Set<string>();
     const incompatiblePeers = new Set<string>();
+    // Set once a seeded peer discarded the boundary; the rest of this run uses each peer's own checkpoint.
+    let seedingRefused = false;
     let slices = 0;
     let lastPeerId: string | undefined;
     let lastResult: DurableSyncResult = createIncompleteDurableSyncResult();
@@ -288,6 +299,11 @@ export class DurableRecoveryRunner {
       const canonicalManifestDigest = owner.manifestDigest
         ?? selectCanonicalDurableRecoveryManifest(candidates);
       if (canonicalManifestDigest) owner.bindManifest(canonicalManifestDigest);
+      const preferred = candidates.reduce<VerifiedDurableBoundary | undefined>(
+        (boundary, candidate) => preferVerifiedDurableBoundary(boundary, verifiedDurableBoundaryOf(candidate.checkpoint)),
+        this.verifiedBoundaryByGraph.get(contextGraphId),
+      );
+      if (preferred) this.verifiedBoundaryByGraph.set(contextGraphId, preferred);
       return rankDurableRecoveryPeers(candidates, canonicalManifestDigest);
     };
 
@@ -312,6 +328,13 @@ export class DurableRecoveryRunner {
         false,
         'data',
       );
+      const boundary = seedingRefused ? undefined : this.verifiedBoundaryByGraph.get(contextGraphId);
+      const seeded = seedVerifiedDurableBoundary(deps.checkpointStore, checkpointKey, boundary);
+      if (seeded) {
+        deps.logInfo(
+          `Durable recovery for "${contextGraphId}" continues with ${candidate.peerId.slice(-8)} from verified offset ${boundary!.offset}`,
+        );
+      }
       const before = deps.checkpointStore.get(checkpointKey);
       const health = this.healthFor(contextGraphId, candidate.peerId);
       health.attempts += 1;
@@ -335,6 +358,13 @@ export class DurableRecoveryRunner {
       accumulateProgress(progressTotals, lastResult);
       recordPeerSlice(candidate.peerId, lastResult);
       const after = deps.checkpointStore.get(checkpointKey);
+      // A round discards a seeded boundary its peer's rows or META do not line up with.
+      if (seeded && !after) seedingRefused = true;
+      const preferred = preferVerifiedDurableBoundary(
+        this.verifiedBoundaryByGraph.get(contextGraphId),
+        verifiedDurableBoundaryOf(after),
+      );
+      if (preferred) this.verifiedBoundaryByGraph.set(contextGraphId, preferred);
       const manifestDigest = after?.manifestDigest ?? before?.manifestDigest;
       const checkpointOffset = after?.offset ?? before?.offset ?? 0;
       if (manifestDigest && manifestDigest !== owner.manifestDigest) {
