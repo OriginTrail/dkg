@@ -1,17 +1,26 @@
 import { ethers } from 'ethers';
 import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
-import type { DKGAgent } from './dkg-agent.js';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { ContextGraphSub, ContextGraphSubscriptionStore, ContextGraphWritePreflightProbe } from './dkg-agent-types.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 import { classifyWritePreflightFailure, type WritePreflightFailure, type WritePreflightFailureSite } from './write-preflight-attribution.js';
 
+/** Read-only dependencies of this point probe; the agent mixin remains its adapter. */
+export interface WritePreflightHost {
+  readonly store: Pick<TripleStore, 'query'>;
+  contextGraphExists(contextGraphId: string): Promise<boolean>;
+  contextGraphHasLocalContent(contextGraphId: string): Promise<boolean>;
+  curatorDidMatchesChecksumAgent(curator: string, checksumAddress: string): boolean;
+  callerIsAllowlistedAgentParticipant(contextGraphId: string, checksumAddress: string): Promise<boolean>;
+}
+
 interface WritePreflightSubscriptions {
-  readonly store?: ContextGraphSubscriptionStore;
+  readonly store?: Pick<ContextGraphSubscriptionStore, 'load'>;
   readonly current: (contextGraphId: string) => Pick<ContextGraphSub, 'subscribed' | 'synced'> | undefined;
 }
 
 export async function probeContextGraphWritePreflight(
-    host: DKGAgent,
+    host: WritePreflightHost,
     subscriptions: WritePreflightSubscriptions,
     contextGraphId: string,
     opts?: { callerAgentAddress?: string | null },
