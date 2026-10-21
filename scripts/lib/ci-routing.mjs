@@ -306,7 +306,7 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/src\/rdf-literal\.ts$/,
   /^packages\/node-ui\/src\/ui\/web3\//,
   /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,
-  /^packages\/node-ui\/src\/ui\/(?:api|assertion-identity|assertions-page|query-bindings|query-api|query-transport|http|identity-wallet-api|pca-api)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:api|agent-identity-api|assertion-identity|assertions-page|query-bindings|query-api|query-transport|http|identity-wallet-api|pca-api)\.ts$/,
   /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken|randomUUID|read-cache)|stores\/wallet)\.ts$/,
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.

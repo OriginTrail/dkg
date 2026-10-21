@@ -2,11 +2,9 @@ import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryStackView } from '../../src/ui/views/MemoryStackView.js';
 import { AgentProfilePage } from '../../src/ui/components/AgentProfilePage.js';
-import { useProjectsStore } from '../../src/ui/stores/projects.js';
 import { RdfGraphViz } from '../../../graph-viz/src/core/rdf-graph-viz.js';
 import { AssertionsList } from '../../src/ui/views/project/components/assertions.js';
 const cg = '0x1111111111111111111111111111111111111111/browser-preview';
-useProjectsStore.setState({ contextGraphs: [{ id: cg, name: 'Browser preview' } as any] });
 function Scene({ dataImages = false }: { dataImages?: boolean }) {
   const container = useRef<HTMLDivElement>(null);
   const viz = useRef<RdfGraphViz | null>(null);

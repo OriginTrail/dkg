@@ -23,6 +23,7 @@ export default defineConfig({
           'test/public-snapshot-job.test.ts',
           'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
+          'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
@@ -198,6 +199,9 @@ export default defineConfig({
           // plus one real-histogram smoke test, and the route block shape.
           'test/event-loop-delay-monitor.test.ts',
           'test/supervisor-liveness.test.ts',
+          'test/liveness-diagnostics.test.ts',
+          'test/liveness-supervisor-log.test.ts',
+          'test/foreground-supervisor-command.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
