@@ -1,3 +1,4 @@
+import { AsyncLiftClaimGate } from './async-lift-claim-gate.js';
 import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
 import { completionTrace } from './async-lift-completion-trace.js';
@@ -614,7 +615,9 @@ export class TripleStoreAsyncLiftPublisher
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
   private readonly claimCoordinator: AsyncLiftClaimCoordinator;
-  private paused = false;
+  readonly claimGate = new AsyncLiftClaimGate(commit =>
+    this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimTransaction(owner,
+      async () => { commit?.(); })));
   private graphEnsured = false;
 
   private readonly rawLiftJobHandler: AsyncLiftJobHandler = {
@@ -727,7 +730,7 @@ export class TripleStoreAsyncLiftPublisher
       {
         journalCompletion: this.journalCompletion,
         ensureGraph: async () => await this.ensureGraph(),
-        isPaused: () => this.paused,
+        isPaused: () => this.claimGate.state !== 'running',
         readStatus: async (jobId) => await this.readJobPayload(jobId),
         nextClaimCandidate: async (section, now) => await this.readNextClaimCandidate(section, now),
         toClaimed: (current, walletId) =>
@@ -2457,7 +2460,7 @@ export class TripleStoreAsyncLiftPublisher
     // must not do either. The interrupted half above deliberately keeps running while paused: it
     // repairs jobs this node has ALREADY broadcast, where stopping would leave a live transaction
     // unreconciled — the phantom the pre-send write-ahead exists to make visible.
-    if (this.paused) return 0;
+    if (this.claimGate.state !== 'running') return 0;
     const resolver = this.chainProofResolver;
     if (!resolver) return 0;
 
@@ -2758,14 +2761,11 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async pause(): Promise<void> {
-    // Acknowledgement follows every claim already inside the shared claim domain.
-    await this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimTransaction(owner,
-      async () => { this.paused = true; }));
+    await this.claimGate.hold();
   }
 
   async resume(): Promise<void> {
-    await this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimTransaction(owner,
-      async () => { this.paused = false; }));
+    await this.claimGate.release();
     this.notifyWorkAvailable();
   }
 

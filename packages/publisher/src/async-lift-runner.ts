@@ -32,8 +32,6 @@ export class AsyncLiftRunner {
   private readonly activeRecoveryIntervalMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError?: (error: unknown) => void | Promise<void>;
-  private claimsHeld = false;
-  private controlClosed = false;
   private started = false;
   private stopped = false;
   private running?: Promise<void>;
@@ -77,32 +75,27 @@ export class AsyncLiftRunner {
   }
 
   /** Gate state only; durable generations and transition ordering belong to the runtime owner. */
-  claimGateStatus(): Readonly<{ held: boolean; walletIds: readonly string[] }> {
-    return Object.freeze({ held: this.claimsHeld, walletIds: Object.freeze([...this.config.walletIds]) });
+  claimGateStatus(): Readonly<{ held: boolean; closed: boolean; walletIds: readonly string[] }> {
+    const state = this.config.publisher.claimGate?.state ?? 'running';
+    return Object.freeze({ held: state !== 'running', closed: state === 'closed',
+      walletIds: Object.freeze([...this.config.walletIds]) });
   }
 
-  /** Synchronously fence wallet loops, then drain claims already inside the publisher claim domain. */
-  async holdClaims(): Promise<void> {
-    this.claimsHeld = true;
-    await this.config.publisher.pause();
-  }
+  holdClaims(): Promise<void> { return this.requireClaimGate().hold(); }
 
-  /** Terminal synchronous gate fence, installed before an owner drains pending controls. */
-  async closeClaims(): Promise<void> {
-    this.controlClosed = true;
-    await this.holdClaims();
-  }
+  closeClaims(): Promise<void> { return this.requireClaimGate().close(); }
 
   /** The owner calls this only after its desired running state is durable. */
   async releaseClaims(): Promise<void> {
-    if (this.stopped || this.controlClosed) throw new Error('Publisher runner claim control is closed');
-    await this.config.publisher.resume();
-    if (this.stopped || this.controlClosed) {
-      await this.holdClaims();
-      throw new Error('Publisher runner claim control is closed');
-    }
-    this.claimsHeld = false;
+    if (this.stopped) throw new Error('Publisher runner is stopped');
+    await this.requireClaimGate().release();
     for (const walletId of this.config.walletIds) this.wakeWallet(walletId);
+  }
+
+  private requireClaimGate() {
+    const gate = this.config.publisher.claimGate;
+    if (!gate) throw new Error('Publisher does not support live claim control');
+    return gate;
   }
 
   async start(): Promise<void> {
@@ -184,7 +177,8 @@ export class AsyncLiftRunner {
   private async walletLoop(walletId: string): Promise<void> {
     while (!this.stopped) {
       try {
-        if (this.claimsHeld) { await this.idleWalletWait(walletId); continue; }
+        const gate = this.config.publisher.claimGate;
+        if (gate && gate.state !== 'running') { await this.idleWalletWait(walletId); continue; }
         const processed = await this.config.publisher.processNext(walletId);
         if (!processed && !this.stopped) {
           // Interruptible idle wait: a wallet-release poke ends it early, and one that landed

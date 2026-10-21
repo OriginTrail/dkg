@@ -51,4 +51,45 @@ describe('acknowledged publisher pause is a claim boundary', () => {
     expect((await publisher.claimNext('b'))?.jobId).toBe(id);
     await store.close();
   });
+
+  it.each(['hold', 'close'] as const)('keeps direct publisher claims fenced when %s supersedes a queued resume', async (transition) => {
+    const store = new OxigraphStore();
+    const publisher = new TripleStoreAsyncLiftPublisher(store);
+    const first = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const entered = deferred(); const release = deferred();
+    const query = store.query.bind(store);
+    let intercepted = false;
+    store.query = async (...args) => {
+      const result = await query(...args);
+      if (!intercepted && args[1]?.source === 'publisher.asyncLift.walletLock.ownership') {
+        intercepted = true; entered.resolve(); await release.promise;
+      }
+      return result;
+    };
+    const claiming = publisher.claimNext('before-fence');
+    await entered.promise;
+    const pausing = publisher.pause();
+    expect(publisher.claimGate.state).toBe('held');
+    const resuming = publisher.resume();
+    const rejected = expect(resuming).rejects.toThrow(transition === 'close' ? 'closed' : 'superseded');
+    let drained = false;
+    const fencing = publisher.claimGate[transition]().then(() => { drained = true; });
+    try {
+      expect(publisher.claimGate.state).toBe(transition === 'close' ? 'closed' : 'held');
+      await new Promise<void>(done => setImmediate(done));
+      expect(drained).toBe(false);
+      release.resolve();
+      await Promise.all([claiming, pausing, rejected, fencing]);
+      expect((await claiming)?.jobId).toBe(first);
+      expect(await publisher.claimNext('after-fence')).toBeNull();
+      expect(publisher.claimGate.state).toBe(transition === 'close' ? 'closed' : 'held');
+      if (transition === 'close') await expect(publisher.resume()).rejects.toThrow('closed');
+      else { await publisher.resume(); expect(publisher.claimGate.state).toBe('running'); }
+    } finally {
+      release.resolve();
+      await Promise.allSettled([claiming, pausing, resuming, rejected, fencing]);
+      await store.close();
+    }
+  });
+
 });

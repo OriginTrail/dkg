@@ -198,8 +198,8 @@ describe('durable control of the active publisher wallet loops', () => {
     const accepted = await publisher.getStatus(jobId);
     let entered!: () => void; const resumingPublisher = new Promise<void>(resolve => { entered = resolve; });
     let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
-    const originalResume = publisher.resume.bind(publisher);
-    vi.spyOn(publisher, 'resume').mockImplementationOnce(async () => {
+    const originalResume = publisher.claimGate.release.bind(publisher.claimGate);
+    vi.spyOn(publisher.claimGate, 'release').mockImplementationOnce(async () => {
       entered(); await held; await originalResume();
     });
     const resuming = control.resume();

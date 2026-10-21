@@ -79,18 +79,17 @@ export async function createPublisherLiveControl(
   if (!existing) await saveState(dataDir, state);
   if (state.desiredState === 'running') await runner.releaseClaims();
   let fault: PublisherLiveStatus['fault'] = null;
-  let closed = false;
   let tail: Promise<unknown> = Promise.resolve();
   const status = (): PublisherLiveStatus => {
     const effective = runner.claimGateStatus();
-    return Object.freeze({ ...state, effectiveState: fault || closed ? 'unavailable' : effective.held ? 'paused' : 'running',
+    return Object.freeze({ ...state, effectiveState: fault || effective.closed ? 'unavailable' : effective.held ? 'paused' : 'running',
       acknowledgedGeneration: state.generation,
       wallets: Object.freeze(effective.walletIds.map(walletId => Object.freeze({ walletId,
         paused: effective.held, generation: state.generation }))), fault });
   };
   const change = (desiredState: Desired): Promise<PublisherLiveStatus> => {
     const changing = tail.then(async () => {
-      if (closed || fault) throw new Error('Publisher live control is unavailable');
+      if (runner.claimGateStatus().closed || fault) throw new Error('Publisher live control is unavailable');
       if (state.desiredState === desiredState) return status();
       const next: PublisherDesiredState = { ...state, desiredState,
         generation: nextGeneration(state.generation), updatedAt: new Date().toISOString() };
@@ -98,14 +97,14 @@ export async function createPublisherLiveControl(
         // Pause first so persistence latency cannot admit additional claims; resume opens last.
         if (desiredState === 'paused') await runner.holdClaims();
         await saveState(dataDir, next);
-        if (closed) throw new Error('Publisher live control closed during persistence');
+        if (runner.claimGateStatus().closed) throw new Error('Publisher live control closed during persistence');
         if (desiredState === 'running') await runner.releaseClaims();
         state = next;
         return status();
       } catch (error) {
         fault = 'persistence_or_control_failed';
         // A failed operation is never acknowledged. Keep every runner gate closed until restart.
-        await runner.holdClaims().catch(() => {});
+        await runner.closeClaims().catch(() => {});
         throw new Error('Publisher control could not commit; restart to reload durable intent', { cause: error });
       }
     });
@@ -114,7 +113,6 @@ export async function createPublisherLiveControl(
   };
   return Object.freeze({ status, pause: () => change('paused'), resume: () => change('running'),
     close: async () => {
-      closed = true;
       const fenced = runner.closeClaims();
       await Promise.all([tail, fenced]);
     } });
