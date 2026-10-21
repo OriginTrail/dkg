@@ -1,10 +1,10 @@
-import { getBytes, hexlify } from 'ethers';
+import { getBytes } from 'ethers';
 import { replaceLocallyTrustedKnowledgeAssetControlEnvelope } from '@origintrail-official/dkg-publisher';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertionLifecycleUri, parseAssertionSealQuads, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { ChangelogStore, GraphSetIndexStore, OxigraphStore, SparqlHttpStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedKnowledgeAssetVmPublishRequest } from '../src/internal/knowledge-asset-vm-publish-request.js';
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
@@ -54,10 +54,10 @@ describe('confirmed lifecycle persistence policy', () => {
   it.each([false, true])('applies the same host policy during a recovered queued confirmation, durable journal=%s', async durable => {
     const dir = durable ? await mkdtemp(join(tmpdir(), 'dkg-recovered-memory-')) : undefined; if (dir) dirs.push(dir);
     const store = new OxigraphStore(); stores.push(store); const { agent, current } = agentFor(store, dir);
-    const seal = parseAssertionSealQuads([...input.namedSealQuads!], input.namedSealQuads![0]!.subject)!;
+    const seal = input.namedSeal!;
     const request = { intentKey: 'process-local-recovery', shareOperationId: 'original-publication', contentScopeVersion: 2, roots: [], kaUal: input.materialization!.kaUal, publicTripleCount: 1, privateTripleCount: 0,
-      seal: { merkleRoot: hexlify(seal.merkleRoot), authorAddress: seal.authorAddress, schemeVersion: seal.authorSchemeVersion,
-        signature: { r: hexlify(seal.authorAttestationR), vs: hexlify(seal.authorAttestationVS) } }, sealFinalizedAtIso: seal.finalizedAtIso,
+      seal: { merkleRoot: seal.assertionMerkleRoot, authorAddress: seal.authorAddress, schemeVersion: 1,
+        signature: { r: seal.authorAttestationR, vs: seal.authorAttestationVS } }, sealFinalizedAtIso: seal.assertionFinalizedAt,
       contextGraphId: input.contextGraphId, name: input.name, agentAddress: input.agentAddress,
       assertionVersion: input.assertionVersion, sealMerkleRoot: input.merkleRoot,
       sealChainId: input.publicationDeployment.chainId, sealKav10Address: input.publicationDeployment.lifecycleAddress } as GraphScopedKnowledgeAssetVmPublishRequest;

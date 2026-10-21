@@ -339,8 +339,7 @@ it.each(['count', 'namespace'])('compares typed snapshot-less seal %s against th
     { assertionVersion: input.assertionVersion, merkleRoot: getBytes(input.merkleRoot) },
     { publisherPeerId: 'test-publisher', accessPolicy: 'allowList', allowedPeers: ['test-reader'] });
   const { materialization: _snapshot, ...legacy } = input;
-  const wrongCount = { ...legacy, namedSealQuads: legacy.namedSealQuads!.map(q => field === 'count' && q.predicate === 'http://dkg.io/ontology/publicTripleCount'
-    ? { ...q, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' } : field === 'namespace' && q.predicate === 'http://dkg.io/ontology/kaUal'
-      ? { ...q, object: `<${input.materialization!.kaUal.replace('mock:31337', 'other:31337')}>` } : q) };
+  const wrongCount = { ...legacy, namedSeal: { ...legacy.namedSeal!, ...(field === 'count'
+    ? { publicTripleCount: '2' } : { kaUal: input.materialization!.kaUal.replace('mock:31337', 'other:31337') }) } } as typeof legacy;
   expect(await owner.submit(wrongCount)).toBe('rejected'); expect(await journal()).toHaveLength(1);
 });

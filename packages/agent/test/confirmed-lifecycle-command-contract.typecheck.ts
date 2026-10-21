@@ -104,7 +104,7 @@ const inlineV4: StoredLifecycleRepairInputV4 = { ...stored, materialization: con
 void inlineV4;
 
 // @ts-expect-error Executable named evidence is typed rather than RDF wire quads.
-const rdfExecutable: ValidatedLifecycleRepairCommand = { ...executable, namedSealQuads: confirmed.namedSealQuads };
+const rdfExecutable: ValidatedLifecycleRepairCommand = { ...executable, namedSealQuads: [] };
 // @ts-expect-error Canonical seal fields are immutable after admission.
 executable.namedSeal!.assertionVersion = '2';
 void rdfExecutable;

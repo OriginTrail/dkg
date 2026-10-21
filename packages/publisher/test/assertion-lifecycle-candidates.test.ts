@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { assertionLifecycleUri, contextGraphMetaUri, MAX_ROOTLESS_KA_NUMBER_V1 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } from '../src/assertion-lifecycle-record.js';
+import { decodeAssertionLifecycleRecord, assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } from '../src/assertion-lifecycle-record.js';
 
 const CG = 'lifecycle-candidates';
 const NAME = 'retained-asset';
@@ -94,4 +94,11 @@ describe('retained lifecycle candidate evidence', () => {
     await expect(readAssertionLifecycleCandidates(store, CG, LOWER, NAME))
       .rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_CORRUPT' });
   });
+});
+
+it('preserves legacy reserved-UAL whitespace normalization through the shared decoder', () => {
+  const ual = 'did:dkg:evm:31337/author/42';
+  const rows = [{ p: `${DKG}kaId`, o: '"42"' }, { p: `${DKG}reservedUal`, o: `"  ${ual}  "` }];
+  expect(decodeAssertionLifecycleRecord(rows).reservedUal).toBe(ual);
+  expect(decodeAssertionLifecycleRecord(rows, 'strict-reservation').reservedUal).toBe(ual);
 });

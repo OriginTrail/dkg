@@ -17,8 +17,7 @@ import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLoc
  */
 
 import { ConfirmedNamedKaVmLifecycleExecutor, confirmedLifecycleExecutionCapabilities } from './named-ka-vm-lifecycle-executor.js';
-import { confirmedNamedSealQuads } from './named-ka-vm-lifecycle-named-evidence.js';
-import { confirmedNamedKaVmLifecycleInput, normalizeLifecycleRepairInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
+import { confirmedNamedSeal, confirmedNamedKaVmLifecycleInput, normalizeLifecycleRepairInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
 
 import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
 import { createContextGraphAuthorityError } from './internal/context-graph-authority/context-graph-authority.js';
@@ -5173,7 +5172,7 @@ export class PublishMethods extends DKGAgentBase {
       assertionVersion: request.assertionVersion,
       publicationDeployment: { chainId: request.sealChainId, lifecycleAddress: request.sealKav10Address },
       ...(request.seal && isGraphScopedKnowledgeAssetVmPublishRequest(request) ? {
-        namedSealQuads: confirmedNamedSealQuads(assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request), packedKaId),
+        namedSeal: confirmedNamedSeal(assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request), packedKaId),
       } : {}),
       ...(request.vmCurrentAssertion ? { priorMerkleRoot: request.vmCurrentAssertion } : {}),
     });

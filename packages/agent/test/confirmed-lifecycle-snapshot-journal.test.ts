@@ -1,3 +1,4 @@
+import { assertCanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
 import { historicalLifecycleRepairJournal } from './_helpers/historical-lifecycle-repair-journal.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -14,6 +15,9 @@ import { encodeLifecycleRepairJournal, lifecycleRepairKey } from '../src/named-k
 import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
 
+function checkedSeal(value: unknown) {
+  assertCanonicalGraphScopedAuthorSealV1(value); return Object.freeze({ ...value });
+}
 const dirs: string[] = [], owners: NamedKaVmLifecycleRepair[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const owner of owners.splice(0)) await owner.stop(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 async function setup() {
@@ -29,8 +33,7 @@ it('writes immutable payload once and settling another entry only rewrites compa
   const { dir, input: base, path, snapshots } = await setup();
   const publicQuads = [{ ...base.materialization!.publicQuads[0], object: JSON.stringify('payload-'.repeat(10_000)) }];
   const root = hexlify(computeFlatKCRootV10(publicQuads, []));
-  const input = { ...base, merkleRoot: root, namedSealQuads: base.namedSealQuads!.map(q => q.predicate === 'http://dkg.io/ontology/assertionMerkleRoot'
-    ? { ...q, object: `"${root.slice(2)}"^^<http://www.w3.org/2001/XMLSchema#hexBinary>` } : q), materialization: { ...base.materialization!, publicQuads,
+  const input = { ...base, merkleRoot: root, namedSeal: checkedSeal({ ...base.namedSeal!, assertionMerkleRoot: root }), materialization: { ...base.materialization!, publicQuads,
     metadataQuads: base.materialization!.metadataQuads.map(q => q.predicate === 'http://dkg.io/ontology/merkleRoot' ? { ...q, object: JSON.stringify(root.slice(2)) } : q) } };
   const repair = owner(dir, async value => { if (value.name === input.name) throw new NamedKaVmLifecycleIntegrityError('retained rejected evidence'); });
   expect(await repair.submit(input)).toBe('rejected');
@@ -131,14 +134,14 @@ it('hydrates typed references into immutable evidence and reuses their verified 
 
 it.each([false, true])('durably upgrades a loaded seal-less obligation before restart recovery, resubmitted snapshot=%s', async includeSnapshot => {
   const { dir, input, path } = await setup();
-  const { namedSealQuads: _seal, ...legacy } = input;
+  const { namedSeal: _seal, ...legacy } = input;
   const first = owner(dir, async () => { throw new Error('original named seal unavailable'); });
   expect(await first.submit(legacy)).toBe('pending'); await first.stop();
   const admitted = vi.fn(async () => { throw new Error('held store pressure after upgraded admission'); });
   const second = owner(dir, admitted);
   expect(await second.submit(includeSnapshot ? input : { ...input, materialization: undefined })).toBe('pending');
   expect(admitted).toHaveBeenCalledOnce();
-  expect(JSON.parse(await readFile(path, 'utf8')).entries[0][1].input.namedSealQuads).toHaveLength(input.namedSealQuads!.length);
+  expect(JSON.parse(await readFile(path, 'utf8')).entries[0][1].input.namedSealQuads.length).toBeGreaterThan(0);
   await second.stop();
   const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
   const { applyMaterializedConfirmedLifecycle } = await import('../src/named-ka-vm-lifecycle-materialization.js');
@@ -162,10 +165,24 @@ it.each(['identity', 'snapshot', 'seal'])('rejects contradictory same-version %s
   const repair = owner(dir, async () => { throw new Error('pressure'); });
   expect(await repair.submit(input)).toBe('pending');
   const bytes = await readFile(path, 'utf8');
-  const changed = field === 'identity' ? { ...input, packedKaId: input.packedKaId + 1n, materialization: undefined, namedSealQuads: undefined }
+  const changed = field === 'identity' ? { ...input, packedKaId: input.packedKaId + 1n, materialization: undefined, namedSeal: undefined }
     : field === 'snapshot' ? { ...input, materialization: { ...input.materialization!, metadataQuads: input.materialization!.metadataQuads.map(q => q.predicate === 'http://dkg.io/ontology/publisherPeerId' ? { ...q, object: '"another-publisher"' } : q) } }
-    : { ...input, namedSealQuads: input.namedSealQuads!.map(q => q.predicate === 'http://dkg.io/ontology/assertionFinalizedAt' ? { ...q, object: '"2026-02-01T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' } : q) };
+    : { ...input, namedSeal: checkedSeal({ ...input.namedSeal!, assertionFinalizedAt: '2026-02-01T00:00:00.000Z' }) };
   expect(changed).not.toEqual(input);
   await expect(repair.submit(changed)).rejects.toBeInstanceOf(NamedKaVmLifecycleIntegrityError);
   expect(await readFile(path, 'utf8')).toBe(bytes);
+});
+
+it.each(['subject', 'graph', 'extra', 'duplicate', 'model'])('rejects malformed named seal wire %s before snapshot I/O', async field => {
+  const { dir, input } = await setup(), command = normalizeLifecycleRepairInput(input);
+  const wire = JSON.parse(JSON.stringify(encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(command), {
+    input: command, attempts: 0, nextAttemptAt: 0,
+  }]]), new Map([[command.materialization!, 'ab'.repeat(32)]]))));
+  const stored = wire.entries[0][1].input, rows = stored.namedSealQuads;
+  if (field === 'subject') rows[0].subject = 'urn:wrong';
+  if (field === 'graph') rows[0].graph = 'urn:wrong';
+  if (field === 'extra') rows.push({ ...rows[0], predicate: 'urn:unexpected' });
+  if (field === 'duplicate') rows.push(rows[0]);
+  if (field === 'model') stored.namedSeal = command.namedSeal;
+  await expect(new NamedKaVmLifecycleSnapshots(dir).decode(wire)).rejects.toBeInstanceOf(NamedKaVmLifecycleIntegrityError);
 });

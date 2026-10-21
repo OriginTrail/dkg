@@ -1,11 +1,11 @@
-import { confirmedNamedSealQuads } from '../src/named-ka-vm-lifecycle-named-evidence.js';
+import { confirmedNamedSeal } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { readLifecycleRepairJournalFile } from './_helpers/read-lifecycle-repair-journal.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10, replaceLocallyTrustedKnowledgeAssetControlEnvelope, assertionLifecycleWriteLockKey, withKeyedLocks, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
+import { confirmedNamedAssertionSealQuads, computeFlatKCRootV10, replaceLocallyTrustedKnowledgeAssetControlEnvelope, assertionLifecycleWriteLockKey, withKeyedLocks, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
 import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-evidence.js';
@@ -37,7 +37,7 @@ async function fixture(subGraphName?: string, durable = true) {
     const { publication } = confirmedLifecycleRecoveryFixture();
     const merkleRoot = computeFlatKCRootV10(quads(version), []);
     const seal = { ...publication.seal, merkleRoot, assertionVersion: input.assertionVersion, kaUal: UAL, kav10Address: AUTHOR };
-    return { ...input, namedSealQuads: confirmedNamedSealQuads(seal, input.packedKaId),
+    return { ...input, namedSeal: confirmedNamedSeal(seal, input.packedKaId),
       materialization: confirmedLifecycleMaterialization(input, { ...publication, ual: UAL, merkleRoot, seal },
     { publicQuads: quads(version), publisherPeerId: 'locked-repair-peer', accessPolicy: 'ownerOnly', allowedPeers: [] }) };
   };
@@ -193,7 +193,7 @@ describe('confirmed lifecycle lock-time authority fence', () => {
       if (scenario === 'chain-error') f.agent.chain.readKnowledgeAssetVersionSnapshot.mockRejectedValue(new Error('chain temporarily unavailable'));
       const request = { ...f.input, sealMerkleRoot: ROOT1, shareOperationId: 'own-operation', sealChainId: '31337', sealKav10Address: AUTHOR } as unknown as KnowledgeAssetVmPublishRequest;
       const graph = f.input.materialization.metadataQuads.find(q => q.predicate === 'http://dkg.io/ontology/assertionGraph')!.object;
-      await f.store.insert([...f.input.namedSealQuads.map(q => ({ ...q, subject: contextGraphAssertionUri(CG, AUTHOR, NAME), graph: contextGraphMetaUri(CG) })), ...f.input.materialization.metadataQuads, ...f.input.materialization.publicQuads.map(q => ({ ...q, graph }))]);
+      await f.store.insert([...confirmedNamedAssertionSealQuads(f.input.namedSeal, contextGraphAssertionUri(CG, AUTHOR, NAME), contextGraphMetaUri(CG)), ...f.input.materialization.metadataQuads, ...f.input.materialization.publicQuads.map(q => ({ ...q, graph }))]);
       if (scenario !== 'missing-controls') await replaceLocallyTrustedKnowledgeAssetControlEnvelope(f.store, f.input.publishedUal,
         { assertionVersion: '1', merkleRoot: Uint8Array.from(Buffer.from(ROOT1, 'hex')) },
         { publisherPeerId: 'locked-repair-peer', accessPolicy: 'ownerOnly', allowedPeers: [] });

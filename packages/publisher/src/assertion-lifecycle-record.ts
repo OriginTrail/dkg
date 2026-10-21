@@ -55,8 +55,9 @@ export function decodeAssertionLifecycleRecord(
     if (match) number = BigInt(match[1]);
   }
   const ual = bindings.find(r => r.p === 'http://dkg.io/ontology/reservedUal')?.o;
-  return { bindings, hasKaId: ids.length > 0, number,
-    reservedUal: ual === undefined ? undefined : decodeAssertionReservationValue('http://dkg.io/ontology/reservedUal', ual) ?? ual.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim() };
+  const reservedUal = ual === undefined ? undefined : (decodeAssertionReservationValue('http://dkg.io/ontology/reservedUal', ual)
+    ?? ual.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')).trim();
+  return { bindings, hasKaId: ids.length > 0, number, reservedUal };
 }
 
 /** Legacy lifecycle subjects preserve caller spelling; layer graphs do not. */

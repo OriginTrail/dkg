@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-import { lifecycleNamedSealWire } from './named-ka-vm-lifecycle-named-evidence.js';
-import type { CanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
+import { buildAssertionSealQuads, parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, type CanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
+import { confirmedNamedAssertionSealQuads } from '@origintrail-official/dkg-publisher';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { normalizeLifecycleRepairInput, normalizeLifecycleCoordinates,
   normalizeLifecyclePackedIdentity, normalizeLifecyclePublicationDeployment,
-  type ConfirmedLifecycleMaterialization, type ValidatedLifecycleRepairCommand, type ConfirmedNamedKaVmLifecycleInput,
+  type ConfirmedLifecycleMaterialization, type ValidatedLifecycleRepairCommand, type ConfirmedNamedKaVmLifecycleInput, type HistoricalUnboundLifecycleRepairInput,
 } from './named-ka-vm-lifecycle-evidence.js';
 import { createHash } from 'node:crypto';
-export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId' | 'materialization'> & {
-  readonly materialization?: never;
-  readonly publicationDeployment?: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'];
-  readonly packedKaId?: bigint;
-};
+export type { HistoricalUnboundLifecycleRepairInput } from './named-ka-vm-lifecycle-evidence.js';
 type JournalInput = ValidatedLifecycleRepairCommand | HistoricalUnboundLifecycleRepairInput;
-export type StoredLifecycleRepairInputV4 = Omit<ConfirmedNamedKaVmLifecycleInput | HistoricalUnboundLifecycleRepairInput, 'packedKaId' | 'tentative' | 'materialization'> & { packedKaId?: string; materializationRef?: string };
+export type StoredLifecycleRepairInputV4 = Omit<ConfirmedNamedKaVmLifecycleInput | HistoricalUnboundLifecycleRepairInput, 'packedKaId' | 'tentative' | 'materialization' | 'namedSeal'> & { packedKaId?: string; materializationRef?: string; namedSealQuads?: readonly Quad[] };
 interface RepairRetryState {
   attempts: number;
   nextAttemptAt: number;
@@ -32,9 +29,30 @@ export function lifecycleMaterializationWire(snapshot: ConfirmedLifecycleMateria
 
 /** Explicit executable-to-wire boundary shared with historical test fixtures. */
 export function lifecycleRepairCoordinatesWire(input: JournalInput): StoredLifecycleRepairInputV4 {
-  const { materialization: _materialization, namedSeal, ...coordinates } = input as JournalInput & { namedSeal?: CanonicalGraphScopedAuthorSealV1 };
+  const { materialization: _materialization, namedSeal, ...coordinates } = input;
   return { ...coordinates, packedKaId: coordinates.packedKaId?.toString(),
     ...(namedSeal ? { namedSealQuads: lifecycleNamedSealWire(namedSeal) } : {}) };
+}
+
+const SUBJECT = 'urn:dkg:confirmed-lifecycle-seal';
+/** Journal compatibility boundary; ordinary confirmation/admission never renders RDF. */
+function decodeLifecycleNamedSealWire(value: unknown): CanonicalGraphScopedAuthorSealV1 {
+  if (!Array.isArray(value) || value.some(q => !q || typeof q !== 'object'
+    || q.subject !== SUBJECT || q.graph !== '' || typeof q.predicate !== 'string' || typeof q.object !== 'string')) return invalid();
+  try {
+    const seal = parseAssertionSealQuads(value, SUBJECT);
+    if (!seal || seal.contentScopeVersion !== 2 || seal.reservedKaId === undefined || seal.kaUal === undefined
+      || seal.assertionVersion === undefined || seal.publicTripleCount === undefined || seal.privateTripleCount === undefined) return invalid();
+    const canonicalWire = buildAssertionSealQuads({ ...seal, assertionUri: SUBJECT, metaGraph: '', reservedKaId: seal.reservedKaId, contentScopeVersion: 2,
+      kaUal: seal.kaUal, assertionVersion: seal.assertionVersion, publicTripleCount: seal.publicTripleCount,
+      privateTripleCount: seal.privateTripleCount, rootEntities: undefined });
+    const terms = (quads: readonly Quad[]) => quads.map(q => JSON.stringify([q.predicate, q.object])).sort().join('\n');
+    if (terms(value) !== terms(canonicalWire)) return invalid();
+    return canonicalGraphScopedAuthorSealFromAssertionSealV1(seal);
+  } catch { return invalid(); }
+}
+function lifecycleNamedSealWire(seal: CanonicalGraphScopedAuthorSealV1): readonly Quad[] {
+  return confirmedNamedAssertionSealQuads(seal, SUBJECT, '');
 }
 
 function invalid(): never {
@@ -86,10 +104,13 @@ export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, Lifecy
 }
 function decodeLifecycleRepairInput(value: unknown): DecodedLifecycleEvidence {
   const input = record(value), packed = input['packedKaId'];
+  if ('namedSeal' in input) return invalid();
   if (packed !== undefined && !/^[0-9]+$/.test(string(packed))) return invalid();
   const packedKaId = packed === undefined ? undefined : normalizeLifecyclePackedIdentity(BigInt(string(packed)));
   if (packedKaId !== undefined && input['publicationDeployment'] !== undefined) {
-    return { input: normalizeLifecycleRepairInput({ ...input, packedKaId }) };
+    const { namedSealQuads, ...coordinates } = input;
+    return { input: normalizeLifecycleRepairInput({ ...coordinates, packedKaId,
+      ...(namedSealQuads === undefined ? {} : { namedSeal: decodeLifecycleNamedSealWire(namedSealQuads) }) }) };
   }
   // Historical incomplete commands remain retained and can never reach execution.
   if (input['materialization'] !== undefined) return invalid();
@@ -139,7 +160,7 @@ export function decodeLifecycleRepairJournalWire(value: unknown): Map<string, Li
 export function hydrateLifecycleRepairWireEntry(wire: LifecycleRepairWireEntry, snapshot?: unknown): LifecycleRepairEntry {
   if (wire.materializationRef === undefined) return wire.entry;
   if (snapshot === undefined || wire.entry.retention !== undefined) return invalid();
-  return { ...wire.entry, input: normalizeLifecycleRepairInput({ ...lifecycleRepairCoordinatesWire(wire.entry.input), packedKaId: wire.entry.input.packedKaId, materialization: snapshot }) };
+  return { ...wire.entry, input: normalizeLifecycleRepairInput({ ...wire.entry.input, materialization: snapshot }) };
 }
 
 export function decodeLifecycleRepairJournal(value: unknown, snapshots?: ReadonlyMap<string, unknown>): Map<string, LifecycleRepairEntry> {

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-import { confirmedNamedSealQuads, normalizeConfirmedNamedSeal } from './named-ka-vm-lifecycle-named-evidence.js';
-import { type CanonicalGraphScopedAuthorSealV1, MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { assertCanonicalGraphScopedAuthorSealV1, canonicalGraphScopedAuthorSealFromAssertionSealV1, canonicalizeCanonicalGraphScopedAuthorSealV1, type AssertionSeal, type CanonicalGraphScopedAuthorSealV1, MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, materializedVersionQuad,
-  parseConfirmedGraphKnowledgeAssetMetadataEnvelope, confirmedGraphKnowledgeAssetProof,
+  assertConfirmedNamedAssertionSeal, parseConfirmedGraphKnowledgeAssetMetadataEnvelope, confirmedGraphKnowledgeAssetProof,
   type LocallyTrustedKnowledgeAssetControlEnvelope, type ConfirmedGraphKnowledgeAssetProof,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -11,6 +10,22 @@ import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.j
 import type { ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
+
+function invalidNamedSeal(): never { throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named assertion seal evidence'); }
+/** Fresh confirmations stay typed. Resolved identity supplies only a missing legacy seal field. */
+export function confirmedNamedSeal(seal: AssertionSeal, packedKaId: bigint): CanonicalGraphScopedAuthorSealV1 {
+  try { return canonicalGraphScopedAuthorSealFromAssertionSealV1({ ...seal, reservedKaId: seal.reservedKaId ?? packedKaId }); }
+  catch { return invalidNamedSeal(); }
+}
+function normalizeConfirmedNamedSeal(value: unknown, input: ConfirmedNamedKaVmLifecycleInput,
+  proof?: ConfirmedGraphKnowledgeAssetProof): CanonicalGraphScopedAuthorSealV1 {
+  try {
+    assertCanonicalGraphScopedAuthorSealV1(value);
+    const canonical = Object.freeze({ ...value });
+    assertConfirmedNamedAssertionSeal(canonical, { ...input, kaUal: input.materialization?.kaUal }, proof);
+    return canonical;
+  } catch { return invalidNamedSeal(); }
+}
 
 export interface ConfirmedNamedKaVmPublicationDeployment {
   readonly chainId: string;
@@ -22,7 +37,7 @@ export interface ConfirmedNamedKaVmLifecycleInput extends PublishedNamedKaVmLife
   readonly publicationDeployment: ConfirmedNamedKaVmPublicationDeployment;
   readonly materialization?: ConfirmedLifecycleMaterialization;
   readonly priorMerkleRoot?: string;
-  readonly namedSealQuads?: readonly Quad[];
+  readonly namedSeal?: CanonicalGraphScopedAuthorSealV1;
 }
 /** Immutable public recovery material; private plaintext never enters the journal. */
 export interface ConfirmedLifecycleMaterialization {
@@ -39,7 +54,7 @@ export interface ValidatedLifecycleMaterialization extends ConfirmedLifecycleMat
 }
 declare const validatedLifecycleCommand: unique symbol;
 /** Only admission and journal decoding construct executable, frozen recovery commands. */
-export type ValidatedLifecycleRepairCommand = Omit<Readonly<ConfirmedNamedKaVmLifecycleInput>, 'materialization' | 'namedSealQuads'> & {
+export type ValidatedLifecycleRepairCommand = Omit<Readonly<ConfirmedNamedKaVmLifecycleInput>, 'materialization' | 'namedSeal'> & {
   readonly [validatedLifecycleCommand]: true;
   readonly materialization?: ValidatedLifecycleMaterialization;
   readonly namedSeal?: CanonicalGraphScopedAuthorSealV1;
@@ -71,7 +86,7 @@ export function normalizeLifecyclePublicationDeployment(value: unknown): Confirm
   if (!/^(0|[1-9][0-9]*)$/.test(chainId) || BigInt(chainId) >= 1n << 256n || !/^0x[0-9a-f]{40}$/i.test(lifecycleAddress)) return invalid();
   return Object.freeze({ chainId, lifecycleAddress: lifecycleAddress.toLowerCase() });
 }
-export function normalizeLifecycleCoordinates(value: unknown): Omit<ConfirmedNamedKaVmLifecycleInput, 'materialization' | 'packedKaId' | 'publicationDeployment' | 'namedSealQuads'> {
+export function normalizeLifecycleCoordinates(value: unknown): Omit<ConfirmedNamedKaVmLifecycleInput, 'materialization' | 'packedKaId' | 'publicationDeployment' | 'namedSeal'> {
   const input = record(value);
   if ('tentative' in input) return invalid();
   const assertionVersion = string(input['assertionVersion']);
@@ -86,6 +101,7 @@ export function normalizeLifecycleCoordinates(value: unknown): Omit<ConfirmedNam
 /** Fresh executable evidence always requires complete deployment and identity binding. */
 export function normalizeLifecycleRepairInput(value: unknown): ValidatedLifecycleRepairCommand {
   const input = record(value);
+  if ('namedSealQuads' in input) return invalid();
   const coordinates = { ...normalizeLifecycleCoordinates(input),
     packedKaId: normalizeLifecyclePackedIdentity(input['packedKaId']),
     publicationDeployment: normalizeLifecyclePublicationDeployment(input['publicationDeployment']),
@@ -94,8 +110,8 @@ export function normalizeLifecycleRepairInput(value: unknown): ValidatedLifecycl
     : normalizeLifecycleMaterialization(input['materialization'], coordinates);
   const admitted = { ...coordinates, ...(materialization ? { materialization } : {}) };
   return Object.freeze({ ...admitted,
-    ...(input['namedSealQuads'] === undefined ? {} : {
-      namedSeal: normalizeConfirmedNamedSeal(input['namedSealQuads'], admitted, materialization?.proof),
+    ...(input['namedSeal'] === undefined ? {} : {
+      namedSeal: normalizeConfirmedNamedSeal(input['namedSeal'], admitted, materialization?.proof),
     }),
   }) as ValidatedLifecycleRepairCommand;
 }
@@ -126,7 +142,7 @@ export function confirmedNamedKaVmLifecycleInput(
     ...(coordinates.subGraphName === undefined ? {} : { subGraphName: coordinates.subGraphName }),
     ...(coordinates.priorMerkleRoot === undefined ? {} : { priorMerkleRoot: coordinates.priorMerkleRoot }),
     packedKaId: coordinates.packedKaId,
-    namedSealQuads: confirmedNamedSealQuads(seal, coordinates.packedKaId),
+    namedSeal: confirmedNamedSeal(seal, coordinates.packedKaId),
     publishedUal: publication.ual, merkleRoot: hexlify(seal.merkleRoot), assertionVersion: scope.assertionVersion,
     publicationDeployment: Object.freeze({ chainId: seal.chainId.toString(), lifecycleAddress: seal.kav10Address }),
   };
@@ -185,4 +201,46 @@ export function normalizeLifecycleMaterialization(value: unknown, input: Confirm
   const model = Object.freeze({ kaUal: scope.ual, publicQuads: Object.freeze(publicQuads.map(q => Object.freeze(q))),
     metadataQuads: Object.freeze(metadataQuads.map(q => Object.freeze(q))), proof: confirmedGraphKnowledgeAssetProof(parsed.envelope) });
   return model;
+}
+
+/** Incomplete historical journal evidence can be retained but cannot execute. */
+export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId' | 'materialization'> & {
+  readonly materialization?: never;
+  readonly publicationDeployment?: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'];
+  readonly packedKaId?: bigint;
+};
+export type RetainedLifecycleRepairEvidence =
+  | { readonly input: ValidatedLifecycleRepairCommand; readonly retention?: never }
+  | { readonly input: HistoricalUnboundLifecycleRepairInput; readonly retention: 'historical-unbound' };
+
+/** Pure monotonic evidence selection. Scheduling and persistence belong to the retry owner. */
+export function reconcileLifecycleRepairEvidence(previous: RetainedLifecycleRepairEvidence | undefined, incoming: ValidatedLifecycleRepairCommand):
+  { status: 'superseded' } | { status: 'unchanged' | 'upgraded'; input: ValidatedLifecycleRepairCommand } {
+  const prior = previous?.input;
+  const conflict = (): never => { throw new NamedKaVmLifecycleIntegrityError('Conflicting confirmed evidence at the same assertion version'); };
+  const authorKey = (value: string) => /^0x[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : value;
+  if (prior && (prior.contextGraphId !== incoming.contextGraphId || prior.name !== incoming.name
+    || prior.subGraphName !== incoming.subGraphName || authorKey(prior.agentAddress) !== authorKey(incoming.agentAddress)
+    || (prior.publicationDeployment && (prior.publicationDeployment.chainId !== incoming.publicationDeployment.chainId
+      || prior.publicationDeployment.lifecycleAddress.toLowerCase() !== incoming.publicationDeployment.lifecycleAddress)))) conflict();
+  if (prior && BigInt(prior.assertionVersion) > BigInt(incoming.assertionVersion)) return { status: 'superseded' };
+  if (prior?.assertionVersion === incoming.assertionVersion && prior.merkleRoot !== incoming.merkleRoot) conflict();
+  if (!previous || previous.retention === 'historical-unbound' || previous.input.assertionVersion !== incoming.assertionVersion) return { status: 'upgraded', input: incoming };
+  const current = previous.input;
+  if (current.packedKaId !== incoming.packedKaId) conflict();
+  if (current.namedSeal && incoming.namedSeal && canonicalizeCanonicalGraphScopedAuthorSealV1(current.namedSeal) !== canonicalizeCanonicalGraphScopedAuthorSealV1(incoming.namedSeal)) conflict();
+  if (current.materialization && incoming.materialization) {
+    const terms = (rows: readonly Quad[]) => rows.map(q => JSON.stringify([q.subject, q.predicate, q.object, q.graph])).sort().join('\n');
+    if (current.materialization.kaUal !== incoming.materialization.kaUal
+      || terms(current.materialization.publicQuads) !== terms(incoming.materialization.publicQuads)
+      || terms(current.materialization.metadataQuads) !== terms(incoming.materialization.metadataQuads)) conflict();
+  }
+  const materialization = current.materialization ?? incoming.materialization, namedSeal = current.namedSeal ?? incoming.namedSeal;
+  if (namedSeal) {
+    try { assertConfirmedNamedAssertionSeal(namedSeal, { ...current, kaUal: materialization?.kaUal }, materialization?.proof); }
+    catch { conflict(); }
+  }
+  if (materialization === current.materialization && namedSeal === current.namedSeal) return { status: 'unchanged', input: current };
+  return { status: 'upgraded', input: Object.freeze({ ...current,
+    ...(materialization ? { materialization } : {}), ...(namedSeal ? { namedSeal } : {}) }) };
 }
