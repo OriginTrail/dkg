@@ -56,6 +56,15 @@ const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
 const FAILURE_BACKOFF_INITIAL_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
 
+function addReplayIdentity(byBlock: Map<number, Set<string>>, block: number, identity: string): void {
+  let identities = byBlock.get(block);
+  if (identities === undefined) {
+    identities = new Set();
+    byBlock.set(block, identities);
+  }
+  identities.add(identity);
+}
+
 interface ChainEventPollerLaneSchedule {
   name: ChainEventPollerLane;
   enabled(): boolean;
@@ -105,7 +114,10 @@ interface ChainEventLaneBoundary {
 type ChainEventLaneScheduleOutcome =
   | { kind: 'noWork'; now: number }
   | { kind: 'success'; now: number; caughtUp: boolean }
-  | { kind: 'failure'; now: number };
+  | { kind: 'failure'; now: number }
+  // A replay-identity lane whose lease expired after it dispatched new events:
+  // it scans the range again at its cadence, skipping what it dispatched.
+  | { kind: 'retry'; now: number };
 
 export interface ChainEventLaneRunnerConfig {
   chain: ChainAdapter;
@@ -454,6 +466,9 @@ export class ChainEventLaneRunner {
     let leaseExpired = false;
     const remembered = this.replayedEvents.get(lane.spec.name) ?? new Map<number, Set<string>>();
     const observed = new Map<number, Set<string>>();
+    // Events whose dispatch returned in this scan. A failed scan keeps them, so
+    // its retry dispatches only what is still owed.
+    const dispatched = new Map<number, Set<string>>();
 
     try {
       for await (const incoming of this.chain.listenForEvents(filter)) {
@@ -472,11 +487,8 @@ export class ChainEventLaneRunner {
           identity = lookback > 0 ? this.replayIdentity(incoming) : undefined;
           dispatch = () => handle.call(spec, incoming, ctx, signal);
         }
-        if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
-          leaseExpired = true;
-          throw new Error('event scan horizon lease expired before event dispatch');
-        }
-        signal?.throwIfAborted();
+        // An exact replay dispatches nothing, so it needs no lease check; the
+        // check before the cursor advance still covers the whole range.
         if (identity !== undefined) {
           let atBlock = observed.get(event.blockNumber);
           if (atBlock === undefined) {
@@ -488,7 +500,13 @@ export class ChainEventLaneRunner {
           atBlock.add(identity);
           if (alreadySeen) continue;
         }
+        if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
+          leaseExpired = true;
+          throw new Error('event scan horizon lease expired before event dispatch');
+        }
+        signal?.throwIfAborted();
         await dispatch();
+        if (identity !== undefined) addReplayIdentity(dispatched, event.blockNumber, identity);
         signal?.throwIfAborted();
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
@@ -519,12 +537,23 @@ export class ChainEventLaneRunner {
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
       if (signal?.aborted) signal.throwIfAborted();
-      if (leaseExpired) {
-        this.restoreLaneState(state, stateBefore);
-        this.replayedEvents.delete(lane.spec.name);
+      if (leaseExpired) this.restoreLaneState(state, stateBefore);
+      const message = err instanceof Error ? err.message : String(err);
+      // The cursor stays put; only the replay memory learns what was dispatched.
+      // A lease lasts one chain index revision, so a range whose dispatches
+      // outlast it would otherwise be dispatched again from its start forever.
+      const kept = this.keepDispatched(lane, remembered, dispatched);
+      if (leaseExpired && kept > 0) {
+        this.log.warn(
+          ctx,
+          `Poll lane ${lane.spec.name}: ${message}; kept ${kept} new dispatch(es), `
+            + 'scanning the range again next poll without repeating them',
+        );
+        this.applyLaneSchedule(lane, { kind: 'retry', now });
+      } else {
+        this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${message}`);
+        this.applyLaneSchedule(lane, { kind: 'failure', now });
       }
-      this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
-      this.applyLaneSchedule(lane, { kind: 'failure', now });
     }
     return {
       lane,
@@ -640,6 +669,23 @@ export class ChainEventLaneRunner {
     };
   }
 
+  /** Adds a failed scan's completed dispatches to the lane's replay memory; returns how many. */
+  private keepDispatched(
+    lane: ChainEventPollerLaneRuntime,
+    remembered: Map<number, Set<string>>,
+    dispatched: ReadonlyMap<number, ReadonlySet<string>>,
+  ): number {
+    let kept = 0;
+    for (const [block, identities] of dispatched) {
+      for (const identity of identities) {
+        addReplayIdentity(remembered, block, identity);
+        kept += 1;
+      }
+    }
+    if (kept > 0) this.replayedEvents.set(lane.spec.name, remembered);
+    return kept;
+  }
+
   private async eventScanLeaseHolds(lease: EventScanHorizonLease): Promise<boolean> {
     try {
       return await lease.holds();
@@ -661,7 +707,7 @@ export class ChainEventLaneRunner {
 
   private applyLaneSchedule(lane: ChainEventPollerLaneRuntime, outcome: ChainEventLaneScheduleOutcome): void {
     const state = lane.state;
-    if (outcome.kind === 'noWork') {
+    if (outcome.kind === 'noWork' || outcome.kind === 'retry') {
       state.nextRunAtMs = outcome.now + lane.spec.cadenceMs;
       return;
     }
