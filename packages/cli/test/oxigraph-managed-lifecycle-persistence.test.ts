@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -28,7 +28,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 });
 
 it('completes confirmed lifecycle repair through actual managed configuration only after WAL sync, then survives SIGKILL', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dkg-managed-lifecycle-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dkg-managed-lifecycle-')));
   const location = join(root, 'rocksdb'), cacheDir = join(root, 'cache');
   if (process.env.DKG_TEST_OXIGRAPH_BINARY) {
     await mkdir(cacheDir, { recursive: true });
