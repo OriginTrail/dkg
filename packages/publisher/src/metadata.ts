@@ -47,7 +47,7 @@ const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
-export const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set([
+const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set([
   `${DKG}accessPolicy`,
   `${DKG}allowedPeer`,
   `${DKG}publisherPeerId`,
@@ -57,7 +57,7 @@ const LOCAL_TRUSTED_KA_ANCHOR_PREDICATES = new Set([
   `${DKG}merkleRoot`,
 ]);
 const LOCAL_TRUSTED_KA_UAL_PREDICATE = `${DKG}kaUal`;
-export const LOCAL_TRUSTED_KA_SIDECAR_PREDICATES = new Set([
+const LOCAL_TRUSTED_KA_SIDECAR_PREDICATES = new Set([
   ...LOCAL_TRUSTED_KA_CONTROL_PREDICATES,
   ...LOCAL_TRUSTED_KA_ANCHOR_PREDICATES,
 ]);
@@ -652,7 +652,7 @@ export function parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
  * metadata-quad API and the typed envelope API terminate here; neither needs
  * to adapt through the other.
  */
-export async function writeLocallyTrustedKnowledgeAssetControlEntry(
+async function writeLocallyTrustedKnowledgeAssetControlEntry(
   store: TripleStore,
   ual: string,
   version: bigint,
@@ -688,34 +688,42 @@ export async function writeLocallyTrustedKnowledgeAssetControlEntry(
   ]);
 }
 
+/** Select exact-anchor ownership once; admit trusted fallback controls only when requested. */
+export async function selectOrAdmitLocallyTrustedKnowledgeAssetControls(store: TripleStore, input: {
+  metaGraph: string; ual: string; metadataQuads: readonly Quad[]; restoreMissing: boolean;
+  anchor?: LocallyTrustedKnowledgeAssetControlAnchor;
+}): Promise<Quad[]> {
+  const { metaGraph, ual, metadataQuads, restoreMissing, anchor } = input;
+  const sidecarQuads = metadataQuads.filter(
+    quad => quad.subject === ual && LOCAL_TRUSTED_KA_SIDECAR_PREDICATES.has(quad.predicate),
+  );
+  const version = parseControlVersion(readControlAnchor(sidecarQuads, `${DKG}assertionVersion`, 'assertionVersion'));
+  const root = normalizeControlRoot(readControlAnchor(sidecarQuads, `${DKG}merkleRoot`, 'merkleRoot'));
+  if (restoreMissing) validateLocallyTrustedControlRows(sidecarQuads);
+  if (anchor && (version !== BigInt(anchor.assertionVersion) || root !== toHex(anchor.merkleRoot).toLowerCase())) {
+    throw new Error('Locally trusted KA control entry does not match its assertion anchor');
+  }
+  // A curator must not replace or append to a member's authenticated exact-anchor owner.
+  const selected = await readLocallyTrustedKnowledgeAssetControls(store, metaGraph, ual, metadataQuads, {}, 'exact');
+  if (selected.length > 0 || !restoreMissing) return selected;
+  await writeLocallyTrustedKnowledgeAssetControlEntry(store, ual, version, root, sidecarQuads);
+  return sidecarQuads.filter(quad => LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate))
+    .map(quad => ({ ...quad, subject: ual, graph: metaGraph }));
+}
+
 /** Persist locally authored access controls outside sync-visible metadata. */
 export async function replaceLocallyTrustedKnowledgeAssetControls(
-  store: TripleStore,
-  ual: string,
-  metadataQuads: readonly Quad[],
+  store: TripleStore, ual: string, metadataQuads: readonly Quad[],
 ): Promise<void> {
-  const sidecarQuads = metadataQuads.filter(
-    (quad) => quad.subject === ual && LOCAL_TRUSTED_KA_SIDECAR_PREDICATES.has(quad.predicate),
-  );
-  const version = parseControlVersion(
-    readControlAnchor(sidecarQuads, `${DKG}assertionVersion`, 'assertionVersion'),
-  );
-  const root = normalizeControlRoot(
-    readControlAnchor(sidecarQuads, `${DKG}merkleRoot`, 'merkleRoot'),
-  );
-  validateLocallyTrustedControlRows(sidecarQuads);
-  // A curator may publish a member's already-authenticated share. Its local
-  // publisher identity must not append a second owner to the same anchor.
-  if (await readLocallyTrustedKnowledgeAssetControlEnvelope(
-    store, metadataQuads[0]!.graph, ual, metadataQuads, {}, 'exact',
-  )) return;
-  await writeLocallyTrustedKnowledgeAssetControlEntry(
-    store,
-    ual,
-    version,
-    root,
-    sidecarQuads,
-  );
+  await selectOrAdmitLocallyTrustedKnowledgeAssetControls(store, {
+    metaGraph: metadataQuads[0]!.graph, ual, metadataQuads, restoreMissing: true,
+  });
+}
+
+/** Apply already-selected controls without another lookup or inheritance decision. */
+export function overlaySelectedKnowledgeAssetControls(metadata: readonly Quad[], selected: readonly Quad[]): Quad[] {
+  if (selected.length === 0) return [...metadata];
+  return [...metadata.filter(quad => !LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate)), ...selected];
 }
 
 /**
@@ -840,11 +848,7 @@ export async function overlayLocallyTrustedKnowledgeAssetControls(
     incomingMetadata,
     options,
   );
-  if (locallyTrustedControls.length === 0) return [...incomingMetadata];
-  return [
-    ...incomingMetadata.filter((quad) => !LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate)),
-    ...locallyTrustedControls,
-  ];
+  return overlaySelectedKnowledgeAssetControls(incomingMetadata, locallyTrustedControls);
 }
 
 /**

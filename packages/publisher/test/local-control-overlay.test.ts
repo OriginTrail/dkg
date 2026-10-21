@@ -108,3 +108,29 @@ it.each([false, true])('confirmed reconciliation selects exact controls once wit
       .toMatchObject({ publisherPeerId: existing ? 'member' : 'untrusted-publisher', accessPolicy: existing ? 'ownerOnly' : 'allowList' });
   } finally { await store.close(); }
 });
+
+
+it('recovery without restoration does not admit or inherit missing exact controls, while ordinary overlay still inherits', async () => {
+  const store = new OxigraphStore();
+  try {
+    await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, UAL, { assertionVersion: '1', merkleRoot: ROOT }, {
+      publisherPeerId: 'earlier-owner', accessPolicy: 'ownerOnly', allowedPeers: [],
+    });
+    const incoming = incomingMetadata().map(q => q.predicate.endsWith('/assertionVersion')
+      ? { ...q, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' } : q);
+    const anchor = { assertionVersion: '2', merkleRoot: ROOT }, insert = vi.spyOn(store, 'insert');
+    expect(await reconcileConfirmedKnowledgeAssetControls(store, {
+      metaGraph: META_GRAPH, ual: UAL, anchor, metadataQuads: incoming, restoreMissing: false,
+    })).toEqual([]);
+    expect(insert).not.toHaveBeenCalled();
+    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, incoming, {}, 'exact')).toBeUndefined();
+    const inherited = await overlayLocallyTrustedKnowledgeAssetControls(store, META_GRAPH, UAL, incoming);
+    expect(inherited.filter(q => q.predicate === DKG + 'publisherPeerId').map(q => q.object)).toEqual(['"earlier-owner"']);
+    const selected = await reconcileConfirmedKnowledgeAssetControls(store, {
+      metaGraph: META_GRAPH, ual: UAL, anchor, metadataQuads: incoming, restoreMissing: true,
+    });
+    expect(selected.filter(q => q.predicate === DKG + 'publisherPeerId').map(q => q.object)).toEqual(['"untrusted-publisher"']);
+    const exact = await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, incoming, {}, 'exact');
+    expect(exact?.publisherPeerId).toBe('untrusted-publisher');
+  } finally { await store.close(); }
+});

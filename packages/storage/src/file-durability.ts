@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { mkdir, open } from 'node:fs/promises';
+import { mkdir, open, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
 /** Only callers maintaining a historical best-effort state file may tolerate these directory refusals. */
@@ -33,8 +33,9 @@ export interface DurableDirectoryOptions {
  * A directory whose entries must survive a crash. A new directory entry lives in
  * its parent, so a barrier syncs this directory, each directory recursive mkdir
  * created for it, and the first parent that already existed. mkdir reports its
- * first new directory only once: that range stays pending across failed barriers
- * until one persists it, so the owner of a durable path keeps one instance.
+ * first new directory only on success. Capture the existing ancestor before
+ * creation so partial mkdir failures and failed barriers retain the full range
+ * until one persists it; the owner of a durable path keeps one instance.
  */
 export class DurableDirectory {
   readonly path: string;
@@ -45,10 +46,23 @@ export class DurableDirectory {
   }
 
   async create(): Promise<void> {
+    let existing = this.path;
+    for (;;) {
+      try { await stat(existing); break; } catch (error) {
+        const parent = dirname(existing);
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || parent === existing) throw error;
+        existing = parent;
+      }
+    }
+    // mkdir can create some ancestors and then reject without returning firstCreated.
+    // Record their parent barrier before any creation, and keep it on every failure.
+    if (existing !== this.path) this.retainThrough(existing);
     const firstCreated = await mkdir(this.path, { recursive: true, mode: this.options.mode });
-    if (firstCreated === undefined) return;
+    if (firstCreated !== undefined) this.retainThrough(dirname(resolve(firstCreated)));
+  }
+
+  private retainThrough(through: string): void {
     // Every candidate is an ancestor of this directory; the shorter path is the outer one.
-    const through = dirname(resolve(firstCreated));
     if (this.pendingThrough === undefined || through.length < this.pendingThrough.length) this.pendingThrough = through;
   }
 
