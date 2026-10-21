@@ -88,8 +88,8 @@ export class AsyncLiftRunner {
   /** The owner calls this only after its desired running state is durable. */
   async releaseClaims(): Promise<void> {
     if (this.stopped) throw new Error('Publisher runner is stopped');
-    await this.requireClaimGate().release();
-    for (const walletId of this.config.walletIds) this.wakeWallet(walletId);
+    this.requireClaimGate();
+    await this.config.publisher.resume();
   }
 
   private requireClaimGate() {
@@ -109,7 +109,8 @@ export class AsyncLiftRunner {
     this.stopped = false;
     try {
       if (this.config.startPaused === true) {
-        await this.holdClaims();
+        if (this.config.publisher.claimGate) await this.holdClaims();
+        else await this.config.publisher.pause();
       }
       // Startup recovery IS the first pass: with the scheduling capability its outcome seeds
       // the cadence choice directly — one inventory, no second boot-time outlook read. Without

@@ -7,29 +7,56 @@ import { createRunnerPublisher as createPublisher } from './_helpers/async-lift-
 
 describe('AsyncLiftRunner claim control', () => {
   it('observes the publisher gate for startup maintenance and later live pause/resume', async () => {
-    const order: string[] = [];
-    const claimGate = new AsyncLiftClaimGate(async commit => {
-      commit?.(); order.push(claimGate.state === 'running' ? 'resume' : 'pause');
-    });
-    const publisher = createPublisher({ claimGate,
-      recover: async () => { order.push('recover'); return 0; },
-      processNext: async () => { order.push(`process-${claimGate.state}`); return null; },
-    });
+    const store = new OxigraphStore();
+    const publisher = new TripleStoreAsyncLiftPublisher(store);
+    const processNext = vi.spyOn(publisher, 'processNext');
     const runner = new AsyncLiftRunner({ publisher, walletIds: ['wallet-1'],
       startPaused: true, pollIntervalMs: 60_000 });
     try {
       await runner.start();
       expect(runner.claimGateStatus().held).toBe(true);
-      expect(order).toEqual(['pause', 'recover']);
+      expect(processNext).not.toHaveBeenCalled();
       await runner.releaseClaims();
-      await vi.waitFor(() => expect(order).toContain('process-running'));
+      await vi.waitFor(() => expect(processNext).toHaveBeenCalledTimes(1));
       expect(runner.claimGateStatus().held).toBe(false);
-      await claimGate.hold();
+      await publisher.pause();
       expect(runner.claimGateStatus().held).toBe(true);
       await runner.releaseClaims();
-      await vi.waitFor(() => expect(order.filter(step => step === 'process-running')).toHaveLength(2));
-      expect(order).not.toContain('process-held');
+      await vi.waitFor(() => expect(processNext).toHaveBeenCalledTimes(2));
+    } finally { await runner.stop(); await store.close(); }
+  });
+
+  it('preserves legacy paused maintenance before startup recovery without live claim control', async () => {
+    const order: string[] = [];
+    let paused = false;
+    const publisher = createPublisher({ claimGate: undefined,
+      pause: async () => { paused = true; order.push('pause'); },
+      recover: async () => { expect(paused).toBe(true); order.push('recover'); return 0; },
+      processNext: async () => { expect(paused).toBe(true); return null; },
+    });
+    const runner = new AsyncLiftRunner({ publisher, walletIds: ['wallet-1'],
+      startPaused: true, pollIntervalMs: 60_000 });
+    try {
+      await runner.start();
+      expect(order).toEqual(['pause', 'recover']);
+      expect(() => runner.holdClaims()).toThrow('does not support live claim control');
     } finally { await runner.stop(); }
+  });
+
+  it('announces live resume through the publisher scheduler even when another owner is attached', async () => {
+    const store = new OxigraphStore();
+    const publisher = new TripleStoreAsyncLiftPublisher(store);
+    const onWorkAvailable = vi.fn();
+    const detach = publisher.reconciliationScheduling.attachScheduler({
+      onReconciliationDemand() {}, onWalletRelease() {}, onWorkAvailable,
+    });
+    const runner = new AsyncLiftRunner({ publisher, walletIds: ['wallet-1'] });
+    try {
+      await publisher.pause();
+      await runner.releaseClaims();
+      expect(publisher.claimGate.state).toBe('running');
+      expect(onWorkAvailable).toHaveBeenCalledOnce();
+    } finally { detach(); await runner.stop(); await store.close(); }
   });
 
   it('closes admission synchronously before the publisher claim drain settles', async () => {

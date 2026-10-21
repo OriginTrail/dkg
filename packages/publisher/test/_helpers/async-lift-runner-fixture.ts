@@ -2,7 +2,7 @@ import { AsyncLiftClaimGate } from '../../src/async-lift-claim-gate.js';
 import type { AsyncLiftPublisher } from '../../src/index.js';
 
 export function createRunnerPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLiftPublisher {
-  const claimGate = new AsyncLiftClaimGate(async commit => { commit?.(); });
+  const claimGate = overrides.claimGate ?? new AsyncLiftClaimGate(async commit => { commit?.(); });
   return {
     claimGate,
     lift: async () => {},
