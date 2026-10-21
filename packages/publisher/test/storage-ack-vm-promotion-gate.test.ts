@@ -112,7 +112,7 @@ function harness(
 /** A graph-scoped public publish, inline (`value`) or from local SWM (`inline: false`). */
 function publishIntent(
   value: string,
-  options: { inline?: boolean; version?: number; graphScoped?: boolean } = {},
+  options: { inline?: boolean; version?: number; graphScoped?: boolean; publisherPeerId?: string } = {},
 ): { bytes: Uint8Array; quads: Quad[] } {
   const version = options.version ?? 1;
   const quads = assetQuads(value, layerGraph(MemoryLayer.SharedWorkingMemory, version));
@@ -123,7 +123,7 @@ function publishIntent(
       merkleRoot: computeFlatKCRootV10([...quads], []),
       contextGraphId: CG_ID,
       swmGraphId: SWM_GRAPH_ID,
-      publisherPeerId: 'publisher-peer',
+      publisherPeerId: options.publisherPeerId ?? 'publisher-peer',
       publicByteSize: options.inline === false ? byteSizeFloor(quads) : wireNquads(quads).length,
       isPrivate: false,
       kaCount: 1,
@@ -148,7 +148,7 @@ function publishIntent(
 /** The default public update: graph-scoped, payload inline from the publisher's VM graph. */
 function updateIntent(
   value: string,
-  options: { version?: number; graphScoped?: boolean; inline?: boolean } = {},
+  options: { version?: number; graphScoped?: boolean; inline?: boolean; publisherPeerId?: string } = {},
 ): { bytes: Uint8Array; quads: Quad[] } {
   const version = options.version ?? 2;
   const graphScoped = options.graphScoped ?? true;
@@ -172,7 +172,7 @@ function updateIntent(
       mintAmount: 0,
       burnTokenIds: [],
       newMerkleLeafCount: computeFlatKCMerkleLeafCountV10([...quads], []),
-      publisherPeerId: 'publisher-peer',
+      publisherPeerId: options.publisherPeerId ?? 'publisher-peer',
       ...(inline ? { stagingQuads: wireNquads(quads) } : {}),
       ...(graphScoped
         ? {
@@ -796,6 +796,39 @@ describe('StorageACK VM-promotion finality gate', () => {
     expect(h.signMessage).toHaveBeenCalledOnce();
     expect(gate).not.toHaveBeenCalled();
     expect(await h.store.countQuads(contextGraphCatalogUri(CG_ID))).toBe(catalogTriples.length);
+  });
+
+  it('tells the gate the peer that asked for a remote publish or update, not the one its intent names, and no peer for a local one', async () => {
+    const remote: StorageAckVmPromotionRequest[] = [];
+    const h = harness(async (request) => {
+      remote.push(request);
+      return OK;
+    });
+    // The intents name the owner's node; the connection they arrive on is another peer's.
+    const sender = { toString: () => 'other-peer' };
+    const claimed = { publisherPeerId: 'owner-peer' };
+    const publish = decodeStorageACK(await h.handler.handler(publishIntent('v1', claimed).bytes, sender));
+    expect(isStorageACKDecline(publish)).toBe(false);
+    await markPromoted(h.store, 1);
+    const update = decodeStorageACK(await h.handler.updateHandler(updateIntent('v2', claimed).bytes, sender));
+    expect(isStorageACKDecline(update)).toBe(false);
+    expect(remote.map((request) => [request.operation, request.publisherPeerId])).toEqual([
+      ['publish', 'other-peer'],
+      ['update', 'other-peer'],
+    ]);
+
+    const local: StorageAckVmPromotionRequest[] = [];
+    const self = harness(async (request) => {
+      local.push(request);
+      return OK;
+    });
+    const published = decodeStorageACK(await self.handler.localHandler(publishIntent('v1', claimed).bytes, PEER));
+    expect(isStorageACKDecline(published)).toBe(false);
+    await markPromoted(self.store, 1);
+    const updated = decodeStorageACK(await self.handler.localUpdateHandler(updateIntent('v2', claimed).bytes, PEER));
+    expect(isStorageACKDecline(updated)).toBe(false);
+    expect(local.map((request) => request.operation)).toEqual(['publish', 'update']);
+    expect(local.every((request) => !('publisherPeerId' in request))).toBe(true);
   });
 
   it('keeps the pre-gate behaviour for an embedding that wires no gate', async () => {

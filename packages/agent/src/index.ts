@@ -279,6 +279,7 @@ export type {
 export type {
   FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
+export { committedSharePendingCatalogHandoff, type CommittedSharePendingCatalogHandoff } from './internal/promote/inventory-recovery-failure.js';
 export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';
@@ -659,3 +660,5 @@ export {
 // exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
 // internal; only the in-agent lifecycle (at its env boundary) + tests use it.
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
+
+export type { CoreChainCacheNetwork } from './core-chain-cache-config.js';

@@ -28,6 +28,8 @@ export interface PublishedNamedKaVmLifecycleInput {
   /** The chain-current root to materialize, which may supersede the queued root. */
   readonly merkleRoot: string;
   readonly packedKaId?: bigint;
+  /** Incomplete-descriptor repair has already proved these fields; never replace its retry evidence. */
+  readonly preserveVerifiedVmProof?: boolean;
 }
 
 import type { StoreMutation } from './store-mutation.js';
@@ -63,8 +65,10 @@ export function buildNamedKaVmLifecycleMutation(input: PublishedNamedKaVmLifecyc
     subject, predicate, object, graph: metaGraph,
   });
   const replacements = [
-    replacement(lifecycleUri, VM_CURRENT_ASSERTION_PRED, sparqlString(bareMerkleRoot)),
-    replacement(lifecycleUri, MEMORY_LAYER_PRED, sparqlString(MemoryLayer.VerifiableMemory)),
+    ...(input.preserveVerifiedVmProof ? [] : [
+      replacement(lifecycleUri, VM_CURRENT_ASSERTION_PRED, sparqlString(bareMerkleRoot)),
+      replacement(lifecycleUri, MEMORY_LAYER_PRED, sparqlString(MemoryLayer.VerifiableMemory)),
+    ]),
     replacement(assertionUri, MEMORY_LAYER_PRED, sparqlString(MemoryLayer.VerifiableMemory)),
     replacement(lifecycleUri, STATE_PRED, sparqlString('published')),
     replacement(lifecycleUri, PUBLISHED_UAL_PRED, sparqlString(input.publishedUal)),
