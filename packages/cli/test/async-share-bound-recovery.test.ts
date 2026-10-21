@@ -325,9 +325,10 @@ describe('async shares acquire durable replay authority before promotion', () =>
     } finally { release(); await running; }
   });
 
-  it.each(['cancel', 'replacement', 'shutdown'])('does not finalize a mutable draft after %s while awaiting the lifecycle fence', async mode => {
+  it.each(['current', 'cancel', 'replacement', 'shutdown'])('respects %s authority while awaiting the lifecycle fence', async mode => {
     const f = await setup(undefined, false, true);
-    delete f.agent.prepareAtomicAssertionShare;
+    useRealFinalizer(f);
+    const preparation = vi.spyOn(f.agent, 'prepareAtomicAssertionShare');
     const draft = await f.publisher.wmGraphUri(CG, AUTHOR, NAME);
     const before = await f.publisher.assertionQuery(CG, NAME, AUTHOR);
     const job = await f.claim();
@@ -344,7 +345,7 @@ describe('async shares acquire durable replay authority before promotion', () =>
     try {
       await queryDone;
       if (mode === 'shutdown') abort.abort();
-      else {
+      else if (mode !== 'current') {
         f.expire();
         await f.queue.recoverOnStartup();
         if (mode === 'cancel') await f.queue.cancel(job.jobId);
@@ -352,8 +353,19 @@ describe('async shares acquire durable replay authority before promotion', () =>
       }
       release(); await holder;
       const outcome = await running;
-      if (mode === 'shutdown') expect(outcome.error?.message).toContain('shutdown');
-      else expect(outcome.result?.outcome).toBe('failure_bookkeeping_uncertain');
+      if (mode === 'current') {
+        expect(outcome.result?.outcome).toBe('succeeded');
+        expect((await f.queue.getStatus(f.jobId)).request.recoveryBinding).toBeDefined();
+        await expect(preparation.mock.results[0].value).resolves.toBeUndefined();
+        return;
+      }
+      if (mode === 'shutdown') {
+        expect(outcome.error?.message).toContain('shutdown');
+        await expect(preparation.mock.results[0].value).rejects.toThrow('shutdown');
+      } else {
+        expect(outcome.result?.outcome).toBe('failure_bookkeeping_uncertain');
+        await expect(preparation.mock.results[0].value).rejects.toBeInstanceOf(PromoteJobLeaseError);
+      }
       expect(await f.publisher.assertionQuery(CG, NAME, AUTHOR)).toEqual(before);
       expect(await f.store.countQuads(draft)).toBe(before.length);
       expect((await readAssertionPromoteEvidence(f.store, CG, NAME, AUTHOR)).seal).toBeUndefined();

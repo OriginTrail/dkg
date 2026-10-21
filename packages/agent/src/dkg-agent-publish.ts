@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import { commitAssertionFinalization } from './internal/promote/commit-assertion-finalization.js';
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
 import { tryWithKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
@@ -3328,21 +3327,22 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    const commitFinalized = (ual: string, version: string, root: Uint8Array,
-      persistFreshSeal?: () => Promise<void>) => commitAssertionFinalization({
-      authority: opts?.executionAuthority,
-      materialize: () => this.publisher.materializeCanonicalWorkingMemory(
-        contextGraphId, ual, version, normalizedKnowledgeAssetQuads, opts?.subGraphName),
-      writePrivateContent: () => privateStore.replaceKnowledgeAssetPrivateTriples(
-        contextGraphId, createGraphKnowledgeAssetScope(ual, version), normalizedPrivateKnowledgeAssetQuads, opts?.subGraphName),
-      persistFreshSeal,
-      stampLifecycle: () => stampFinalizedLifecycle(version, root),
-      cleanupSources: canonicalGraph => this.publisher.cleanupCanonicalWorkingMemorySources(
-        contextGraphId, name, agentAddress, canonicalGraph, [sourceWmGraphUri], opts?.subGraphName),
-      cleanupPrivateDraft: () => privateStore.deleteKnowledgeAssetPrivateDraft(
-        contextGraphId, agentAddress, name, opts?.subGraphName),
-    });
-
+    const commitFinalized = async (ual: string, version: string, root: Uint8Array, persistFreshSeal?: () => Promise<void>) => {
+      const assertCurrent = () => opts?.executionAuthority?.assertCurrent();
+      await assertCurrent();
+      const canonicalGraph = await this.publisher.materializeCanonicalWorkingMemory(
+        contextGraphId, ual, version, normalizedKnowledgeAssetQuads, opts?.subGraphName);
+      await assertCurrent();
+      await privateStore.replaceKnowledgeAssetPrivateTriples(
+        contextGraphId, createGraphKnowledgeAssetScope(ual, version), normalizedPrivateKnowledgeAssetQuads, opts?.subGraphName);
+      if (persistFreshSeal) { await assertCurrent(); await persistFreshSeal(); }
+      await stampFinalizedLifecycle(version, root); // Checks authority between its writes.
+      await assertCurrent();
+      await this.publisher.cleanupCanonicalWorkingMemorySources(
+        contextGraphId, name, agentAddress, canonicalGraph, [sourceWmGraphUri], opts?.subGraphName);
+      await assertCurrent();
+      await privateStore.deleteKnowledgeAssetPrivateDraft(contextGraphId, agentAddress, name, opts?.subGraphName);
+    };
     // 4. Idempotency: if a seal already exists for this assertion,
     //    return it as-is when the merkleRoot matches. Mismatch means
     //    the assertion was mutated since the previous finalize —
