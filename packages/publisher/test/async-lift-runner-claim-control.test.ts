@@ -14,13 +14,13 @@ describe('AsyncLiftRunner claim control', () => {
       startPaused: true, pollIntervalMs: 60_000 });
     try {
       await runner.start();
-      expect(runner.claimGateStatus().held).toBe(true);
+      expect(runner.claimControl.state).toBe('held');
       expect(processNext).not.toHaveBeenCalled();
       await runner.claimControl.release();
       await vi.waitFor(() => expect(processNext).toHaveBeenCalledTimes(1));
-      expect(runner.claimGateStatus().held).toBe(false);
+      expect(runner.claimControl.state).toBe('running');
       await publisher.pause();
-      expect(runner.claimGateStatus().held).toBe(true);
+      expect(runner.claimControl.state).toBe('held');
       await runner.claimControl.release();
       await vi.waitFor(() => expect(processNext).toHaveBeenCalledTimes(2));
     } finally { await runner.stop(); await store.close(); }
@@ -84,7 +84,7 @@ describe('AsyncLiftRunner claim control', () => {
     const runner = new AsyncLiftRunner({ publisher: createPublisher({ claimControl }), walletIds: ['wallet-1'] });
     const closing = runner.claimControl.close();
     try {
-      expect(runner.claimGateStatus()).toMatchObject({ held: true, closed: true });
+      expect(runner.claimControl.state).toBe('closed');
       expect(claimControl.state).toBe('closed');
       await expect(runner.claimControl.release()).rejects.toThrow('closed');
     } finally { releaseDrain(); await closing; await runner.stop(); }
@@ -106,7 +106,7 @@ describe('AsyncLiftRunner claim control', () => {
     try {
       await entered; await runner.claimControl.close();
       releaseResume(); await rejected;
-      expect(runner.claimGateStatus()).toMatchObject({ held: true, closed: true });
+      expect(runner.claimControl.state).toBe('closed');
       expect(claimControl.state).toBe('closed');
       expect(processNext).not.toHaveBeenCalled();
       expect(notifyWorkAvailable).not.toHaveBeenCalled();
@@ -140,7 +140,7 @@ describe('AsyncLiftRunner claim control', () => {
       await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
       await second.start();
       await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
-      expect(second.claimGateStatus()).toMatchObject({ held: false, closed: false });
+      expect(second.claimControl.state).toBe('running');
     } finally { await first.stop(); await second.stop(); await store.close(); }
   });
 

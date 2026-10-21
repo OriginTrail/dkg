@@ -750,7 +750,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       hasIncludedRecoveryResolver: hasChainRecovery,
     });
 
-    const control = await createPublisherLiveControl(runner, args.dataDir, args.startPaused);
+    const control = await createPublisherLiveControl(runner.claimControl, validWalletIds, args.dataDir, args.startPaused);
     startup.assertActive();
     return {
       runner,

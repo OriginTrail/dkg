@@ -85,13 +85,6 @@ export class AsyncLiftRunner {
     });
   }
 
-  /** Gate state only; durable generations and transition ordering belong to the runtime owner. */
-  claimGateStatus(): Readonly<{ held: boolean; closed: boolean; walletIds: readonly string[] }> {
-    const state = this.config.publisher.claimControl?.state ?? 'running';
-    return Object.freeze({ held: state !== 'running', closed: state === 'closed',
-      walletIds: Object.freeze([...this.config.walletIds]) });
-  }
-
   /** Same publisher control semantics, with this runner's release lifetime enforced. */
   get claimControl(): AsyncLiftClaimControl {
     if (!this.ownedClaimControl) throw new Error('Publisher does not support live claim control');

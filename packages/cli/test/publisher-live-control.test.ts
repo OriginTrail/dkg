@@ -43,7 +43,7 @@ async function fixture(directory?: string, publisher?: TripleStoreAsyncLiftPubli
   publisher ??= new TripleStoreAsyncLiftPublisher(store);
   const runner = new AsyncLiftRunner({ publisher, walletIds: ['one', 'two'], pollIntervalMs: 60_000, ...runnerOptions });
   cleanup.push(() => runner.stop());
-  const control = await createPublisherLiveControl(runner, dataDir, startPaused);
+  const control = await createPublisherLiveControl(runner.claimControl, ['one', 'two'], dataDir, startPaused);
   cleanup.push(() => control.close());
   return { dataDir, publisher, runner, control };
 }
@@ -149,7 +149,7 @@ describe('durable control of the active publisher wallet loops', () => {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     const accepted = await publisher.getStatus(jobId);
     release(); await rejected; await closing;
-    expect(runner.claimGateStatus().held).toBe(true);
+    expect(runner.claimControl.state).toBe('closed');
     expect(await publisher.claimNext('late')).toBeNull();
     expect(await publisher.getStatus(jobId)).toEqual(accepted);
     // The persisted resume is intent for the next incarnation, never permission for this closed one.
@@ -207,7 +207,7 @@ describe('durable control of the active publisher wallet loops', () => {
     await resumingPublisher;
     const closing = control.close();
     release(); await rejected; await closing;
-    expect(runner.claimGateStatus().held).toBe(true);
+    expect(runner.claimControl.state).toBe('closed');
     expect(await publisher.claimNext('probe')).toBeNull();
     expect(await publisher.getStatus(jobId)).toEqual(accepted);
   });
@@ -228,7 +228,7 @@ describe('durable control of the active publisher wallet loops', () => {
     const resuming = control.resume();
     try {
       await syncing;
-      expect(runner.claimGateStatus().held).toBe(true);
+      expect(runner.claimControl.state).toBe('held');
       expect(await publisher.claimNext('probe')).toBeNull();
       expect(await publisher.getStatus(jobId)).toEqual(accepted);
       expect(execute).not.toHaveBeenCalled();
@@ -245,11 +245,11 @@ describe('durable control of the active publisher wallet loops', () => {
     const publisher = new TripleStoreAsyncLiftPublisher(store);
     const runner = new AsyncLiftRunner({ publisher, walletIds: ['one', 'two'] });
     cleanup.push(() => runner.stop());
-    expect(!runner.claimGateStatus().held).toBe(true);
-    await expect(createPublisherLiveControl(runner, dataDir)).rejects.toBeInstanceOf(SyntaxError);
+    expect(runner.claimControl.state).toBe('running');
+    await expect(createPublisherLiveControl(runner.claimControl, ['one', 'two'], dataDir)).rejects.toBeInstanceOf(SyntaxError);
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     expect(await publisher.claimNext('two')).toBeNull();
-    expect(runner.claimGateStatus().held).toBe(true);
+    expect(runner.claimControl.state).toBe('held');
   });
 
   it('honors the platform durability boundary before acknowledging renamed resume intent', async () => {
@@ -260,7 +260,7 @@ describe('durable control of the active publisher wallet loops', () => {
       // unsupported directory open/sync before acknowledging the committed rename.
       expect(await control.resume()).toMatchObject({ desiredState: 'running', effectiveState: 'running',
         generation: 2, acknowledgedGeneration: 2 });
-      expect(runner.claimGateStatus().held).toBe(false);
+      expect(runner.claimControl.state).toBe('running');
       expect(JSON.parse(await readFile(publisherDesiredStatePath(dataDir), 'utf8')))
         .toMatchObject({ desiredState: 'running', generation: 2 });
       return;
@@ -280,7 +280,7 @@ describe('durable control of the active publisher wallet loops', () => {
         .toMatchObject({ desiredState: 'running', generation: 2 });
       expect(settled).toBe(false);
       expect(control.status()).toMatchObject({ desiredState: 'paused', generation: 1, acknowledgedGeneration: 1 });
-      expect(runner.claimGateStatus().held).toBe(true);
+      expect(runner.claimControl.state).toBe('held');
       expect(await publisher.claimNext('probe')).toBeNull();
       expect(await publisher.getStatus(jobId)).toEqual(accepted);
     } finally { rejectSync(Object.assign(new Error('directory fsync failed'), { code: 'EIO' })); await rejected; }

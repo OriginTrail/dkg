@@ -2,7 +2,7 @@
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AsyncLiftRunner } from '@origintrail-official/dkg-publisher';
+import type { AsyncLiftClaimControl } from '@origintrail-official/dkg-publisher';
 
 type Desired = 'paused' | 'running';
 export interface PublisherDesiredState {
@@ -58,9 +58,9 @@ async function saveState(dataDir: string, state: PublisherDesiredState): Promise
 
 /** Created only for the exact runtime, before runner.start() may recover or claim any work. */
 export async function createPublisherLiveControl(
-  runner: AsyncLiftRunner, dataDir: string, startPaused = false,
+  claims: AsyncLiftClaimControl, walletIds: readonly string[], dataDir: string, startPaused = false,
 ): Promise<PublisherLiveControl> {
-  const claims = runner.claimControl;
+  const controlledWalletIds = [...walletIds];
   // A failed read or write cannot accidentally start the runner unpaused.
   await claims.hold();
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
@@ -82,15 +82,16 @@ export async function createPublisherLiveControl(
   let fault: PublisherLiveStatus['fault'] = null;
   let tail: Promise<unknown> = Promise.resolve();
   const status = (): PublisherLiveStatus => {
-    const effective = runner.claimGateStatus();
-    return Object.freeze({ ...state, effectiveState: fault || effective.closed ? 'unavailable' : effective.held ? 'paused' : 'running',
+    const effective = claims.state;
+    return Object.freeze({ ...state, effectiveState: fault || effective === 'closed' ? 'unavailable' : effective === 'held' ? 'paused' : 'running',
       acknowledgedGeneration: state.generation,
-      wallets: Object.freeze(effective.walletIds.map(walletId => Object.freeze({ walletId,
-        paused: effective.held, generation: state.generation }))), fault });
+      wallets: Object.freeze(controlledWalletIds.map(walletId => Object.freeze({ walletId,
+        paused: effective !== 'running', generation: state.generation }))), fault });
   };
   const change = (desiredState: Desired): Promise<PublisherLiveStatus> => {
     const changing = tail.then(async () => {
-      if (runner.claimGateStatus().closed || fault) throw new Error('Publisher live control is unavailable');
+      const initialClaimState = claims.state;
+      if (initialClaimState === 'closed' || fault) throw new Error('Publisher live control is unavailable');
       if (state.desiredState === desiredState) return status();
       const next: PublisherDesiredState = { ...state, desiredState,
         generation: nextGeneration(state.generation), updatedAt: new Date().toISOString() };
@@ -98,13 +99,13 @@ export async function createPublisherLiveControl(
         // Pause first so persistence latency cannot admit additional claims; resume opens last.
         if (desiredState === 'paused') await claims.hold();
         await saveState(dataDir, next);
-        if (runner.claimGateStatus().closed) throw new Error('Publisher live control closed during persistence');
+        if (claims.state === 'closed') throw new Error('Publisher live control closed during persistence');
         if (desiredState === 'running') await claims.release();
         state = next;
         return status();
       } catch (error) {
         fault = 'persistence_or_control_failed';
-        // A failed operation is never acknowledged. Keep every runner gate closed until restart.
+        // A failed operation is never acknowledged. Keep publisher admission closed until restart.
         await claims.close().catch(() => {});
         throw new Error('Publisher control could not commit; restart to reload durable intent', { cause: error });
       }
