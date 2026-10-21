@@ -8,7 +8,7 @@ export interface AsyncLiftClaimControl {
 }
 
 /** The publisher claim domain owns admission; runner and durable control only observe it. */
-export class AsyncLiftClaimGate implements AsyncLiftClaimControl {
+class AsyncLiftClaimGate implements AsyncLiftClaimControl {
   private current: 'running' | 'held' | 'closed' = 'running';
   private revision = 0;
 
@@ -39,4 +39,17 @@ export class AsyncLiftClaimGate implements AsyncLiftClaimControl {
       this.current = 'running';
     });
   }
+}
+
+/** Bind every release to the publisher scheduler; callers never receive the raw gate. */
+export function createAsyncLiftClaimControl(
+  drain: (commit?: () => void) => Promise<void>, notifyWorkAvailable: () => void,
+): AsyncLiftClaimControl {
+  const gate = new AsyncLiftClaimGate(drain);
+  return {
+    get state() { return gate.state; },
+    hold: () => gate.hold(),
+    close: () => gate.close(),
+    release: async () => { await gate.release(); notifyWorkAvailable(); },
+  };
 }

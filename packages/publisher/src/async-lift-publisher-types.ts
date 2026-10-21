@@ -294,7 +294,7 @@ export interface AsyncLiftPublisher {
   };
   getStats(): Promise<Record<LiftJobState, number>>;
   /** Single admission owner; older structural publishers may omit live claim control. */
-  readonly claimGate?: import('./async-lift-claim-gate.js').AsyncLiftClaimControl;
+  readonly claimControl?: import('./async-lift-claim-gate.js').AsyncLiftClaimControl;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(jobId: string): Promise<void>;

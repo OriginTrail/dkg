@@ -69,22 +69,22 @@ describe('acknowledged publisher pause is a claim boundary', () => {
     const claiming = publisher.claimNext('before-fence');
     await entered.promise;
     const pausing = publisher.pause();
-    expect(publisher.claimGate.state).toBe('held');
+    expect(publisher.claimControl.state).toBe('held');
     const resuming = publisher.resume();
     const rejected = expect(resuming).rejects.toThrow(transition === 'close' ? 'closed' : 'superseded');
     let drained = false;
-    const fencing = publisher.claimGate[transition]().then(() => { drained = true; });
+    const fencing = publisher.claimControl[transition]().then(() => { drained = true; });
     try {
-      expect(publisher.claimGate.state).toBe(transition === 'close' ? 'closed' : 'held');
+      expect(publisher.claimControl.state).toBe(transition === 'close' ? 'closed' : 'held');
       await new Promise<void>(done => setImmediate(done));
       expect(drained).toBe(false);
       release.resolve();
       await Promise.all([claiming, pausing, rejected, fencing]);
       expect((await claiming)?.jobId).toBe(first);
       expect(await publisher.claimNext('after-fence')).toBeNull();
-      expect(publisher.claimGate.state).toBe(transition === 'close' ? 'closed' : 'held');
+      expect(publisher.claimControl.state).toBe(transition === 'close' ? 'closed' : 'held');
       if (transition === 'close') await expect(publisher.resume()).rejects.toThrow('closed');
-      else { await publisher.resume(); expect(publisher.claimGate.state).toBe('running'); }
+      else { await publisher.resume(); expect(publisher.claimControl.state).toBe('running'); }
     } finally {
       release.resolve();
       await Promise.allSettled([claiming, pausing, resuming, rejected, fencing]);

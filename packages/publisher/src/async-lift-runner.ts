@@ -1,4 +1,4 @@
-import type { AsyncLiftPublisher } from './async-lift-publisher.js';
+import type { AsyncLiftPublisher, AsyncLiftClaimControl } from './async-lift-publisher.js';
 import { assertNodeTimerDelayMs } from '@origintrail-official/dkg-core';
 
 export interface AsyncLiftRunnerConfig {
@@ -32,6 +32,7 @@ export class AsyncLiftRunner {
   private readonly activeRecoveryIntervalMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError?: (error: unknown) => void | Promise<void>;
+  private readonly ownedClaimControl?: AsyncLiftClaimControl;
   private started = false;
   private stopped = false;
   private running?: Promise<void>;
@@ -72,30 +73,29 @@ export class AsyncLiftRunner {
     assertNodeTimerDelayMs(this.activeRecoveryIntervalMs, 'AsyncLiftRunner activeRecoveryIntervalMs');
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
+    const control = config.publisher.claimControl;
+    if (control) this.ownedClaimControl = Object.freeze({
+      get state() { return control.state; },
+      hold: () => control.hold(),
+      close: () => control.close(),
+      release: async () => {
+        if (this.stopped) throw new Error('Publisher runner is stopped');
+        await control.release();
+      },
+    });
   }
 
   /** Gate state only; durable generations and transition ordering belong to the runtime owner. */
   claimGateStatus(): Readonly<{ held: boolean; closed: boolean; walletIds: readonly string[] }> {
-    const state = this.config.publisher.claimGate?.state ?? 'running';
+    const state = this.config.publisher.claimControl?.state ?? 'running';
     return Object.freeze({ held: state !== 'running', closed: state === 'closed',
       walletIds: Object.freeze([...this.config.walletIds]) });
   }
 
-  holdClaims(): Promise<void> { return this.requireClaimGate().hold(); }
-
-  closeClaims(): Promise<void> { return this.requireClaimGate().close(); }
-
-  /** The owner calls this only after its desired running state is durable. */
-  async releaseClaims(): Promise<void> {
-    if (this.stopped) throw new Error('Publisher runner is stopped');
-    this.requireClaimGate();
-    await this.config.publisher.resume();
-  }
-
-  private requireClaimGate() {
-    const gate = this.config.publisher.claimGate;
-    if (!gate) throw new Error('Publisher does not support live claim control');
-    return gate;
+  /** Same publisher control semantics, with this runner's release lifetime enforced. */
+  get claimControl(): AsyncLiftClaimControl {
+    if (!this.ownedClaimControl) throw new Error('Publisher does not support live claim control');
+    return this.ownedClaimControl;
   }
 
   async start(): Promise<void> {
@@ -109,8 +109,7 @@ export class AsyncLiftRunner {
     this.stopped = false;
     try {
       if (this.config.startPaused === true) {
-        if (this.config.publisher.claimGate) await this.holdClaims();
-        else await this.config.publisher.pause();
+        await this.config.publisher.pause();
       }
       // Startup recovery IS the first pass: with the scheduling capability its outcome seeds
       // the cadence choice directly — one inventory, no second boot-time outlook read. Without
@@ -178,7 +177,7 @@ export class AsyncLiftRunner {
   private async walletLoop(walletId: string): Promise<void> {
     while (!this.stopped) {
       try {
-        const gate = this.config.publisher.claimGate;
+        const gate = this.config.publisher.claimControl;
         if (gate && gate.state !== 'running') { await this.idleWalletWait(walletId); continue; }
         const processed = await this.config.publisher.processNext(walletId);
         if (!processed && !this.stopped) {

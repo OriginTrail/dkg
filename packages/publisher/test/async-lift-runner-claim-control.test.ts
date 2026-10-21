@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AsyncLiftRunner, TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { kaVmPublishRequest, stageKnowledgeAssetShareSnapshot } from '../../../scripts/testing/ka-vm-publish.js';
-import { AsyncLiftClaimGate } from '../src/async-lift-claim-gate.js';
+import { createAsyncLiftClaimControl } from '../src/async-lift-claim-gate.js';
 import { createRunnerPublisher as createPublisher } from './_helpers/async-lift-runner-fixture.js';
 
 describe('AsyncLiftRunner claim control', () => {
@@ -16,12 +16,12 @@ describe('AsyncLiftRunner claim control', () => {
       await runner.start();
       expect(runner.claimGateStatus().held).toBe(true);
       expect(processNext).not.toHaveBeenCalled();
-      await runner.releaseClaims();
+      await runner.claimControl.release();
       await vi.waitFor(() => expect(processNext).toHaveBeenCalledTimes(1));
       expect(runner.claimGateStatus().held).toBe(false);
       await publisher.pause();
       expect(runner.claimGateStatus().held).toBe(true);
-      await runner.releaseClaims();
+      await runner.claimControl.release();
       await vi.waitFor(() => expect(processNext).toHaveBeenCalledTimes(2));
     } finally { await runner.stop(); await store.close(); }
   });
@@ -29,7 +29,7 @@ describe('AsyncLiftRunner claim control', () => {
   it('preserves legacy paused maintenance before startup recovery without live claim control', async () => {
     const order: string[] = [];
     let paused = false;
-    const publisher = createPublisher({ claimGate: undefined,
+    const publisher = createPublisher({ claimControl: undefined,
       pause: async () => { paused = true; order.push('pause'); },
       recover: async () => { expect(paused).toBe(true); order.push('recover'); return 0; },
       processNext: async () => { expect(paused).toBe(true); return null; },
@@ -39,7 +39,7 @@ describe('AsyncLiftRunner claim control', () => {
     try {
       await runner.start();
       expect(order).toEqual(['pause', 'recover']);
-      expect(() => runner.holdClaims()).toThrow('does not support live claim control');
+      expect(() => runner.claimControl.hold()).toThrow('does not support live claim control');
     } finally { await runner.stop(); }
   });
 
@@ -53,55 +53,73 @@ describe('AsyncLiftRunner claim control', () => {
     const runner = new AsyncLiftRunner({ publisher, walletIds: ['wallet-1'] });
     try {
       await publisher.pause();
-      await runner.releaseClaims();
-      expect(publisher.claimGate.state).toBe('running');
+      await runner.claimControl.release();
+      expect(publisher.claimControl.state).toBe('running');
       expect(onWorkAvailable).toHaveBeenCalledOnce();
     } finally { detach(); await runner.stop(); await store.close(); }
+  });
+
+  it('publishes the complete release notification through its public control capability', async () => {
+    const store = new OxigraphStore();
+    const publisher = new TripleStoreAsyncLiftPublisher(store);
+    const onWorkAvailable = vi.fn();
+    const detach = publisher.reconciliationScheduling.attachScheduler({
+      onReconciliationDemand() {}, onWalletRelease() {}, onWorkAvailable,
+    });
+    try {
+      await publisher.claimControl.hold();
+      expect(publisher.claimControl.state).toBe('held');
+      await publisher.claimControl.release();
+      expect(onWorkAvailable).toHaveBeenCalledOnce();
+      await publisher.claimControl.close();
+      await expect(publisher.claimControl.release()).rejects.toThrow('closed');
+      expect(onWorkAvailable).toHaveBeenCalledOnce();
+    } finally { detach(); await store.close(); }
   });
 
   it('closes admission synchronously before the publisher claim drain settles', async () => {
     let releaseDrain!: () => void;
     const drainHeld = new Promise<void>(resolve => { releaseDrain = resolve; });
-    const claimGate = new AsyncLiftClaimGate(async commit => { await drainHeld; commit?.(); });
-    const runner = new AsyncLiftRunner({ publisher: createPublisher({ claimGate }), walletIds: ['wallet-1'] });
-    const closing = runner.closeClaims();
+    const claimControl = createAsyncLiftClaimControl(async commit => { await drainHeld; commit?.(); }, () => {});
+    const runner = new AsyncLiftRunner({ publisher: createPublisher({ claimControl }), walletIds: ['wallet-1'] });
+    const closing = runner.claimControl.close();
     try {
       expect(runner.claimGateStatus()).toMatchObject({ held: true, closed: true });
-      expect(claimGate.state).toBe('closed');
-      await expect(runner.releaseClaims()).rejects.toThrow('closed');
+      expect(claimControl.state).toBe('closed');
+      await expect(runner.claimControl.release()).rejects.toThrow('closed');
     } finally { releaseDrain(); await closing; await runner.stop(); }
   });
 
   it('never reopens the publisher gate when terminal closure races an awaited resume', async () => {
     let enterResume!: () => void; const entered = new Promise<void>(resolve => { enterResume = resolve; });
     let releaseResume!: () => void; const held = new Promise<void>(resolve => { releaseResume = resolve; });
-    const claimGate = new AsyncLiftClaimGate(async commit => {
+    const claimControl = createAsyncLiftClaimControl(async commit => {
       if (commit) { enterResume(); await held; commit(); }
-    });
+    }, () => {});
     const processNext = vi.fn(async () => null);
-    const runner = new AsyncLiftRunner({ publisher: createPublisher({ claimGate, processNext }),
+    const runner = new AsyncLiftRunner({ publisher: createPublisher({ claimControl, processNext }),
       walletIds: ['wallet-1'], pollIntervalMs: 60_000 });
-    await runner.holdClaims(); await runner.start();
-    const resuming = runner.releaseClaims();
+    await runner.claimControl.hold(); await runner.start();
+    const resuming = runner.claimControl.release();
     const rejected = expect(resuming).rejects.toThrow('closed');
     try {
-      await entered; await runner.closeClaims();
+      await entered; await runner.claimControl.close();
       releaseResume(); await rejected;
       expect(runner.claimGateStatus()).toMatchObject({ held: true, closed: true });
-      expect(claimGate.state).toBe('closed');
+      expect(claimControl.state).toBe('closed');
       expect(processNext).not.toHaveBeenCalled();
-      await expect(runner.releaseClaims()).rejects.toThrow('closed');
+      await expect(runner.claimControl.release()).rejects.toThrow('closed');
     } finally { releaseResume(); await resuming.catch(() => {}); await runner.stop(); }
   });
 
   it('allows legacy polling but refuses live control without a publisher-owned gate', async () => {
     const processNext = vi.fn(async () => null);
-    const runner = new AsyncLiftRunner({ publisher: createPublisher({ claimGate: undefined, processNext }),
+    const runner = new AsyncLiftRunner({ publisher: createPublisher({ claimControl: undefined, processNext }),
       walletIds: ['wallet-1'], pollIntervalMs: 60_000 });
     try {
       await runner.start();
       expect(processNext).toHaveBeenCalled();
-      expect(() => runner.holdClaims()).toThrow('does not support live claim control');
+      expect(() => runner.claimControl.hold()).toThrow('does not support live claim control');
     } finally { await runner.stop(); }
   });
 
@@ -113,8 +131,10 @@ describe('AsyncLiftRunner claim control', () => {
     const first = new AsyncLiftRunner({ publisher, walletIds: ['wallet-1'], pollIntervalMs: 60_000 });
     const second = new AsyncLiftRunner({ publisher, walletIds: ['wallet-1'], pollIntervalMs: 60_000 });
     try {
+      const retiringControl = first.claimControl;
       await first.start(); await first.stop();
-      expect(publisher.claimGate.state).toBe('running');
+      await expect(retiringControl.release()).rejects.toThrow('stopped');
+      expect(publisher.claimControl.state).toBe('running');
       await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
       await second.start();
       await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());

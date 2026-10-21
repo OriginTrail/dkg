@@ -60,8 +60,9 @@ async function saveState(dataDir: string, state: PublisherDesiredState): Promise
 export async function createPublisherLiveControl(
   runner: AsyncLiftRunner, dataDir: string, startPaused = false,
 ): Promise<PublisherLiveControl> {
+  const claims = runner.claimControl;
   // A failed read or write cannot accidentally start the runner unpaused.
-  await runner.holdClaims();
+  await claims.hold();
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   let state: PublisherDesiredState;
   let existing = true;
@@ -77,7 +78,7 @@ export async function createPublisherLiveControl(
     existing = false;
   }
   if (!existing) await saveState(dataDir, state);
-  if (state.desiredState === 'running') await runner.releaseClaims();
+  if (state.desiredState === 'running') await claims.release();
   let fault: PublisherLiveStatus['fault'] = null;
   let tail: Promise<unknown> = Promise.resolve();
   const status = (): PublisherLiveStatus => {
@@ -95,16 +96,16 @@ export async function createPublisherLiveControl(
         generation: nextGeneration(state.generation), updatedAt: new Date().toISOString() };
       try {
         // Pause first so persistence latency cannot admit additional claims; resume opens last.
-        if (desiredState === 'paused') await runner.holdClaims();
+        if (desiredState === 'paused') await claims.hold();
         await saveState(dataDir, next);
         if (runner.claimGateStatus().closed) throw new Error('Publisher live control closed during persistence');
-        if (desiredState === 'running') await runner.releaseClaims();
+        if (desiredState === 'running') await claims.release();
         state = next;
         return status();
       } catch (error) {
         fault = 'persistence_or_control_failed';
         // A failed operation is never acknowledged. Keep every runner gate closed until restart.
-        await runner.closeClaims().catch(() => {});
+        await claims.close().catch(() => {});
         throw new Error('Publisher control could not commit; restart to reload durable intent', { cause: error });
       }
     });
@@ -113,7 +114,7 @@ export async function createPublisherLiveControl(
   };
   return Object.freeze({ status, pause: () => change('paused'), resume: () => change('running'),
     close: async () => {
-      const fenced = runner.closeClaims();
+      const fenced = claims.close();
       await Promise.all([tail, fenced]);
     } });
 }

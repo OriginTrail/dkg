@@ -1,4 +1,4 @@
-import { AsyncLiftClaimGate } from './async-lift-claim-gate.js';
+import { createAsyncLiftClaimControl } from './async-lift-claim-gate.js';
 import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
 import { completionTrace } from './async-lift-completion-trace.js';
@@ -615,9 +615,9 @@ export class TripleStoreAsyncLiftPublisher
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
   private readonly claimCoordinator: AsyncLiftClaimCoordinator;
-  readonly claimGate = new AsyncLiftClaimGate(commit =>
+  readonly claimControl = createAsyncLiftClaimControl(commit =>
     this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimTransaction(owner,
-      async () => { commit?.(); })));
+      async () => { commit?.(); })), () => this.notifyWorkAvailable());
   private graphEnsured = false;
 
   private readonly rawLiftJobHandler: AsyncLiftJobHandler = {
@@ -730,7 +730,7 @@ export class TripleStoreAsyncLiftPublisher
       {
         journalCompletion: this.journalCompletion,
         ensureGraph: async () => await this.ensureGraph(),
-        isPaused: () => this.claimGate.state !== 'running',
+        isPaused: () => this.claimControl.state !== 'running',
         readStatus: async (jobId) => await this.readJobPayload(jobId),
         nextClaimCandidate: async (section, now) => await this.readNextClaimCandidate(section, now),
         toClaimed: (current, walletId) =>
@@ -2460,7 +2460,7 @@ export class TripleStoreAsyncLiftPublisher
     // must not do either. The interrupted half above deliberately keeps running while paused: it
     // repairs jobs this node has ALREADY broadcast, where stopping would leave a live transaction
     // unreconciled — the phantom the pre-send write-ahead exists to make visible.
-    if (this.claimGate.state !== 'running') return 0;
+    if (this.claimControl.state !== 'running') return 0;
     const resolver = this.chainProofResolver;
     if (!resolver) return 0;
 
@@ -2761,12 +2761,11 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async pause(): Promise<void> {
-    await this.claimGate.hold();
+    await this.claimControl.hold();
   }
 
   async resume(): Promise<void> {
-    await this.claimGate.release();
-    this.notifyWorkAvailable();
+    await this.claimControl.release();
   }
 
   async cancel(jobId: string): Promise<void> {

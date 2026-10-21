@@ -1,10 +1,10 @@
-import { AsyncLiftClaimGate } from '../../src/async-lift-claim-gate.js';
+import { createAsyncLiftClaimControl } from '../../src/async-lift-claim-gate.js';
 import type { AsyncLiftPublisher } from '../../src/index.js';
 
 export function createRunnerPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLiftPublisher {
-  const claimGate = overrides.claimGate ?? new AsyncLiftClaimGate(async commit => { commit?.(); });
+  const claimControl = overrides.claimControl ?? createAsyncLiftClaimControl(async commit => { commit?.(); }, () => {});
   return {
-    claimGate,
+    claimControl,
     lift: async () => {},
     claimNext: async () => null,
     update: async () => {},
@@ -17,8 +17,8 @@ export function createRunnerPublisher(overrides: Partial<AsyncLiftPublisher> = {
     reconcileTransactions: async () => 0,
     drainDetachedExecutions: async () => {},
     getStats: () => ({}),
-    pause: () => claimGate.hold(),
-    resume: () => claimGate.release(),
+    pause: () => claimControl.hold(),
+    resume: () => claimControl.release(),
     cancel: async () => {},
     retry: async () => {},
     clear: async () => {},

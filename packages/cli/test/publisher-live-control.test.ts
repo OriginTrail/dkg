@@ -104,7 +104,7 @@ describe('durable control of the active publisher wallet loops', () => {
   it('cannot reopen a runner after terminal claim closure', async () => {
     const { runner, control } = await fixture();
     await control.pause(); await control.close();
-    await expect(runner.releaseClaims()).rejects.toThrow('closed');
+    await expect(runner.claimControl.release()).rejects.toThrow('closed');
     await expect(control.resume()).rejects.toThrow('unavailable');
     expect(control.status().wallets.every(w => w.paused && w.generation === 1)).toBe(true);
   });
@@ -198,8 +198,8 @@ describe('durable control of the active publisher wallet loops', () => {
     const accepted = await publisher.getStatus(jobId);
     let entered!: () => void; const resumingPublisher = new Promise<void>(resolve => { entered = resolve; });
     let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
-    const originalResume = publisher.claimGate.release.bind(publisher.claimGate);
-    vi.spyOn(publisher.claimGate, 'release').mockImplementationOnce(async () => {
+    const originalResume = publisher.claimControl.release.bind(publisher.claimControl);
+    vi.spyOn(publisher.claimControl, 'release').mockImplementationOnce(async () => {
       entered(); await held; await originalResume();
     });
     const resuming = control.resume();
