@@ -16,7 +16,12 @@ import { NextTurnRecurringTaskV1 } from './next-turn-recurring-task.js';
 interface RetryEntry {
   readonly repair: Rfc64FinalizedPrivatePlacementRepairV1;
   readonly retry: FinalizedPrivateRepairRetryV1;
+  failureHistoryRead: boolean;
   attempts: number;
+}
+interface ResetPlan {
+  readonly repair: Rfc64FinalizedPrivatePlacementRepairV1;
+  readonly state: PrivatePlacementFailureStateV1 | null;
 }
 interface GraphLane {
   readonly id: ContextGraphIdV1;
@@ -123,11 +128,10 @@ export class FinalizedPrivatePlacementOwnerV1 {
   /** Commit every reset before changing memory, generations or wakeups. */
   retryFailed(): number {
     if (this.closed) throw new Error('Private placement owner is closed');
-    const resets: Rfc64PrivatePlacementFailureWriteV1[] = [];
+    const resets: ResetPlan[] = [];
     for (const repair of this.#dependencies.listFinalizedPrivateRepairs()) {
-      const previous = this.#retries.get(finalizedPrivateRepairKeyV1(repair))?.retry.snapshot()
-        ?? this.#dependencies.readPrivateFailure(repair);
-      if (previous) resets.push({ repair, state: resetPrivatePlacementFailureStateV1(previous) });
+      const reset = this.#prepareReset(repair);
+      if (reset.state) resets.push(reset);
     }
     if (!resets.length) return 0;
     this.#commitResets(resets);
@@ -148,9 +152,8 @@ export class FinalizedPrivatePlacementOwnerV1 {
     const key = finalizedPrivateRepairKeyV1(repair);
     let entry = this.#retries.get(key);
     if (!entry) {
-      entry = { repair, retry: new FinalizedPrivateRepairRetryV1(), attempts: 0 };
-      try { entry.retry.restore(this.#dependencies.readPrivateFailure(repair), Date.now()); }
-      catch { /* Unavailable hints cannot park owed work. */ }
+      entry = { repair, retry: new FinalizedPrivateRepairRetryV1(), failureHistoryRead: false, attempts: 0 };
+      this.#restoreFailureHistory(entry);
       this.#retries.set(key, entry);
       let lane = this.#lanes.get(repair.contextGraphId);
       if (!lane) {
@@ -179,22 +182,39 @@ export class FinalizedPrivatePlacementOwnerV1 {
     // to its committed state before storage recovers.
     lane.resetPending ||= lane.active !== active;
     if (!lane.resetPending) return false;
-    const resets = [...lane.entries].map(entry => {
-      const previous = entry.retry.snapshot();
-      return { repair: entry.repair, state: previous ? resetPrivatePlacementFailureStateV1(previous) : null };
-    });
+    const resets = [...lane.entries].map(entry => this.#prepareReset(entry.repair));
     this.#commitResets(resets);
     lane.active = active;
     lane.resetPending = false;
     return true;
   }
 
+  /** Unread evidence is not absence; a reset must resolve it before consuming its edge. */
+  #prepareReset(repair: Rfc64FinalizedPrivatePlacementRepairV1): ResetPlan {
+    const entry = this.#retries.get(finalizedPrivateRepairKeyV1(repair));
+    const previous = entry?.failureHistoryRead ? entry.retry.snapshot()
+      : this.#dependencies.readPrivateFailure(repair) ?? entry?.retry.snapshot();
+    return { repair, state: previous ? resetPrivatePlacementFailureStateV1(previous) : null };
+  }
+
+  #restoreFailureHistory(entry: RetryEntry): boolean {
+    if (entry.failureHistoryRead) return true;
+    try {
+      entry.retry.restore(this.#dependencies.readPrivateFailure(entry.repair), Date.now());
+      entry.failureHistoryRead = true;
+      return true;
+    } catch { return false; } // Unread hints cannot park owed work or authorize overwriting old evidence.
+  }
+
   /** Persist the prepared evidence before fencing any loaded scheduling generation. */
-  #commitResets(resets: readonly Rfc64PrivatePlacementFailureWriteV1[]): void {
-    const writes = resets.filter(({ state }) => state !== null);
+  #commitResets(resets: readonly ResetPlan[]): void {
+    const writes = resets.filter((reset): reset is Rfc64PrivatePlacementFailureWriteV1 => reset.state !== null);
     if (writes.length) this.#dependencies.writePrivateFailures(writes);
     // Lane resets also fence loaded entries that have not recorded a failure yet.
-    for (const { repair, state } of resets) this.#retries.get(finalizedPrivateRepairKeyV1(repair))?.retry.retryNow(state);
+    for (const { repair, state } of resets) {
+      const entry = this.#retries.get(finalizedPrivateRepairKeyV1(repair));
+      if (entry) { entry.retry.retryNow(state); entry.failureHistoryRead = true; }
+    }
   }
 
   #observeLane(contextGraphId: ContextGraphIdV1): boolean {
@@ -262,12 +282,16 @@ export class FinalizedPrivatePlacementOwnerV1 {
           if (laneChanged === undefined) return;
           if (laneChanged) this.#runner.request();
           if (attemptGeneration !== entry.retry.generation) return;
+          const historyRead = this.#restoreFailureHistory(entry);
           const capacityOwned = this.#options.fullCatalogs.placementRefused(key, repair, error);
           const recorded = capacityOwned
             ? entry.retry.recordCapacityFailure(attemptGeneration, Date.now())
             : entry.retry.fail(attemptGeneration, Date.now(), this.#options.retryIntervalMs, catalogRepairDiagnosticV1(error).kind);
           if (recorded) {
-            try { this.#dependencies.writePrivateFailures([{ repair, state: entry.retry.snapshot() }]); }
+            try {
+              if (!historyRead) throw new Error('Private placement failure history is unread');
+              this.#dependencies.writePrivateFailures([{ repair, state: entry.retry.snapshot()! }]);
+            }
             catch { this.#warnFailure(new CatalogRepairConditionErrorV1('persistence_unavailable',
               'Private placement failure history could not persist; owed work is retained'), entry); }
           }

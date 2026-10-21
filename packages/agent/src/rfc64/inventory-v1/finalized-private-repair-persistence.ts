@@ -152,21 +152,16 @@ export class FinalizedPrivateRepairPersistenceV1 {
     // Validate the entire batch before opening one owned transaction.
     const rows = entries.map(({ repair, state }) => {
       const digest = digestRfc64FinalizedPrivatePlacementRepairV1(encodeRfc64FinalizedPrivatePlacementRepairV1(repair));
-      const validated = state === null ? null : parsePrivatePlacementFailureStateV1(state);
-      if (state !== null && validated === null) throw new TypeError('Invalid private placement failure state');
-      return { digest, validated, json: validated === null ? null : JSON.stringify(validated) };
+      const validated = parsePrivatePlacementFailureStateV1(state);
+      if (validated === null) throw new TypeError('Invalid private placement failure state');
+      return { digest, validated, json: JSON.stringify(validated) };
     });
     if (rows.length === 0) return;
     const write = () => {
       for (const { digest, json } of rows) {
-        if (json === null) {
-          const remove = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.deleteFinalizedPrivatePlacementFailure);
-          this.host.statement(() => remove.run({ digest }));
-        } else {
-          // INSERT-SELECT cannot resurrect a completed marker. The FK cleans up successful deletion.
-          const save = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.upsertFinalizedPrivatePlacementFailure);
-          this.host.statement(() => save.run({ digest, json }));
-        }
+        // INSERT-SELECT cannot resurrect a completed marker. The FK cleans up successful deletion.
+        const save = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.upsertFinalizedPrivatePlacementFailure);
+        this.host.statement(() => save.run({ digest, json }));
       }
     };
     this.host.write('record private placement failures', write, {

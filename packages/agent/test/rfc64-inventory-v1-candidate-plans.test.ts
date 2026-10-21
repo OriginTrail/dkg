@@ -359,7 +359,7 @@ function expectPlanGate(plans: PlanClass): void {
   }
 
   for (const statementId of ['getFinalizedPrivatePlacementFailure',
-    'deleteFinalizedPrivatePlacementFailure', 'upsertFinalizedPrivatePlacementFailure'] as const) {
+    'upsertFinalizedPrivatePlacementFailure'] as const) {
     expect(plans[statementId].some(detail => detail.includes('USING PRIMARY KEY')),
       `${INVENTORY_V1_STATEMENT_IDS[statementId]} must use its exact repair digest key`).toBe(true);
   }

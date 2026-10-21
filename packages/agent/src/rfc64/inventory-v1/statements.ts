@@ -407,8 +407,6 @@ WHERE repair_digest = :repairDigest AND repair_json = :repairJson;`,
   getFinalizedPrivatePlacementFailure: `
 SELECT state_json FROM rfc64_private_placement_failures_v1
 WHERE repair_digest = :digest;`,
-  deleteFinalizedPrivatePlacementFailure: `
-DELETE FROM rfc64_private_placement_failures_v1 WHERE repair_digest = :digest;`,
   upsertFinalizedPrivatePlacementFailure: `
 INSERT INTO rfc64_private_placement_failures_v1 (repair_digest, state_json)
 SELECT repair_digest, :json FROM rfc64_finalized_private_placement_repairs_v1
@@ -475,7 +473,6 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   insertFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.insert.v1',
   deleteFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.delete.v1',
   getFinalizedPrivatePlacementFailure: 'rfc64.finalized-private-placement-failure.get.v1',
-  deleteFinalizedPrivatePlacementFailure: 'rfc64.finalized-private-placement-failure.delete.v1',
   upsertFinalizedPrivatePlacementFailure: 'rfc64.finalized-private-placement-failure.upsert.v1',
   getUnregisteredAuthoritySeed: 'rfc64.unregistered-authority-seed.get.v1',
   insertUnregisteredAuthoritySeed: 'rfc64.unregistered-authority-seed.insert.v1',
@@ -526,6 +523,5 @@ export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   'insertFinalizedPrivatePlacementRepair',
   'deleteFinalizedPrivatePlacementRepair',
   'insertUnregisteredAuthoritySeed',
-  'deleteFinalizedPrivatePlacementFailure',
   'upsertFinalizedPrivatePlacementFailure',
 ] as const satisfies readonly InventoryV1StatementKey[]);

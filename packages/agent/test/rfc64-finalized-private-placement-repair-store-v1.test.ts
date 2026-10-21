@@ -129,7 +129,10 @@ it('refuses invalid failure state, and ignores damaged diagnostics without losin
   const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-failure-corrupt-')); roots.push(dataDir);
   const store = await openStore(dataDir); await store.put(repair);
   expect(() => store.writeFailure(repair, { ...failure, kind: 'secret' } as any)).toThrow('Invalid');
-  store.writeFailure(repair, failure); inventories.pop()!.close();
+  store.writeFailure(repair, failure);
+  expect(() => store.writeFailure(repair, null as any)).toThrow('Invalid');
+  expect(store.readFailure(repair)).toEqual(failure);
+  inventories.pop()!.close();
   const db = new DatabaseSync(join(dataDir, 'rfc64-sync', 'inventory-v1.sqlite3'));
   db.exec("UPDATE rfc64_private_placement_failures_v1 SET state_json = 'broken'"); db.close();
   const reopened = await openStore(dataDir);
@@ -369,3 +372,84 @@ it.each(['availability', 'refused request'] as const)(
     } finally { db.close(); }
   },
 );
+
+
+it.each([
+  ['availability', false], ['availability', true],
+  ['refused request', false], ['refused request', true],
+] as const)('resolves unread SQLite failure history before a %s reset (first reset read fails: %s)', async (transition, failFirstReset) => {
+  vi.useFakeTimers(); vi.setSystemTime(20000);
+  const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-unread-reset-')); roots.push(dataDir);
+  let store = await openStore(dataDir); await store.put(repair); store.writeFailure(repair, failure);
+  let laneActive = true, readUnavailable = true;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const attempt = vi.fn(async (row: typeof repair) => { await store.delete(row); });
+  attempt.mockImplementationOnce(async () => { await held; throw new Error('aborted old placement'); });
+  const makeOwner = () => {
+    const owner = new Rfc64SwmCatalogProjectionOwnerV1({
+      resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
+      listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
+      acceptsFinalizedPrivateLane: () => laneActive, readRepairRevision: () => null,
+      listFinalizedPrivateRepairs: () => store.list(),
+      readPrivateFailure: row => { if (readUnavailable) throw new Error('diagnostic read unavailable'); return store.readFailure(row); },
+      writePrivateFailures: entries => store.writeFailures(entries),
+      repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
+    });
+    owners.push(owner); return owner;
+  };
+  const ctx = createOperationContext('system');
+  let owner = makeOwner(); owner.start(ctx); await vi.advanceTimersByTimeAsync(0);
+  const observeInactive = () => {
+    if (transition === 'availability') owner.observeLaneAvailability(repair.contextGraphId);
+    else expect(owner.requestFinalizedPrivate({ repair, ctx }).accepted).toBe(false);
+  };
+  try {
+    expect(attempt).toHaveBeenCalledTimes(1); // Unread diagnostics must not park owed work.
+    laneActive = false;
+    if (failFirstReset) {
+      observeInactive();
+      expect(store.readFailure(repair)).toEqual(failure);
+    }
+    readUnavailable = false;
+    observeInactive();
+  } finally {
+    const closing = owner.close(); release(); await closing; // Stop before an attempt writes new evidence.
+  }
+  inventories.pop()!.close(); store = await openStore(dataDir);
+  expect(store.list()).toEqual([repair]);
+  expect(store.readFailure(repair)).toEqual({ ...failure, consecutiveFailures: 0,
+    sameKindFailures: 0, nextAttemptAtMs: null, parked: false });
+  laneActive = true; owner = makeOwner(); owner.start(ctx); await owner.whenIdle();
+  expect(attempt).toHaveBeenCalledTimes(2); expect(store.list()).toEqual([]);
+});
+
+
+it('keeps unread SQLite history intact while runtime backoff continues, until operator reset can read it', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(20000);
+  const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-unread-failure-')); roots.push(dataDir);
+  const store = await openStore(dataDir); await store.put(repair); store.writeFailure(repair, failure);
+  let readUnavailable = true;
+  const attempt = vi.fn(async () => { throw new Error('current transport failure'); });
+  const owner = new Rfc64SwmCatalogProjectionOwnerV1({
+    resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
+    listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
+    acceptsFinalizedPrivateLane: () => true, readRepairRevision: () => null,
+    listFinalizedPrivateRepairs: () => store.list(),
+    readPrivateFailure: row => { if (readUnavailable) throw new Error('diagnostic read unavailable'); return store.readFailure(row); },
+    writePrivateFailures: entries => store.writeFailures(entries),
+    repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
+  });
+  owners.push(owner); const ctx = createOperationContext('system'); owner.start(ctx); await owner.whenIdle();
+  expect(attempt).toHaveBeenCalledTimes(1);
+  expect(store.readFailure(repair)).toEqual(failure); // Best-effort diagnostics cannot overwrite unread history.
+  const before = owner.status()?.finalizedPrivatePlacement;
+  expect(() => owner.retryFailedPrivate(ctx)).toThrow('diagnostic read unavailable');
+  expect(owner.status()?.finalizedPrivatePlacement).toEqual(before);
+  owner.start(ctx); await owner.whenIdle(); expect(attempt).toHaveBeenCalledTimes(1); // Runtime cooldown still applies.
+  readUnavailable = false; expect(owner.retryFailedPrivate(ctx)).toBe(1);
+  await owner.close(); inventories.pop()!.close();
+  const reopened = await openStore(dataDir);
+  expect(reopened.readFailure(repair)).toEqual({ ...failure, consecutiveFailures: 0,
+    sameKindFailures: 0, nextAttemptAtMs: null, parked: false });
+});

@@ -28,6 +28,13 @@ placement; no affected repair passes an uncommitted reset. An unavailable author
 lookup also preserves that obligation. First and last failure timestamps remain
 intact. A failed graph reset blocks that graph only; unrelated graph repairs keep
 running, and blocked sibling observers settle without an immediate retry loop.
+An unavailable initial failure-history read remains distinct from a confirmed
+absent record. A lane or operator reset must resolve that history before its
+transaction can advance scheduling; failed reads leave the reset pending. While
+history is unread, runtime backoff still applies, but best-effort diagnostics do
+not overwrite older durable failure timestamps. Scheduling-only fences remain
+local to the owner; persisted writes always contain failure evidence, and exact
+marker deletion owns cascade cleanup.
 Public catalog reconciliation retains its existing retry policy.
 
 `GET /api/status` reports the additional `failures` aggregate inside
