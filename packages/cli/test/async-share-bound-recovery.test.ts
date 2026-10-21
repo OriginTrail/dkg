@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { OxigraphStore, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { PromoteJobLeaseError } from '@origintrail-official/dkg-publisher';
@@ -370,6 +371,58 @@ describe('async shares acquire durable replay authority before promotion', () =>
       expect(await f.store.countQuads(draft)).toBe(before.length);
       expect((await readAssertionPromoteEvidence(f.store, CG, NAME, AUTHOR)).seal).toBeUndefined();
     } finally { release(); await holder; await running; }
+  });
+
+  it.each([{ revoked: false, leftover: true }, { revoked: true, leftover: true },
+    { revoked: false, leftover: false }, { revoked: true, leftover: false }])('fences completed legacy VM cleanup (revoked=$revoked, leftover=$leftover)', async ({ revoked, leftover }) => {
+    const f = await setup();
+    await f.agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR });
+    const vm = f.finalized.sharedGraphUri.replace('/_shared_memory/', '/_verifiable_memory/');
+    await f.store.insert(f.finalized.publicQuads.map(q => ({ ...q, graph: vm })));
+    if (leftover) await f.store.insert(f.finalized.publicQuads.map(q => ({ ...q, graph: f.finalized.graphUri })));
+    const graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    for (const predicate of ['promoteOperationIntent', 'memoryLayer'])
+      await f.store.deleteByPattern({ graph, subject, predicate: `http://dkg.io/ontology/${predicate}` });
+    await f.store.insert([{ graph, subject, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"VM"' }]);
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    delete f.agent.prepareAtomicAssertionShare; // Exercise actual existing-seal finalization too.
+    const job = await f.claim();
+    let release!: () => void, entered!: () => void;
+    const blocked = new Promise<void>(r => { release = r; });
+    const reached = new Promise<void>(r => { entered = r; });
+    const scoped = (f.publisher as any).assertionScopedQuads.bind(f.publisher);
+    let paused = false;
+    const barrier = vi.spyOn(f.publisher as any, 'assertionScopedQuads').mockImplementation(async (uri: string) => {
+      const rows = await scoped(uri);
+      if (uri === vm && !paused) { paused = true; entered(); await blocked; }
+      return rows;
+    });
+    const promote = vi.spyOn(f.publisher, 'assertionPromote');
+    const bind = vi.spyOn(f.queue, 'bindRecovery');
+    const preparing = f.prepare(job);
+    try {
+      await reached;
+      let current = job;
+      if (revoked) { f.expire(); await f.queue.recoverOnStartup(); current = await f.claim(); }
+      release();
+      if (revoked) {
+        await expect(preparing).rejects.toBeInstanceOf(PromoteJobLeaseError);
+        expect(await f.store.countQuads(f.finalized.graphUri)).toBe(leftover ? 1 : 0);
+        expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+      } else {
+        expect((await preparing).completedResult).toMatchObject({ promotedCount: 0 });
+        expect(await f.store.countQuads(f.finalized.graphUri)).toBe(0);
+        expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+      }
+      barrier.mockRestore();
+      expect((await f.run(current)).outcome).toBe('succeeded');
+      expect((await f.queue.getStatus(f.jobId)).state).toBe('succeeded');
+      expect(current.jobId).toBe(f.jobId);
+      expect(await f.store.countQuads(f.finalized.graphUri)).toBe(0);
+      expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+      expect(await f.store.countQuads(vm)).toBe(1);
+      expect(promote).not.toHaveBeenCalled(); expect(bind).not.toHaveBeenCalled();
+    } finally { release(); await preparing.catch(() => {}); }
   });
 
   it('fails preparation before promotion without marking an unsafe start', async () => {
