@@ -76,7 +76,8 @@ export function probeWorkerLiveness(
       });
       probe.once('error', (error) => {
         const code = safeErrorCode(error);
-        const outcome = code.startsWith('HPE_') ? 'malformed_response'
+        const rawCode = (error as NodeJS.ErrnoException).code;
+        const outcome = typeof rawCode === 'string' && rawCode.startsWith('HPE_') ? 'malformed_response'
           : connected && code === 'ECONNRESET' ? 'premature_close'
           : connected ? 'request_error' : 'connect_error';
         settle(outcome, code);

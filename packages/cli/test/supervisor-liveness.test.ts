@@ -1,7 +1,7 @@
 /**
  * Unit tests for the supervisor-liveness watchdog — NO service mocks.
  *
- * `startLivenessWatcher`'s `probe` / `onUnresponsive` / `onFailure` /
+ * `startLivenessWatcher`'s `probe` / `onUnresponsive` / `onObservation` /
  * `isShuttingDown` parameters are the module's OWN documented
  * dependency-injection seams (the source: "Injectable probe — tests pass a
  * stub"; "Exported so tests can verify the truth table"), not service
@@ -122,7 +122,9 @@ describe('startLivenessWatcher', () => {
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       intervalMs: 1000,
       timeoutMs: 100,
       consecutiveFailuresToKill: 3,
@@ -261,7 +263,9 @@ describe('startLivenessWatcher', () => {
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       intervalMs: 1000,
       consecutiveFailuresToKill: 1,
     });
@@ -284,7 +288,9 @@ describe('startLivenessWatcher', () => {
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       intervalMs: 1000,
       consecutiveFailuresToKill: 2,
     });
@@ -314,7 +320,9 @@ describe('startLivenessWatcher', () => {
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       isShuttingDown,
       intervalMs: 1000,
       consecutiveFailuresToKill: 1,
@@ -432,7 +440,9 @@ describe('startLivenessWatcher', () => {
       port: 1234,
       probe,
       onUnresponsive,
-      onFailure,
+      onObservation: (observation) => {
+        if (observation.consecutiveFailures > 0) onFailure(observation.consecutiveFailures);
+      },
       isShuttingDown: () => shuttingDown,
       intervalMs: 1000,
       consecutiveFailuresToKill: 3,

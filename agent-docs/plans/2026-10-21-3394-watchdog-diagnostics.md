@@ -68,3 +68,5 @@ Progress: structured transport results, bounded generation history, cancellation
 Private bundle inspection confirmed the published restart chronology and ambiguous failed responses; it did not supply pre-restart per-probe classes or a causal stack. Subsequent sync activity belongs to replacement startup and cannot establish the preceding stall's cause.
 
 Live setup: isolated `.tmp/issue3394-live`, owned container `dkg3394-blazegraph`, loopback API/store ports 19394/19395, prepared batch-1 claimed as `issue3394-20261021`. The pool is Base Sepolia, unlike the Gnosis incident. Use this as controlled validation, explicitly not exact historical reproduction. No deployment wallets or services will be used.
+
+Review round 1: classify native parser failures before sanitizing their codes; add valid-status/malformed-header coverage; remove the superseded count-only callback. The first live load remains pinned to `9855f8f72`; rebuild/restart the owned supervisor after it finishes before the controlled interruption check.

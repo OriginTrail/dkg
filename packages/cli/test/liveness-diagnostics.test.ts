@@ -63,11 +63,13 @@ describe('bounded HTTP probe diagnostics', () => {
   it.each([
     ['premature_close', 'HTTP/1.1 200 OK\r\nX-Incomplete: value'],
     ['malformed_response', 'PRIVATE-invalid-response\r\n\r\n'],
+    ['malformed_response', 'HTTP/1.1 200 OK\r\nX-Test: private\rX\r\n\r\n'],
   ] as const)('classifies %s without retaining parser input', async (outcome, response) => {
     await withServer((socket) => socket.once('data', () => socket.end(response)), async (port) => {
       const result = await probeWorkerLiveness(port);
       expect(result).toMatchObject({ outcome, connected: true, headersReceived: false });
-      expect(JSON.stringify(result)).not.toMatch(/PRIVATE|Incomplete|value/);
+      expect(JSON.stringify(result)).not.toMatch(/PRIVATE|private|Incomplete|value/);
+      if (response.includes('X-Test:')) expect(result.errorCode).toBe('UNKNOWN');
     });
   });
 
@@ -129,7 +131,6 @@ describe('generation-bound diagnostic history', () => {
     const watcher = startLivenessWatcher({ port: 1, intervalMs: 10,
       probe: async () => ++count <= 12 ? healthy() : failure(),
       onObservation: (item) => { item.generation = 'private'; item.probe.outcome = 'cancelled'; throw new Error('observer'); },
-      onFailure: () => { throw new Error('logger'); },
       onUnresponsive: (summary) => summaries.push(summary) });
     await vi.advanceTimersByTimeAsync(200);
     expect(summaries[0].recent).toHaveLength(8);

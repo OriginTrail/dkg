@@ -83,11 +83,6 @@ export interface LivenessWatcherOpts {
   /** Called whenever the threshold trips. Wired by the supervisor to `child.kill('SIGKILL')`. */
   onUnresponsive: (summary: LivenessRestartSummary) => void;
   onObservation?: (observation: LivenessObservation) => void;
-  /**
-   * Called once per failure increment (not per healthy probe) for log/telemetry.
-   * Receives the running consecutive-failure count after the increment.
-   */
-  onFailure?: (consecutive: number) => void;
   intervalMs?: number;
   timeoutMs?: number;
   consecutiveFailuresToKill?: number;
@@ -207,10 +202,6 @@ export function startLivenessWatcher(opts: LivenessWatcherOpts): { stop(): void 
       if (recent.length > LIVENESS_HISTORY_LIMIT) recent.shift();
       // Logging callbacks cannot disarm the watchdog or mutate retained history.
       try { opts.onObservation?.(structuredClone(observation)); } catch { /* best effort */ }
-      if (stopped) return;
-      if (consecutiveFailures > 0) {
-        try { opts.onFailure?.(consecutiveFailures); } catch { /* best effort */ }
-      }
       if (stopped) return;
       if (consecutiveFailures >= threshold) {
         stop();
