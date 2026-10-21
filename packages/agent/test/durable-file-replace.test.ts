@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { replaceDurableFile } from '../src/durable-file-replace.js';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
+import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
 import { saveSourceWorkerState } from '../src/source-worker.js';
 
 const failure = vi.hoisted(() => ({ directory: '', phase: '' as 'sync' | 'close' | 'file' | '', code: 'EPERM' }));
@@ -145,4 +146,19 @@ it('concurrent replacements retain complete contents, independent temporary name
   expect(contents).toContain(await readFile(path, 'utf8'));
   expect(await readdir(parent)).toEqual(['concurrent.json']);
   if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600 & ~process.umask());
+});
+
+it.each([false, true])('snapshot admission retries pending ancestors for a different snapshot=%s', async different => {
+  const root = await directory(), created = join(root, 'new'), dataDir = join(created, 'data');
+  const snapshots = join(dataDir, 'named-ka-vm-lifecycle-snapshots');
+  const apply = vi.fn(async () => { expect(synced).toEqual(expect.arrayContaining([snapshots, dataDir, created, root])); });
+  const owner = new NamedKaVmLifecycleRepair({ dataDir, writeLocks: new Map(), isCurrent: async () => true, apply, warn: () => {} });
+  try {
+    failure.directory = created; failure.phase = 'sync';
+    await expect(owner.submit(confirmedMaterializationFixture().input)).rejects.toMatchObject({ code: 'EPERM' });
+    expect(apply).not.toHaveBeenCalled();
+    synced.splice(0); failure.phase = '';
+    expect(await owner.submit(confirmedMaterializationFixture(different).input)).toBe('repaired');
+    expect(apply).toHaveBeenCalledOnce();
+  } finally { failure.phase = ''; await owner.stop(); }
 });

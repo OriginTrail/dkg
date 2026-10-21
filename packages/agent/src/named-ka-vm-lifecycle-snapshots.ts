@@ -2,10 +2,11 @@
 import { createHash } from 'node:crypto';
 import { readFile, readdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { DurableDirectory } from '@origintrail-official/dkg-storage';
 import { DurableReplaceableFile } from './durable-file-replace.js';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, type LifecycleRepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
-import type { ConfirmedLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
+import { lifecycleMaterializationWire, type ConfirmedLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
 
 const digest = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
 const validRef = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -14,7 +15,11 @@ export class NamedKaVmLifecycleSnapshots {
   private readonly references = new WeakMap<ConfirmedLifecycleMaterialization, string>();
   private readonly durable = new Set<string>();
   private readonly directory: string;
-  constructor(dataDir: string) { this.directory = join(dataDir, 'named-ka-vm-lifecycle-snapshots'); }
+  private readonly directoryDurability: DurableDirectory;
+  constructor(dataDir: string) {
+    this.directory = join(dataDir, 'named-ka-vm-lifecycle-snapshots');
+    this.directoryDurability = new DurableDirectory(this.directory, { mode: 0o700 });
+  }
 
   async decode(value: unknown): Promise<Map<string, LifecycleRepairEntry>> {
     const journal = value as { version?: unknown; entries?: unknown } | null;
@@ -48,9 +53,11 @@ export class NamedKaVmLifecycleSnapshots {
       if (!snapshot) continue;
       const cached = this.references.get(snapshot);
       if (cached && this.durable.has(cached)) continue;
-      const bytes = JSON.stringify(snapshot), ref = cached ?? digest(bytes);
+      const bytes = JSON.stringify(lifecycleMaterializationWire(snapshot)), ref = cached ?? digest(bytes);
       if (!this.durable.has(ref)) {
+        await this.directoryDurability.create();
         await new DurableReplaceableFile(join(this.directory, `${ref}.json`), { fileMode: 0o600, directoryMode: 0o700 }).replace(bytes);
+        await this.directoryDurability.persist();
         this.durable.add(ref);
       }
       this.references.set(snapshot, ref);

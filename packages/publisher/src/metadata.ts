@@ -47,7 +47,7 @@ const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
-const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set([
+export const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set([
   `${DKG}accessPolicy`,
   `${DKG}allowedPeer`,
   `${DKG}publisherPeerId`,
@@ -57,7 +57,7 @@ const LOCAL_TRUSTED_KA_ANCHOR_PREDICATES = new Set([
   `${DKG}merkleRoot`,
 ]);
 const LOCAL_TRUSTED_KA_UAL_PREDICATE = `${DKG}kaUal`;
-const LOCAL_TRUSTED_KA_SIDECAR_PREDICATES = new Set([
+export const LOCAL_TRUSTED_KA_SIDECAR_PREDICATES = new Set([
   ...LOCAL_TRUSTED_KA_CONTROL_PREDICATES,
   ...LOCAL_TRUSTED_KA_ANCHOR_PREDICATES,
 ]);
@@ -651,7 +651,7 @@ export function parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
  * metadata-quad API and the typed envelope API terminate here; neither needs
  * to adapt through the other.
  */
-async function writeLocallyTrustedKnowledgeAssetControlEntry(
+export async function writeLocallyTrustedKnowledgeAssetControlEntry(
   store: TripleStore,
   ual: string,
   version: bigint,

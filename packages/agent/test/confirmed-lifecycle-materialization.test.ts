@@ -5,6 +5,7 @@ import { join, dirname } from 'node:path';
 import { assertionLifecycleUri, contextGraphMetaUri, TypedEventBus, encodeAccessRequest, decodeAccessResponse } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AccessHandler, readConfirmedGraphKnowledgeAssetMetadataEnvelope, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControlEnvelope, overlayLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
+import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
 import { getBytes } from 'ethers';
 import * as materialization from '../src/named-ka-vm-lifecycle-materialization.js';
 import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
@@ -150,7 +151,7 @@ it('freezes admitted and decoded evidence while retry encoding does not revalida
   for (let attempt = 3; attempt < 6; attempt += 1) {
     decoded.get(lifecycleRepairKey(unrelated))!.attempts = attempt;
     const wire = encodeLifecycleRepairJournal(decoded);
-    expect(wire.entries[0]![1].input.materialization).toBe([...decoded.values()][0]!.input.materialization);
+    expect(wire.entries[0]![1].input.materialization!.publicQuads).toBe([...decoded.values()][0]!.input.materialization!.publicQuads);
     JSON.stringify(wire);
   }
   expect(normalize).not.toHaveBeenCalled();
@@ -178,4 +179,40 @@ it('reconciles visible policy for matching v2 content and preserves receipt prov
     requesterPeerId: 'unauthorized-peer', paymentProof: new Uint8Array(), requesterSignature: new Uint8Array() }),
     { toString: () => 'unauthorized-peer' } as Parameters<typeof handler.handler>[1]));
   expect(response.granted).toBe(false); expect(response.rejectionReason).toBe('Access denied: owner-only policy');
+});
+
+it.each(['publicTripleCount', 'privateTripleCount', 'privateMerkleRoot', 'batchId', 'subGraphName', 'kaUal', 'transactionHash'])(
+  'repairs conflicting immutable %s while preserving receipt provenance, then resolves after durable reopen', async field => {
+    const { owner, input, store, path, graph, journal } = await fixture(true);
+    const dkg = 'http://dkg.io/ontology/', meta = contextGraphMetaUri(input.contextGraphId), receipt = '0x' + 'ef'.repeat(32);
+    const corrupt = field === 'privateMerkleRoot' ? JSON.stringify('cd'.repeat(32))
+      : field === 'subGraphName' ? '"wrong-subgraph"' : field === 'kaUal' ? 'urn:wrong-ka' : '"99"^^<http://www.w3.org/2001/XMLSchema#integer>';
+    await store.insert([...input.materialization!.metadataQuads.filter(q => q.predicate !== dkg + field)
+      .map(q => q.predicate === dkg + 'transactionHash' ? { ...q, object: JSON.stringify(receipt) } : q),
+      { subject: input.materialization!.kaUal, predicate: dkg + field, object: corrupt, graph: meta },
+      { subject: input.materialization!.kaUal, predicate: 'urn:receipt-note', object: '"preserve"', graph: meta },
+      ...input.materialization!.publicQuads.map(q => ({ ...q, graph }))]);
+    const resolve = (target: OxigraphStore) => resolveConfirmedGraphScopedVm(target, { contextGraphId: input.contextGraphId,
+      ual: input.materialization!.kaUal, merkleRoot: getBytes(input.merkleRoot), kaId: input.packedKaId,
+      batchId: input.packedKaId, assertionVersion: BigInt(input.assertionVersion) });
+    if (field !== 'privateTripleCount') expect(await resolve(store)).toMatchObject({ status: 'invalid' });
+    expect(await owner.submit(input)).toBe('repaired'); expect(await journal()).toHaveLength(0);
+    const reopened = new OxigraphStore(path); cleanups.push(() => reopened.close());
+    expect(await resolve(reopened)).toMatchObject({ status: 'verified', envelope: { publicTripleCount: 1, privateTripleCount: 2, batchId: input.packedKaId } });
+    expect(await reopened.query(`ASK { GRAPH <${meta}> { <${input.materialization!.kaUal}> <${dkg}transactionHash> "${field === 'transactionHash' ? '0x' + '34'.repeat(32) : receipt}"; <urn:receipt-note> "preserve" } }`)).toMatchObject({ value: true });
+  });
+it('retains a typed immutable proof across admission/retries and rejects copied tampered evidence', async () => {
+  const { owner, input, store, advance } = await fixture(true);
+  const model = materialization.normalizeLifecycleMaterialization(input.materialization, input);
+  expect(Object.isFrozen(model.proof)).toBe(true);
+  expect(materialization.normalizeLifecycleMaterialization(model, input)).toBe(model);
+  expect(normalizeLifecycleRepairInput({ ...input, materialization: model }).materialization).toBe(model);
+  expect(() => materialization.normalizeLifecycleMaterialization(model, { ...input, merkleRoot: 'ab'.repeat(32) })).toThrow('public recovery snapshot');
+  const capture = store.commitment!.capture.bind(store.commitment);
+  vi.spyOn(store.commitment!, 'capture').mockImplementationOnce(() => async () => { throw new Error('retry'); }).mockImplementation(capture);
+  expect(await owner.submit(input)).toBe('pending'); advance(); await owner.runDue();
+  expect(materialization.normalizeLifecycleMaterialization(model, input)).toBe(model);
+  const wire = materialization.lifecycleMaterializationWire(model);
+  expect(wire).not.toHaveProperty('proof'); expect(wire.publicQuads).toBe(model.publicQuads);
+  expect(() => materialization.normalizeLifecycleMaterialization({ ...wire, publicQuads: [] }, input)).toThrow('public recovery snapshot');
 });

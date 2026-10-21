@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { describe, expect, it, vi } from 'vitest';
+import { OxigraphStore, LOCAL_TRUSTED_KA_CONTROLS_GRAPH, type Quad } from '@origintrail-official/dkg-storage';
 import {
-  overlayLocallyTrustedKnowledgeAssetControls,
+  overlayLocallyTrustedKnowledgeAssetControls, reconcileConfirmedKnowledgeAssetControls, overlaySelectedKnowledgeAssetControls,
   replaceLocallyTrustedKnowledgeAssetControlEnvelope,
   replaceLocallyTrustedKnowledgeAssetControls,
   readLocallyTrustedKnowledgeAssetControlEnvelope,
@@ -90,5 +90,21 @@ it('a curator publication preserves the authenticated member controls at the sam
     await replaceLocallyTrustedKnowledgeAssetControls(store, UAL, next);
     expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, next, {}, 'exact'))
       .toEqual({ publisherPeerId: 'curator-publisher', accessPolicy: 'allowList', allowedPeers: ['untrusted-peer'] });
+  } finally { await store.close(); }
+});
+
+it.each([false, true])('confirmed reconciliation selects exact controls once with existing=%s', async existing => {
+  const store = new OxigraphStore(), anchor = { assertionVersion: '1', merkleRoot: ROOT }, incoming = incomingMetadata();
+  try {
+    if (existing) await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, UAL, anchor,
+      { publisherPeerId: 'member', accessPolicy: 'ownerOnly', allowedPeers: [] });
+    const query = vi.spyOn(store, 'query');
+    const selected = await reconcileConfirmedKnowledgeAssetControls(store, { metaGraph: META_GRAPH, ual: UAL, anchor,
+      metadataQuads: incoming, restoreMissing: true });
+    const visible = overlaySelectedKnowledgeAssetControls(incoming, selected);
+    expect(query.mock.calls.filter(([sparql]) => sparql.includes(LOCAL_TRUSTED_KA_CONTROLS_GRAPH))).toHaveLength(1);
+    expect(visible.filter(q => q.predicate === DKG + 'accessPolicy').map(q => q.object)).toEqual([existing ? '"ownerOnly"' : '"allowList"']);
+    expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, incoming, {}, 'exact'))
+      .toMatchObject({ publisherPeerId: existing ? 'member' : 'untrusted-publisher', accessPolicy: existing ? 'ownerOnly' : 'allowList' });
   } finally { await store.close(); }
 });

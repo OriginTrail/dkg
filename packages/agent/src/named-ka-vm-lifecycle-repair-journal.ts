@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
-import { normalizeLifecycleMaterialization, type ConfirmedLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
+import { normalizeLifecycleMaterialization, lifecycleMaterializationWire, type ConfirmedLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
 import { createHash } from 'node:crypto';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId'> & {
@@ -103,7 +103,7 @@ export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, Lifecy
         const ref = references.get(materialization);
         if (!ref || !/^[a-f0-9]{64}$/.test(ref)) return invalid();
         input.materializationRef = ref;
-      } else input = { ...input, materialization };
+      } else input = { ...input, materialization: lifecycleMaterializationWire(materialization) };
     }
     const { retention: _retention, ...retry } = entry;
     return [key, { ...retry, input }];

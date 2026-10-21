@@ -1,12 +1,15 @@
 import { expect, it, vi } from 'vitest';
-import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { assertionLifecycleUri, contextGraphAssertionUri, contextGraphLayerUri, contextGraphMetaUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { NamedKaVmLifecycleRepair } from '../../agent/src/named-ka-vm-lifecycle-repair.js';
-import { applyPublishedNamedKaVmLifecycle } from '../../agent/src/named-ka-vm-lifecycle.js';
-import { decodeLifecycleRepairJournal } from '../../agent/src/named-ka-vm-lifecycle-repair-journal.js';
+import { applyMaterializedConfirmedLifecycle } from '../../agent/src/named-ka-vm-lifecycle-materialization.js';
+import { confirmedMaterializationFixture } from '../../agent/test/_helpers/confirmed-materialization-fixture.js';
+import { readLifecycleRepairJournalFile } from '../../agent/test/_helpers/read-lifecycle-repair-journal.js';
+import { resolveConfirmedGraphScopedVm } from '../../agent/src/confirmed-graph-scoped-vm-resolver.js';
+import { getBytes } from 'ethers';
 import { OXIGRAPH_VERSION } from '../src/daemon/oxigraph-binary.js';
 import { startManagedOxigraph } from '../src/daemon/oxigraph-managed.js';
 import { freePort, waitForCondition } from './fixtures/oxigraph-server-real-fixture.js';
@@ -44,31 +47,28 @@ it('completes confirmed lifecycle repair through actual managed configuration on
     store = await createTripleStore(managed!.storeConfig);
     expect(store.commitment?.durability).toBe('restart-durable');
     expect(store.commitment?.capture).toBeTypeOf('function');
-    const cg = 'managed-lifecycle', author = `0x${'11'.repeat(20)}`, name = 'asset', hash = 'ab'.repeat(32);
-    const packedKaId = (BigInt(author) << 96n) | 1n;
+    const { input, graph: vmGraph } = confirmedMaterializationFixture();
+    const { contextGraphId: cg, agentAddress: author, name } = input, hash = input.merkleRoot.replace(/^0x/, '');
     const meta = contextGraphMetaUri(cg), lifecycle = assertionLifecycleUri(cg, author, name);
     const assertion = contextGraphAssertionUri(cg, author, name), ontology = 'http://dkg.io/ontology/';
-    const vmGraph = contextGraphLayerUri(cg, MemoryLayer.VerifiableMemory, author, 1n);
     await store.insert([
       { graph: meta, subject: lifecycle, predicate: `${ontology}swmCurrentAssertion`, object: JSON.stringify(hash) },
       { graph: meta, subject: lifecycle, predicate: `${ontology}state`, object: '"shared"' },
       { graph: meta, subject: lifecycle, predicate: `${ontology}memoryLayer`, object: '"SWM"' },
       { graph: meta, subject: assertion, predicate: `${ontology}memoryLayer`, object: '"SWM"' },
-      { graph: vmGraph, subject: 'urn:confirmed', predicate: 'urn:value', object: '"Confirmed"' },
     ]);
-    const journal = async () => decodeLifecycleRepairJournal(JSON.parse(await readFile(join(root, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+    const journal = async () => readLifecycleRepairJournalFile(join(root, 'named-ka-vm-lifecycle-repairs.json'));
     // Chain confirmation is an already admitted immutable input. This test uses
     // the actual production journal owner, writer, runtime factory and endpoint.
     repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: root, warn: vi.fn(), isCurrent: async () => true,
-      apply: input => applyPublishedNamedKaVmLifecycle(store!, input) });
+      apply: candidate => applyMaterializedConfirmedLifecycle(store!, candidate, { persistence: 'restart-durable' }) });
     let entered!: () => void;
     const syncing = new Promise<void>(resolve => { entered = resolve; });
     barrier.location = location; barrier.entered = entered;
     barrier.release = new Promise<void>(resolve => { release = resolve; });
-    const submission = repair.submit({ contextGraphId: cg, agentAddress: author, name, merkleRoot: hash,
-      assertionVersion: '1', publicationDeployment: { chainId: '31337', lifecycleAddress: author }, packedKaId, publishedUal: `did:dkg:mock:31337/${author}/1` });
-    let settled = false; void submission.then(() => { settled = true; });
-    await syncing;
+    const submission = repair.submit(input);
+    let settled = false; void submission.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.race([syncing, submission.then(outcome => { throw new Error(`Repair returned ${outcome} before reaching the held WAL barrier`); })]);
     expect(settled).toBe(false); expect((await journal()).size).toBe(1);
     // HTTP mutation succeeded and rows are visible, but evidence is still held.
     expect(await store.query(`ASK { GRAPH <${meta}> { <${lifecycle}> <${ontology}state> "published" } }`))
@@ -85,8 +85,10 @@ it('completes confirmed lifecycle repair through actual managed configuration on
     expect(await fresh.query(`ASK { GRAPH <${meta}> { <${lifecycle}> <${ontology}state> "published" ;
       <${ontology}vmCurrentAssertion> "${hash}" ; <${ontology}assertionGraph> <${vmGraph}> ;
       <${ontology}memoryLayer> "VM" . <${assertion}> <${ontology}memoryLayer> "VM" . }
-      GRAPH <${vmGraph}> { <urn:confirmed> <urn:value> "Confirmed" } }`)).toMatchObject({ value: true });
+      GRAPH <${vmGraph}> { <urn:payload> <urn:value> "original public payload" } }`)).toMatchObject({ value: true });
     expect((await journal()).size).toBe(0);
+    expect(await resolveConfirmedGraphScopedVm(fresh, { contextGraphId: cg, ual: input.materialization!.kaUal,
+      merkleRoot: getBytes(input.merkleRoot), kaId: input.packedKaId, batchId: input.packedKaId, assertionVersion: 1n })).toMatchObject({ status: 'verified' });
   } finally {
     barrier.location = null; release(); await repair?.stop(); await fresh?.close(); await store?.close();
     await managed?.handle.stop(); await rm(root, { recursive: true, force: true });

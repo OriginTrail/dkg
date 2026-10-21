@@ -134,11 +134,13 @@ const faults = [
   ['published state', `${DKG}state`, 'insert'], ['published UAL', `${DKG}publishedUal`, 'insert'],
   ['update provenance', 'http://www.w3.org/ns/prov#wasRevisionOf', 'insert'],
   ['successful stamp', 'urn:never-fails', 'insert'],
+  ['optional cleanup timeout', `${DKG}state`, 'insert'],
 ] as const;
 for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] as const) {
   describe(`confirmed descriptor recovery: ${mode}`, () => {
     for (const [label, predicate, operation] of faults) {
       if (label === 'update provenance' && !mode.includes('update')) continue;
+      if (label === 'optional cleanup timeout' && mode.startsWith('queued')) continue;
       it(`re-stamps ${label} after restart without another publication or version`, async () => {
         const dir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-stamp-')); dirs.push(dir);
         let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
@@ -170,6 +172,12 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
         agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: async () => undefined,
           clearPublishedKnowledgeAssetSwm: async () => true };
         agent.publishFromSharedMemory = publish; agent.update = publish;
+        const tail = vi.spyOn(agent, 'afterConfirmedGraphScopedVmPublishV1');
+        const optionalCleanup = vi.fn(async () => {
+          expect((await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'))).size).toBe(1);
+          throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'update', outcome: 'not_started' });
+        });
+        agent.publisher.clearRemainingSharedMemory = optionalCleanup;
         let queue: TripleStoreAsyncLiftPublisher | undefined, result: any;
         if (mode.startsWith('queued')) {
           const staging = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
@@ -188,7 +196,8 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
           const processed = await queue.processNext('wallet-1');
           if (processed?.status === 'failed') throw new Error(JSON.stringify(processed));
           expect(processed).toMatchObject({ jobId, status: label === 'successful stamp' ? 'finalized' : 'broadcast' });
-        } else result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
+        } else result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR, clearSharedMemoryAfter: label === 'optional cleanup timeout' });
+        if (label === 'optional cleanup timeout') { expect(optionalCleanup).toHaveBeenCalledOnce(); expect(tail).toHaveBeenCalledOnce(); }
         expect(result.status).toBe('confirmed'); expect(result.ual).toBe(PUBLISHED); expect(result.lifecycleRepairPending).toBe(label === 'successful stamp' ? undefined : true); expect(publish).toHaveBeenCalledTimes(1);
         await agent.namedKaVmLifecycleRepair?.runDue(); // No retry before the persisted 5s deadline.
         await agent.namedKaVmLifecycleRepair?.stop(); await store.close(); now += 6_000;

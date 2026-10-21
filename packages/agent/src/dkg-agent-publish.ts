@@ -6281,17 +6281,6 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    // Exact scope owns published-root cleanup. A caller's explicit request to
-    // clear every remaining share is a separate family-wide destructive action
-    // that runs only after a confirmed publish/update.
-    if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true) {
-      await publisher.clearRemainingSharedMemory(
-        contextGraphId,
-        opts?.subGraphName,
-        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-      );
-    }
-
     let lifecycleRepairPending = false;
     try {
       if (result.status === 'confirmed') {
@@ -6301,6 +6290,12 @@ export class PublishMethods extends DKGAgentBase {
         }, { ...result, status: 'confirmed', assertionUri, seal }, { publicQuads: canonicalSwmQuads,
           publisherPeerId: rfc64WorkspaceHead?.publisherPeerId ?? this.peerId, accessPolicy: rfc64WorkspaceHead?.access.accessPolicy ?? 'ownerOnly',
           allowedPeers: [...(rfc64WorkspaceHead?.access.allowedPeers ?? [])] });
+        // Admission must precede optional cleanup; a cleanup timeout cannot erase confirmation.
+        if (opts?.clearSharedMemoryAfter === true) {
+          try { await publisher.clearRemainingSharedMemory(contextGraphId, opts.subGraphName, opts.operationCtx ?? createOperationContext('publishFromSWM')); }
+          catch (error) { this.log.warn(opts.operationCtx ?? createOperationContext('publishFromSWM'),
+            `Confirmed publication ${result.ual}: optional remaining shared-memory cleanup failed: ${String(error)}`); }
+        }
       }
     } finally {
       await this.finishConfirmedNamedKaPublicationTail(result, {

@@ -1,3 +1,4 @@
+export { reconcileConfirmedKnowledgeAssetControls, overlaySelectedKnowledgeAssetControls } from './knowledge-asset-control-recovery.js';
 export { journalEntriesContextGraphId } from './async-lift-control-plane.js';
 export {
   decodeEntityShareMetadata,
