@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { getBytes, hexlify } from 'ethers';
-import { TripleStoreAsyncLiftPublisher, computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import { TripleStoreAsyncLiftPublisher, computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, replaceLocallyTrustedKnowledgeAssetControlEnvelope } from '@origintrail-official/dkg-publisher';
 import { assertionLifecycleUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { applyVerifiedNamedKaDescriptor as applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
@@ -61,6 +61,10 @@ describe('confirmed named KA descriptor recovery [#3362]', () => {
           predicate: DKG + p, object: JSON.stringify(value) + (p === 'kaId' ? '^^<http://www.w3.org/2001/XMLSchema#integer>' : '') })),
         { graph, subject, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `did:dkg:agent:${lifecycleOwner}` },
       ]);
+      // Successful snapshot-less recovery requires the publication's authenticated exact-anchor controls.
+      await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, request.kaUal!,
+        { assertionVersion: '1', merkleRoot: getBytes(merkleRoot) },
+        { publisherPeerId: '12D3KooWRecoveryFixture', accessPolicy: 'public', allowedPeers: [] });
       // Existing packed-ID lookup filters lifecycle owners to the wallet namespace.
       // Establish its pre-fault behavior for a peer-owned lifecycle independently
       // of recovery; the owner-scoped history API is the supported lookup here.

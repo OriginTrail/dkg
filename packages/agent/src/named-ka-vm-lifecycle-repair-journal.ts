@@ -94,18 +94,24 @@ function decodeLifecycleRepairInput(value: unknown): DecodedLifecycleEvidence {
     }),
   }) };
 }
-export function decodeLifecycleRepairJournal(value: unknown, snapshots?: ReadonlyMap<string, unknown>): Map<string, LifecycleRepairEntry> {
+export interface LifecycleRepairWireEntry {
+  readonly entry: LifecycleRepairEntry;
+  readonly materializationRef?: string;
+}
+/** Validate every wire version, tuple, identity, retry field and reference before snapshot I/O. */
+export function decodeLifecycleRepairJournalWire(value: unknown): Map<string, LifecycleRepairWireEntry> {
   const journal = record(value);
   if ((journal['version'] !== 1 && journal['version'] !== 2 && journal['version'] !== 3 && journal['version'] !== 4) || !Array.isArray(journal['entries'])) return invalid();
-  const entries = new Map<string, LifecycleRepairEntry>();
+  const entries = new Map<string, LifecycleRepairWireEntry>();
   const storedKeys = new Set<string>();
   for (const tuple of journal['entries']) {
     if (!Array.isArray(tuple) || tuple.length !== 2 || typeof tuple[0] !== 'string') return invalid();
     const entry = record(tuple[1]), stored = record(entry['input']);
     const ref = stored['materializationRef'];
     if ((journal['version'] !== 4 && ref !== undefined) || (journal['version'] === 4 && stored['materialization'] !== undefined)) return invalid();
-    if (ref !== undefined && (typeof ref !== 'string' || !/^[a-f0-9]{64}$/.test(ref) || !snapshots?.has(ref))) return invalid();
-    const evidence = decodeLifecycleRepairInput({ ...stored, ...(typeof ref === 'string' ? { materialization: snapshots!.get(ref) } : {}) });
+    if (ref !== undefined && (typeof ref !== 'string' || !/^[a-f0-9]{64}$/.test(ref))) return invalid();
+    const evidence = decodeLifecycleRepairInput(stored);
+    if (ref !== undefined && evidence.retention !== undefined) return invalid();
     const input = evidence.input;
     const key = lifecycleRepairKey(input), attempts = entry['attempts'], nextAttemptAt = entry['nextAttemptAt'];
     const storedKey = journal['version'] === 1 ? historicalRepairKey(input) : key;
@@ -114,10 +120,23 @@ export function decodeLifecycleRepairJournal(value: unknown, snapshots?: Readonl
       || (entry['lastError'] !== undefined && typeof entry['lastError'] !== 'string')
       || (entry['rejected'] !== undefined && typeof entry['rejected'] !== 'boolean')) return invalid();
     storedKeys.add(storedKey);
-    entries.set(key, { ...evidence, attempts, nextAttemptAt,
+    entries.set(key, { entry: { ...evidence, attempts, nextAttemptAt,
       ...(entry['lastError'] === undefined ? {} : { lastError: entry['lastError'] }),
       ...(entry['rejected'] === undefined ? {} : { rejected: entry['rejected'] }),
-    });
+    }, ...(typeof ref === 'string' ? { materializationRef: ref } : {}) });
   }
   return entries;
+}
+
+/** Bind a verified snapshot to typed coordinates, reconstructing immutable executable evidence. */
+export function hydrateLifecycleRepairWireEntry(wire: LifecycleRepairWireEntry, snapshot?: unknown): LifecycleRepairEntry {
+  if (wire.materializationRef === undefined) return wire.entry;
+  if (snapshot === undefined || wire.entry.retention !== undefined) return invalid();
+  return { ...wire.entry, input: normalizeLifecycleRepairInput({ ...wire.entry.input, materialization: snapshot }) };
+}
+
+export function decodeLifecycleRepairJournal(value: unknown, snapshots?: ReadonlyMap<string, unknown>): Map<string, LifecycleRepairEntry> {
+  return new Map([...decodeLifecycleRepairJournalWire(value)].map(([key, wire]) => [
+    key, hydrateLifecycleRepairWireEntry(wire, wire.materializationRef === undefined ? undefined : snapshots?.get(wire.materializationRef)),
+  ]));
 }

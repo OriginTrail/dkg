@@ -53,6 +53,7 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
     const controls = await reconcileConfirmedKnowledgeAssetControls(store, { metaGraph: meta, ual: scope.ual,
       anchor: { assertionVersion: input.assertionVersion, merkleRoot: getBytes(`0x${proof.merkleRoot}`) },
       metadataQuads: snapshot?.metadataQuads ?? metadata, restoreMissing: snapshot !== undefined });
+    if (controls.length === 0) throw new Error('Confirmed lifecycle repair awaits exact-version trusted access controls');
     const recoveredMetadata = overlaySelectedKnowledgeAssetControls(recoveredBase, controls);
     const canonical = (rows: readonly Quad[]) => rows.map(q => JSON.stringify([q.predicate, q.object])).sort().join('\n');
     const metadataMatches = exactMetadata && canonical(metadata) === canonical(recoveredMetadata);

@@ -92,3 +92,31 @@ it('recreates a retired snapshot before referencing the same immutable object ag
   expect(await readdir(snapshots)).toHaveLength(1);
   expect([...(await new NamedKaVmLifecycleSnapshots(dir).decode(journal)).values()][0]!.input.materialization).toEqual(normalized.materialization);
 });
+
+
+it.each(['key', 'retry', 'version', 'tuple'] as const)('rejects malformed %s before attempting snapshot I/O', async field => {
+  const { dir, input } = await setup(), normalized = normalizeLifecycleRepairInput(input);
+  const references = new Map([[normalized.materialization!, 'ab'.repeat(32)]]);
+  const wire = encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(normalized), {
+    input: normalized, attempts: 0, nextAttemptAt: 0,
+  }]]), references);
+  const malformed = JSON.parse(JSON.stringify(wire));
+  if (field === 'key') malformed.entries[0][0] = 'invalid';
+  if (field === 'retry') malformed.entries[0][1].attempts = -1;
+  if (field === 'version') malformed.version = 3;
+  if (field === 'tuple') malformed.entries[0].push('unexpected');
+  // No snapshot exists: opening the file before validating the wire would throw ENOENT.
+  await expect(new NamedKaVmLifecycleSnapshots(dir).decode(malformed)).rejects.toBeInstanceOf(NamedKaVmLifecycleIntegrityError);
+});
+
+it('hydrates typed references into immutable evidence and reuses their verified reference on encoding', async () => {
+  const { dir, input } = await setup(), normalized = normalizeLifecycleRepairInput(input);
+  const entries = new Map([[lifecycleRepairKey(normalized), { input: normalized, attempts: 0, nextAttemptAt: 0 }]]);
+  const wire = await new NamedKaVmLifecycleSnapshots(dir).encode(entries);
+  const reopened = new NamedKaVmLifecycleSnapshots(dir), decoded = await reopened.decode(wire);
+  const restored = [...decoded.values()][0]!.input.materialization!;
+  expect(restored).toEqual(normalized.materialization); expect(Object.isFrozen(restored)).toBe(true);
+  expect(Object.isFrozen(restored.publicQuads[0])).toBe(true);
+  const writes = vi.spyOn(DurableReplaceableFile.prototype, 'replace');
+  expect(await reopened.encode(decoded)).toEqual(wire); expect(writes).not.toHaveBeenCalled();
+});

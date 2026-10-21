@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10, assertionLifecycleWriteLockKey, withKeyedLocks, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
+import { computeFlatKCRootV10, replaceLocallyTrustedKnowledgeAssetControlEnvelope, assertionLifecycleWriteLockKey, withKeyedLocks, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
 import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-evidence.js';
@@ -181,7 +181,7 @@ describe('confirmed lifecycle lock-time authority fence', () => {
       await expect(f.journal()).rejects.toMatchObject({ code: 'ENOENT' });
     }
   });
-  it.each(['current', 'newer', 'unfinalized', 'conflicting-root', 'chain-error', 'replaced-workspace'] as const)(
+  it.each(['current', 'missing-controls', 'newer', 'unfinalized', 'conflicting-root', 'chain-error', 'replaced-workspace'] as const)(
     'retains coherent recovered queued behavior for %s', async scenario => {
       const f = await fixture();
       f.agent._resolveRecoveredKnowledgeAssetVmLifecycleAuthor = vi.fn(async () => scenario !== 'replaced-workspace' && ({ author: AUTHOR, incomplete: false }));
@@ -192,6 +192,9 @@ describe('confirmed lifecycle lock-time authority fence', () => {
       const request = { ...f.input, sealMerkleRoot: ROOT1, shareOperationId: 'own-operation', sealChainId: '31337', sealKav10Address: AUTHOR } as unknown as KnowledgeAssetVmPublishRequest;
       const graph = f.input.materialization.metadataQuads.find(q => q.predicate === 'http://dkg.io/ontology/assertionGraph')!.object;
       await f.store.insert([...f.input.materialization.metadataQuads, ...f.input.materialization.publicQuads.map(q => ({ ...q, graph }))]);
+      if (scenario !== 'missing-controls') await replaceLocallyTrustedKnowledgeAssetControlEnvelope(f.store, f.input.publishedUal,
+        { assertionVersion: '1', merkleRoot: Uint8Array.from(Buffer.from(ROOT1, 'hex')) },
+        { publisherPeerId: 'locked-repair-peer', accessPolicy: 'ownerOnly', allowedPeers: [] });
       const commit = vi.spyOn(f.store, 'atomicUpdate');
       const queued = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.input.publishedUal, PACKED);
       if (scenario === 'current') {

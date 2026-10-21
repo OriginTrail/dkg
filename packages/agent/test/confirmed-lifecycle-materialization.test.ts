@@ -64,8 +64,44 @@ it('retains snapshot-less legacy evidence on missing content and upgrades matchi
 it('verifies existing payload for snapshot-less queue recovery', async () => {
   const { owner, input, store, graph } = await fixture(true);
   await store.insert([...input.materialization!.metadataQuads, ...input.materialization!.publicQuads.map(q => ({ ...q, graph }))]);
+  await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, input.publishedUal,
+    { assertionVersion: input.assertionVersion, merkleRoot: getBytes(input.merkleRoot) },
+    { publisherPeerId: 'test-publisher', accessPolicy: 'allowList', allowedPeers: ['test-reader'] });
   const { materialization: _snapshot, ...legacy } = input;
   expect(await owner.submit(legacy)).toBe('repaired');
+});
+
+it('retains snapshot-less v2 recovery without exact controls, then denies private access after authenticated repair and durable reopen', async () => {
+  const { owner, input, store, graph, path, journal, chain } = await fixture(true, '2');
+  const meta = contextGraphMetaUri(input.contextGraphId), dkg = 'http://dkg.io/ontology/';
+  const visible = input.materialization!.metadataQuads.filter(q => q.predicate !== dkg + 'allowedPeer')
+    .map(q => q.predicate === dkg + 'accessPolicy' ? { ...q, object: '"public"' } : q);
+  await store.insert([{ subject: `did:dkg:context-graph:${input.contextGraphId}`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://dkg.network/ontology#ContextGraph', graph: meta },
+    ...visible, ...input.materialization!.publicQuads.map(q => ({ ...q, graph }))]);
+  await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, input.publishedUal,
+    { assertionVersion: '1', merkleRoot: getBytes(input.merkleRoot) },
+    { publisherPeerId: 'old-owner', accessPolicy: 'public', allowedPeers: [] });
+  const { materialization: _snapshot, ...legacy } = input;
+  expect(await owner.submit(legacy)).toBe('pending'); expect(await journal()).toHaveLength(1);
+  await owner.stop(); await store.close();
+  const reopened = new OxigraphStore(path); cleanups.push(() => reopened.close());
+  let now = 10_000;
+  const retry = new NamedKaVmLifecycleRepair({ dataDir: dirname(path), now: () => now, warn: () => {},
+    ...confirmedLifecycleExecutionCapabilities({ store: reopened, chain, dataDir: dirname(path), writeLocks: new Map(), readTimeoutMs: 1000 }) });
+  cleanups.push(() => retry.stop()); await retry.runDue(); expect(await journal()).toHaveLength(1);
+  expect(await reopened.query(`ASK { GRAPH <${meta}> { <${assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name)}> <${dkg}vmCurrentAssertion> ?root } }`)).toMatchObject({ value: false });
+  // Independent receiver-authenticated evidence supplies exact v2 ownership; no publication occurs.
+  await replaceLocallyTrustedKnowledgeAssetControlEnvelope(reopened, input.publishedUal,
+    { assertionVersion: '2', merkleRoot: getBytes(input.merkleRoot) },
+    { publisherPeerId: 'current-owner', accessPolicy: 'ownerOnly', allowedPeers: [] });
+  now = 20_000; await retry.runDue(); expect(await journal()).toHaveLength(0);
+  const durable = new OxigraphStore(path); cleanups.push(() => durable.close());
+  expect(await durable.query(`ASK { GRAPH <${meta}> { <${input.publishedUal}> <${dkg}accessPolicy> "ownerOnly"; <${dkg}publisherPeerId> "current-owner" } }`)).toMatchObject({ value: true });
+  const handler = new AccessHandler(durable, new TypedEventBus());
+  const response = decodeAccessResponse(await handler.handler(encodeAccessRequest({ kaUal: input.publishedUal,
+    requesterPeerId: 'unauthorized-peer', paymentProof: new Uint8Array(), requesterSignature: new Uint8Array() }),
+    { toString: () => 'unauthorized-peer' } as Parameters<typeof handler.handler>[1]));
+  expect(response.granted).toBe(false); expect(response.rejectionReason).toBe('Access denied: owner-only policy');
 });
 it('keeps a repair pending without overwriting a newer local VM version', async () => {
   const { owner, input, store, graph, journal } = await fixture();

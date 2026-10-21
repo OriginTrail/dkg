@@ -5,11 +5,10 @@ import { join } from 'node:path';
 import { DurableDirectory } from '@origintrail-official/dkg-storage';
 import { DurableReplaceableFile } from './durable-file-replace.js';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
-import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleMaterializationWire, type LifecycleRepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
+import { decodeLifecycleRepairJournalWire, hydrateLifecycleRepairWireEntry, encodeLifecycleRepairJournal, lifecycleMaterializationWire, type LifecycleRepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
 import type { ConfirmedLifecycleMaterialization } from './named-ka-vm-lifecycle-evidence.js';
 
 const digest = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
-const validRef = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 /** Immutable snapshots are durable before their compact retry records become visible. */
 export class NamedKaVmLifecycleSnapshots {
   private readonly references = new WeakMap<ConfirmedLifecycleMaterialization, string>();
@@ -22,24 +21,17 @@ export class NamedKaVmLifecycleSnapshots {
   }
 
   async decode(value: unknown): Promise<Map<string, LifecycleRepairEntry>> {
-    const journal = value as { version?: unknown; entries?: unknown } | null;
-    if (journal?.version !== 4) return decodeLifecycleRepairJournal(value);
-    if (!Array.isArray(journal.entries)) return decodeLifecycleRepairJournal(value);
-    const snapshots = new Map<string, unknown>(), byKey = new Map<string, string>();
-    for (const tuple of journal.entries) {
-      const ref = Array.isArray(tuple) ? tuple[1]?.input?.materializationRef : undefined;
-      if (ref === undefined) continue;
-      if (!validRef(ref)) throw new NamedKaVmLifecycleIntegrityError('Invalid lifecycle snapshot reference');
-      if (!snapshots.has(ref)) {
+    const wireEntries = decodeLifecycleRepairJournalWire(value);
+    const snapshots = new Map<string, unknown>(), entries = new Map<string, LifecycleRepairEntry>();
+    for (const [key, wire] of wireEntries) {
+      const ref = wire.materializationRef;
+      if (ref !== undefined && !snapshots.has(ref)) {
         const bytes = await readFile(join(this.directory, `${ref}.json`), 'utf8');
         if (digest(bytes) !== ref) throw new NamedKaVmLifecycleIntegrityError('Lifecycle snapshot digest mismatch');
         snapshots.set(ref, JSON.parse(bytes));
       }
-      byKey.set(tuple[0], ref);
-    }
-    const entries = decodeLifecycleRepairJournal(value, snapshots);
-    for (const [key, entry] of entries) {
-      const ref = byKey.get(key);
+      const entry = hydrateLifecycleRepairWireEntry(wire, ref === undefined ? undefined : snapshots.get(ref));
+      entries.set(key, entry);
       if (ref && entry.input.materialization) {
         this.references.set(entry.input.materialization, ref); this.durable.add(ref);
       }
