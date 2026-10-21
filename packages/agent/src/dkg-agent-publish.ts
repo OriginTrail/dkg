@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
-import { tryWithKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
+import { tryWithKeyedLocks, assertionLifecycleWriteLockKey, type PromoteExecutionAuthority } from '@origintrail-official/dkg-publisher';
 
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
@@ -3189,7 +3189,7 @@ export class PublishMethods extends DKGAgentBase {
         lifecycleUri,
         WM_CURRENT_ASSERTION_PRED,
         merkleHexBare,
-        metaGraph,
+        metaGraph, opts?.executionAuthority,
       );
     };
 
@@ -6553,15 +6553,13 @@ export class PublishMethods extends DKGAgentBase {
    * `query()` rejects DELETE/INSERT — `stampLayerPointerSparql` is reserved for
    * backends that accept UPDATE via query(). `merkleHex` is stored bare (no 0x).
    */
-  async _stampPointer(
-    this: DKGAgent,
-    lifecycleUri: string,
-    pred: string,
-    merkleHex: string,
-    metaGraph: string,
+  async _stampPointer(this: DKGAgent, lifecycleUri: string, pred: string,
+    merkleHex: string, metaGraph: string, authority?: PromoteExecutionAuthority,
   ): Promise<void> {
     const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
+    await authority?.assertCurrent();
     await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
+    await authority?.assertCurrent();
     await this.store.insert([
       { subject: lifecycleUri, predicate: pred, object: `"${bare}"`, graph: metaGraph },
     ]);
@@ -6577,12 +6575,8 @@ export class PublishMethods extends DKGAgentBase {
    * to the vm value (see `agent.assertion.history()`), which also keeps
    * old-store rows (always materialised) readable unchanged.
    */
-  async _stampPointerIfDivergedFromVm(
-    this: DKGAgent,
-    lifecycleUri: string,
-    pred: string,
-    merkleHex: string,
-    metaGraph: string,
+  async _stampPointerIfDivergedFromVm(this: DKGAgent, lifecycleUri: string, pred: string,
+    merkleHex: string, metaGraph: string, authority?: PromoteExecutionAuthority,
   ): Promise<void> {
     const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
     let vmBare: string | undefined;
@@ -6598,11 +6592,12 @@ export class PublishMethods extends DKGAgentBase {
       // an extra convergent row is harmless (readers COALESCE), a missing
       // divergent row is not.
     }
+    await authority?.assertCurrent();
     if (vmBare !== undefined && vmBare === bare) {
       await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
       return;
     }
-    await this._stampPointer(lifecycleUri, pred, bare, metaGraph);
+    await this._stampPointer(lifecycleUri, pred, bare, metaGraph, authority);
   }
 
   /**

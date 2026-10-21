@@ -100,3 +100,7 @@ Flattened publisher preparation bodies into explicit authority checks after life
 ### Review round 9 — fence destructive cleanup internally
 
 Pass optional execution authority into canonical-source and completed-legacy scoped-graph cleanup. Recheck after graph enumeration and immediately before every graph deletion, including root graphs. Preserve synchronous callers without authority. Regressions revoke an actual queued claim inside enumeration and after the first deletion; stale workers must not delete further graphs. Rebuild after stopping the live worker and exercise the final revision on the retained isolated testnet home.
+
+### Review round 10 — fence lifecycle pointer internals
+
+Carry optional execution authority through the divergence lookup and pointer delete/insert helpers. Check after the VM lookup outside its fallback catch and before each mutation. Real-store barriers cover revocation during lookup and after deletion for fresh/existing seals; metadata must not change further, and the replacement job must recover. Preserve synchronous callers and validate the final revision with the live lifecycle smoke if a prepared wallet batch is available.

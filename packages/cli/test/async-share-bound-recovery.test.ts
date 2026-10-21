@@ -433,6 +433,45 @@ describe('async shares acquire durable replay authority before promotion', () =>
     } finally { release(); await preparing.catch(() => {}); }
   });
 
+  it.each([{ existing: false, stage: 'lookup' }, { existing: true, stage: 'lookup' },
+    { existing: false, stage: 'deletion' }, { existing: true, stage: 'deletion' }])('fences pointer $stage (existing=$existing)', async ({ existing, stage }) => {
+    const f = await setup(undefined, false, true); useRealFinalizer(f);
+    if (existing) await f.agent.assertion.finalize(CG, NAME, { agentAddress: AUTHOR });
+    const job = await f.claim(), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const predicate = 'http://dkg.io/ontology/wmCurrentAssertion', graph = contextGraphMetaUri(CG);
+    let release!: () => void, entered!: () => void, paused = false;
+    const blocked = new Promise<void>(r => { release = r; }), reached = new Promise<void>(r => { entered = r; });
+    const pause = async () => { if (!paused) { paused = true; entered(); await blocked; } };
+    const query = f.store.query.bind(f.store), del = f.store.deleteByPattern.bind(f.store);
+    vi.spyOn(f.store, 'query').mockImplementation(async (sparql, options) => {
+      const rows = await query(sparql, options);
+      if (stage === 'lookup' && options?.source === 'agent.publish.pointerVmGuard') await pause();
+      return rows;
+    });
+    const deletes = vi.spyOn(f.store, 'deleteByPattern').mockImplementation(async (pattern, options) => {
+      const result = await del(pattern, options);
+      if (stage === 'deletion' && pattern.subject === subject && pattern.predicate === predicate) await pause();
+      return result;
+    });
+    const inserts = vi.spyOn(f.store, 'insert');
+    const pointer = () => query(`CONSTRUCT { <${subject}> <${predicate}> ?o } WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`);
+    const preparing = f.prepare(job); void preparing.catch(() => {});
+    try {
+      await reached;
+      const before = await pointer();
+      const deletionCount = deletes.mock.calls.filter(([p]) => p.subject === subject && p.predicate === predicate).length;
+      const insertionCount = inserts.mock.calls.filter(([qs]) => qs.some(q => q.subject === subject && q.predicate === predicate)).length;
+      f.expire(); await f.queue.recoverOnStartup(); const replacement = await f.claim();
+      release(); await expect(preparing).rejects.toBeInstanceOf(PromoteJobLeaseError);
+      expect(await pointer()).toEqual(before);
+      expect(deletes.mock.calls.filter(([p]) => p.subject === subject && p.predicate === predicate)).toHaveLength(deletionCount);
+      expect(inserts.mock.calls.filter(([qs]) => qs.some(q => q.subject === subject && q.predicate === predicate))).toHaveLength(insertionCount);
+      expect((await f.run(replacement)).outcome).toBe('succeeded');
+      expect(replacement.jobId).toBe(job.jobId);
+      expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    } finally { release(); await preparing.catch(() => {}); }
+  });
+
   it.each(['enumeration', 'deletion'])('fences source cleanup after %s inside the helper', async stage => {
     const f = await setup(undefined, false, true); useRealFinalizer(f);
     const source = await f.publisher.wmGraphUri(CG, AUTHOR, NAME);
