@@ -1,5 +1,4 @@
-import type { ServerResponse } from 'node:http';
-import { Logger, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import { Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import { sanitizeWritePreflightFailures, type WritePreflightDiagnosticFailure } from './write-preflight-attribution.js';
 export type { WritePreflightDiagnosticFailure } from './write-preflight-attribution.js';
 import { createWarningGate } from './read-authority-diagnostics.js';
@@ -31,22 +30,11 @@ export function createWritePreflightDiagnostics(options: {
 }
 
 const diagnostics = createWritePreflightDiagnostics();
-const answered = new WeakMap<ServerResponse, string>();
-const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-
-/** One safe event per actual response; observer failure must never affect HTTP. */
+/** Record the renderer's operation context; observer failure must never affect HTTP. */
 export function recordWritePreflightUnavailable(
-  res: ServerResponse, failures: readonly WritePreflightDiagnosticFailure[], rescue: WritePreflightRescueOutcome,
+  ctx: OperationContext, failures: readonly WritePreflightDiagnosticFailure[], rescue: WritePreflightRescueOutcome,
   observer: WritePreflightDiagnostics = diagnostics,
-): string {
-  const previous = answered.get(res); if (previous) return previous;
-  let ctx = createOperationContext('resolve');
-  try {
-    const previousId = res.getHeader?.('x-dkg-operation-id');
-    if (typeof previousId === 'string' && uuid.test(previousId)) ctx = { ...ctx, operationId: previousId };
-  } catch { /* Do not reflect arbitrary correlation input. */ }
-  answered.set(res, ctx.operationId);
+): void {
   try { void Promise.resolve(observer.record(ctx, { failures: sanitizeWritePreflightFailures(failures), rescue })).catch(() => {}); }
   catch { /* Diagnostics must not change access, response, reads or retries. */ }
-  return ctx.operationId;
 }

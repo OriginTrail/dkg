@@ -11,9 +11,9 @@ import { resolveRequiredWriteContextGraphId } from '../src/daemon/http-utils.js'
 import { createWritePreflightDiagnostics, recordWritePreflightUnavailable } from '../src/daemon/write-preflight-diagnostics.js';
 
 const qualified = '0x1111111111111111111111111111111111111111/diagnostics';
-function response(previousId?: string) {
+function response() {
   const out: { status?: number; body?: any; headers?: Record<string, string> } = {};
-  const res = { getHeader: () => previousId,
+  const res = {
     writeHead(status: number, headers: Record<string, string>) { out.status = status; out.headers = headers; },
     end(body: string) { out.body = JSON.parse(body); },
   } as unknown as ServerResponse;
@@ -99,20 +99,15 @@ describe('write preflight response diagnostics', () => {
     expect(out.status).toBe(400); expect(out.body.code).toBe('CONTEXT_GRAPH_NOT_FOUND');
     expect(options.writePreflightDiagnostics.record).not.toHaveBeenCalled();
   });
-  it('redacts closed fields, bounds attribution, and deduplicates each response', () => {
-    const observer = { record: vi.fn() }; const { res } = response('token=private');
+  it('redacts closed fields and bounds attribution without replacing the renderer context', () => {
+    const observer = { record: vi.fn() }; const ctx = createOperationContext('resolve');
     const row = { site: 'https://user:secret@rpc', kind: 'private payload' };
-    const id = recordWritePreflightUnavailable(res, Array(1000).fill(row), 'failed', observer);
-    recordWritePreflightUnavailable(res, [], 'denied', observer);
-    expect(id).toMatch(/^[a-f0-9-]{36}$/); expect(id).not.toContain('private');
-    expect(observer.record).toHaveBeenCalledTimes(1);
-    expect(observer.record.mock.calls[0][1]).toEqual({ failures: [{ site: 'decision', kind: 'unknown' }], rescue: 'failed' });
+    recordWritePreflightUnavailable(ctx, Array(1000).fill(row), 'failed', observer);
+    expect(observer.record).toHaveBeenCalledExactlyOnceWith(ctx, {
+      failures: [{ site: 'decision', kind: 'unknown' }], rescue: 'failed',
+    });
   });
-  it('reuses only an existing safe operation id', () => {
-    const id = createOperationContext('resolve').operationId;
-    expect(recordWritePreflightUnavailable(response(id).res, [], 'not-attempted', { record() {} })).toBe(id);
-  });
-  it('retains one correlated line per response while bounding warning state', () => {
+  it('bounds warning state while retaining repeated informational messages', () => {
     let now = 0; const logger = { warn: vi.fn(), info: vi.fn() };
     const recorder = createWritePreflightDiagnostics({ logger, now: () => now, intervalMs: 100, cacheMax: 1 });
     const a = { failures: [{ site: 'existence' as const, kind: 'unknown' as const }], rescue: 'unsupported' as const };
@@ -136,21 +131,34 @@ it('correlates a real HTTP 503 after a real Oxigraph worker closes', async () =>
   const agent = { listContextGraphs: vi.fn(async () => []),
     probeContextGraphWritePreflight: (id: string) => proto.probeContextGraphWritePreflight.call(harness as never, id),
   };
-  const options = opts();
+  const logger = { warn: vi.fn(), info: vi.fn() };
+  const options = { writePreflightDiagnostics: createWritePreflightDiagnostics({ logger, now: () => 0 }) };
   const server = createServer((_req, res) => {
     void resolveRequiredWriteContextGraphId(agent, qualified, res, options).catch(() => { res.writeHead(500); res.end(); });
   });
   try {
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const address = server.address(); if (!address || typeof address === 'string') throw new Error('No listener');
-    const result = await fetch(`http://127.0.0.1:${address.port}/preflight`, { signal: AbortSignal.timeout(5000) });
-    expect(result.status).toBe(503); expect((await result.json() as any).code).toBe('CONTEXT_GRAPH_VALIDATION_UNAVAILABLE');
-    const [ctx, diagnostic] = options.writePreflightDiagnostics.record.mock.calls[0];
-    expect(result.headers.get('x-dkg-operation-id')).toBe(ctx.operationId);
-    expect(diagnostic.failures).toEqual([
-      { site: 'existence', kind: 'unknown' }, { site: 'content', kind: 'unknown' },
-      { site: 'declaration', kind: 'unknown' },
-    ]);
+    const ids: string[] = [];
+    for (const level of ['warn', 'info'] as const) {
+      const result = await fetch(`http://127.0.0.1:${address.port}/preflight`, { signal: AbortSignal.timeout(5000) });
+      expect(result.status).toBe(503); expect((await result.json() as any).code).toBe('CONTEXT_GRAPH_VALIDATION_UNAVAILABLE');
+      expect(logger[level]).toHaveBeenCalledTimes(1);
+      const [ctx, message] = logger[level].mock.calls[0];
+      const responseId = result.headers.get('x-dkg-operation-id');
+      expect(responseId).toMatch(/^[a-f0-9-]{36}$/);
+      expect(ctx.operationId).toBe(responseId);
+      expect(ctx.operationName).toBe('resolve');
+      expect(message).toContain('Context Graph write preflight unavailable, answered 503');
+      expect(message).toContain('failures=' + JSON.stringify([
+        { site: 'existence', kind: 'unknown' }, { site: 'content', kind: 'unknown' },
+        { site: 'declaration', kind: 'unknown' },
+      ]));
+      expect(message).toContain('rescue=unsupported');
+      ids.push(responseId!);
+    }
+    expect(new Set(ids).size).toBe(2);
+    expect(logger.warn).toHaveBeenCalledTimes(1); expect(logger.info).toHaveBeenCalledTimes(1);
     expect(agent.listContextGraphs).not.toHaveBeenCalled();
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 });

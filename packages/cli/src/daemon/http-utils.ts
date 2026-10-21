@@ -824,11 +824,12 @@ function contextGraphValidationUnavailable(
   rescue: WritePreflightRescueOutcome = 'not-attempted',
   observer?: WritePreflightDiagnostics,
 ): null {
-  const operationId = recordWritePreflightUnavailable(res, attribution, rescue, observer);
+  const ctx = createOperationContext('resolve');
+  recordWritePreflightUnavailable(ctx, attribution, rescue, observer);
   jsonResponse(res, 503, {
     code: "CONTEXT_GRAPH_VALIDATION_UNAVAILABLE",
     error: `Failed to validate contextGraphId against known context graphs: ${message}`,
-  }, undefined, { 'x-dkg-operation-id': operationId });
+  }, undefined, { 'x-dkg-operation-id': ctx.operationId });
   return null;
 }
 
